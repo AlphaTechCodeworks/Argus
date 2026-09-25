@@ -886,6 +886,26 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .hp-table td.warn { color: var(--tl-evt); }
 .hp-table td.bad { color: #e5484d; }
 
+/* Per-NVR health panels: its own disks and retention first, then the rest of the facts. */
+.nvr-panels { display: grid; gap: 14px; }
+.nvr-panel { background: var(--panel); border-radius: 8px; padding: 12px 14px; display: grid; gap: 10px; }
+.nvr-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.nvr-head h3 { margin: 0; font-size: 15px; }
+.nvr-why { color: var(--muted); font-size: 12px; }
+.pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.pill.ok { color: #3fb27f; }
+.pill.warn { color: var(--tl-evt); }
+.pill.bad { color: #e5484d; }
+/* The cards sit inside a panel, so they need a background of their own to stay readable. */
+.nvr-headline .card { background: #0000001f; }
+.nvr-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 4px 14px; margin: 0; font-size: 13px; }
+.nvr-facts dt { color: var(--muted); font-size: 12px; }
+.nvr-facts dd { margin: 0 0 6px; }
+.nvr-facts dd.ok { color: #3fb27f; }
+.nvr-facts dd.warn { color: var(--tl-evt); }
+.nvr-facts dd.bad { color: #e5484d; }
+.nvr-disks { background: transparent; }
+
 /* Live tile state dot (live-tile.js tileDot): green video arriving, red also being recorded,
    grey nothing arriving. Colour is never the only clue: the state is written out in the dot's
    title, and the recording dot also pulses. */

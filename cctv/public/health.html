@@ -36,12 +36,9 @@
     <div id="system" class="cards"></div>
 
     <h2>NVRs</h2>
-    <table class="hp-table">
-      <thead>
-        <tr><th>NVR</th><th>Status</th><th>Cameras</th><th>Recording</th><th>Clock</th><th>Refused (10 min)</th></tr>
-      </thead>
-      <tbody id="nvrs"></tbody>
-    </table>
+    <!-- One panel per NVR. Its own disks are the headline: the NVR's copy of roughly the last
+         30 days is the only redundancy this system has, and nothing used to look at it. -->
+    <div id="nvrs" class="nvr-panels"></div>
 
     <h2>Alerts in the last 7 days</h2>
     <table class="hp-table">

@@ -91,8 +91,123 @@ function systemCards(sys) {
 }
 
 /**
+ * Anything we did not manage to read says so in words. Never a zero, never a blank: the whole
+ * point of this page is that it does not report good news it never actually checked.
+ */
+const NOT_AVAILABLE = 'not available'
+
+/** "31 days", "not available". Days come from the NVR's own oldest and newest recording. */
+const days = (n) => (Number.isFinite(n) ? `${n} ${n === 1 ? 'day' : 'days'}` : NOT_AVAILABLE)
+
+/** "2 s ago", "4 m ago": how long ago a call from this NVR last came back. */
+const ago = (ms) => {
+  if (!Number.isFinite(ms)) return NOT_AVAILABLE
+  if (ms < 1000) return 'just now'
+  if (ms < 60_000) return `${Math.round(ms / 1000)} s ago`
+  return `${dur(ms)} ago`
+}
+
+/** The site rule: an NVR is meant to hold at least this long by itself (streams.mjs MIN_RETENTION_DAYS). */
+const MIN_NVR_DAYS = 30
+
+/**
+ * One NVR's panel: everything we can honestly say about it, and "not available" for the rest.
+ * @param {object} n one entry of /api/health's `nvrs`
+ * @param {object[]} mine that NVR's cameras (already filtered to real, configured channels)
+ * @param {number} nowMs
+ */
+function nvrPanel(n, mine, nowMs) {
+  const st = n.storage ?? null
+  const secs = Math.round((n.clockSkewMs ?? 0) / 1000)
+  const online = Boolean(n.online)
+  const recording = mine.filter((c) => c.recording && c.online).length
+  const camerasOnline = mine.filter((c) => c.online).length
+
+  // Why it is not usable, in the order that matters: refused credentials are a different job from
+  // a dead network, and an NVR that is merely cooling down is neither.
+  const status = n.loginError
+    ? { value: 'Login refused', state: 'bad', note: n.loginError }
+    : !online
+      ? {
+          value: n.status === 'connecting' ? 'Connecting' : 'Offline',
+          state: 'bad',
+          // st.why carries the TCP probe's verdict when it was made: "did not answer ... within
+          // 2000 ms" versus "answers on the network but is not logged in".
+          note: st?.why || n.error || 'the server cannot reach it'
+        }
+      : n.cooling
+        ? { value: 'Online, slow', state: 'warn', note: 'calls to it are overdue; new streams and playbacks are held back' }
+        : { value: 'Online', state: 'ok', note: `last contact ${ago(n.lastContactMs)}` }
+
+  // Disks. An NVR we could not ask says so; an NVR that answered "no disks" is a real fault, and
+  // is exactly the silent failure this panel exists to catch.
+  const diskRows = (st?.disks ?? []).map((disk) => ({
+    name: disk.name,
+    status: disk.status || NOT_AVAILABLE,
+    state: disk.state === 'unknown' ? 'warn' : disk.state === 'busy' ? 'warn' : disk.state,
+    size: Number.isFinite(disk.totalBytes)
+      ? `${bytes(disk.totalBytes)}${Number.isFinite(disk.freeBytes) ? ` · ${bytes(disk.freeBytes)} free` : ''}`
+      : NOT_AVAILABLE,
+    days: days(disk.days)
+  }))
+
+  const disks = !st
+    ? { value: NOT_AVAILABLE, state: 'warn', note: 'the NVR has not been asked yet' }
+    : !st.available
+      ? { value: NOT_AVAILABLE, state: 'warn', note: st.why || 'the NVR did not answer' }
+      : diskRows.length === 0
+        ? { value: 'No disk', state: 'bad', note: 'this NVR is keeping no copy of its own' }
+        : st.worst === 'bad'
+          ? { value: `${diskRows.filter((r) => r.state === 'bad').length} of ${diskRows.length} failed`, state: 'bad', note: 'its own copy of the recordings is at risk' }
+          : { value: `${diskRows.length} ${diskRows.length === 1 ? 'disk' : 'disks'}`, state: st.worst === 'ok' ? 'ok' : 'warn', note: st.why || '' }
+
+  const held = st?.available ? st.days : null
+  const retention = {
+    value: days(held),
+    // Below the site's minimum is worth a colour, but an unknown figure is never green.
+    state: !Number.isFinite(held) ? 'warn' : held < MIN_NVR_DAYS ? 'bad' : 'ok',
+    note: Number.isFinite(held) ? `the site asks for at least ${MIN_NVR_DAYS}` : 'the NVR did not give its recording dates'
+  }
+
+  // The stream limit: nvr-2 refuses streams once it is full, which looks like a broken camera
+  // unless the limit is on the page next to it.
+  const maxCameras = st?.caps?.maxCameras
+  const refused = n.refusalsLast10Min
+
+  return {
+    id: n.id,
+    name: n.name,
+    status,
+    disks,
+    diskRows,
+    retention,
+    fields: [
+      { label: 'Model', value: n.model || NOT_AVAILABLE },
+      { label: 'Firmware', value: st?.caps?.firmware || NOT_AVAILABLE },
+      { label: 'Serial', value: n.serial || NOT_AVAILABLE },
+      { label: 'Address', value: n.host ? `${n.host}${n.via === 'p2p' ? ' (by serial)' : ''}` : NOT_AVAILABLE },
+      {
+        label: 'Cameras',
+        value: `${camerasOnline} of ${mine.length}${Number.isFinite(maxCameras) ? ` (it takes ${maxCameras})` : ''}`,
+        state: mine.length === 0 ? 'warn' : camerasOnline === mine.length ? 'ok' : 'warn'
+      },
+      { label: 'Recording here', value: `${recording} of ${mine.length}`, state: recording === mine.length ? 'ok' : 'warn' },
+      { label: 'Streams in use', value: Number.isFinite(n.streams) ? String(n.streams) : NOT_AVAILABLE },
+      {
+        label: 'Refused (10 min)',
+        value: refused === null || refused === undefined ? 'not measured' : String(refused),
+        state: !Number.isFinite(refused) ? 'warn' : refused >= 3 ? 'bad' : 'ok'
+      },
+      { label: 'Clock', value: `${secs > 0 ? '+' : ''}${secs} s`, state: Math.abs(secs) >= 30 ? 'warn' : 'ok' },
+      { label: 'Last contact', value: ago(n.lastContactMs) },
+      { label: 'Disks read', value: st ? `${ago(nowMs - st.at)}` : NOT_AVAILABLE }
+    ]
+  }
+}
+
+/**
  * @param {object} d the body of GET /api/health
- * @returns {{ cards: object, systemCards: object, nvrRows: object[], historyRows: object[], bannerText: string, sendingProblem: string }}
+ * @returns {{ cards: object, systemCards: object, nvrRows: object[], nvrPanels: object[], historyRows: object[], bannerText: string, sendingProblem: string }}
  */
 export function renderHealth(d) {
   const cameras = d.cameras ?? []
@@ -144,9 +259,13 @@ export function renderHealth(d) {
       recording: String(mine.filter((c) => c.recording && c.online).length),
       clock: `${secs > 0 ? '+' : ''}${secs} s`,
       clockState: Math.abs(secs) >= 30 ? 'warn' : 'ok',
-      refusals: String(n.refusalsLast10Min ?? 0)
+      // Nobody counted them is not the same as none happened, and this column used to say "0"
+      // for a figure that was never measured at all.
+      refusals: n.refusalsLast10Min === null || n.refusalsLast10Min === undefined ? NOT_AVAILABLE : String(n.refusalsLast10Min)
     }
   })
+
+  const nvrPanels = nvrs.map((n) => nvrPanel(n, cameras.filter((c) => c.nvrId === n.id), d.now))
 
   // History: pair each "cleared" with the "opened" that came before it, so one episode is one row.
   // Walking newest first means a second episode of the same problem never swallows the first.
@@ -181,7 +300,7 @@ export function renderHealth(d) {
       ? `email failing: ${s.emailError}`
       : ''
 
-  return { cards, systemCards: systemCards(d.system), nvrRows, historyRows, bannerText, sendingProblem }
+  return { cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, sendingProblem }
 }
 
 // ---- the page itself (skipped when a test imports this module: there is no document) ------------
@@ -207,11 +326,50 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     paintCards('cards', r.cards)
     paintCards('system', r.systemCards)
 
-    document.getElementById('nvrs').replaceChildren(...r.nvrRows.map((n) => {
-      const tr = el('tr')
-      const cells = [[`${n.id} · ${n.name}`, ''], [n.status, n.statusState], [n.cameras, ''], [n.recording, ''], [n.clock, n.clockState], [n.refusals, '']]
-      for (const [text, cls] of cells) tr.append(el('td', { textContent: text, className: cls }))
-      return tr
+    document.getElementById('nvrs').replaceChildren(...r.nvrPanels.map((n) => {
+      const panel = el('section', { className: 'nvr-panel' })
+      const head = el('div', { className: 'nvr-head' })
+      head.append(
+        el('h3', { textContent: `${n.id} · ${n.name}` }),
+        el('span', { className: `pill ${n.status.state}`, textContent: n.status.value }),
+        el('span', { className: 'nvr-why', textContent: n.status.note ?? '' })
+      )
+
+      const headline = el('div', { className: 'cards nvr-headline' })
+      for (const c of [{ label: 'NVR disks', ...n.disks }, { label: 'It holds', ...n.retention }]) {
+        const node = el('div', { className: `card ${c.state}` })
+        node.append(
+          el('div', { className: 'lbl', textContent: c.label }),
+          el('div', { className: 'big', textContent: c.value }),
+          el('div', { className: 'note', textContent: c.note ?? '' })
+        )
+        headline.append(node)
+      }
+
+      const facts = el('dl', { className: 'nvr-facts' })
+      for (const f of n.fields) {
+        facts.append(el('dt', { textContent: f.label }), el('dd', { textContent: f.value, className: f.state ?? '' }))
+      }
+
+      panel.append(head, headline, facts)
+
+      if (n.diskRows.length) {
+        const table = el('table', { className: 'hp-table nvr-disks' })
+        const thead = el('thead')
+        const hr = el('tr')
+        for (const t of ['Disk', 'State', 'Size', 'Recordings go back']) hr.append(el('th', { textContent: t }))
+        thead.append(hr)
+        const tbody = el('tbody')
+        for (const row of n.diskRows) {
+          const tr = el('tr')
+          const cells = [[row.name, ''], [row.status, row.state], [row.size, ''], [row.days, '']]
+          for (const [text, cls] of cells) tr.append(el('td', { textContent: text, className: cls }))
+          tbody.append(tr)
+        }
+        table.append(thead, tbody)
+        panel.append(table)
+      }
+      return panel
     }))
 
     document.getElementById('history').replaceChildren(...r.historyRows.map((h) => {

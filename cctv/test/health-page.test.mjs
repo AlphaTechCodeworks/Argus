@@ -86,6 +86,82 @@ const data = (o = {}) => ({
   check('recording counts only online cameras', r.nvrRows[0].recording === '1', r.nvrRows[0]?.recording)
 }
 
+// ---- the per-NVR panel ---------------------------------------------------------------------
+//
+// The rule this whole page now lives by: anything we did not actually read says "not available".
+// A zero or a blank that looks like a healthy reading is worse than an admitted gap.
+const nvrWith = (extra) => data({ nvrs: [{ id: 'nvr1', name: 'Main site', online: true, status: 'online', loginError: null, refusalsLast10Min: 0, clockSkewMs: 0, ...extra }] })
+const field = (panel, label) => panel.fields.find((f) => f.label === label)
+const storage = {
+  at: T0 - 60_000,
+  available: true,
+  why: '',
+  disks: [
+    { name: 'disk1', slot: 1, status: 'read/write', state: 'ok', totalBytes: 4e12, freeBytes: 4.1e10, days: 33 },
+    { name: 'disk2', slot: 2, status: 'exception', state: 'bad', totalBytes: 4e12, freeBytes: 0, days: 7 }
+  ],
+  days: 7,
+  worst: 'bad',
+  caps: { firmware: '1.4.5.2', maxCameras: 32 }
+}
+{
+  const [p] = renderHealth(nvrWith({ storage, model: 'TD-3532H8', serial: 'SN123', host: '10.0.0.9', via: 'lan', streams: 12, lastContactMs: 800 })).nvrPanels
+  check('the panel names the NVR', p.id === 'nvr1' && p.name === 'Main site')
+  check('a failed disk is the headline and is marked bad', p.disks.state === 'bad' && p.disks.value === '1 of 2 failed', JSON.stringify(p.disks))
+  check('each disk gets a row with its size and how far back it goes', p.diskRows.length === 2 && p.diskRows[1].status === 'exception' && p.diskRows[1].state === 'bad', JSON.stringify(p.diskRows[1]))
+  check('sizes are human-readable', p.diskRows[0].size === '4.0 TB · 41.0 GB free', p.diskRows[0].size)
+  check('retention is the shortest disk, and under 30 days is bad', p.retention.value === '7 days' && p.retention.state === 'bad', JSON.stringify(p.retention))
+  check('firmware comes from the NVR, not from us', field(p, 'Firmware').value === '1.4.5.2')
+  check('the camera limit is shown so refusals make sense', field(p, 'Cameras').value === '1 of 1 (it takes 32)', field(p, 'Cameras').value)
+  check('streams in use are shown', field(p, 'Streams in use').value === '12')
+  check('last contact is in words', field(p, 'Last contact').value === 'just now', field(p, 'Last contact').value)
+}
+{
+  const [p] = renderHealth(nvrWith({ storage: { ...storage, disks: [storage.disks[0]], days: 33, worst: 'ok' } })).nvrPanels
+  check('all-healthy disks read well', p.disks.state === 'ok' && p.disks.value === '1 disk', JSON.stringify(p.disks))
+  check('33 days clears the site minimum', p.retention.value === '33 days' && p.retention.state === 'ok')
+}
+{
+  const [p] = renderHealth(nvrWith({ storage: { ...storage, available: true, disks: [], days: null, worst: 'missing' } })).nvrPanels
+  check('an NVR with no disk says so, loudly', p.disks.value === 'No disk' && p.disks.state === 'bad', JSON.stringify(p.disks))
+}
+{
+  const [p] = renderHealth(nvrWith({ storage: { at: T0, available: false, why: 'queryDiskStatus: not supported', disks: [], days: null, worst: 'unknown', caps: {} } })).nvrPanels
+  check('an NVR that would not answer says "not available"', p.disks.value === 'not available' && p.disks.state === 'warn', JSON.stringify(p.disks))
+  check('and the reason is shown, not hidden', p.disks.note === 'queryDiskStatus: not supported', p.disks.note)
+  check('retention is not available either, and never green', p.retention.value === 'not available' && p.retention.state === 'warn')
+  check('no disk rows are invented', p.diskRows.length === 0)
+}
+{
+  const [p] = renderHealth(nvrWith({})).nvrPanels
+  check('before the first read, nothing is claimed', p.disks.value === 'not available' && p.retention.value === 'not available')
+  check('an unknown model reads "not available", not blank', field(p, 'Model').value === 'not available' && field(p, 'Firmware').value === 'not available')
+  check('an unknown stream count reads "not available", not 0', field(p, 'Streams in use').value === 'not available')
+  check('an unknown last contact reads "not available", not "just now"', field(p, 'Last contact').value === 'not available')
+}
+{
+  const [p] = renderHealth(nvrWith({ refusalsLast10Min: null })).nvrPanels
+  check('a refusal count nobody measured says so', field(p, 'Refused (10 min)').value === 'not measured', field(p, 'Refused (10 min)').value)
+  check('and is not painted as healthy', field(p, 'Refused (10 min)').state === 'warn')
+  check('the old table column agrees', renderHealth(nvrWith({ refusalsLast10Min: null })).nvrRows[0].refusals === 'not available')
+}
+{
+  const [p] = renderHealth(nvrWith({ refusalsLast10Min: 5 })).nvrPanels
+  check('real refusals are counted and marked', field(p, 'Refused (10 min)').value === '5' && field(p, 'Refused (10 min)').state === 'bad')
+}
+{
+  const [p] = renderHealth(nvrWith({ online: false, status: 'offline', error: 'timed out', storage: { at: T0, available: false, why: 'Main site did not answer a connection to 10.0.0.9:6036 within 2000 ms', disks: [], days: null, worst: 'unknown', caps: {} } })).nvrPanels
+  check('an unreachable NVR says how it failed', p.status.value === 'Offline' && /within 2000 ms/.test(p.status.note), JSON.stringify(p.status))
+}
+{
+  const [p] = renderHealth(nvrWith({ loginError: 'password wrong' })).nvrPanels
+  check('a refused login is distinguished from an unreachable NVR', p.status.value === 'Login refused' && p.status.note === 'password wrong')
+}
+{
+  const [p] = renderHealth(nvrWith({ cooling: true })).nvrPanels
+  check('an NVR whose calls are overdue is shown as slow, not offline', p.status.value === 'Online, slow' && p.status.state === 'warn', JSON.stringify(p.status))
+}
+
 // ---- sending problems --------------------------------------------------------------------------
 {
   const r = renderHealth(data({ sending: { emailError: '535 bad credentials' } }))
