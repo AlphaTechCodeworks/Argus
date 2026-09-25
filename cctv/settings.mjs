@@ -6,7 +6,9 @@
 //                  cameras: { "<nvr>/<ch>": { ...only the fields that differ, plus locationId } } },
 //     memory: { recentMinutes },            // recent footage kept in RAM: warms the file cache, rec-cache.mjs
 //     thumbnails: 'off' | '1m' | '5m',
-//     storage: { locations: [...], lowFreePct, floorFreePct } }   // locations: see storage.mjs
+//     storage: { locations: [...], netshares: [...], lowFreePct, floorFreePct } }
+//                                           // locations: see storage.mjs; netshares: see netshares.mjs
+//                                           // (a netshare never holds a password: only root has it)
 //
 // The file is written as a temp file + rename (never half-written), mode 0600.
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
@@ -30,7 +32,7 @@ export const DEFAULTS = Object.freeze({
   },
   memory: { recentMinutes: 2 },
   thumbnails: 'off',
-  storage: { locations: [], lowFreePct: 15, floorFreePct: 5 },
+  storage: { locations: [], netshares: [], lowFreePct: 15, floorFreePct: 5 },
   alerts: {
     ntfy: { url: 'https://ntfy.sh', topic: '' },
     email: { host: '', port: 587, secure: false, user: '', pass: '', from: '', to: [] },
@@ -107,6 +109,7 @@ function validate(s) {
   int('Hard floor (% free)', 1, 50)(s.storage.floorFreePct)
   if (s.storage.floorFreePct >= s.storage.lowFreePct) throw new HttpError(400, 'the hard floor must be below the low-space threshold')
   if (!Array.isArray(s.storage.locations)) throw new HttpError(400, 'storage.locations must be a list')
+  if (!Array.isArray(s.storage.netshares)) throw new HttpError(400, 'storage.netshares must be a list')
 }
 
 /** Settings from the file, each part falling back to the default when missing or invalid. */
@@ -145,6 +148,7 @@ function fromFile(j) {
     const floor = j.storage.floorFreePct
     if (Number.isInteger(low) && Number.isInteger(floor) && floor >= 1 && floor < low && low <= 50) Object.assign(s.storage, { lowFreePct: low, floorFreePct: floor })
     if (Array.isArray(j.storage.locations)) s.storage.locations = j.storage.locations.filter(isPlainObject)
+    if (Array.isArray(j.storage.netshares)) s.storage.netshares = j.storage.netshares.filter(isPlainObject)
   }
   // Alerts are read back field by field through the same validators, so one bad value in the file
   // costs only that field rather than the whole section.
@@ -249,7 +253,7 @@ export function saveSettings(patch, user, { internal = false } = {}) {
   if ('thumbnails' in patch) next.thumbnails = patch.thumbnails
   if ('storage' in patch) {
     const st = needObject(patch.storage, 'storage')
-    knownKeys(st, internal ? ['locations', 'lowFreePct', 'floorFreePct'] : ['lowFreePct', 'floorFreePct'], 'storage.')
+    knownKeys(st, internal ? ['locations', 'netshares', 'lowFreePct', 'floorFreePct'] : ['lowFreePct', 'floorFreePct'], 'storage.')
     Object.assign(next.storage, st)
   }
   if ('alerts' in patch) {
