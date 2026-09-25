@@ -16,6 +16,9 @@
 //   /api/admin/discovery       -> find TVT NVRs on the network (admins), see discovery.mjs
 //   GET  /api/admin/vpn        -> VPN hub status and the remote sites (admins), see vpn.mjs
 //   /api/admin/nvrs/:id/substreams -> sub-stream codec per channel, switch to H.264 (admins), see substreams.mjs
+//   GET  /api/admin/nvrs/:id/disks[?discover=1] -> what the NVR says about its own disks and how
+//                                 many days it holds; discover=1 sends every candidate query and
+//                                 returns the raw answers (read only), see nvr-disks.mjs
 //   /api/admin/nvrs/:id/channels/:ch/image -> a camera's picture settings (admins), see imaging.mjs
 //     .../image/profiles, .../image/schedule -> Day/Night set-up and schedule, see imaging.mjs
 //     .../lens -> focus settings and "Focus now", see lens.mjs
@@ -59,7 +62,7 @@ import { handleLens } from './lens.mjs'
 import { handleStreams } from './streams.mjs'
 import { handleCameraNotes, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
-import { handleProbe } from './nvr-probe.mjs'
+import { handleClocks, handleProbe } from './nvr-probe.mjs'
 import { handleSettings } from './settings-api.mjs'
 import { cameraRecording, getSettings } from './settings.mjs'
 import { startAlerts } from './alert-checks.mjs'
@@ -77,7 +80,10 @@ import { timelineApi } from './rec-api.mjs'
 import { downloadExport, handleExports } from './export-api.mjs'
 import { connectPlayback } from './rec-playback.mjs'
 import { vpnView } from './vpn.mjs'
-import { sdkStats } from './sdk.mjs'
+import { nvrCooling, sdkStats } from './sdk.mjs'
+import { discoverStorage, makeNvrStorage, readStorage, sdkQuery } from './nvr-disks.mjs'
+import { recentRefusals } from './nvr-health.mjs'
+import { probeTarget, tcpReachable } from './probe.mjs'
 import { loadCertificate } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
@@ -145,22 +151,64 @@ const lastSegmentMs = (nvrId, ch) => {
   return closed === null && open === null ? null : Math.max(closed ?? 0, open ?? 0)
 }
 
+/**
+ * Streams of this NVR whose last start was refused rather than slow, in the last 10 minutes.
+ * With CCTV_LIVE_WORKER=on the streams live in the worker process, so the figure comes back in
+ * its STATS message (nvr-worker.mjs); without a worker they are here. null means nobody counted
+ * — the Health page then says "not measured" rather than a reassuring zero, and the
+ * nvr-refusing rule (which needs >= 3) simply does not fire.
+ */
+const refusalsOf = (n) => {
+  if (n.worker) {
+    const s = n.worker.state() === 'ready' ? n.worker.stats() : null
+    return Number.isFinite(s?.refusals) ? s.refusals : null
+  }
+  return recentRefusals(n.streams?.values?.() ?? [], Date.now())
+}
+
+/** How long ago a call to this NVR last came back from the SDK, or null if none ever has. */
+const lastContactOf = (() => {
+  let cached = { at: 0, byNvr: {} }
+  return (id) => {
+    // sdkStats() walks every in-flight call; once per health poll is plenty for a whole list.
+    if (Date.now() - cached.at > 1000) cached = { at: Date.now(), byNvr: sdkStats().lastReturnAgoByNvr ?? {} }
+    const ms = cached.byNvr[id]
+    return Number.isFinite(ms) ? ms : null
+  }
+})()
+
+/** What each NVR says about its own disks and retention (nvr-disks.mjs): background, cached 10 min. */
+const nvrStorage = makeNvrStorage({
+  listNvrs: () => [...nvrs.values()],
+  // Only asked for an NVR that is not logged in, so the page can separate "the network is down"
+  // from "it is there but would not let us in".
+  reach: async (nvr) => {
+    const target = probeTarget(nvr.cfg)
+    return target ? tcpReachable(target.host, target.port) : { ok: true, why: '', skipped: true }
+  }
+})
+
 const alerts = startAlerts({
   dataDir: DATA_DIR,
   startedMs: STARTED_MS,
   restartReason: RESTART_REASON,
   getSettings,
+  nvrStorage,
   listNvrs: () =>
     [...nvrs.values()].map((n) => ({
       id: n.id,
       name: n.name,
       status: n.status,
       error: n.error,
+      model: n.model,
+      serial: n.serial,
+      host: n.cfg?.host ?? null,
+      via: n.cfg?.sn ? 'p2p' : 'lan',
+      streams: n.worker ? (n.worker.stats()?.streams ?? null) : n.streams.size,
+      cooling: nvrCooling(n.id),
+      lastContactMs: lastContactOf(n.id),
       clockSkewMs: n.playback?.lastClock?.()?.skewMs ?? 0,
-      // Always 0 for now: stream refusals are counted inside each live stream (live.mjs
-      // lastFailure), and with CCTV_LIVE_WORKER=on those live in the worker process, so there is
-      // no clean way to total them here yet. The nvr-refusing rule therefore never fires.
-      refusalsLast10Min: 0
+      refusalsLast10Min: refusalsOf(n)
     })),
   // Only slots that actually hold a camera: an NVR reports all 32 of its channels whether or not
   // anything is plugged into them, and empty slots are permanently "offline".
@@ -392,7 +440,33 @@ const handleRequest = async (req, res) => {
     // of it depends on its model, firmware and licence, so the only honest answer is to ask it.
     const probe = await handleProbe(req.method, pathname, nvrs)
     if (probe) return sendJson(res, probe[0], probe[1])
+    const clocks = await handleClocks(req.method, pathname, nvrs)
+    if (clocks) return sendJson(res, clocks[0], clocks[1])
 
+    // GET /api/admin/nvrs/:id/disks[?discover=1] — what this NVR says about its own disks.
+    // Without discover: the cached snapshot the Health page uses, read again now.
+    // With discover: every candidate command is sent once and the raw answers come back, so the
+    // shapes these NVRs really return can be confirmed. Read-only: the list is fixed and every
+    // name on it is a query (see nvr-disks.mjs DISCOVERY); nothing here can be made to write.
+    const disksRoute = /^\/api\/admin\/nvrs\/([^/]+)\/disks$/.exec(pathname)
+    if (disksRoute) {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' }, { allow: 'GET' })
+      let id
+      try {
+        id = decodeURIComponent(disksRoute[1])
+      } catch {
+        return sendJson(res, 400, { error: 'Bad NVR id' })
+      }
+      const nvr = nvrs.get(id)
+      if (!nvr) return sendJson(res, 404, { error: 'No such NVR' })
+      if (!nvr.online) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
+      try {
+        if (url.searchParams.get('discover')) return sendJson(res, 200, { id, answers: await discoverStorage(nvr, sdkQuery) })
+        return sendJson(res, 200, { id, storage: await readStorage(nvr, sdkQuery, Date.now) })
+      } catch (e) {
+        return sendJson(res, 502, { error: e.message })
+      }
+    }
     const sub = /^\/api\/admin\/nvrs\/([^/]+)\/substreams(\/job)?$/.exec(pathname)
     if (sub) {
       let id
