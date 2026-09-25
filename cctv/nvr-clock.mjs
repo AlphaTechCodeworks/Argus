@@ -26,9 +26,9 @@
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
-import { HttpError, XML_HEADER, transparent, withNvrLock } from './nvr-xml.mjs'
+import { HttpError, transparent, withNvrLock } from './nvr-xml.mjs'
 // the clock arithmetic and document building live apart so they can be tested without the SDK
-import { buildTimeCfg, checkWanted, parseNvrTime, readClock, zoneOffsetMs } from './clock-time.mjs'
+import { QUERY_TIME, buildTimeCfg, checkWanted, parseNvrTime, readClock, zoneOffsetMs } from './clock-time.mjs'
 
 const LOG_FILE = join(DATA_DIR, 'clock-changes.log')
 const READ_BACK_MS = 2000 // the NVR takes a moment to apply before it will report the new values
@@ -40,7 +40,7 @@ const READ_BACK_MS = 2000 // the NVR takes a moment to apply before it will repo
 export async function setClock(nvr, want, user) {
   const wanted = checkWanted(want)
   return withNvrLock(nvr, 'clock', async () => {
-    const beforeXml = String((await transparent(nvr, 'queryTimeCfg', `${XML_HEADER}<request version="1.0" systemType="NVMS-9000" clientType="WEB"></request>`, 'clock before', { outBytes: 16 * 1024 })) ?? '')
+    const beforeXml = String((await transparent(nvr, 'queryTimeCfg', QUERY_TIME, 'clock before', { outBytes: 16 * 1024 })) ?? '')
     const before = readClock(beforeXml)
     if (!before.timeZone) throw new HttpError(502, 'the NVR did not report its clock settings; nothing was changed')
 
@@ -52,7 +52,7 @@ export async function setClock(nvr, want, user) {
     }
 
     await new Promise((r) => setTimeout(r, READ_BACK_MS))
-    const afterXml = String((await transparent(nvr, 'queryTimeCfg', `${XML_HEADER}<request version="1.0" systemType="NVMS-9000" clientType="WEB"></request>`, 'clock after', { outBytes: 16 * 1024 })) ?? '')
+    const afterXml = String((await transparent(nvr, 'queryTimeCfg', QUERY_TIME, 'clock after', { outBytes: 16 * 1024 })) ?? '')
     const after = readClock(afterXml)
 
     // Did it actually take? The NVR can answer "success" and keep its old settings.
@@ -125,7 +125,7 @@ const SYNC_EVERY_MS = 60 * 60_000 // check every hour
  */
 export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 'clock sync' } = {}) {
   try {
-    const xml = String((await transparent(nvr, 'queryTimeCfg', `${XML_HEADER}<request version="1.0" systemType="NVMS-9000" clientType="WEB"></request>`, 'clock check', { outBytes: 16 * 1024 })) ?? '')
+    const xml = String((await transparent(nvr, 'queryTimeCfg', QUERY_TIME, 'clock check', { outBytes: 16 * 1024 })) ?? '')
     const cur = readClock(xml)
     if (cur.sync === 'NTP') return { nvr: nvr.id, drift: null, changed: false, why: 'it takes its time from NTP itself' }
 
@@ -159,7 +159,11 @@ export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 3 * 60
       if (!nvr.online) continue
       const r = await syncOne(nvr)
       out.push(r)
-      if (r.changed) log(`[clock] ${r.nvr}: ${r.why}${r.drift === null ? '' : ` (was ${Math.round(r.drift / 1000)} s out)`}`)
+      // Every outcome, not only the changes. A background job that speaks only when it acts cannot
+      // be told apart from one that is not running at all: when nvr-2 was seen four minutes out on
+      // 2026-09-25 there was no way to find out whether the sync had skipped it, failed on it, or
+      // never run, because doing nothing looked exactly like being switched off.
+      log(`[clock] ${r.nvr}: ${r.why}${r.drift === null ? '' : ` (${Math.round(r.drift / 1000)} s out)`}`)
     }
     return out
   }

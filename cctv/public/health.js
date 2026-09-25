@@ -2,6 +2,7 @@
 // is pure so it can be tested without a browser (the same split pb-sources.js uses for playback);
 // the DOM code at the bottom only paints. alert-banner.js reuses bannerText on every other page,
 // which is why the banner wording lives here rather than in the page.
+import { smartRows, smartSummary } from './smart-view.js'
 
 const hhmm = (ms) => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
 
@@ -152,13 +153,30 @@ function nvrPanel(n, mine, nowMs) {
     // with recordings running up to today is observably writing -- that is evidence, not a guess,
     // and it is reported as what it is rather than as the condition the NVR would not give us.
     const writing = !disk.status && Number.isFinite(disk.days) && disk.days > 0
+    // The drive's own SMART verdict. "read/write" only says the NVR is still using the disk; this
+    // is the disk's own opinion of itself, and it is the earlier warning of the two.
+    const s = disk.smart
+    const health = !s
+      ? NOT_AVAILABLE
+      : [
+          s.verdict === 'lowHealth' ? 'Low health' : s.verdict ? s.verdict[0].toUpperCase() + s.verdict.slice(1) : 'Unknown',
+          Number.isFinite(s.temperature) ? `${s.temperature} °C` : null,
+          Number.isFinite(s.powerOnDays) ? `${s.powerOnDays} days on` : null
+        ].filter(Boolean).join(' · ')
     return {
       name: disk.name,
       status: disk.status || (writing ? 'Recording' : NOT_AVAILABLE),
       state: disk.state === 'unknown' ? (writing ? 'ok' : 'warn') : disk.state === 'busy' ? 'warn' : disk.state,
       detail: [disk.model, disk.serial].filter(Boolean).join(' · '),
       size: Number.isFinite(disk.totalBytes) ? `${bytes(disk.totalBytes)}${free}` : NOT_AVAILABLE,
-      days: days(disk.days)
+      days: days(disk.days),
+      health,
+      healthState: s ? s.state : 'warn',
+      // Why it is not green, in words rather than SMART attribute numbers nobody reads.
+      concerns: s?.concerns ?? [],
+      // The full SMART table, in readable form, behind a disclosure on the row.
+      smartSummary: smartSummary(s),
+      smartRows: smartRows(s)
     }
   })
 
@@ -390,7 +408,7 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
         const table = el('table', { className: 'hp-table nvr-disks' })
         const thead = el('thead')
         const hr = el('tr')
-        for (const t of ['Disk', 'State', 'Size', 'Recordings go back']) hr.append(el('th', { textContent: t }))
+        for (const t of ['Disk', 'State', 'Health', 'Size', 'Recordings go back']) hr.append(el('th', { textContent: t }))
         thead.append(hr)
         const tbody = el('tbody')
         for (const row of n.diskRows) {
@@ -401,10 +419,61 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
           nameCell.append(el('div', { textContent: row.name }))
           if (row.detail) nameCell.append(el('div', { className: 'hp-sub', textContent: row.detail }))
           tr.append(nameCell)
-          for (const [text, cls] of [[row.status, row.state], [row.size, ''], [row.days, '']]) {
-            tr.append(el('td', { textContent: text, className: cls }))
+          const healthCell = el('td', { className: row.healthState })
+          healthCell.append(el('div', { textContent: row.health }))
+          // What is actually wrong, spelled out. A SMART attribute number tells nobody anything.
+          for (const c of row.concerns) healthCell.append(el('div', { className: 'hp-sub', textContent: c }))
+          for (const [text, cls, node] of [[row.status, row.state], [null, '', healthCell], [row.size, ''], [row.days, '']]) {
+            tr.append(node ?? el('td', { textContent: text, className: cls }))
           }
           tbody.append(tr)
+
+          // The full SMART report, behind a disclosure so the disk table stays readable. Closed by
+          // default: two dozen attributes are what you want when you are investigating a disk, and
+          // noise when you are checking whether the site is recording.
+          if (row.smartRows.length) {
+            const detail = el('tr', { className: 'hp-smart-row' })
+            const cell = el('td')
+            cell.colSpan = 5
+            const box = el('details', { className: 'hp-smart' })
+            box.append(el('summary', { textContent: `SMART report — ${row.name}${row.detail ? ` (${row.detail})` : ''}` }))
+
+            // The few facts worth reading before the table.
+            const sum = el('div', { className: 'hp-smart-summary' })
+            for (const f of row.smartSummary) {
+              const item = el('div', { className: 'hp-smart-fact' })
+              item.append(el('div', { className: 'hp-sub', textContent: f.label }))
+              item.append(el('div', { className: `hp-smart-value ${f.state}`, textContent: f.value }))
+              if (f.note) item.append(el('div', { className: 'hp-sub', textContent: f.note }))
+              sum.append(item)
+            }
+            box.append(sum)
+
+            const t = el('table', { className: 'hp-table hp-smart-table' })
+            const th = el('thead')
+            const thr = el('tr')
+            for (const h of ['#', 'Attribute', 'Reading', 'Value / limit', 'Type', 'What it means']) thr.append(el('th', { textContent: h }))
+            th.append(thr)
+            const tb = el('tbody')
+            for (const a of row.smartRows) {
+              const r = el('tr', { className: a.state === 'muted' ? 'hp-muted' : '' })
+              r.append(el('td', { textContent: String(a.id) }))
+              const nameCell = el('td', { textContent: a.name })
+              // The five that actually predict a failure, marked so they are findable at a glance.
+              if (a.key) nameCell.append(el('span', { className: 'hp-key', textContent: ' key' }))
+              r.append(nameCell)
+              r.append(el('td', { textContent: a.raw, className: a.state === 'bad' ? 'bad' : a.state === 'warn' ? 'warn' : '' }))
+              r.append(el('td', { textContent: a.margin }))
+              r.append(el('td', { textContent: a.kind }))
+              r.append(el('td', { textContent: a.note, className: 'hp-sub' }))
+              tb.append(r)
+            }
+            t.append(th, tb)
+            box.append(t)
+            cell.append(box)
+            detail.append(cell)
+            tbody.append(detail)
+          }
         }
         table.append(thead, tbody)
         panel.append(table)

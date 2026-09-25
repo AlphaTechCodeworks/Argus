@@ -33,7 +33,6 @@ if [ -x /c/Windows/System32/OpenSSH/scp.exe ]; then
   ssh() { MSYS_NO_PATHCONV=1 /c/Windows/System32/OpenSSH/ssh.exe "$@"; }
 fi
 local_path() { command -v cygpath >/dev/null && cygpath -m "$1" || echo "$1"; }
-[ "$code_only" = 0 ] || [ "$target" = wsl ] || { echo "--code-only is for the WSL test PC" >&2; exit 2; }
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -101,5 +100,29 @@ else
   echo "== copying to $host" >&2
   scp -q "${ssh_opts[@]}" "$(local_path "$bundle")" "$host:/tmp/$name"
   echo "== installing" >&2
-  ssh -t "${ssh_opts[@]}" "$host" "set -e; rm -rf /tmp/cctv-release && mkdir -p /tmp/cctv-release && tar -xzf /tmp/$name -C /tmp/cctv-release && sudo bash /tmp/cctv-release/*/deploy/install-ubuntu.sh; rm -rf /tmp/cctv-release /tmp/$name"
+  if [ "$code_only" = 1 ]; then
+    # The same overlay the test PC gets: the new app code laid over the packages and the compiled
+    # SDK bindings of the release already installed there. Those come out of the Docker build, and
+    # a change that touches neither has no business needing Docker running on this PC to reach the
+    # server. package.json is compared because a new dependency would not be installed by this
+    # route, and the app would start without it.
+    ssh -t "${ssh_opts[@]}" "$host" "set -e
+cur=\"\$(readlink -f /opt/cctv/current)\"
+new=/tmp/cctv-release/cctv-$release
+rm -rf /tmp/cctv-release && mkdir -p /tmp/cctv-release
+sudo cp -a \"\$cur\" \"\$new\"
+sudo rm -rf \"\$new/cctv\" \"\$new/deploy\"
+sudo tar -xf /tmp/$name -C \"\$new\"
+if ! cmp -s \"\$new/package.json\" \"\$cur/package.json\"; then
+  echo 'package.json changed since the installed release: the npm packages would differ. Run a full push (without --code-only).' >&2
+  sudo rm -rf /tmp/cctv-release; rm -f /tmp/$name; exit 3
+fi
+echo \"code $release over \$(cat \"\$cur/RELEASE\" 2>/dev/null || basename \"\$cur\")'s packages\"
+status=0
+sudo bash \"\$new/deploy/install-ubuntu.sh\" || status=\$?
+sudo rm -rf /tmp/cctv-release; rm -f /tmp/$name
+exit \$status"
+  else
+    ssh -t "${ssh_opts[@]}" "$host" "set -e; rm -rf /tmp/cctv-release && mkdir -p /tmp/cctv-release && tar -xzf /tmp/$name -C /tmp/cctv-release && sudo bash /tmp/cctv-release/*/deploy/install-ubuntu.sh; rm -rf /tmp/cctv-release /tmp/$name"
+  fi
 fi

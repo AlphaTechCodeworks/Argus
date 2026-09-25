@@ -9,7 +9,7 @@
 // unrecognised answer has to end as "not available" rather than as a wrong-but-confident number.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { diskState, makeNvrStorage, parseDate, parseDiskStatus, parseStorageDevInfo, parseSystemCaps, readStorage, sizeBytes } from '../nvr-disks.mjs'
+import { diskState, makeNvrStorage, parseDate, parseDiskStatus, parseStorageDevInfo, parseSmart, parseSystemCaps, readStorage, sizeBytes, smartRequest } from '../nvr-disks.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -169,32 +169,103 @@ const at = (t) => () => t
   const b = store.refresh()
   release()
   await Promise.all([a, b])
-  check('overlapping rounds ask the NVR once', started === 3, `${started} queries for 3 commands`)
+  // Counted against one round rather than a fixed number: the number of queries a round makes
+  // grows with the disks (each one is asked for its SMART data), and what matters here is that
+  // the second round added nothing, not how many the first one took.
+  let solo = 0
+  const one = makeNvrStorage({ listNvrs: () => [nvr], query: async (_n, url) => { solo++; return ALL[url] ?? '' }, now: () => now })
+  await one.refresh()
+  check('overlapping rounds ask the NVR once', started === solo, `${started} queries against ${solo} for a single round`)
 }
 
 // ---- the shape the real NVRs actually answer with, 2026-09-25 -------------------------------------
 //
-// No longer a guess. These NVMS-9000 boxes refuse queryDiskStatus outright and put the model,
-// serial, size and free space in queryStorageDevInfo alongside the recording dates -- the opposite
-// of what the SDK's own strings suggested. Reading only the dates out of that answer is what made
-// the Health page show a disk it could name with every other field blank.
+// No longer a guess: this is nvr-2's own answer, copied verbatim from a discovery run. Two things
+// about it defeated the old reader, and between them they blanked every field on the Health page.
+//
+//   - queryDiskStatus puts its items straight under <content type="list">, with no <diskList>
+//     around them, so a reader looking only for the named lists found no disks at all.
+//   - it names its disks only by GUID and carries no slotIndex, while queryStorageDevInfo carries
+//     both -- so pairing the two answers by slot left every disk's condition stranded.
 {
-  const SDI = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryStorageDevInfo"><status>success</status><content><diskList type="list"><itemType><size unit="MB"></size><freeSpace unit="MB"></freeSpace></itemType><item id="{d1}"><raidId></raidId><slotIndex>1</slotIndex><diskInterfaceType>sata</diskInterfaceType><serialNum>ZRT0CMKL</serialNum><model>ST12000VE001-3BN101 </model><size>11444224</size><freeSpace>0</freeSpace><recStartDate>2026-09-08</recStartDate><recEndDate>2026-09-25</recEndDate></item></diskList></content></response>`
-  const REFUSED = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryDiskStatus"><status>fail</status><errorCode>536870913</errorCode></response>`
-  const CAPS = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="querySystemCaps"><status>success</status><content><ipChlMaxCount>32</ipChlMaxCount><playbackMaxWin>16</playbackMaxWin></content></response>`
-  const q = async (n, url) => (url === 'queryDiskStatus' ? REFUSED : url === 'queryStorageDevInfo' ? SDI : CAPS)
-  const r = await readStorage({ id: 'nvr1', name: 'NVR 1', online: true }, q, () => 0)
+  const DS = `<?xml version="1.0" encoding="UTF-8"?><response version="1.0" cmdUrl="queryDiskStatus"><status>success</status><types><diskStatus><enum>read/write</enum><enum>read</enum><enum>bad</enum></diskStatus></types><content type="list"><itemType type="diskStatus"></itemType><item id="{C131C5D2-0842-46E9-B3BE-549E60AD184E}"><diskStatus>read/write</diskStatus><diskEncryptStatus>notEncrypted</diskEncryptStatus></item></content></response>`
+  const SDI = `<?xml version="1.0" encoding="UTF-8"?><response version="1.0" cmdUrl="queryStorageDevInfo"><status>success</status><content><cycleRecord>true</cycleRecord><storageSysInfo><supportedRaidType type="list"><item>RAID_TYPE_0</item><item>RAID_TYPE_1</item></supportedRaidType></storageSysInfo><raidCardList type="list"></raidCardList><raidList type="list"><itemType><realSize unit="MB"></realSize></itemType></raidList><diskList type="list"><itemType><size unit="MB"></size></itemType><item id="{C131C5D2-0842-46E9-B3BE-549E60AD184E}"><raidId>{00000000-0000-0000-0000-000000000000}</raidId><slotIndex>1</slotIndex><diskInterfaceType>sata</diskInterfaceType><serialNum>ZV70E99C</serialNum><model>ST12000VE001-3BN101 </model><size>11444224</size><freeSpace>0</freeSpace><recStartDate>2026-09-10</recStartDate><recEndDate>2026-09-25</recEndDate></item></diskList></content></response>`
+  const CAPS = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="querySystemCaps"><status>success</status><content><chlMaxCount>32</chlMaxCount><ipChlMaxCount>32</ipChlMaxCount><playbackMaxWin>16</playbackMaxWin><totalBandwidth unit="Mb">192</totalBandwidth><usedTotalBandwidth unit="Kb">131072</usedTotalBandwidth><supportHDHealth>true</supportHDHealth></content></response>`
+  const q = async (n, url) => (url === 'queryDiskStatus' ? DS : url === 'queryStorageDevInfo' ? SDI : CAPS)
+  const r = await readStorage({ id: 'nvr-2', name: 'NVR 2', online: true }, q, () => 0)
   const d = r.disks[0]
-  check('the disk survives queryDiskStatus being refused', r.available === true && r.disks.length === 1)
+  check('one disk, not none', r.available === true && r.disks.length === 1, JSON.stringify(r.disks))
+  check('items straight under <content> are found', d.status === 'read/write' && d.state === 'ok', `${d.status} ${d.state}`)
+  check('the two answers pair up by GUID when there is no slot to pair on', d.slot === 1 && d.serial === 'ZV70E99C', JSON.stringify(d))
   check('the model comes through', d.model === 'ST12000VE001-3BN101', String(d.model))
-  check('the serial comes through', d.serial === 'ZRT0CMKL', String(d.serial))
-  check('the id comes through', d.id === '{d1}', String(d.id))
   // 11444224 MB is a 12 TB drive. A thousandfold slip here reads as 11 GB and looks like a fault.
   check('the size is read in the megabytes the list declares', d.totalBytes === 11444224e6, String(d.totalBytes))
   check('a full cycling disk is zero free, not unknown', d.freeBytes === 0, String(d.freeBytes))
-  check('the recording days still come through', d.days === 18, String(d.days))
-  check('a condition the NVR would not give stays unknown rather than invented', d.state === 'unknown' && d.status === null)
+  check('the recording days come through', d.days === 16, String(d.days))
+  // the raid type lists in this same answer also hold <item> elements, and are not disks
+  check('the raid type lists are not mistaken for disks', r.disks.length === 1)
   check('the camera limit is read', r.caps.maxCameras === 32 && r.caps.maxPlaybackWindows === 16)
+  check('the bandwidth figures are read', r.caps.totalBandwidthMbps === 192 && r.caps.usedBandwidthKbps === 131072, JSON.stringify(r.caps))
+}
+
+// ---- SMART ----------------------------------------------------------------------------------------
+//
+// nvr-2's own reply, 2026-09-25. The command name was found by elimination (every wrong name gives
+// a bare HTTP 404; this one gave XML), and it refuses any request that does not name a disk.
+{
+  const attr = (id, v, raw, st = 'normal', kind = 'Oldage') =>
+    `<item id="${id}"><value>${v}</value><worstValue>${v}</worstValue><threshold>0</threshold><rawValue>${raw}</rawValue><type>${kind}</type><state>0</state><smartStatus>${st}</smartStatus></item>`
+  const reply = (items, extra = '') =>
+    `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryDiskSmartInfo"><status>success</status><content><id>{D1}</id><smartItems type="list"><itemType><smartStatus type="smartStatus"></smartStatus></itemType>${items}</smartItems><temperature>30</temperature><powerOnDays>463</powerOnDays><diskStatus type="diskStatus">${extra || 'good'}</diskStatus></content></response>`
+
+  // The real attribute values off nvr-2's drive.
+  const healthy = attr(1, 100, 1352435, 'normal', 'Pre-fail') + attr(5, 100, 0, 'normal', 'Pre-fail') +
+    attr(7, 89, 889728777, 'normal', 'Pre-fail') + attr(9, 88, 11090) + attr(187, 100, 0) +
+    attr(188, 100, 0) + attr(194, 30, 30) + attr(197, 100, 0) + attr(198, 100, 0)
+
+  const r = parseSmart(reply(healthy))
+  check('the drive is read as good', r.ok && r.smart.verdict === 'good' && r.smart.state === 'ok', JSON.stringify(r.smart?.state))
+  check('the temperature is read', r.smart.temperature === 30)
+  check('how long it has been powered on is read', r.smart.powerOnDays === 463)
+  check('the attributes are named, not left as numbers', r.smart.attrs.find((a) => a.id === 197)?.name === 'Pending sectors')
+  // The trap this must not fall into: Seagate encodes attributes 1 and 7 so that a perfectly
+  // healthy drive reports raw values in the hundreds of millions. Calling a big number a bad
+  // number would condemn every healthy Seagate in the estate.
+  check('889 million Seagate seek errors are not a fault', r.smart.concerns.length === 0, JSON.stringify(r.smart.concerns))
+
+  // The five that actually predict failure, one at a time.
+  for (const [id, what] of [[5, 'reallocated sectors'], [187, 'reported uncorrectable'], [188, 'command timeouts'], [197, 'pending sectors'], [198, 'offline uncorrectable']]) {
+    // attribute 5 is Pre-fail on this drive and the rest are Oldage, so the line to swap out is
+    // whichever one the fixture actually holds
+    const kind = id === 5 ? 'Pre-fail' : 'Oldage'
+    const was = attr(id, 100, 0, 'normal', kind)
+    if (!healthy.includes(was)) { check(`fixture holds attribute ${id}`, false, 'test bug'); continue }
+    const bad = parseSmart(reply(healthy.replace(was, attr(id, 90, 4, 'normal', kind))))
+    check(`a non-zero count of ${what} is a concern`, bad.smart.concerns.length === 1 && bad.smart.state === 'warn', JSON.stringify(bad.smart.concerns))
+  }
+  // A drive can be writable and still failing: the NVR says read/write, the drive says otherwise.
+  check('the drive\'s own poor verdict is believed', parseSmart(reply(healthy, 'lowHealth')).smart.state === 'warn')
+  check('and a bad one more so', parseSmart(reply(healthy, 'bad')).smart.state === 'bad')
+  check('a word we do not know is unknown, not a guess', parseSmart(reply(healthy, 'somethingNew')).smart.state === 'unknown')
+  // An overheating drive is a fault whatever its attributes say.
+  check('a drive being cooked is a concern', parseSmart(reply(healthy).replace('<temperature>30<', '<temperature>58<')).smart.concerns.some((c) => c.includes('58')))
+  check('and a cool one is not', !parseSmart(reply(healthy)).smart.concerns.some((c) => c.includes('°C')))
+  // The drive flagging an attribute itself is trusted even where we would not have judged it.
+  check('an attribute the drive itself flags is a concern', parseSmart(reply(healthy.replace(attr(9, 88, 11090), attr(9, 88, 11090, 'warn')))).smart.concerns.length === 1)
+
+  const refused = parseSmart('<?xml version="1.0"?><response cmdUrl="queryDiskSmartInfo"><status>fail</status><errorCode>536870923</errorCode></response>')
+  check('a refusal is a refusal, not an empty healthy report', refused.ok === false && refused.smart === null && refused.errorCode === '536870923')
+  check('the request names the disk, which is what it refuses without', smartRequest('{D1}').includes('<condition><diskId>{D1}</diskId></condition>'))
+}
+{
+  // A SMART reply we cannot make sense of must never make a working disk look worse.
+  const ID = '{D9}'
+  const DS = `<?xml version="1.0"?><response cmdUrl="queryDiskStatus"><status>success</status><content type="list"><item id="${ID}"><diskStatus>read/write</diskStatus></item></content></response>`
+  const SDI = `<?xml version="1.0"?><response cmdUrl="queryStorageDevInfo"><status>success</status><content><diskList type="list"><itemType><size unit="MB"></size></itemType><item id="${ID}"><slotIndex>1</slotIndex><size>11444224</size><freeSpace>0</freeSpace><recStartDate>2026-09-10</recStartDate><recEndDate>2026-09-25</recEndDate></item></diskList></content></response>`
+  const NONSENSE = '<?xml version="1.0"?><response cmdUrl="queryDiskSmartInfo"><status>success</status><content><somethingElse>1</somethingElse></content></response>'
+  const q = async (_n, url) => (url === 'queryDiskStatus' ? DS : url === 'queryStorageDevInfo' ? SDI : url === 'queryDiskSmartInfo' ? NONSENSE : '<?xml version="1.0"?><response><status>success</status><content></content></response>')
+  const r = await readStorage({ id: 'x', name: 'X', online: true }, q, () => 0)
+  check('an unreadable SMART reply does not downgrade a disk that is recording', r.disks[0].state === 'ok' && r.worst === 'ok', `${r.disks[0].state} / ${r.worst}`)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

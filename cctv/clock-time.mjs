@@ -10,6 +10,20 @@
 // the NVR's own web client sends this header on every request; matching it keeps us ordinary
 const XML_HEADER = '<?xml version="1.0" encoding="utf-8"?>'
 
+/**
+ * The document that asks an NVR for its clock. It lives here, with the other document building,
+ * because nvr-clock.mjs cannot be imported without the Linux SDK and so cannot be tested on a
+ * development PC -- and this is precisely the kind of thing that needs testing. The version that
+ * lived there wrote the opening <request> tag a second time on top of the one XML_HEADER already
+ * provides, sending two opening tags and one close. Nothing rejected it loudly: the NVR simply
+ * answered something unreadable, every clock read back with a null timezone, and the hourly
+ * master-clock pass concluded it could not place any of them and did nothing, for weeks.
+ */
+// Note which XML_HEADER this is. The one in this file is the XML declaration alone; the one in
+// nvr-xml.mjs also opens <request>. Mixing them up is the whole bug: nvr-clock.mjs imported that
+// second one and then wrote the opening tag again itself.
+export const QUERY_TIME = `${XML_HEADER}<request version="1.0" systemType="NVMS-9000" clientType="WEB"></request>`
+
 export class ClockError extends Error {
   constructor(status, message) {
     super(message)

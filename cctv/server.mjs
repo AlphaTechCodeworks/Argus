@@ -82,7 +82,7 @@ import { downloadExport, handleExports } from './export-api.mjs'
 import { connectPlayback } from './rec-playback.mjs'
 import { vpnView } from './vpn.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
-import { discoverStorage, makeNvrStorage, readStorage, sdkQuery } from './nvr-disks.mjs'
+import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
 import { recentRefusals } from './nvr-health.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
 import { loadCertificate } from './tls.mjs'
@@ -446,6 +446,12 @@ const handleRequest = async (req, res) => {
     // of it depends on its model, firmware and licence, so the only honest answer is to ask it.
     const probe = await handleProbe(req.method, pathname, nvrs)
     if (probe) return sendJson(res, probe[0], probe[1])
+    // GET /api/admin/nvr-clocks?sync=1 — run the master-clock pass now and say what it did to each
+    // NVR. Without this the only way to see the sync work is to restart and wait three minutes,
+    // and its answer for an NVR it chose to leave alone is as interesting as one it corrected.
+    if (pathname === '/api/admin/nvr-clocks' && req.method === 'GET' && url.searchParams.get('sync')) {
+      return sendJson(res, 200, { ran: await clockSync.runNow() })
+    }
     const clocks = await handleClocks(req.method, pathname, nvrs)
     if (clocks) return sendJson(res, clocks[0], clocks[1])
     const clockWrite = await handleClockWrite(req.method, pathname, () => readJsonObject(req, 2048), nvrs, user)
@@ -469,7 +475,18 @@ const handleRequest = async (req, res) => {
       if (!nvr) return sendJson(res, 404, { error: 'No such NVR' })
       if (!nvr.online) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
       try {
-        if (url.searchParams.get('discover')) return sendJson(res, 200, { id, answers: await discoverStorage(nvr, sdkQuery) })
+        if (url.searchParams.get('discover')) {
+          // ?cmds=a,b,c asks this NVR about command names we are still hunting for -- the disk
+          // health one, for instance, which these boxes advertise as supportHDHealth without
+          // saying what it is called. Only names beginning "query" are passed on: everything in
+          // this dialect that changes the NVR is an "edit"/"set"/"add" command, so a read-only
+          // hunt cannot become a write by way of a URL.
+          const asked = (url.searchParams.get('cmds') ?? '')
+            .split(',').map((s) => s.trim()).filter((s) => /^query[A-Za-z0-9]{1,48}$/.test(s)).slice(0, 40)
+          return sendJson(res, 200, { id, answers: await discoverStorage(nvr, sdkQuery, asked.length ? asked : undefined) })
+        }
+        // ?smart=1 — which request shape queryDiskSmartInfo will actually accept
+        if (url.searchParams.get('smart')) return sendJson(res, 200, { id, ...await probeSmart(nvr, sdkQuery) })
         return sendJson(res, 200, { id, storage: await readStorage(nvr, sdkQuery, Date.now) })
       } catch (e) {
         return sendJson(res, 502, { error: e.message })

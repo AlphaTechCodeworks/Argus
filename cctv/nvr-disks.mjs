@@ -30,7 +30,7 @@
 // minutes, in the background, and never on the health poll's own thread of control. health() is
 // synchronous and only ever reads the last snapshot.
 
-import { XML_HEADER, kid, kids, parseXml } from './xml.mjs'
+import { XML_HEADER, esc, kid, kids, parseXml } from './xml.mjs'
 
 /** How long a good answer is kept before the NVR is asked again. */
 export const FRESH_MS = 10 * 60_000
@@ -101,6 +101,13 @@ const OK_WORDS = /^(read\s*\/?\s*write|readwrite|rw|normal|ok|good|online|in\s*u
 const WARN_WORDS = /read\s*only|^ro$|idle|standby|sleep|hibernat|redundan|backup/i
 const BUSY_WORDS = /format|rebuild|sync/i
 const BAD_WORDS = /except|error|abnormal|fail|damage|\bbad\b|unformat|no\s*disk|offline|missing|pull|lost|smart|degrade/i
+
+/**
+ * Worst first. Used both to pick the worst disk in an NVR and to let a drive's own SMART verdict
+ * lower a disk's state -- never raise it. "read/write" only means the NVR is still using the disk;
+ * a drive can be perfectly writable and quietly failing, which is the case this exists to catch.
+ */
+const RANK = Object.freeze({ bad: 0, unknown: 1, busy: 2, warn: 3, ok: 4 })
 
 /** 'ok' | 'warn' | 'busy' | 'bad' | 'unknown' for an NVR's word for a disk's condition. */
 export function diskState(status) {
@@ -192,7 +199,12 @@ function diskFields(item, i, listTotalUnit, listFreeUnit) {
 export function parseDiskStatus(xml) {
   const { response, status, errorCode } = answerOf(xml)
   if (status && status !== 'success') return { ok: false, errorCode: errorCode || status, disks: [] }
-  const items = itemsUnder(response, ['diskList', 'disks', 'diskInfo'])
+  // 'content' matters: these NVRs answer queryDiskStatus with <content type="list"> holding the
+  // items directly, with no <diskList> around them at all. Looking only for the named lists found
+  // nothing, and a disk whose condition the NVR had plainly stated came out as "unknown".
+  // kids() takes direct children only, so naming 'content' here cannot pick up the items nested
+  // deeper inside it (the raid type lists in queryStorageDevInfo's answer).
+  const items = itemsUnder(response, ['diskList', 'disks', 'diskInfo', 'content'])
   const tu = declaredUnit(response, ['totalSpace', 'size', 'capacity'])
   const fu = declaredUnit(response, ['freeSpace', 'remainSize', 'freeSize'])
   return { ok: true, errorCode: '', disks: items.map((item, i) => diskFields(item, i, tu, fu)) }
@@ -325,6 +337,167 @@ export async function discoverStorage(nvr, query, commands = DISCOVERY) {
   return out
 }
 
+// ---- SMART: what the disk says about its own health ---------------------------------------------
+//
+// queryDiskSmartInfo, with <condition><diskId>{GUID}</diskId></condition>. The command was found
+// by elimination: every wrong name answers a bare HTTP 404, and this one answered with XML, so the
+// NVR knew it. A bodyless request is refused with errorCode 536870923 -- it wants to be told which
+// disk.
+//
+// The NVR gives its own verdict (good / lowHealth / bad), the temperature, how long the disk has
+// been powered on, and the raw SMART attribute table.
+//
+// Of the two dozen attributes, only a few actually predict a failure. Backblaze, who have run
+// hundreds of thousands of these drives, report that five do most of the work: reallocated
+// sectors, reported uncorrectable, command timeout, pending sectors and offline uncorrectable.
+// Those are the ones this raises a warning for, and only when their raw count is above zero.
+//
+// The others are deliberately NOT judged. Seagate encodes attributes 1 and 7 so that a perfectly
+// healthy drive reports a raw value in the hundreds of millions -- this disk reports 889,728,777
+// seek errors and is fine. Treating a big number as a bad number would condemn every healthy
+// Seagate in the estate, so the normalised value and the maker's own verdict are trusted instead.
+const SMART_NAMES = Object.freeze({
+  1: 'Read error rate', 3: 'Spin-up time', 4: 'Start/stop count', 5: 'Reallocated sectors',
+  7: 'Seek error rate', 9: 'Power-on hours', 10: 'Spin retries', 12: 'Power cycles',
+  18: 'Head health', 187: 'Reported uncorrectable', 188: 'Command timeout', 190: 'Airflow temperature',
+  192: 'Unsafe shutdowns', 193: 'Load/unload cycles', 194: 'Temperature', 197: 'Pending sectors',
+  198: 'Offline uncorrectable', 199: 'CRC errors', 200: 'Write error rate', 240: 'Head flying hours',
+  241: 'Total written', 242: 'Total read'
+})
+
+/** The attributes worth waking somebody for, and what a non-zero count on each one means. */
+export const CRITICAL_SMART = Object.freeze({
+  5: 'sectors have already failed and been swapped out',
+  187: 'reads the drive could not correct',
+  188: 'commands the drive gave up on',
+  197: 'sectors waiting to be swapped out',
+  198: 'sectors that could not be read even offline'
+})
+
+const HOT_C = 50 // a 3.5" drive above this is being cooked; Seagate rate these to 60
+
+/**
+ * queryDiskSmartInfo for one disk.
+ * @returns {{ ok: boolean, errorCode: string, smart: object|null }}
+ */
+export function parseSmart(xml) {
+  const { response, status, errorCode } = answerOf(xml)
+  if (status && status !== 'success') return { ok: false, errorCode: errorCode || status, smart: null }
+  const c = kid(response, 'content') ?? response
+  const attrs = itemsUnder(response, ['smartItems']).map((item) => {
+    const id = num(item.attrs?.id)
+    return {
+      id,
+      name: SMART_NAMES[id] ?? `Attribute ${id ?? '?'}`,
+      value: num(field(item, ['value'])),
+      worst: num(field(item, ['worstValue'])),
+      threshold: num(field(item, ['threshold'])),
+      raw: num(field(item, ['rawValue'])),
+      kind: field(item, ['type']), // 'Pre-fail' or 'Oldage'
+      status: field(item, ['smartStatus']) // 'normal' or 'warn'
+    }
+  })
+
+  // Concerns, in the disk's own words where it gives them and in plain counts where it does not.
+  const concerns = []
+  for (const a of attrs) {
+    if (a.status && a.status.toLowerCase() === 'warn') concerns.push(`${a.name}: the drive flags this`)
+    else if (CRITICAL_SMART[a.id] && Number.isFinite(a.raw) && a.raw > 0) concerns.push(`${a.name}: ${a.raw} — ${CRITICAL_SMART[a.id]}`)
+  }
+  const temperature = num(field(c, ['temperature']))
+  if (Number.isFinite(temperature) && temperature >= HOT_C) concerns.push(`running at ${temperature} °C`)
+
+  // A few attributes say something the disk's own verdict does not, and are worth carrying.
+  const raw = (id) => attrs.find((a) => a.id === id)?.raw ?? null
+  const powerCycles = raw(12) ?? raw(4)
+  const unsafe = raw(192) // emergency retracts: the heads parked because the power went, not because it was asked
+  // Attribute 190 is the airflow temperature as 100 minus degrees; its worst-ever value is the
+  // only record of how hot this drive has ever been, which is what shows a cabinet fan has died.
+  const hot190 = attrs.find((a) => a.id === 190)
+  const peakTemp = Number.isFinite(hot190?.worst) ? 100 - hot190.worst : (attrs.find((a) => a.id === 194)?.worst ?? null)
+  // Deliberately NOT reported: attributes 241/242, "total written" and "total read". They are
+  // 32-bit and have wrapped about 150 times on this drive -- it reads 0.93 TB where the real
+  // figure is nearer 331 TB. A number that wrong is worse than no number.
+
+  const verdict = field(c, ['diskStatus'])
+  const v = String(verdict ?? '').toLowerCase()
+  return {
+    ok: true,
+    errorCode: '',
+    smart: {
+      id: field(c, ['id']),
+      verdict, // the NVR's own word: good | lowHealth | bad
+      state: v === 'good' ? (concerns.length ? 'warn' : 'ok') : v === 'lowhealth' ? 'warn' : v === 'bad' ? 'bad' : 'unknown',
+      temperature,
+      peakTemp,
+      powerOnDays: num(field(c, ['powerOnDays'])),
+      powerOnHours: raw(9),
+      flyingHours: raw(240),
+      powerCycles,
+      unsafeShutdowns: unsafe,
+      loadCycles: raw(193),
+      crcErrors: raw(199),
+      concerns,
+      attrs
+    }
+  }
+}
+
+/** The request this command wants: it refuses one that does not name a disk. */
+export const smartRequest = (diskId) => `${XML_HEADER}<condition><diskId>${esc(diskId)}</diskId></condition></request>`
+
+/**
+ * The disk health hunt. These NVRs advertise supportHDHealth and do know the command
+ * `queryDiskSmartInfo` -- it is the one name of twelve tried that answered with XML rather than a
+ * 404 -- but it refuses a bodyless request with errorCode 536870923. A SMART report is per disk,
+ * so the likeliest reason is that it wants to be told which disk. This sends the shapes the rest
+ * of this dialect uses, against the GUIDs the NVR itself just gave us, and reports what each one
+ * said. Read-only, and it stops at the first shape that succeeds.
+ */
+export async function probeSmart(nvr, query, url = 'queryDiskSmartInfo') {
+  const out = []
+  let ids = []
+  try {
+    const r = parseStorageDevInfo(await query(nvr, 'queryStorageDevInfo', emptyRequest(), 'smart probe'))
+    ids = r.slots.map((s) => s.id).filter(Boolean)
+  } catch (e) {
+    out.push({ shape: 'read the disk list first', error: e?.message ?? String(e) })
+  }
+  const id = ids[0] ?? null
+  const shapes = [
+    ['no body', emptyRequest()],
+    ['requireField', `${XML_HEADER}<requireField><diskId/><smartInfo/></requireField></request>`],
+    ...(id
+      ? [
+          ['condition/diskId', `${XML_HEADER}<condition><diskId>${id}</diskId></condition></request>`],
+          ['content/diskId', `${XML_HEADER}<content><diskId>${id}</diskId></content></request>`],
+          ['condition/item id', `${XML_HEADER}<condition><diskList type="list"><item id="${id}"></item></diskList></condition></request>`],
+          ['content list item id', `${XML_HEADER}<content type="list"><item id="${id}"></item></content></request>`],
+          ['condition/id', `${XML_HEADER}<condition><id>${id}</id></condition></request>`]
+        ]
+      : [])
+  ]
+  for (const [shape, doc] of shapes) {
+    try {
+      const xml = await query(nvr, url, doc, 'smart probe')
+      let status = ''
+      let errorCode = ''
+      try {
+        const a = answerOf(xml)
+        status = a.status
+        errorCode = a.errorCode
+      } catch (e) {
+        status = `unparsable: ${e.message}`
+      }
+      out.push({ shape, sent: doc, ok: status === 'success', status, errorCode, xml })
+      if (status === 'success') break
+    } catch (e) {
+      out.push({ shape, sent: doc, ok: false, status: 'failed', error: e?.message ?? String(e) })
+    }
+  }
+  return { url, diskIds: ids, tried: out }
+}
+
 /** An entry that says "we have nothing", with the reason, so the page never invents a reading. */
 const unavailable = (why, at, extra = {}) => ({ at, available: false, why, disks: [], days: null, worst: 'unknown', caps: {}, reachable: null, ...extra })
 
@@ -370,8 +543,15 @@ export async function readStorage(nvr, query, now, reach) {
 
   // Merge the two views by slot: queryDiskStatus knows the condition and the size,
   // queryStorageDevInfo knows how far back the recordings on that disk go.
+  // By id first, then by slot. queryDiskStatus names its disks only by the GUID -- it carries no
+  // slotIndex at all -- so matching on slot alone left every disk's condition stranded in an
+  // answer that could not be paired with the disk it described.
   const bySlot = new Map()
-  for (const s of got.record?.slots ?? []) if (s.slot !== null) bySlot.set(s.slot, s)
+  const byId = new Map()
+  for (const s of got.record?.slots ?? []) {
+    if (s.slot !== null) bySlot.set(s.slot, s)
+    if (s.id) byId.set(s.id, s)
+  }
   const loneSlot = (got.record?.slots ?? []).length === 1 ? got.record.slots[0] : null
 
   // Whichever answer knows a thing, wins. Neither command is complete on every firmware: these
@@ -385,7 +565,7 @@ export async function readStorage(nvr, query, now, reach) {
   }
 
   const disks = (got.disks?.disks ?? []).map((d) => {
-    const rec = (d.slot !== null && bySlot.get(d.slot)) || (got.disks.disks.length === 1 ? loneSlot : null) || null
+    const rec = (d.id && byId.get(d.id)) || (d.slot !== null && bySlot.get(d.slot)) || (got.disks.disks.length === 1 ? loneSlot : null) || null
     const { from, to, days, ...detail } = rec ?? {}
     return { ...merge(d, detail), recFrom: from ?? null, recTo: to ?? null, days: days ?? null }
   })
@@ -400,8 +580,29 @@ export async function readStorage(nvr, query, now, reach) {
 
   // The NVR holds what its shortest-serving disk holds: with two disks recording in parallel,
   // a promise of "30 days" is only true for as long as both of them go back.
+  // SMART, one query per disk, and only for disks the NVR gave an id for -- the command refuses a
+  // request that does not name one. A disk that will not give its SMART data keeps everything else
+  // it did give: this is extra detail, not a precondition. A failure here is recorded in `why`.
+  for (const d of disks) {
+    if (!d.id) continue
+    try {
+      const r = parseSmart(await query(nvr, 'queryDiskSmartInfo', smartRequest(d.id), 'disk smart'))
+      if (r.ok) d.smart = r.smart
+      else failed.push(`queryDiskSmartInfo: ${r.errorCode || 'refused'}`)
+    } catch (e) {
+      failed.push(`queryDiskSmartInfo: ${e?.message ?? e}`)
+    }
+    // The drive's own verdict outranks the NVR's "read/write", which only says the NVR is using
+    // it. A disk can be perfectly writable and quietly failing, and that is the case this exists
+    // to catch; it is never allowed to upgrade a state, only to lower it.
+    // Only a verdict we positively recognise as poor lowers it. A SMART reply we could not make
+    // sense of comes back as 'unknown', and letting that downgrade a disk the NVR is writing to
+    // would turn every firmware quirk into a disk fault.
+    const sv = d.smart?.state
+    if ((sv === 'warn' || sv === 'bad') && RANK[sv] < RANK[d.state]) d.state = sv
+  }
+
   const dayFigures = disks.map((d) => d.days).filter((d) => Number.isFinite(d))
-  const RANK = { bad: 0, unknown: 1, busy: 2, warn: 3, ok: 4 }
   const worst = disks.length === 0 ? 'missing' : disks.map((d) => d.state).reduce((a, b) => (RANK[b] < RANK[a] ? b : a), 'ok')
 
   return {

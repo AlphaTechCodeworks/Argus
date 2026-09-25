@@ -1,7 +1,7 @@
 // Tests for nvr-clock.mjs: reading an NVR's clock settings, writing them back safely, working out
 // a timezone offset, and the server acting as the master clock.
 // Run: node cctv/test/nvr-clock.test.mjs
-import { buildTimeCfg, checkWanted, formatForNvr, parseNvrTime, readClock, zoneOffsetMs } from '../clock-time.mjs'
+import { QUERY_TIME, buildTimeCfg, checkWanted, formatForNvr, parseNvrTime, readClock, zoneOffsetMs } from '../clock-time.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -98,6 +98,30 @@ const SOLUS = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryTime
   // setting a time while the NVR takes its own from NTP would be pointless and confusing
   const doc = buildTimeCfg(readClock(NVR1), { timeMs: Date.now() })
   check('no time is pushed to an NVR that uses NTP', !doc.includes('currentTime'))
+}
+
+// ---- the documents we send are well formed -----------------------------------------------------
+//
+// This is the test that was missing. The query that reads an NVR's clock was built by writing an
+// opening <request> tag on top of the one XML_HEADER already provides -- two opens, one close.
+// Nothing failed loudly: the NVR answered something unreadable, every clock came back with a null
+// timezone, and the hourly master-clock pass decided it could not place any of the NVRs and left
+// them all alone. It ran for weeks and corrected nothing, and the only visible symptom was nvr-2
+// sitting four minutes fast.
+{
+  const opens = (s) => (s.match(/<request\b/g) ?? []).length
+  const closes = (s) => (s.match(/<\/request>/g) ?? []).length
+  check('the clock query opens <request> exactly once', opens(QUERY_TIME) === 1, `${opens(QUERY_TIME)} opening tags: ${QUERY_TIME}`)
+  check('and closes it exactly once', closes(QUERY_TIME) === 1, QUERY_TIME)
+  check('the clock query carries the XML declaration first', QUERY_TIME.startsWith('<?xml'), QUERY_TIME.slice(0, 20))
+  // the same trap in the document that actually writes a clock would set the wrong time, silently
+  const doc = buildTimeCfg(readClock(NVR2), { timeMs: Date.UTC(2026, 8, 25, 19, 15, 0), offsetMs: -4 * 3600_000 })
+  check('the clock write opens <request> exactly once', opens(doc) === 1, `${opens(doc)} opening tags`)
+  check('and closes it exactly once', closes(doc) === 1)
+  // every element opened is closed: a tag count mismatch is what made this invisible
+  const tags = doc.match(/<\/?[A-Za-z][A-Za-z0-9]*/g) ?? []
+  const depth = tags.reduce((d, t) => d + (t.startsWith('</') ? -1 : 1), 0)
+  check('the clock write document is balanced', depth === 0, `depth ${depth}`)
 }
 
 // ---- refusing nonsense -----------------------------------------------------------------------------

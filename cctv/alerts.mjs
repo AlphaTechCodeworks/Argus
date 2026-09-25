@@ -114,6 +114,18 @@ function candidates(snap, { notRecordingMs, clockSkewMs, nowMs }) {
       if (!st.disks?.length) {
         out.push({ key: `nvr-disk/${n.id}`, kind: 'nvr-disk', title: `${n.id} reports no disk`, detail: `${n.name} is not keeping its own copy of the recordings.` })
       } else {
+        // A drive the NVR is happily writing to while its own SMART data says it is going. This
+        // is the warning that arrives in time to do something about it -- by the time the NVR
+        // itself calls the disk bad, the recordings on it are already at risk.
+        const ailing = st.disks.filter((d) => d.smart && (d.smart.state === 'warn' || d.smart.state === 'bad') && d.state !== 'bad')
+        if (ailing.length) {
+          out.push({
+            key: `nvr-disk-smart/${n.id}`,
+            kind: 'nvr-disk',
+            title: `${n.id}: ${plural(ailing.length, 'disk')} reporting poor health`,
+            detail: `${names(ailing.map((d) => `${d.name}${d.smart.concerns.length ? ` (${d.smart.concerns[0]})` : ''}`))} — still recording, but ${n.name} may not hold its own copy for much longer.`
+          })
+        }
         const broken = st.disks.filter((d) => d.state === 'bad')
         if (broken.length) {
           out.push({

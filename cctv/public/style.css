@@ -884,6 +884,22 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .hp-table tr:last-child td { border-bottom: 0; }
 /* the make and serial under a disk's name: there to be copied down, not read at a glance */
 .hp-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+/* the full SMART report, folded away under its disk */
+.hp-smart-row td { padding: 0 !important; }
+.hp-smart { padding: 0 12px 12px; }
+.hp-smart > summary { cursor: pointer; padding: 8px 0; font-size: 12px; color: var(--muted); }
+.hp-smart > summary:hover { color: var(--fg); }
+.hp-smart-summary { display: flex; flex-wrap: wrap; gap: 14px; margin: 4px 0 12px; }
+.hp-smart-fact { flex: 1 1 200px; min-width: 180px; max-width: 320px; background: #0f141a; border-radius: 6px; padding: 8px 10px; }
+.hp-smart-value { font-size: 15px; margin: 2px 0; }
+.hp-smart-value.ok { color: #3fb27f; }
+.hp-smart-value.warn { color: var(--tl-evt); }
+.hp-smart-value.bad { color: #e5534b; }
+.hp-smart-table th, .hp-smart-table td { font-size: 11px; padding: 5px 8px; vertical-align: top; }
+/* the attributes whose raw number means nothing are visibly quieter than the ones that matter */
+.hp-smart-table tr.hp-muted td { opacity: 0.55; }
+.hp-key { color: var(--tl-evt); font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; margin-left: 5px; }
 .hp-table td.ok { color: #3fb27f; }
 .hp-table td.warn { color: var(--tl-evt); }
 .hp-table td.bad { color: #e5484d; }
