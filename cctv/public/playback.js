@@ -1275,9 +1275,13 @@ function clipOn(on) {
   selectClipBtn.classList.toggle('pb-on', on)
   exportBtn.disabled = !on
   if (on && clip.from === null) {
-    // start with a minute around where you are, so there is something to drag
+    // Start with a stretch you can actually see and grab. A fixed minute looked sensible until you
+    // try it on a two-hour view, where it is under one percent of the width: the two handles land
+    // on top of each other and read as a single mark. So the first clip is a fifth of whatever is
+    // on screen, which keeps the two ends clearly apart at any zoom, within sane bounds.
     const at = state.position ?? state.view.startMs + state.view.spanMs / 2
-    setClip(at - 30_000, at + 30_000)
+    const half = Math.min(30 * 60_000, Math.max(5000, state.view.spanMs / 10))
+    setClip(at - half, at + half)
   }
   scheduleDraw()
 }

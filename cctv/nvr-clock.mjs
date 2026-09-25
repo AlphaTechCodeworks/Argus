@@ -150,7 +150,7 @@ export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 
  * Checks every NVR every hour and corrects any that have drifted.
  * @returns {{ stop: () => void, runNow: () => Promise<object[]> }}
  */
-export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, log = console.log, enabled = () => true } = {}) {
+export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 3 * 60_000, log = console.log, enabled = () => true } = {}) {
   const runNow = async () => {
     if (!enabled()) return []
     const out = []
@@ -165,5 +165,9 @@ export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, log = console.lo
   }
   const timer = setInterval(() => { runNow().catch(() => {}) }, everyMs)
   timer.unref?.()
-  return { stop: () => clearInterval(timer), runNow }
+  // A first pass shortly after start, not an hour later: a clock that is wrong is wrong now, and
+  // waiting an hour to notice defeats the point. The delay lets the NVRs finish logging in first.
+  const first = setTimeout(() => { runNow().catch(() => {}) }, startMs)
+  first.unref?.()
+  return { stop: () => { clearInterval(timer); clearTimeout(first) }, runNow }
 }
