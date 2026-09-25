@@ -18,6 +18,7 @@ import { Lane, PRIORITY, connectLane } from './lanes.mjs'
 import { LiveStream } from './live.mjs'
 import { createPlayback } from './playback.mjs'
 import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastError, lateCalls, nvrCooling, sdkCallT } from './sdk.mjs'
+import { probeTarget, tcpReachable } from './probe.mjs'
 import { xmlSettled } from './nvr-xml.mjs'
 import { startWorker } from './worker-supervisor.mjs'
 import { openRecIndex } from './rec-index.mjs'
@@ -148,12 +149,28 @@ const logoutLate = (tag, nvr = '') => (userId) => {
  */
 const login = async ({ host, port, user, password, sn }, { tag, nvr = '', info = {}, priority = PRIORITY.NORMAL }) => {
   let err = null
-  const byAddress = () => sdkCallT({ nvr, tag, onLate: logoutLate(tag, nvr) }, NET_SDK.Login, host, Number(port), user, password, info)
+  // Reachability first (probe.mjs): NET_SDK_Login against an NVR that does not answer at all
+  // blocks inside the SDK for well over the watchdog's limit, and one such NVR then took the
+  // whole server down again and again. A TCP connect asks the same question in a couple of
+  // seconds and can really be abandoned, so when it fails we never make the blocking call and
+  // this counts as an ordinary failed login attempt, with the usual backoff. The probe is done
+  // before taking the connect lane, so an unreachable NVR does not hold up healthy ones either.
+  const target = probeTarget({ host, port })
+  if (target) {
+    const reach = await tcpReachable(target.host, target.port)
+    if (!reach.ok) {
+      return { userId: -1, why: `${sn ? 'TVT’s P2P relay' : 'The NVR'} ${reach.why}` }
+    }
+  }
+  // mayBlock: a login is known to sit inside this SDK for minutes; the watchdog must not read
+  // that on its own as a hung SDK (see watchdog.mjs), and logoutLate below already tidies up
+  // a login that succeeds after we gave up on it.
+  const byAddress = () => sdkCallT({ nvr, tag, mayBlock: true, onLate: logoutLate(tag, nvr) }, NET_SDK.Login, host, Number(port), user, password, info)
   // by serial number: point the SDK at the relay, then log in through it (one lane task, so no
   // other login changes the relay address in between)
   const bySerial = async () => {
     if (!(await sdkCallT({ nvr, tag: `${tag}: relay address` }, NET_SDK.SetNat2Addr, host, Number(port)))) throw new Error(`the SDK did not accept the P2P relay ${host}:${port}`)
-    return sdkCallT({ nvr, tag, onLate: logoutLate(tag, nvr) }, NET_SDK.LoginEx, host, Number(port), user, password, info, NET_SDK_CONNECT_NAT20, sn)
+    return sdkCallT({ nvr, tag, mayBlock: true, onLate: logoutLate(tag, nvr) }, NET_SDK.LoginEx, host, Number(port), user, password, info, NET_SDK_CONNECT_NAT20, sn)
   }
   const userId = await connectLane
     .run(sn ? bySerial : byAddress, { priority })

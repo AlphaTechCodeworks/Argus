@@ -89,6 +89,10 @@ const waiting = [] // calls queued for a free native slot: { start, queuedAt }
 let running = 0
 let lastReturnAt = Date.now() // when a native call (any NVR) last returned: the watchdog's sign of progress
 const lateReturnAt = new Map() // NVR id -> when one of its calls last came back after its time limit
+// NVR id -> when one of its calls last returned from the SDK at all. The watchdog uses it to tell
+// "this one NVR is not answering" from "the SDK itself is wedged": if calls to OTHER NVRs keep
+// coming back, the library is still working and killing the process would only lose the healthy ones.
+const returnAtByNvr = new Map()
 
 /** A call to an NVR came back after its time limit: the NVR cools down from now (logged once per episode). */
 const noteLateReturn = (entry, budget) => {
@@ -128,7 +132,9 @@ const exclusiveTails = new Map()
 
 /**
  * Runs an SDK function on a worker thread with a time limit.
- * @param {{ timeoutMs?: number, tag?: string, nvr?: string, exclusive?: string, onLate?: (result: any, err?: Error) => void }} opts
+ * @param {{ timeoutMs?: number, tag?: string, nvr?: string, exclusive?: string, mayBlock?: boolean, onLate?: (result: any, err?: Error) => void }} opts
+ *   mayBlock: this call is known to block inside the SDK when the NVR does not answer (logins),
+ *   so the watchdog does not treat it on its own as a hung SDK
  *   onLate: called when the native call finishes after its timeout, with its result
  *   (e.g. a LivePlay that returns a handle nobody is waiting for any more), or with
  *   result undefined and the error if it failed late
@@ -150,7 +156,10 @@ export function sdkCallT(opts, fn, ...args) {
     const start = () => {
       running++
       const id = ++seq
-      const entry = { name, tag: opts.tag ?? '', nvr: opts.nvr ?? '', startedAt: Date.now(), late: false }
+      // mayBlock: this call is known to sit inside the SDK for minutes when the far end does not
+      // answer (logins). It still counts as work in flight, but the watchdog does not read it on
+      // its own as a hung SDK (see watchdog.mjs).
+      const entry = { name, tag: opts.tag ?? '', nvr: opts.nvr ?? '', mayBlock: opts.mayBlock === true, startedAt: Date.now(), late: false }
       inFlight.set(id, entry)
       if (TRACE) trace(`> ${id} ${name} ${entry.tag} nvr=${entry.nvr}${typeof args[0] === 'number' || typeof args[0] === 'bigint' ? ` a0=${args[0]}` : ''} running=${running}`)
       timer = setTimeout(() => {
@@ -171,6 +180,7 @@ export function sdkCallT(opts, fn, ...args) {
           clearTimeout(timer)
           inFlight.delete(id)
           lastReturnAt = Date.now()
+          if (entry.nvr) returnAtByNvr.set(entry.nvr, lastReturnAt)
           if (entry.late && entry.nvr && !entry.queuedBehind) noteLateReturn(entry, budget)
           release()
           try {
@@ -245,6 +255,7 @@ export function discountPause(ms) {
   for (const e of inFlight.values()) e.startedAt += ms
   for (const w of waiting) w.queuedAt += ms
   lastReturnAt = Math.min(Date.now(), lastReturnAt + ms)
+  for (const [id, at] of returnAtByNvr) returnAtByNvr.set(id, Math.min(Date.now(), at + ms))
 }
 
 /** sdkCallT with the default budget for the function. */
@@ -266,6 +277,11 @@ export const sdkStats = () => {
     oldestMs: oldest?.ms ?? 0,
     oldest: oldest ? `${oldest.name}${oldest.tag ? ` (${oldest.tag})` : ''}` : '',
     lastReturnAgoMs: now - lastReturnAt,
+    // per NVR: how long ago one of its calls last returned (the watchdog's test for "are the
+    // other NVRs still healthy?"). NVRs that have never had a call return are simply absent.
+    lastReturnAgoByNvr: Object.fromEntries([...returnAtByNvr].map(([id, at]) => [id, now - at])),
+    // late calls that are not `mayBlock` (logins): only these are evidence of a hung SDK
+    lateBlocking: list.filter((e) => e.late && !e.mayBlock).length,
     calls: list.sort((a, b) => b.ms - a.ms).slice(0, 50)
   }
 }
