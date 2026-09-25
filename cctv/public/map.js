@@ -5,9 +5,29 @@
 // (the whole world is 256 wide, like one zoom-0 tile) for street/satellite maps.
 // screen = (world - centre) * 2^zoom + half the viewport.
 import { LiveTile, SUB_STREAM, TILE_HTML } from './live-tile.js'
+import {
+  MAX_LAT,
+  STATES,
+  TILE,
+  boundsOf,
+  buildMarkers,
+  camWorld,
+  cameraStates,
+  clamp,
+  clusterMarkers,
+  latToY,
+  lngToX,
+  markerClass,
+  markerTitle,
+  metresPerUnit,
+  playbackHref,
+  setCamPos,
+  stateCounts,
+  xToLng,
+  yToLat
+} from './map-cameras.js'
 
 const $ = (id) => document.getElementById(id)
-const TILE = 256
 const LAYERS = {
   street: {
     url: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,
@@ -21,20 +41,9 @@ const LAYERS = {
   }
 }
 const DEFAULT_GEO = { lat: 30, lng: -40, zoom: 2, layer: 'street' }
-const MAX_LAT = 85
 const MAX_RANGE = { geo: 5000, plan: 20_000 }
-
-// Web Mercator
-const lngToX = (lng) => ((lng + 180) / 360) * TILE
-const latToY = (lat) => {
-  const r = (lat * Math.PI) / 180
-  return ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * TILE
-}
-const xToLng = (x) => (x / TILE) * 360 - 180
-const yToLat = (y) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / TILE))) * 180) / Math.PI
-/** Metres per world unit at a latitude. */
-const metresPerUnit = (lat) => 156543.03392 * Math.cos((lat * Math.PI) / 180)
-const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
+/** Marker centres closer together than this are one illegible smudge, so they are clustered. */
+const CLUSTER_GAP = 26
 
 // ---- map engine -------------------------------------------------------------
 
@@ -446,7 +455,12 @@ const emptyEl = $('empty')
 const liveEl = $('live')
 
 let isAdmin = false
-let cameras = [] // /api/cameras: { nvr, site, nvrName, ch, name, online }
+let cameras = [] // /api/cameras: { nvr, site, nvrName, ch, name, online, configured }
+// What each camera is actually doing, worked out from the body of /api/health -- the very data the
+// Health page paints. Taking it from anywhere else is how two pages come to disagree about whether
+// a camera is recording. Empty until the first poll answers, and every camera is drawn as unknown
+// until then rather than assumed to be well.
+let states = {}
 let maps = { sites: {} } // /api/maps
 let site = ''
 let editing = false
@@ -502,21 +516,11 @@ async function checkSession() {
   return res?.ok ? res.json() : null
 }
 
-/** World position (and range in world units) of a placement. */
-function camWorld(m, c) {
-  if (m.mode === 'geo') return { x: lngToX(c.lng), y: latToY(c.lat), r: c.range / metresPerUnit(c.lat) }
-  return { x: c.x, y: c.y, r: c.range }
-}
+/** The roster keyed the way placements are, for the pure module. */
+const rosterByKey = () => new Map(cameras.map((c) => [camKey(c), c]))
 
-function setPos(m, c, wx, wy) {
-  if (m.mode === 'geo') {
-    c.lat = clamp(yToLat(clamp(wy, 0, TILE)), -MAX_LAT, MAX_LAT)
-    c.lng = clamp(xToLng(wx), -180, 180)
-  } else {
-    c.x = Math.round(clamp(wx, 0, m.plan.w))
-    c.y = Math.round(clamp(wy, 0, m.plan.h))
-  }
-}
+/** A camera's state, or 'unknown' when nothing has told us: never a guess at healthy. */
+const stateFor = (key) => states[key]?.state ?? 'unknown'
 
 // ---- drawing ----
 
@@ -594,41 +598,77 @@ function linkLayer(m) {
   return g
 }
 
+/** The markers for the map on screen right now, worked out by the pure module. */
+function currentMarkers() {
+  const m = current()
+  if (!m || !view.mode) return []
+  return buildMarkers({
+    map: m,
+    cameras: rosterByKey(),
+    states,
+    toScreen: (x, y) => view.toScreen(x, y),
+    scale: view.scale,
+    editing
+  })
+}
+
+/** One camera's marker: the dot, its channel number, and its name when names are on. */
+function markerNode(marker, sel, showNames) {
+  const g = svgEl('g', { class: `${markerClass(marker.state)}${sel}`, 'data-key': marker.key, transform: `translate(${marker.x.toFixed(1)} ${marker.y.toFixed(1)})` })
+  const title = svgEl('title')
+  title.textContent = markerTitle(marker)
+  const num = svgEl('text', { class: 'cam-num' })
+  num.textContent = marker.cam ? String(marker.cam.ch + 1) : '?'
+  g.append(title, svgEl('circle', { r: 12, class: 'cam-dot' }), num)
+  if (showNames && marker.cam) {
+    const name = svgEl('text', { x: 17, class: 'cam-name' })
+    name.textContent = marker.cam.name
+    g.append(name)
+  }
+  return g
+}
+
+/** Several cameras in one place: one dot carrying the count, coloured by its worst member. */
+function clusterNode(cluster) {
+  const g = svgEl('g', { class: `cam cluster st-${cluster.state}`, 'data-cluster': cluster.members.map((m) => m.key).join(' '), transform: `translate(${cluster.x.toFixed(1)} ${cluster.y.toFixed(1)})` })
+  const title = svgEl('title')
+  title.textContent = `${cluster.count} cameras here — ${STATES[cluster.state].title}. Zoom in, or click to.`
+  const num = svgEl('text', { class: 'cam-num' })
+  num.textContent = String(cluster.count)
+  g.append(title, svgEl('circle', { r: 14, class: 'cam-dot' }), num)
+  return g
+}
+
 view.onDraw = () => {
   const m = current()
   const cones = svgEl('g')
   const marks = svgEl('g')
+  const markers = currentMarkers()
   if (m && view.mode) {
     const showNames = namesBox.checked
-    for (const [key, c] of Object.entries(placed(m))) {
-      const cam = camByKey(key)
-      if (!cam && !editing) continue // its NVR was removed: kept in the data, not shown
-      const w = camWorld(m, c)
-      const p = view.toScreen(w.x, w.y)
-      const r = Math.max(6, w.r * view.scale)
-      const cls = `${cam?.online ? '' : ' off'}${key === selected || key === popup?.key ? ' sel' : ''}`
-      cones.append(svgEl('path', { d: conePath(p, c.dir, c.fov, r), class: `cone${cls}` }))
-      const g = svgEl('g', { class: `cam${cls}`, 'data-key': key, transform: `translate(${p[0].toFixed(1)} ${p[1].toFixed(1)})` })
-      const title = svgEl('title')
-      title.textContent = `${camLabel(cam, key)}${cam && !cam.online ? ' (offline)' : ''}`
-      const num = svgEl('text', { class: 'cam-num' })
-      num.textContent = cam ? String(cam.ch + 1) : '?'
-      g.append(title, svgEl('circle', { r: 12, class: 'cam-dot' }), num)
-      if (showNames && cam) {
-        const name = svgEl('text', { x: 17, class: 'cam-name' })
-        name.textContent = cam.name
-        g.append(name)
-      }
-      marks.append(g)
-      if (editing && key === selected) {
-        const tip = polar(p, c.dir, r)
+    // While editing, every camera stays its own marker: an admin is moving and aiming individual
+    // cameras, and one that merged into a pile under the pointer could not be worked with at all.
+    const pinned = [selected, popup?.key].filter(Boolean)
+    const clusters = editing ? markers.map((x) => ({ x: x.x, y: x.y, members: [x], state: x.state, count: 1, key: x.key })) : clusterMarkers(markers, CLUSTER_GAP, pinned)
+    const alone = new Set(clusters.filter((c) => c.count === 1).map((c) => c.key))
+    for (const marker of markers) {
+      // A cone belongs to one camera; drawing the cones of a whole cluster would be a blue smear
+      // saying nothing, so a clustered camera keeps its position and loses its cone.
+      if (!alone.has(marker.key)) continue
+      const sel = marker.key === selected || marker.key === popup?.key ? ' sel' : ''
+      cones.append(svgEl('path', { d: conePath([marker.x, marker.y], marker.dir, marker.fov, marker.r), class: `cone st-${marker.state}${sel}` }))
+      marks.append(markerNode(marker, sel, showNames))
+      if (editing && marker.key === selected) {
+        const p = [marker.x, marker.y]
+        const tip = polar(p, marker.dir, marker.r)
         marks.append(svgEl('circle', { cx: tip[0], cy: tip[1], r: 8, class: 'handle', 'data-handle': 'tip' }))
-        if (c.fov < 359.5) {
-          const edge = polar(p, c.dir + c.fov / 2, r)
+        if (marker.fov < 359.5) {
+          const edge = polar(p, marker.dir + marker.fov / 2, marker.r)
           marks.append(svgEl('circle', { cx: edge[0], cy: edge[1], r: 6, class: 'handle edge', 'data-handle': 'edge' }))
         }
       }
     }
+    for (const cluster of clusters) if (cluster.count > 1) marks.append(clusterNode(cluster))
   }
   // links above the cones (they say where a person goes, not what a camera sees) but below the marks
   view.svg.replaceChildren(cones, linkLayer(current()), marks)
@@ -641,7 +681,7 @@ view.hitTest = (e, start) => {
   const handle = e.target.closest?.('[data-handle]')
   if (handle && selected && placed(draft)[selected]) return dragHandle(handle.dataset.handle)
   const mark = e.target.closest?.('.cam')
-  if (mark) {
+  if (mark?.dataset.key) {
     select(mark.dataset.key)
     return dragCamera(mark.dataset.key, start)
   }
@@ -653,8 +693,14 @@ view.onClick = (p, target) => {
     placeAt(placing, p)
     return
   }
+  const pile = target?.closest?.('.cluster')
+  if (pile) {
+    // Clicking a pile of markers is a request to see what is in it, which only zooming can answer.
+    zoomToCluster(pile.dataset.cluster.split(' '))
+    return
+  }
   const mark = target?.closest?.('.cam')
-  if (mark) {
+  if (mark?.dataset.key) {
     if (linkMode) clickedInLinkMode(mark.dataset.key)
     else if (editing) select(mark.dataset.key)
     else openLive(mark.dataset.key)
@@ -682,7 +728,7 @@ function dragCamera(key, start) {
   return {
     move: (q) => {
       const [wx, wy] = view.toWorld(q.x + offset.x, q.y + offset.y)
-      setPos(m, c, wx, wy)
+      setCamPos(m, c, wx, wy)
       changed()
       view.requestRender()
     },
@@ -726,7 +772,7 @@ function placeAt(key, p) {
   if (!m || !m[m.mode]) return
   const [wx, wy] = view.toWorld(p.x, p.y)
   const c = { dir: 0, fov: 90, range: m.mode === 'geo' ? 25 : Math.round(Math.min(m.plan.w, m.plan.h) * 0.12) }
-  setPos(m, c, wx, wy)
+  setCamPos(m, c, wx, wy)
   m[m.mode].cams ??= {}
   m[m.mode].cams[key] = c
   selected = key
@@ -774,16 +820,22 @@ function openLive(key) {
   tile.innerHTML = TILE_HTML
   const close = el('button', { type: 'button', className: 'map-live-close', textContent: '×', 'aria-label': 'Close' })
   close.addEventListener('click', closeLive)
+  // The state is repeated here in words: someone who came to a camera from a coloured dot should
+  // not have to remember which colour it was, and "online, recording nothing" is not obvious from
+  // a live picture, which looks perfectly healthy while nothing is being kept.
+  const state = stateFor(key)
   liveEl.replaceChildren(
     el('div', { className: 'map-live-head' },
       el('span', { className: 'map-live-name', textContent: `${cam.ch + 1} · ${cam.name}` }),
-      el('a', { href: `/playback.html?nvr=${enc(cam.nvr)}&ch=${cam.ch}`, textContent: 'Recordings' }),
+      el('span', { className: `map-live-state st-${state}`, textContent: STATES[state].label, title: STATES[state].title }),
+      el('a', { href: playbackHref(cam), textContent: 'Recordings' }),
       close),
     tile
   )
   liveEl.hidden = false
   popup = { key, tile: null }
-  if (!cam.online) {
+  // Either source saying it is down is enough not to ask the NVR for a stream it cannot give.
+  if (state === 'offline' || !cam.online) {
     tile.classList.add('offline')
     tile.querySelector('.status').textContent = 'offline'
   } else {
@@ -841,15 +893,24 @@ function fitAll() {
   const m = current()
   if (!m || !view.mode) return
   if (m.mode === 'plan') return view.fit()
-  const pts = Object.values(placed(m)).map((c) => camWorld(m, c))
-  if (pts.length === 0) return
-  const pad = Math.max(...pts.map((p) => p.r))
-  view.fit({
-    x0: Math.min(...pts.map((p) => p.x)) - pad,
-    y0: Math.min(...pts.map((p) => p.y)) - pad,
-    x1: Math.max(...pts.map((p) => p.x)) + pad,
-    y1: Math.max(...pts.map((p) => p.y)) + pad
-  })
+  const box = boundsOf(m)
+  if (box) view.fit(box)
+}
+
+/**
+ * Opens a pile of markers out: fly to the box holding them, which at that zoom separates them.
+ * Flying rather than jumping keeps the sense of where they were, exactly as moving between sites
+ * does, and flyTo itself honours a person who has asked for no animation.
+ */
+function zoomToCluster(keys) {
+  const m = current()
+  const box = m && boundsOf(m, keys)
+  if (!box) return
+  const before = { cx: view.cx, cy: view.cy, zoom: view.zoom }
+  view.fit(box)
+  const to = { cx: view.cx, cy: view.cy, zoom: Math.max(view.zoom, before.zoom + 1) }
+  Object.assign(view, before)
+  view.flyTo(to, 600)
 }
 
 function centreOnCamera(key) {
@@ -868,7 +929,9 @@ function renderSide() {
 }
 
 function camRow(cam, key, extra, opts = {}) {
-  const dot = el('span', { className: `map-dot${cam?.online ? '' : ' off'}`, title: cam?.online ? 'online' : 'offline' })
+  // The same colour and the same words as the marker on the map, from the same state.
+  const state = cam ? stateFor(key) : 'unknown'
+  const dot = el('span', { className: `map-dot st-${state}`, title: STATES[state].title })
   const li = el('li', { className: `${opts.placed ? 'placed' : 'unplaced'}${key === selected || key === popup?.key ? ' sel' : ''}` },
     dot, el('span', { className: 'map-cam-name', textContent: camLabel(cam, key) }), extra)
   return li
@@ -902,8 +965,25 @@ function viewPanel() {
   return [
     el('h2', { textContent: 'Cameras' }),
     el('p', { className: 'map-help', textContent: m ? `${count} of ${siteCams().length} on the map. Click a camera for live video.` : 'This site has no map yet.' }),
+    legend(),
     list
   ]
+}
+
+/**
+ * What the colours mean, with the number of this site's markers in each. A colour nobody can read
+ * is worse than no colour, and the count is the quickest answer to "is anything wrong here".
+ * States with nothing in them are left out, so the usual case is two short lines, not five.
+ */
+function legend() {
+  const counts = stateCounts(currentMarkers())
+  const ul = el('ul', { className: 'map-legend' })
+  for (const [state, meta] of Object.entries(STATES)) {
+    if (!counts[state]) continue
+    ul.append(el('li', {}, el('span', { className: `map-dot st-${state}` }), el('span', { textContent: `${counts[state]} ${meta.label}`, title: meta.title })))
+  }
+  if (!ul.childElementCount) return el('span', { hidden: true })
+  return ul
 }
 
 function uploadButton() {
@@ -1383,7 +1463,20 @@ isAdmin = Boolean(me?.admin)
 if (isAdmin) $('sitesTab').hidden = $('settingsTab').hidden = false
 setInterval(checkSession, 60_000)
 
-;[cameras, maps] = await Promise.all([api('GET', '/api/cameras'), api('GET', '/api/maps')])
+/**
+ * What every camera is doing, from the Health page's own endpoint. A failed poll leaves the last
+ * states alone rather than blanking them: a dropped request is not evidence that anything changed.
+ */
+async function loadStates() {
+  try {
+    states = cameraStates(await api('GET', '/api/health')).byKey
+    return true
+  } catch {
+    return false
+  }
+}
+
+;[cameras, maps] = await Promise.all([api('GET', '/api/cameras'), api('GET', '/api/maps'), loadStates()])
 const siteNames = [...new Set(cameras.map((c) => c.site))].sort()
 siteSelect.replaceChildren(...siteNames.map((n) => new Option(n, n)))
 {
@@ -1397,11 +1490,12 @@ applyView(false)
 renderSide()
 requestAnimationFrame(fitAll)
 
-// camera status (online/offline colours) every 30 s
+// camera colours every 30 s: the roster for names and new cameras, the health poll for the states
 setInterval(async () => {
   try {
     cameras = await api('GET', '/api/cameras')
-    view.requestRender()
-    if (!editing) renderSide()
   } catch {}
+  await loadStates()
+  view.requestRender()
+  if (!editing) renderSide()
 }, 30_000)

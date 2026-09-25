@@ -7,6 +7,11 @@
   --accent: #3ba3ff;
   --live: #e5484d;
   --offline: #5b6470;
+  /* The camera states the map and its list are coloured by (public/map-cameras.js). */
+  --rec-ok: #3fb950; /* online and recording */
+  --rec-idle: #e0a030; /* online, recording nothing: a fault of its own, not a healthy camera */
+  --rec-alert: #e5484d; /* an alert is open about it */
+  --rec-unknown: #6b7480; /* nobody has told us: never painted as well */
   --gap: 4px;
   --tl-track: #1d232b;
   --tl-rec: #2f6f9f;
@@ -541,11 +546,22 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 }
 .map-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; z-index: 2; }
 .map-overlay .cam, .map-overlay .handle { pointer-events: auto; cursor: pointer; }
+/* What a camera is doing, in one colour each. "Online but recording nothing" is amber and its own
+   colour on purpose: at this site that is a real failure, and painting it the same green as a
+   recording camera is how it goes unnoticed. Grey is "we have not been told", never "fine". */
 .map-overlay .cone { fill: rgba(59, 163, 255, 0.2); stroke: rgba(59, 163, 255, 0.85); stroke-width: 1.5; }
-.map-overlay .cone.off { fill: rgba(138, 147, 160, 0.16); stroke: rgba(138, 147, 160, 0.7); }
+.map-overlay .cone.st-offline, .map-overlay .cone.st-unknown { fill: rgba(138, 147, 160, 0.16); stroke: rgba(138, 147, 160, 0.7); }
+.map-overlay .cone.st-idle { fill: rgba(224, 160, 48, 0.18); stroke: rgba(224, 160, 48, 0.8); }
+.map-overlay .cone.st-alert { fill: rgba(229, 72, 77, 0.18); stroke: rgba(229, 72, 77, 0.85); }
 .map-overlay .cone.sel { fill: rgba(59, 163, 255, 0.3); stroke-width: 2.5; }
 .map-overlay .cam-dot { fill: var(--accent); stroke: #fff; stroke-width: 2; }
-.map-overlay .cam.off .cam-dot { fill: var(--offline); }
+.map-overlay .cam.st-recording .cam-dot { fill: var(--rec-ok); }
+.map-overlay .cam.st-idle .cam-dot { fill: var(--rec-idle); }
+.map-overlay .cam.st-alert .cam-dot { fill: var(--rec-alert); }
+.map-overlay .cam.st-offline .cam-dot { fill: var(--offline); }
+/* Dashed edge: unknown must not be mistaken for a state we actually checked. */
+.map-overlay .cam.st-unknown .cam-dot { fill: var(--rec-unknown); stroke-dasharray: 3 3; }
+.map-overlay .cam.cluster .cam-dot { stroke-width: 3; }
 .map-overlay .cam.sel .cam-dot { stroke: #ffcf87; stroke-width: 3; }
 .map-overlay text { fill: #fff; pointer-events: none; dominant-baseline: central; }
 .map-overlay .cam-num { font: 600 11px system-ui, sans-serif; text-anchor: middle; }
@@ -648,8 +664,19 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-cams li[draggable="true"] { cursor: grab; }
 .map-cams li.unplaced .map-cam-name { color: var(--muted); }
 .map-cam-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.map-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #3fb950; }
-.map-dot.off { background: var(--offline); }
+.map-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--rec-unknown); }
+.map-dot.off, .map-dot.st-offline { background: var(--offline); }
+.map-dot.st-recording { background: var(--rec-ok); }
+.map-dot.st-idle { background: var(--rec-idle); }
+.map-dot.st-alert { background: var(--rec-alert); }
+/* A ring rather than a solid dot: unknown should not read as one of the states we did check. */
+.map-dot.st-unknown { background: transparent; box-shadow: inset 0 0 0 2px var(--rec-unknown); }
+.map-legend { list-style: none; margin: 0 0 4px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+.map-legend li { display: flex; align-items: center; gap: 6px; }
+.map-live-state { font-size: 12px; color: var(--muted); }
+.map-live-state.st-recording { color: var(--rec-ok); }
+.map-live-state.st-idle { color: var(--rec-idle); }
+.map-live-state.st-alert { color: var(--rec-alert); }
 .map-selected { padding-top: 10px; border-top: 1px solid #2f3742; }
 .map-actions { display: flex; gap: 8px; }
 .map-actions button { flex: 1; padding: 6px 10px; }
