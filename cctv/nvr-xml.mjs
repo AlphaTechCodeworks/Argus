@@ -6,6 +6,10 @@ import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'n
 import { setTimeout as sleep } from 'node:timers/promises'
 import { PRIORITY } from './lanes.mjs'
 import { NET_SDK, lastError, lateCalls, sdkCallT } from './sdk.mjs'
+import { kid, parseXml } from './xml.mjs'
+// The parser itself lives in xml.mjs, which imports nothing: modules that only read an NVR's
+// answer can use it without loading the native SDK. Re-exported here so nothing else had to change.
+export { XML_HEADER, esc, kid, kids, parseXml } from './xml.mjs'
 
 export class HttpError extends Error {
   /** @param {number} status @param {string} message @param {object} [extra] fields added to the JSON answer (e.g. needsAck) */
@@ -15,39 +19,6 @@ export class HttpError extends Error {
     this.extra = extra
   }
 }
-
-export const XML_HEADER = '<?xml version="1.0" encoding="utf-8" ?><request version="1.0" systemType="NVMS-9000" clientType="WEB">'
-const decode = (s) =>
-  s.replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-f]+);/gi, (_m, e) =>
-    e === 'lt' ? '<' : e === 'gt' ? '>' : e === 'amp' ? '&' : e === 'quot' ? '"' : e === 'apos' ? "'"
-      : String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : Number(e.slice(1))))
-export const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
-
-/** Parses XML into { name, attrs, children, text }. Throws on malformed input. */
-export function parseXml(xml) {
-  const root = { name: '#root', attrs: {}, children: [], text: '' }
-  const stack = [root]
-  const re = /<!\[CDATA\[([\s\S]*?)\]\]>|<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<\/([^\s>]+)\s*>|<([^\s/>]+)((?:\s+[^\s=]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>|([^<]+)/g
-  let m
-  while ((m = re.exec(xml))) {
-    const top = stack.at(-1)
-    if (m[1] !== undefined) top.text += m[1]
-    else if (m[2]) {
-      if (top.name !== m[2]) throw new Error(`bad answer from the NVR (</${m[2]}> closes <${top.name}>)`)
-      stack.pop()
-    } else if (m[3]) {
-      const attrs = {}
-      for (const a of m[4].matchAll(/([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) attrs[a[1]] = decode(a[2] ?? a[3])
-      const node = { name: m[3], attrs, children: [], text: '' }
-      top.children.push(node)
-      if (!m[5]) stack.push(node)
-    } else if (m[6] !== undefined) top.text += decode(m[6])
-  }
-  if (stack.length !== 1) throw new Error(`bad answer from the NVR (<${stack.at(-1).name}> not closed)`)
-  return root
-}
-export const kid = (n, name) => n?.children.find((c) => c.name === name)
-export const kids = (n, name) => n?.children.filter((c) => c.name === name) ?? []
 
 /** { response, status, errorCode, reboot } of any NVR answer. */
 export function parseAnswer(xml) {
