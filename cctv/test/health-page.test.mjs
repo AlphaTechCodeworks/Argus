@@ -143,6 +143,65 @@ const data = (o = {}) => ({
   check('no backup yet is a warning', r.cards.backup.state === 'warn' && r.cards.backup.value === 'None yet', JSON.stringify(r.cards.backup))
 }
 
+// ---- the machine's own figures ------------------------------------------------------------------
+const sys = (o = {}) => ({
+  cpu: { percent: 23.4, cores: 4, load1: 1.42 },
+  memory: { total: 16_000_000_000, used: 5_000_000_000, available: 11_000_000_000 },
+  network: { rxBytesPerSec: 30_000_000, txBytesPerSec: 1_500_000 },
+  disk: { writeBytesPerSec: 12_400_000 },
+  gpu: null,
+  ...o
+})
+{
+  const r = renderHealth(data({ system: sys() })).systemCards
+  check('CPU is a rounded percentage', r.cpu.value === '23 %', r.cpu?.value)
+  check('with the load average and cores beside it', r.cpu.note === 'load 1.42 · 4 cores', r.cpu?.note)
+  check('memory reads as used of total', r.memory.value === '5.0 GB of 16.0 GB', r.memory?.value)
+  check('and says how much is available', r.memory.note === '11.0 GB available', r.memory?.note)
+  check('network is in bits per second, both ways', r.network.value === '↓ 240 Mbps ↑ 12 Mbps', r.network?.value)
+  check('disk write is in MB/s', r.disk.value === '12.4 MB/s', r.disk?.value)
+}
+{
+  const r = renderHealth(data({ system: sys({ cpu: { percent: 84, cores: 4, load1: 6.1 } }) })).systemCards
+  check('CPU over 80 % is a warning', r.cpu.state === 'warn', r.cpu?.state)
+}
+{
+  const r = renderHealth(data({ system: sys({ cpu: { percent: 99, cores: 4, load1: 20 } }) })).systemCards
+  check('a pegged CPU is bad', r.cpu.state === 'bad', r.cpu?.state)
+}
+{
+  const r = renderHealth(data({ system: sys({ cpu: { percent: 40, cores: 4, load1: 1 } }) })).systemCards
+  check('an ordinary CPU load is fine', r.cpu.state === 'ok', r.cpu?.state)
+}
+{
+  const r = renderHealth(data({ system: sys({ memory: { total: 16_000_000_000, used: 14_600_000_000, available: 1_400_000_000 } }) })).systemCards
+  check('under 10 % memory available is a warning', r.memory.state === 'warn', r.memory?.state)
+}
+{
+  const r = renderHealth(data({ system: sys({ memory: { total: 16_000_000_000, used: 15_600_000_000, available: 400_000_000 } }) })).systemCards
+  check('almost no memory available is bad', r.memory.state === 'bad', r.memory?.state)
+}
+{
+  const r = renderHealth(data({ system: sys() })).systemCards
+  check('no GPU says none detected, not 0 %', r.gpu.value === 'None detected', r.gpu?.value)
+}
+{
+  const r = renderHealth(data({ system: sys({ gpu: { percent: 37, memUsed: 1_000_000_000, memTotal: 8_000_000_000, name: 'NVIDIA' } }) })).systemCards
+  check('a real GPU shows its percentage', r.gpu.value === '37 %', r.gpu?.value)
+  check('and its memory', r.gpu.note === 'NVIDIA · 1.0 GB of 8.0 GB', r.gpu?.note)
+}
+{
+  // the very first poll after a restart: the counters have nothing to be compared with yet
+  const r = renderHealth(data({ system: sys({ cpu: { percent: null, cores: 4, load1: 1.42 }, network: { rxBytesPerSec: null, txBytesPerSec: null }, disk: { writeBytesPerSec: null } }) })).systemCards
+  check('a rate with no previous sample shows a dash, not a zero', r.cpu.value === '—' && r.network.value === '—' && r.disk.value === '—', JSON.stringify([r.cpu.value, r.network.value, r.disk.value]))
+  check('and is not coloured as a problem', r.cpu.state === 'ok', r.cpu?.state)
+  check('the gauges still show on that first poll', r.cpu.note === 'load 1.42 · 4 cores' && r.memory.value.endsWith('16.0 GB'), r.cpu?.note)
+}
+{
+  const r = renderHealth(data()).systemCards
+  check('no system figures at all does not throw', r.cpu.value === '—' && r.memory.value === '—' && r.gpu.value === 'None detected', JSON.stringify(r))
+}
+
 // ---- no secret ever leaves ----------------------------------------------------------------------
 {
   const r = renderHealth(data({ sending: { emailError: 'nope' } }))

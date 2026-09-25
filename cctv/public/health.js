@@ -11,9 +11,88 @@ const dur = (ms) => {
   return m < 60 ? `${m} m` : `${Math.floor(m / 60)} h ${m % 60} m`
 }
 
+/** "1.4 GB", "930 MB": two significant-ish digits, because these sit under a card's label. */
+const bytes = (n) => {
+  if (n === null || n === undefined || !Number.isFinite(n)) return null
+  const units = ['B', 'kB', 'MB', 'GB', 'TB']
+  let i = 0
+  let v = n
+  while (v >= 1000 && i < units.length - 1) { v /= 1000; i++ }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`
+}
+
+/** Network is quoted in bits, not bytes: every link, switch and camera is rated in Mbps. */
+const bitsPerSec = (bytesPerSec) => {
+  if (bytesPerSec === null || bytesPerSec === undefined || !Number.isFinite(bytesPerSec)) return null
+  const bits = bytesPerSec * 8
+  if (bits >= 1e9) return `${(bits / 1e9).toFixed(1)} Gbps`
+  if (bits >= 1e6) return `${Math.round(bits / 1e6)} Mbps`
+  if (bits >= 1e3) return `${Math.round(bits / 1e3)} kbps`
+  return `${Math.round(bits)} bps`
+}
+
+/**
+ * The machine itself. Every figure can be null: on the first poll after a restart the rates have
+ * no previous sample to subtract, and on a host without /proc nothing is readable at all. Null is
+ * shown as an em dash rather than as a zero, because "0 Mbps" on a server pulling a dozen camera
+ * streams is a figure somebody would act on.
+ */
+function systemCards(sys) {
+  const s = sys ?? {}
+  const cpuPct = s.cpu?.percent
+  const cpu = {
+    label: 'CPU',
+    value: Number.isFinite(cpuPct) ? `${Math.round(cpuPct)} %` : '—',
+    state: !Number.isFinite(cpuPct) ? 'ok' : cpuPct >= 95 ? 'bad' : cpuPct >= 80 ? 'warn' : 'ok',
+    note: [
+      Number.isFinite(s.cpu?.load1) ? `load ${s.cpu.load1.toFixed(2)}` : null,
+      Number.isFinite(s.cpu?.cores) ? `${s.cpu.cores} cores` : null
+    ].filter(Boolean).join(' · ')
+  }
+
+  const total = s.memory?.total
+  const used = s.memory?.used
+  const avail = s.memory?.available
+  const availPct = Number.isFinite(total) && Number.isFinite(avail) && total > 0 ? (avail / total) * 100 : null
+  const memory = {
+    label: 'Memory',
+    value: Number.isFinite(used) && Number.isFinite(total) ? `${bytes(used)} of ${bytes(total)}` : '—',
+    // Available, not free: Linux "free" counts the page cache as used and always looks alarming.
+    state: availPct === null ? 'ok' : availPct < 5 ? 'bad' : availPct < 10 ? 'warn' : 'ok',
+    note: Number.isFinite(avail) ? `${bytes(avail)} available` : ''
+  }
+
+  const rx = bitsPerSec(s.network?.rxBytesPerSec)
+  const tx = bitsPerSec(s.network?.txBytesPerSec)
+  const network = {
+    label: 'Network',
+    value: rx === null && tx === null ? '—' : `↓ ${rx ?? '—'} ↑ ${tx ?? '—'}`,
+    state: 'ok',
+    note: 'all interfaces except loopback'
+  }
+
+  const w = s.disk?.writeBytesPerSec
+  const disk = {
+    label: 'Disk write',
+    value: Number.isFinite(w) ? `${(w / 1e6).toFixed(1)} MB/s` : '—',
+    state: 'ok',
+    note: 'across the real block devices'
+  }
+
+  const g = s.gpu
+  const gpu = {
+    label: 'GPU',
+    value: g && Number.isFinite(g.percent) ? `${Math.round(g.percent)} %` : 'None detected',
+    state: 'ok',
+    note: g && Number.isFinite(g.memUsed) && Number.isFinite(g.memTotal) ? `${g.name ?? ''} · ${bytes(g.memUsed)} of ${bytes(g.memTotal)}`.trim() : g?.name ?? ''
+  }
+
+  return { cpu, memory, network, disk, gpu }
+}
+
 /**
  * @param {object} d the body of GET /api/health
- * @returns {{ cards: object, nvrRows: object[], historyRows: object[], bannerText: string, sendingProblem: string }}
+ * @returns {{ cards: object, systemCards: object, nvrRows: object[], historyRows: object[], bannerText: string, sendingProblem: string }}
  */
 export function renderHealth(d) {
   const cameras = d.cameras ?? []
@@ -102,7 +181,7 @@ export function renderHealth(d) {
       ? `email failing: ${s.emailError}`
       : ''
 
-  return { cards, nvrRows, historyRows, bannerText, sendingProblem }
+  return { cards, systemCards: systemCards(d.system), nvrRows, historyRows, bannerText, sendingProblem }
 }
 
 // ---- the page itself (skipped when a test imports this module: there is no document) ------------
@@ -112,13 +191,21 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
   const paint = (d) => {
     const r = renderHealth(d)
 
-    document.getElementById('cards').replaceChildren(...Object.values(r.cards).map((c) =>
-      el('div', { className: `card ${c.state}` }).appendChild(el('div', { className: 'lbl', textContent: c.label })).parentElement
-    ))
-    for (const [i, node] of [...document.getElementById('cards').children].entries()) {
-      const c = Object.values(r.cards)[i]
-      node.append(el('div', { className: 'big', textContent: c.value }), el('div', { className: 'note', textContent: c.note ?? '' }))
+    const paintCards = (id, cards) => {
+      const host = document.getElementById(id)
+      if (!host) return
+      host.replaceChildren(...Object.values(cards).map((c) => {
+        const node = el('div', { className: `card ${c.state}` })
+        node.append(
+          el('div', { className: 'lbl', textContent: c.label }),
+          el('div', { className: 'big', textContent: c.value }),
+          el('div', { className: 'note', textContent: c.note ?? '' })
+        )
+        return node
+      }))
     }
+    paintCards('cards', r.cards)
+    paintCards('system', r.systemCards)
 
     document.getElementById('nvrs').replaceChildren(...r.nvrRows.map((n) => {
       const tr = el('tr')
