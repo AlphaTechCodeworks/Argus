@@ -105,6 +105,9 @@
       <div class="pb-now" id="tlNow" hidden></div>
       <div class="pb-hoverline" id="hoverLine" hidden></div>
       <div class="pb-hoverlabel" id="hoverLabel" hidden></div>
+      <div class="pb-clip-sel" id="clipSel" hidden></div>
+      <div class="pb-clip-handle pb-clip-from" id="clipFrom" hidden title="Drag: start of the clip"></div>
+      <div class="pb-clip-handle pb-clip-to" id="clipTo" hidden title="Drag: end of the clip"></div>
       <div class="pb-playhead" id="playhead" hidden></div>
     </div>
 
@@ -134,8 +137,8 @@
         <button id="searchToggle" type="button" title="Find movement inside an area you draw" aria-pressed="false">Motion search</button>
         <button id="snapshot" type="button" title="Save the picture on screen">Snapshot</button>
         <button id="fullscreen" type="button" title="Full screen (F)" aria-pressed="false">Full screen</button>
-        <button id="selectClip" type="button" title="Choosing a clip comes later ([ and ])" disabled>Select clip</button>
-        <button id="exportClip" type="button" title="Export comes later" disabled>Export</button>
+        <button id="selectClip" type="button" title="Choose a clip to export ([ and ])" aria-pressed="false">Select clip</button>
+        <button id="exportClip" type="button" title="Export the chosen clip" disabled>Export</button>
       </div>
     </div>
 
@@ -168,11 +171,42 @@
         <dt>T</dt><dd>type a time to go to</dd>
         <dt>F</dt><dd>full screen</dd>
         <dt>B</dt><dd>bookmark (coming later)</dd>
-        <dt>[ ]</dt><dd>start and end of a clip (coming later)</dd>
+        <dt>[ ]</dt><dd>start and end of the clip to export</dd>
         <dt>D</dt><dd>show the decoder statistics</dd>
         <dt>?</dt><dd>this list</dd>
       </dl>
       <button id="shortcutsClose" type="button">Close</button>
+    </dialog>
+
+    <dialog id="exportDlg" class="pb-export">
+      <form method="dialog">
+        <h2>Export clip</h2>
+        <p class="pb-ex-period" id="exPeriod"></p>
+        <p class="pb-ex-warn" id="exClockWarn" hidden></p>
+
+        <label>Cameras
+          <select id="exCameras" multiple size="4"></select>
+        </label>
+        <p class="pb-hint">Hold Ctrl to pick more than one, for the same moment from several angles.</p>
+
+        <fieldset class="pb-ex-formats">
+          <legend>Format</legend>
+          <label><input type="radio" name="exFormat" value="pack" checked> <b>Evidence pack</b> — the original video, signed, with a player. Best for the police or an insurer.</label>
+          <label><input type="radio" name="exFormat" value="mp4"> <b>MP4</b> — plays anywhere, signed alongside.</label>
+          <label><input type="radio" name="exFormat" value="stills"> <b>Stills</b> — one picture every few seconds.</label>
+        </fieldset>
+
+        <label>Name <input id="exName" maxlength="120" /></label>
+        <label>Notes <input id="exNotes" maxlength="500" placeholder="Shown when the export is opened" /></label>
+        <label>Password <input id="exPass" type="password" maxlength="128" autocomplete="new-password" placeholder="Optional. Without it, anyone with the file can watch it." /></label>
+
+        <p class="pb-ex-msg" id="exMsg"></p>
+        <progress id="exProgress" max="100" value="0" hidden></progress>
+        <div class="pb-ex-actions">
+          <button type="submit" value="cancel">Close</button>
+          <button type="button" id="exStart" class="pb-primary">Create export</button>
+        </div>
+      </form>
     </dialog>
   </section>
 

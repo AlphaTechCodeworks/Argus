@@ -915,6 +915,7 @@ function drawTimeline() {
   spanEl.textContent = spanLabel(v.spanMs)
   for (const b of zoomBtns) b.setAttribute('aria-pressed', String(Number(b.dataset.span) === Math.round(v.spanMs)))
   followBtn.setAttribute('aria-pressed', String(state.follow))
+  drawClip()
   drawOverview()
   drawHover()
 }
@@ -1241,11 +1242,86 @@ function snapshot() {
 }
 $('snapshot').addEventListener('click', snapshot)
 
-// Clip selection (phase 4) and bookmarks (phase 3) are not built yet; their keys and buttons are
-// here so the shortcut list and the layout do not have to change again when they arrive.
-const selectClipStart = () => {}
-const selectClipEnd = () => {}
+// ---- choosing a clip to export -----------------------------------------------
+//
+// Two marks on the timeline with draggable handles. The times are kept as absolute milliseconds,
+// not as fractions of the view, so zooming and panning never move the clip you chose — which is
+// the whole point of being able to zoom in to pick a moment precisely.
+//
+// Bookmarks (phase 3) are still to come; the key and the button stay so the shortcut list and the
+// layout do not have to change again.
+
+const clip = { on: false, from: null, to: null }
+const clipSelEl = $('clipSel')
+const clipFromEl = $('clipFrom')
+const clipToEl = $('clipTo')
+const selectClipBtn = $('selectClip')
+const exportBtn = $('exportClip')
+
+/** Keeps `from` before `to` and both inside the day, whichever handle was moved. */
+function setClip(from, to) {
+  const dayStart = dayStartOf(state.date)
+  const lo = dayStart
+  const hi = dayStart + DAY
+  clip.from = Math.min(Math.max(from, lo), hi)
+  clip.to = Math.min(Math.max(to, lo), hi)
+  if (clip.to < clip.from) [clip.from, clip.to] = [clip.to, clip.from]
+  scheduleDraw()
+}
+
+function clipOn(on) {
+  clip.on = on
+  selectClipBtn.setAttribute('aria-pressed', String(on))
+  selectClipBtn.classList.toggle('pb-on', on)
+  exportBtn.disabled = !on
+  if (on && clip.from === null) {
+    // start with a minute around where you are, so there is something to drag
+    const at = state.position ?? state.view.startMs + state.view.spanMs / 2
+    setClip(at - 30_000, at + 30_000)
+  }
+  scheduleDraw()
+}
+
+const selectClipStart = () => { if (!clip.on) clipOn(true); setClip(state.position ?? clip.from, clip.to ?? (state.position ?? 0) + 60_000) }
+const selectClipEnd = () => { if (!clip.on) clipOn(true); setClip(clip.from ?? (state.position ?? 0) - 60_000, state.position ?? clip.to) }
 const addBookmark = () => {}
+
+selectClipBtn.addEventListener('click', () => clipOn(!clip.on))
+
+/** Draws the chosen stretch and its two handles; called from drawTimeline. */
+function drawClip() {
+  const show = clip.on && clip.from !== null && clip.to !== null
+  clipSelEl.hidden = !show
+  clipFromEl.hidden = !show
+  clipToEl.hidden = !show
+  if (!show) return
+  const v = state.view
+  const pct = (t) => ((t - v.startMs) / v.spanMs) * 100
+  clipSelEl.style.left = `${pct(clip.from)}%`
+  clipSelEl.style.width = `${Math.max(0, pct(clip.to) - pct(clip.from))}%`
+  clipFromEl.style.left = `${pct(clip.from)}%`
+  clipToEl.style.left = `${pct(clip.to)}%`
+  const secs = Math.round((clip.to - clip.from) / 1000)
+  clipSelEl.title = `${fmtTime(clip.from)} – ${fmtTime(clip.to)} (${Math.floor(secs / 60)} min ${secs % 60} s)`
+}
+
+/** Dragging a handle. The times come from the timeline's own scale, so zooming keeps them true. */
+function grabHandle(el, which) {
+  el.addEventListener('pointerdown', (e) => {
+    e.stopPropagation() // the timeline's own pointerdown would pan instead
+    el.setPointerCapture(e.pointerId)
+    const move = (ev) => {
+      const t = timeAt(ev.clientX)
+      if (which === 'from') setClip(t, clip.to)
+      else setClip(clip.from, t)
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', () => el.removeEventListener('pointermove', move), { once: true })
+    el.addEventListener('pointercancel', () => el.removeEventListener('pointermove', move), { once: true })
+  })
+}
+grabHandle(clipFromEl, 'from')
+grabHandle(clipToEl, 'to')
 
 $('shortcutsBtn').addEventListener('click', () => shortcutsDlg.showModal())
 $('shortcutsClose').addEventListener('click', () => shortcutsDlg.close())
@@ -1817,3 +1893,123 @@ document.addEventListener('fullscreenchange', () => {
   applyZoom() // the picture changed size, so the pan limits did too
 })
 if (!document.fullscreenEnabled && fullBtn) fullBtn.hidden = true
+
+// ---- the export dialog -------------------------------------------------------
+//
+// Talks to /api/exports (export-api.mjs). The clip's times come from the two handles on the
+// timeline; the server trims to the nearest keyframes and records in the manifest what it
+// actually produced, which will differ by a second or two from what was asked for.
+
+const exportDlg = $('exportDlg')
+const exPeriod = $('exPeriod')
+const exClockWarn = $('exClockWarn')
+const exCameras = $('exCameras')
+const exName = $('exName')
+const exNotes = $('exNotes')
+const exPass = $('exPass')
+const exMsg = $('exMsg')
+const exProgress = $('exProgress')
+const exStart = $('exStart')
+
+const exSay = (text, bad = false) => {
+  exMsg.textContent = text
+  exMsg.className = `pb-ex-msg${bad ? ' pb-ex-bad' : ''}`
+}
+
+async function openExport() {
+  if (clip.from === null || clip.to === null) return
+  const secs = Math.round((clip.to - clip.from) / 1000)
+  exPeriod.textContent = `${state.date} · ${fmtTime(clip.from)} – ${fmtTime(clip.to)} (${Math.floor(secs / 60)} min ${secs % 60} s)`
+
+  // A wrong NVR clock is the sort of thing that gets evidence thrown out, so say it here rather
+  // than only burying it in the manifest.
+  const skew = Math.round((state.skew ?? 0) / 1000)
+  exClockWarn.hidden = Math.abs(skew) < 30
+  exClockWarn.textContent = exClockWarn.hidden
+    ? ''
+    : `This NVR's clock is ${Math.abs(skew)} s ${skew > 0 ? 'fast' : 'slow'}. The export records both times and the difference, so the real time can be shown.`
+
+  // every camera, with the one on screen already chosen
+  const cams = await fetch('/api/cameras').then((r) => (r.ok ? r.json() : [])).catch(() => [])
+  exCameras.replaceChildren(
+    ...cams.map((c) => {
+      const o = document.createElement('option')
+      o.value = `${c.nvr}/${c.ch}`
+      o.textContent = `${c.name} · ${c.nvrName}`
+      o.selected = c.nvr === state.nvr && c.ch === state.ch
+      return o
+    })
+  )
+
+  exName.value = `${state.date} ${fmtTime(clip.from).slice(0, 5)} ${cameraSel.selectedOptions[0]?.textContent ?? 'export'}`
+  exNotes.value = ''
+  exPass.value = ''
+  exProgress.hidden = true
+  exStart.disabled = false
+  exSay('')
+  exportDlg.showModal()
+}
+exportBtn.addEventListener('click', openExport)
+
+exStart.addEventListener('click', async () => {
+  const cameras = [...exCameras.selectedOptions].map((o) => {
+    const [nvr, ch] = o.value.split('/')
+    return { nvr, ch: Number(ch) }
+  })
+  if (!cameras.length) return exSay('Choose at least one camera.', true)
+  const format = document.querySelector('input[name="exFormat"]:checked')?.value ?? 'pack'
+
+  exStart.disabled = true
+  exProgress.hidden = false
+  exProgress.value = 0
+  exSay('Starting…')
+  try {
+    const started = await fetch('/api/exports', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cameras, fromMs: Math.round(clip.from), toMs: Math.round(clip.to), format, name: exName.value, notes: exNotes.value, password: exPass.value || undefined })
+    }).then(async (r) => {
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(d.error ?? `HTTP ${r.status}`)
+      return d
+    })
+    exPass.value = '' // never leave it sitting in the page
+    await followExport(started.id)
+  } catch (e) {
+    exSay(e.message, true)
+    exStart.disabled = false
+    exProgress.hidden = true
+  }
+})
+
+/** Polls until the export finishes, then offers it. */
+async function followExport(id) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000))
+    let job
+    try {
+      job = await fetch(`/api/exports/${encodeURIComponent(id)}`).then((r) => r.json())
+    } catch {
+      continue // a blip in polling is not a failed export
+    }
+    if (Number.isFinite(job.percent)) exProgress.value = job.percent
+    if (job.state === 'done') {
+      exProgress.hidden = true
+      exSay('Ready.')
+      const a = document.createElement('a')
+      a.href = `/api/exports/${encodeURIComponent(id)}/download`
+      a.textContent = 'Download the export'
+      a.className = 'pb-ex-download'
+      exMsg.append(' ', a)
+      exStart.disabled = false
+      return
+    }
+    if (job.state === 'failed' || job.state === 'cancelled') {
+      exProgress.hidden = true
+      exSay(job.error ?? 'The export did not finish.', true)
+      exStart.disabled = false
+      return
+    }
+    exSay(job.step ?? 'Working…')
+  }
+}

@@ -912,3 +912,28 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 /* Full screen on the playback page: the picture takes the space the page chrome gives back. */
 body.is-fullscreen > header { display: none; }
 body.is-fullscreen .alert-banner { display: none; }
+
+/* Choosing a clip to export: two handles on the timeline (playback.js drawClip). The handle's hit
+   area is far wider than the line you see, because a 3 px target is unusable with a thumb. */
+.pb-clip-sel { position: absolute; top: 0; bottom: 0; background: rgb(224 160 48 / 18%); border-top: 2px solid var(--tl-evt); border-bottom: 2px solid var(--tl-evt); pointer-events: none; }
+.pb-clip-handle { position: absolute; top: -4px; bottom: -4px; width: 26px; margin-left: -13px; cursor: ew-resize; touch-action: none; z-index: 3; }
+.pb-clip-handle::after { content: ""; position: absolute; left: 8px; top: 0; bottom: 0; width: 10px; background: var(--tl-evt); border-radius: 3px; }
+.pb-clip-handle:hover::after { background: #f3c877; }
+
+/* The export dialog (playback.js). Someone uses this when something has gone wrong, so it is
+   plain and the format choice explains itself rather than assuming knowledge. */
+.pb-export { max-width: min(560px, 94vw); background: var(--panel); color: var(--text); border: 1px solid #2f3742; border-radius: 10px; padding: 16px 18px; }
+.pb-export::backdrop { background: rgb(0 0 0 / 55%); }
+.pb-export h2 { margin: 0 0 8px; font-size: 17px; }
+.pb-export label { display: block; margin: 8px 0; }
+.pb-export input[type="text"], .pb-export input:not([type]), .pb-export input[type="password"], .pb-export select { width: 100%; margin-top: 3px; }
+.pb-ex-period { margin: 0 0 6px; font-weight: 600; }
+.pb-ex-warn { margin: 0 0 10px; padding: 8px 10px; border-radius: 6px; background: #3a2a0e; color: #f3c877; font-size: 13px; }
+.pb-ex-formats { border: 1px solid #2f3742; border-radius: 6px; padding: 8px 10px; margin: 10px 0; }
+.pb-ex-formats label { font-size: 13px; margin: 6px 0; }
+.pb-ex-msg { min-height: 1.2em; margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.pb-ex-bad { color: #ff8b8e; }
+.pb-ex-download { color: var(--accent); }
+.pb-ex-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+#exProgress { width: 100%; margin-top: 8px; }
+.pb-on { background: #12314d; border-color: var(--accent); }
