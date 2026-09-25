@@ -94,6 +94,14 @@ function trip(reason, stats) {
   process.kill(process.pid, 'SIGKILL')
 }
 
+/**
+ * Is some OTHER NVR still getting answers out of the SDK? Evidence has to be positive: a call
+ * belonging to a different NVR must really have returned within PROGRESS_MS. If none ever has
+ * (a single-NVR install, or the whole library wedged), this is false and the verdict stands.
+ */
+const othersProgressing = (stats, nvrId) =>
+  Object.entries(stats.lastReturnAgoByNvr ?? {}).some(([id, ago]) => id !== nvrId && ago < PROGRESS_MS)
+
 export function startWatchdog() {
   let lastCheck = Date.now()
   let quietUntil = 0
@@ -109,9 +117,26 @@ export function startWatchdog() {
     }
     if (now - startedAt < GRACE_MS || now < quietUntil) return
     const s = sdkStats()
-    if (s.oldestMs > MAX_CALL_MS) return trip(`SDK call stuck for ${Math.round(s.oldestMs / 1000)} s: ${s.oldest}`, s)
-    if (s.late >= MAX_LATE && s.oldestMs > LATE_HOLD_MS && s.lastReturnAgoMs > PROGRESS_MS) {
-      return trip(`${s.late} SDK calls overdue, none returned for ${Math.round(s.lastReturnAgoMs / 1000)} s`, s)
+    // What this is for: a heap-corrupted SDK stops returning anything and no time limit in
+    // sdk.mjs can free it, so only a restart helps. What it is NOT for: an NVR that has gone
+    // off the network. Two things follow, both learnt the hard way on the live server, where one
+    // unreachable NVR had the process killed five times in six minutes and stopped the other
+    // four NVRs recording each time.
+    //
+    // 1. A login (mayBlock) that is stuck proves nothing: NET_SDK_Login is known to block for
+    //    minutes in this SDK when the far end does not answer, a late login is already tidied
+    //    up by logoutLate in nvrs.mjs, and probe.mjs now avoids the call altogether in the
+    //    common case. So stuck logins do not drive a verdict on their own.
+    // 2. One NVR's stuck call is not evidence either, as long as calls to OTHER NVRs keep
+    //    coming back: the library is plainly still working, and killing the process would only
+    //    take the healthy NVRs down with the broken one. If nothing else is returning (or there
+    //    is nothing else), a stuck call still trips, exactly as before.
+    const oldestBlocking = s.calls.find((c) => !c.mayBlock)
+    if (oldestBlocking && oldestBlocking.ms > MAX_CALL_MS && !othersProgressing(s, oldestBlocking.nvr)) {
+      return trip(`SDK call stuck for ${Math.round(oldestBlocking.ms / 1000)} s: ${oldestBlocking.name}${oldestBlocking.tag ? ` (${oldestBlocking.tag})` : ''}`, s)
+    }
+    if (s.lateBlocking >= MAX_LATE && s.oldestMs > LATE_HOLD_MS && s.lastReturnAgoMs > PROGRESS_MS) {
+      return trip(`${s.lateBlocking} SDK calls overdue, none returned for ${Math.round(s.lastReturnAgoMs / 1000)} s`, s)
     }
     if (s.queued > 0 && s.queuedOldestMs > MAX_QUEUE_WAIT_MS) return trip(`SDK call slots exhausted for ${Math.round(s.queuedOldestMs / 1000)} s`, s)
   }, CHECK_MS).unref()
