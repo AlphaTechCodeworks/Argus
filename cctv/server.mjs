@@ -31,6 +31,8 @@
 //   /api/playback/*?nvr=ID, WS /playback?nvr=ID -> recorded video, see playback.mjs
 //   WS   /playback?nvr=ID&...&src=auto -> from the server's own recordings, see rec-playback.mjs
 //   GET  /api/playback/timeline?nvr=ID&ch=N&from=ms&to=ms -> the server's own recordings, see rec-api.mjs
+//   /api/exports               -> evidence exports (admins): list, start, progress, download,
+//                                 delete; see export-api.mjs and export-job.mjs
 //   WS   /motion?nvr=ID&...    -> motion search inside a box, see motion.mjs
 //
 // Wire format of each WebSocket message (little endian):
@@ -69,6 +71,7 @@ import { LIVE_WORKER, P2P_ENABLED, allCameras, nvrs, readConfig, recIndex, start
 import { runHousekeeping } from './housekeeping.mjs'
 import { playbackApi } from './playback.mjs'
 import { timelineApi } from './rec-api.mjs'
+import { downloadExport, handleExports } from './export-api.mjs'
 import { connectPlayback } from './rec-playback.mjs'
 import { vpnView } from './vpn.mjs'
 import { sdkStats } from './sdk.mjs'
@@ -451,6 +454,34 @@ const handleRequest = async (req, res) => {
   if (pathname === '/api/sites') return sendJson(res, 200, [...nvrs.values()].map((n) => n.info()))
   if (pathname === '/api/cameras') return sendJson(res, 200, allCameras())
   if (handleMapsRead(pathname, res, sendJson, SECURITY_HEADERS)) return
+  if (pathname.startsWith('/api/exports')) {
+    const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
+    // Same cross-site guard as the admin routes: a change only from our own pages, as JSON.
+    if (req.method !== 'GET') {
+      const origin = req.headers.origin
+      let sameOrigin = false
+      try {
+        sameOrigin = !origin || new URL(origin).host === req.headers.host
+      } catch {}
+      // DELETE carries no body, so it is not asked for a JSON content type.
+      const jsonBody = req.method === 'DELETE' || String(req.headers['content-type'] ?? '').startsWith('application/json')
+      if (!sameOrigin || !jsonBody) return sendJson(res, 403, { error: 'Forbidden' })
+    }
+    // The download streams straight to the response, so it is handled before the JSON routes.
+    if (await downloadExport({ pathname, method: req.method, who, res, dataDir: DATA_DIR, headers: SECURITY_HEADERS, sendJson })) return
+    const clockOf = (id) => nvrs.get(id)?.playback?.lastClock?.()?.skewMs ?? 0
+    const answer = await handleExports({
+      method: req.method,
+      pathname,
+      readJson: () => readJsonObject(req, 16384),
+      who,
+      user,
+      index: recIndex(),
+      dataDir: DATA_DIR,
+      clockOf
+    })
+    if (answer) return sendJson(res, answer[0], answer[1])
+  }
   if (pathname === '/api/playback/timeline') {
     // server recordings, from the database only (never the NVR), see rec-api.mjs
     const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
