@@ -3,6 +3,7 @@
 // worker-supervisor.mjs with CCTV_WORKER_NVR=<nvr id>; the real Nvr and LiveStream classes do
 // the work, and each wanted stream has one "tap" (a fake WebSocket) that forwards its frames
 // to the parent, which fans them out to the viewers (stream-hub.mjs).
+import { recentRefusals } from './nvr-health.mjs'
 import { MSG, frameMsg, streamKey } from './worker-ipc.mjs'
 
 if (process.env.CCTV_WORKER_FAKE_SDK === '1') await import('./test/fake-sdk.mjs') // tests: replaces NET_SDK
@@ -129,5 +130,7 @@ async function shutdown() {
 
 process.send?.({ t: MSG.READY })
 // (channels: the worker polls the camera list; the main process uses this one, nvrs.mjs workerStats)
-const sendStats = () => process.connected && process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, streams: nvr.streams.size, channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), sdk: sdkStats(), rec: recorder.status() })
+// refusals: the streams live in THIS process, so the main process cannot count them itself; without
+// this number the Health page's "refused" column and the nvr-refusing alert are both dead letters.
+const sendStats = () => process.connected && process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, streams: nvr.streams.size, refusals: recentRefusals(nvr.streams.values(), Date.now()), channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), sdk: sdkStats(), rec: recorder.status() })
 setInterval(sendStats, 5000).unref()
