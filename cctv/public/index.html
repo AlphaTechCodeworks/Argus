@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCTV Live</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="colour-check.css" />
+  <link rel="stylesheet" href="grid-order.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+      <nav class="tabs" aria-label="Views">
+        <a href="/" aria-current="page">Live</a>
+        <a href="/playback.html">Playback</a>
+        <a href="/map.html">Map</a>
+        <a href="/sites.html" id="sitesTab" hidden>Sites</a>
+        <a href="/settings.html" id="settingsTab" hidden>Settings</a>
+      </nav>
+    </div>
+    <div class="controls">
+      <label id="siteLabel" hidden>Site
+        <select id="site"><option value="">All sites</option></select>
+      </label>
+      <label>Layout
+        <select id="layout">
+          <optgroup label="Grid">
+            <option value="g1">1</option>
+            <option value="g2">2 × 2</option>
+            <option value="g3" selected>3 × 3</option>
+            <option value="g4">4 × 4</option>
+            <option value="g5">5 × 5</option>
+            <option value="g6">6 × 6</option>
+            <option value="g8">8 × 8</option>
+          </optgroup>
+          <optgroup label="Featured">
+            <option value="1+5">1 large + 5</option>
+            <option value="1+7">1 large + 7</option>
+            <option value="1+12">1 large (centre) + 12</option>
+            <option value="2+8">2 large + 8</option>
+          </optgroup>
+        </select>
+      </label>
+      <label title="Leave offline cameras out of the layout"><input id="hideOffline" type="checkbox" checked /> Hide offline</label>
+      <label title="Steadier motion: holds about 0.4 s more video (a little more delay)"><input id="smooth" type="checkbox" /> Smooth</label>
+      <button id="resetOrder" type="button" title="Your cameras are in your own order (drag a tile onto another to swap them, or onto ‹ › to move it to another page). This puts them back in the default order." hidden>Reset order</button>
+      <button id="prev" type="button" aria-label="Previous page">‹</button>
+      <span id="page">1 / 1</span>
+      <button id="next" type="button" aria-label="Next page">›</button>
+      <button id="fullscreen" type="button" title="Full screen (F)" aria-label="Full screen">⛶</button>
+    </div>
+    <div class="account">
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+  <main id="grid"></main>
+  <p id="notice" hidden></p>
+  <p id="orderNote" class="order-note" role="status" hidden></p>
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>

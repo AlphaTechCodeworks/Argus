@@ -1,0 +1,27 @@
+# CCTV disk helper (root): lists drives and prepares a USB drive for recordings, nothing else.
+# Started by cctv-disk-helper.socket; the protocol and its checks are in cctv-disk-helperd.mjs,
+# the disk work in /usr/local/sbin/cctv-disk-helper. Installed by deploy/install-ubuntu.sh.
+#   journalctl -u cctv-disk-helper       (every prepare is logged: device, serial, file system)
+[Unit]
+Description=CCTV disk helper (prepares USB drives for recordings)
+Requires=cctv-disk-helper.socket
+After=cctv-disk-helper.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/node /usr/local/lib/cctv/cctv-disk-helperd.mjs
+Environment=LC_ALL=C
+UMask=0022
+
+# It must partition, format and mount a drive for the whole system, so it gets no mount
+# namespace: no ProtectSystem/ProtectHome/PrivateTmp/PrivateDevices/ReadWritePaths (a mount made
+# inside one would be invisible to the cctv service). Limited instead by what does not need one:
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER CAP_FSETID CAP_MKNOD
+# the socket from systemd; netlink for udevadm/lsblk; no IP network at all
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+RestrictRealtime=yes
+# (no RestrictSUIDSGID: the recording folder is made setgid cctv-disk, chmod 2770)
+LockPersonality=yes
+SystemCallArchitectures=native

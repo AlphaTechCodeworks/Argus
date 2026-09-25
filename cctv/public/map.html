@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCTV Map</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="map-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+      <nav class="tabs" aria-label="Views">
+        <a href="/">Live</a>
+        <a href="/playback.html">Playback</a>
+        <a href="/map.html" aria-current="page">Map</a>
+        <a href="/sites.html" id="sitesTab" hidden>Sites</a>
+        <a href="/settings.html" id="settingsTab" hidden>Settings</a>
+      </nav>
+    </div>
+    <div class="controls">
+      <label>Site <select id="site"></select></label>
+      <label title="Show camera names on the map"><input id="names" type="checkbox" checked /> Names</label>
+      <button id="edit" type="button" hidden>Edit map</button>
+    </div>
+    <div class="account">
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="map-main">
+    <div id="map" class="map-view" tabindex="0" aria-label="Camera map. The camera list beside it has the same cameras.">
+      <div class="map-tiles"></div>
+      <img class="map-plan" alt="" hidden />
+      <svg class="map-overlay" aria-hidden="true"></svg>
+      <div class="map-zoom">
+        <button type="button" id="zoomIn" aria-label="Zoom in">+</button>
+        <button type="button" id="zoomOut" aria-label="Zoom out">−</button>
+        <button type="button" id="fit" aria-label="Show every camera" title="Show every camera">⤢</button>
+      </div>
+      <div class="map-credit" hidden></div>
+      <div id="empty" class="map-empty" hidden></div>
+      <div id="live" class="map-live" hidden></div>
+    </div>
+    <aside id="side" class="map-side" aria-label="Cameras"></aside>
+  </main>
+
+  <script type="module" src="map.js"></script>
+</body>
+</html>

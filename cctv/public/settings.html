@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCTV Settings</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="sites-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+      <nav class="tabs" aria-label="Views">
+        <a href="/">Live</a>
+        <a href="/playback.html">Playback</a>
+        <a href="/map.html">Map</a>
+        <a href="/sites.html">Sites</a>
+        <a href="/settings.html" aria-current="page">Settings</a>
+      </nav>
+    </div>
+    <div class="account">
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="st-main">
+    <p id="notice" class="st-notice" hidden></p>
+
+    <section class="se-section" aria-labelledby="rec-title">
+      <h2 id="rec-title">Recording</h2>
+      <p class="st-help">Server recording of each camera's main stream. Off for every camera until you turn it on here. Motion and AI modes record continuously until event support arrives.</p>
+      <form id="defaults" class="se-grid" autocomplete="off">
+        <label>Mode <select id="d-mode"></select></label>
+        <label>Full video kept (days) <input id="d-fullDays" type="number" min="1" max="366" required /></label>
+        <label>After that <select id="d-after"></select></label>
+        <label>Time-lapse: one picture every (s) <input id="d-timelapseS" type="number" min="1" max="3600" required /></label>
+        <label>Total retention (days) <input id="d-retentionDays" type="number" min="1" max="366" required /></label>
+        <label>Before an event (s) <input id="d-preS" type="number" min="0" max="300" required /></label>
+        <label>After an event (s) <input id="d-postS" type="number" min="0" max="600" required /></label>
+        <div class="se-actions"><button type="submit" class="st-primary">Save defaults</button><span id="d-msg" class="st-meta"></span></div>
+      </form>
+      <h3>Per camera</h3>
+      <p class="st-help">Empty fields use the defaults above.</p>
+      <div class="se-table-wrap">
+        <table class="se-table" id="cams">
+          <thead><tr><th>Camera</th><th>Mode</th><th>Full days</th><th>After that</th><th>Retention days</th><th>Location</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="se-actions"><button id="saveCams" type="button" class="st-primary" disabled>Save camera changes</button><span id="c-msg" class="st-meta"></span></div>
+    </section>
+
+    <section class="se-section" aria-labelledby="mem-title">
+      <h2 id="mem-title">Memory, thumbnails and free space</h2>
+      <form id="misc" class="se-grid" autocomplete="off">
+        <label>Recent footage kept in RAM <select id="m-recent"></select></label>
+        <label>Timeline thumbnails <select id="m-thumbs"></select></label>
+        <label>Low space: delete oldest below (% free) <input id="m-low" type="number" min="1" max="50" required /></label>
+        <label>Hard floor: full-video period touched only below (% free) <input id="m-floor" type="number" min="1" max="49" required /></label>
+        <p id="m-ram" class="st-help se-wide" hidden></p>
+        <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="m-msg" class="st-meta"></span></div>
+      </form>
+    </section>
+
+    <section class="se-section" aria-labelledby="loc-title">
+      <h2 id="loc-title">Storage locations</h2>
+      <p class="st-help">Folders where recordings are written. Each holds a marker file; a location without it (drive unplugged, share down) is never written and recording moves to the next one.</p>
+      <div id="locations" class="st-cards"></div>
+      <form id="addLoc" class="se-grid" autocomplete="off">
+        <div class="se-wide se-path-row">
+          <label>Folder <input id="l-path" required maxlength="256" placeholder="/srv/cctv-rec/usb1" /></label>
+          <button id="l-browse" type="button">Browse…</button>
+        </div>
+        <label>Type <select id="l-type"><option value="usb">External disk (USB/eSATA)</option><option value="internal">Internal (ZFS pool, disk)</option><option value="network">Network share (NFS, SMB, iSCSI)</option></select></label>
+        <label>Role <select id="l-role"><option value="main">Main</option><option value="overflow">Overflow</option><option value="archive">Archive</option></select></label>
+        <label>Space limit (GB, empty = none) <input id="l-limit" type="number" min="1" step="any" /></label>
+        <label class="st-check se-wide" id="l-same-row" hidden><input id="l-same" type="checkbox" /> Same disk as the system (recordings could fill the system disk)</label>
+        <div class="se-actions"><button type="submit">Add location</button><span id="l-msg" class="st-meta"></span></div>
+      </form>
+    </section>
+
+    <section class="se-section" aria-labelledby="usb-title">
+      <h2 id="usb-title">Prepare USB drive</h2>
+      <p class="st-help">Erases a USB/eSATA drive, formats it for recordings and adds it as a location. Only drives that are not the system disk, not mounted and not in a pool are offered.</p>
+      <div class="se-actions"><button id="refreshDisks" type="button">Look for drives</button><span id="u-msg" class="st-meta"></span></div>
+      <div id="disks" class="st-cards"></div>
+      <div id="job" class="se-job" hidden></div>
+    </section>
+  </main>
+
+  <dialog id="prep" class="st-dialog">
+    <form id="prepForm" method="dialog" autocomplete="off">
+      <h2>Prepare <span id="p-name"></span></h2>
+      <p class="se-danger">Everything on this drive will be erased and cannot be recovered.</p>
+      <p id="p-info" class="st-meta"></p>
+      <ul id="p-parts" class="se-parts"></ul>
+      <label>File system
+        <select id="p-fs"><option value="xfs">XFS (recommended)</option><option value="ext4">ext4</option></select>
+      </label>
+      <label>Type the drive's serial number to confirm: <strong id="p-serial"></strong>
+        <input id="p-typed" required spellcheck="false" autocapitalize="off" />
+      </label>
+      <p id="p-error" class="st-error" hidden></p>
+      <div class="st-actions">
+        <button type="button" id="p-cancel">Cancel</button>
+        <button type="submit" id="p-go" class="se-erase" disabled>Erase and prepare</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="folders" class="st-dialog" aria-labelledby="f-title">
+    <form id="foldersForm" method="dialog" autocomplete="off">
+      <h2 id="f-title">Choose a folder</h2>
+      <p class="st-meta">Folders under /srv/cctv-rec, /mnt and /media. Pick the folder where a drive or share is mounted, or make a new one.</p>
+      <div class="se-folder-path"><button type="button" id="f-up">Up</button><code id="f-path"></code></div>
+      <ul id="f-list" class="se-folder-list" role="listbox" aria-label="Folders"></ul>
+      <div class="se-folder-new">
+        <input id="f-name" maxlength="64" placeholder="New folder name" spellcheck="false" autocapitalize="off" aria-label="New folder name" />
+        <button type="button" id="f-new">New folder</button>
+      </div>
+      <p id="f-error" class="st-error" hidden></p>
+      <div class="st-actions">
+        <button type="button" id="f-cancel">Cancel</button>
+        <button type="button" id="f-select" disabled>Select</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="settings.js"></script>
+</body>
+</html>

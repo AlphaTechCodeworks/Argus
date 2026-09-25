@@ -1,0 +1,31 @@
+# CCTV Live: TVT NVR viewer.
+#   docker compose up -d --build                        start (and rebuild after code changes)
+#   docker compose exec cctv node cctv/adduser.mjs NAME  add a viewer account
+#   docker compose logs -f                               follow logs
+#   node cctv/discovery-helper.mjs                       TVT network search helper (see below)
+services:
+  cctv:
+    build: .
+    image: tvt-cctv
+    container_name: tvt-cctv
+    init: true
+    restart: unless-stopped # restarts after crashes, NVR loss and Docker/PC restarts
+    env_file: .env
+    environment:
+      # Finding NVRs (Sites > Find NVRs): the TVT network search on UDP 23456 needs multicast,
+      # which never leaves Docker Desktop, so the app asks a small helper running on this PC:
+      #   node cctv/discovery-helper.mjs      (or double-click start-discovery-helper.cmd)
+      # Without the helper, Find NVRs still works by scanning address ranges.
+      DISCOVERY_HELPER_URL: ${DISCOVERY_HELPER_URL:-http://host.docker.internal:23457}
+    # Linux PCs don't need the helper: use "network_mode: host" (and remove "ports:") and set
+    # DISCOVERY_HELPER_URL= (empty) in .env, and the app runs the search itself.
+    ports:
+      - "8080:8080" # HTTP, for this PC (http://localhost:8080)
+      - "8443:8443" # HTTPS, for other PCs and phones on the LAN
+    volumes:
+      - ./data:/app/data # viewer accounts, session secret, HTTPS certificate
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

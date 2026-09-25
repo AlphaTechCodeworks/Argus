@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response cmdId="" cmdUrl="queryCameraLensCtrlParam">
+	<types>
+		<focusType>
+			<enum>manual</enum>
+		</focusType>
+	</types>
+	<status>success</status>
+	<content>
+		<chl id="{00000018-0000-0000-0000-000000000000}">
+			<focusType>manual</focusType>
+			<IrchangeFocus>false</IrchangeFocus>
+			<timeInterval>60</timeInterval>
+			<timeIntervalNote>60,300,600,1800,0</timeIntervalNote>
+		</chl>
+	</content>
+</response>

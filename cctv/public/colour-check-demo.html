@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Colour check practice</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="colour-check.css" />
+  <style>
+    /* the practice page only: a simulated full-size camera view */
+    .ccd-main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--gap); padding: var(--gap); }
+    .ccd-main .tile { flex: 1; min-height: 240px; }
+    .ccd-note { margin: 0; padding: 6px 16px; color: var(--muted); font-size: 12px; background: var(--panel); border-top: 1px solid #232931; }
+    .ccd-controls { flex-wrap: wrap; }
+    .ccd-log { margin: 0; padding: 8px 12px; background: var(--panel); border-radius: 4px; font-size: 12px; color: var(--muted); max-height: 22vh; overflow: auto; }
+    .ccd-log:empty { display: none; }
+    .ccd-log ul { margin: 4px 0 0; padding-left: 18px; color: var(--text); }
+    .ccd-start { background: var(--accent); border-color: var(--accent); color: #041018; font-weight: 600; }
+    @media (max-width: 640px) {
+      header { padding: 8px 10px; }
+      .ccd-controls { min-width: 0; max-width: 100%; }
+      .ccd-controls label { flex: 1 1 100%; min-width: 0; justify-content: space-between; }
+      /* a select is as wide as its longest option unless allowed to shrink */
+      .ccd-controls select { min-width: 0; flex: 0 1 auto; max-width: 64%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><h1>Colour check practice</h1></div>
+    <div class="controls ccd-controls">
+      <label>Simulated camera
+        <select id="scene"></select>
+      </label>
+      <label>Its white balance
+        <select id="wb">
+          <option value="auto">Auto</option>
+          <option value="outdoor">Outdoor (fixed)</option>
+          <option value="manual">Manual (red and blue gains)</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="hints" /> Show the corners</label>
+      <button type="button" id="start" class="ccd-start">Colour check</button>
+    </div>
+  </header>
+  <p class="ccd-note">A made-up camera picture with a chart or card in it, to practise the colour check. Nothing here talks to a camera or NVR, and nothing is saved.</p>
+  <main class="ccd-main">
+    <div class="tile single" id="tile">
+      <canvas id="video"></canvas>
+      <div class="label"><span class="name">Practice camera</span><span class="status live">simulated</span></div>
+    </div>
+    <div class="ccd-log" id="log" aria-live="polite"></div>
+  </main>
+  <script type="module" src="colour-check-demo.js"></script>
+</body>
+</html>

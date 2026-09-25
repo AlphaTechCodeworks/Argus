@@ -1,0 +1,117 @@
+// Viewer accounts and sessions.
+// Users live in data/users.json as scrypt hashes (manage with cctv/adduser.mjs).
+// Sessions are stateless signed cookies: base64url(user).expiry.hmac
+import { createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { promisify } from 'node:util'
+
+const scrypt = promisify(scryptCb)
+
+export const DATA_DIR = process.env.DATA_DIR ?? join(import.meta.dirname, '..', 'data')
+const USERS_FILE = join(DATA_DIR, 'users.json')
+const SECRET_FILE = join(DATA_DIR, 'session-secret')
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
+export const COOKIE_NAME = 'cctv_session'
+
+const ensureDir = (file) => mkdirSync(dirname(file), { recursive: true })
+
+const loadSecret = () => {
+  if (!existsSync(SECRET_FILE)) {
+    ensureDir(SECRET_FILE)
+    writeFileSync(SECRET_FILE, randomBytes(32).toString('hex'), { mode: 0o600 })
+  }
+  return readFileSync(SECRET_FILE, 'utf8').trim()
+}
+
+/**
+ * @returns {Record<string, { hash: string, role: 'admin' | 'viewer' }>}
+ * Older files stored just the hash per user; those accounts were created before
+ * roles existed (by the owner), so they become admins.
+ */
+export const loadUsers = () => {
+  if (!existsSync(USERS_FILE)) return {}
+  const raw = JSON.parse(readFileSync(USERS_FILE, 'utf8'))
+  return Object.fromEntries(
+    Object.entries(raw).map(([name, v]) => [name, typeof v === 'string' ? { hash: v, role: 'admin' } : v])
+  )
+}
+
+/** Admins can manage NVRs and sites; viewers can only watch. */
+export const isAdmin = (user) => loadUsers()[user]?.role === 'admin'
+
+export const saveUsers = (users) => {
+  ensureDir(USERS_FILE)
+  writeFileSync(USERS_FILE, `${JSON.stringify(users, null, 2)}\n`, { mode: 0o600 })
+}
+
+export const hashPassword = async (password) => {
+  const salt = randomBytes(16)
+  const hash = await scrypt(password, salt, 64)
+  return `scrypt:${salt.toString('hex')}:${hash.toString('hex')}`
+}
+
+const verifyPassword = async (password, stored) => {
+  const [, saltHex, hashHex] = stored.split(':')
+  const expected = Buffer.from(hashHex, 'hex')
+  const actual = await scrypt(password, Buffer.from(saltHex, 'hex'), expected.length)
+  return timingSafeEqual(actual, expected)
+}
+
+// a fixed hash to compare against for unknown users, so response time doesn't reveal valid names
+const DUMMY_HASH = await hashPassword(randomBytes(16).toString('hex'))
+
+export const checkLogin = async (user, password) => {
+  const stored = loadUsers()[user]?.hash
+  const ok = await verifyPassword(String(password), stored ?? DUMMY_HASH)
+  return ok && stored !== undefined
+}
+
+const secret = loadSecret()
+const sign = (payload) => createHmac('sha256', secret).update(payload).digest('base64url')
+
+export const createSession = (user) => {
+  const payload = `${Buffer.from(user).toString('base64url')}.${Date.now() + SESSION_TTL_MS}`
+  return `${payload}.${sign(payload)}`
+}
+
+/** Returns the user name for a valid session token, otherwise null. */
+export const verifySession = (token) => {
+  if (!token) return null
+  const parts = token.split('.')
+  if (parts.length !== 3) return null
+  const payload = `${parts[0]}.${parts[1]}`
+  const sig = Buffer.from(parts[2])
+  const expected = Buffer.from(sign(payload))
+  if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) return null
+  if (Number(parts[1]) < Date.now()) return null
+  const user = Buffer.from(parts[0], 'base64url').toString()
+  return user in loadUsers() ? user : null // removed users lose access immediately
+}
+
+export const parseCookies = (header = '') =>
+  Object.fromEntries(
+    header
+      .split(';')
+      .map((c) => c.trim().split('='))
+      .filter(([k, v]) => k && v)
+      .map(([k, v]) => [k, decodeURIComponent(v)])
+  )
+
+export const sessionCookie = (token, secure) =>
+  `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure ? '; Secure' : ''}`
+
+export const clearCookie = () => `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`
+
+/** Simple per-IP limiter for login attempts: 10 failures per 15 minutes. */
+const failures = new Map()
+export const loginBlocked = (ip) => {
+  const f = failures.get(ip)
+  return f !== undefined && f.count >= 10 && Date.now() - f.first < 15 * 60 * 1000
+}
+export const recordFailure = (ip) => {
+  const f = failures.get(ip)
+  if (!f || Date.now() - f.first > 15 * 60 * 1000) failures.set(ip, { count: 1, first: Date.now() })
+  else f.count++
+}
+export const clearFailures = (ip) => failures.delete(ip)

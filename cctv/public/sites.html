@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCTV Sites</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="sites-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+      <nav class="tabs" aria-label="Views">
+        <a href="/">Live</a>
+        <a href="/playback.html">Playback</a>
+        <a href="/map.html">Map</a>
+        <a href="/sites.html" aria-current="page">Sites</a>
+        <a href="/settings.html" id="settingsTab" hidden>Settings</a>
+      </nav>
+    </div>
+    <div class="controls">
+      <button id="find" type="button">Find NVRs</button>
+      <button id="add" type="button" class="st-primary">+ Add NVR</button>
+    </div>
+    <div class="account">
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="st-main">
+    <p id="notice" class="st-notice" hidden></p>
+    <section id="vpn" class="st-vpn" hidden aria-labelledby="vpn-title"></section>
+    <div id="sites"></div>
+  </main>
+
+  <dialog id="dialog" class="st-dialog">
+    <form id="form" method="dialog" autocomplete="off">
+      <h2 id="formTitle">Add NVR</h2>
+      <label>Site
+        <input id="f-site" name="site" list="siteNames" required maxlength="64" placeholder="e.g. North Yard" />
+        <datalist id="siteNames"></datalist>
+      </label>
+      <label>NVR name
+        <input id="f-name" name="name" required maxlength="64" placeholder="e.g. Gate NVR" />
+      </label>
+      <fieldset class="st-connect">
+        <legend>Connect by</legend>
+        <label class="st-check"><input type="radio" name="via" id="f-via-lan" value="lan" checked /> IP address (this network, or port forwarding)</label>
+        <label class="st-check"><input type="radio" name="via" id="f-via-p2p" value="p2p" /> Serial number, through TVT P2P (NVRs at other sites)</label>
+      </fieldset>
+      <div class="st-row" id="f-lan">
+        <label class="st-grow">IP address
+          <input id="f-host" name="host" required maxlength="253" placeholder="192.168.0.x" pattern="[A-Za-z0-9.\-]+" />
+        </label>
+        <label class="st-port">Port
+          <input id="f-port" name="port" type="number" min="1" max="65535" value="6036" required />
+        </label>
+      </div>
+      <div id="f-p2p" hidden>
+        <label>Serial number
+          <input id="f-sn" name="sn" maxlength="64" pattern=" *[A-Za-z0-9]{6,64} *" title="Letters and digits, as printed on the NVR" placeholder="as on the NVR's label or QR code" autocapitalize="characters" spellcheck="false" />
+        </label>
+        <small class="st-help">Connects through TVT’s cloud relay (c2020.autonat.com): the serial number and the login pass through TVT’s servers. P2P must be switched on in the NVR’s network settings. Video is slower than on the local network, so the full-size view stays on the sub-stream.</small>
+      </div>
+      <label class="st-check"><input id="f-remote" type="checkbox" /> At another site (VPN or a slow link): the full-size view stays on the sub-stream</label>
+      <label>NVR user name
+        <input id="f-user" name="user" required maxlength="64" value="admin" autocomplete="off" />
+      </label>
+      <label>NVR password
+        <input id="f-password" name="password" type="password" autocomplete="new-password" />
+        <small id="f-password-hint">The NVR's own login. It is tested before saving and never shown again.</small>
+      </label>
+      <label class="st-check"><input id="f-skip" type="checkbox" /> Save even if the NVR can't be reached right now</label>
+      <p id="formError" class="st-error" role="alert" hidden></p>
+      <div class="st-actions">
+        <button type="button" id="cancel">Cancel</button>
+        <button type="submit" id="save" class="st-primary">Test &amp; save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="discover" class="st-dialog st-discover" aria-labelledby="d-title">
+    <form id="d-form" method="dialog" autocomplete="off">
+      <h2 id="d-title">Find NVRs on the network</h2>
+      <p class="st-help">Looks for TVT NVRs two ways: TVT’s own network search (UDP port 23456) and a check of every address below for an NVR answering on its SDK port. Nothing is logged in to or changed.</p>
+      <div class="st-row">
+        <label class="st-grow">Addresses to check
+          <input id="d-ranges" required maxlength="400" placeholder="192.168.0.0/24, 192.168.2.10-200" />
+        </label>
+        <label class="st-port">Port
+          <input id="d-port" type="number" min="1" max="65535" value="6036" required />
+        </label>
+      </div>
+      <small>Networks (192.168.0.0/24, as large as /22), ranges (192.168.2.10-200) or single addresses, up to 1024 in all.</small>
+      <div class="st-actions st-actions-start">
+        <button type="submit" id="d-search" class="st-primary">Search</button>
+        <span id="d-status" class="st-meta" role="status"></span>
+      </div>
+      <div id="d-notes" role="status"></div>
+      <ul id="d-results" class="st-found"></ul>
+      <div class="st-actions">
+        <button type="button" id="d-close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="subs" class="st-dialog st-discover" aria-labelledby="s-title">
+    <form id="s-form" method="dialog">
+      <h2 id="s-title">Sub-streams</h2>
+      <p class="st-help">Live grids play each camera’s sub-stream. Browsers on PCs without H.265 hardware decoding can only play H.264, so H.265 sub-streams stay black there. This switches the chosen cameras’ sub-stream to H.264 on the camera itself; main streams and recordings are not changed. You can undo it here.</p>
+      <p id="s-status" class="st-meta" role="status"></p>
+      <p id="s-error" class="st-error" role="alert" hidden></p>
+      <ul id="s-list" class="st-found st-subs"></ul>
+      <fieldset class="st-bitrate">
+        <legend>Bitrate after switching</legend>
+        <label class="st-check"><input type="radio" name="s-bitrate" value="match" checked /> Raise where needed to keep the picture quality (recommended: H.264 needs about 1.8× the bitrate of H.265)</label>
+        <label class="st-check"><input type="radio" name="s-bitrate" value="keep" /> Keep the current bitrate</label>
+      </fieldset>
+      <div class="st-actions st-actions-start">
+        <button type="button" id="s-all">Select all H.265</button>
+        <button type="submit" id="s-apply" class="st-primary" disabled>Switch to H.264</button>
+      </div>
+      <div class="st-actions">
+        <button type="button" id="s-close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="sites.js"></script>
+</body>
+</html>

@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# CCTV disk helper: the ONLY thing that runs as root for the app. Installed by
+# deploy/install-ubuntu.sh to /usr/local/sbin/cctv-disk-helper (owned by root) and run only by
+# cctv-disk-helper.service (deploy/cctv-disk-helperd.mjs), which the app asks over the unix
+# socket /run/cctv-disk/helper.sock. The app itself has no sudo and no root.
+#
+#   cctv-disk-helper list
+#       -> one JSON line: { "lsblk": <lsblk -J ...>, "root": ["/dev/sda", ...] }
+#          (root: the disk(s) holding "/"; the app works out which disks may be prepared)
+#   cctv-disk-helper prepare <dev> <serial> <xfs|ext4>
+#       ERASES the whole disk <dev>: re-checks that it is a whole disk, not the system disk,
+#       nothing on it mounted (or swap), not a ZFS/LVM/RAID member, and that its serial is
+#       <serial>; then one GPT partition, formatted with a new file system UUID chosen here, mounted
+#       by that UUID at /srv/cctv-rec/<uuid> (fstab: nofail, 10 s device timeout), owned by
+#       root:cctv-disk mode 2770 (the cctv service has the cctv-disk group; new folders inherit
+#       the group), with the recordings marker (id usb-<uuid>). The mount point is named by the
+#       UUID, not the serial: cheap USB enclosures often report the same serial for different
+#       drives. Refused before anything is erased when the mount point is mounted, not empty, or
+#       in fstab for another UUID; the serial is read again right before wiping.
+#       Prints JSON lines: {"step","state","message"}, finally {"done":true,"path","id"}.
+#       Exit 0 only when everything worked.
+#
+#   CCTV_DISK_DRYRUN=1: prints each command as {"run":"..."} instead of running it (tests).
+#   Only in dry run: CCTV_DISK_FAKE_TREE=<file> (lsblk -P lines for <dev>) and
+#   CCTV_DISK_FAKE_ROOT=<dev> replace the real device tree; CCTV_DISK_FAKE_TREE_AGAIN=<file> is the
+#   tree read the second time (just before wiping); CCTV_DISK_FAKE_UUID, CCTV_DISK_FAKE_FSTAB=<file>
+#   and CCTV_DISK_FAKE_MOUNTS=<file> (mount points, one per line) replace the new UUID, /etc/fstab
+#   and the mount table. The helper service runs this script
+#   with a fixed environment (never these), so a call from the app is always real.
+set -euo pipefail
+export LC_ALL=C
+
+DRY=0
+[ "${CCTV_DISK_DRYRUN:-}" = 1 ] && DRY=1
+MNT_BASE=/srv/cctv-rec
+LABEL=cctv-rec
+GROUP=cctv-disk # the group the socket and the recording folders belong to (install-ubuntu.sh)
+
+say() { # step state [message]
+  local m="${3:-}"
+  m="${m//\\/\\\\}"
+  m="${m//\"/\\\"}"
+  printf '{"step":"%s","state":"%s","message":"%s"}\n' "$1" "$2" "$m"
+}
+fail() { # step message
+  say "$1" failed "$2"
+  exit 3
+}
+jstr() { # a JSON string (no control characters expected)
+  local s="${1//\\/\\\\}"
+  printf '"%s"' "${s//\"/\\\"}"
+}
+
+# CCTV_DISK_FAKE_TREE only in dry run: refused before anything else happens
+if [ $DRY = 0 ] && env | grep -q '^CCTV_DISK_FAKE_'; then
+  echo '{"step":"check","state":"failed","message":"CCTV_DISK_FAKE_* settings are for dry runs only (CCTV_DISK_DRYRUN=1)"}'
+  exit 2
+fi
+
+run() { # the only way a command is executed
+  if [ $DRY = 1 ]; then
+    printf '{"run":%s}\n' "$(jstr "$*")"
+  else
+    "$@" >/dev/null 2>&1 || return 1
+  fi
+}
+
+# the disk(s) holding "/" (through partitions, LVM, RAID, crypt), one per line
+root_disks() {
+  if [ $DRY = 1 ] && [ -n "${CCTV_DISK_FAKE_ROOT:-}" ]; then
+    echo "$CCTV_DISK_FAKE_ROOT"
+    return
+  fi
+  local src
+  src="$(findmnt -no SOURCE / 2>/dev/null || true)"
+  src="${src%%\[*}" # btrfs subvolume suffix
+  [ -b "$src" ] || return 0
+  lsblk -rspno NAME,TYPE "$src" 2>/dev/null | awk '$2 == "disk" { print $1 }' | sort -u
+}
+
+# lsblk -P lines for the device and everything on it (NAME TYPE FSTYPE MOUNTPOINTS SERIAL)
+tree() { # dev [again]
+  if [ $DRY = 1 ] && [ "${2:-}" = again ] && [ -n "${CCTV_DISK_FAKE_TREE_AGAIN:-}" ]; then
+    cat "$CCTV_DISK_FAKE_TREE_AGAIN"
+    return
+  fi
+  if [ $DRY = 1 ] && [ -n "${CCTV_DISK_FAKE_TREE:-}" ]; then
+    cat "$CCTV_DISK_FAKE_TREE"
+    return
+  fi
+  lsblk -P -p -o NAME,TYPE,FSTYPE,MOUNTPOINTS,SERIAL "$1"
+}
+
+# the value of KEY="..." in one lsblk -P line, read as text (never evaluated)
+field() { # line key
+  local re="(^| )$2=\"([^\"]*)\""
+  if [[ $1 =~ $re ]]; then printf '%s' "${BASH_REMATCH[2]}"; fi
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  list)
+    [ $DRY = 1 ] || [ "$(id -u)" = 0 ] || { echo "run as root (by cctv-disk-helper.service)" >&2; exit 1; }
+    roots="$(root_disks | while read -r d; do [ -n "$d" ] && printf '%s,' "$(jstr "$d")"; done)"
+    printf '{"root":[%s],"lsblk":%s}\n' "${roots%,}" "$(lsblk -J -b -o NAME,PATH,MODEL,SERIAL,SIZE,TRAN,TYPE,FSTYPE,LABEL,MOUNTPOINTS,PKNAME | tr -d '\n')"
+    ;;
+  prepare)
+    [ $# = 4 ] || fail check "usage: prepare <dev> <serial> <xfs|ext4>"
+    dev="$2"
+    serial="$3"
+    fs="$4"
+    say check start "checking $dev"
+    [[ $dev =~ ^/dev/(sd[a-z]{1,2}|vd[a-z]{1,2}|nvme[0-9]{1,2}n[0-9]{1,2}|mmcblk[0-9]{1,2})$ ]] || fail check "odd device name $dev (a whole disk such as /dev/sdb is expected)"
+    [[ $serial =~ ^[A-Za-z0-9._-]{1,64}$ ]] || fail check "odd serial number (letters, digits, . _ - only)"
+    [[ $serial != .* ]] || fail check "odd serial number (starts with a dot)"
+    case "$fs" in xfs | ext4) ;; *) fail check "file system must be xfs or ext4" ;; esac
+    [ $DRY = 1 ] || [ "$(id -u)" = 0 ] || fail check "run as root (by cctv-disk-helper.service)"
+    [ $DRY = 1 ] || [ -b "$dev" ] || fail check "$dev is not a block device"
+
+    lines="$(tree "$dev" 2>/dev/null)" || fail check "cannot read the device tree of $dev"
+    [ -n "$lines" ] || fail check "cannot read the device tree of $dev"
+    first="$(printf '%s\n' "$lines" | head -1)"
+    [ "$(field "$first" NAME)" = "$dev" ] || fail check "the device tree does not start with $dev"
+    [ "$(field "$first" TYPE)" = disk ] || fail check "$dev is not a whole disk"
+    [ "$(field "$first" SERIAL)" = "$serial" ] || fail check "serial does not match: nothing was changed"
+    while read -r d; do
+      [ "$d" = "$dev" ] && fail check "$dev holds the running system"
+    done < <(root_disks)
+    while IFS= read -r l; do
+      [ -n "$l" ] || continue
+      name="$(field "$l" NAME)"
+      mp="$(field "$l" MOUNTPOINTS)"
+      fst="$(field "$l" FSTYPE)"
+      typ="$(field "$l" TYPE)"
+      [ -z "$mp" ] || fail check "$name is mounted (or swap in use): unmount it first"
+      case "$fst" in
+        zfs_member) fail check "$name is part of a ZFS pool" ;;
+        LVM2_member) fail check "$name is an LVM member" ;;
+        linux_raid_member) fail check "$name is part of a RAID" ;;
+      esac
+      case "$typ" in
+        lvm) fail check "$name is an LVM volume" ;;
+        raid*) fail check "$name is part of a RAID" ;;
+        crypt) fail check "$name is an encrypted volume in use" ;;
+      esac
+    done <<<"$lines"
+    say check done
+
+    if [[ $dev =~ [0-9]$ ]]; then part="${dev}p1"; else part="${dev}1"; fi
+    # the new file system's UUID, chosen now: it names the mount point, so two drives that
+    # report the same serial never share one
+    if [ $DRY = 1 ]; then uuid="${CCTV_DISK_FAKE_UUID:-00000000-0000-4000-8000-000000000000}"; else uuid="$(cat /proc/sys/kernel/random/uuid)"; fi
+    [[ $uuid =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || fail check "could not make a file system UUID"
+    mnt="$MNT_BASE/$uuid"
+    owner="root:$GROUP"
+    id="usb-$uuid"
+    if [ $DRY = 1 ]; then mounts="$(cat "${CCTV_DISK_FAKE_MOUNTS:-/dev/null}")"; else mounts="$(findmnt -rno TARGET)"; fi
+    if printf '%s\n' "$mounts" | grep -qxF "$mnt"; then fail check "$mnt is already mounted: nothing was changed"; fi
+    if [ $DRY = 1 ]; then fstab="${CCTV_DISK_FAKE_FSTAB:-/dev/null}"; else fstab=/etc/fstab; fi
+    other="$(awk -v m="$mnt" -v u="UUID=$uuid" '$1 !~ /^#/ && $2 == m && $1 != u { print $1 }' "$fstab")"
+    [ -z "$other" ] || fail check "$mnt is in fstab for another drive ($other): nothing was changed"
+    if [ -d "$mnt" ] && [ -n "$(ls -A "$mnt" 2>/dev/null)" ]; then fail check "$mnt is not empty: nothing was changed"; fi
+
+    # the serial again, immediately before erasing (the drive could have been swapped)
+    again="$(tree "$dev" again 2>/dev/null | head -1)" || fail check "cannot read $dev again"
+    [ "$(field "$again" NAME)" = "$dev" ] && [ "$(field "$again" TYPE)" = disk ] || fail check "$dev changed: nothing was changed"
+    [ "$(field "$again" SERIAL)" = "$serial" ] || fail check "serial of $dev changed (drive swapped?): nothing was changed"
+    [ -z "$(field "$again" MOUNTPOINTS)" ] || fail check "$dev is mounted now: nothing was changed"
+
+    say wipe start "erasing the partition table of $dev"
+    run wipefs -a "$dev" || fail wipe "wipefs failed"
+    run sgdisk -Z "$dev" || fail wipe "sgdisk -Z failed"
+    say wipe done
+    say partition start
+    run sgdisk -n1:0:0 -t1:8300 -c1:$LABEL "$dev" || fail partition "sgdisk failed"
+    run udevadm settle || true
+    say partition done
+    say format start "formatting $part as $fs"
+    if [ "$fs" = xfs ]; then
+      run mkfs.xfs -f -L $LABEL -m uuid="$uuid" "$part" || fail format "mkfs.xfs failed"
+      pass=0
+    else
+      run mkfs.ext4 -F -L $LABEL -U "$uuid" "$part" || fail format "mkfs.ext4 failed"
+      pass=2
+    fi
+    say format done
+    say mount start "mounting at $mnt"
+    if [ $DRY = 0 ]; then
+      got="$(blkid -s UUID -o value "$part" || true)"
+      [ "$got" = "$uuid" ] || fail mount "$part has UUID '$got', expected $uuid"
+    fi
+    run mkdir -p "$mnt" || fail mount "mkdir failed"
+    line="UUID=$uuid $mnt $fs defaults,nofail,x-systemd.device-timeout=10s 0 $pass"
+    if [ $DRY = 1 ]; then
+      printf '{"run":%s}\n' "$(jstr "fstab: $line")"
+    else
+      # (a line for this mount point can only be this UUID's: checked above)
+      tmp="$(mktemp /etc/fstab.cctv-XXXXXX)"
+      awk -v m="$mnt" '$2 != m' /etc/fstab >"$tmp"
+      printf '%s\n' "$line" >>"$tmp"
+      chmod 644 "$tmp"
+      mv -f "$tmp" /etc/fstab
+    fi
+    run systemctl daemon-reload || true
+    run mount "$mnt" || fail mount "mount failed"
+    run chown "$owner" "$mnt" || fail mount "chown failed"
+    run chmod 2770 "$mnt" || fail mount "chmod failed"
+    say mount done
+    say marker start
+    if [ $DRY = 1 ]; then
+      printf '{"run":%s}\n' "$(jstr "marker: $mnt/.cctv-recordings id $id owner $owner")"
+    else
+      printf '{"id":"%s","created":"%s"}\n' "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$mnt/.cctv-recordings"
+      run chown "$owner" "$mnt/.cctv-recordings" || fail marker "chown failed"
+      run chmod 640 "$mnt/.cctv-recordings" || fail marker "chmod failed"
+    fi
+    say marker done
+    printf '{"done":true,"path":%s,"id":%s}\n' "$(jstr "$mnt")" "$(jstr "$id")"
+    ;;
+  *)
+    echo "usage: cctv-disk-helper list | prepare <dev> <serial> <xfs|ext4>" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response cmdId="" cmdUrl="queryCameraLensCtrlParam">
+	<status>fail</status>
+	<errorCode>536870962</errorCode>
+</response>

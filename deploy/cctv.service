@@ -1,0 +1,63 @@
+# CCTV VMS as a native Linux service (no Docker). Installed by deploy/install-ubuntu.sh.
+#   systemctl status cctv        journalctl -u cctv -f        systemctl restart cctv
+[Unit]
+Description=CCTV VMS (TVT NVR gateway)
+After=network-online.target
+Wants=network-online.target
+# a crash loop (e.g. a missing SDK symbol: 233 restarts in 9 min) is slowed by the rising
+# RestartSec below; this limit only trips if restarts still come faster than that (older systemd
+# without RestartSteps): then the unit stops as failed instead of logging in to every NVR again
+StartLimitIntervalSec=10min
+StartLimitBurst=40
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cctv/current
+ExecStart=/usr/local/bin/node /opt/cctv/current/cctv/server.mjs
+# every SDK call runs on a libuv worker thread; some block for seconds (see Dockerfile)
+Environment=LD_LIBRARY_PATH=/opt/cctv/current/bin/linux
+Environment=DATA_DIR=/var/lib/cctv
+Environment=UV_THREADPOOL_SIZE=64
+Environment=NODE_ENV=production
+# the TVT SDK converts recording/search times with the process time zone; the app works in
+# UTC and converts for display itself (on a machine set to local time, searches came out 4 h short)
+Environment=TZ=UTC
+# site settings: CERT_HOSTS, DISCOVERY_HELPER_URL, ... (created by the installer)
+EnvironmentFile=-/etc/cctv/cctv.env
+
+# a throwaway system user created by systemd for this service; data in /var/lib/cctv
+DynamicUser=yes
+StateDirectory=cctv
+StateDirectoryMode=0700
+# recordings: prepared drives are mounted under /srv/cctv-rec (root:cctv-disk 2770, by the disk
+# helper). The cctv-disk group also lets the app reach the disk helper's socket
+# (/run/cctv-disk/helper.sock, cctv-disk-helper.socket); the app has no sudo and no root at all.
+SupplementaryGroups=cctv-disk
+ReadWritePaths=-/srv/cctv-rec
+
+# the app's watchdog kills the process when SDK calls hang; come straight back (2 s), but in a
+# crash loop each further restart waits longer, up to 60 s (systemd 254+; Ubuntu 24.04 has 255)
+Restart=always
+RestartSec=2
+RestartSteps=5
+RestartMaxDelaySec=60
+TimeoutStopSec=10
+LimitNOFILE=65536
+
+# hardening: the app only needs its data folder and the network
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+# the TVT SDK needs ordinary IPv4/IPv6 sockets (TCP to NVRs, UDP multicast for the TVT search)
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

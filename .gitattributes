@@ -1,2 +1,6 @@
 docs/* linguist-vendored
 proto/* linguist-vendored
+# deploy/ holds shell scripts (some without an extension, e.g. deploy/vpn/cctv-vpn), unit files and
+# Python that run on Linux: always LF, also on a Windows checkout with core.autocrlf=true
+deploy/** text eol=lf
+*.sh text eol=lf

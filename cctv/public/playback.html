@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCTV Playback</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="playback-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+      <nav class="tabs" aria-label="Views">
+        <a href="/">Live</a>
+        <a href="/playback.html" aria-current="page">Playback</a>
+        <a href="/map.html">Map</a>
+        <a href="/sites.html" id="sitesTab" hidden>Sites</a>
+        <a href="/settings.html" id="settingsTab" hidden>Settings</a>
+      </nav>
+    </div>
+    <div class="controls">
+      <label>Camera <select id="camera"></select></label>
+      <label>Date <input id="date" type="date" /></label>
+    </div>
+    <div class="account">
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="pb-main">
+    <div class="tile pb-video" id="video">
+      <canvas></canvas>
+      <pre class="stats"></pre>
+      <div class="pb-badge" id="srcBadge" hidden title="The server has not recorded this stretch: it plays from the NVR">from NVR</div>
+      <div class="pb-notice" id="pbNotice" role="status" hidden></div>
+      <div class="pb-message" id="message" hidden></div>
+      <div class="pb-box-layer" id="boxLayer" hidden><div class="pb-box" id="box" hidden></div></div>
+    </div>
+    <aside class="pb-search" id="searchPanel" hidden aria-label="Motion search">
+      <h2>Motion search</h2>
+      <p class="pb-search-help" id="searchHelp">Drag a box on the picture around the area to watch.</p>
+      <label>Search
+        <select id="searchRange">
+          <option value="view">what the timeline shows</option>
+          <option value="hour">the hour before the playhead</option>
+          <option value="day">the whole day</option>
+        </select>
+      </label>
+      <label>Sensitivity
+        <select id="searchSens">
+          <option value="1">Low (big movement only)</option>
+          <option value="2" selected>Medium</option>
+          <option value="3">High (small movement)</option>
+        </select>
+      </label>
+      <div class="pb-search-actions">
+        <button id="searchGo" type="button" class="pb-primary" disabled>Search</button>
+        <button id="searchStop" type="button" hidden>Stop</button>
+        <button id="searchClear" type="button">Clear</button>
+      </div>
+      <div class="pb-progress" id="searchProgress" hidden><div></div></div>
+      <p class="pb-search-status" id="searchStatus"></p>
+      <ol class="pb-hits" id="searchHits"></ol>
+    </aside>
+  </main>
+
+  <section class="pb-bar" aria-label="Playback controls">
+    <div class="pb-buttons">
+      <button id="prevEvent" type="button" title="Previous event (Shift+←)" aria-label="Previous event">⏮</button>
+      <button id="back" type="button" title="Back 30 s (←)" aria-label="Back 30 seconds">−30s</button>
+      <button id="play" type="button" class="pb-play" title="Play / pause (Space)" aria-label="Play">▶</button>
+      <button id="fwd" type="button" title="Forward 30 s (→)" aria-label="Forward 30 seconds">+30s</button>
+      <button id="nextEvent" type="button" title="Next event (Shift+→)" aria-label="Next event">⏭</button>
+      <label>Speed
+        <!-- options filled by playback.js: 1-8x from the NVR, -32x to 32x from the server's recordings -->
+        <select id="speed"></select>
+      </label>
+      <label>Quality
+        <select id="quality" data-kind="nvr">
+          <option value="1">SD (light)</option>
+          <option value="0">HD</option>
+        </select>
+      </label>
+      <button id="searchToggle" type="button" title="Find movement inside an area you draw" aria-pressed="false">Motion search</button>
+      <span id="clock" class="pb-clock">--:--:--</span>
+    </div>
+    <div class="pb-timeline-wrap">
+      <canvas id="timeline" class="pb-timeline" aria-label="Timeline: click to jump, drag the playhead to scrub, scroll to zoom, drag to pan"></canvas>
+      <div class="pb-zoom">
+        <button id="zoomOut" type="button" aria-label="Zoom out">−</button>
+        <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
+        <button id="zoomDay" type="button">Day</button>
+      </div>
+    </div>
+    <div class="pb-legend">
+      <span class="lg-rec"></span> recorded
+      <span class="lg-evt"></span> motion / alarm
+      <span class="lg-hit"></span> movement in your box
+      <span id="legendServer" class="pb-legend-server" hidden><span class="lg-nvr"></span> NVR only <span class="lg-gap"></span> server gap</span>
+      <span id="skewHint" class="pb-skew" hidden></span>
+      <span class="pb-hint" id="pbHint">Click the timeline to jump · scroll to zoom · drag to pan</span>
+    </div>
+  </section>
+
+  <script type="module" src="playback.js"></script>
+</body>
+</html>

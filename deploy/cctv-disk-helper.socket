@@ -1,0 +1,16 @@
+# CCTV disk helper socket (Settings -> Prepare USB drive). Installed by deploy/install-ubuntu.sh.
+# Only members of the cctv-disk group (the cctv service, via SupplementaryGroups) can connect;
+# the first connection starts cctv-disk-helper.service (root), which answers one request each.
+[Unit]
+Description=CCTV disk helper socket
+
+[Socket]
+ListenStream=/run/cctv-disk/helper.sock
+SocketUser=root
+SocketGroup=cctv-disk
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+
+[Install]
+WantedBy=sockets.target

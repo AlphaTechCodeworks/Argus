@@ -1,0 +1,726 @@
+{
+ "made": "exp/fx-selfcheck.mjs: frame 6 of each clip, ffmpeg drawing the region 1:1 as a limited-range and a full-range display",
+ "frame": 6,
+ "clips": [
+  {
+   "file": "nvr1-13.bin",
+   "name": "nvr1-13.bin",
+   "W": 3840,
+   "H": 2160,
+   "region": {
+    "sx": 880,
+    "sy": 324,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0.014,
+     "white": 0.288
+    },
+    "full": {
+     "black": 0,
+     "white": 0.159
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0.016,
+     "white": 0.286,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.016,
+     "white": 0.286,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.014,
+     "white": 0.288,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0.001,
+     "white": 0.125,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.001,
+     "white": 0.125,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0.152,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr-192-168-0-226-2.bin",
+   "name": "nvr-192-168-0-226-2.bin",
+   "W": 2880,
+   "H": 1620,
+   "region": {
+    "sx": 0,
+    "sy": 1198,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0.01,
+     "white": 0.46
+    },
+    "full": {
+     "black": 0,
+     "white": 0.094
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0.01,
+     "white": 0.452,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.01,
+     "white": 0.452,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.01,
+     "white": 0.462,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0,
+     "white": 0.078,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0,
+     "white": 0.078,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0.096,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr1-24.bin",
+   "name": "nvr1-24.bin",
+   "W": 3200,
+   "H": 1800,
+   "region": {
+    "sx": 1440,
+    "sy": 810,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0.019,
+     "white": 0.325
+    },
+    "full": {
+     "black": 0.003,
+     "white": 0.173
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0.019,
+     "white": 0.316,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.019,
+     "white": 0.316,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.019,
+     "white": 0.325,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0.005,
+     "white": 0.14,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.005,
+     "white": 0.14,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.003,
+     "white": 0.164,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr-192-168-0-226-17.bin",
+   "name": "nvr-192-168-0-226-17.bin",
+   "W": 3200,
+   "H": 1800,
+   "region": {
+    "sx": 2880,
+    "sy": 1350,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0,
+     "white": 0.226
+    },
+    "full": {
+     "black": 0,
+     "white": 0
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0,
+     "white": 0.2,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0,
+     "white": 0.2,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0.225,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0,
+     "white": 0,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0,
+     "white": 0,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr-192-168-0-226-1.bin",
+   "name": "nvr-192-168-0-226-1.bin",
+   "W": 3200,
+   "H": 1800,
+   "region": {
+    "sx": 720,
+    "sy": 270,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0,
+     "white": 0.185
+    },
+    "full": {
+     "black": 0,
+     "white": 0.003
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0,
+     "white": 0.181,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0,
+     "white": 0.181,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0.185,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0,
+     "white": 0.001,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0,
+     "white": 0.001,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0.003,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr1-2.bin",
+   "name": "nvr1-2.bin",
+   "W": 3200,
+   "H": 1800,
+   "region": {
+    "sx": 0,
+    "sy": 1350,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0.363,
+     "white": 0
+    },
+    "full": {
+     "black": 0,
+     "white": 0
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0.379,
+     "white": 0,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.379,
+     "white": 0,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.364,
+     "white": 0,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0,
+     "white": 0,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0,
+     "white": 0,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr1-5.bin",
+   "name": "nvr1-5.bin",
+   "W": 3840,
+   "H": 2160,
+   "region": {
+    "sx": 880,
+    "sy": 324,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0,
+     "white": 0.011
+    },
+    "full": {
+     "black": 0,
+     "white": 0.006
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0,
+     "white": 0.011,
+     "range": "unknown"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0,
+     "white": 0.011,
+     "range": "unknown"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0.011,
+     "range": "unknown"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0,
+     "white": 0.005,
+     "range": "unknown"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0,
+     "white": 0.005,
+     "range": "unknown"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0.006,
+     "range": "unknown"
+    }
+   ]
+  },
+  {
+   "file": "nvr1-3.bin",
+   "name": "nvr1-3.bin",
+   "W": 3840,
+   "H": 2160,
+   "region": {
+    "sx": 3520,
+    "sy": 324,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0.015,
+     "white": 0.001
+    },
+    "full": {
+     "black": 0,
+     "white": 0
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0.016,
+     "white": 0.001,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.016,
+     "white": 0.001,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.015,
+     "white": 0.001,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0,
+     "white": 0,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0,
+     "white": 0,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr1-27.bin",
+   "name": "nvr1-27.bin",
+   "W": 3200,
+   "H": 1800,
+   "region": {
+    "sx": 2160,
+    "sy": 270,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0.017,
+     "white": 0.143
+    },
+    "full": {
+     "black": 0.001,
+     "white": 0.043
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0.017,
+     "white": 0.141,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.017,
+     "white": 0.141,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.017,
+     "white": 0.144,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0.001,
+     "white": 0.013,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.001,
+     "white": 0.013,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.001,
+     "white": 0.029,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr-192-168-0-226-9.bin",
+   "name": "nvr-192-168-0-226-9.bin",
+   "W": 2688,
+   "H": 1520,
+   "region": {
+    "sx": 2368,
+    "sy": 1112,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0.018,
+     "white": 0.199
+    },
+    "full": {
+     "black": 0.003,
+     "white": 0.169
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0.019,
+     "white": 0.198,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.019,
+     "white": 0.198,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.018,
+     "white": 0.199,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0.003,
+     "white": 0.164,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.003,
+     "white": 0.164,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.002,
+     "white": 0.167,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr1-6.bin",
+   "name": "nvr1-6.bin",
+   "W": 3200,
+   "H": 1800,
+   "region": {
+    "sx": 1440,
+    "sy": 270,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0.008,
+     "white": 0.009
+    },
+    "full": {
+     "black": 0.003,
+     "white": 0.002
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0.009,
+     "white": 0.009,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.009,
+     "white": 0.009,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.009,
+     "white": 0.009,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0.003,
+     "white": 0.002,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.003,
+     "white": 0.002,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.003,
+     "white": 0.002,
+     "range": "full"
+    }
+   ]
+  },
+  {
+   "file": "nvr-192-168-0-226-0.bin",
+   "name": "nvr-192-168-0-226-0.bin",
+   "W": 3200,
+   "H": 1800,
+   "region": {
+    "sx": 2880,
+    "sy": 270,
+    "sw": 320,
+    "sh": 180,
+    "limited": {
+     "black": 0.01,
+     "white": 0.034
+    },
+    "full": {
+     "black": 0,
+     "white": 0.022
+    }
+   },
+   "limited": [
+    {
+     "flags": "neighbor",
+     "black": 0.011,
+     "white": 0.034,
+     "range": "limited"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.011,
+     "white": 0.034,
+     "range": "limited"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0.01,
+     "white": 0.034,
+     "range": "limited"
+    }
+   ],
+   "full": [
+    {
+     "flags": "neighbor",
+     "black": 0.001,
+     "white": 0.015,
+     "range": "full"
+    },
+    {
+     "flags": "bilinear",
+     "black": 0.001,
+     "white": 0.015,
+     "range": "full"
+    },
+    {
+     "flags": "bicubic+accurate_rnd+full_chroma_int",
+     "black": 0,
+     "white": 0.02,
+     "range": "full"
+    }
+   ]
+  }
+ ]
+}

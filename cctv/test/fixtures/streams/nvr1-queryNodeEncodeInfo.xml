@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response version="1.0" cmdId="" cmdUrl="queryNodeEncodeInfo">
+	<status>success</status>
+	<content type="list" total="5">
+		<subRecResAdaptiveMode>true</subRecResAdaptiveMode>
+		<item id="{00000002-0000-0000-0000-000000000000}" isRTSPChl="false">
+			<name>PW Exit</name>
+			<mainCaps supEnct="h264,h265,h265p" bitType="VBR,CBR">
+				<res fps="20">3200x1800</res>
+				<res fps="30">2688x1520</res>
+				<res fps="30">2560x1440</res>
+				<res fps="30">1920x1080</res>
+			</mainCaps>
+			<main enct="h265p" aGOP="40" mGOP="40"></main>
+			<mn res="3200x1800" fps="20" bitType="VBR" level="higher" QoI="4096" audio="ON" type="main"></mn>
+			<me res="3200x1800" fps="20" bitType="VBR" level="higher" QoI="4096" audio="ON" type="main"></me>
+			<an res="3200x1800" fps="20" bitType="VBR" level="higher" QoI="4096" audio="ON" type="main"></an>
+			<ae res="3200x1800" fps="20" bitType="VBR" level="higher" QoI="4096" audio="ON" type="main"></ae>
+			<chlType>digital</chlType>
+			<mainStreamQualityCaps>
+				<item enct="h264" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264" res="2688x1520" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264" res="3200x1800" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264p" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264p" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264p" res="2688x1520" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264p" res="3200x1800" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264s" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264s" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264s" res="2688x1520" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264s" res="3200x1800" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h265" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265" res="2688x1520" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265" res="3200x1800" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265p" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265p" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265p" res="2688x1520" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265p" res="3200x1800" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265s" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265s" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265s" res="2688x1520" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265s" res="3200x1800" digitalDefault="4096" analogDefault="4096"></item>
+			</mainStreamQualityCaps>
+			<levelNote>highest,higher,medium,lower,lowest</levelNote>
+		</item>
+		<item id="{00000004-0000-0000-0000-000000000000}" isRTSPChl="false">
+			<name>PW Entrance</name>
+			<mainCaps supEnct="h264,h265,h265p" bitType="VBR,CBR">
+				<res fps="20">3840x2160</res>
+				<res fps="30">3200x1800</res>
+				<res fps="30">2688x1520</res>
+				<res fps="30">2560x1440</res>
+				<res fps="30">1920x1080</res>
+			</mainCaps>
+			<main enct="h265" aGOP="40" mGOP="40"></main>
+			<mn res="3840x2160" fps="20" bitType="VBR" level="higher" QoI="5120" audio="ON" type="main"></mn>
+			<me res="3840x2160" fps="20" bitType="VBR" level="higher" QoI="5120" audio="ON" type="main"></me>
+			<an res="3840x2160" fps="20" bitType="VBR" level="higher" QoI="5120" audio="ON" type="main"></an>
+			<ae res="3840x2160" fps="20" bitType="VBR" level="higher" QoI="5120" audio="ON" type="main"></ae>
+			<chlType>digital</chlType>
+			<mainStreamQualityCaps>
+				<item enct="h264" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264" res="2688x1520" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264" res="3200x1800" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264" res="3840x2160" digitalDefault="8192" analogDefault="8192"></item>
+				<item enct="h264p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264p" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264p" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264p" res="2688x1520" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264p" res="3200x1800" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264p" res="3840x2160" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264s" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264s" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264s" res="2688x1520" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264s" res="3200x1800" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264s" res="3840x2160" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h265" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265" res="2688x1520" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265" res="3200x1800" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265" res="3840x2160" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h265p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265p" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265p" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265p" res="2688x1520" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265p" res="3200x1800" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265p" res="3840x2160" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h265s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265s" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265s" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265s" res="2688x1520" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265s" res="3200x1800" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265s" res="3840x2160" digitalDefault="5120" analogDefault="5120"></item>
+			</mainStreamQualityCaps>
+			<levelNote>highest,higher,medium,lower,lowest</levelNote>
+		</item>
+		<item id="{0000000E-0000-0000-0000-000000000000}" isRTSPChl="false">
+			<name>North Gate</name>
+			<mainCaps supEnct="h264,h265,h265p" bitType="VBR,CBR">
+				<res fps="20">3840x2160</res>
+				<res fps="20">3200x1800</res>
+				<res fps="20">2688x1520</res>
+				<res fps="20">2560x1440</res>
+				<res fps="20">1920x1080</res>
+			</mainCaps>
+			<main enct="h265" aGOP="40" mGOP="40"></main>
+			<mn res="3840x2160" fps="20" QoI="5120" bitType="VBR" level="higher" audio="ON" type="main"></mn>
+			<me res="3840x2160" fps="20" QoI="5120" bitType="VBR" level="higher" audio="ON" type="main"></me>
+			<an res="3840x2160" fps="20" QoI="5120" bitType="VBR" level="higher" audio="ON" type="main"></an>
+			<ae res="3840x2160" fps="20" QoI="5120" bitType="VBR" level="higher" audio="ON" type="main"></ae>
+			<chlType>digital</chlType>
+			<mainStreamQualityCaps>
+				<item enct="h264" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264" res="2688x1520" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264" res="3200x1800" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264" res="3840x2160" digitalDefault="8192" analogDefault="8192"></item>
+				<item enct="h264p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264p" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264p" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264p" res="2688x1520" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264p" res="3200x1800" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264p" res="3840x2160" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264s" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264s" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264s" res="2688x1520" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264s" res="3200x1800" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264s" res="3840x2160" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h265" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265" res="2688x1520" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265" res="3200x1800" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265" res="3840x2160" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h265p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265p" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265p" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265p" res="2688x1520" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265p" res="3200x1800" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265p" res="3840x2160" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h265s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265s" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265s" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265s" res="2688x1520" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265s" res="3200x1800" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265s" res="3840x2160" digitalDefault="5120" analogDefault="5120"></item>
+			</mainStreamQualityCaps>
+			<levelNote>highest,higher,medium,lower,lowest</levelNote>
+		</item>
+		<item id="{0000001B-0000-0000-0000-000000000000}" isRTSPChl="false">
+			<name>truckview</name>
+			<mainCaps supEnct="h264,h265" bitType="CBR,VBR">
+				<res fps="30">2880x1620</res>
+				<res fps="30">2560x1440</res>
+				<res fps="30">2304x1296</res>
+				<res fps="30">1920x1080</res>
+				<res fps="30">1280x720</res>
+			</mainCaps>
+			<main enct="h265" aGOP="60" mGOP="60"></main>
+			<mn res="2880x1620" fps="30" bitType="VBR" level="higher" QoI="4096" audio="ON" type="main"></mn>
+			<me res="2880x1620" fps="30" bitType="VBR" level="higher" QoI="4096" audio="ON" type="main"></me>
+			<an res="1920x1080" fps="30" bitType="VBR" level="medium" QoI="4096" audio="ON" type="main"></an>
+			<ae res="1920x1080" fps="30" bitType="VBR" level="medium" QoI="4096" audio="ON" type="main"></ae>
+			<chlType>digital</chlType>
+			<mainStreamQualityCaps>
+				<item enct="h264" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264" res="1280x720" digitalDefault="1536" analogDefault="1536"></item>
+				<item enct="h264" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264" res="2304x1296" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h264" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264" res="2880x1620" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264p" res="1280x720" digitalDefault="1536" analogDefault="1536"></item>
+				<item enct="h264p" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264p" res="2304x1296" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h264p" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264p" res="2880x1620" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h264s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264s" res="1280x720" digitalDefault="1536" analogDefault="1536"></item>
+				<item enct="h264s" res="1920x1080" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264s" res="2304x1296" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h264s" res="2560x1440" digitalDefault="5120" analogDefault="5120"></item>
+				<item enct="h264s" res="2880x1620" digitalDefault="6144" analogDefault="6144"></item>
+				<item enct="h265" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265" res="1280x720" digitalDefault="1024" analogDefault="1024"></item>
+				<item enct="h265" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265" res="2304x1296" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265" res="2880x1620" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265p" res="1280x720" digitalDefault="1024" analogDefault="1024"></item>
+				<item enct="h265p" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265p" res="2304x1296" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265p" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265p" res="2880x1620" digitalDefault="4096" analogDefault="4096"></item>
+				<item enct="h265s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265s" res="1280x720" digitalDefault="1024" analogDefault="1024"></item>
+				<item enct="h265s" res="1920x1080" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265s" res="2304x1296" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265s" res="2560x1440" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h265s" res="2880x1620" digitalDefault="4096" analogDefault="4096"></item>
+			</mainStreamQualityCaps>
+			<levelNote>highest,higher,medium,lower,lowest</levelNote>
+		</item>
+		<item id="{0000001F-0000-0000-0000-000000000000}" isRTSPChl="false">
+			<name>LCL Cage</name>
+			<mainCaps supEnct="h264" bitType="CBR">
+				<res fps="30">1280x960</res>
+				<res fps="30">1280x720</res>
+				<res fps="30">704x480</res>
+			</mainCaps>
+			<main enct="h264" aGOP="60" mGOP="60"></main>
+			<mn res="1280x960" fps="30" bitType="" level="higher" QoI="3072" audio="ON" type="main"></mn>
+			<me res="1280x960" fps="30" bitType="" level="higher" QoI="3072" audio="ON" type="main"></me>
+			<an res="1280x960" fps="30" bitType="" level="higher" QoI="3072" audio="ON" type="main"></an>
+			<ae res="1280x960" fps="30" bitType="" level="higher" QoI="3072" audio="ON" type="main"></ae>
+			<chlType>digital</chlType>
+			<mainStreamQualityCaps>
+				<item enct="h264" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264" res="1280x720" digitalDefault="1536" analogDefault="1536"></item>
+				<item enct="h264" res="1280x960" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264" res="704x480" digitalDefault="768" analogDefault="768"></item>
+				<item enct="h264p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264p" res="1280x720" digitalDefault="1536" analogDefault="1536"></item>
+				<item enct="h264p" res="1280x960" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264p" res="704x480" digitalDefault="768" analogDefault="768"></item>
+				<item enct="h264s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h264s" res="1280x720" digitalDefault="1536" analogDefault="1536"></item>
+				<item enct="h264s" res="1280x960" digitalDefault="3072" analogDefault="3072"></item>
+				<item enct="h264s" res="704x480" digitalDefault="768" analogDefault="768"></item>
+				<item enct="h265" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265" res="1280x720" digitalDefault="1024" analogDefault="1024"></item>
+				<item enct="h265" res="1280x960" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265" res="704x480" digitalDefault="512" analogDefault="512"></item>
+				<item enct="h265p" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265p" res="1280x720" digitalDefault="1024" analogDefault="1024"></item>
+				<item enct="h265p" res="1280x960" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265p" res="704x480" digitalDefault="512" analogDefault="512"></item>
+				<item enct="h265s" res="0x0" digitalDefault="0" analogDefault="0">32,64,128,256,512,768,1024,1536,2048,3072,4096,5120,6144,8192,10240</item>
+				<item enct="h265s" res="1280x720" digitalDefault="1024" analogDefault="1024"></item>
+				<item enct="h265s" res="1280x960" digitalDefault="2048" analogDefault="2048"></item>
+				<item enct="h265s" res="704x480" digitalDefault="512" analogDefault="512"></item>
+			</mainStreamQualityCaps>
+			<levelNote>highest,higher,medium,lower,lowest</levelNote>
+		</item>
+	</content>
+</response>

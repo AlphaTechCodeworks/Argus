@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCTV Health</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="health-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+      <nav class="tabs" aria-label="Views">
+        <a href="/">Live</a>
+        <a href="/playback.html">Playback</a>
+        <a href="/map.html">Map</a>
+        <a href="/health.html" aria-current="page">Health</a>
+        <a href="/sites.html" id="sitesTab" hidden>Sites</a>
+        <a href="/settings.html" id="settingsTab" hidden>Settings</a>
+      </nav>
+    </div>
+    <div class="account">
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="health">
+    <p id="sending" class="hp-sending" role="status"></p>
+
+    <div id="cards" class="cards"></div>
+
+    <h2>NVRs</h2>
+    <table class="hp-table">
+      <thead>
+        <tr><th>NVR</th><th>Status</th><th>Cameras</th><th>Recording</th><th>Clock</th><th>Refused (10 min)</th></tr>
+      </thead>
+      <tbody id="nvrs"></tbody>
+    </table>
+
+    <h2>Alerts in the last 7 days</h2>
+    <table class="hp-table">
+      <thead>
+        <tr><th>Problem</th><th>Started</th><th>Cleared</th></tr>
+      </thead>
+      <tbody id="history"></tbody>
+    </table>
+    <p class="hp-note">Where these are sent is set in <a href="/settings.html">Settings</a>.</p>
+  </main>
+
+  <script type="module" src="health.js"></script>
+</body>
+</html>

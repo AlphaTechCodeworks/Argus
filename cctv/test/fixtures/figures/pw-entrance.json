@@ -1,0 +1,600 @@
+{
+ "file": "set/nvr1-3.bin",
+ "name": "PW Entrance (normal)",
+ "camera": {
+  "ch": 3,
+  "name": "PW Entrance"
+ },
+ "nvr": "nvr1",
+ "profile": "normal",
+ "codec": "h265",
+ "W": 3840,
+ "H": 2160,
+ "pix_fmt": "yuv420p",
+ "color_range": "tv",
+ "color_space": "gbr",
+ "videoInfo": {
+  "width": 3840,
+  "height": 2160,
+  "fullRange": false,
+  "colourDesc": null,
+  "colourCodes": [
+   0,
+   0,
+   0
+  ],
+  "fps": 20
+ },
+ "mode": "planar",
+ "frames": [
+  6,
+  12,
+  18,
+  24
+ ],
+ "keys": [
+  0
+ ],
+ "aus": 30,
+ "msPerFrame": 154,
+ "figures": {
+  "v": 2,
+  "width": 3840,
+  "height": 2160,
+  "frames": 4,
+  "sets": [
+   4
+  ],
+  "planes": "coded",
+  "stream": "main",
+  "codec": "h265",
+  "aligned": true,
+  "displayRange": "limited",
+  "displayMatrix": "bt709",
+  "mean": 114.084,
+  "centre": 119.524,
+  "p1": 29,
+  "p50": 123.25,
+  "p99": 216,
+  "spread": 187,
+  "black": 0,
+  "white": 0,
+  "highlightLoss": 0,
+  "clip": {
+   "surface": 0,
+   "near": 0,
+   "light": 0.001,
+   "lights": 13,
+   "text": 0
+  },
+  "osd": [
+   [
+    0,
+    0.008,
+    0.108,
+    0.033
+   ],
+   [
+    0.713,
+    0.008,
+    0.844,
+    0.033
+   ]
+  ],
+  "display": {
+   "range": "limited",
+   "mean": 113.769,
+   "p1": 15.137,
+   "p99": 232.877,
+   "spread": 217.74,
+   "black": 0.002,
+   "white": 0.002
+  },
+  "rangeMismatch": false,
+  "coded": {
+   "min": 0,
+   "max": 255,
+   "le4": 0,
+   "le16": 0.002,
+   "ge235": 0.005,
+   "ge251": 0.002
+  },
+  "neutralChroma": 0.042,
+  "mono": false,
+  "colour": {
+   "matrix": "bt709",
+   "saturation": 0.334,
+   "colourClip": 0.026,
+   "neutral": {
+    "r": -0.15,
+    "b": 0.07
+   },
+   "greyEdge": {
+    "r": 0.122,
+    "b": -0.046
+   },
+   "brightNeutral": {
+    "r": -0.157,
+    "b": 0.021
+   },
+   "zones": [
+    {
+     "r": -0.005,
+     "b": 0.108
+    },
+    {
+     "r": 0.209,
+     "b": -0.089
+    },
+    {
+     "r": -0.1,
+     "b": 0.044
+    },
+    {
+     "r": -0.229,
+     "b": 0.101
+    },
+    {
+     "r": 0.118,
+     "b": -0.084
+    },
+    {
+     "r": -0.016,
+     "b": 0.1
+    },
+    {
+     "r": -0.209,
+     "b": 0.081
+    },
+    {
+     "r": -0.123,
+     "b": 0.016
+    },
+    {
+     "r": 0.122,
+     "b": 0.05
+    }
+   ],
+   "zoneSpread": {
+    "r": 0.438,
+    "b": 0.198
+   },
+   "disagreement": 0.279,
+   "neutralShare": 0.421
+  },
+  "saturation": 0.334,
+  "colourClip": 0.026,
+  "cast": {
+   "r": -0.15,
+   "b": 0.07,
+   "sure": false
+  },
+  "noise": {
+   "value": 0.469,
+   "spread": null,
+   "measurable": true,
+   "reason": null,
+   "comparable": true,
+   "notComparable": null,
+   "skip": 0.501,
+   "moving": 0.019,
+   "gap": 6,
+   "sets": [
+    {
+     "set": 0,
+     "value": 0.469,
+     "pairs": [
+      {
+       "a": 6,
+       "b": 12,
+       "gap": 6,
+       "sigma": 0.469,
+       "skip": 0.424,
+       "moving": 0.019,
+       "still": 4695,
+       "usable": true,
+       "why": null
+      },
+      {
+       "a": 12,
+       "b": 18,
+       "gap": 6,
+       "sigma": 0.536,
+       "skip": 0.501,
+       "moving": 0.019,
+       "still": 4711,
+       "usable": true,
+       "why": null
+      },
+      {
+       "a": 18,
+       "b": 24,
+       "gap": 6,
+       "sigma": 0.715,
+       "skip": 0.555,
+       "moving": 0.018,
+       "still": 4729,
+       "usable": true,
+       "why": null
+      }
+     ]
+    }
+   ]
+  },
+  "lines": {
+   "rise25": 1.933,
+   "rise": 2.598,
+   "overshoot": 0.144,
+   "edges": 92359,
+   "block": 0.085
+  },
+  "ab": null,
+  "ms": {
+   "frame": 136.378,
+   "plane": 20.31,
+   "exposure": 24.558,
+   "colour": 30.704,
+   "lines": 55.747,
+   "noise": 10.53
+  }
+ },
+ "describe": {
+  "exposure": "average 45%, uses 73% of the range; 0.0% pure black, 0.0% pure white; 13 lamps left out",
+  "colour": "cyan cast (11%): mixed or uncertain lighting, the estimates disagree",
+  "noise": "low (0.47)",
+  "focus": "edges rise over 1.93 px, overshoot 14%, block index 0.09",
+  "stream": "4.9 of 5.1 Mbit/s (95%), at the cap in 13 of 13 keyframe intervals",
+  "size": "3840×2160",
+  "lines": [
+   "Exposure: average 45%, uses 73% of the range; 0.0% pure black, 0.0% pure white; 13 lamps left out",
+   "Colour: cyan cast (11%): mixed or uncertain lighting, the estimates disagree",
+   "Noise: low (0.47)",
+   "Edges: edges rise over 1.93 px, overshoot 14%, block index 0.09",
+   "Stream: 4.9 of 5.1 Mbit/s (95%), at the cap in 13 of 13 keyframe intervals"
+  ]
+ },
+ "suggestionsV1": [
+  {
+   "path": "saturation",
+   "label": "Saturation",
+   "from": 50,
+   "to": 42,
+   "why": "Strong colours are clipping (2.6% of the picture).",
+   "optional": false
+  }
+ ],
+ "stream": {
+  "qoi": 5120,
+  "gop": 40,
+  "fps": 20,
+  "enct": "h265",
+  "res": "3840x2160",
+  "from": "exp/mainstream.json",
+  "clip": {
+   "windowS": 0,
+   "enough": false,
+   "mode": "gops",
+   "fps": null,
+   "kbps": null,
+   "gopS": null,
+   "gops": [],
+   "qoi": 5120,
+   "usage": null,
+   "bindShare": null,
+   "iShare": null,
+   "forced": 0,
+   "codec": "h265",
+   "width": 3840,
+   "height": 2160,
+   "fullRange": false
+  },
+  "looped": {
+   "looped": true,
+   "gop": 40,
+   "windowS": 26,
+   "enough": true,
+   "mode": "gops",
+   "fps": 20,
+   "kbps": 4854,
+   "gopS": 2,
+   "gops": [
+    {
+     "s": 2,
+     "kbps": 4879,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4845,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4824,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4877,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4833,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4848,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4884,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4802,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4864,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4884,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4810,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4865,
+     "iBytes": 640516
+    },
+    {
+     "s": 2,
+     "kbps": 4889,
+     "iBytes": 640516
+    }
+   ],
+   "qoi": 5120,
+   "usage": 0.948,
+   "bindShare": 1,
+   "iShare": 0.528,
+   "forced": 0,
+   "codec": "h265",
+   "width": 3840,
+   "height": 2160,
+   "fullRange": false
+  }
+ },
+ "settings": {
+  "nvr": {
+   "id": "nvr1",
+   "name": "NVR 1",
+   "device": "192.168.0.228:6036"
+  },
+  "camera": {
+   "ch": 3,
+   "name": "PW Entrance"
+  },
+  "profile": "normal",
+  "profiles": [
+   "normal",
+   "day",
+   "night"
+  ],
+  "schedule": {
+   "program": "normal",
+   "dayTime": "00:00",
+   "nightTime": "23:59"
+  },
+  "fields": [
+   {
+    "path": "bright",
+    "label": "Brightness",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "contrast",
+    "label": "Contrast",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "saturation",
+    "label": "Saturation",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "hue",
+    "label": "Hue",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "sharpen.switch",
+    "label": "Sharpening",
+    "section": "Picture",
+    "kind": "switch",
+    "value": false,
+    "default": false
+   },
+   {
+    "path": "sharpen.value",
+    "label": "Sharpening level",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 255,
+    "value": 128,
+    "default": 128
+   },
+   {
+    "path": "denoise.switch",
+    "label": "Noise reduction",
+    "section": "Picture",
+    "kind": "switch",
+    "value": false,
+    "default": false
+   },
+   {
+    "path": "denoise.value",
+    "label": "Noise reduction level",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 255,
+    "value": 128,
+    "default": 128
+   },
+   {
+    "path": "backlightCompensation.mode",
+    "label": "Backlight",
+    "section": "Light",
+    "kind": "select",
+    "options": [
+     "OFF",
+     "HWDR",
+     "HLC",
+     "BLC"
+    ],
+    "value": "OFF",
+    "default": "OFF"
+   },
+   {
+    "path": "backlightCompensation.HWDRLevel",
+    "label": "HWDR level",
+    "section": "Light",
+    "kind": "select",
+    "options": [
+     "low",
+     "medium",
+     "high"
+    ],
+    "value": "medium",
+    "default": "medium"
+   },
+   {
+    "path": "fogReduction.switch",
+    "label": "Defog",
+    "section": "Light",
+    "kind": "switch",
+    "value": false,
+    "default": false
+   },
+   {
+    "path": "fogReduction.value",
+    "label": "Defog level",
+    "section": "Light",
+    "kind": "range",
+    "min": 0,
+    "max": 255,
+    "value": 128,
+    "default": 128
+   },
+   {
+    "path": "antiflicker",
+    "label": "Anti-flicker",
+    "section": "Light",
+    "kind": "select",
+    "options": [
+     "OFF",
+     "50HZ",
+     "60HZ"
+    ],
+    "value": "OFF",
+    "default": "OFF"
+   },
+   {
+    "path": "illumination.illuminationMode",
+    "label": "Night light",
+    "section": "Light",
+    "kind": "select",
+    "options": [
+     "whiteLight",
+     "irLight",
+     "smart"
+    ],
+    "value": "smart",
+    "default": "smart"
+   },
+   {
+    "path": "whiteBalance.mode",
+    "label": "White balance",
+    "section": "Colour",
+    "kind": "select",
+    "options": [
+     "auto",
+     "indoor",
+     "outdoor",
+     "manual"
+    ],
+    "value": "auto",
+    "default": "auto"
+   },
+   {
+    "path": "whiteBalance.red",
+    "label": "Red gain",
+    "section": "Colour",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "whiteBalance.blue",
+    "label": "Blue gain",
+    "section": "Colour",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "mirrorSwitch",
+    "label": "Mirror",
+    "section": "Orientation",
+    "kind": "switch",
+    "value": false,
+    "default": false
+   },
+   {
+    "path": "flipSwitch",
+    "label": "Flip",
+    "section": "Orientation",
+    "kind": "switch",
+    "value": false,
+    "default": false
+   }
+  ],
+  "undo": null
+ }
+}
