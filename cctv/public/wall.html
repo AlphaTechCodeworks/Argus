@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCTV Wall</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="wall-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+      <nav class="tabs" aria-label="Views">
+        <a href="/">Live</a>
+        <a href="/playback.html">Playback</a>
+        <a href="/wall.html" aria-current="page">Wall</a>
+        <a href="/map.html">Map</a>
+        <a href="/health.html">Health</a>
+        <a href="/sites.html" id="sitesTab" hidden>Sites</a>
+        <a href="/settings.html" id="settingsTab" hidden>Settings</a>
+      </nav>
+    </div>
+    <div class="controls">
+      <button id="pickCameras" type="button" title="Choose the cameras on the wall">Cameras…</button>
+      <label>Date <input id="date" type="date" /></label>
+      <label>Quality
+        <select id="quality" title="Sub-streams are much lighter on this PC; the server's own recordings ask nothing of the NVR">
+          <option value="sd">SD (NVR sub-streams)</option>
+          <option value="hd">HD (server recordings)</option>
+        </select>
+      </label>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="wall-main">
+    <p class="wall-load" id="loadNote" role="status"></p>
+    <div class="wall-grid" id="grid" aria-label="Every chosen camera at one moment"></div>
+    <p class="wall-empty" id="empty" hidden>No cameras on the wall yet. Choose some with <b>Cameras…</b>.</p>
+  </main>
+
+  <section class="pb-bar wall-bar" aria-label="Wall playback controls">
+    <!-- 1. the one moment every tile is showing -->
+    <div class="pb-row pb-when">
+      <button id="dayPrev" type="button" title="The day before" aria-label="Previous day">◀</button>
+      <span id="wallDate" class="pb-date"></span>
+      <button id="dayNext" type="button" title="The day after" aria-label="Next day">▶</button>
+      <button id="clock" type="button" class="pb-clock" title="Click or press T to type a time">--:--:--</button>
+      <input id="clockInput" class="pb-clock-input" type="text" hidden inputmode="numeric"
+             aria-label="Go to time" placeholder="hh:mm:ss" />
+      <span id="spanLabel" class="pb-span" title="How much of the day the timeline shows"></span>
+      <div class="pb-zoom" role="group" aria-label="Zoom">
+        <button type="button" data-span="86400000">24h</button>
+        <button type="button" data-span="3600000">1h</button>
+        <button type="button" data-span="600000">10m</button>
+        <button type="button" data-span="60000">1m</button>
+      </div>
+      <button id="followBtn" type="button" aria-pressed="true" title="Keep the playhead on screen while it plays">Follow</button>
+      <span id="coverage" class="wall-coverage" title="How many of the cameras have footage at this moment"></span>
+      <span id="skewHint" class="pb-skew"></span>
+    </div>
+
+    <!-- 2. a lane per camera: where each one has footage, and where the gaps are -->
+    <div class="wall-lanes" id="lanes"
+         aria-label="Timeline, one lane per camera: click to jump, scroll to zoom, drag to pan">
+      <div class="wall-lane-names" id="laneNames" aria-hidden="true"></div>
+      <div class="wall-lane-track" id="laneTrack">
+        <div class="wall-lane-rows" id="laneRows"></div>
+        <div class="pb-now" id="tlNow" hidden></div>
+        <div class="pb-playhead" id="playhead" hidden></div>
+      </div>
+    </div>
+
+    <!-- 3. -->
+    <div class="wall-ticks-row">
+      <div class="wall-lane-names" aria-hidden="true"></div>
+      <div class="pb-ticks" id="ticks" aria-hidden="true"></div>
+    </div>
+
+    <!-- 4. one set of controls driving every tile -->
+    <div class="pb-row pb-controls">
+      <div class="pb-speeds" id="speeds" role="group" aria-label="Speed"></div>
+      <div class="pb-transport">
+        <button id="back" type="button" title="Back 30 s (←)" aria-label="Back 30 seconds">−30s</button>
+        <button id="play" type="button" class="pb-play" title="Play / pause (Space)" aria-label="Play">▶</button>
+        <button id="fwd" type="button" title="Forward 30 s (→)" aria-label="Forward 30 seconds">+30s</button>
+      </div>
+      <div class="pb-tools">
+        <span class="pb-hint" id="wallHint">Click a lane to jump · scroll to zoom · drag to pan · click a tile's name to open it on the playback page</span>
+      </div>
+    </div>
+
+    <!-- 5. the shuttle springs back to the middle when let go -->
+    <div class="pb-shuttle-row">
+      <input id="shuttle" class="pb-shuttle" type="range" min="-100" max="100" value="0" step="1"
+             aria-label="Shuttle: push away from the middle to play faster" />
+      <span id="shuttleLabel" class="pb-shuttle-label">paused</span>
+    </div>
+
+    <!-- 6. -->
+    <div class="pb-legend">
+      <span class="lg-rec"></span> the server has this recorded
+      <span class="lg-gap"></span> the server's recorder missed it
+      <span class="pb-hint">Every time on this page is <b>server time</b>, whatever each NVR's own clock says.</span>
+    </div>
+  </section>
+
+  <dialog id="pickDlg" class="wall-pick">
+    <form method="dialog">
+      <h2>Cameras on the wall</h2>
+      <p class="wall-pick-note" id="pickNote" role="status"></p>
+      <div class="wall-pick-list" id="pickList"></div>
+      <div class="pb-ex-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="button" id="pickSave" class="pb-primary">Show these</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="wall.js"></script>
+  <script type="module" src="alert-banner.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>
