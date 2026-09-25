@@ -24,6 +24,41 @@ const XML_HEADER = '<?xml version="1.0" encoding="utf-8"?>'
 // second one and then wrote the opening tag again itself.
 export const QUERY_TIME = `${XML_HEADER}<request version="1.0" systemType="NVMS-9000" clientType="WEB"></request>`
 
+/**
+ * Ask for a clock reading, and ask again if the answer was no use.
+ *
+ * Here rather than in nvr-clock.mjs for the same reason as everything else in this file: that
+ * module cannot be imported without the Linux SDK, so nothing in it can be tested on a development
+ * PC -- which is how a malformed request document went unnoticed for weeks.
+ *
+ * Retrying matters because the NVRs that fail this call are the busy ones: rigginglot took 37
+ * seconds over a routine SDK call on a link that pings in 10 ms with no packet loss, so the SDK's
+ * "network timeout" is about load, not the network. Giving up on the first attempt means the
+ * recorders that most need watching are the ones never checked.
+ *
+ * @param {() => Promise<string>} send one attempt
+ * @param {object} o
+ * @returns {Promise<{xml: string, clock: object, tries: number}>}
+ * @throws the last failure, when no attempt produced a clock
+ */
+export async function readWithRetry(send, { tries = 3, waitMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  let last = null
+  for (let i = 0; i < tries; i++) {
+    if (i) await sleep(waitMs)
+    try {
+      const xml = String((await send()) ?? '')
+      const clock = readClock(xml)
+      // An answer without a timezone is not an answer: it is what a malformed request produces,
+      // and treating it as a reading is what let the clock sync quietly do nothing.
+      if (clock.timeZone) return { xml, clock, tries: i + 1 }
+      last = new ClockError(502, 'the NVR answered, but not with its clock settings')
+    } catch (e) {
+      last = e
+    }
+  }
+  throw last ?? new ClockError(502, 'the NVR was never asked')
+}
+
 export class ClockError extends Error {
   constructor(status, message) {
     super(message)

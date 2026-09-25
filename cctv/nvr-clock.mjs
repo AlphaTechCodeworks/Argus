@@ -28,7 +28,7 @@ import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 import { HttpError, transparent, withNvrLock } from './nvr-xml.mjs'
 // the clock arithmetic and document building live apart so they can be tested without the SDK
-import { QUERY_TIME, buildTimeCfg, checkWanted, parseNvrTime, readClock, zoneOffsetMs } from './clock-time.mjs'
+import { QUERY_TIME, buildTimeCfg, checkWanted, parseNvrTime, readClock, readWithRetry, zoneOffsetMs } from './clock-time.mjs'
 
 const LOG_FILE = join(DATA_DIR, 'clock-changes.log')
 const READ_BACK_MS = 2000 // the NVR takes a moment to apply before it will report the new values
@@ -123,10 +123,17 @@ const SYNC_EVERY_MS = 60 * 60_000 // check every hour
  * Puts one NVR's clock to the server's, if it has drifted far enough to be worth writing.
  * @returns {Promise<{nvr:string, drift:number|null, changed:boolean, why:string}>} never throws
  */
-export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 'clock sync' } = {}) {
+export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 'clock sync', tries = 3, waitMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   try {
-    const xml = String((await transparent(nvr, 'queryTimeCfg', QUERY_TIME, 'clock check', { outBytes: 16 * 1024 })) ?? '')
-    const cur = readClock(xml)
+    // A busy NVR answers a management call slowly or not at all -- rigginglot took 37 s over a
+    // GetDeviceIPCInfo on a link that pings in 10 ms with no loss, so the SDK's "network timeout"
+    // is about load, not the network. Nothing here is urgent, so it simply asks again rather than
+    // giving up for an hour. Without this the NVRs that most need their clocks checked, the busy
+    // ones, are exactly the ones never checked.
+    const { clock: cur } = await readWithRetry(
+      () => transparent(nvr, 'queryTimeCfg', QUERY_TIME, 'clock check', { outBytes: 16 * 1024 }),
+      { tries, waitMs, sleep }
+    )
     if (cur.sync === 'NTP') return { nvr: nvr.id, drift: null, changed: false, why: 'it takes its time from NTP itself' }
 
     const offsetMs = zoneOffsetMs(cur.timeZone, cur.daylight)
@@ -150,7 +157,7 @@ export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 
  * Checks every NVR every hour and corrects any that have drifted.
  * @returns {{ stop: () => void, runNow: () => Promise<object[]> }}
  */
-export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 3 * 60_000, log = console.log, enabled = () => true } = {}) {
+export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 10 * 60_000, log = console.log, enabled = () => true } = {}) {
   const runNow = async () => {
     if (!enabled()) return []
     const out = []
@@ -169,8 +176,11 @@ export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 3 * 60
   }
   const timer = setInterval(() => { runNow().catch(() => {}) }, everyMs)
   timer.unref?.()
-  // A first pass shortly after start, not an hour later: a clock that is wrong is wrong now, and
-  // waiting an hour to notice defeats the point. The delay lets the NVRs finish logging in first.
+  // A first pass soon after start, not an hour later: a clock that is wrong is wrong now, and
+  // waiting an hour to notice defeats the point. Ten minutes rather than three, because at three
+  // the server is still re-establishing every stream on every NVR and the busy ones time out --
+  // on 2026-09-25 three of four failed at the three-minute mark and all of them answered once
+  // things had settled.
   const first = setTimeout(() => { runNow().catch(() => {}) }, startMs)
   first.unref?.()
   return { stop: () => { clearInterval(timer); clearTimeout(first) }, runNow }

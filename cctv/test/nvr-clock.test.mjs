@@ -1,7 +1,7 @@
 // Tests for nvr-clock.mjs: reading an NVR's clock settings, writing them back safely, working out
 // a timezone offset, and the server acting as the master clock.
 // Run: node cctv/test/nvr-clock.test.mjs
-import { QUERY_TIME, buildTimeCfg, checkWanted, formatForNvr, parseNvrTime, readClock, zoneOffsetMs } from '../clock-time.mjs'
+import { QUERY_TIME, buildTimeCfg, checkWanted, formatForNvr, parseNvrTime, readClock, readWithRetry, zoneOffsetMs } from '../clock-time.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -122,6 +122,55 @@ const SOLUS = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryTime
   const tags = doc.match(/<\/?[A-Za-z][A-Za-z0-9]*/g) ?? []
   const depth = tags.reduce((d, t) => d + (t.startsWith('</') ? -1 : 1), 0)
   check('the clock write document is balanced', depth === 0, `depth ${depth}`)
+}
+
+// ---- asking again ----------------------------------------------------------------------------------
+//
+// The NVRs that fail a clock check are the busy ones, not the unreachable ones: rigginglot timed
+// out twice on a link that pings in 10 ms with no packet loss, while a routine SDK call to it took
+// 37 seconds. Giving up on the first attempt means the recorders that most need watching are the
+// ones never checked.
+{
+  const noWait = { waitMs: 0, sleep: async () => {} }
+  {
+    let calls = 0
+    const r = await readWithRetry(async () => { calls++; return NVR2 }, noWait)
+    check('a good answer first time is not asked for twice', calls === 1 && r.tries === 1 && r.clock.timeZone === 'AST4')
+  }
+  {
+    let calls = 0
+    const r = await readWithRetry(async () => {
+      calls++
+      if (calls < 3) throw new Error('the NVR did not accept the request (network timeout)')
+      return SOLUS
+    }, noWait)
+    check('a busy NVR is asked again until it answers', calls === 3 && r.tries === 3 && r.clock.timeZone === 'AST4')
+  }
+  {
+    let thrown = null
+    let calls = 0
+    try {
+      await readWithRetry(async () => { calls++; throw new Error('network timeout') }, noWait)
+    } catch (e) { thrown = e }
+    check('an NVR that never answers gives up, and says why', thrown !== null && /network timeout/.test(thrown.message), String(thrown))
+    check('and does not ask for ever', calls === 3, String(calls))
+  }
+  {
+    // The failure that started all this: a malformed request gets an answer with no clock in it.
+    // Treating that as a reading is exactly what let the sync silently do nothing for weeks.
+    let thrown = null
+    const empty = '<?xml version="1.0"?><response cmdUrl="queryTimeCfg"><status>fail</status><errorCode>536870923</errorCode></response>'
+    try { await readWithRetry(async () => empty, noWait) } catch (e) { thrown = e }
+    check('an answer with no clock in it is not mistaken for a reading', thrown !== null && /not with its clock settings/.test(thrown.message), String(thrown))
+  }
+  {
+    // It waits between attempts rather than hammering an NVR that is already struggling.
+    const waits = []
+    let calls = 0
+    await readWithRetry(async () => { calls++; if (calls < 3) throw new Error('busy'); return NVR1 },
+      { waitMs: 5000, sleep: async (ms) => { waits.push(ms) } })
+    check('it pauses between attempts, but not before the first', waits.length === 2 && waits.every((w) => w === 5000), JSON.stringify(waits))
+  }
 }
 
 // ---- refusing nonsense -----------------------------------------------------------------------------
