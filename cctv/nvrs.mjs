@@ -23,7 +23,7 @@ import { startWorker } from './worker-supervisor.mjs'
 import { openRecIndex } from './rec-index.mjs'
 import { createWarmer } from './rec-cache.mjs'
 import { downtimeGaps, recoverOrphans } from './rec-recover.mjs'
-import { getSettings, onSettingsChange } from './settings.mjs'
+import { cameraRecording, getSettings, onSettingsChange } from './settings.mjs'
 import { checkHealth, listLocations, onChange as onStorageChange, startHealthChecks } from './storage.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
@@ -895,6 +895,9 @@ export const allCameras = () =>
         ch: c.ch,
         name: c.name,
         online: c.online && nvr.online,
+        // whether the server is set to record this camera, so a live tile can show the red dot
+        // that tells a viewer at a glance this one is being kept
+        recording: cameraRecording(nvr.id, c.ch).mode !== 'off',
         // another site (VPN, TVT P2P): little bandwidth, so the full-size view stays on the sub stream
         remote: Boolean(nvr.cfg.sn || nvr.cfg.remote)
       }))

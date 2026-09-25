@@ -11,7 +11,25 @@ export const NO_VIDEO_MS = 5000
 export const STALL_RECONNECT_MS = 18_000
 
 /** The markup a LiveTile expects inside its tile element. */
-export const TILE_HTML = '<canvas></canvas><pre class="stats"></pre><div class="label"><span class="name"></span><span class="status"></span></div>'
+export const TILE_HTML = '<canvas></canvas><pre class="stats"></pre><div class="label"><span class="dot dot-off" title="No video: nothing is arriving from this camera"></span><span class="name"></span><span class="status"></span></div>'
+
+/**
+ * The state dot on a tile, the way Milestone shows it: green when video is arriving, red when
+ * that camera is also being recorded by the server, grey when nothing is arriving. Pure, so it
+ * can be tested without a DOM. The title carries the state in words as well, because colour on
+ * its own is no use to a colour-blind viewer or a screen reader.
+ *
+ * `recording` is not known in the live grid today (/api/cameras does not report it), so
+ * `undefined` is treated as "not known to be recorded" and shows green rather than red.
+ *
+ * @param {{ hasVideo?: boolean, recording?: boolean, stale?: boolean }} [state]
+ * @returns {{ className: string, title: string }}
+ */
+export function tileDot({ hasVideo = false, recording = undefined, stale = false } = {}) {
+  if (!hasVideo || stale) return { className: 'dot dot-off', title: 'No video: nothing is arriving from this camera' }
+  if (recording === true) return { className: 'dot dot-rec', title: 'Video is arriving and this camera is being recorded' }
+  return { className: 'dot dot-live', title: 'Video is arriving' }
+}
 
 export class LiveTile {
   /**
@@ -22,7 +40,8 @@ export class LiveTile {
    * @param {{ pacing?: boolean, clock?: object, statsVisible?: () => boolean, onDisconnect?: () => void,
    *   onFirstFrame?: () => void, onUnsupported?: (codecId: number) => void }} [opts]
    *   clock: PlayoutClock options (the "Smooth" setting); onFirstFrame: the first frame is on screen;
-   *   onUnsupported: replaces the built-in handling (main -> sub fallback, message) when the
+   *   recording: tells the dot whether the server is also recording this camera (red rather than
+   *   green); leave it out where that is not known. onUnsupported: replaces the built-in handling (main -> sub fallback, message) when the
    *   browser can't play the stream
    */
   constructor(tile, cam, streamType, startDelayMs = 0, opts = {}) {
@@ -33,6 +52,7 @@ export class LiveTile {
     this.opts = opts
     this.status = tile.querySelector('.status')
     this.statsEl = tile.querySelector('.stats')
+    this.dotEl = tile.querySelector('.dot') // absent in older markup: the dot is then simply not drawn
     this.closed = false
     this.suspended = false // connected, but frames are dropped (not decoded): see suspend()
     this.attempts = 0 // reconnects since video last arrived
@@ -60,6 +80,14 @@ export class LiveTile {
     this.status.classList.toggle('live', live)
   }
 
+  /** Paints the state dot (only when it changes: a big grid would otherwise rewrite every tile every second). */
+  setDot(state) {
+    if (!this.dotEl) return
+    const { className, title } = tileDot(state)
+    if (this.dotEl.className !== className) this.dotEl.className = className
+    if (this.dotEl.title !== title) this.dotEl.title = title
+  }
+
   updateStatus() {
     const s = this.player.stats
     const ws = this.ws
@@ -76,6 +104,12 @@ export class LiveTile {
       onclose?.()
     } else if (open && since >= NO_VIDEO_MS) this.setStatus('no video')
     else if (s.fps > 0 && open) this.setStatus(`${s.fps} fps`, true)
+    this.setDot({
+      hasVideo: Boolean(open && this.lastDataAt && s.fps > 0),
+      stale: Boolean(open && since >= NO_VIDEO_MS),
+      // the live grid has no per-camera recording flag yet; a caller that knows can supply one
+      recording: this.opts.recording?.(this)
+    })
     if (this.opts.statsVisible?.()) {
       this.statsEl.textContent = [
         `${s.width}×${s.height} ${s.codec} (${s.hw})`,

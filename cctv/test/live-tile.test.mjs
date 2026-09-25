@@ -34,10 +34,28 @@ globalThis.WebSocket = class {
 WebSocket.OPEN = 1
 const el = () => ({ textContent: '', classList: { set: new Set(), toggle(c, on) { on ? this.set.add(c) : this.set.delete(c) }, contains(c) { return this.set.has(c) } }, append() {} })
 const canvas = { width: 0, height: 0, getContext: () => ({}) }
-const parts = { '.status': el(), '.stats': el(), '.name': el(), canvas }
+const dotEl = { className: '', title: '' }
+const parts = { '.status': el(), '.stats': el(), '.name': el(), '.dot': dotEl, canvas }
 const tileEl = { querySelector: (s) => parts[s], append() {} }
 
-const { LiveTile, NO_VIDEO_MS, STALL_RECONNECT_MS } = await import('../public/live-tile.js')
+const { LiveTile, NO_VIDEO_MS, STALL_RECONNECT_MS, TILE_HTML, tileDot } = await import('../public/live-tile.js')
+
+// ---- the tile state dot (pure: no DOM needed)
+{
+  const live = tileDot({ hasVideo: true, recording: false })
+  check('video arriving, not recorded: green dot', /\bdot-live\b/.test(live.className) && /video is arriving/i.test(live.title), `${live.className} / ${live.title}`)
+  const rec = tileDot({ hasVideo: true, recording: true })
+  check('video arriving and recorded: red dot, title says so', /\bdot-rec\b/.test(rec.className) && /record/i.test(rec.title), `${rec.className} / ${rec.title}`)
+  const off = tileDot({ hasVideo: false })
+  check('no video: grey dot, title says nothing is arriving', /\bdot-off\b/.test(off.className) && /nothing is arriving/i.test(off.title), `${off.className} / ${off.title}`)
+  const stale = tileDot({ hasVideo: true, stale: true })
+  check('stale (frames stopped): grey, not green', /\bdot-off\b/.test(stale.className) && !/dot-live/.test(stale.className), stale.className)
+  const unknown = tileDot({ hasVideo: true })
+  check('recording unknown: green, never red', /\bdot-live\b/.test(unknown.className), unknown.className)
+  check('every dot state carries a title, so colour is not the only clue', [live, rec, off, stale, unknown].every((d) => typeof d.title === 'string' && d.title.length > 0))
+  check('the tile markup holds a dot', /class="dot /.test(TILE_HTML), TILE_HTML)
+}
+
 check('no video after ~5 s, reconnect after 15-20 s', NO_VIDEO_MS >= 4000 && NO_VIDEO_MS <= 6000 && STALL_RECONNECT_MS >= 15_000 && STALL_RECONNECT_MS <= 20_000, `${NO_VIDEO_MS} ${STALL_RECONNECT_MS}`)
 
 let now = 1_000_000
@@ -59,6 +77,7 @@ now += 1000
 t.updateStatus()
 const status = parts['.status']
 check('frames arriving: "25 fps" with the live dot', status.textContent === '25 fps' && status.classList.contains('live'), status.textContent)
+check('... and the tile dot is green', /\bdot-live\b/.test(dotEl.className), dotEl.className)
 // frames stop; the player's last fps figure stays
 now += 3000
 t.updateStatus()
@@ -66,6 +85,7 @@ check('3 s without frames: still the fps badge', status.textContent === '25 fps'
 now += 3000
 t.updateStatus()
 check('6 s without frames: "no video", live dot off', status.textContent === 'no video' && !status.classList.contains('live'), status.textContent)
+check('... and the tile dot has gone grey', /\bdot-off\b/.test(dotEl.className), dotEl.className)
 check('... and the socket is still the same one', sockets.length === 1 && !ws.closed)
 now += 12_000 // 18 s without frames
 t.updateStatus()

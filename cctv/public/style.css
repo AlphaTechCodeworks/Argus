@@ -754,3 +754,17 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .hp-table td.ok { color: #3fb27f; }
 .hp-table td.warn { color: var(--tl-evt); }
 .hp-table td.bad { color: #e5484d; }
+
+/* Live tile state dot (live-tile.js tileDot): green video arriving, red also being recorded,
+   grey nothing arriving. Colour is never the only clue: the state is written out in the dot's
+   title, and the recording dot also pulses. */
+.tile .dot { flex: 0 0 auto; align-self: center; width: 9px; height: 9px; border-radius: 50%; background: var(--muted, #7a8290); box-shadow: 0 0 0 1px rgb(0 0 0 / 45%); pointer-events: auto; }
+/* the label is a space-between row: let the name take the slack so the dot sits beside it */
+.tile .label .name { flex: 1 1 auto; }
+.tile .dot-live { background: #3fb27f; }
+.tile .dot-rec { background: #e5484d; border-radius: 50%; box-shadow: 0 0 0 1px rgb(0 0 0 / 45%), 0 0 5px rgb(229 72 77 / 70%); }
+.tile .dot-off { background: #7a8290; opacity: 0.75; }
+@media (prefers-reduced-motion: no-preference) {
+  .tile .dot-rec { animation: dot-rec-pulse 2s ease-in-out infinite; }
+}
+@keyframes dot-rec-pulse { 50% { opacity: 0.55; } }
