@@ -136,6 +136,23 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     document.getElementById('sending').textContent = r.sendingProblem
   }
 
+  // The same account wiring every page does: who is signed in, and the admin-only tabs.
+  fetch('/api/me')
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error('signed out'))))
+    .then((me) => {
+      document.getElementById('whoami').textContent = me.user
+      if (me.admin) {
+        document.getElementById('sitesTab').hidden = false
+        document.getElementById('settingsTab').hidden = false
+      }
+    })
+    .catch(() => { location.href = '/login.html' })
+
+  document.getElementById('logout').addEventListener('click', async () => {
+    await fetch('/api/logout', { method: 'POST' })
+    location.href = '/login.html'
+  })
+
   const load = () => fetch('/api/health').then((x) => x.json()).then(paint).catch(() => {})
   load()
   setInterval(load, 15_000)

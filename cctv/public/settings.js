@@ -434,10 +434,102 @@ $('prepForm').addEventListener('submit', async (e) => {
 
 // ---- start ----------------------------------------------------------------------------------------------
 
+// ---- alerts --------------------------------------------------------------------------------------
+
+// Why each kind is worth a message, in the owner's words rather than the engine's ids.
+const KIND_TEXT = {
+  'server-restart': 'the server restarts',
+  'drive-missing': 'the recording drive goes missing',
+  'drive-full': 'the drive is nearly full',
+  'not-recording': 'a camera stops recording',
+  'camera-offline': 'a camera goes offline',
+  'nvr-offline': 'an NVR goes offline',
+  'nvr-refusing': 'an NVR refuses streams',
+  'nvr-login': 'an NVR refuses the login',
+  'nvr-clock': "an NVR's clock drifts"
+}
+
+function renderAlerts() {
+  const a = settings.alerts
+  $('a-topic').value = a.ntfy.topic
+  $('a-notrec').value = a.notRecordingMinutes
+  $('a-skew').value = a.clockSkewSeconds
+  $('a-host').value = a.email.host
+  $('a-port').value = a.email.port
+  $('a-secure').checked = a.email.secure
+  $('a-user').value = a.email.user
+  // The server answers 'set' rather than the password itself, so it is never sent back to a browser.
+  $('a-pass').value = a.email.pass === 'set' ? 'set' : ''
+  $('a-from').value = a.email.from
+  $('a-to').value = (a.email.to ?? []).join(', ')
+
+  // A ticked box means "tell me", so the muted list is the unticked ones.
+  const muted = new Set(a.muted ?? [])
+  $('a-kinds').replaceChildren(
+    el('legend', { textContent: 'Tell me about' }),
+    ...(choices.alertKinds ?? Object.keys(KIND_TEXT)).map((k) =>
+      el('label', {}, el('input', { type: 'checkbox', value: k, checked: !muted.has(k), className: 'a-kind' }), ` ${KIND_TEXT[k] ?? k}`))
+  )
+}
+
+$('a-new').addEventListener('click', () => {
+  // Long and random: the topic is effectively the password to the owner's phone.
+  const letters = 'abcdefghijklmnopqrstuvwxyz0123456789'
+  const rnd = crypto.getRandomValues(new Uint8Array(16))
+  $('a-topic').value = `cctv-${Array.from(rnd, (b) => letters[b % letters.length]).join('')}`
+})
+
+$('a-test').addEventListener('click', async () => {
+  say('a-test-msg', 'Sending…')
+  try {
+    if ($('a-topic').value !== settings.alerts.ntfy.topic) {
+      say('a-test-msg', 'Save first, then test.', true)
+      return
+    }
+    const out = await api('POST', '/api/admin/alerts/test', { method: 'ntfy' })
+    say('a-test-msg', out.ok ? 'Sent. Check your phone.' : `Could not send: ${out.error}`, !out.ok)
+  } catch (err) {
+    say('a-test-msg', err.message, true)
+  }
+})
+
+$('alerts').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const pass = $('a-pass').value
+  const email = {
+    host: $('a-host').value.trim(),
+    port: Number($('a-port').value) || 587,
+    secure: $('a-secure').checked,
+    user: $('a-user').value.trim(),
+    from: $('a-from').value.trim(),
+    to: $('a-to').value.split(',').map((s) => s.trim()).filter(Boolean)
+  }
+  // 'set' means "leave the stored password alone"; anything else is a new one.
+  if (pass !== 'set') email.pass = pass
+  try {
+    settings = (
+      await api('POST', '/api/admin/settings', {
+        alerts: {
+          ntfy: { topic: $('a-topic').value.trim() },
+          email,
+          muted: [...document.querySelectorAll('.a-kind')].filter((c) => !c.checked).map((c) => c.value),
+          notRecordingMinutes: Number($('a-notrec').value),
+          clockSkewSeconds: Number($('a-skew').value)
+        }
+      })
+    ).settings
+    renderAlerts()
+    say('a-msg', 'Saved')
+  } catch (err) {
+    say('a-msg', err.message, true)
+  }
+})
+
 function render() {
   renderDefaults()
   renderCameras()
   renderMisc()
+  renderAlerts()
 }
 
 $('logout').addEventListener('click', async () => {

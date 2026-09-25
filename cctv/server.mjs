@@ -23,6 +23,8 @@
 //   /api/admin/sites/:site/notes -> a site's mains frequency (app data), see camera-notes.mjs
 //   /api/admin/settings, /api/admin/storage, /api/admin/disks[/prepare] -> Settings tab
 //     (recording, storage locations, preparing a USB drive), see settings-api.mjs
+//   GET  /api/health           -> the Health page: alerts, NVRs, cameras, drive, last backup
+//   POST /api/admin/alerts/test { method: 'ntfy'|'email' } -> sends a test message (admins)
 //   GET  /healthz              -> used by the Docker healthcheck
 //   WS   /live?nvr=ID&ch=N&stream=S -> binary frames, S: 0 = main, 1 = sub
 //   /api/playback/*?nvr=ID, WS /playback?nvr=ID -> recorded video, see playback.mjs
@@ -54,7 +56,11 @@ import { handleStreams } from './streams.mjs'
 import { handleCameraNotes, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleSettings } from './settings-api.mjs'
-import { getSettings } from './settings.mjs'
+import { cameraRecording, getSettings } from './settings.mjs'
+import { startAlerts } from './alert-checks.mjs'
+import { makeSender } from './alert-send.mjs'
+import { lastBackup, runBackup } from './backup.mjs'
+import { freePercent, listLocations } from './storage.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead } from './maps.mjs'
 import { LIVE_WORKER, P2P_ENABLED, allCameras, nvrs, readConfig, recIndex, startNvrs, stopNvrs } from './nvrs.mjs'
@@ -97,6 +103,97 @@ if (LIVE_WORKER) {
       .finally(() => (busy = false))
   }, 5 * 60_000).unref()
 }
+
+// ---- health alerts and nightly settings backups ---------------------------
+
+const DATA_DIR = auth.DATA_DIR
+const STARTED_MS = Date.now()
+
+// Only a hang from just before this start is worth reporting as "the server restarted": an older
+// dump file describes a restart the owner was already told about days ago.
+const RESTART_REASON = (() => {
+  const hang = lastHang()
+  const at = hang ? Date.parse(hang.at) : NaN
+  return Number.isFinite(at) && STARTED_MS - at < 15 * 60_000 ? `watchdog: ${hang.reason}` : null
+})()
+
+/** Each storage location as the alert rules see it: is the drive really there, and how full. */
+const locationState = () =>
+  listLocations().map((l) => ({
+    id: l.id,
+    // The folder is what the owner recognises a location by; locations carry no other name.
+    name: l.path,
+    // The marker file is the test for "really mounted": an empty mount point has no marker.
+    mounted: l.health.marker,
+    freePct: l.health.marker ? freePercent(l.health) : 0
+  }))
+
+/** When each camera last had footage written: its newest closed segment, or the file being written. */
+const lastSegmentMs = (nvrId, ch) => {
+  const index = recIndex()
+  if (!index) return null
+  const closed = index.lastEnds(nvrId, ch).segEnd
+  const open = index.openOf(nvrId, ch)?.startMs ?? null
+  return closed === null && open === null ? null : Math.max(closed ?? 0, open ?? 0)
+}
+
+const alerts = startAlerts({
+  dataDir: DATA_DIR,
+  startedMs: STARTED_MS,
+  restartReason: RESTART_REASON,
+  getSettings,
+  listNvrs: () =>
+    [...nvrs.values()].map((n) => ({
+      id: n.id,
+      name: n.name,
+      status: n.status,
+      error: n.error,
+      clockSkewMs: n.playback?.lastClock?.()?.skewMs ?? 0,
+      // Always 0 for now: stream refusals are counted inside each live stream (live.mjs
+      // lastFailure), and with CCTV_LIVE_WORKER=on those live in the worker process, so there is
+      // no clean way to total them here yet. The nvr-refusing rule therefore never fires.
+      refusalsLast10Min: 0
+    })),
+  listCameras: () =>
+    allCameras().map((c) => ({
+      nvrId: c.nvr,
+      ch: c.ch,
+      name: c.name,
+      online: c.online,
+      recording: cameraRecording(c.nvr, c.ch).mode !== 'off',
+      lastSegmentMs: lastSegmentMs(c.nvr, c.ch)
+    })),
+  locationState,
+  lastBackup: () => lastBackup(DATA_DIR),
+  sender: makeSender({ settings: getSettings().alerts, log: console.log })
+})
+
+// Nightly at 02:00, plus one at every start so a change made today is copied before the next one.
+const backupTargets = () => {
+  const onDrive = (getSettings().storage?.locations ?? []).filter((l) => l.path).map((l) => join(l.path, '_backup'))
+  return [...onDrive, ...(process.env.CCTV_BACKUP_DIR ? [process.env.CCTV_BACKUP_DIR] : [])]
+}
+const runBackupNow = async () => {
+  const r = await runBackup({ dataDir: DATA_DIR, targets: backupTargets() })
+  console.log(`[backup] ${r.written.length} written${r.errors.length ? `, ${r.errors.length} failed: ${r.errors.join('; ')}` : ''}`)
+}
+const untilTwoAm = () => {
+  const d = new Date()
+  d.setHours(2, 0, 0, 0)
+  if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1)
+  return d.getTime() - Date.now()
+}
+const scheduleBackup = () => {
+  // Re-scheduled after each run rather than on an interval, so it stays at 02:00 across a
+  // daylight-saving change.
+  setTimeout(() => {
+    runBackupNow()
+      .catch((e) => console.warn(`[backup] failed: ${e.message}`))
+      .finally(scheduleBackup)
+  }, untilTwoAm()).unref?.()
+}
+scheduleBackup()
+runBackupNow().catch((e) => console.warn(`[backup] failed: ${e.message}`))
 
 // ---- HTTP + WebSocket -----------------------------------------------------
 
@@ -300,6 +397,11 @@ const handleRequest = async (req, res) => {
       const [status, body] = await handleSiteNotes(req.method, site, () => readJsonObject(req, 4096))
       return sendJson(res, status, body)
     }
+    if (pathname === '/api/admin/alerts/test' && req.method === 'POST') {
+      const { method } = await readJsonObject(req, 1024)
+      if (method !== 'ntfy' && method !== 'email') return sendJson(res, 400, { error: 'method must be ntfy or email' })
+      return sendJson(res, 200, await alerts.testSend(method))
+    }
     if (pathname === '/api/admin/vpn') {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
       return sendJson(res, 200, vpnView(readConfig().nvrs))
@@ -321,6 +423,9 @@ const handleRequest = async (req, res) => {
     const [status, body] = await handleAdmin(req.method, pathname, readJson)
     return sendJson(res, status, body)
   }
+  // The Health page: everything anyone signed in may see about how the server is doing. It
+  // carries no secret, so it is not admin-only (see alert-checks.mjs health()).
+  if (pathname === '/api/health') return sendJson(res, 200, alerts.health())
   if (pathname === '/api/sites') return sendJson(res, 200, [...nvrs.values()].map((n) => n.info()))
   if (pathname === '/api/cameras') return sendJson(res, 200, allCameras())
   if (handleMapsRead(pathname, res, sendJson, SECURITY_HEADERS)) return

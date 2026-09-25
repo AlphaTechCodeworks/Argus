@@ -729,3 +729,28 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .se-progress { display: block; width: 100%; max-width: 420px; height: 10px; margin: 6px 0 8px; accent-color: var(--accent); }
 .se-job { border: 1px solid #2f3742; border-radius: 6px; padding: 10px 12px; }
 .se-job h3 { margin: 0 0 6px; }
+
+/* ---- Health page and the alert banner -------------------------------------------------------- */
+/* The banner sits above everything on every page: a problem should be seen by whoever is looking
+   at a camera, not only by someone who thinks to open Health. */
+.alert-banner { background: #3a1416; color: #ffb3b5; padding: 8px 16px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #5a1f22; }
+.alert-banner a { color: #fff; margin-left: auto; }
+.health { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+.hp-sending { margin: 0; color: var(--tl-evt); }
+.hp-sending:empty { display: none; }
+.hp-note { margin: 0; color: var(--muted); font-size: 12px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.card { background: var(--panel); border-radius: 8px; padding: 12px 14px; }
+.card .lbl { color: var(--muted); font-size: 12px; }
+.card .big { font-size: 22px; font-weight: 600; margin: 4px 0; }
+.card .note { color: var(--muted); font-size: 12px; }
+.card.bad .big { color: #e5484d; }
+.card.warn .big { color: var(--tl-evt); }
+.card.ok .big { color: #3fb27f; }
+.hp-table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
+.hp-table th, .hp-table td { padding: 8px 12px; text-align: left; font-size: 13px; border-bottom: 1px solid #262d36; }
+.hp-table th { color: var(--muted); font-weight: 500; }
+.hp-table tr:last-child td { border-bottom: 0; }
+.hp-table td.ok { color: #3fb27f; }
+.hp-table td.warn { color: var(--tl-evt); }
+.hp-table td.bad { color: #e5484d; }

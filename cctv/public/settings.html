@@ -14,6 +14,7 @@
         <a href="/">Live</a>
         <a href="/playback.html">Playback</a>
         <a href="/map.html">Map</a>
+        <a href="/health.html">Health</a>
         <a href="/sites.html">Sites</a>
         <a href="/settings.html" aria-current="page">Settings</a>
       </nav>
@@ -60,6 +61,43 @@
         <label>Hard floor: full-video period touched only below (% free) <input id="m-floor" type="number" min="1" max="49" required /></label>
         <p id="m-ram" class="st-help se-wide" hidden></p>
         <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="m-msg" class="st-meta"></span></div>
+      </form>
+    </section>
+
+    <section class="se-section" aria-labelledby="al-title">
+      <h2 id="al-title">Alerts</h2>
+      <p class="st-help">Where to send a message when something is wrong. Leave a method empty to switch it off.</p>
+      <form id="alerts" class="se-grid" autocomplete="off">
+        <label class="se-wide">Phone push topic
+          <input id="a-topic" placeholder="at least 8 letters, digits, - or _" maxlength="64" />
+        </label>
+        <div class="se-actions se-wide">
+          <button type="button" id="a-new">Make one up</button>
+          <button type="button" id="a-test">Send a test</button>
+          <span id="a-test-msg" class="st-meta"></span>
+        </div>
+        <p class="st-help se-wide">Install the free ntfy app on your phone and subscribe to this topic. Keep it secret: anyone who knows it can send you messages.</p>
+
+        <label>A camera counts as stopped after <input id="a-notrec" type="number" min="1" max="120" required /> minutes</label>
+        <label>An NVR clock is wrong beyond <input id="a-skew" type="number" min="5" max="3600" required /> seconds</label>
+
+        <fieldset class="se-wide" id="a-kinds">
+          <legend>Tell me about</legend>
+        </fieldset>
+
+        <details class="se-wide">
+          <summary>Email (not sending yet)</summary>
+          <p class="st-help">These are stored but nothing is sent by email yet. The watcher that reports the server being down can already use them.</p>
+          <label>Mail server <input id="a-host" placeholder="smtp.gmail.com" /></label>
+          <label>Port <input id="a-port" type="number" min="1" max="65535" /></label>
+          <label>TLS from the start (port 465) <input id="a-secure" type="checkbox" /></label>
+          <label>User <input id="a-user" autocomplete="off" /></label>
+          <label>Password <input id="a-pass" type="password" autocomplete="new-password" placeholder="leave as it is to keep" /></label>
+          <label>From <input id="a-from" placeholder="cctv@yourplace.com" /></label>
+          <label class="se-wide">To <input id="a-to" placeholder="one or more addresses, separated by commas" /></label>
+        </details>
+
+        <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="a-msg" class="st-meta"></span></div>
       </form>
     </section>
 
@@ -128,5 +166,6 @@
   </dialog>
 
   <script type="module" src="settings.js"></script>
+  <script type="module" src="alert-banner.js"></script>
 </body>
 </html>

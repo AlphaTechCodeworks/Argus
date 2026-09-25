@@ -15,12 +15,24 @@
 //                              ERASES the drive; the typed serial must match exactly
 import { isAdmin } from './auth.mjs'
 import { errorAnswer } from './nvr-xml.mjs'
+import { KINDS } from './alerts.mjs'
 import { AFTER, MAX_RETENTION_DAYS, MODES, RECENT_MINUTES, THUMBNAILS, getSettings, saveSettings } from './settings.mjs'
 import { currentJob, listDisks, prepareDisk } from './disks.mjs'
 import { listFolders, makeFolder } from './folders.mjs'
 import { ROLES, TYPES, addLocation, listLocations, removeLocation, updateLocation } from './storage.mjs'
 
-const CHOICES = { modes: MODES, after: AFTER, recentMinutes: RECENT_MINUTES, thumbnails: THUMBNAILS, maxRetentionDays: MAX_RETENTION_DAYS }
+const CHOICES = { modes: MODES, after: AFTER, recentMinutes: RECENT_MINUTES, thumbnails: THUMBNAILS, maxRetentionDays: MAX_RETENTION_DAYS, alertKinds: KINDS }
+
+/**
+ * The settings as the page may see them: the mail password is write-only, so it leaves here as
+ * 'set' or ''. An admin's browser has no reason to hold it, and it would otherwise sit in the
+ * page's memory and in anything that logs a response.
+ */
+function forPage() {
+  const s = getSettings() // already a deep clone, so this cannot alter what is stored
+  if (s.alerts?.email) s.alerts.email.pass = s.alerts.email.pass ? 'set' : ''
+  return s
+}
 
 const ROUTES = {
   '/api/admin/settings': ['GET', 'POST'],
@@ -53,11 +65,12 @@ export async function handleSettings(method, pathname, readJson, user, admin = i
         } catch (e) {
           console.warn(`[settings] RAM estimate failed: ${e.message}`)
         }
-        return [200, { settings: getSettings(), choices: CHOICES, memory }]
+        return [200, { settings: forPage(), choices: CHOICES, memory }]
       }
       const body = await readJson()
       const patch = { ...body }
-      return [200, { settings: saveSettings(patch, user) }]
+      saveSettings(patch, user)
+      return [200, { settings: forPage() }]
     }
     if (pathname === '/api/admin/storage') {
       if (method === 'GET') {
