@@ -319,7 +319,8 @@ if (!existsSync(HELPER)) {
     refusedReq('odd file system', '{"op":"prepare","dev":"/dev/sdb","serial":"A1","fs":"ntfs"}')
     refusedReq('not JSON', 'list')
     refusedReq('an array', '["list"]')
-    check('service accepts list and prepare', JSON.stringify(parseRequest('{"op":"list"}')) === '["list"]' && JSON.stringify(parseRequest('{"fs":"ext4","serial":"A1","dev":"/dev/nvme0n1","op":"prepare"}')) === '["prepare","/dev/nvme0n1","A1","ext4"]')
+    // parseRequest answers { args } (plus `stdin` for a netmount's secret: see netshares.test.mjs)
+    check('service accepts list and prepare', JSON.stringify(parseRequest('{"op":"list"}').args) === '["list"]' && JSON.stringify(parseRequest('{"fs":"ext4","serial":"A1","dev":"/dev/nvme0n1","op":"prepare"}').args) === '["prepare","/dev/nvme0n1","A1","ext4"]')
 
     const ask = (path, text) => new Promise((resolve) => {
       const lines = []
