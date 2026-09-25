@@ -76,6 +76,39 @@ CREATE INDEX IF NOT EXISTS bookmarks_start ON bookmarks (start_ms);
 CREATE INDEX IF NOT EXISTS bookmarks_end ON bookmarks (end_ms);
 CREATE INDEX IF NOT EXISTS bookmarks_user ON bookmarks (user);
 `
+/**
+ * Events and alarm rules (phase 7, events-db.mjs). Same reasoning as the bookmarks table above:
+ * they live in the recordings database because that is where the footage an event points at is
+ * indexed, and because it is the one file both the jobs and the pages already open. Its own
+ * statement, run here and by events-db.mjs, so the tables exist whichever opens the file first.
+ *
+ * Everything is CREATE ... IF NOT EXISTS: run against the populated database on the server it adds
+ * two tables and changes not one existing row.
+ *
+ * The UNIQUE key on an event is what makes intake safe to repeat. The NVRs are polled gently and a
+ * poll re-reads a stretch it has already read (that is the cheapest way to catch an event that
+ * arrived late); INSERT OR IGNORE against this key means the same event seen five times is still
+ * one row, with its acknowledgement intact.
+ */
+export const EVENTS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY, nvr TEXT NOT NULL, ch INTEGER NOT NULL, type TEXT NOT NULL,
+  subtype TEXT NOT NULL DEFAULT '', start_ms INTEGER NOT NULL, end_ms INTEGER,
+  source TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '',
+  priority TEXT NOT NULL DEFAULT 'low', rule_id INTEGER, rule_name TEXT, notified_ms INTEGER,
+  ack_ms INTEGER, ack_user TEXT, ack_note TEXT, seen_ms INTEGER NOT NULL,
+  UNIQUE (nvr, ch, type, subtype, start_ms));
+CREATE INDEX IF NOT EXISTS events_start ON events (start_ms);
+CREATE INDEX IF NOT EXISTS events_cam ON events (nvr, ch, start_ms);
+CREATE INDEX IF NOT EXISTS events_ack ON events (ack_ms);
+CREATE TABLE IF NOT EXISTS alarm_rules (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+  cameras TEXT NOT NULL DEFAULT '[]', types TEXT NOT NULL DEFAULT '[]',
+  schedule TEXT NOT NULL DEFAULT '[]', priority TEXT NOT NULL DEFAULT 'low',
+  notify INTEGER NOT NULL DEFAULT 0, min_gap_s INTEGER NOT NULL DEFAULT 0,
+  user TEXT, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
+`
+
 const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, keyframes, loc, source, filled_ms AS filledMs'
 const BF_COLS = 'id, nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason, kind, state, attempts, last_try_ms AS lastTryMs, last_error AS lastError, filled_ms AS filledMs, note, first_seen_ms AS firstSeenMs'
 /** Fields of a backfill ledger row a job may change, and the column each one is stored in. */
@@ -92,6 +125,7 @@ export function openRecIndex(file) {
   db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;')
   db.exec(SCHEMA)
   db.exec(BOOKMARKS_SCHEMA)
+  db.exec(EVENTS_SCHEMA)
   // An index written before phase 2b has no `source`/`filled_ms` columns. They are added here
   // rather than by recreating the table: the rows are the only record of where the footage is,
   // and a migration that rewrites them is a migration that can lose them.

@@ -112,6 +112,15 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
       recSettings = { ...msg, t: MSG.SETTINGS }
       if (state === 'ready' && child?.connected) child.send(recSettings)
     },
+    /**
+     * Event windows for the worker (rec-modes.mjs): which stretches each event-mode camera should
+     * be recording. Deliberately NOT kept and resent the way the settings are — windows go stale
+     * within minutes, and a worker that has just restarted must fall back to recording
+     * continuously until a fresh set arrives rather than act on an old one.
+     */
+    setEventWindows(msg) {
+      if (state === 'ready' && child?.connected) child.send({ ...msg, t: MSG.EVENTS })
+    },
     /** Stops the worker; resolves once it has exited (SIGKILL if it overstays). Same promise on every call. */
     stop() {
       stopped ??= stopNow()

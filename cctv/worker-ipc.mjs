@@ -3,7 +3,8 @@
 // Recording (recorder.mjs): parent -> worker settings; worker -> parent segopen / segment / recgap
 // (segopen: a segment file has been created and is being written; kept by the parent in memory only).
 // (restart: parent -> worker, restart stream ch/type in place, e.g. after a sub-stream codec change)
-export const MSG = { WANT: 'want', UNWANT: 'unwant', RESTART: 'restart', STOP: 'stop', READY: 'ready', STATE: 'state', FRAME: 'frame', STATS: 'stats', SETTINGS: 'settings', SEGOPEN: 'segopen', SEGMENT: 'segment', RECGAP: 'recgap' }
+// (events: parent -> worker, the stretches each event-mode camera should be recording; rec-modes.mjs)
+export const MSG = { WANT: 'want', UNWANT: 'unwant', RESTART: 'restart', STOP: 'stop', READY: 'ready', STATE: 'state', FRAME: 'frame', STATS: 'stats', SETTINGS: 'settings', EVENTS: 'events', SEGOPEN: 'segopen', SEGMENT: 'segment', RECGAP: 'recgap' }
 export const restart = (ch, type, why) => ({ t: MSG.RESTART, ch, type, why })
 export const streamKey = (ch, type) => `${ch}:${type}`
 export const want = (ch, type) => ({ t: MSG.WANT, ch, type })

@@ -20,6 +20,8 @@
 // "disk too slow", recording resumes at a keyframe once the queue has caught up.
 import { MAIN, SUB, afterRefusal, afterVideo, chooseStream, degradedNote } from './stream-choice.mjs'
 import { SegmentWriter, rollOffsetFor } from './segment-writer.mjs'
+// The event modes' decision lives apart so it can be tested without a worker, an NVR or a disk.
+import { shouldWrite } from './rec-modes.mjs'
 
 const HEADER_SIZE = 16 // sdk.mjs encodeFrame: key flag, codec, size, time; then the payload
 const FAILED_LOCATION_MS = 60_000 // a location a write failed on is skipped this long
@@ -63,6 +65,34 @@ export class Recorder {
     this.cams = new Map() // ch -> cam
     this.failed = new Map() // location id -> { at, reason }
     this.noted = new Set()
+    // Event-driven recording (phase 7): the parent sends the stretches each event-mode camera
+    // should be writing, worked out from the events in the recordings database and the pre/post
+    // seconds in settings. Until a message arrives, and whenever the last one is too old to trust,
+    // an event-mode camera records continuously — see rec-modes.mjs for why.
+    this.windows = new Map() // ch -> [[startMs, endMs]]
+    this.windowsAt = null // when the parent last sent them
+  }
+
+  /**
+   * New event windows from the parent: { windows: { "<ch>": [[s, e]] }, at }.
+   * Replaces what was there rather than merging, because the parent's list is the whole truth about
+   * what that camera should be recording right now.
+   */
+  applyEvents({ windows, at } = {}) {
+    if (!windows || typeof windows !== 'object') return
+    this.windows = new Map(Object.entries(windows).map(([ch, w]) => [Number(ch), Array.isArray(w) ? w : []]))
+    this.windowsAt = Number.isFinite(Number(at)) ? Number(at) : this.now()
+  }
+
+  /** Whether this camera should be writing at frame time `ts`, and the sentence explaining it. */
+  #gate(cam, ts, nowMs) {
+    return shouldWrite({
+      mode: cam.mode,
+      windows: this.windows.get(cam.ch) ?? [],
+      feedAt: this.windowsAt,
+      ts,
+      nowMs
+    })
   }
 
   /**
@@ -121,7 +151,7 @@ export class Recorder {
       if (!mode || mode === 'off') continue
       if (mode !== 'continuous' && !this.noted.has(`${ch}:${mode}`)) {
         this.noted.add(`${ch}:${mode}`)
-        console.log(`[rec ${this.nvrId}/${ch + 1}] mode ${mode}: recorded continuously until events are supported`)
+        console.log(`[rec ${this.nvrId}/${ch + 1}] mode ${mode}: recording only inside event windows, and continuously whenever the event feed is not fresh (rec-modes.mjs)`)
       }
       out.set(ch, { mode, locationId: o.locationId ?? null, online })
     }
@@ -141,6 +171,7 @@ export class Recorder {
         console.log(`[rec ${this.nvrId}/${ch + 1}] recording on`)
       }
       cam.locationId = w.locationId
+      cam.mode = w.mode // the event gate needs to know whether this camera records on events
       if (!w.online && cam.camOnline) {
         // the NVR reports the camera offline: let go of its stream (no retries against a dead
         // camera); the time until it is back is a 'camera offline' gap
@@ -213,7 +244,7 @@ export class Recorder {
     return Object.fromEntries(
       [...this.cams.values()].map((c) => {
         const q = c.writer?.queueStatus()
-        return [c.ch, { loc: c.loc?.id ?? null, writing: Boolean(c.writer?.open), lastFrameAt: c.lastAt || null, gapSince: c.gap?.fromMs ?? null, lastError: c.lastError, camOnline: c.camOnline, refusedUntil: c.refusedUntil > this.now() ? c.refusedUntil : null, queue: q ? { bytes: q.queuedBytes, ageMs: q.ageMs, dropped: q.dropped, overflows: q.overflows } : null }]
+        return [c.ch, { mode: c.mode ?? null, eventIdle: c.eventIdle ?? null, loc: c.loc?.id ?? null, writing: Boolean(c.writer?.open), lastFrameAt: c.lastAt || null, gapSince: c.gap?.fromMs ?? null, lastError: c.lastError, camOnline: c.camOnline, refusedUntil: c.refusedUntil > this.now() ? c.refusedUntil : null, queue: q ? { bytes: q.queuedBytes, ageMs: q.ageMs, dropped: q.dropped, overflows: q.overflows } : null }]
       })
     )
   }
@@ -307,6 +338,25 @@ export class Recorder {
     const now = this.now()
     const isKey = buf[0] === 1
     const { ts, lost, reanchored } = this.#stamp(cam, Number(buf.readBigInt64LE(8)) / 1000, now)
+    // Event-driven modes: outside an event window this camera is meant not to be writing. That is a
+    // decision, not a fault, so no gap row is filed for it and the silence check below is skipped —
+    // a timeline that marked every quiet minute as "no video from the NVR" would be a lie, and
+    // would bury the gaps that really are faults. The clock references are still moved on, so the
+    // first frame after a quiet spell is not mistaken for a jump.
+    const gate = this.#gate(cam, ts, now)
+    if (!gate.write) {
+      cam.lastTs = ts
+      cam.lastAt = now
+      cam.waitKey = true // the next written frame must be a keyframe: deltas need their reference
+      // Finish the file the moment the window closes rather than leaving it open and empty. An open
+      // file counts on the timeline as coverage up to three minutes past its last frame
+      // (rec-index.mjs OPEN_MAX_MS), so leaving it open would draw footage that does not exist.
+      // The writer opens a fresh file by itself on the next frame it is given.
+      if (!cam.eventIdle && cam.writer?.open) cam.writer.close()
+      cam.eventIdle = gate.why
+      return
+    }
+    cam.eventIdle = null
     // (a re-anchor moves the timeline, it loses nothing: no gap row for that jump)
     if (cam.lastTs && ts - cam.lastTs >= SILENCE_GAP_MS && !cam.gap && !reanchored) cam.gap = { fromMs: cam.lastTs, reason: 'no video from the NVR' }
     // frames were lost (a stall inside the SDK: LiveStream did not restart, so nothing asked for

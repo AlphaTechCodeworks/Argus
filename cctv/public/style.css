@@ -1155,3 +1155,63 @@ body.is-fullscreen .alert-banner { display: none; }
 .pb-follow-back { padding: 6px 12px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; cursor: pointer; }
 /* the recorder's own gaps, thin and on top of the recorded stretches (the reason is on hover) */
 .wall-lane div[data-kind="gap"] { top: 4px; bottom: 4px; background: var(--tl-gap); opacity: 0.9; }
+
+/* Multi-camera playback (phase 8): the tile toolbar, a maximised tile, the picker's search box and
+   the pager. The pager exists because a fixed grid streams only the page on screen — the cameras on
+   the other pages cost the NVRs nothing at all, which is the point of paging rather than shrinking. */
+.wall-tile-tools {
+  position: absolute; top: 4px; right: 4px; display: flex; gap: 2px;
+  opacity: 0; transition: opacity 120ms; pointer-events: none;
+}
+.wall-tile:hover .wall-tile-tools, .wall-tile:focus-within .wall-tile-tools { opacity: 1; pointer-events: auto; }
+.wall-tile-tools button {
+  background: rgba(0, 0, 0, 0.6); color: var(--text); border: 1px solid #2a3139; border-radius: 3px;
+  font-size: 13px; line-height: 1; padding: 4px 6px; cursor: pointer;
+}
+.wall-tile-tools button:hover { background: var(--accent); color: #fff; }
+/* A maximised tile fills the grid. The others stay in the page (so the lanes and the order do not
+   jump about) but are hidden, and a hidden tile stops streaming. */
+.wall-grid.wall-maximised { --wall-cols: 1; }
+.wall-grid.wall-maximised .wall-tile { display: none; }
+.wall-grid.wall-maximised .wall-tile-max { display: block; }
+.wall-pick-search { display: block; margin: 4px 0 8px; }
+.wall-pick-search input { width: 100%; }
+.wall-pager { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+
+/* Alarms (phase 7). The list is meant to be read at a glance from across a room: the colour is the
+   urgency, and anything still waiting for a person keeps a bar down its left edge, because colour
+   alone is no use to a colour-blind viewer. */
+.al-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 8px; }
+.al-filters label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 2px; }
+.al-summary { color: var(--muted); margin: 4px 0 10px; }
+.al-table { width: 100%; border-collapse: collapse; }
+.al-table th, .al-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #222a32; vertical-align: top; }
+.al-table td:first-child { text-transform: capitalize; font-weight: 600; }
+.al-table tr.needs-ack { border-left: 3px solid currentColor; }
+.al-table tr.pri-critical { color: #ff6b6b; }
+.al-table tr.pri-high { color: #ffa94d; }
+.al-table tr.pri-medium { color: #ffd43b; }
+.al-table tr.pri-low { color: var(--muted); }
+/* the rest of a row reads as ordinary text: only the urgency cell and the edge bar are coloured */
+.al-table td:not(:first-child) { color: var(--text); }
+.al-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.al-actions button, .al-actions a {
+  background: var(--panel); color: var(--text); border: 1px solid #2a3139; border-radius: 3px;
+  font-size: 12px; padding: 3px 6px; cursor: pointer; text-decoration: none;
+}
+.al-actions button:hover, .al-actions a:hover { background: var(--accent); color: #fff; }
+.al-sources { color: var(--muted); font-size: 13px; }
+.al-sources h3 { margin: 8px 0 2px; font-size: 13px; color: var(--text); }
+.al-rules { list-style: none; padding: 0; }
+.al-rules li { display: flex; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid #222a32; }
+.al-rules li span { flex: 1; }
+.al-rule-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-top: 8px; }
+.al-rule-form label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 2px; }
+.al-error { color: #ff6b6b; }
+/* The tuning view: the live picture with the NVR's watched zones over it, and the meter under it. */
+.al-tune { display: flex; flex-direction: column; gap: 8px; max-width: 720px; }
+.al-tune-live { position: relative; }
+.al-tune-live .tile { position: relative; background: #000; aspect-ratio: 16 / 9; }
+.al-tune-live .tile canvas { width: 100%; height: 100%; object-fit: contain; }
+.al-tune-overlay { position: absolute; inset: 0; pointer-events: none; }
+.al-meter { font-variant-numeric: tabular-nums; }

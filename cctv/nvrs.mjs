@@ -895,8 +895,72 @@ const retire = async (nvr) => {
 }
 const workerGone = (id) => (exitingWorkers.get(id) ?? Promise.resolve()).catch(() => {})
 
+// ---- events and alarms (phase 7) -------------------------------------------------------------
+//
+// Three small jobs, all deliberately slow. Event intake polls the NVRs' own recorded-file index one
+// camera at a time (events.mjs explains why that is the only confirmed source and how gently it is
+// done); the offline check turns a camera dropping off into an event; and the window push tells each
+// worker which stretches its event-mode cameras should be recording (rec-modes.mjs).
+//
+// The notifier is given its own sender built from the same settings and the same alert-send.mjs the
+// health alerts use, rather than being handed the health checks' instance: server.mjs owns that one,
+// and this phase adds nothing to server.mjs. Delivery, retries and failure reporting are unchanged.
+const EVENT_TICK_MS = 5000 // the intake rate-limits itself; this is only how often it is offered a turn
+const OFFLINE_TICK_MS = 30_000
+const WINDOW_TICK_MS = 15_000
+let eventIntake = null
+/** What event intake is doing, per NVR, for the Alarms and Health pages ([] when it is not running). */
+export const eventStatus = () => eventIntake?.status() ?? []
+
+async function startEvents() {
+  const [{ makeEventIntake }, { buildWindowMessage }, { eventsOfCamera }, { makeAlarmNotifier }, { makeSender }] = await Promise.all([
+    import('./events.mjs'), import('./rec-modes.mjs'), import('./events-db.mjs'), import('./alarms.mjs'), import('./alert-send.mjs')
+  ])
+  const sender = makeSender({ settings: getSettings().alerts ?? {} })
+  const notifier = makeAlarmNotifier({ sender, nameOf: (key) => allCameras().find((c) => `${c.nvr}/${c.ch}` === key)?.name ?? key })
+
+  eventIntake = makeEventIntake({
+    listNvrs: () => [...nvrs.values()],
+    camerasOf: (nvr) => nvr.channels.filter((c) => c.configured !== false),
+    recordings: (nvr, ch, date) => nvr.playback.recordings(ch, date),
+    clock: (nvr) => nvr.playback.clock(),
+    onEvent: (event) => void notifier.handle(event).catch((e) => console.warn(`[alarms] ${e.message}`)),
+    log: console.warn
+  })
+
+  const every = (ms, fn) => {
+    const t = setInterval(() => {
+      try {
+        const r = fn()
+        if (r?.catch) r.catch((e) => console.warn(`[events] ${e.message}`))
+      } catch (e) {
+        console.warn(`[events] ${e.message}`)
+      }
+    }, ms)
+    t.unref?.()
+  }
+  every(EVENT_TICK_MS, () => eventIntake.tick())
+  every(OFFLINE_TICK_MS, () => eventIntake.checkOffline(allCameras()))
+  every(WINDOW_TICK_MS, () => {
+    if (!LIVE_WORKER) return
+    const recording = getSettings().recording
+    for (const nvr of nvrs.values()) {
+      if (!nvr.worker) continue
+      nvr.worker.setEventWindows(buildWindowMessage({
+        nvrId: nvr.id,
+        cameras: nvr.channels,
+        recording,
+        eventsOf: (ch, from, to) => eventsOfCamera(nvr.id, ch, from, to),
+        nowMs: Date.now()
+      }))
+    }
+  })
+}
+
 export const startNvrs = () => {
   if (LIVE_WORKER) startRecording()
+  // Never fatal: a server that cannot do events must still record and still show live video.
+  startEvents().catch((e) => console.warn(`[events] intake not started: ${e.message}`))
   seedConfig()
   sync()
   watchFile(NVRS_FILE, { interval: 2000 }, () => sync())

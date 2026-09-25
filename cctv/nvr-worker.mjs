@@ -105,6 +105,10 @@ process.on('message', (m) => {
     }
   } else if (m?.t === MSG.SETTINGS) {
     recorder.apply(m)
+  } else if (m?.t === MSG.EVENTS) {
+    // Which stretches each event-mode camera should be writing (phase 7, rec-modes.mjs). The
+    // recorder falls back to recording continuously if these stop arriving.
+    recorder.applyEvents(m)
   } else if (m?.t === MSG.RESTART) {
     nvr.streams.get(streamKey(m.ch, m.type))?.restart(String(m.why || 'restart asked'))
   } else if (m?.t === MSG.STOP) shutdown()
