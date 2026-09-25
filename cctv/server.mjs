@@ -12,6 +12,7 @@
 //   GET  /api/sites            -> NVRs with site, name and connection status
 //   GET  /api/cameras          -> [{ nvr, site, nvrName, ch, name, online }]
 //   /api/maps, /api/admin/maps -> camera maps per site, see maps.mjs
+//   /api/camera-links, /api/admin/camera-links -> which camera adjoins which, see camera-links.mjs
 //   /api/admin/discovery       -> find TVT NVRs on the network (admins), see discovery.mjs
 //   GET  /api/admin/vpn        -> VPN hub status and the remote sites (admins), see vpn.mjs
 //   /api/admin/nvrs/:id/substreams -> sub-stream codec per channel, switch to H.264 (admins), see substreams.mjs
@@ -66,7 +67,8 @@ import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freePercent, listLocations } from './storage.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
-import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead } from './maps.mjs'
+import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
+import { ADMIN_LINKS_PATH, BODY_LIMIT as LINKS_BODY_LIMIT, LINKS_PATH, handleCameraLinks } from './camera-links.mjs'
 import { LIVE_WORKER, P2P_ENABLED, allCameras, nvrs, readConfig, recIndex, startNvrs, stopNvrs } from './nvrs.mjs'
 import { runHousekeeping } from './housekeeping.mjs'
 import { playbackApi } from './playback.mjs'
@@ -365,6 +367,12 @@ const handleRequest = async (req, res) => {
 
   if (pathname === '/api/me') return sendJson(res, 200, { user, admin: AUTH_OFF || auth.isAdmin(user), p2p: P2P_ENABLED, build: BUILD })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
+  // Which camera adjoins which: read by everyone signed in (the follow strip needs it), changed by
+  // admins only. The admin path goes through the same guard block below as every other admin write.
+  if (pathname === LINKS_PATH) {
+    const answer = await handleCameraLinks(req.method, pathname, () => readJsonObject(req, LINKS_BODY_LIMIT), { cameras: allCameras, maps: readMaps })
+    if (answer) return sendJson(res, answer[0], answer[1], answer[2])
+  }
   if (pathname.startsWith('/api/admin/')) {
     if (!AUTH_OFF && !auth.isAdmin(user)) return sendJson(res, 403, { error: 'Only admins can manage NVRs and sites' })
     // changes only from the app's own pages, as JSON (blocks cross-site form posts)
@@ -439,6 +447,10 @@ const handleRequest = async (req, res) => {
       const limit = pathname.endsWith('/plan') ? UPLOAD_LIMIT : SAVE_LIMIT
       const [status, body] = await handleMapsAdmin(req.method, pathname, async () => JSON.parse((await readBody(req, limit)) || '{}'))
       return sendJson(res, status, body)
+    }
+    if (pathname === ADMIN_LINKS_PATH) {
+      const answer = await handleCameraLinks(req.method, pathname, () => readJsonObject(req, LINKS_BODY_LIMIT), { admin: true, cameras: allCameras, maps: readMaps })
+      if (answer) return sendJson(res, answer[0], answer[1], answer[2])
     }
     // (the RAM estimate: the NVRs' cameras, not a scan of the whole index; one small query per camera)
     const ramEstimate = () => estimateRecentRam({ index: recIndex(), settings: getSettings(), list: allCameras() })

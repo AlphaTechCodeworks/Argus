@@ -33,7 +33,8 @@ class HttpError extends Error {
   }
 }
 
-const readMaps = () => {
+/** Every site's map, as stored. Exported for camera-links.mjs, which suggests neighbours from it. */
+export const readMaps = () => {
   if (!existsSync(MAPS_FILE)) return { sites: {} }
   const data = JSON.parse(readFileSync(MAPS_FILE, 'utf8'))
   return { sites: data && typeof data.sites === 'object' && data.sites ? data.sites : {} }
