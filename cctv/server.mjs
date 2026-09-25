@@ -79,12 +79,21 @@ import { runHousekeeping } from './housekeeping.mjs'
 import { playbackApi } from './playback.mjs'
 import { timelineApi } from './rec-api.mjs'
 import { downloadExport, handleExports } from './export-api.mjs'
+import { listExports } from './export-job.mjs'
 import { connectPlayback } from './rec-playback.mjs'
 import { vpnView } from './vpn.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
 import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
 import { recentRefusals } from './nvr-health.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
+import { handleBookmarks } from './bookmarks.mjs'
+import { handleBackfill, initBackfill } from './backfill.mjs'
+import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
+import { can, handleRights } from './rights.mjs'
+import { audit, handleAudit, pruneAudit } from './audit.mjs'
+import { handleViews } from './views.mjs'
+import { handleEvents } from './events.mjs'
+import { handleAlarms } from './alarms.mjs'
 import { loadCertificate } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
@@ -114,9 +123,31 @@ if (LIVE_WORKER) {
     if (busy) return
     busy = true
     runHousekeeping({ index: recIndex() })
+      .then(() => pruneAudit(auth.DATA_DIR)) // a year of audit is kept; older rows go with the rest
       .catch((e) => console.warn(`[housekeeping] failed: ${e.message}`))
       .finally(() => (busy = false))
   }, 5 * 60_000).unref()
+
+  // The storage forecast is built from free-space samples taken over time, so it has nothing to say
+  // until it has been running a while -- and it says that, rather than extrapolating from one point.
+  setStorageContext({ index: recIndex, dataDir: auth.DATA_DIR })
+
+  // Backfill: pulling stretches the server missed from the NVR that still has them. It resumes a
+  // job interrupted by a restart, and stands down for live recording and exports -- nothing here
+  // is worth a frame of live video. It only runs at all once an owner switches it on.
+  initBackfill({
+    index: recIndex,
+    nvrs,
+    locations: listLocations,
+    settings: getSettings,
+    // An export is somebody waiting at a screen for evidence; backfill is a job with days of slack.
+    // If this cannot be answered the module assumes an export IS running and stands down, which is
+    // the right way round to be wrong.
+    exportsBusy: () => listExports(auth.DATA_DIR).some((j) => j.state === 'running' || j.state === 'queued'),
+    recordingBusy: () => false, // recording never pauses; the rate limit is what keeps backfill polite
+    refusingOf: (id) => recentRefusals(nvrs.get(id)?.streams ?? [], Date.now()) > 0,
+    coolingOf: (id) => Boolean(nvrCooling(id))
+  })
 }
 
 // ---- health alerts and nightly settings backups ---------------------------
@@ -200,6 +231,13 @@ const alerts = startAlerts({
   restartReason: RESTART_REASON,
   getSettings,
   nvrStorage,
+  // "This drive will be full in under a week", from the free-space samples storage-report keeps.
+  // It stays quiet for a drive that has already reached its retention and is overwriting, because
+  // a cycling recorder is permanently full and an alert that fires every night is one nobody reads.
+  extraCandidates: () => driveFullCandidates(
+    buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR) }),
+    { days: 7 }
+  ),
   listNvrs: () =>
     [...nvrs.values()].map((n) => ({
       id: n.id,
@@ -369,10 +407,14 @@ const handleLogin = async (req, res) => {
   if (!(await auth.checkLogin(user, creds.password ?? ''))) {
     auth.recordFailure(ip)
     console.log(`login failed for "${user}" from ${ip}`)
+    // Failed sign-ins are the ones worth keeping: a run of them from one address is the first
+    // sign of somebody trying the door. audit() never throws, so it cannot break a login.
+    audit(auth.DATA_DIR, { user, action: 'login-failed', ip, ok: false })
     return sendJson(res, 401, { error: 'Wrong user name or password' })
   }
   auth.clearFailures(ip)
   console.log(`login ok for "${user}" from ${ip}`)
+  audit(auth.DATA_DIR, { user, action: 'login', ip })
   const cookie = auth.sessionCookie(auth.createSession(user), Boolean(req.socket.encrypted))
   sendJson(res, 200, { user }, { 'set-cookie': cookie })
 }
@@ -409,6 +451,9 @@ const handleRequest = async (req, res) => {
   }
   if (pathname === '/api/login' && req.method === 'POST') return handleLogin(req, res)
   if (pathname === '/api/logout' && req.method === 'POST') {
+    // Read before the cookie is cleared, or there is nobody to name in the entry.
+    const leaving = currentUser(req)
+    if (leaving) audit(auth.DATA_DIR, { user: leaving, action: 'logout', ip: clientIp(req) })
     return sendJson(res, 200, { ok: true }, { 'set-cookie': auth.clearCookie() })
   }
   if (PUBLIC_PATHS.has(pathname)) return serveFile(res, pathname)
@@ -420,8 +465,25 @@ const handleRequest = async (req, res) => {
     return
   }
 
-  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: AUTH_OFF || auth.isAdmin(user), p2p: P2P_ENABLED, build: BUILD })
+  // Who is asking, in the one shape the rights and audit layers accept. Authority comes from the
+  // session and nowhere else: a user named in a request body says whose settings are being
+  // changed, never who is doing the changing.
+  const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
+
+  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, p2p: P2P_ENABLED, build: BUILD })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
+
+  // Signed in is enough for these; what each user may actually see is settled inside them.
+  const marks = await handleBookmarks(req.method, pathname + url.search, () => readJsonObject(req, 8192), who)
+  if (marks) return sendJson(res, ...marks)
+  const views = await handleViews(req.method, pathname, () => readJsonObject(req, 32768), user)
+  if (views) return sendJson(res, ...views)
+  const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null })
+  if (ev) return sendJson(res, ...ev)
+  const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: who.admin, cameras: allCameras })
+  if (al) return sendJson(res, ...al)
+  const store = await handleStorage(req.method, pathname, () => readJsonObject(req, 4096), who)  // accepts the { user, admin } shape
+  if (store) return sendJson(res, ...store)
   // Which camera adjoins which: read by everyone signed in (the follow strip needs it), changed by
   // admins only. The admin path goes through the same guard block below as every other admin write.
   if (pathname === LINKS_PATH) {
@@ -456,6 +518,15 @@ const handleRequest = async (req, res) => {
     if (clocks) return sendJson(res, clocks[0], clocks[1])
     const clockWrite = await handleClockWrite(req.method, pathname, () => readJsonObject(req, 2048), nvrs, user)
     if (clockWrite) return sendJson(res, clockWrite[0], clockWrite[1])
+
+    // Filling holes in the server's copy from the NVR's own, while the NVR still has them.
+    const backfill = await handleBackfill(req.method, pathname, () => readJsonObject(req, 2048), user)
+    if (backfill) return sendJson(res, backfill[0], backfill[1])
+    // Who may do what, and the record of who did.
+    const rightsRoute = await handleRights(req.method, pathname, () => readJsonObject(req, 8192), who)
+    if (rightsRoute) return sendJson(res, ...rightsRoute)
+    const auditRoute = handleAudit(req.method, pathname, url.searchParams, who, auth.DATA_DIR, { can })
+    if (auditRoute) return sendJson(res, ...auditRoute)
 
     // GET /api/admin/nvrs/:id/disks[?discover=1] — what this NVR says about its own disks.
     // Without discover: the cached snapshot the Health page uses, read again now.

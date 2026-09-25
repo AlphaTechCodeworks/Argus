@@ -31,6 +31,17 @@ export function buildSnapshot(deps, nowMs) {
   return {
     startedMs: deps.startedMs,
     restartReason: deps.restartReason ?? null,
+    // The storage forecast, worked out where the free-space history lives. It never throws here:
+    // a forecast that cannot be made is no alert, which is the right answer, and a broken forecast
+    // must not be able to stop every other alert being checked.
+    extra: (() => {
+      try {
+        return deps.extraCandidates?.() ?? []
+      } catch (e) {
+        console.warn(`[alerts] the storage forecast could not be read: ${e.message}`)
+        return []
+      }
+    })(),
     // lowFreePct rides on each location so the rules stay pure: they compare, they do not read settings.
     locations: deps.locationState().map((l) => ({ ...l, lowFreePct })),
     nvrs: deps.listNvrs().map((n) => ({

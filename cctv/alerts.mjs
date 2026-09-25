@@ -11,9 +11,13 @@
 
 /** Every kind, in the order they are shown. */
 export const KINDS = Object.freeze([
-  'server-restart', 'drive-missing', 'drive-full', 'not-recording',
+  'server-restart', 'drive-missing', 'drive-full', 'drive-filling', 'not-recording',
   'camera-offline', 'nvr-offline', 'nvr-disk', 'nvr-refusing', 'nvr-login', 'nvr-clock'
 ])
+// 'drive-filling' is a forecast, and deliberately a different kind from 'drive-full'. A recorder
+// that has reached its retention is permanently full and overwriting, which is the healthy steady
+// state here, so a forecast only speaks up about a drive that is still filling towards its first
+// time round -- see storage-report.mjs driveFullCandidates.
 
 /** Kinds that open on the first sighting rather than after raiseMs. */
 const IMMEDIATE = new Set(['server-restart', 'nvr-login', 'nvr-refusing'])
@@ -90,6 +94,11 @@ export function alertEngine({ raiseMs, clearMs, graceMs, notRecordingMs, clockSk
 /** Everything wrong in this snapshot, before the raise/clear timing is applied. */
 function candidates(snap, { notRecordingMs, clockSkewMs, nowMs }) {
   const out = []
+  // Candidates worked out elsewhere and handed in ready made -- the storage forecast, which needs
+  // a history of free-space samples this module has no business keeping. They go through the same
+  // raise, clear and mute timing as everything else, so nothing can page the owner instantly by
+  // coming in this way.
+  for (const c of snap.extra ?? []) if (c?.key && c?.kind && KINDS.includes(c.kind)) out.push(c)
   if (snap.restartReason) {
     out.push({ key: `server-restart/${snap.startedMs}`, kind: 'server-restart', title: 'The server restarted', detail: snap.restartReason })
   }

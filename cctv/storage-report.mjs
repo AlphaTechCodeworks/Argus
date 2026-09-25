@@ -15,6 +15,13 @@ import { mkdirSync, readFileSync, renameSync, statfsSync, writeFileSync } from '
 import { join } from 'node:path'
 import { isAdmin } from './auth.mjs'
 
+// The caller may hand us a plain user name or the { user, admin } the newer routes pass around.
+// Taking only one of the two is how a route ends up refusing everybody: isAdmin() given an object
+// looks it up as if it were a name, finds nothing, and denies an admin as confidently as a
+// stranger. CCTV_AUTH=off has no real users at all, and is honoured here as everywhere else.
+const AUTH_OFF = process.env.CCTV_AUTH === 'off'
+const admin = (who) => (AUTH_OFF ? true : who && typeof who === 'object' ? who.admin === true : isAdmin(who))
+
 // storage.mjs and settings.mjs both pull in nvr-xml.mjs -> sdk.mjs -> koffi, which cannot even be
 // loaded on a machine without the Linux SDK. This module has to stay testable on any laptop, so
 // the one thing it needs from storage.mjs (is the drive really mounted?) is three lines and is
@@ -340,7 +347,7 @@ export function setStorageContext({ index = null, dataDir = null, settingsOf = n
 export async function handleStorage(method, pathname, _readJson, user) {
   if (pathname !== '/api/storage') return null
   if (method !== 'GET') return [405, { error: 'Method not allowed' }]
-  if (!isAdmin(user)) return [403, { error: 'Only admins can see storage' }]
+  if (!admin(user)) return [403, { error: 'Only admins can see storage' }]
   const settings = settingsRef ? settingsRef() : (await import('./settings.mjs')).getSettings()
   let history = {}
   try {
