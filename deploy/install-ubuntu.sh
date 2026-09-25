@@ -49,17 +49,24 @@ fi
 /usr/local/bin/node -v
 
 say "npm packages"
-# A release built by deploy/bundle.sh already carries node_modules. Installing straight from a
-# git checkout (which is how this is done now that the Docker image is gone) does not, so fetch
-# them here. Only the three runtime packages; koffi ships a prebuilt Linux x86-64 binary, so
-# nothing is compiled.
-if [ -d "$here/node_modules/koffi" ]; then
+# A release built by deploy/bundle.sh already carries node_modules and build/. Installing straight
+# from a git checkout (which is how this is done now that the Docker image is gone) carries
+# neither: build/ holds the compiled SDK struct definitions and is a build artifact, so it is not
+# in git. Fetch and compile here when they are missing.
+command -v npm >/dev/null 2>&1 || ln -sf /opt/node/bin/npm /usr/local/bin/npm
+npm=/usr/local/bin/npm
+if [ -d "$here/node_modules/koffi" ] && [ -d "$here/build/lib" ]; then
   echo "bundled with the release"
+elif [ -d "$here/build/lib" ]; then
+  # runtime packages only; koffi ships a prebuilt Linux x86-64 binary, so nothing is compiled
+  (cd "$here" && "$npm" install --omit=dev --no-audit --no-fund --loglevel=error)
 else
-  command -v npm >/dev/null 2>&1 || ln -sf /opt/node/bin/npm /usr/local/bin/npm
-  (cd "$here" && /usr/local/bin/npm install --omit=dev --no-audit --no-fund --loglevel=error)
-  [ -d "$here/node_modules/koffi" ] || { echo "npm install did not produce koffi; the app cannot talk to the NVRs" >&2; exit 1; }
+  # the SDK structs have to be compiled, which needs the dev tools; they are removed again after
+  echo "compiling the SDK struct definitions"
+  (cd "$here" && "$npm" install --no-audit --no-fund --loglevel=error && "$npm" run build --loglevel=error && "$npm" prune --omit=dev --no-audit --no-fund --loglevel=error)
 fi
+[ -d "$here/node_modules/koffi" ] || { echo "npm install did not produce koffi; the app cannot talk to the NVRs" >&2; exit 1; }
+[ -d "$here/build/lib" ] || { echo "the SDK struct definitions were not built (build/lib is missing)" >&2; exit 1; }
 
 say "app files"
 release="$(cat "$here/RELEASE" 2>/dev/null || date -u +%Y%m%d-%H%M%S)"
