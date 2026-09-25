@@ -198,7 +198,7 @@
 
         <label>Name <input id="exName" maxlength="120" /></label>
         <label>Notes <input id="exNotes" maxlength="500" placeholder="Shown when the export is opened" /></label>
-        <label>Password <input id="exPass" type="password" maxlength="128" autocomplete="new-password" placeholder="Optional. Without it, anyone with the file can watch it." /></label>
+        <!-- A password would encrypt the pack. The plumbing exists but the export API does not take one yet, so the field is not shown rather than pretending it protects anything. -->
 
         <p class="pb-ex-msg" id="exMsg"></p>
         <progress id="exProgress" max="100" value="0" hidden></progress>

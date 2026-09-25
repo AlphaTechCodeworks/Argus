@@ -1906,7 +1906,7 @@ const exClockWarn = $('exClockWarn')
 const exCameras = $('exCameras')
 const exName = $('exName')
 const exNotes = $('exNotes')
-const exPass = $('exPass')
+// no password field yet: the export API does not accept one
 const exMsg = $('exMsg')
 const exProgress = $('exProgress')
 const exStart = $('exStart')
@@ -1943,7 +1943,6 @@ async function openExport() {
 
   exName.value = `${state.date} ${fmtTime(clip.from).slice(0, 5)} ${cameraSel.selectedOptions[0]?.textContent ?? 'export'}`
   exNotes.value = ''
-  exPass.value = ''
   exProgress.hidden = true
   exStart.disabled = false
   exSay('')
@@ -1967,13 +1966,19 @@ exStart.addEventListener('click', async () => {
     const started = await fetch('/api/exports', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ cameras, fromMs: Math.round(clip.from), toMs: Math.round(clip.to), format, name: exName.value, notes: exNotes.value, password: exPass.value || undefined })
+      // one clip per camera: the server takes each camera's own range, so a future version can
+      // export different moments per camera without changing the shape
+      body: JSON.stringify({
+        clips: cameras.map((c) => ({ nvr: c.nvr, ch: c.ch, fromMs: Math.round(clip.from), toMs: Math.round(clip.to) })),
+        format,
+        name: exName.value,
+        notes: exNotes.value
+      })
     }).then(async (r) => {
       const d = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(d.error ?? `HTTP ${r.status}`)
       return d
     })
-    exPass.value = '' // never leave it sitting in the page
     await followExport(started.id)
   } catch (e) {
     exSay(e.message, true)
@@ -1992,7 +1997,7 @@ async function followExport(id) {
     } catch {
       continue // a blip in polling is not a failed export
     }
-    if (Number.isFinite(job.percent)) exProgress.value = job.percent
+    if (Number.isFinite(job.progress?.pct)) exProgress.value = job.progress.pct
     if (job.state === 'done') {
       exProgress.hidden = true
       exSay('Ready.')
@@ -2010,6 +2015,6 @@ async function followExport(id) {
       exStart.disabled = false
       return
     }
-    exSay(job.step ?? 'Working…')
+    exSay(job.progress?.message ?? job.progress?.step ?? 'Working…')
   }
 }
