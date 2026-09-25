@@ -22,8 +22,6 @@
 // position by the NVR's clock skew.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
 import {
-  NVR_SPEEDS,
-  SERVER_SPEEDS,
   ScrubThrottle,
   convertTime,
   describeSkew,
@@ -37,6 +35,8 @@ import {
   shift,
   speedFor
 } from './pb-sources.js'
+import { follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
+import { allowedSpeeds, clampSpeed, frameStep, shuttleLabel, shuttleRate } from './pb-transport.js'
 
 // Video is decoded here in the browser, exactly as the camera encoded it; the
 // server never converts it. Recordings in H.265 need a browser/PC that can decode H.265.
@@ -45,7 +45,11 @@ const H265_HELP =
 
 const HEADER_SIZE = 16
 const DAY = 86_400_000
-const MIN_SPAN = 5 * 60_000
+// The timeline is drawn from ordinary elements rather than a canvas, so every box can carry its own
+// title and click. That only stays cheap because nothing outside the view is drawn (laneBoxes clips)
+// and each lane is capped: a day of one-second motion events would otherwise be tens of thousands.
+const MIN_SPAN = 10_000
+const MAX_BOXES = 400
 const SEEK_STEP = 30_000
 const START_BACK_MS = 5 * 60_000
 // server recordings: the file being written is readable, so playback starts closer to now
@@ -57,9 +61,9 @@ const $ = (id) => document.getElementById(id)
 const cameraSel = $('camera')
 const dateInput = $('date')
 const playBtn = $('play')
-const speedSel = $('speed')
 const qualitySel = $('quality')
 const clockEl = $('clock')
+const clockInput = $('clockInput')
 const messageEl = $('message')
 const noticeEl = $('pbNotice')
 const badgeEl = $('srcBadge')
@@ -67,8 +71,27 @@ const skewEl = $('skewHint')
 const legendServer = $('legendServer')
 const hintEl = $('pbHint')
 const videoEl = $('video')
+const spinnerEl = $('spinner')
 const timeline = $('timeline')
-const tctx = timeline.getContext('2d')
+const laneRec = $('laneRec')
+const laneMotion = $('laneMotion')
+const ticksEl = $('ticks')
+const playheadEl = $('playhead')
+const nowEl = $('tlNow')
+const hoverLine = $('hoverLine')
+const hoverLabel = $('hoverLabel')
+const overview = $('overview')
+const ovBoxes = $('ovBoxes')
+const ovWindow = $('ovWindow')
+const ovNow = $('ovNow')
+const speedsEl = $('speeds')
+const spanEl = $('spanLabel')
+const dateEl = $('pbDate')
+const followBtn = $('followBtn')
+const shuttleEl = $('shuttle')
+const shuttleLabelEl = $('shuttleLabel')
+const shortcutsDlg = $('shortcuts')
+const zoomBtns = [...document.querySelectorAll('.pb-zoom button')]
 
 const pad = (n) => String(n).padStart(2, '0')
 const local = (ms) => new Date(ms + state.tz) // NVR local wall time, read with getUTC*()
@@ -96,7 +119,9 @@ const state = {
   speed: 1,
   stream: 1,
   h265: true, // this browser can decode H.265 (checked at start)
-  view: { start: 0, span: DAY },
+  // the window on the day (pb-view.js): absolute ms, always valid, always replaced rather than edited
+  view: makeView({ dayStartMs: 0, dayEndMs: DAY, spanMs: DAY, minSpanMs: MIN_SPAN }),
+  follow: true, // keep the playhead on screen while it plays; panning switches it off
   nvrNow: Date.now(),
   tz: 0, // NVR time-zone offset in ms (local - UTC)
   clockOf: null, // the NVR whose clock (nvrNow, tz) was read
@@ -120,6 +145,8 @@ let scrub = null // { t } while the playhead is dragged (server mode)
 let seekAt = null // performance.now() of the last seek, until its first picture (D overlay)
 let startMs = null // seek to first picture, ms
 let lastEndSkip = -Infinity // the last stretch jumped to at an end (never the same one twice)
+let hoverX = null // where the pointer is over the timeline, in px from its left edge
+let drag = null // { x, startMs, moved } while the timeline is being panned
 
 const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   clock: { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 1000 },
@@ -143,9 +170,15 @@ const player = new VideoPlayer(videoEl.querySelector('canvas'), {
 
 /** The first picture after a seek (a poster or a frame): the D overlay's start time. */
 function noteStart() {
+  spinnerEl.hidden = true // the first picture is here: whatever we were waiting for has arrived
   if (seekAt === null) return
   startMs = Math.round(performance.now() - seekAt)
   seekAt = null
+}
+
+/** The spinner while there is nothing to show yet: seeking, another camera, another quality. */
+function showSpinner() {
+  spinnerEl.hidden = false
 }
 
 function showMessage(text) {
@@ -421,14 +454,31 @@ function setOptions(sel, list, value) {
   sel.value = String(value)
 }
 
+/**
+ * The speed buttons for the mode shown (pb-transport allowedSpeeds: the server's whole ladder, the
+ * NVR's 1-8 forward). Rebuilt only when the mode changes; otherwise just the pressed one moves.
+ */
+function renderSpeeds() {
+  if (speedsEl.dataset.kind !== state.mode) {
+    speedsEl.replaceChildren(
+      ...allowedSpeeds(state.mode).map((s) => {
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.textContent = speedLabel(s)
+        b.dataset.speed = String(s)
+        b.addEventListener('click', () => setSpeed(s))
+        return b
+      })
+    )
+    speedsEl.dataset.kind = state.mode
+  }
+  for (const b of speedsEl.children) b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === state.speed))
+}
+
 /** Speeds, quality choices, legend, skew hint and source badge for the mode shown. */
 function updateModeUi() {
   const server = state.mode === 'server'
-  const speeds = server ? SERVER_SPEEDS : NVR_SPEEDS
-  if (speedSel.dataset.kind !== state.mode) {
-    setOptions(speedSel, speeds.map((s) => [s, speedLabel(s)]), state.speed)
-    speedSel.dataset.kind = state.mode
-  } else speedSel.value = String(state.speed)
+  renderSpeeds()
   // quality: with server recordings "HD (server)" or "SD (NVR)"; otherwise the NVR's SD or HD as before
   const kind = state.avail && (server || state.quality === 'sd-nvr') ? 'server' : 'nvr'
   if (qualitySel.dataset.kind !== kind) {
@@ -474,6 +524,7 @@ function seek(t) {
   updatePlayButton()
   seekAt = performance.now()
   startMs = null
+  showSpinner()
   player.reset()
   player.resume()
   player.setRate(state.speed)
@@ -566,6 +617,7 @@ function serverSeek(t) {
   throttle.cancel()
   seekAt = performance.now()
   startMs = null
+  showSpinner()
   player.seekReset() // the decoder stays set up
   if (state.speed > 0) player.setStills(false)
   player.resume()
@@ -646,7 +698,7 @@ function onServerStatus(sock, msg) {
       return
     case 'speed':
       state.speed = msg.speed
-      speedSel.value = String(msg.speed)
+      renderSpeeds()
       player.setRate(rateOf(msg.speed))
       if (msg.reason === 'newest') showNotice('Reached the newest footage: playing at 1×.')
       scheduleDraw()
@@ -710,15 +762,39 @@ function updatePlayButton() {
   playBtn.setAttribute('aria-label', state.paused ? 'Play' : 'Pause')
 }
 
+// The mode we have already explained a clamp for: an NVR leg refuses reverse and anything above 8x,
+// and saying so on every button press would be nagging, so it is said once per mode.
+let clampedFor = null
+
+/**
+ * Play at `speed`, or at the nearest speed this source will actually accept. Every speed bound for a
+ * session goes through clampSpeed, so an NVR leg is never sent one it would refuse and drop.
+ */
 function setSpeed(speed) {
-  state.speed = speed
-  send({ speed })
-  player.setRate(rateOf(speed))
+  const { speed: allowed, changed } = clampSpeed(speed, state.mode)
+  if (changed && clampedFor !== state.mode) {
+    clampedFor = state.mode
+    showNotice(`This camera's NVR cannot play at ${speedLabel(speed)}: playing at ${speedLabel(allowed)}.`)
+  }
+  state.speed = allowed
+  send({ speed: allowed })
+  player.setRate(rateOf(allowed))
+  renderSpeeds()
   scheduleDraw()
+  return allowed
+}
+
+/** One frame back or on (pb-transport frameStep), paused where it lands. */
+function stepFrame(direction) {
+  if (state.position === null) return
+  const fps = Number(player.stats?.fps) > 0 ? Number(player.stats.fps) : 25
+  const target = frameStep(state.position / 1000, direction, fps) * 1000
+  seek(target)
+  if (!state.paused) togglePause()
 }
 
 function jumpEvent(direction) {
-  const pos = state.position ?? state.view.start
+  const pos = state.position ?? state.view.startMs
   const list = state.events.map(([s]) => s)
   const target = direction > 0 ? list.find((s) => s > pos + 2000) : list.filter((s) => s < pos - 2000).at(-1)
   if (target !== undefined) {
@@ -728,6 +804,24 @@ function jumpEvent(direction) {
 }
 
 // ---- timeline -------------------------------------------------------------
+//
+// The timeline is built from ordinary elements, not a canvas: each recorded stretch, gap and motion
+// block is its own div, so it can carry a title the browser shows on hover and be clicked directly.
+// The maths all comes from pb-view.js, which knows nothing about the DOM; this half only positions
+// things as percentages of the track, so a resize needs no redraw.
+
+/**
+ * Replace the view. Every change goes through here, so the day's limits (and the minimum span) are
+ * written down in exactly one place and no caller can leave the window off the end of the day.
+ */
+function setView(v) {
+  const dayStart = dayStartOf(state.date)
+  state.view = makeView({ ...v, minSpanMs: MIN_SPAN, maxSpanMs: DAY, dayStartMs: dayStart, dayEndMs: dayStart + DAY })
+  scheduleDraw()
+}
+
+/** The whole day on screen. */
+const viewWholeDay = () => setView({ startMs: dayStartOf(state.date), spanMs: DAY })
 
 let drawPending = false
 function scheduleDraw() {
@@ -735,151 +829,149 @@ function scheduleDraw() {
   drawPending = true
   requestAnimationFrame(() => {
     drawPending = false
-    drawTimeline()
-    if (state.position !== null) {
-      clockEl.textContent = `${fmtDate(state.position)} ${fmtTime(state.position)}${state.speed !== 1 ? ` · ${speedLabel(state.speed)}` : ''}`
+    // follow mode keeps the playhead in sight; pb-view returns the same object when nothing must move
+    if (state.follow && state.position !== null && !scrub && !drag) {
+      const next = followView(state.view, state.position)
+      if (next !== state.view) {
+        const dayStart = dayStartOf(state.date)
+        state.view = makeView({ ...next, minSpanMs: MIN_SPAN, maxSpanMs: DAY, dayStartMs: dayStart, dayEndMs: dayStart + DAY })
+      }
     }
+    drawTimeline()
+    drawClock()
   })
 }
 
-const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+/** The big clock and the date beside it. Milliseconds only under a two-minute span, where they mean something. */
+function drawClock() {
+  dateEl.textContent = state.date ?? ''
+  if (!clockInput.hidden) return // the viewer is typing a time: leave the field alone
+  clockEl.textContent = state.position === null
+    ? '--:--:--'
+    : fmtClock(state.position, { ms: state.view.spanMs < 120_000, tzOffsetMs: state.tz })
+}
+
+/**
+ * The stretches for the top lane. In server mode they are split by source — the server's own
+ * footage and the stretches only the NVR has — with the recorder's gaps on top, so a hover says why
+ * nothing was recorded. In NVR mode there is only one source, so it all reads as plain recorded.
+ */
+function recRanges() {
+  if (state.mode !== 'server') return state.ranges.map(([s, e]) => ({ s, e, kind: 'rec' }))
+  const out = state.stretches.map(({ s, e, src }) => ({ s, e, kind: src }))
+  for (const [s, e] of state.gaps) out.push({ s, e, kind: 'gap' })
+  return out
+}
+
+/**
+ * Fill a lane with positioned divs. Only boxes laneBoxes kept (those inside the view) are made, and
+ * at most MAX_BOXES of them: a busy day of motion events would otherwise be tens of thousands of
+ * elements, which is the price of leaving the canvas behind.
+ */
+function fillLane(el, boxes, decorate) {
+  const nodes = boxes.slice(0, MAX_BOXES).map((b) => {
+    const d = document.createElement('div')
+    d.style.left = `${b.leftPct}%`
+    d.style.width = `${b.widthPct}%`
+    d.dataset.kind = b.kind ?? 'rec'
+    decorate?.(d, b)
+    return d
+  })
+  el.replaceChildren(...nodes)
+}
 
 function drawTimeline() {
-  const dpr = window.devicePixelRatio || 1
-  const w = timeline.clientWidth
-  const h = timeline.clientHeight
-  if (timeline.width !== Math.round(w * dpr) || timeline.height !== Math.round(h * dpr)) {
-    timeline.width = Math.round(w * dpr)
-    timeline.height = Math.round(h * dpr)
-  }
-  const c = tctx
-  c.setTransform(dpr, 0, 0, dpr, 0, 0)
-  c.clearRect(0, 0, w, h)
-  const { start, span } = state.view
-  const x = (t) => ((t - start) / span) * w
-  const server = state.mode === 'server'
+  const v = state.view
+  const pct = (t) => ((t - v.startMs) / v.spanMs) * 100
+  const inView = (t) => Number.isFinite(t) && t >= v.startMs && t <= v.endMs
 
-  // track
-  const barY = 18
-  const barH = h - barY - 6
-  c.fillStyle = css('--tl-track')
-  c.fillRect(0, barY, w, barH)
-  c.fillStyle = css('--tl-rec')
-  for (const [s, e] of state.ranges) {
-    if (e < start || s > start + span) continue
-    c.fillRect(x(s), barY, Math.max(1, x(e) - x(s)), barH)
-  }
-  if (server) {
-    // stretches only the NVR has (played from it), and the recorder's gaps as a thin strip
-    c.fillStyle = css('--tl-nvr')
-    for (const { s, e, src } of state.stretches) {
-      if (src !== 'nvr' || e < start || s > start + span) continue
-      c.fillRect(x(s), barY, Math.max(1, x(e) - x(s)), barH)
-    }
-    c.fillStyle = css('--tl-gap')
-    for (const [s, e] of state.gaps) {
-      if (e < start || s > start + span) continue
-      c.fillRect(x(s), barY + barH - 3, Math.max(2, x(e) - x(s)), 3)
-    }
-  }
-  c.fillStyle = css('--tl-evt')
-  for (const [s, e] of state.events) {
-    if (e < start || s > start + span) continue
-    c.fillRect(x(s), barY + barH * 0.55, Math.max(2, x(e) - x(s)), barH * 0.45)
-  }
-  c.fillStyle = css('--tl-hit')
-  for (const { start: s, end: e } of state.hits) {
-    if (e + 2000 < start || s > start + span) continue
-    c.fillRect(x(s) - 1, barY, Math.max(3, x(e + 2000) - x(s)), barH * 0.4)
-  }
+  fillLane(laneRec, laneBoxes(v, recRanges()), (d, b) => {
+    if (b.kind === 'gap') d.title = `Not recorded: ${gapAt(state.gaps, b.from) ?? 'no reason given'}`
+    else d.title = `${fmtTime(b.from)} – ${fmtTime(b.to)}${b.kind === 'nvr' ? ' · from the NVR' : ''}`
+  })
 
-  // ticks: pick a step giving roughly one label per 90px
-  const steps = [60_000, 300_000, 600_000, 1_800_000, 3_600_000, 3 * 3_600_000, 6 * 3_600_000]
-  const step = steps.find((s) => (s / span) * w >= 90) ?? steps.at(-1)
-  c.fillStyle = css('--muted')
-  c.strokeStyle = css('--tl-tick')
-  c.font = '11px system-ui, sans-serif'
-  c.textBaseline = 'top'
-  for (let t = Math.ceil((start + state.tz) / step) * step - state.tz; t <= start + span; t += step) {
-    const px = Math.round(x(t)) + 0.5
-    c.beginPath()
-    c.moveTo(px, barY - 4)
-    c.lineTo(px, barY)
-    c.stroke()
-    const d = local(t)
-    c.fillText(`${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`, px + 3, 2)
-  }
+  // the motion lane, with the search's own hits drawn over it; clicking a block plays from it
+  const events = state.events.map(([s, e]) => ({ s, e, kind: 'event' }))
+  const hits = state.hits.map((h) => ({ s: h.start, e: h.end + 2000, kind: 'hit' }))
+  fillLane(laneMotion, [...laneBoxes(v, events), ...laneBoxes(v, hits)], (d, b) => {
+    d.title = `${b.kind === 'hit' ? 'Movement in your box' : 'Motion'} at ${fmtTime(b.from)}`
+    // the seek happens in the timeline's own pointerup, so a click does not both jump and pan
+    d.dataset.ms = String(Math.round(b.from))
+  })
 
-  // "now" marker for today
-  if (state.nvrNow > start && state.nvrNow < start + span) {
-    c.fillStyle = css('--muted')
-    c.fillRect(Math.round(x(state.nvrNow)), barY, 1, barH)
-  }
+  playheadEl.hidden = state.position === null || !inView(state.position)
+  if (!playheadEl.hidden) playheadEl.style.left = `${pct(state.position)}%`
+  nowEl.hidden = !inView(state.nvrNow)
+  if (!nowEl.hidden) nowEl.style.left = `${pct(state.nvrNow)}%`
 
-  // playhead
-  if (state.position !== null && state.position >= start && state.position <= start + span) {
-    const px = Math.round(x(state.position))
-    c.fillStyle = css('--accent')
-    c.fillRect(px - 1, 0, 2, h)
-    c.beginPath()
-    c.moveTo(px - 5, 0)
-    c.lineTo(px + 5, 0)
-    c.lineTo(px, 6)
-    c.fill()
-  }
-
-  // hover time (server mode: and why the server did not record there)
-  if (hoverX !== null && !scrub) {
-    const t = start + (hoverX / w) * span
-    c.fillStyle = css('--text')
-    c.fillRect(Math.round(hoverX), barY, 1, barH)
-    const gap = server ? gapAt(state.gaps, t) : null
-    const label = gap ? `${fmtTime(t)} · not recorded: ${gap}` : fmtTime(t)
-    const tw = Math.min(w, c.measureText(label).width + 8)
-    const lx = Math.min(Math.max(0, hoverX - tw / 2), w - tw)
-    c.fillStyle = css('--panel')
-    c.fillRect(lx, barY + 2, tw, 15)
-    c.fillStyle = css('--text')
-    c.fillText(label, lx + 4, barY + 4, tw - 8)
-  }
+  ticksEl.replaceChildren(
+    ...ticks(v, state.tz).map((t) => {
+      const s = document.createElement('span')
+      s.style.left = `${pct(t.ms)}%`
+      s.textContent = t.label
+      return s
+    })
+  )
+  spanEl.textContent = spanLabel(v.spanMs)
+  for (const b of zoomBtns) b.setAttribute('aria-pressed', String(Number(b.dataset.span) === Math.round(v.spanMs)))
+  followBtn.setAttribute('aria-pressed', String(state.follow))
+  drawOverview()
+  drawHover()
 }
 
-function clampView() {
+/** The whole day, with the zoomed part marked. Its own view is the day itself, so laneBoxes clips to it. */
+function drawOverview() {
   const dayStart = dayStartOf(state.date)
-  state.view.span = Math.min(DAY, Math.max(MIN_SPAN, state.view.span))
-  state.view.start = Math.min(dayStart + DAY - state.view.span, Math.max(dayStart, state.view.start))
+  const day = makeView({ dayStartMs: dayStart, dayEndMs: dayStart + DAY, spanMs: DAY })
+  fillLane(ovBoxes, laneBoxes(day, recRanges().filter((r) => r.kind !== 'gap')))
+  ovWindow.style.left = `${((state.view.startMs - dayStart) / DAY) * 100}%`
+  ovWindow.style.width = `${(state.view.spanMs / DAY) * 100}%`
+  ovNow.hidden = state.nvrNow < dayStart || state.nvrNow > dayStart + DAY
+  if (!ovNow.hidden) ovNow.style.left = `${((state.nvrNow - dayStart) / DAY) * 100}%`
 }
 
-function zoom(factor, anchorT) {
-  const { start, span } = state.view
-  const t = anchorT ?? state.position ?? start + span / 2
-  const newSpan = span * factor
-  state.view.start = t - ((t - start) / span) * newSpan
-  state.view.span = newSpan
-  clampView()
-  drawTimeline()
+/** The line and label under the pointer: the time there, and in server mode why nothing was recorded. */
+function drawHover() {
+  if (hoverX === null || scrub) {
+    hoverLine.hidden = true
+    hoverLabel.hidden = true
+    return
+  }
+  const w = timeline.clientWidth || 1
+  const t = state.view.startMs + (hoverX / w) * state.view.spanMs
+  const gap = state.mode === 'server' ? gapAt(state.gaps, t) : null
+  hoverLine.hidden = false
+  hoverLabel.hidden = false
+  hoverLine.style.left = `${hoverX}px`
+  hoverLabel.textContent = gap ? `${fmtTime(t)} · not recorded: ${gap}` : fmtTime(t)
+  hoverLabel.style.left = `${Math.min(Math.max(0, hoverX - hoverLabel.offsetWidth / 2), Math.max(0, w - hoverLabel.offsetWidth))}px`
+}
+
+function zoom(factor, anchorMs) {
+  setView(zoomAt(state.view, factor, anchorMs ?? state.position ?? state.view.startMs + state.view.spanMs / 2))
 }
 
 function ensureVisible(t) {
-  const { start, span } = state.view
-  if (t < start || t > start + span) {
-    state.view.start = t - span / 2
-    clampView()
-  }
+  if (t < state.view.startMs || t > state.view.endMs) setView({ ...state.view, startMs: t - state.view.spanMs / 2 })
 }
 
-let hoverX = null
-let drag = null
+/** Panning is a deliberate look elsewhere, so it drops follow mode; the button puts it back. */
+function setFollow(on) {
+  state.follow = on
+  followBtn.setAttribute('aria-pressed', String(on))
+  scheduleDraw()
+}
+
 const timeAt = (clientX) => {
   const r = timeline.getBoundingClientRect()
-  return state.view.start + ((clientX - r.left) / r.width) * state.view.span
+  return state.view.startMs + ((clientX - r.left) / r.width) * state.view.spanMs
 }
 
-/** Server mode: whether a press at clientX grabs the playhead (within 8 px of it, or its triangle). */
+/** Server mode: whether a press at clientX grabs the playhead (within 8 px of it). */
 function onPlayhead(clientX) {
   if (state.mode !== 'server' || state.position === null) return false
   const r = timeline.getBoundingClientRect()
-  const px = ((state.position - state.view.start) / state.view.span) * r.width
+  const px = ((state.position - state.view.startMs) / state.view.spanMs) * r.width
   return Math.abs(clientX - r.left - px) <= PLAYHEAD_GRAB_PX
 }
 
@@ -914,62 +1006,240 @@ function endScrub() {
   seek(t) // plays from there ({seek}; stills off going forward)
 }
 
+// Pinch zoom: two pointers on the track zoom about the point between them. The view they started
+// from is kept, so the zoom follows the fingers exactly instead of compounding on every move.
+const pointers = new Map()
+let pinch = null
+
+const pinchSpread = () => {
+  const [a, b] = [...pointers.values()]
+  return { gap: Math.abs(a.x - b.x), mid: (a.x + b.x) / 2 }
+}
+
 timeline.addEventListener('pointerdown', (e) => {
   timeline.setPointerCapture(e.pointerId)
+  pointers.set(e.pointerId, { x: e.clientX })
+  if (pointers.size === 2) {
+    if (scrub) endScrub()
+    drag = null
+    const { gap, mid } = pinchSpread()
+    pinch = { gap: Math.max(1, gap), view: state.view, atMs: timeAt(mid) }
+    return
+  }
+  if (pointers.size > 2) return
   if (onPlayhead(e.clientX)) return startScrub(e)
-  drag = { x: e.clientX, start: state.view.start, moved: false }
+  drag = { x: e.clientX, startMs: state.view.startMs, moved: false }
 })
+
 timeline.addEventListener('pointermove', (e) => {
   const r = timeline.getBoundingClientRect()
   hoverX = e.clientX - r.left
+  if (pointers.has(e.pointerId)) pointers.get(e.pointerId).x = e.clientX
+  if (pinch && pointers.size === 2) {
+    const { gap } = pinchSpread()
+    setView(zoomAt(pinch.view, pinch.gap / Math.max(1, gap), pinch.atMs))
+    return
+  }
   if (scrub) return scrubTo(e.clientX)
   if (drag) {
     const dx = e.clientX - drag.x
     if (Math.abs(dx) > 3) drag.moved = true
     if (drag.moved) {
-      state.view.start = drag.start - (dx / r.width) * state.view.span
-      clampView()
+      if (state.follow) setFollow(false)
+      setView({ ...state.view, startMs: drag.startMs - (dx / r.width) * state.view.spanMs })
+      return
     }
-  } else timeline.classList.toggle('on-playhead', onPlayhead(e.clientX))
+  }
+  if (!drag) timeline.classList.toggle('on-playhead', onPlayhead(e.clientX))
   scheduleDraw()
 })
+
 timeline.addEventListener('pointerup', (e) => {
+  pointers.delete(e.pointerId)
+  if (pointers.size < 2) pinch = null
   if (scrub) return endScrub()
-  if (drag && !drag.moved) seek(timeAt(e.clientX))
+  if (drag && !drag.moved) {
+    // a motion block under the pointer says where it starts; elsewhere the time under the pointer
+    const ms = Number(e.target?.dataset?.ms)
+    seek(Number.isFinite(ms) ? ms : timeAt(e.clientX))
+  }
   drag = null
 })
-timeline.addEventListener('pointercancel', () => {
+
+timeline.addEventListener('pointercancel', (e) => {
+  pointers.delete(e.pointerId)
+  if (pointers.size < 2) pinch = null
   if (scrub) endScrub()
   drag = null
 })
+
+timeline.addEventListener('dblclick', (e) => seek(timeAt(e.clientX)))
+
 timeline.addEventListener('pointerleave', () => {
   hoverX = null
   scheduleDraw()
 })
+
 timeline.addEventListener(
   'wheel',
   (e) => {
     e.preventDefault()
+    // a trackpad pinch arrives as a wheel with ctrlKey; both zoom about the pointer
     zoom(e.deltaY > 0 ? 1.4 : 1 / 1.4, timeAt(e.clientX))
   },
   { passive: false }
 )
+
+// ---- the overview strip: drag the window, or click to put it somewhere ----
+
+let ovDrag = null
+const ovTimeAt = (clientX) => {
+  const r = overview.getBoundingClientRect()
+  return dayStartOf(state.date) + ((clientX - r.left) / r.width) * DAY
+}
+
+overview.addEventListener('pointerdown', (e) => {
+  overview.setPointerCapture(e.pointerId)
+  setFollow(false) // choosing where to look is the same deliberate act as panning
+  const t = ovTimeAt(e.clientX)
+  const inside = t >= state.view.startMs && t <= state.view.endMs
+  // grabbing the window keeps the point you took hold of under the pointer; elsewhere it centres there
+  ovDrag = { offset: inside ? t - state.view.startMs : state.view.spanMs / 2 }
+  setView({ ...state.view, startMs: t - ovDrag.offset })
+})
+overview.addEventListener('pointermove', (e) => {
+  if (!ovDrag) return
+  setView({ ...state.view, startMs: ovTimeAt(e.clientX) - ovDrag.offset })
+})
+const endOvDrag = () => (ovDrag = null)
+overview.addEventListener('pointerup', endOvDrag)
+overview.addEventListener('pointercancel', endOvDrag)
+
 new ResizeObserver(() => drawTimeline()).observe(timeline)
 
 // ---- controls -------------------------------------------------------------
 
 playBtn.addEventListener('click', togglePause)
-$('back').addEventListener('click', () => seek((state.position ?? state.view.start) - SEEK_STEP))
-$('fwd').addEventListener('click', () => seek((state.position ?? state.view.start) + SEEK_STEP))
+$('back').addEventListener('click', () => seek((state.position ?? state.view.startMs) - SEEK_STEP))
+$('fwd').addEventListener('click', () => seek((state.position ?? state.view.startMs) + SEEK_STEP))
 $('prevEvent').addEventListener('click', () => jumpEvent(-1))
 $('nextEvent').addEventListener('click', () => jumpEvent(1))
-$('zoomIn').addEventListener('click', () => zoom(1 / 2))
-$('zoomOut').addEventListener('click', () => zoom(2))
-$('zoomDay').addEventListener('click', () => {
-  state.view = { start: dayStartOf(state.date), span: DAY }
-  drawTimeline()
+$('framePrev').addEventListener('click', () => stepFrame(-1))
+$('frameNext').addEventListener('click', () => stepFrame(1))
+
+// zoom presets: the span stays centred on the playhead, or on the middle of the view without one
+for (const b of zoomBtns) {
+  b.addEventListener('click', () => {
+    const at = state.position ?? state.view.startMs + state.view.spanMs / 2
+    setView({ ...state.view, spanMs: Number(b.dataset.span), startMs: at - Number(b.dataset.span) / 2 })
+  })
+}
+followBtn.addEventListener('click', () => setFollow(!state.follow))
+
+// the day arrows move the date picker, so the existing change handler does the loading
+const shiftDay = (days) => {
+  const d = new Date(`${state.date}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + days)
+  dateInput.value = d.toISOString().slice(0, 10)
+  dateInput.dispatchEvent(new Event('change'))
+}
+$('dayPrev').addEventListener('click', () => shiftDay(-1))
+$('dayNext').addEventListener('click', () => shiftDay(1))
+
+// ---- the clock you can type into -------------------------------------------
+
+/** Turn the clock into a field holding the time on screen; Enter goes there, Escape puts it back. */
+function openClockInput() {
+  clockInput.value = state.position === null ? '' : fmtClock(state.position, { ms: state.view.spanMs < 120_000, tzOffsetMs: state.tz })
+  clockEl.hidden = true
+  clockInput.hidden = false
+  clockInput.focus()
+  clockInput.select()
+}
+function closeClockInput() {
+  clockInput.hidden = true
+  clockEl.hidden = false
+  scheduleDraw()
+}
+/** "9:34", "09:34:48" or "09:34:48.199" as ms into the day, or null when it reads as nothing. */
+function parseClock(text) {
+  const m = /^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?\s*$/.exec(text ?? '')
+  if (!m) return null
+  const [h, min, s] = [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)]
+  if (h > 23 || min > 59 || s > 59) return null
+  const ms = Number((m[4] ?? '0').padEnd(3, '0'))
+  return ((h * 60 + min) * 60 + s) * 1000 + ms
+}
+clockEl.addEventListener('click', openClockInput)
+clockInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') return closeClockInput()
+  if (e.key !== 'Enter') return
+  const into = parseClock(clockInput.value)
+  if (into === null) {
+    showNotice('That is not a time. Type it as hh:mm:ss.')
+    return
+  }
+  const t = dayStartOf(state.date) + into
+  closeClockInput()
+  ensureVisible(t)
+  seek(t)
 })
-speedSel.addEventListener('change', () => setSpeed(Number(speedSel.value)))
+clockInput.addEventListener('blur', closeClockInput)
+
+// ---- the shuttle: spring-loaded, back to paused when let go ------------------
+
+function applyShuttle() {
+  const rate = shuttleRate(Number(shuttleEl.value) / 100)
+  if (rate === 0) {
+    shuttleLabelEl.textContent = shuttleLabel(0)
+    if (!state.paused) togglePause()
+    return
+  }
+  if (state.paused) togglePause()
+  // the label shows what is actually playing, not what was asked for, when the source clamped it
+  shuttleLabelEl.textContent = shuttleLabel(setSpeed(rate))
+}
+shuttleEl.addEventListener('input', applyShuttle)
+const springBack = () => {
+  shuttleEl.value = '0'
+  shuttleLabelEl.textContent = shuttleLabel(0)
+}
+shuttleEl.addEventListener('pointerup', springBack)
+shuttleEl.addEventListener('keyup', springBack)
+
+// ---- snapshot ----------------------------------------------------------------
+
+/** The picture on screen as a JPEG named after the camera and the moment it shows. */
+function snapshot() {
+  const src = player.canvas
+  if (!src.width || !src.height) return showNotice('There is no picture to save yet.')
+  const out = document.createElement('canvas')
+  out.width = src.width
+  out.height = src.height
+  out.getContext('2d').drawImage(src, 0, 0)
+  const when = state.position ?? state.nvrNow
+  // colons are not allowed in a Windows file name, so the time is written with dashes
+  const name = `${cameraSel.selectedOptions[0]?.textContent ?? camKey()} ${fmtDate(when)} ${fmtTime(when).replaceAll(':', '-')}.jpg`
+  out.toBlob((blob) => {
+    if (!blob) return showNotice('The picture could not be saved.')
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = name.replace(/[\\/:*?"<>|]/g, '-')
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000)
+  }, 'image/jpeg', 0.92)
+}
+$('snapshot').addEventListener('click', snapshot)
+
+// Clip selection (phase 4) and bookmarks (phase 3) are not built yet; their keys and buttons are
+// here so the shortcut list and the layout do not have to change again when they arrive.
+const selectClipStart = () => {}
+const selectClipEnd = () => {}
+const addBookmark = () => {}
+
+$('shortcutsBtn').addEventListener('click', () => shortcutsDlg.showModal())
+$('shortcutsClose').addEventListener('click', () => shortcutsDlg.close())
+
 qualitySel.addEventListener('change', () => {
   const v = qualitySel.value
   if (v === 'server' || v === 'sd-nvr') {
@@ -1029,7 +1299,7 @@ async function loadNvrInfo() {
 dateInput.addEventListener('change', async () => {
   if (!dateInput.value) return
   state.date = dateInput.value
-  state.view = { start: dayStartOf(state.date), span: DAY }
+  viewWholeDay()
   if (ws?.kind === 'server' && ws.readyState === WebSocket.OPEN) {
     // server mode keeps its socket: paused, and what it still sends is dropped
     ws.gen++
@@ -1063,6 +1333,27 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'd' || e.key === 'D') {
     showStats = !showStats
     document.querySelector('.pb-main').classList.toggle('show-stats', showStats)
+  } else if (e.key === ',') {
+    stepFrame(-1)
+  } else if (e.key === '.') {
+    stepFrame(1)
+  } else if (e.key === '+' || e.key === '=') {
+    zoom(1 / 2)
+  } else if (e.key === '-' || e.key === '_') {
+    zoom(2)
+  } else if (e.key === '0') {
+    viewWholeDay()
+  } else if (e.key === 't' || e.key === 'T') {
+    e.preventDefault()
+    openClockInput()
+  } else if (e.key === '[') {
+    selectClipStart()
+  } else if (e.key === ']') {
+    selectClipEnd()
+  } else if (e.key === 'b' || e.key === 'B') {
+    addBookmark()
+  } else if (e.key === '?') {
+    shortcutsDlg.showModal()
   }
 })
 
@@ -1179,13 +1470,13 @@ searchToggle.addEventListener('click', () => {
 })
 
 function searchWindow() {
-  const pos = state.position ?? state.view.start + state.view.span / 2
+  const pos = state.position ?? state.view.startMs + state.view.spanMs / 2
   const mode = $('searchRange').value
   let from
   let to
   if (mode === 'hour') [from, to] = [pos - 3_600_000, pos]
   else if (mode === 'day') [from, to] = [dayStartOf(state.date), dayStartOf(state.date) + DAY]
-  else [from, to] = [state.view.start, state.view.start + state.view.span]
+  else [from, to] = [state.view.startMs, state.view.endMs]
   const dayStart = dayStartOf(state.date)
   from = Math.max(from, dayStart)
   to = Math.min(to, dayStart + DAY, state.nvrNow - 60_000)
@@ -1379,12 +1670,11 @@ async function start() {
     state.nvrNow = tl.now
     state.date = fmtDate(state.nvrNow)
     dateInput.value = state.date
-    state.view = { start: dayStartOf(state.date), span: DAY }
+    viewWholeDay()
     return loadDay(() => {
       if (state.mode !== 'server') return startNvrDay()
       // a minute back (the file being written is readable), the last hour in view
-      state.view = { start: state.nvrNow - 60 * 60_000, span: 2 * 60 * 60_000 }
-      clampView()
+      setView({ startMs: state.nvrNow - 60 * 60_000, spanMs: 2 * 60 * 60_000 })
       const last = state.ranges.at(-1)
       if (last) seek(Math.min(state.nvrNow - START_BACK_SERVER_MS, last[1] - START_BACK_SERVER_MS))
     })
@@ -1393,7 +1683,7 @@ async function start() {
   // (while busy: today by this computer's clock, so the page works meanwhile)
   state.date = fmtDate(state.nvrNow)
   dateInput.value = state.date
-  state.view = { start: dayStartOf(state.date), span: DAY }
+  viewWholeDay()
   if (busy) {
     drawTimeline()
     retryWhenFree(busy, start)
@@ -1404,8 +1694,7 @@ async function start() {
 
 /** NVR playback of today: 5 minutes back (the newest minute or so is still being written by the NVR), last hour in view. */
 function startNvrDay() {
-  state.view = { start: state.nvrNow - 60 * 60_000, span: 2 * 60 * 60_000 }
-  clampView()
+  setView({ startMs: state.nvrNow - 60 * 60_000, spanMs: 2 * 60 * 60_000 })
   if (state.ranges.length) seek(Math.min(state.nvrNow - START_BACK_MS, state.ranges.at(-1)[1] - START_BACK_MS))
 }
 await start()

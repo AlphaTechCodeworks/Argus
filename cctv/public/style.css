@@ -186,14 +186,135 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
 }
 .pb-message[hidden] { display: none; }
 .show-stats .pb-video .stats { display: block; }
-.pb-bar { background: var(--panel); padding: 8px 16px 10px; display: flex; flex-direction: column; gap: 8px; }
-.pb-buttons { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pb-bar { background: var(--panel); padding: 8px 16px 10px; display: flex; flex-direction: column; gap: 6px; }
+.pb-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pb-play { min-width: 44px; font-size: 16px; }
-.pb-clock { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text); }
-.pb-timeline-wrap { display: flex; gap: 8px; align-items: stretch; }
-.pb-timeline { flex: 1; min-width: 0; height: 56px; cursor: pointer; touch-action: none; border-radius: 4px; }
-.pb-zoom { display: flex; flex-direction: column; gap: 2px; }
-.pb-zoom button { padding: 0 8px; font-size: 12px; flex: 1; }
+
+/* ---- the when row: date, clock, span, zoom presets, follow ---- */
+.pb-date { color: var(--muted); font-variant-numeric: tabular-nums; }
+.pb-clock { font-size: 20px; font-variant-numeric: tabular-nums; color: var(--text); padding: 2px 10px; }
+.pb-clock-input {
+  width: 9.5em;
+  background: #232931;
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font: 20px/1.2 inherit;
+  font-variant-numeric: tabular-nums;
+}
+.pb-clock-input[hidden] { display: none; }
+.pb-span { color: var(--muted); min-width: 4em; }
+.pb-zoom { display: flex; gap: 2px; }
+.pb-zoom button { padding: 3px 8px; font-size: 12px; }
+.pb-zoom button[aria-pressed="true"], .pb-speeds button[aria-pressed="true"],
+#followBtn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* ---- the overview strip: the whole day, with the zoomed part marked ---- */
+.pb-overview {
+  position: relative;
+  height: 14px;
+  background: var(--tl-track);
+  border-radius: 3px;
+  overflow: hidden;
+  touch-action: none;
+  cursor: pointer;
+}
+.pb-ov-boxes { position: absolute; inset: 0; }
+.pb-ov-boxes div { position: absolute; top: 0; bottom: 0; background: var(--tl-rec); }
+.pb-ov-now { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--muted); }
+.pb-ov-window {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: rgba(59, 163, 255, 0.18);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  cursor: grab;
+}
+.pb-ov-window:active { cursor: grabbing; }
+
+/* ---- the timeline: ordinary elements, not a canvas, so each box can carry a title and a click ---- */
+.pb-timeline {
+  position: relative;
+  height: 62px;
+  background: var(--tl-track);
+  border-radius: 4px;
+  overflow: hidden;
+  touch-action: none;
+  cursor: pointer;
+  user-select: none;
+}
+.pb-lane { position: absolute; left: 0; right: 0; }
+.pb-lane-rec { top: 4px; height: 20px; }
+.pb-lane-motion { top: 28px; height: 30px; }
+.pb-lane div { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+.pb-lane-rec div[data-kind="server"], .pb-lane-rec div[data-kind="rec"] { background: var(--tl-rec); }
+/* NVR stretches are striped as well as coloured, so they read without relying on colour */
+.pb-lane-rec div[data-kind="nvr"] {
+  background: repeating-linear-gradient(45deg, var(--tl-nvr) 0 5px, #2b6559 5px 10px);
+}
+.pb-lane-rec div[data-kind="gap"] { background: var(--tl-gap); opacity: 0.85; }
+.pb-lane-motion div[data-kind="event"] { background: var(--tl-evt); cursor: pointer; }
+.pb-lane-motion div[data-kind="hit"] { background: var(--tl-hit); top: 0; bottom: 50%; cursor: pointer; }
+.pb-now { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--muted); }
+.pb-hoverline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text); pointer-events: none; }
+.pb-hoverlabel {
+  position: absolute;
+  top: 2px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.pb-playhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; }
+.pb-playhead::before {
+  content: "";
+  position: absolute;
+  top: 0; left: -4px;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid var(--accent);
+}
+.pb-now[hidden], .pb-playhead[hidden], .pb-hoverline[hidden], .pb-hoverlabel[hidden] { display: none; }
+.pb-ticks { position: relative; height: 14px; color: var(--muted); font-size: 11px; }
+.pb-ticks span { position: absolute; top: 0; transform: translateX(-50%); font-variant-numeric: tabular-nums; }
+
+/* ---- controls: speed left, transport centred, tools right ---- */
+.pb-controls { gap: 12px; }
+.pb-speeds { display: flex; gap: 2px; flex: 1; min-width: 0; flex-wrap: wrap; }
+.pb-speeds button { padding: 3px 7px; font-size: 12px; }
+.pb-transport { display: flex; gap: 6px; align-items: center; }
+.pb-tools { display: flex; gap: 6px; align-items: center; flex: 1; min-width: 0; justify-content: flex-end; flex-wrap: wrap; }
+
+/* ---- the shuttle ---- */
+.pb-shuttle-row { display: flex; align-items: center; justify-content: center; gap: 10px; }
+.pb-shuttle { width: min(420px, 60%); accent-color: var(--accent); }
+.pb-shuttle-label { color: var(--muted); min-width: 5em; font-variant-numeric: tabular-nums; }
+
+/* ---- spinner while seeking, switching camera or changing quality ---- */
+.pb-spinner {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 34px; height: 34px;
+  margin: -17px 0 0 -17px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: pb-spin 0.9s linear infinite;
+  pointer-events: none;
+}
+.pb-spinner[hidden] { display: none; }
+@keyframes pb-spin { to { transform: rotate(360deg); } }
+
+.pb-shortcuts { background: var(--panel); color: var(--text); border: 1px solid #2f3742; border-radius: 8px; }
+.pb-shortcuts h2 { margin: 0 0 8px; font-size: 15px; }
+.pb-shortcuts dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin: 0 0 12px; }
+.pb-shortcuts dt { color: var(--accent); font-variant-numeric: tabular-nums; }
+.pb-shortcuts dd { margin: 0; color: var(--muted); }
+.pb-shortcuts-btn { padding: 2px 8px; font-size: 12px; }
 .pb-legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
 .pb-legend span[class^="lg-"] { display: inline-block; width: 12px; height: 8px; border-radius: 2px; margin-left: 8px; }
 .lg-rec { background: var(--tl-rec); }
@@ -242,7 +363,15 @@ input[type="date"] {
 }
 @media (max-width: 640px) {
   .pb-hint { display: none; }
-  .pb-clock { margin-left: 0; width: 100%; }
+  .pb-bar { padding: 6px 8px 8px; }
+  /* on a phone the transport is what the thumb wants first, so it comes before speeds and tools */
+  .pb-controls { flex-direction: column; align-items: stretch; gap: 6px; }
+  .pb-transport { order: 1; justify-content: center; }
+  .pb-speeds { order: 2; justify-content: center; }
+  .pb-tools { order: 3; justify-content: center; }
+  .pb-shuttle { width: 100%; }
+  .pb-when { gap: 6px; }
+  .pb-clock { font-size: 17px; }
 }
 
 /* dense grids: smaller labels so they don't cover the picture */
@@ -274,6 +403,8 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
   border-radius: 4px;
   overflow-y: auto;
 }
+/* display: flex above would otherwise beat the hidden attribute and leave the panel always open */
+.pb-search[hidden] { display: none; }
 .pb-search h2 { margin: 0; font-size: 14px; }
 .pb-search label { flex-direction: column; align-items: stretch; gap: 4px; font-size: 12px; }
 .pb-search-help, .pb-search-status { margin: 0; color: var(--muted); font-size: 12px; }
