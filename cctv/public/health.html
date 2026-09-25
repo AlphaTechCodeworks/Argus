@@ -18,6 +18,7 @@
         <a href="/health.html" aria-current="page">Health</a>
         <a href="/sites.html" id="sitesTab" hidden>Sites</a>
         <a href="/settings.html" id="settingsTab" hidden>Settings</a>
+        <a href="/audit.html" id="auditTab" hidden>Audit</a>
       </nav>
     </div>
     <div class="account">
@@ -39,6 +40,12 @@
     <!-- One panel per NVR. Its own disks are the headline: the NVR's copy of roughly the last
          30 days is the only redundancy this system has, and nothing used to look at it. -->
     <div id="nvrs" class="nvr-panels"></div>
+
+    <h2>Administrators</h2>
+    <!-- Who can change anything. From rights.mjs adminList(), shown here because this is the page
+         people actually look at. -->
+    <p id="admins" class="hp-note"></p>
+    <p class="hp-note">Rights and the audit trail are on the <a href="/audit.html">Audit</a> page.</p>
 
     <h2>Alerts in the last 7 days</h2>
     <table class="hp-table">

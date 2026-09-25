@@ -356,6 +356,18 @@ function makePack(tag = 'pack', { by = 'mike', at = AT, notes = 'Break-in, front
 {
   check('buildManifest requires an exporter', threw(() => buildManifest({ files: [], clips: [], exportedAt: AT })) !== null)
   check('buildManifest requires a time of export', threw(() => buildManifest({ files: [], clips: [], exportedBy: 'mike' })) !== null)
+  // Phase 6: the manifest can carry WHO exported, beyond the name. The rule that matters is that
+  // adding it changed nothing for packs already issued, so their signatures still verify.
+  const without = buildManifest({ files: [], clips: [], exportedBy: 'mike', exportedAt: AT })
+  const withId = buildManifest({ files: [], clips: [], exportedBy: 'mike', exportedAt: AT, identity: { user: 'mike', admin: true, ip: '10.0.0.1', via: 'cctv-export' } })
+  check('a manifest with no identity is byte-identical to the old shape', !manifestBytes(without).toString().includes('identity'))
+  check('identity:null is treated as absent, so old packs keep their exact bytes', manifestBytes(buildManifest({ files: [], clips: [], exportedBy: 'mike', exportedAt: AT, identity: null })).equals(manifestBytes(without)))
+  check('identity is recorded when given', withId.identity.user === 'mike' && withId.identity.admin === true && withId.identity.ip === '10.0.0.1')
+  check('identity is signable: canonicalJson accepts it', typeof canonicalJson(withId) === 'string')
+  check('identity is a fixed set of fields, whatever the caller passes', Object.keys(buildManifest({ files: [], clips: [], exportedBy: 'm', exportedAt: AT, identity: { user: 'm', sneaky: 1 } }).identity).sort().join() === 'admin,ip,user,via')
+  check('a forged admin flag in identity must be the literal true', buildManifest({ files: [], clips: [], exportedBy: 'm', exportedAt: AT, identity: { admin: 'true' } }).identity.admin === false)
+  check('a newline in identity cannot break the canonical bytes', !buildManifest({ files: [], clips: [], exportedBy: 'm', exportedAt: AT, identity: { user: 'a\nb' } }).identity.user.includes('\n'))
+  check('identity order does not change the bytes', manifestBytes(withId).equals(manifestBytes(buildManifest({ files: [], clips: [], exportedBy: 'mike', exportedAt: AT, identity: { via: 'cctv-export', ip: '10.0.0.1', admin: true, user: 'mike' } }))))
   check('buildManifest requires a files array', threw(() => buildManifest({ clips: [], exportedBy: 'mike', exportedAt: AT })) !== null)
 }
 

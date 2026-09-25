@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCTV Audit</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="sites-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+      <nav class="tabs" aria-label="Views">
+        <a href="/">Live</a>
+        <a href="/playback.html">Playback</a>
+        <a href="/wall.html">Wall</a>
+        <a href="/map.html">Map</a>
+        <a href="/health.html">Health</a>
+        <a href="/sites.html" id="sitesTab" hidden>Sites</a>
+        <a href="/settings.html" id="settingsTab" hidden>Settings</a>
+        <a href="/audit.html" aria-current="page">Audit</a>
+      </nav>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="st-main">
+    <section class="se-section" aria-labelledby="audit-title">
+      <h2 id="audit-title">Audit trail</h2>
+      <p class="st-help">Every sign-in, refused sign-in, settings change, export and playback view. Append-only: nothing here can be edited or removed from this page.</p>
+
+      <!-- Filtering happens on the server. The browser is never sent rows it then hides. -->
+      <form id="filters" class="se-grid" autocomplete="off">
+        <label>User <input id="fUser" type="search" placeholder="any" /></label>
+        <label>Action <select id="fAction"><option value="">any</option></select></label>
+        <label>From <input id="fFrom" type="date" /></label>
+        <label>To <input id="fTo" type="date" /></label>
+        <button type="submit">Show</button>
+        <button id="reset" type="button">Clear</button>
+      </form>
+
+      <div id="auditWarn" hidden></div>
+      <p id="auditSummary" class="st-help" role="status"></p>
+
+      <table class="hp-table">
+        <thead>
+          <tr><th>When</th><th>User</th><th>Action</th><th>Camera / target</th><th>Detail</th><th>From</th></tr>
+        </thead>
+        <tbody id="auditRows"></tbody>
+      </table>
+      <p id="retention" class="hp-note"></p>
+    </section>
+
+    <section class="se-section" aria-labelledby="rights-title">
+      <h2 id="rights-title">Rights</h2>
+      <p class="st-help">What each account may do, per site or per camera. Anything not listed here is refused.</p>
+      <p id="rightsNote" class="hp-note"></p>
+      <table class="hp-table">
+        <thead id="rightsHead"></thead>
+        <tbody id="rightsRows"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script type="module" src="audit.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>

@@ -135,9 +135,17 @@ export function describeFile(dir, path) {
  * @param {{files:Array<{path:string,sha256:string,bytes?:number}>,
  *          clips:Array<{camera:string,nvr:string,startMs:number,endMs:number}>,
  *          clocks?:Array<{nvr:string,offsetMs:number}>,
- *          exportedBy:string, exportedAt:number|string, notes?:string, app?:string}} o
+ *          exportedBy:string, exportedAt:number|string, notes?:string, app?:string,
+ *          identity?:{user?:string, admin?:boolean, ip?:string, via?:string}|null}} o
+ *
+ * `identity` records WHO took the export in more than a name: the account, whether they held admin
+ * at the time, the address they asked from, and how (the web export page, a script). It is added
+ * only when supplied, and when it is absent the manifest bytes are exactly what they were before
+ * this field existed — so every pack already issued still verifies against its own signature,
+ * unchanged. verifyPack re-hashes the manifest bytes as they sit on disk and never inspects the
+ * shape beyond `files`, so a new optional key cannot invalidate an old pack.
  */
-export function buildManifest({ files, clips, clocks = [], exportedBy, exportedAt, notes = '', app = APP_VERSION }) {
+export function buildManifest({ files, clips, clocks = [], exportedBy, exportedAt, notes = '', app = APP_VERSION, identity = null }) {
   if (!Array.isArray(files)) throw new Error('files must be an array')
   if (!Array.isArray(clips)) throw new Error('clips must be an array')
   if (!exportedBy) throw new Error('exportedBy is required')
@@ -151,6 +159,9 @@ export function buildManifest({ files, clips, clocks = [], exportedBy, exportedA
     algorithm: { hash: 'SHA-256', signature: 'Ed25519' },
     exportedBy: String(exportedBy),
     exportedAt: iso(exportedAt),
+    // Spread, so the key simply is not there when no identity was given: an absent key and a key
+    // holding null are different bytes, and only the absent one matches the older packs.
+    ...(identity ? { identity: cleanIdentity(identity) } : {}),
     notes: String(notes),
     files: files
       .map((f) => ({ path: posix(String(f.path)), bytes: f.bytes ?? null, sha256: String(f.sha256) }))
@@ -170,6 +181,16 @@ export function buildManifest({ files, clips, clocks = [], exportedBy, exportedA
 }
 
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
+
+/**
+ * A fixed set of fields with fixed types, so the signed bytes cannot be steered by whatever the
+ * caller happened to hand over. Everything is a string or a boolean: canonicalJson refuses
+ * undefined, and a surprise object here would be a surprise in a court exhibit.
+ */
+function cleanIdentity(id) {
+  const s = (v, max = 120) => String(v ?? '').replace(/[\u0000-\u001f]/g, ' ').slice(0, max)
+  return { user: s(id.user, 64), admin: id.admin === true, ip: s(id.ip, 64), via: s(id.via, 64) }
+}
 
 /**
  * Signs the canonical manifest bytes.

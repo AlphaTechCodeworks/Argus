@@ -7,7 +7,7 @@
 //          ranges: [[s, e]], gaps: [[s, e, reason]] }
 //   All times are the server's clock (UTC ms). tzOffsetMs and skewMs (NVR clock - server clock)
 //   come from the NVR's last clock read (playback.mjs lastClock()): null and 0 when there is none.
-import { canPlayServer } from './rec-access.mjs'
+import { can } from './rights.mjs'
 
 const MAX_SPAN_MS = 48 * 3_600_000
 const INT = /^\d{1,15}$/
@@ -26,7 +26,7 @@ export function timelineApi({ nvr, params, who, index, now = Date.now() }) {
   const to = Number(raw.to)
   if (to <= from) return [400, { error: 'to must be after from' }]
   if (to - from > MAX_SPAN_MS) return [400, { error: 'at most 48 hours per request' }]
-  if (!index || !canPlayServer(who, nvr.id, ch)) return [200, { available: false }]
+  if (!index || !can(who, 'playback-server', { nvr: nvr.id, ch })) return [200, { available: false }]
   try {
     const first = index.first(nvr.id, ch)
     if (!first) return [200, { available: false }]

@@ -29,7 +29,8 @@ import { basename, dirname, join, sep } from 'node:path'
 import { CODEC, SegmentReader, codecOfPath, keyAtOrBefore } from './rec-reader.mjs'
 import { buildManifest, ensureKey, signManifest, writePack } from './export-pack.mjs'
 import { writeMp4 } from './mp4.mjs'
-import { canPlayServer } from './rec-access.mjs'
+import { can } from './rights.mjs'
+import { audit } from './audit.mjs'
 
 // ---------------------------------------------------------------------------- bounds
 
@@ -316,7 +317,7 @@ export function planExport(body, { index, who }) {
     }
     // The rights check, never re-implemented here: rec-access.mjs decides who may take footage off
     // this server, and an export is a permanent copy, so it is no laxer than playback.
-    if (!canPlayServer(who, nvr, ch)) throw new ExportError(403, `you are not allowed to export ${nvr} channel ${ch}`)
+    if (!can(who, 'export', { nvr, ch, format })) throw new ExportError(403, `you are not allowed to export ${nvr} channel ${ch} as ${format}`)
     const segments = index.segments(nvr, ch, fromMs, toMs).filter((s) => !s.open && s.endMs != null)
     const segBytes = segments.reduce((n, s) => n + (Number(s.bytes) || 0), 0)
     bytes += segBytes
@@ -435,8 +436,12 @@ const saveMeta = (dataDir, j, dir) => {
  * @param {{dataDir:string, index:object, who:object, user:string, clockOf?:(nvr:string)=>number}} deps
  *   clockOf: that NVR's clock offset in ms (NVR clock - server clock), 0 when unknown.
  */
-export function startExport(body, { dataDir, index, who, user, clockOf = () => 0 }) {
+export function startExport(body, { dataDir, index, who, user, clockOf = () => 0, ip = '' }) {
   loadFromDisk(dataDir)
+  // An export nobody can be named for is not evidence, and the name is signed into the manifest,
+  // so an unnamed caller is refused before any work is done rather than recorded as '?'. The name
+  // comes from the session (server.mjs), never from the request body.
+  if (!String(who?.user ?? user ?? '')) throw new ExportError(401, 'exports must be signed in for; there is no user on this request')
   if (running) throw new ExportError(409, 'another export is being made; wait for it to finish or cancel it')
   const plan = planExport(body, { index, who })
   const id = randomUUID()
@@ -446,7 +451,12 @@ export function startExport(body, { dataDir, index, who, user, clockOf = () => 0
     format: plan.format,
     notes: plan.notes,
     everyS: plan.everyS,
-    by: user ?? '?',
+    // The exporter's identity comes from the session (server.mjs), never from the request body,
+    // and it ends up signed into the pack manifest. An export nobody can be named for is not
+    // evidence, so an unnamed caller is refused outright rather than recorded as '?'.
+    by: String(who?.user ?? user ?? ''),
+    byAdmin: who?.admin === true,
+    byIp: String(ip ?? ''),
     state: 'running',
     error: '',
     startedAt: new Date().toISOString(),
@@ -558,6 +568,8 @@ async function runJob(job, plan, { dataDir, work }) {
     clips: job.clips.map((c) => ({ camera: `${c.nvr} channel ${c.ch}`, nvr: c.nvr, startMs: c.actualStartMs ?? c.fromMs, endMs: c.actualEndMs ?? c.toMs })),
     clocks: [...new Map(job.clips.map((c) => [c.nvr, { nvr: c.nvr, offsetMs: c.offsetMs }])).values()],
     exportedBy: job.by,
+    // Signed into the manifest: the account, whether it held admin at the time, and where from.
+    identity: { user: job.by, admin: job.byAdmin === true, ip: job.byIp ?? '', via: 'cctv-export' },
     exportedAt: Date.now(),
     notes: job.notes
   })
@@ -598,6 +610,9 @@ async function runJob(job, plan, { dataDir, work }) {
   mkdirSync(exportsRoot(dataDir), { recursive: true })
   renameSync(work, final)
   job.state = 'done'
+  // The audit trail must reach the packs: this row is how 'who exported that clip' is answerable
+  // without opening the pack. It can never fail the export (audit() does not throw).
+  audit(dataDir, { user: job.by, action: 'export', target: job.clips.map((c) => `${c.nvr}/${c.ch}`).join(' '), ip: job.byIp, detail: `${job.format} export "${job.name}" (${job.id}), ${job.bytes} bytes` })
   job.progress = { step: 'done', pct: 100, bytesDone: job.bytes, bytesTotal: job.bytesTotal, message: '' }
 }
 

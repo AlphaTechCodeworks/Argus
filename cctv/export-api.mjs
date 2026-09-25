@@ -6,16 +6,17 @@
 //   GET    /api/exports/:id/download -> the pack as a ZIP (streamed; see downloadExport)
 //   DELETE /api/exports/:id          -> cancels it if it is running, then removes it
 //
-// Admins only, decided by rec-access.mjs the same way playback is: an export is a permanent copy
+// Decided by rights.mjs the same way playback is: an export is a permanent copy
 // of footage, so it can be no easier to obtain than watching it. The per-clip check happens again
 // inside planExport for each camera, so a future per-camera rights model needs no change here.
-import { canPlayServer } from './rec-access.mjs'
+import { canAny } from './rights.mjs'
 import { ExportError, cancelExport, getExport, listExports, packDirOf, removeExport, startExport, zipEntriesOf, zipStream } from './export-job.mjs'
 
 const ROUTE = /^\/api\/exports(?:\/([A-Za-z0-9-]{1,64})(?:\/(download))?)?$/
 
-/** The coarse "may this person use exports at all" gate; per-camera rights are checked per clip. */
-const mayExport = (who) => canPlayServer(who, '', -1)
+/** The coarse "may this person use exports at all" gate; the camera AND the format are checked again
+ *  per clip inside planExport, which is what actually decides. */
+const mayExport = (who) => canAny(who, 'export')
 
 /**
  * @param {{method:string, pathname:string, readJson:()=>Promise<object>, who:object, user:string,
@@ -26,7 +27,7 @@ export async function handleExports({ method, pathname, readJson, who, user, ind
   const m = ROUTE.exec(pathname)
   if (!m) return null
   const [, id, tail] = m
-  if (!mayExport(who)) return [403, { error: 'Only admins can make exports' }]
+  if (!mayExport(who)) return [403, { error: 'You are not allowed to make exports' }]
   if (tail === 'download') return [400, { error: 'downloads are served separately' }] // handled by downloadExport
 
   try {
@@ -63,7 +64,7 @@ export async function downloadExport({ pathname, method, who, res, dataDir, head
   const m = ROUTE.exec(pathname)
   if (!m || m[2] !== 'download') return false
   const id = m[1]
-  if (!mayExport(who)) return sendJson(res, 403, { error: 'Only admins can make exports' }), true
+  if (!mayExport(who)) return sendJson(res, 403, { error: 'You are not allowed to make exports' }), true
   if (method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' }), true
   const job = getExport(dataDir, id)
   const dir = packDirOf(dataDir, id)

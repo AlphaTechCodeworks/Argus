@@ -63,7 +63,9 @@
 //  - Parsed files are kept per session (an LRU of 64 open readers, closed after 60 s unused), so
 //    scrubbing and seeking back and forth do not read an .idx twice.
 import * as fsp from 'node:fs/promises'
-import { canPlayServer } from './rec-access.mjs'
+import { canPlayServer } from './rights.mjs'
+import { audit } from './audit.mjs'
+import { DATA_DIR } from './auth.mjs'
 import { nvrLegs } from './rec-fallback.mjs'
 import { SegmentReader, keyAtOrAfter, keyAtOrBefore } from './rec-reader.mjs'
 
@@ -113,10 +115,28 @@ const sendJson = (ws, obj) => {
 }
 
 /**
+ * One audit row per playback session opened: who looked at recorded footage, which camera, from
+ * when, and whether it came off the server or the NVR. Kept tiny and wrapped in its own try even
+ * though audit() already swallows everything — nothing about recording an event may ever be the
+ * reason somebody cannot watch a camera.
+ */
+const note = (who, nvr, ch, source, start) => {
+  try {
+    const n = Number(start)
+    audit(DATA_DIR, {
+      user: who?.user,
+      action: 'playback-view',
+      target: `${nvr?.id}/${ch}`,
+      detail: `${source} playback from ${Number.isFinite(n) ? new Date(n).toISOString() : String(start)}`
+    })
+  } catch {}
+}
+
+/**
  * Handles a /playback WebSocket: server recordings (src=auto) or the NVR, see the top.
  * @param {{ nvr: object, ws: object, url: URL, who: {user?: string, admin?: boolean}|null,
  *           index: object|null, allowed?: Function, legs?: object|null, opts?: object }} args
- *   index: rec-index.mjs (null: CCTV_LIVE_WORKER off); allowed: the access hook (rec-access.mjs);
+ *   index: rec-index.mjs (null: CCTV_LIVE_WORKER off); allowed: the access hook (rights.mjs);
  *   opts: ServerPlayback options (tests)
  * @returns {ServerPlayback|null}
  */
@@ -125,7 +145,12 @@ export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlaySer
   if (p.get('src') !== 'auto') {
     // today's NVR playback, exactly as before
     if (!nvr.online) ws.close(1013, 'NVR offline')
-    else nvr.playback.connect(ws, url)
+    else {
+      // Recorded before the socket is handed over: who looked at recorded footage, and when, is
+      // the row an investigation asks for. audit() never throws, so it cannot break playback.
+      note(who, nvr, p.get('ch') ?? '?', 'nvr', p.get('start') ?? '')
+      nvr.playback.connect(ws, url)
+    }
     return null
   }
   const rawCh = p.get('ch') ?? ''
@@ -148,6 +173,7 @@ export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlaySer
     ws.close(1011, 'server recordings not available')
     return null
   }
+  note(who, nvr, ch, 'server', start)
   return new ServerPlayback({ ws, nvr, ch, start, stream, index, legs, ...opts })
 }
 

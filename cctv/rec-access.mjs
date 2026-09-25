@@ -1,15 +1,8 @@
-// Who may play back (and later export) the server's own recordings. The one place per-camera
-// rights are decided: every server-recording route asks here (the timeline API, server playback).
-// Non-admins keep today's NVR playback unchanged.
+// Who may play back (and export) the server's own recordings.
+//
+// The decision itself moved to rights.mjs in Phase 6, which is the one place per-camera rights are
+// now made. This module stays only so that the `canPlayServer(who, nvrId, ch)` call shape keeps
+// working for anything that still uses it; it adds no rule of its own, and must never grow one.
+// New code should call rights.can(who, 'playback-server', { nvr, ch }) directly.
 
-/**
- * Whether `who` may play camera `ch` of NVR `nvrId` from the server's recordings.
- * Admins only for now (who.admin is also true with CCTV_AUTH=off). Per-user rights (admin screens
- * in a later plan) replace this body; the signature stays.
- * @param {{ user?: string, admin?: boolean } | null | undefined} who
- * @param {string} nvrId
- * @param {number} ch
- */
-export function canPlayServer(who, nvrId, ch) {
-  return Boolean(who?.admin)
-}
+export { canPlayServer } from './rights.mjs'

@@ -351,7 +351,16 @@ export function renderHealth(d) {
       ? `email failing: ${s.emailError}`
       : ''
 
-  return { cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, sendingProblem }
+  // Who holds the keys, from rights.mjs adminList() by way of /api/health. Worth a line on the
+  // page everyone already looks at: an admin account nobody remembers creating is the sort of
+  // thing that is only ever noticed if it is put somewhere in plain sight.
+  const admins = Array.isArray(d.admins) ? d.admins.filter((a) => typeof a === 'string' && a).slice().sort() : []
+  const adminText = admins.length === 0
+    ? 'No admins — nobody can change settings. Create one with adduser.mjs.'
+    : `${admins.length} ${admins.length === 1 ? 'admin' : 'admins'}: ${admins.join(', ')}`
+  const adminState = admins.length === 0 ? 'bad' : admins.length > 4 ? 'warn' : 'ok'
+
+  return { cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, sendingProblem, admins, adminText, adminState }
 }
 
 // ---- the page itself (skipped when a test imports this module: there is no document) ------------
@@ -488,6 +497,12 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     }))
 
     document.getElementById('sending').textContent = r.sendingProblem
+
+    const adminBox = document.getElementById('admins')
+    if (adminBox) {
+      adminBox.textContent = r.adminText
+      adminBox.className = `hp-note ${r.adminState}`
+    }
   }
 
   // The same account wiring every page does: who is signed in, and the admin-only tabs.
@@ -498,6 +513,8 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
       if (me.admin) {
         document.getElementById('sitesTab').hidden = false
         document.getElementById('settingsTab').hidden = false
+        const at = document.getElementById('auditTab')
+        if (at) at.hidden = false
       }
     })
     .catch(() => { location.href = '/login.html' })

@@ -38,7 +38,10 @@ export const loadUsers = () => {
 }
 
 /** Admins can manage NVRs and sites; viewers can only watch. */
-export const isAdmin = (user) => loadUsers()[user]?.role === 'admin'
+export const isAdmin = (user) => {
+  const users = loadUsers()
+  return Object.hasOwn(users, user) && users[user]?.role === 'admin'
+}
 
 export const saveUsers = (users) => {
   ensureDir(USERS_FILE)
@@ -86,7 +89,9 @@ export const verifySession = (token) => {
   if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) return null
   if (Number(parts[1]) < Date.now()) return null
   const user = Buffer.from(parts[0], 'base64url').toString()
-  return user in loadUsers() ? user : null // removed users lose access immediately
+  // hasOwn, not `in`: `'constructor' in {}` is true, and a name that resolves through
+  // Object.prototype must not count as an account.
+  return Object.hasOwn(loadUsers(), user) ? user : null // removed users lose access immediately
 }
 
 export const parseCookies = (header = '') =>
