@@ -154,15 +154,19 @@ const alerts = startAlerts({
       // no clean way to total them here yet. The nvr-refusing rule therefore never fires.
       refusalsLast10Min: 0
     })),
+  // Only slots that actually hold a camera: an NVR reports all 32 of its channels whether or not
+  // anything is plugged into them, and empty slots are permanently "offline".
   listCameras: () =>
-    allCameras().map((c) => ({
-      nvrId: c.nvr,
-      ch: c.ch,
-      name: c.name,
-      online: c.online,
-      recording: cameraRecording(c.nvr, c.ch).mode !== 'off',
-      lastSegmentMs: lastSegmentMs(c.nvr, c.ch)
-    })),
+    allCameras()
+      .filter((c) => c.configured !== false)
+      .map((c) => ({
+        nvrId: c.nvr,
+        ch: c.ch,
+        name: c.name,
+        online: c.online,
+        recording: cameraRecording(c.nvr, c.ch).mode !== 'off',
+        lastSegmentMs: lastSegmentMs(c.nvr, c.ch)
+      })),
   locationState,
   lastBackup: () => lastBackup(DATA_DIR),
   sender: makeSender({ settings: getSettings().alerts, log: console.log })

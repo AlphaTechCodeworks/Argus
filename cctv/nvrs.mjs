@@ -504,7 +504,11 @@ export class Nvr {
     const list = []
     for (let i = 0; i < n; i++) {
       const ipc = koffi.decode(buf, i * size, IPC_INFO)
-      list.push({ ch: ipc.channel, name: ipc.szChlname || `Camera ${ipc.channel + 1}`, online: ipc.status === 1 })
+      // An NVR reports every channel slot it has, empty ones included. A slot with no camera
+      // address and no name has no camera in it; counting those as offline cameras made the
+      // alerts claim 21 of rigginglot's 11 cameras were down.
+      const configured = Boolean(String(ipc.szServer ?? '').trim() || String(ipc.szChlname ?? '').trim())
+      list.push({ ch: ipc.channel, name: ipc.szChlname || `Camera ${ipc.channel + 1}`, online: ipc.status === 1, configured })
     }
     if (list.length > 0) this.channels = list.sort((a, b) => a.ch - b.ch)
     return true
@@ -687,7 +691,8 @@ export class Nvr {
     // the worker's camera list (it polls; this process then does not, see #refresh)
     const list = stats?.channels
     if (Array.isArray(list) && list.length > 0 && list.every((c) => c && Number.isInteger(c.ch))) {
-      this.channels = list.map((c) => ({ ch: c.ch, name: String(c.name ?? `Camera ${c.ch + 1}`), online: c.online === true })).sort((a, b) => a.ch - b.ch)
+      // older workers do not send `configured`; assume a camera is there rather than hiding one
+      this.channels = list.map((c) => ({ ch: c.ch, name: String(c.name ?? `Camera ${c.ch + 1}`), online: c.online === true, configured: c.configured !== false })).sort((a, b) => a.ch - b.ch)
       this.workerListAt = Date.now()
     }
   }
@@ -895,6 +900,8 @@ export const allCameras = () =>
         ch: c.ch,
         name: c.name,
         online: c.online && nvr.online,
+        // false for an empty channel slot on the NVR: there is no camera there to be offline
+        configured: c.configured !== false,
         // whether the server is set to record this camera, so a live tile can show the red dot
         // that tells a viewer at a glance this one is being kept
         recording: cameraRecording(nvr.id, c.ch).mode !== 'off',
