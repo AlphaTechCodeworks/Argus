@@ -937,3 +937,22 @@ body.is-fullscreen .alert-banner { display: none; }
 .pb-ex-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 #exProgress { width: 100%; margin-top: 8px; }
 .pb-on { background: #12314d; border-color: var(--accent); }
+
+/* Which camera adjoins which, drawn on the map (camera-links.mjs). A suggestion is always dashed
+   and always labelled a guess: a nearest-neighbour guess must never look like a drawn link. */
+.map-view.linking, .map-view.linking .cam { cursor: pointer; }
+.map-link { stroke: var(--accent); stroke-width: 2; stroke-opacity: 0.45; pointer-events: stroke; }
+.map-link.sel { stroke-opacity: 1; stroke-width: 3; }
+.map-link.suggested { stroke: var(--muted); stroke-width: 2; stroke-dasharray: 5 6; stroke-opacity: 0.8; }
+.map-link-arrow { fill: var(--accent); fill-opacity: 0.45; }
+.map-link-arrow.sel { fill-opacity: 1; }
+.map-link-dir { color: var(--accent); font-size: 14px; padding: 0 4px; }
+.map-link-label { width: 100%; margin-top: 4px; font-size: 12px; }
+.map-link-actions { display: flex; gap: 8px; }
+.map-link-oneway { display: flex; align-items: center; gap: 6px; }
+.map-suggested li { opacity: 0.85; }
+.map-suggest h2 { display: flex; align-items: center; gap: 6px; }
+.map-guess-tag {
+  border: 1px dashed var(--muted); border-radius: 10px; padding: 0 6px;
+  color: var(--muted); font-size: 11px; font-weight: normal; text-transform: lowercase;
+}

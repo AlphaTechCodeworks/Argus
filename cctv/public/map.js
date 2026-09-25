@@ -368,6 +368,7 @@ const view = new MapView($('map'))
 const siteSelect = $('site')
 const namesBox = $('names')
 const editBtn = $('edit')
+const linksBtn = $('links')
 const side = $('side')
 const emptyEl = $('empty')
 const liveEl = $('live')
@@ -382,6 +383,13 @@ let dirty = false
 let selected = null // camera key
 let placing = null // camera key waiting for a click on the map
 let popup = null // { key, tile }
+// Which camera adjoins which (camera-links.mjs). Drawn on the map rather than edited in a list of
+// dropdowns because the spatial relationship is the whole idea: you can see that the yard camera
+// looks at the gate, so you can see that it leads there.
+let linkMode = false
+let linkData = { links: {}, version: 0, suggestions: {} } // suggestions: guesses from the map, never stored
+let newLabel = '' // the label given to the next link drawn
+let newOneWay = false // a one-way door or a stairwell: the link leads only one way
 
 const camKey = (c) => `${c.nvr}/${c.ch}`
 const enc = encodeURIComponent
@@ -456,6 +464,64 @@ function conePath(p, dir, fov, r) {
   return `M ${p[0]} ${p[1]} L ${ax} ${ay} A ${r} ${r} 0 ${fov > 180 ? 1 : 0} 1 ${bx} ${by} Z`
 }
 
+/** Where each placed camera is on screen, for drawing the links between them. */
+function screenPoints(m) {
+  const pts = {}
+  for (const [key, c] of Object.entries(placed(m))) {
+    const w = camWorld(m, c)
+    pts[key] = view.toScreen(w.x, w.y)
+  }
+  return pts
+}
+
+/** A small arrowhead partway along a -> b, so a one-way link reads as one-way at a glance. */
+function arrowHead(a, b) {
+  const [dx, dy] = [b[0] - a[0], b[1] - a[1]]
+  const len = Math.hypot(dx, dy) || 1
+  const [ux, uy] = [dx / len, dy / len]
+  const p = [a[0] + ux * len * 0.6, a[1] + uy * len * 0.6]
+  const s = 7
+  return `M ${p[0]} ${p[1]} L ${p[0] - ux * s - uy * s * 0.6} ${p[1] - uy * s + ux * s * 0.6} L ${p[0] - ux * s + uy * s * 0.6} ${p[1] - uy * s - ux * s * 0.6} Z`
+}
+
+/** The drawn links, and (dashed, only for the chosen camera) the map's guesses at them. */
+function linkLayer(m) {
+  const g = svgEl('g')
+  if (!linkMode || !m) return g
+  const pts = screenPoints(m)
+  const drawn = new Set()
+  for (const [from, list] of Object.entries(linkData.links)) {
+    for (const n of list) {
+      if (!pts[from] || !pts[n.to]) continue // one of them is not on this map
+      const bothWays = (linkData.links[n.to] ?? []).some((x) => x.to === from)
+      const pair = [from, n.to].sort().join('\u0000')
+      if (bothWays && drawn.has(pair)) continue // a two-way link is one line, not two on top of each other
+      drawn.add(pair)
+      const a = pts[from]
+      const b = pts[n.to]
+      const sel = selected === from || selected === n.to ? ' sel' : ''
+      const line = svgEl('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1], class: `map-link${sel}` })
+      const title = svgEl('title')
+      title.textContent = `${camLabel(camByKey(from), from)} ${bothWays ? '↔' : '→'} ${camLabel(camByKey(n.to), n.to)}${n.label ? `: ${n.label}` : ''}`
+      line.append(title)
+      g.append(line)
+      if (!bothWays) g.append(svgEl('path', { d: arrowHead(a, b), class: `map-link-arrow${sel}` }))
+    }
+  }
+  // guesses, and only while a camera is chosen, so they are never mistaken for drawn links
+  if (selected && pts[selected]) {
+    for (const s of suggestionsFor(selected)) {
+      if (!pts[s.to]) continue
+      const line = svgEl('line', { x1: pts[selected][0], y1: pts[selected][1], x2: pts[s.to][0], y2: pts[s.to][1], class: 'map-link suggested' })
+      const title = svgEl('title')
+      title.textContent = `Suggestion (not a drawn link): ${camLabel(camByKey(s.to), s.to)}, about ${s.distance} ${s.units} away`
+      line.append(title)
+      g.append(line)
+    }
+  }
+  return g
+}
+
 view.onDraw = () => {
   const m = current()
   const cones = svgEl('g')
@@ -492,7 +558,8 @@ view.onDraw = () => {
       }
     }
   }
-  view.svg.replaceChildren(cones, marks)
+  // links above the cones (they say where a person goes, not what a camera sees) but below the marks
+  view.svg.replaceChildren(cones, linkLayer(current()), marks)
 }
 
 // ---- interaction ----
@@ -516,11 +583,22 @@ view.onClick = (p, target) => {
   }
   const mark = target?.closest?.('.cam')
   if (mark) {
-    if (editing) select(mark.dataset.key)
+    if (linkMode) clickedInLinkMode(mark.dataset.key)
+    else if (editing) select(mark.dataset.key)
     else openLive(mark.dataset.key)
     return
   }
-  if (editing) select(null)
+  if (editing || linkMode) select(null)
+}
+
+/**
+ * Pick a camera, then click the cameras it leads to. Clicking a camera it already leads to takes
+ * that link away again, so drawing and undrawing are the same gesture.
+ */
+function clickedInLinkMode(key) {
+  if (!selected || selected === key) return select(selected === key ? null : key)
+  const already = (linkData.links[selected] ?? []).some((n) => n.to === key)
+  linkAction(already ? { action: 'unlink', from: selected, to: key } : { action: 'link', from: selected, to: key, label: newLabel, oneWay: newOneWay })
 }
 
 function dragCamera(key, start) {
@@ -714,7 +792,7 @@ function centreOnCamera(key) {
 
 function renderSide() {
   statusEl = null
-  side.replaceChildren(...(editing ? editPanel() : viewPanel()))
+  side.replaceChildren(...(linkMode ? linkPanel() : editing ? editPanel() : viewPanel()))
 }
 
 function camRow(cam, key, extra, opts = {}) {
@@ -897,6 +975,158 @@ function syncInputs() {
   for (const out of side.querySelectorAll('[data-out]')) out.textContent = `${Math.round(c[out.dataset.out])}°`
 }
 
+// ---- which camera adjoins which ----
+
+/** The guesses still worth offering for a camera: not ones already drawn since the page loaded. */
+function suggestionsFor(key) {
+  const drawn = new Set((linkData.links[key] ?? []).map((n) => n.to))
+  return (linkData.suggestions[key] ?? []).filter((s) => !drawn.has(s.to))
+}
+
+async function loadLinks() {
+  try {
+    linkData = await api('GET', '/api/camera-links')
+  } catch (e) {
+    setStatus(`Could not read the camera links: ${e.message}`)
+  }
+}
+
+/**
+ * One change, named against the version it was made on. Another admin having saved in the meantime
+ * gives 409 with the latest links; the change is then made again on those rather than overwriting
+ * their work. It is tried once more only, so a page cannot loop against a busy server.
+ */
+async function linkAction(body) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch('/api/admin/camera-links', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...body, version: linkData.version })
+    })
+    if (res.status === 401) return (location.href = '/login.html')
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) {
+      linkData.links = data.links
+      linkData.version = data.version
+      setStatus('Saved')
+      renderSide()
+      view.requestRender()
+      return true
+    }
+    if (res.status === 409 && attempt === 0) {
+      linkData.links = data.links
+      linkData.version = data.version
+      setStatus('Someone else changed the links; doing your change again on theirs…')
+      continue
+    }
+    setStatus(`Could not save: ${data.error ?? `HTTP ${res.status}`}`)
+    renderSide()
+    return false
+  }
+  return false
+}
+
+function linkPanel() {
+  const m = current()
+  const where = placed(m)
+  const cam = camByKey(selected)
+  const parts = [
+    el('h2', { textContent: 'Which camera leads where' }),
+    el('p', { className: 'map-help', textContent: 'Click a camera, then click the cameras a person can walk to from it. Clicking a linked camera again takes the link away.' })
+  ]
+
+  const label = el('input', { type: 'text', maxLength: 60, value: newLabel, placeholder: 'through the front door' })
+  label.addEventListener('input', () => {
+    newLabel = label.value
+  })
+  const oneWay = el('input', { type: 'checkbox', checked: newOneWay })
+  oneWay.addEventListener('change', () => {
+    newOneWay = oneWay.checked
+  })
+  parts.push(
+    el('section', {},
+      el('label', {}, 'Label for the next link', label),
+      el('label', { className: 'map-link-oneway' }, oneWay, ' One-way only (a fire door, a stairwell)'),
+      el('p', { className: 'map-help', textContent: 'Links lead both ways unless you say otherwise: a way out is nearly always a way back.' }))
+  )
+
+  if (!selected) {
+    parts.push(el('p', { className: 'map-help', textContent: 'No camera chosen yet.' }))
+  } else if (!where[selected]) {
+    parts.push(el('p', { className: 'map-help', textContent: `${camLabel(cam, selected)} is not on the map. Place it first, under Edit map.` }))
+  } else {
+    const list = el('ul', { className: 'map-cams' })
+    const mine = linkData.links[selected] ?? []
+    for (const n of mine) {
+      const back = (linkData.links[n.to] ?? []).some((x) => x.to === selected)
+      const text = el('input', { type: 'text', maxLength: 60, value: n.label, placeholder: 'where it leads', className: 'map-link-label' })
+      // saved when the box is left, not on every keystroke: one save per edit, not one per letter
+      text.addEventListener('change', () => linkAction({ action: 'link', from: selected, to: n.to, label: text.value, oneWay: !back }))
+      const flip = el('button', { type: 'button', className: 'st-link', textContent: back ? 'Make one-way' : 'Make two-way' })
+      flip.addEventListener('click', () =>
+        back
+          ? linkAction({ action: 'unlink', from: n.to, to: selected, oneWay: true })
+          : linkAction({ action: 'link', from: n.to, to: selected, label: n.label })
+      )
+      const remove = el('button', { type: 'button', className: 'st-link st-danger', textContent: 'Remove' })
+      remove.addEventListener('click', () => linkAction({ action: 'unlink', from: selected, to: n.to }))
+      const li = camRow(camByKey(n.to), n.to, el('span', { className: 'map-link-actions' }, flip, remove), { placed: true })
+      li.append(el('span', { className: 'map-link-dir', title: back ? 'Leads both ways' : 'Leads one way only', textContent: back ? '↔' : '→' }), text)
+      list.append(li)
+    }
+    parts.push(el('section', {},
+      el('h2', { textContent: camLabel(cam, selected) }),
+      mine.length ? list : el('p', { className: 'map-help', textContent: 'No links yet. Click the cameras this one leads to.' })))
+
+    const guesses = suggestionsFor(selected).filter((s) => where[s.to])
+    if (guesses.length) {
+      const gl = el('ul', { className: 'map-cams map-suggested' })
+      for (const s of guesses) {
+        const add = el('button', { type: 'button', className: 'st-link', textContent: 'Add link' })
+        add.addEventListener('click', () => linkAction({ action: 'link', from: selected, to: s.to, label: newLabel, oneWay: newOneWay }))
+        const li = camRow(camByKey(s.to), s.to, add)
+        li.append(el('span', { className: 'map-note', textContent: `about ${s.distance} ${s.units} away` }))
+        gl.append(li)
+      }
+      parts.push(el('section', { className: 'map-suggest' },
+        el('h2', {}, 'Suggestions ', el('span', { className: 'map-guess-tag', textContent: 'guesses' })),
+        el('p', { className: 'map-help', textContent: 'Only the nearest cameras on this map. Nothing here is saved until you add it.' }),
+        gl))
+    }
+  }
+
+  statusEl = el('p', { className: 'map-help', role: 'status', textContent: '' })
+  const done = el('button', { type: 'button', textContent: 'Done' })
+  done.addEventListener('click', stopLinks)
+  parts.push(el('div', { className: 'map-actions' }, done), statusEl)
+  return parts
+}
+
+async function startLinks() {
+  closeLive()
+  linkMode = true
+  selected = null
+  editBtn.hidden = true
+  linksBtn.hidden = true
+  siteSelect.disabled = true
+  view.el.classList.add('linking')
+  renderSide()
+  await loadLinks()
+  renderSide()
+  view.requestRender()
+}
+
+function stopLinks() {
+  linkMode = false
+  selected = null
+  view.el.classList.remove('linking')
+  editBtn.hidden = !isAdmin || !site
+  linksBtn.hidden = !isAdmin || !site
+  siteSelect.disabled = false
+  renderSide()
+  view.requestRender()
+}
+
 // ---- editing ----
 
 function startEdit() {
@@ -907,6 +1137,7 @@ function startEdit() {
   selected = null
   placing = null
   editBtn.hidden = true
+  linksBtn.hidden = true
   siteSelect.disabled = true
   applyView(true)
   renderSide()
@@ -921,6 +1152,7 @@ function stopEdit(force = false) {
   placing = null
   view.el.classList.remove('placing')
   editBtn.hidden = !isAdmin
+  linksBtn.hidden = !isAdmin || !site
   siteSelect.disabled = false
   applyView(true)
   renderSide()
@@ -1008,6 +1240,8 @@ document.addEventListener('keydown', (e) => {
       renderSide()
     } else if (popup) {
       closeLive()
+    } else if (linkMode && selected) {
+      select(null)
     } else if (editing && selected) {
       select(null)
     }
@@ -1027,6 +1261,7 @@ $('zoomIn').addEventListener('click', () => view.zoomBy(1))
 $('zoomOut').addEventListener('click', () => view.zoomBy(-1))
 $('fit').addEventListener('click', fitAll)
 editBtn.addEventListener('click', startEdit)
+linksBtn.addEventListener('click', startLinks)
 
 try {
   namesBox.checked = localStorage.getItem('cctv.mapNames') !== '0'
@@ -1038,6 +1273,7 @@ namesBox.addEventListener('change', () => {
 
 siteSelect.addEventListener('change', () => {
   site = siteSelect.value
+  selected = null
   try { localStorage.setItem('cctv.mapSite', site) } catch {}
   closeLive()
   applyView(false)
@@ -1067,7 +1303,7 @@ siteSelect.replaceChildren(...siteNames.map((n) => new Option(n, n)))
   site = siteNames.includes(saved) ? saved : siteNames[0] ?? ''
   siteSelect.value = site
 }
-editBtn.hidden = !isAdmin || !site
+editBtn.hidden = linksBtn.hidden = !isAdmin || !site
 applyView(false)
 renderSide()
 requestAnimationFrame(fitAll)

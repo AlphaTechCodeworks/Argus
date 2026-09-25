@@ -220,6 +220,22 @@ check('data/camera-links.json in DATA_DIR', LINKS_FILE === join(DATA, 'camera-li
   check('server.mjs dispatches the write route inside the admin block', write > src.indexOf("if (pathname.startsWith('/api/admin/'))"))
 }
 
+// ---- the map editor -----------------------------------------------------------------------------
+{
+  const js = readFileSync(new URL('../public/map.js', import.meta.url), 'utf8')
+  const html = readFileSync(new URL('../public/map.html', import.meta.url), 'utf8')
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8')
+  check('the map page has an Edit links button', /id="links"/.test(html))
+  check('the editor reads and writes the links API', /'\/api\/camera-links'/.test(js) && /'\/api\/admin\/camera-links'/.test(js))
+  check('it sends the version it read, so it cannot overwrite another admin', /version: linkData\.version/.test(js))
+  check('  and redoes its change on theirs after a 409', /res\.status === 409/.test(js))
+  check('picking a camera then clicking another draws the link', /clickedInLinkMode/.test(js) && /action: 'link'/.test(js))
+  check('a one-way link can be drawn', /oneWay: newOneWay/.test(js))
+  check('suggestions are drawn dashed and never as drawn links', /class: 'map-link suggested'/.test(js) && /\.map-link\.suggested \{[^}]*dasharray/.test(css))
+  check('  and are labelled a guess in the panel', /map-guess-tag/.test(js) && /guesses/.test(js))
+  check('nothing suggested is saved until a person adds it', /textContent: 'Add link'/.test(js))
+}
+
 reset()
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
