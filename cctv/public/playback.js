@@ -36,6 +36,7 @@ import {
   speedFor
 } from './pb-sources.js'
 import { follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
+import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
 import { allowedSpeeds, clampSpeed, frameStep, shuttleLabel, shuttleRate } from './pb-transport.js'
 
 // Video is decoded here in the browser, exactly as the camera encoded it; the
@@ -916,6 +917,7 @@ function drawTimeline() {
   for (const b of zoomBtns) b.setAttribute('aria-pressed', String(Number(b.dataset.span) === Math.round(v.spanMs)))
   followBtn.setAttribute('aria-pressed', String(state.follow))
   drawClip()
+  drawBookmarks()
   drawOverview()
   drawHover()
 }
@@ -1248,8 +1250,8 @@ $('snapshot').addEventListener('click', snapshot)
 // not as fractions of the view, so zooming and panning never move the clip you chose — which is
 // the whole point of being able to zoom in to pick a moment precisely.
 //
-// Bookmarks (phase 3) are still to come; the key and the button stay so the shortcut list and the
-// layout do not have to change again.
+// Bookmarks sit on the same timeline (see further down): the clip is a stretch you are about to
+// export, a bookmark is a stretch someone wants kept and findable.
 
 const clip = { on: false, from: null, to: null }
 const clipSelEl = $('clipSel')
@@ -1288,7 +1290,6 @@ function clipOn(on) {
 
 const selectClipStart = () => { if (!clip.on) clipOn(true); setClip(state.position ?? clip.from, clip.to ?? (state.position ?? 0) + 60_000) }
 const selectClipEnd = () => { if (!clip.on) clipOn(true); setClip(clip.from ?? (state.position ?? 0) - 60_000, state.position ?? clip.to) }
-const addBookmark = () => {}
 
 selectClipBtn.addEventListener('click', () => clipOn(!clip.on))
 
@@ -1326,6 +1327,299 @@ function grabHandle(el, which) {
 }
 grabHandle(clipFromEl, 'from')
 grabHandle(clipToEl, 'to')
+
+// ---- bookmarks ---------------------------------------------------------------
+//
+// A bookmark is a stretch someone marked as mattering ("van reverses into the gate"). It is drawn
+// as a diamond on the timeline, listed beside the picture, and — the part that is not about the
+// screen at all — it stops housekeeping deleting that footage later.
+//
+// The rules about what a bookmark may contain live in bookmarks-view.js, which the server loads
+// too, so the form here refuses exactly what the server would refuse. The page still sends the bad
+// one nowhere: the check is only so the person hears about it at once, and the server checks again
+// because a page is not a permission.
+//
+// Times are the same absolute milliseconds as everything else here. In server mode that is the
+// server's clock and in NVR mode the NVR's, which is the clock a bookmark is stored in — a bookmark
+// made while watching an NVR whose clock is out is therefore marked in that NVR's time, the same
+// time printed on the picture, which is what the person marking it saw.
+
+const bmPanel = $('bookmarkPanel')
+const bmBtn = $('bookmark')
+const bmList = $('bookmarkList')
+const bmMarks = $('bookmarkMarks')
+const bmFind = $('bookmarkFind')
+const bmThisCamera = $('bookmarkThisCamera')
+const bmStatus = $('bookmarkStatus')
+const bmDlg = $('bmDlg')
+const bmHeading = $('bmTitleHeading')
+const bmTitle = $('bmTitle')
+const bmFrom = $('bmFrom')
+const bmTo = $('bmTo')
+const bmDay = $('bmDay')
+const bmCameras = $('bmCameras')
+const bmNotes = $('bmNotes')
+const bmMsg = $('bmMsg')
+const bmSave = $('bmSave')
+
+/** Who is signed in, for deciding which Edit and Delete buttons to draw. Filled in at start-up. */
+let viewer = { user: null, admin: false }
+/** Every bookmark the server answered with, whatever camera; the list and the marks filter it. */
+let bookmarks = []
+/** The bookmark being edited, or null while adding a new one. */
+let editing = null
+
+const bmSay = (text, bad = false) => {
+  bmMsg.textContent = text
+  bmMsg.className = `pb-ex-msg${bad ? ' pb-ex-bad' : ''}`
+}
+/** The camera on screen as a key, or null before one is chosen. */
+const thisCamera = () => (state.nvr === null || state.nvr === undefined ? null : camKey())
+
+async function bmApi(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: body !== undefined ? { 'content-type': 'application/json' } : {},
+    body: body !== undefined ? JSON.stringify(body) : undefined
+  })
+  if (res.status === 401) location.href = '/login.html'
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+  return data
+}
+
+/** The bookmarks the panel and the timeline show: this camera's unless the tick box says otherwise. */
+function shownBookmarks() {
+  return sortBookmarks(filterBookmarks(bookmarks, { text: bmFind.value, camera: bmThisCamera.checked ? thisCamera() : null }))
+}
+
+/**
+ * Reads every bookmark once and keeps them here. They are few and they change rarely, so filtering
+ * in the browser keeps typing in the Find box instant and saves a request per keystroke.
+ */
+async function loadBookmarks() {
+  try {
+    const { bookmarks: list, user, admin } = await bmApi('GET', '/api/bookmarks')
+    bookmarks = list ?? []
+    viewer = { user: user ?? viewer.user, admin: admin === true }
+    bmStatus.textContent = ''
+  } catch (e) {
+    // The picture still plays without them, so this is a note rather than a takeover of the page.
+    bmStatus.textContent = `Bookmarks are not available: ${e.message}`
+  }
+  drawBookmarkList()
+  scheduleDraw()
+}
+
+/** The diamonds and their faint bands. Called from drawTimeline, so zooming and panning move them. */
+function drawBookmarks() {
+  const marks = bookmarkMarkers(state.view, shownBookmarks())
+  bmMarks.replaceChildren(
+    ...marks.flatMap((m) => {
+      const nodes = []
+      if (m.widthPct > 0) {
+        const band = document.createElement('div')
+        band.className = 'pb-bm-band'
+        band.style.left = `${m.leftPct}%`
+        band.style.width = `${m.widthPct}%`
+        nodes.push(band)
+      }
+      const d = document.createElement('button')
+      d.type = 'button'
+      d.className = 'pb-bm-mark'
+      d.style.left = `${m.leftPct}%`
+      d.title = `${m.title} · ${fmtTime(m.ms)}${m.user ? ` · ${m.user}` : ''}`
+      d.setAttribute('aria-label', d.title)
+      // the true start, not the diamond's position: a mark clamped to the edge of the window stands
+      // for a bookmark that begins off-screen
+      d.addEventListener('click', (e) => {
+        e.stopPropagation() // the timeline's own pointer handling would pan or seek instead
+        ensureVisible(m.ms)
+        seek(m.ms)
+      })
+      nodes.push(d)
+      return nodes
+    })
+  )
+}
+
+/** The list beside the picture. Edit and Delete appear only for the bookmarks this person may change. */
+function drawBookmarkList() {
+  const list = shownBookmarks()
+  if (!list.length) {
+    bmList.replaceChildren()
+    if (!bmStatus.textContent) bmStatus.textContent = bookmarks.length ? 'Nothing matches.' : 'No bookmarks yet.'
+    return
+  }
+  if (bmStatus.textContent === 'Nothing matches.' || bmStatus.textContent === 'No bookmarks yet.') bmStatus.textContent = ''
+  bmList.replaceChildren(
+    ...list.map((b) => {
+      const li = document.createElement('li')
+      const go = document.createElement('button')
+      go.type = 'button'
+      go.className = 'pb-bm-go'
+      go.append(b.title)
+      const when = document.createElement('span')
+      when.className = 'pb-bm-when'
+      // The day is shown as well as the clock: the list is not limited to the day on screen, and a
+      // bookmark from last week reading only "09:14" would look like this morning.
+      when.textContent = `${fmtDate(b.startMs)} ${fmtTime(b.startMs)} · ${spanText(b.startMs, b.endMs)} · ${b.user ?? 'not available'}`
+      go.append(when)
+      go.addEventListener('click', () => openBookmark(b))
+      li.append(go)
+      if (b.description) {
+        const p = document.createElement('p')
+        p.className = 'pb-bm-note'
+        p.textContent = b.description
+        li.append(p)
+      }
+      if (canEdit(b, viewer)) {
+        const actions = document.createElement('div')
+        actions.className = 'pb-bm-actions'
+        const edit = document.createElement('button')
+        edit.type = 'button'
+        edit.textContent = 'Edit'
+        edit.addEventListener('click', () => openBookmarkDialog(b))
+        const del = document.createElement('button')
+        del.type = 'button'
+        del.textContent = 'Delete'
+        del.addEventListener('click', () => removeBookmark(b))
+        actions.append(edit, del)
+        li.append(actions)
+      }
+      return li
+    })
+  )
+}
+
+/**
+ * Clicking a bookmark: show the camera and moment it marks, switching camera and day if need be.
+ * The day and the camera are set before a single reload rather than each firing its own change
+ * handler, because two reloads in flight at once land wherever the slower one finishes.
+ */
+async function openBookmark(b) {
+  const key = b.cameras?.[0]
+  const known = Boolean(key) && [...cameraSel.options].some((o) => o.value === key)
+  const day = fmtDate(b.startMs)
+  if (day !== state.date) {
+    state.date = day
+    dateInput.value = day
+    viewWholeDay()
+  }
+  state.position = b.startMs
+  if (known && key !== thisCamera()) {
+    const [nvr, ch] = key.split('/')
+    await goToCamera(nvr, Number(ch), b.startMs)
+  } else {
+    await reloadKeepingPosition()
+  }
+  ensureVisible(b.startMs)
+  seek(b.startMs)
+}
+
+/**
+ * The add/edit dialog. Adding starts from the clip if one is marked — the usual way of working is
+ * to mark the stretch first and then say what it is — and otherwise from the moment on screen, as a
+ * bookmark of that instant.
+ */
+async function openBookmarkDialog(existing = null) {
+  editing = existing
+  bmHeading.textContent = existing ? 'Edit bookmark' : 'Add a bookmark'
+  const from = existing ? existing.startMs : clip.on && clip.from !== null ? clip.from : state.position
+  const to = existing ? existing.endMs : clip.on && clip.to !== null ? clip.to : state.position
+  if (from === null || to === null) return showNotice('Nothing is playing yet, so there is no moment to bookmark.')
+  bmTitle.value = existing?.title ?? ''
+  bmNotes.value = existing?.description ?? ''
+  bmFrom.value = fmtTime(from)
+  bmTo.value = fmtTime(to)
+  bmDay.textContent = `On ${fmtDate(from)}, in the time shown on the picture.`
+  bmSay('')
+
+  const wanted = new Set(existing?.cameras ?? [thisCamera()].filter(Boolean))
+  const cams = await fetch('/api/cameras').then((r) => (r.ok ? r.json() : [])).catch(() => [])
+  bmCameras.replaceChildren(
+    ...cams.map((c) => {
+      const o = document.createElement('option')
+      o.value = `${c.nvr}/${c.ch}`
+      o.textContent = `${c.name} · ${c.nvrName}`
+      o.selected = wanted.has(o.value)
+      return o
+    })
+  )
+  bmDlg.showModal()
+  bmTitle.focus()
+}
+
+/** B, and the Add button. */
+function addBookmark() {
+  if (bmPanel.hidden) showBookmarkPanel(true)
+  openBookmarkDialog(null)
+}
+
+/**
+ * The typed times back into absolute ms. They are read against the day the bookmark is on rather
+ * than the day on screen, so editing an old bookmark from today's view does not move it to today.
+ */
+function timesFromDialog(dayMs) {
+  const dayStart = dayStartOf(fmtDate(dayMs))
+  const from = parseClock(bmFrom.value)
+  const to = parseClock(bmTo.value)
+  if (from === null || to === null) return null
+  // A bookmark that runs over midnight is typed with the end earlier than the start; treating that
+  // as the next day is the only reading that is not simply a mistake.
+  return { startMs: dayStart + from, endMs: dayStart + to + (to < from ? DAY : 0) }
+}
+
+bmSave.addEventListener('click', async () => {
+  const cameras = [...bmCameras.selectedOptions].map((o) => o.value)
+  const base = editing ? editing.startMs : (clip.on && clip.from !== null ? clip.from : state.position) ?? Date.now()
+  const times = timesFromDialog(base)
+  if (!times) return bmSay('Type the times as hh:mm:ss.', true)
+  const wanted = { cameras, ...times, title: bmTitle.value, description: bmNotes.value }
+  const checked = checkBookmark(wanted)
+  if (!checked.ok) return bmSay(checked.error, true)
+
+  bmSave.disabled = true
+  try {
+    if (editing) await bmApi('PATCH', `/api/bookmarks/${editing.id}`, checked.value)
+    else await bmApi('POST', '/api/bookmarks', checked.value)
+    bmDlg.close()
+    await loadBookmarks()
+    showNotice(editing ? 'Bookmark saved.' : 'Bookmark added.')
+  } catch (e) {
+    bmSay(e.message, true)
+  } finally {
+    bmSave.disabled = false
+  }
+})
+
+async function removeBookmark(b) {
+  if (!confirm(`Delete the bookmark "${b.title}"?`)) return
+  try {
+    await bmApi('DELETE', `/api/bookmarks/${b.id}`)
+    await loadBookmarks()
+  } catch (e) {
+    bmStatus.textContent = e.message
+  }
+}
+
+function showBookmarkPanel(on) {
+  bmPanel.hidden = !on
+  bmBtn.setAttribute('aria-pressed', String(on))
+  bmBtn.classList.toggle('pb-on', on)
+  if (on) loadBookmarks()
+}
+
+bmBtn.addEventListener('click', () => showBookmarkPanel(bmPanel.hidden))
+$('bookmarkAdd').addEventListener('click', () => openBookmarkDialog(null))
+bmFind.addEventListener('input', () => {
+  drawBookmarkList()
+  scheduleDraw()
+})
+bmThisCamera.addEventListener('change', () => {
+  drawBookmarkList()
+  scheduleDraw()
+})
 
 $('shortcutsBtn').addEventListener('click', () => shortcutsDlg.showModal())
 $('shortcutsClose').addEventListener('click', () => shortcutsDlg.close())
@@ -1412,7 +1706,8 @@ dateInput.addEventListener('change', async () => {
 })
 
 document.addEventListener('keydown', (e) => {
-  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
+  // a textarea counts too: B in the bookmark notes used to open a second bookmark dialog
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return
   if (e.key === ' ') {
     e.preventDefault()
     togglePause()
@@ -1722,6 +2017,8 @@ updateModeUi()
 const [me, cameras] = await Promise.all([api('/api/me'), api('/api/cameras')])
 $('whoami').textContent = me.user
 if (me.admin) $('sitesTab').hidden = $('settingsTab').hidden = false
+// who this is, for deciding which bookmarks offer Edit and Delete (the server decides again itself)
+viewer = { user: me.user, admin: me.admin === true }
 state.h265 = await canDecodeH265()
 
 // camera list grouped by site and NVR
@@ -2131,3 +2428,6 @@ cameraSel.addEventListener('change', () => {
 })
 
 await loadCameraLinks()
+
+// The diamonds belong on the timeline whether or not the list beside the picture is open.
+await loadBookmarks()

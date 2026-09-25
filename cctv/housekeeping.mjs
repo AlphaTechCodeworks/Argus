@@ -92,6 +92,8 @@ export async function runHousekeeping({ index, settings = getSettings(), freeOf 
   try {
     const days = [settings.recording?.defaults?.retentionDays, ...Object.values(settings.recording?.cameras ?? {}).map((c) => c?.retentionDays)].map(Number).filter((d) => Number.isFinite(d) && d > 0)
     if (days.length && typeof index.forgetGapsBefore === 'function') index.forgetGapsBefore(now - Math.max(...days) * DAY)
+    // the backfill ledger goes the same way: a hole in footage that has been deleted is not a hole
+    if (days.length && typeof index.backfillForgetBefore === 'function') index.backfillForgetBefore(now - Math.max(...days) * DAY)
   } catch (e) {
     out.warnings.push(`gap rows not pruned: ${e.message}`)
   }

@@ -18,6 +18,7 @@
 // live viewers) only hands the frame to the camera's SegmentWriter queue. A disk too slow for
 // it (over 8 MB or 10 s behind) makes the writer drop frames: reported as a recgap
 // "disk too slow", recording resumes at a keyframe once the queue has caught up.
+import { MAIN, SUB, afterRefusal, afterVideo, chooseStream, degradedNote } from './stream-choice.mjs'
 import { SegmentWriter, rollOffsetFor } from './segment-writer.mjs'
 
 const HEADER_SIZE = 16 // sdk.mjs encodeFrame: key flag, codec, size, time; then the payload
@@ -62,6 +63,26 @@ export class Recorder {
     this.cams = new Map() // ch -> cam
     this.failed = new Map() // location id -> { at, reason }
     this.noted = new Set()
+  }
+
+  /**
+   * Whether a camera the NVR refuses may fall back to its sub-stream. On by default: reduced
+   * quality is worth having and nothing is not. `recording.subFallback: false` turns it off for
+   * an owner who would rather have a clean gap than footage at a lower resolution.
+   */
+  allowSubFallback() {
+    return this.recording?.subFallback !== false
+  }
+
+  /** Cameras recording less than they should be, for the Health page. */
+  degraded() {
+    const now = this.now()
+    const out = []
+    for (const [ch, cam] of this.cams) {
+      const note = degradedNote(cam.pick, now)
+      if (note) out.push({ nvr: this.nvrId, ch, note, since: cam.pick.subSince })
+    }
+    return out
   }
 
   /** New settings from the parent. */
@@ -114,7 +135,7 @@ export class Recorder {
     for (const [ch, w] of want) {
       let cam = this.cams.get(ch)
       if (!cam) {
-        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0 }
+        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0, pick: { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }, wantType: MAIN }
         cam.tap = this.#tapFor(cam)
         this.cams.set(ch, cam)
         console.log(`[rec ${this.nvrId}/${ch + 1}] recording on`)
@@ -146,18 +167,34 @@ export class Recorder {
     const f = cam.stream?.lastFailure
     if (f?.fast && f.at >= cam.attachedAt) {
       this.#detach(cam)
-      cam.refusedUntil = now + REFUSED_BACKOFF_MS[0] + Math.round(Math.random() * (REFUSED_BACKOFF_MS[1] - REFUSED_BACKOFF_MS[0]))
+      cam.pick = afterRefusal(cam.pick, now)
+      // Is there a cheaper stream to fall back on? An NVR at its bandwidth ceiling refuses the
+      // main stream for ever, and the old behaviour was to keep asking every few minutes and
+      // record nothing in between -- which is how eleven of nvr-2's cameras came to be online,
+      // green on every page, and writing no footage at all.
+      const next = chooseStream(cam.pick, now, { allowSub: this.allowSubFallback() })
+      const dropping = next.type === SUB && !cam.pick.onSub
       const reason = `refused by the NVR (${f.reason || 'no reason given'})`
       cam.lastError = { at: now, loc: cam.loc?.id ?? null, reason }
       this.#gapFrom(cam, reason)
-      if (!cam.refusedLogged) console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}; trying again in ${Math.round((cam.refusedUntil - now) / 60_000)} min`)
-      cam.refusedLogged = true
+      if (dropping) {
+        // Worth trying at once rather than after the backoff: every minute spent waiting is a
+        // minute of footage that does not exist, and the sub-stream costs the NVR very little.
+        cam.refusedUntil = 0
+        console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}; ${next.why}`)
+      } else {
+        cam.refusedUntil = now + REFUSED_BACKOFF_MS[0] + Math.round(Math.random() * (REFUSED_BACKOFF_MS[1] - REFUSED_BACKOFF_MS[0]))
+        if (!cam.refusedLogged) console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}; trying again in ${Math.round((cam.refusedUntil - now) / 60_000)} min`)
+        cam.refusedLogged = true
+      }
       return
     }
     if (now < cam.refusedUntil) return
     if (!cam.stream) {
       cam.attachedAt = now
-      cam.stream = this.getStream(cam.ch)
+      const pick = chooseStream(cam.pick, now, { allowSub: this.allowSubFallback() })
+      cam.wantType = pick.type
+      cam.stream = this.getStream(cam.ch, pick.type)
       cam.stream.add(cam.tap)
     }
   }
@@ -303,6 +340,11 @@ export class Recorder {
     const ok = cam.writer.write(frame, meta) // queued only: never waits for the disk
     if (ok) {
       cam.refusedLogged = false
+      // Video is flowing, so whatever stream we settled on is the one working. A camera that came
+      // back up on the main stream stops being marked degraded here, and nowhere else.
+      const was = cam.pick?.onSub
+      cam.pick = afterVideo(cam.pick, now, cam.wantType ?? MAIN)
+      if (was && !cam.pick.onSub) console.log(`[rec ${this.nvrId}/${cam.ch + 1}] back on the main stream`)
       this.#endGap(cam, ts)
       cam.lastAt = now
       cam.lastTs = ts

@@ -14,6 +14,7 @@
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
+import { audit } from './audit.mjs'
 import { KINDS } from './alerts.mjs'
 import { HttpError, isPlainObject } from './nvr-xml.mjs'
 
@@ -39,6 +40,20 @@ export const DEFAULTS = Object.freeze({
     muted: [],
     notRecordingMinutes: 5,
     clockSkewSeconds: 30
+  },
+  // Gap backfill from the NVRs (phase 2b, backfill.mjs). It only ever runs inside the off-peak
+  // window because it reads the same NVRs and the same drives the live recording uses, and live
+  // recording always wins. nvrRetentionDays is what each NVR itself keeps (about 30 days here):
+  // a hole older than that can never be filled, and there is no point asking.
+  backfill: {
+    enabled: false,
+    windowStart: '01:00',
+    windowEnd: '05:00',
+    nvrRetentionDays: 30,
+    minGapSeconds: 10,
+    maxGapMinutes: 60,
+    perNvrMbps: 8,
+    restSeconds: 30
   }
 })
 
@@ -80,6 +95,22 @@ const CAMERA_FIELDS = {
   }
 }
 
+/** A time of day as "HH:MM" (24 h, the server's local clock): the off-peak window's ends. */
+const hhmm = (name) => (v) => {
+  if (typeof v !== 'string' || !/^([01]\d|2[0-3]):([0-5]\d)$/.test(v)) throw new HttpError(400, `${name} must be a time of day as HH:MM`)
+  return v
+}
+const BACKFILL_FIELDS = {
+  enabled: (v) => Boolean(v),
+  windowStart: hhmm('backfill.windowStart'),
+  windowEnd: hhmm('backfill.windowEnd'),
+  nvrRetentionDays: int('backfill.nvrRetentionDays', 1, MAX_RETENTION_DAYS),
+  minGapSeconds: int('backfill.minGapSeconds', 1, 3600),
+  maxGapMinutes: int('backfill.maxGapMinutes', 1, 1440),
+  perNvrMbps: int('backfill.perNvrMbps', 1, 200),
+  restSeconds: int('backfill.restSeconds', 0, 3600)
+}
+
 const knownKeys = (obj, keys, where) => {
   for (const k of Object.keys(obj)) if (!keys.includes(k)) throw new HttpError(400, `unknown setting ${where}${k}`)
 }
@@ -110,6 +141,10 @@ function validate(s) {
   if (s.storage.floorFreePct >= s.storage.lowFreePct) throw new HttpError(400, 'the hard floor must be below the low-space threshold')
   if (!Array.isArray(s.storage.locations)) throw new HttpError(400, 'storage.locations must be a list')
   if (!Array.isArray(s.storage.netshares)) throw new HttpError(400, 'storage.netshares must be a list')
+  if (isPlainObject(s.backfill)) for (const [k, f] of Object.entries(BACKFILL_FIELDS)) f(s.backfill[k])
+  // An empty window (both ends the same) would mean "never", which is what `enabled: false` is
+  // for; saying it plainly avoids a job that silently never runs.
+  if (isPlainObject(s.backfill) && s.backfill.windowStart === s.backfill.windowEnd) throw new HttpError(400, 'the backfill window must not start and end at the same time')
 }
 
 /** Settings from the file, each part falling back to the default when missing or invalid. */
@@ -167,6 +202,10 @@ function fromFile(j) {
     if (Array.isArray(a.muted)) s.alerts.muted = a.muted.filter((k) => KINDS.includes(k))
     tryPart(() => (s.alerts.notRecordingMinutes = int('', 1, 120)(a.notRecordingMinutes)))
     tryPart(() => (s.alerts.clockSkewSeconds = int('', 5, 3600)(a.clockSkewSeconds)))
+  }
+  if (isPlainObject(j.backfill)) {
+    for (const [k, f] of Object.entries(BACKFILL_FIELDS)) tryPart(() => (s.backfill[k] = f(j.backfill[k])))
+    if (s.backfill.windowStart === s.backfill.windowEnd) s.backfill = structuredClone(DEFAULTS.backfill)
   }
   return s
 }
@@ -287,9 +326,19 @@ export function saveSettings(patch, user, { internal = false } = {}) {
     if ('notRecordingMinutes' in al) next.alerts.notRecordingMinutes = int('alerts.notRecordingMinutes', 1, 120)(al.notRecordingMinutes)
     if ('clockSkewSeconds' in al) next.alerts.clockSkewSeconds = int('alerts.clockSkewSeconds', 5, 3600)(al.clockSkewSeconds)
   }
+  if ('backfill' in patch) {
+    const b = needObject(patch.backfill, 'backfill')
+    knownKeys(b, Object.keys(BACKFILL_FIELDS), 'backfill.')
+    for (const [k, v] of Object.entries(b)) next.backfill[k] = BACKFILL_FIELDS[k](v)
+  }
   validate(next)
   write(next)
   console.log(`[settings] saved by ${user ?? '?'}: ${Object.keys(patch).join(', ')}`)
+  // Only the top-level keys that changed, never the values: alerts.email.pass would otherwise be
+  // written to a file kept for a year. Which settings were touched, by whom and when is the
+  // question an audit is for; the new value is already in settings.json.
+  // audit() never throws, so a broken audit file cannot stop settings being saved.
+  if (!internal) audit(DATA_DIR, { user, action: 'settings-change', target: Object.keys(patch).join(' '), detail: `changed ${Object.keys(patch).join(', ')}` })
   for (const cb of listeners) {
     try {
       cb(getSettings())

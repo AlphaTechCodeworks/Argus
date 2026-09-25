@@ -26,7 +26,9 @@ const taps = new Map() // key -> { tap, stream, ch, type }
 // sit on the same main-stream LiveStream as the live tap, so both share one pull from the NVR
 const recorder = new Recorder({
   nvrId: id,
-  getStream: (ch) => nvr.getStream(ch, 0),
+  // the stream type is the recorder's choice now: it drops to the sub-stream for a camera the
+  // NVR keeps refusing, rather than recording nothing at all (stream-choice.mjs)
+  getStream: (ch, type = 0) => nvr.getStream(ch, type),
   online: () => nvr.userId >= 0 && nvr.online,
   channels: () => nvr.channels.map((c) => ({ ch: c.ch, online: c.online !== false })), // offline slots are not recorded
   send: (m) => process.connected && process.send(m)

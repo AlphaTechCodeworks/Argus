@@ -14,6 +14,7 @@
   --tl-tick: #3a4450;
   --tl-hit: #b36bff;
   --tl-nvr: #3f8a78; /* stretches only the NVR has (server playback plays them from the NVR) */
+  --tl-bm: #7cc4ff; /* bookmarks: a colour the timeline uses for nothing else */
   --tl-gap: #d9534f; /* the server's recorder missed this (a thin strip; the reason on hover) */
 }
 
@@ -423,10 +424,12 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 }
 .pb-hits button span { color: var(--muted); }
 .lg-hit { background: var(--tl-hit); }
+/* rotated, so the legend shows the same diamond the timeline draws */
+.lg-bm { background: var(--tl-bm); transform: rotate(45deg); }
 #searchToggle[aria-pressed="true"] { border-color: var(--tl-hit); color: var(--tl-hit); }
 @media (max-width: 800px) {
   .pb-main { flex-direction: column; }
-  .pb-search { width: auto; max-height: 40vh; }
+  .pb-search, .pb-bookmarks { width: auto; max-height: 40vh; }
 }
 
 /* ---- sites page ---- */
@@ -957,6 +960,60 @@ body.is-fullscreen .alert-banner { display: none; }
 .pb-clip-handle { position: absolute; top: -4px; bottom: -4px; width: 26px; margin-left: -13px; cursor: ew-resize; touch-action: none; z-index: 3; }
 .pb-clip-handle::after { content: ""; position: absolute; left: 8px; top: 0; bottom: 0; width: 10px; background: var(--tl-evt); border-radius: 3px; }
 .pb-clip-handle:hover::after { background: #f3c877; }
+
+/* Bookmarks (playback.js, bookmarks-view.js). A diamond at the start of each one, with a faint band
+   over the stretch it covers. The diamond is a rotated square rather than a glyph so it stays the
+   same size at every zoom and cannot be confused with the motion blocks below it. */
+.pb-bm-marks { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+.pb-bm-band { position: absolute; top: 0; bottom: 0; background: rgb(124 196 255 / 14%); pointer-events: none; }
+.pb-bm-mark {
+  position: absolute;
+  top: -7px;
+  width: 11px;
+  height: 11px;
+  margin-left: -6px;
+  background: var(--tl-bm, #7cc4ff);
+  border: 1px solid #0c1116;
+  transform: rotate(45deg);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.pb-bm-mark:hover, .pb-bm-mark:focus-visible { background: #b7ddff; }
+#bookmark[aria-pressed="true"] { border-color: var(--tl-bm, #7cc4ff); color: var(--tl-bm, #7cc4ff); }
+
+/* The list beside the picture. Same shape as the motion-search panel so the two read as one page. */
+.pb-bookmarks {
+  width: 300px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--panel);
+  border-radius: 4px;
+  overflow-y: auto;
+}
+/* display: flex above would otherwise beat the hidden attribute and leave the panel always open */
+.pb-bookmarks[hidden] { display: none; }
+.pb-bookmarks h2 { margin: 0; font-size: 14px; }
+.pb-bookmarks label { flex-direction: column; align-items: stretch; gap: 4px; font-size: 12px; }
+.pb-bookmarks .pb-bm-scope { flex-direction: row; align-items: center; gap: 6px; }
+.pb-bm-status { margin: 0; color: var(--muted); font-size: 12px; }
+.pb-bm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.pb-bm-list li { padding: 6px 8px; background: #1a1f26; border-radius: 4px; border-left: 3px solid var(--tl-bm, #7cc4ff); }
+.pb-bm-go { width: 100%; text-align: left; background: none; border: 0; padding: 0; color: var(--text); cursor: pointer; }
+.pb-bm-when { display: block; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.pb-bm-note { margin: 4px 0 0; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+.pb-bm-actions { display: flex; gap: 6px; margin-top: 6px; }
+.pb-bm-actions button { font-size: 11px; padding: 2px 8px; }
+
+.pb-bm-dialog { max-width: min(460px, 94vw); background: var(--panel); color: var(--text); border: 1px solid #2f3742; border-radius: 10px; padding: 16px 18px; }
+.pb-bm-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+.pb-bm-dialog h2 { margin: 0 0 8px; font-size: 17px; }
+.pb-bm-dialog label { display: block; margin: 8px 0; }
+.pb-bm-dialog input[type="text"], .pb-bm-dialog select, .pb-bm-dialog textarea { width: 100%; margin-top: 3px; }
+.pb-bm-times { display: flex; gap: 10px; }
+.pb-bm-times label { flex: 1; }
 
 /* The export dialog (playback.js). Someone uses this when something has gone wrong, so it is
    plain and the format choice explains itself rather than assuming knowledge. */

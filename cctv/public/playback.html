@@ -68,6 +68,20 @@
       <p class="pb-search-status" id="searchStatus"></p>
       <ol class="pb-hits" id="searchHits"></ol>
     </aside>
+
+    <!-- Bookmarks for this camera, beside the picture. Open with the Bookmarks button. -->
+    <aside class="pb-bookmarks" id="bookmarkPanel" hidden aria-label="Bookmarks">
+      <h2>Bookmarks</h2>
+      <label>Find
+        <input id="bookmarkFind" type="search" placeholder="title, notes or who marked it" />
+      </label>
+      <label class="pb-bm-scope">
+        <input id="bookmarkThisCamera" type="checkbox" checked /> this camera only
+      </label>
+      <button id="bookmarkAdd" type="button" class="pb-primary">Add a bookmark (B)</button>
+      <p class="pb-bm-status" id="bookmarkStatus"></p>
+      <ol class="pb-bm-list" id="bookmarkList"></ol>
+    </aside>
   </main>
 
   <section class="pb-bar" aria-label="Playback controls">
@@ -109,6 +123,8 @@
       <div class="pb-clip-sel" id="clipSel" hidden></div>
       <div class="pb-clip-handle pb-clip-from" id="clipFrom" hidden title="Drag: start of the clip"></div>
       <div class="pb-clip-handle pb-clip-to" id="clipTo" hidden title="Drag: end of the clip"></div>
+      <!-- one diamond per bookmark in view, drawn by playback.js from bookmarks-view.js -->
+      <div class="pb-bm-marks" id="bookmarkMarks" aria-hidden="true"></div>
       <div class="pb-playhead" id="playhead" hidden></div>
     </div>
 
@@ -141,7 +157,7 @@
             <option value="0">HD</option>
           </select>
         </label>
-        <button id="bookmark" type="button" title="Bookmarks come later (B)" disabled>Bookmark</button>
+        <button id="bookmark" type="button" title="Bookmarks: mark this moment, and see the ones already marked (B)" aria-pressed="false">Bookmarks</button>
         <button id="searchToggle" type="button" title="Find movement inside an area you draw" aria-pressed="false">Motion search</button>
         <button id="snapshot" type="button" title="Save the picture on screen">Snapshot</button>
         <button id="fullscreen" type="button" title="Full screen (F)" aria-pressed="false">Full screen</button>
@@ -162,6 +178,7 @@
       <span class="lg-rec"></span> recorded
       <span class="lg-evt"></span> motion / alarm
       <span class="lg-hit"></span> movement in your box
+      <span class="lg-bm"></span> bookmark
       <span id="legendServer" class="pb-legend-server" hidden><span class="lg-nvr"></span> from the NVR <span class="lg-gap"></span> not recorded</span>
       <button id="shortcutsBtn" type="button" class="pb-shortcuts-btn" title="Keyboard shortcuts (?)">? shortcuts</button>
       <span class="pb-hint" id="pbHint">Click the timeline to jump · scroll to zoom · drag to pan</span>
@@ -178,7 +195,7 @@
         <dt>0</dt><dd>show the whole day</dd>
         <dt>T</dt><dd>type a time to go to</dd>
         <dt>F</dt><dd>full screen</dd>
-        <dt>B</dt><dd>bookmark (coming later)</dd>
+        <dt>B</dt><dd>bookmark this moment</dd>
         <dt>[ ]</dt><dd>start and end of the clip to export</dd>
         <dt>D</dt><dd>show the decoder statistics</dd>
         <dt>?</dt><dd>this list</dd>
@@ -213,6 +230,34 @@
         <div class="pb-ex-actions">
           <button type="submit" value="cancel">Close</button>
           <button type="button" id="exStart" class="pb-primary">Create export</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Adding or editing one bookmark. The times are filled in from the timeline and can be typed
+         over; the page checks them with the same rules the server uses (bookmarks-view.js). -->
+    <dialog id="bmDlg" class="pb-bm-dialog">
+      <form method="dialog">
+        <h2 id="bmTitleHeading">Bookmark</h2>
+        <label>Title
+          <input id="bmTitle" type="text" maxlength="120" placeholder="What happened" />
+        </label>
+        <div class="pb-bm-times">
+          <label>From <input id="bmFrom" type="text" inputmode="numeric" placeholder="hh:mm:ss" /></label>
+          <label>To <input id="bmTo" type="text" inputmode="numeric" placeholder="hh:mm:ss" /></label>
+        </div>
+        <p class="pb-hint" id="bmDay"></p>
+        <label>Cameras
+          <select id="bmCameras" multiple size="4"></select>
+        </label>
+        <p class="pb-hint">Hold Ctrl to mark the same moment on more than one camera.</p>
+        <label>Notes
+          <textarea id="bmNotes" rows="3" maxlength="2000"></textarea>
+        </label>
+        <p class="pb-ex-msg" id="bmMsg"></p>
+        <div class="pb-ex-actions">
+          <button type="submit" value="cancel">Cancel</button>
+          <button type="button" id="bmSave" class="pb-primary">Save</button>
         </div>
       </form>
     </dialog>

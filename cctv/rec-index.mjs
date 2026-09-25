@@ -38,8 +38,48 @@ CREATE TABLE IF NOT EXISTS gaps (
   id INTEGER PRIMARY KEY, nvr TEXT NOT NULL, ch INTEGER NOT NULL, from_ms INTEGER NOT NULL,
   to_ms INTEGER NOT NULL, reason TEXT);
 CREATE INDEX IF NOT EXISTS gaps_cam ON gaps (nvr, ch, from_ms);
+-- The backfill ledger (phase 2b, backfill.mjs). One row per hole we have decided to do something
+-- about, so that the work survives a restart and a hole that can never be filled is not retried
+-- forever. It is deliberately separate from the gaps table, which is the recorder's account of what it
+-- could not record and must not be rewritten by a later job.
+CREATE TABLE IF NOT EXISTS backfill_gaps (
+  id INTEGER PRIMARY KEY, nvr TEXT NOT NULL, ch INTEGER NOT NULL, from_ms INTEGER NOT NULL,
+  to_ms INTEGER NOT NULL, reason TEXT, kind TEXT, state TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0, last_try_ms INTEGER, last_error TEXT, filled_ms INTEGER,
+  note TEXT, first_seen_ms INTEGER,
+  UNIQUE (nvr, ch, from_ms, to_ms));
+CREATE INDEX IF NOT EXISTS backfill_state ON backfill_gaps (state, from_ms);
 `
-const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, keyframes, loc'
+
+/**
+ * Bookmarks (phase 3, bookmarks.mjs): stretches someone marked as mattering. They live in this
+ * database because this is where the jobs that would delete the footage already look, not because
+ * they have anything to do with the segment index — housekeeping and thinning ask bookmarks.mjs
+ * which stretches they must leave alone.
+ *
+ * Its own statement, run both here and by bookmarks.mjs, so the table exists whichever of the two
+ * opens the file first. Everything in it is CREATE ... IF NOT EXISTS: nothing is dropped, altered
+ * or rewritten, so running it against the populated database on the server adds the table and
+ * leaves every existing row as it was.
+ *
+ * `cameras` is a JSON array of "<nvr>/<channel>" keys. One row per bookmark, rather than a row per
+ * camera, keeps a bookmark one thing to edit and delete; the cost is that filtering by camera is a
+ * text match rather than an index lookup, which is affordable because a site has bookmarks in the
+ * hundreds, not the millions that segments run to.
+ */
+export const BOOKMARKS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS bookmarks (
+  id INTEGER PRIMARY KEY, cameras TEXT NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
+  title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', user TEXT NOT NULL,
+  created_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS bookmarks_start ON bookmarks (start_ms);
+CREATE INDEX IF NOT EXISTS bookmarks_end ON bookmarks (end_ms);
+CREATE INDEX IF NOT EXISTS bookmarks_user ON bookmarks (user);
+`
+const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, keyframes, loc, source, filled_ms AS filledMs'
+const BF_COLS = 'id, nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason, kind, state, attempts, last_try_ms AS lastTryMs, last_error AS lastError, filled_ms AS filledMs, note, first_seen_ms AS firstSeenMs'
+/** Fields of a backfill ledger row a job may change, and the column each one is stored in. */
+const BF_SET = { state: 'state', attempts: 'attempts', lastTryMs: 'last_try_ms', lastError: 'last_error', filledMs: 'filled_ms', note: 'note', reason: 'reason', kind: 'kind', toMs: 'to_ms' }
 const plain = (r) => ({ ...r }) // node:sqlite rows have a null prototype
 const one = (r) => (r === undefined ? null : plain(r))
 const camKey = (nvr, ch) => `${nvr}/${Number(ch)}`
@@ -51,8 +91,25 @@ export function openRecIndex(file) {
   const db = new DatabaseSync(file)
   db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;')
   db.exec(SCHEMA)
+  db.exec(BOOKMARKS_SCHEMA)
+  // An index written before phase 2b has no `source`/`filled_ms` columns. They are added here
+  // rather than by recreating the table: the rows are the only record of where the footage is,
+  // and a migration that rewrites them is a migration that can lose them.
+  {
+    const have = new Set(db.prepare('PRAGMA table_info(segments)').all().map((r) => r.name))
+    if (!have.has('source')) db.exec('ALTER TABLE segments ADD COLUMN source TEXT')
+    if (!have.has('filled_ms')) db.exec('ALTER TABLE segments ADD COLUMN filled_ms INTEGER')
+  }
   const q = {
-    add: db.prepare('INSERT OR REPLACE INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
+    add: db.prepare('INSERT OR REPLACE INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc, source, filled_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+    // the ledger: a hole seen again keeps the state and the attempt count it already had
+    bfAdd: db.prepare('INSERT OR IGNORE INTO backfill_gaps (nvr, ch, from_ms, to_ms, reason, kind, first_seen_ms) VALUES (?, ?, ?, ?, ?, ?, ?)'),
+    bfFind: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps WHERE nvr = ? AND ch = ? AND from_ms = ? AND to_ms = ?`),
+    bfById: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps WHERE id = ?`),
+    bfAll: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps ORDER BY from_ms DESC LIMIT ?`),
+    bfState: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps WHERE state = ? ORDER BY from_ms DESC LIMIT ?`),
+    bfForget: db.prepare('DELETE FROM backfill_gaps WHERE to_ms < ?'),
+    bfDrop: db.prepare('DELETE FROM backfill_gaps WHERE id = ?'),
     gap: db.prepare('INSERT INTO gaps (nvr, ch, from_ms, to_ms, reason) VALUES (?, ?, ?, ?, ?)'),
     // (start_ms bounded below as in at(): the rows just before the range, never the camera's whole history)
     segs: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? AND end_ms >= ? ORDER BY start_ms`),
@@ -83,7 +140,42 @@ export function openRecIndex(file) {
   const openFor = (nvr, ch) => opens.get(camKey(nvr, ch)) ?? null
   return {
     addSegment(s) {
-      q.add.run(String(s.path), String(s.nvr), Number(s.ch), Math.round(s.startMs), Math.round(s.endMs), Number(s.bytes), Number(s.keyframes), s.loc ?? null)
+      // source/filledMs: null for footage the recorder wrote live; backfill.mjs sets them to
+      // "backfill:<nvr id>" and the time it was pulled, which is what an evidence export states.
+      q.add.run(String(s.path), String(s.nvr), Number(s.ch), Math.round(s.startMs), Math.round(s.endMs), Number(s.bytes), Number(s.keyframes), s.loc ?? null, s.source ?? null, s.filledMs == null ? null : Math.round(s.filledMs))
+    },
+
+    // ---- the backfill ledger (phase 2b; see backfill.mjs)
+    /** Records a hole worth filling, or returns the row already there (state and attempts kept). */
+    backfillNote(g, nowMs = Date.now()) {
+      q.bfAdd.run(String(g.nvr), Number(g.ch), Math.round(g.fromMs), Math.round(g.toMs), g.reason ?? null, g.kind ?? null, Math.round(nowMs))
+      return one(q.bfFind.get(String(g.nvr), Number(g.ch), Math.round(g.fromMs), Math.round(g.toMs)))
+    },
+    /** The ledger row for exactly this hole, or null (used to tell a new hole from a known one). */
+    backfillFind: (nvr, ch, fromMs, toMs) => one(q.bfFind.get(String(nvr), Number(ch), Math.round(fromMs), Math.round(toMs))),
+    /** One ledger row by its id, or null. */
+    backfillRow: (id) => one(q.bfById.get(Number(id))),
+    /** Ledger rows, newest hole first; `state` filters to one state. */
+    backfillList: ({ state = null, limit = 1000 } = {}) => (state ? q.bfState.all(String(state), Number(limit)) : q.bfAll.all(Number(limit))).map(plain),
+    /** Changes a ledger row (only the fields in BF_SET; unknown fields are ignored). */
+    backfillSet(id, fields) {
+      const cols = []
+      const vals = []
+      for (const [k, v] of Object.entries(fields ?? {})) {
+        if (!BF_SET[k]) continue
+        cols.push(`${BF_SET[k]} = ?`)
+        vals.push(v === undefined ? null : v)
+      }
+      if (!cols.length) return null
+      db.prepare(`UPDATE backfill_gaps SET ${cols.join(', ')} WHERE id = ?`).run(...vals, Number(id))
+      return one(q.bfById.get(Number(id)))
+    },
+    backfillRemove(id) {
+      q.bfDrop.run(Number(id))
+    },
+    /** Ledger rows about footage that has since been deleted (housekeeping) explain nothing. */
+    backfillForgetBefore(ms) {
+      q.bfForget.run(Math.round(ms))
     },
     addGap(g) {
       q.gap.run(String(g.nvr), Number(g.ch), Math.round(g.fromMs), Math.round(g.toMs), g.reason ?? null)

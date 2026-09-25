@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCTV Storage</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="health-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+      <nav class="tabs" aria-label="Views">
+        <a href="/">Live</a>
+        <a href="/playback.html">Playback</a>
+        <a href="/wall.html">Wall</a>
+        <a href="/map.html">Map</a>
+        <a href="/health.html">Health</a>
+        <a href="/storage.html" aria-current="page">Storage</a>
+        <a href="/sites.html" id="sitesTab" hidden>Sites</a>
+        <a href="/settings.html" id="settingsTab" hidden>Settings</a>
+      </nav>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="health">
+    <p id="totals" class="hp-sending" role="status"></p>
+    <ul id="warnings" class="hp-note"></ul>
+
+    <h2>Locations</h2>
+    <!-- One panel per location: how full it is, how fast it is filling, how long it would take to
+         reach the free-space floor, and how far back each camera goes on it. "not available" is a
+         real answer here: a forecast off two hours of history would be a made-up date. -->
+    <div id="locations" class="nvr-panels"></div>
+
+    <p class="hp-note">
+      Retention days, full-video days and the time-lapse interval are set per camera in
+      <a href="/settings.html">Settings</a>.
+    </p>
+  </main>
+
+  <script type="module" src="storage.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>
