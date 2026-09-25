@@ -441,7 +441,7 @@ case "$cmd" in
     if [ "$proto" = smb ]; then
       what="//$server/$share"
       type=cifs
-      opts="credentials=$cred,$SMB_OPTS,uid=0,gid=$gid,file_mode=0660,dir_mode=2770,vers="
+      opts="credentials=$cred,$SMB_OPTS,uid=0,gid=$gid,file_mode=0660,dir_mode=02770,vers="
     else
       what="$server:$share"
       type=nfs4

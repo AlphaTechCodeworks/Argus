@@ -91,6 +91,9 @@ if [ ! -f /etc/cctv/cctv.env ]; then
     echo "CERT_HOSTS=${ip4}"
     echo "# on a Linux host the app runs the TVT network search itself: no helper"
     echo "DISCOVERY_HELPER_URL="
+    echo "# one child process per NVR for live video, which is also what server recording needs;"
+    echo "# without this the app views cameras but records nothing"
+    echo "CCTV_LIVE_WORKER=on"
     if [ "$test_mode" = 1 ]; then
       echo "# TEST INSTALL: sign-in is off. Only for machines reachable from trusted PCs."
       echo "CCTV_AUTH=off"

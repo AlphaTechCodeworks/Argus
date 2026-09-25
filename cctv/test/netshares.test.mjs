@@ -175,7 +175,7 @@ else {
   check('SMB add: What is the SHARE, not the folder inside it', /^What=\/\/192\.168\.0\.121\/Backups$/m.test(unit), unit)
   check('SMB add: Where is the mount point, with no space in it', /^Where=.*\/nas1$/m.test(unit) && !/^Where=.* .*$/m.test(unit), unit)
   check('SMB add: Type=cifs', /^Type=cifs$/m.test(unit))
-  for (const o of ['vers=3.1.1', 'cache=strict', 'actimeo=1', 'uid=0', 'gid=900', 'file_mode=0660', 'dir_mode=2770', '_netdev', 'nofail'])
+  for (const o of ['vers=3.1.1', 'cache=strict', 'actimeo=1', 'uid=0', 'gid=900', 'file_mode=0660', 'dir_mode=02770', '_netdev', 'nofail'])
     check(`SMB add: option ${o}`, new RegExp(`^Options=(.*,)?${o.replace(/[.\\]/g, '\\$&')}(,|$)`, 'm').test(unit), unit.split('\n').find((l) => l.startsWith('Options=')))
   check('SMB add: nofail, so a NAS that is off can never hold up the boot', /^Options=.*(^|,)nofail(,|$)/m.test(unit))
   check('SMB add: the unit points at the credentials file, and holds NO password', /^Options=.*credentials=.*\/nas-nas1\.cred/m.test(unit) && !hasPass(unit))
