@@ -138,6 +138,54 @@ function answerOf(xml) {
 }
 
 /**
+ * The unit these NVRs declare once for the whole list rather than on each disk:
+ *   <diskList type="list"><itemType><size unit="MB"/></itemType><item>...
+ * Without this a 12 TB disk reads as 11 TB or 11 GB depending on which default is assumed, so the
+ * declared unit is preferred over any guess. Returns null when the answer does not declare one.
+ */
+function declaredUnit(root, names) {
+  let found = null
+  const walk = (node) => {
+    for (const c of node.children) {
+      if (c.name === 'itemType') {
+        for (const n of names) {
+          const u = kid(c, n)?.attrs?.unit
+          if (u && !found) found = String(u).trim()
+        }
+      }
+      walk(c)
+    }
+  }
+  walk(root)
+  return found
+}
+
+/**
+ * One disk as the NVR describes it. Both queryDiskStatus and queryStorageDevInfo carry these
+ * fields, and which of them a given firmware fills in is not something we can predict: on these
+ * NVMS-9000 boxes queryDiskStatus answers with nothing usable and queryStorageDevInfo carries the
+ * lot, so the same reader is used for both and the two answers are merged afterwards.
+ */
+function diskFields(item, i, listTotalUnit, listFreeUnit) {
+  const raw = field(item, ['diskStatus', 'status', 'state'])
+  const totalUnit = kid(item, 'totalSpace')?.attrs?.unit ?? kid(item, 'size')?.attrs?.unit ?? item.attrs?.unit ?? listTotalUnit
+  const freeUnit = kid(item, 'freeSpace')?.attrs?.unit ?? kid(item, 'remainSize')?.attrs?.unit ?? listFreeUnit ?? totalUnit
+  const slot = num(field(item, ['slotIndex', 'slot', 'index', 'diskNum']))
+  return {
+    // The web client numbers disks "disk1", "disk2"; the id attribute is a GUID nobody reads out.
+    name: field(item, ['name', 'diskName']) ?? `Disk ${slot ?? i + 1}`,
+    slot,
+    id: item.attrs?.id ?? null,
+    model: field(item, ['model', 'diskModel']),
+    serial: field(item, ['serialNum', 'serialNumber', 'sn']),
+    status: raw,
+    state: diskState(raw),
+    totalBytes: sizeBytes(field(item, ['totalSpace', 'size', 'capacity']), totalUnit),
+    freeBytes: sizeBytes(field(item, ['freeSpace', 'remainSize', 'freeSize']), freeUnit)
+  }
+}
+
+/**
  * queryDiskStatus: the NVR's disks.
  * @returns {{ ok: boolean, errorCode: string, disks: object[] }}
  */
@@ -145,25 +193,9 @@ export function parseDiskStatus(xml) {
   const { response, status, errorCode } = answerOf(xml)
   if (status && status !== 'success') return { ok: false, errorCode: errorCode || status, disks: [] }
   const items = itemsUnder(response, ['diskList', 'disks', 'diskInfo'])
-  const disks = items.map((item, i) => {
-    const raw = field(item, ['diskStatus', 'status', 'state'])
-    const totalUnit = kid(item, 'totalSpace')?.attrs?.unit ?? item.attrs?.unit
-    const freeUnit = kid(item, 'freeSpace')?.attrs?.unit ?? kid(item, 'remainSize')?.attrs?.unit ?? totalUnit
-    const slot = num(field(item, ['slotIndex', 'slot', 'index', 'diskNum']))
-    return {
-      // The web client numbers disks "disk1", "disk2"; the id attribute is a GUID nobody reads out.
-      name: field(item, ['name', 'diskName', 'model']) ?? `Disk ${slot ?? i + 1}`,
-      slot,
-      id: item.attrs?.id ?? null,
-      model: field(item, ['model', 'diskModel']),
-      serial: field(item, ['serialNum', 'serialNumber', 'sn']),
-      status: raw,
-      state: diskState(raw),
-      totalBytes: sizeBytes(field(item, ['totalSpace', 'size', 'capacity']), totalUnit),
-      freeBytes: sizeBytes(field(item, ['freeSpace', 'remainSize', 'freeSize']), freeUnit)
-    }
-  })
-  return { ok: true, errorCode: '', disks }
+  const tu = declaredUnit(response, ['totalSpace', 'size', 'capacity'])
+  const fu = declaredUnit(response, ['freeSpace', 'remainSize', 'freeSize'])
+  return { ok: true, errorCode: '', disks: items.map((item, i) => diskFields(item, i, tu, fu)) }
 }
 
 const DAY_MS = 86_400_000
@@ -189,20 +221,24 @@ export function parseStorageDevInfo(xml) {
   const { response, status, errorCode } = answerOf(xml)
   if (status && status !== 'success') return { ok: false, errorCode: errorCode || status, slots: [] }
   const items = itemsUnder(response, ['diskList', 'disks', 'storageDevList', 'content'])
+  const tu = declaredUnit(response, ['totalSpace', 'size', 'capacity'])
+  const fu = declaredUnit(response, ['freeSpace', 'remainSize', 'freeSize'])
   const slots = []
-  for (const item of items) {
+  items.forEach((item, i) => {
     const from = parseDate(field(item, ['recStartDate', 'startDate', 'recStartTime']))
     const to = parseDate(field(item, ['recEndDate', 'endDate', 'recEndTime']))
     // An item with no dates at all is not a recording disk (an unformatted or spare slot), and
     // counting it as "0 days" would drag the NVR's figure down to zero. It is simply left out.
-    if (from === null && to === null) continue
+    if (from === null && to === null) return
     slots.push({
-      slot: num(field(item, ['slotIndex', 'slot', 'index'])),
+      // On these NVRs this is the answer that actually carries the model, serial and size; the
+      // dates used to be all that was read out of it, which is why the Health page showed nulls.
+      ...diskFields(item, i, tu, fu),
       from,
       to,
       days: from !== null && to !== null && to >= from ? Math.round((to - from) / DAY_MS) + 1 : null
     })
-  }
+  })
   return { ok: true, errorCode: '', slots }
 }
 
@@ -221,9 +257,24 @@ export function parseSystemCaps(xml) {
       launchDate: field(c, ['launchDate']),
       maxCameras: num(field(c, ['ipChlMaxCount'])),
       analogCameras: num(field(c, ['analogChlCount'])),
-      maxPlaybackWindows: num(field(c, ['playbackMaxWin']))
+      maxPlaybackWindows: num(field(c, ['playbackMaxWin'])),
+      // Why an NVR refuses a stream that should be fine. Each of these boxes has a fixed budget it
+      // shares between recording and live viewing, and once it is spent the next stream is simply
+      // turned away -- which looks exactly like a broken camera unless the figure is on the page.
+      // nvr-2 sits at 128 of its 192 Mb; nvr1 at 102. That is the whole difference between them.
+      totalBandwidthMbps: num(field(c, ['totalBandwidth'])), // the NVR states this one in Mbit/s
+      usedBandwidthKbps: num(field(c, ['usedTotalBandwidth'])) // and this one in kbit/s
     }
   }
+}
+
+/** Used and total in Mbit/s with the percentage, or null when the NVR did not give both. */
+export function bandwidthOf(caps) {
+  const total = caps?.totalBandwidthMbps
+  const usedKb = caps?.usedBandwidthKbps
+  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(usedKb)) return null
+  const used = Math.round((usedKb / 1024) * 10) / 10
+  return { usedMbps: used, totalMbps: total, pct: Math.round((used / total) * 100) }
 }
 
 // ---- what one NVR reports ----------------------------------------------------------------------
@@ -323,15 +374,27 @@ export async function readStorage(nvr, query, now, reach) {
   for (const s of got.record?.slots ?? []) if (s.slot !== null) bySlot.set(s.slot, s)
   const loneSlot = (got.record?.slots ?? []).length === 1 ? got.record.slots[0] : null
 
+  // Whichever answer knows a thing, wins. Neither command is complete on every firmware: these
+  // NVRs put the condition in one and the model, serial and size in the other, and taking one
+  // side wholesale is what made the Health page print nulls next to a disk it could describe.
+  const merge = (a, b) => {
+    const out = { ...a }
+    for (const [k, v] of Object.entries(b ?? {})) if (out[k] === null || out[k] === undefined) out[k] = v
+    if (out.status && a.status === null) out.state = diskState(out.status)
+    return out
+  }
+
   const disks = (got.disks?.disks ?? []).map((d) => {
     const rec = (d.slot !== null && bySlot.get(d.slot)) || (got.disks.disks.length === 1 ? loneSlot : null) || null
-    return { ...d, recFrom: rec?.from ?? null, recTo: rec?.to ?? null, days: rec?.days ?? null }
+    const { from, to, days, ...detail } = rec ?? {}
+    return { ...merge(d, detail), recFrom: from ?? null, recTo: to ?? null, days: days ?? null }
   })
 
-  // No disk list, but recording dates: still worth reporting the days rather than nothing.
+  // No disk list, but recording dates: report everything that answer carried, not just the days.
   if (!disks.length) {
     for (const s of got.record?.slots ?? []) {
-      disks.push({ name: `Disk ${s.slot ?? disks.length + 1}`, slot: s.slot, id: null, model: null, serial: null, status: null, state: 'unknown', totalBytes: null, freeBytes: null, recFrom: s.from, recTo: s.to, days: s.days })
+      const { from, to, days, ...detail } = s
+      disks.push({ ...detail, recFrom: from, recTo: to, days })
     }
   }
 

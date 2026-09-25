@@ -141,15 +141,26 @@ function nvrPanel(n, mine, nowMs) {
 
   // Disks. An NVR we could not ask says so; an NVR that answered "no disks" is a real fault, and
   // is exactly the silent failure this panel exists to catch.
-  const diskRows = (st?.disks ?? []).map((disk) => ({
-    name: disk.name,
-    status: disk.status || NOT_AVAILABLE,
-    state: disk.state === 'unknown' ? 'warn' : disk.state === 'busy' ? 'warn' : disk.state,
-    size: Number.isFinite(disk.totalBytes)
-      ? `${bytes(disk.totalBytes)}${Number.isFinite(disk.freeBytes) ? ` · ${bytes(disk.freeBytes)} free` : ''}`
-      : NOT_AVAILABLE,
-    days: days(disk.days)
-  }))
+  const diskRows = (st?.disks ?? []).map((disk) => {
+    // A CCTV recorder fills its disk once and then overwrites the oldest footage for the rest of
+    // its life, so zero free space is the normal, healthy state and "0 B free" reads as a fault
+    // that is not there. What matters is that it is still writing, which the recording dates say.
+    const cycling = Number.isFinite(disk.freeBytes) && disk.freeBytes === 0 && Number.isFinite(disk.days)
+    const free = !Number.isFinite(disk.freeBytes) ? '' : cycling ? ' · overwriting oldest' : ` · ${bytes(disk.freeBytes)} free`
+    // These NVRs do not answer the command that carries a disk's condition, so `status` is blank
+    // on every one of them. Painting all four amber for ever is the alarm nobody reads. A disk
+    // with recordings running up to today is observably writing -- that is evidence, not a guess,
+    // and it is reported as what it is rather than as the condition the NVR would not give us.
+    const writing = !disk.status && Number.isFinite(disk.days) && disk.days > 0
+    return {
+      name: disk.name,
+      status: disk.status || (writing ? 'Recording' : NOT_AVAILABLE),
+      state: disk.state === 'unknown' ? (writing ? 'ok' : 'warn') : disk.state === 'busy' ? 'warn' : disk.state,
+      detail: [disk.model, disk.serial].filter(Boolean).join(' · '),
+      size: Number.isFinite(disk.totalBytes) ? `${bytes(disk.totalBytes)}${free}` : NOT_AVAILABLE,
+      days: days(disk.days)
+    }
+  })
 
   const disks = !st
     ? { value: NOT_AVAILABLE, state: 'warn', note: 'the NVR has not been asked yet' }
@@ -159,7 +170,9 @@ function nvrPanel(n, mine, nowMs) {
         ? { value: 'No disk', state: 'bad', note: 'this NVR is keeping no copy of its own' }
         : st.worst === 'bad'
           ? { value: `${diskRows.filter((r) => r.state === 'bad').length} of ${diskRows.length} failed`, state: 'bad', note: 'its own copy of the recordings is at risk' }
-          : { value: `${diskRows.length} ${diskRows.length === 1 ? 'disk' : 'disks'}`, state: st.worst === 'ok' ? 'ok' : 'warn', note: st.why || '' }
+          // the rows already worked out what each disk's state really is, including the disks
+          // that are plainly recording but whose NVR will not name their condition
+          : { value: `${diskRows.length} ${diskRows.length === 1 ? 'disk' : 'disks'}`, state: diskRows.every((r) => r.state === 'ok') ? 'ok' : 'warn', note: st.why || '' }
 
   const held = st?.available ? st.days : null
   const retention = {
@@ -173,6 +186,18 @@ function nvrPanel(n, mine, nowMs) {
   // unless the limit is on the page next to it.
   const maxCameras = st?.caps?.maxCameras
   const refused = n.refusalsLast10Min
+
+  // The real reason an NVR turns a stream away. Each box shares one fixed budget between recording
+  // and live viewing; when it is spent the next stream is refused, which on screen is indis-
+  // tinguishable from a broken camera. nvr-2 runs at 128 Mb of 192 where nvr1 runs at 102, and
+  // that alone is why one of them refuses and the other does not. Amber well before the ceiling:
+  // by the time it is actually full, people have already been staring at black tiles.
+  const totalMb = st?.caps?.totalBandwidthMbps
+  const usedKb = st?.caps?.usedBandwidthKbps
+  const bw = Number.isFinite(totalMb) && totalMb > 0 && Number.isFinite(usedKb)
+    ? { used: Math.round((usedKb / 1024) * 10) / 10, total: totalMb, pct: Math.round((usedKb / 1024 / totalMb) * 100) }
+    : null
+  const windows = st?.caps?.maxPlaybackWindows
 
   return {
     id: n.id,
@@ -193,6 +218,14 @@ function nvrPanel(n, mine, nowMs) {
       },
       { label: 'Recording here', value: `${recording} of ${mine.length}`, state: recording === mine.length ? 'ok' : 'warn' },
       { label: 'Streams in use', value: Number.isFinite(n.streams) ? String(n.streams) : NOT_AVAILABLE },
+      {
+        label: 'Bandwidth',
+        value: bw ? `${bw.used} of ${bw.total} Mb (${bw.pct} %)` : NOT_AVAILABLE,
+        // 65, not a rounder 75 or 80: nvr-2 was observed refusing streams at 67 % on 2026-09-25,
+        // so a threshold above that would stay green through the very fault it exists to explain.
+        state: !bw ? 'warn' : bw.pct >= 85 ? 'bad' : bw.pct >= 65 ? 'warn' : 'ok'
+      },
+      { label: 'Playback windows', value: Number.isFinite(windows) ? String(windows) : NOT_AVAILABLE },
       {
         label: 'Refused (10 min)',
         value: refused === null || refused === undefined ? 'not measured' : String(refused),
@@ -362,8 +395,15 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
         const tbody = el('tbody')
         for (const row of n.diskRows) {
           const tr = el('tr')
-          const cells = [[row.name, ''], [row.status, row.state], [row.size, ''], [row.days, '']]
-          for (const [text, cls] of cells) tr.append(el('td', { textContent: text, className: cls }))
+          // The make and serial go under the disk's name: it is what an engineer needs to order a
+          // replacement, and the only place in this system that knows it.
+          const nameCell = el('td')
+          nameCell.append(el('div', { textContent: row.name }))
+          if (row.detail) nameCell.append(el('div', { className: 'hp-sub', textContent: row.detail }))
+          tr.append(nameCell)
+          for (const [text, cls] of [[row.status, row.state], [row.size, ''], [row.days, '']]) {
+            tr.append(el('td', { textContent: text, className: cls }))
+          }
           tbody.append(tr)
         }
         table.append(thead, tbody)

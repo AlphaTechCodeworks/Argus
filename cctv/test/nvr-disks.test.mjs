@@ -172,5 +172,30 @@ const at = (t) => () => t
   check('overlapping rounds ask the NVR once', started === 3, `${started} queries for 3 commands`)
 }
 
+// ---- the shape the real NVRs actually answer with, 2026-09-25 -------------------------------------
+//
+// No longer a guess. These NVMS-9000 boxes refuse queryDiskStatus outright and put the model,
+// serial, size and free space in queryStorageDevInfo alongside the recording dates -- the opposite
+// of what the SDK's own strings suggested. Reading only the dates out of that answer is what made
+// the Health page show a disk it could name with every other field blank.
+{
+  const SDI = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryStorageDevInfo"><status>success</status><content><diskList type="list"><itemType><size unit="MB"></size><freeSpace unit="MB"></freeSpace></itemType><item id="{d1}"><raidId></raidId><slotIndex>1</slotIndex><diskInterfaceType>sata</diskInterfaceType><serialNum>ZRT0CMKL</serialNum><model>ST12000VE001-3BN101 </model><size>11444224</size><freeSpace>0</freeSpace><recStartDate>2026-09-08</recStartDate><recEndDate>2026-09-25</recEndDate></item></diskList></content></response>`
+  const REFUSED = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryDiskStatus"><status>fail</status><errorCode>536870913</errorCode></response>`
+  const CAPS = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="querySystemCaps"><status>success</status><content><ipChlMaxCount>32</ipChlMaxCount><playbackMaxWin>16</playbackMaxWin></content></response>`
+  const q = async (n, url) => (url === 'queryDiskStatus' ? REFUSED : url === 'queryStorageDevInfo' ? SDI : CAPS)
+  const r = await readStorage({ id: 'nvr1', name: 'NVR 1', online: true }, q, () => 0)
+  const d = r.disks[0]
+  check('the disk survives queryDiskStatus being refused', r.available === true && r.disks.length === 1)
+  check('the model comes through', d.model === 'ST12000VE001-3BN101', String(d.model))
+  check('the serial comes through', d.serial === 'ZRT0CMKL', String(d.serial))
+  check('the id comes through', d.id === '{d1}', String(d.id))
+  // 11444224 MB is a 12 TB drive. A thousandfold slip here reads as 11 GB and looks like a fault.
+  check('the size is read in the megabytes the list declares', d.totalBytes === 11444224e6, String(d.totalBytes))
+  check('a full cycling disk is zero free, not unknown', d.freeBytes === 0, String(d.freeBytes))
+  check('the recording days still come through', d.days === 18, String(d.days))
+  check('a condition the NVR would not give stays unknown rather than invented', d.state === 'unknown' && d.status === null)
+  check('the camera limit is read', r.caps.maxCameras === 32 && r.caps.maxPlaybackWindows === 16)
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

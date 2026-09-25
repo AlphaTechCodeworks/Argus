@@ -132,6 +132,46 @@ const storage = {
   check('retention is not available either, and never green', p.retention.value === 'not available' && p.retention.state === 'warn')
   check('no disk rows are invented', p.diskRows.length === 0)
 }
+
+// A real disk from a real NVR: full, cycling, and with no condition reported because these boxes
+// refuse the command that carries one. Both of those are normal here, and neither is a fault.
+{
+  const real = {
+    name: 'Disk 1', slot: 1, id: '{d1}', model: 'ST12000VE001-3BN101', serial: 'ZRT0CMKL',
+    status: null, state: 'unknown', totalBytes: 11444224e6, freeBytes: 0, recFrom: 0, recTo: 0, days: 18
+  }
+  const [p] = renderHealth(nvrWith({ storage: { at: T0, available: true, why: '', disks: [real], days: 18, worst: 'unknown', caps: {} } })).nvrPanels
+  const r = p.diskRows[0]
+  // "0 B free" on a recorder that overwrites its oldest footage by design reads as a fault.
+  check('a full cycling disk says it is overwriting, not that it has no space', r.size === '11.4 TB · overwriting oldest', r.size)
+  // Every one of these NVRs would otherwise sit amber for ever, which is the alarm nobody reads.
+  check('a disk plainly recording is not marked amber for a condition the NVR withheld', r.state === 'ok' && r.status === 'Recording', JSON.stringify(r))
+  check('and the summary agrees with its rows', p.disks.state === 'ok' && p.disks.value === '1 disk', JSON.stringify(p.disks))
+  check('the model and serial are shown now that they are read', r.detail === 'ST12000VE001-3BN101 · ZRT0CMKL', r.detail)
+}
+{
+  // But a disk with no condition AND no recordings is a genuine unknown and must stay amber.
+  const idle = { name: 'Disk 2', slot: 2, id: null, model: null, serial: null, status: null, state: 'unknown', totalBytes: null, freeBytes: null, recFrom: null, recTo: null, days: null }
+  const [p] = renderHealth(nvrWith({ storage: { at: T0, available: true, why: '', disks: [idle], days: null, worst: 'unknown', caps: {} } })).nvrPanels
+  check('a disk with nothing to show for itself stays amber', p.diskRows[0].state === 'warn' && p.diskRows[0].status === 'not available', JSON.stringify(p.diskRows[0]))
+}
+
+// Bandwidth: the fixed budget each NVR shares between recording and live viewing. When it runs
+// out the NVR refuses the next stream, which on screen looks exactly like a broken camera. These
+// are the real figures from the two NVRs on 2026-09-25.
+{
+  const caps = (used) => ({ at: T0, available: true, why: '', disks: [], days: null, worst: 'unknown', caps: { totalBandwidthMbps: 192, usedBandwidthKbps: used } })
+  const field = (s) => renderHealth(nvrWith({ storage: s })).nvrPanels[0].fields.find((f) => f.label === 'Bandwidth')
+  const nvr2 = field(caps(131072))
+  check('nvr-2 reads 128 of 192 Mb', nvr2.value === '128 of 192 Mb (67 %)', nvr2.value)
+  check('and two thirds spent is worth a colour before it runs out', nvr2.state === 'warn', nvr2.state)
+  const nvr1 = field(caps(104857))
+  check('nvr1 reads 102.4 of 192 Mb and is fine', nvr1.value === '102.4 of 192 Mb (53 %)' && nvr1.state === 'ok', `${nvr1.value} ${nvr1.state}`)
+  check('nearly spent is marked bad', field(caps(176947)).state === 'bad')
+  // An NVR that did not give the figures must not be shown a comfortable zero.
+  const none = field({ at: T0, available: true, why: '', disks: [], days: null, worst: 'unknown', caps: {} })
+  check('an NVR that did not say is "not available", never 0 %', none.value === 'not available' && none.state === 'warn', none.value)
+}
 {
   const [p] = renderHealth(nvrWith({})).nvrPanels
   check('before the first read, nothing is claimed', p.disks.value === 'not available' && p.retention.value === 'not available')

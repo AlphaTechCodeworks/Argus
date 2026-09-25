@@ -882,6 +882,8 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .hp-table th, .hp-table td { padding: 8px 12px; text-align: left; font-size: 13px; border-bottom: 1px solid #262d36; }
 .hp-table th { color: var(--muted); font-weight: 500; }
 .hp-table tr:last-child td { border-bottom: 0; }
+/* the make and serial under a disk's name: there to be copied down, not read at a glance */
+.hp-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
 .hp-table td.ok { color: #3fb27f; }
 .hp-table td.warn { color: var(--tl-evt); }
 .hp-table td.bad { color: #e5484d; }
