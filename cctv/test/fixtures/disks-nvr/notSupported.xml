@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<response version="1.0" systemType="NVMS-9000">
+  <status>fail</status>
+  <errorCode>536870983</errorCode>
+  <errorDescription>not support</errorDescription>
+</response>

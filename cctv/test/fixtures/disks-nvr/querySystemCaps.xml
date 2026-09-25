@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<response version="1.0" systemType="NVMS-9000">
+  <status>success</status>
+  <content>
+    <productModel>TD-3532H8</productModel>
+    <softwareVersion>1.4.5.2-B0012.0</softwareVersion>
+    <hardwareVersion>V1.0</hardwareVersion>
+    <kenerlVersion>4.9.84</kenerlVersion>
+    <mcuVersion>1.0.7</mcuVersion>
+    <launchDate>2023-06-14</launchDate>
+    <analogChlCount>0</analogChlCount>
+    <ipChlMaxCount>32</ipChlMaxCount>
+    <playbackMaxWin>16</playbackMaxWin>
+    <supportTalk>true</supportTalk>
+  </content>
+</response>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<response version="1.0" systemType="NVMS-9000">
+  <status>success</status>
+  <content>
+    <diskList type="list" total="2">
+      <item id="{00000001-0000-0000-0000-000000000000}">
+        <slotIndex>1</slotIndex>
+        <recStartDate>2026-08-24</recStartDate>
+        <recEndDate>2026-09-25</recEndDate>
+      </item>
+      <item id="{00000002-0000-0000-0000-000000000000}">
+        <slotIndex>2</slotIndex>
+        <recStartDate>2026-09-19</recStartDate>
+        <recEndDate>2026-09-25</recEndDate>
+      </item>
+    </diskList>
+  </content>
+</response>
