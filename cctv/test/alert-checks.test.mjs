@@ -42,6 +42,29 @@ const fakeSender = (sent = [], pending = {}) => ({
   check('the snapshot carries the location with its lowFreePct', s.locations[0].lowFreePct === 15, JSON.stringify(s.locations))
   check('an online NVR is online', s.nvrs[0].online === true)
   check('a camera carries its last segment time', s.cameras[0].lastSegmentMs === T0)
+  check('no disk reader means no storage, not a fake one', s.nvrs[0].storage === null)
+  // "Nobody counted" must survive as null all the way to the page, not become a comforting 0.
+  check('an unmeasured refusal count stays null', buildSnapshot(deps({ listNvrs: () => [{ id: 'nvr1', name: 'Main site', status: 'online', error: '' }] }), T0).nvrs[0].refusalsLast10Min === null)
+}
+{
+  // What each NVR says about its own disks rides along on the snapshot, and so out on /api/health.
+  const storage = { at: T0, available: true, why: '', disks: [{ name: 'disk1', state: 'ok', status: 'read/write', days: 33 }], days: 33, worst: 'ok', caps: { firmware: '1.4.5.2' } }
+  const s = buildSnapshot(deps({ nvrStorage: { get: () => storage, refresh: async () => {} } }), T0)
+  check('the disk reading rides on the NVR', s.nvrs[0].storage === storage)
+}
+{
+  // The check loop must be unkillable: a disk reader that throws is logged and ignored.
+  let ticked = false
+  const a = startAlerts(deps({
+    autoStart: false,
+    now: () => T0,
+    sender: fakeSender(),
+    log: () => {},
+    nvrStorage: { get: () => { ticked = true; return null }, refresh: () => { throw new Error('the NVR reader blew up') } }
+  }))
+  a.tick()
+  check('a disk reader that throws does not stop the check', ticked === true)
+  check('and the health page still answers', typeof a.health().now === 'number')
 }
 {
   const s = buildSnapshot(deps({ listNvrs: () => [{ id: 'n', name: 'n', status: 'offline', error: '', clockSkewMs: 0, refusalsLast10Min: 0 }] }), T0)

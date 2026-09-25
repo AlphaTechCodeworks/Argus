@@ -37,9 +37,26 @@ export function buildSnapshot(deps, nowMs) {
       id: n.id,
       name: n.name,
       online: n.status === 'online',
+      // The word the NVR list uses, so the page can say "connecting" rather than a bare "offline".
+      status: n.status ?? (n.online ? 'online' : 'offline'),
+      error: n.error || '',
       loginError: n.error && LOGIN_ERROR.test(n.error) ? n.error : null,
-      refusalsLast10Min: n.refusalsLast10Min ?? 0,
-      clockSkewMs: n.clockSkewMs ?? 0
+      // null, not 0, when nothing counted them: the page prints "not measured" rather than a
+      // reassuring zero, and the nvr-refusing rule (>= 3) simply does not fire.
+      refusalsLast10Min: n.refusalsLast10Min ?? null,
+      clockSkewMs: n.clockSkewMs ?? 0,
+      // What the NVR is, and how it is doing, for the per-NVR panel. All optional: an NVR that has
+      // never logged in has no model or serial, and any of these may be null.
+      model: n.model ?? null,
+      serial: n.serial ?? null,
+      host: n.host ?? null,
+      via: n.via ?? null,
+      streams: Number.isFinite(n.streams) ? n.streams : null,
+      cooling: Boolean(n.cooling),
+      lastContactMs: Number.isFinite(n.lastContactMs) ? n.lastContactMs : null,
+      // Read in the background, at most every 10 minutes (nvr-disks.mjs); null until the first
+      // read has happened. The alert rules read `storage` and nothing else here.
+      storage: deps.nvrStorage?.get(n.id) ?? null
     })),
     cameras: deps.listCameras().map((c) => ({
       nvrId: c.nvrId,
@@ -57,6 +74,7 @@ export function buildSnapshot(deps, nowMs) {
 /**
  * @param {object} deps everything buildSnapshot needs, plus:
  *   dataDir, sender ({ deliver, test, pending }), lastBackup?, sysinfo? ({ sample }), now?, log?,
+ *   nvrStorage? ({ get, refresh }: nvr-disks.mjs, what each NVR says about its own disks),
  *   autoStart? (false in tests: tick() is then called by hand)
  */
 export function startAlerts(deps) {
@@ -81,6 +99,15 @@ export function startAlerts(deps) {
 
   function tick() {
     const t = now()
+    // Fire and forget, and deliberately before the snapshot is built: asking the NVRs about their
+    // disks takes seconds and happens at most every 10 minutes, so this check uses whatever the
+    // last round left behind and the next check picks up the answer. The health poll must never
+    // wait on an NVR.
+    try {
+      void deps.nvrStorage?.refresh()
+    } catch (e) {
+      log(`[alerts] could not ask the NVRs about their disks: ${e.message}`)
+    }
     let snap
     try {
       snap = buildSnapshot(deps, t)
