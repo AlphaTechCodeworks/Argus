@@ -214,15 +214,19 @@ const SECURITY_HEADERS = {
 // CCTV_AUTH=off is for local development only: never publish such an instance beyond 127.0.0.1
 const AUTH_OFF = process.env.CCTV_AUTH === 'off'
 
-// Which build is actually running, shown in every page's header. Without it there is no way to
-// tell from the screen whether a deploy landed, which has already cost us time.
-const BUILD = (() => {
+// What is running, shown in every page's header. The version is ours and is bumped by hand in
+// VERSION; the release stamp is when that code was installed. Both matter: the version is what we
+// talk about, the stamp is how we tell two installs of the same version apart.
+const read = (name, fallback) => {
   try {
-    return readFileSync(new URL('../RELEASE', import.meta.url), 'utf8').trim() || 'dev'
+    return readFileSync(new URL(`../${name}`, import.meta.url), 'utf8').trim() || fallback
   } catch {
-    return 'dev'
+    return fallback
   }
-})()
+}
+const VERSION = read('VERSION', '0.0')
+const RELEASE = read('RELEASE', 'dev')
+const BUILD = { version: `v${VERSION}`, release: RELEASE }
 if (AUTH_OFF) console.warn('WARNING: CCTV_AUTH=off, sign-in is disabled. Development use only.')
 
 const clientIp = (req) => req.socket.remoteAddress ?? ''

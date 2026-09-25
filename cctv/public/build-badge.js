@@ -12,9 +12,12 @@ if (el) {
   fetch('/api/me')
     .then((r) => (r.ok ? r.json() : null))
     .then((me) => {
-      if (!me?.build) return
-      el.textContent = me.build
-      el.title = `Running build ${me.build}`
+      const b = me?.build
+      if (!b) return
+      // the version is what we talk about; the release stamp, on hover, is how two installs of the
+      // same version are told apart
+      el.textContent = typeof b === 'string' ? b : b.version
+      el.title = typeof b === 'string' ? `Running ${b}` : `Running ${b.version}, installed ${b.release}`
     })
     .catch(() => {}) // a page that cannot reach the server has louder problems to report
 }

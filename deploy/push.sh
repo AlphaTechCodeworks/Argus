@@ -42,7 +42,7 @@ if [ "$code_only" = 1 ]; then
   echo "== packing the app code (no Docker)" >&2
   echo "$release" > "$work/RELEASE"
   bundle="$work/cctv-code-$release.tar"
-  tar -cf "$bundle" -C "$root" --exclude=cctv/test cctv deploy package.json -C "$work" RELEASE
+  tar -cf "$bundle" -C "$root" --exclude=cctv/test cctv deploy package.json VERSION -C "$work" RELEASE
 else
   echo "== building the release" >&2
   bundle="$(bash "$root/deploy/bundle.sh")"

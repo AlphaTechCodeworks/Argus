@@ -37,7 +37,7 @@ docker run --name "$box" --network none tvt-cctv sh -c '
 MSYS_NO_PATHCONV=1 docker cp "$box:/tmp/p/node_modules" "$(host_path "$stage")/node_modules" >&2
 MSYS_NO_PATHCONV=1 docker cp "$box:/app/build" "$(host_path "$stage")/build" >&2
 
-cp -r "$root/cctv" "$root/bin" "$root/deploy" "$root/package.json" "$stage/"
+cp -r "$root/cctv" "$root/bin" "$root/deploy" "$root/package.json" "$root/VERSION" "$stage/"
 # not part of a release: tests, local experiments
 rm -rf "$stage/cctv/test"
 echo "$release" > "$stage/RELEASE"
