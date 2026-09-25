@@ -956,3 +956,78 @@ body.is-fullscreen .alert-banner { display: none; }
   border: 1px dashed var(--muted); border-radius: 10px; padding: 0 6px;
   color: var(--muted); font-size: 11px; font-weight: normal; text-transform: lowercase;
 }
+
+/* ---- the camera wall (wall.html) --------------------------------------------------------------
+   Appended, never edited into the rules above: the playback page's own styling is in flight. The
+   grid's column count is set by wall.js (gridLayout) rather than auto-fit, because the right number
+   of columns depends on the shape of the space as well as the number of cameras. */
+.wall-page { display: flex; flex-direction: column; height: 100vh; }
+.wall-main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+.wall-load { margin: 0; font-size: 13px; color: var(--muted); }
+.wall-load[data-level="heavy"] { color: var(--tl-evt); }
+.wall-load[data-level="over"] { color: var(--tl-gap); }
+.wall-empty { margin: auto; color: var(--muted); }
+.wall-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--wall-cols, 2), 1fr);
+  grid-auto-rows: 1fr;
+  gap: var(--gap);
+}
+.wall-tile { position: relative; background: var(--tile); border-radius: 4px; overflow: hidden; min-height: 0; }
+.wall-tile canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+/* A camera with nothing at this moment says so; it never just sits there black, because black
+   reads as "broken" or "nothing happened", and on an investigation those are different answers. */
+.wall-tile-msg {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  padding: 12px; text-align: center; font-size: 13px; line-height: 1.4;
+  background: var(--panel); color: var(--muted);
+}
+.wall-tile[data-kind="undecodable"] .wall-tile-msg, .wall-tile[data-kind="error"] .wall-tile-msg { color: var(--tl-gap); }
+.wall-tile-label {
+  position: absolute; left: 0; right: 0; bottom: 0; display: flex; gap: 8px; justify-content: space-between;
+  padding: 3px 6px; font-size: 12px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
+}
+.wall-tile-name { color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wall-tile-name:hover { color: var(--accent); text-decoration: underline; }
+.wall-tile-time { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.wall-bar { flex: 0 0 auto; }
+.wall-coverage { margin-left: 8px; color: var(--muted); font-size: 13px; }
+/* one lane per camera, names down the left so a gap can be read off against a name */
+.wall-lanes, .wall-ticks-row { display: flex; gap: 6px; }
+.wall-lane-names { flex: 0 0 140px; }
+.wall-lane-name {
+  height: 14px; margin-bottom: 2px; font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wall-lane-track { position: relative; flex: 1; background: var(--tl-track); border-radius: 4px; padding: 0; touch-action: none; cursor: crosshair; }
+.wall-lane { position: relative; height: 14px; margin-bottom: 2px; }
+.wall-lane div { position: absolute; top: 1px; bottom: 1px; border-radius: 2px; background: var(--tl-rec); }
+/* the server has no index of this camera: the lane is empty because we do not know, not because
+   there is nothing there */
+.wall-lane-unknown {
+  background: repeating-linear-gradient(45deg, transparent 0 5px, rgba(138, 147, 160, 0.15) 5px 10px);
+}
+.wall-ticks-row .pb-ticks { flex: 1; }
+
+.wall-pick { background: var(--panel); color: var(--text); border: 1px solid #2a3139; border-radius: 6px; min-width: 320px; }
+.wall-pick h3 { margin: 10px 0 4px; font-size: 12px; color: var(--muted); text-transform: none; }
+.wall-pick-list { max-height: 50vh; overflow: auto; }
+.wall-pick-row { display: block; padding: 2px 0; }
+.wall-pick-note { margin: 4px 0 8px; font-size: 13px; color: var(--muted); }
+.wall-pick-note[data-level="heavy"] { color: var(--tl-evt); }
+.wall-pick-note[data-level="over"] { color: var(--tl-gap); }
+
+/* Following someone: where this camera leads (playback.js). Following is guesswork, so the back
+   step is as prominent as the forward ones, and a guess never looks like a known route. */
+.pb-follow { display: flex; align-items: center; gap: 10px; padding: 8px 0 2px; flex-wrap: wrap; }
+.pb-follow-title { color: var(--muted); font-size: 12px; }
+.pb-follow-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.pb-follow-cam { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px 10px; background: var(--panel); color: var(--text); border: 1px solid #2f3742; border-radius: 6px; cursor: pointer; text-align: left; }
+.pb-follow-cam:hover { border-color: var(--accent); }
+.pb-follow-name { font-size: 13px; }
+.pb-follow-where { font-size: 11px; color: var(--muted); }
+.pb-follow-guess { border-style: dashed; opacity: 0.8; }
+.pb-follow-back { padding: 6px 12px; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; cursor: pointer; }

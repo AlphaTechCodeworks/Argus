@@ -13,6 +13,7 @@
       <nav class="tabs" aria-label="Views">
         <a href="/">Live</a>
         <a href="/playback.html" aria-current="page">Playback</a>
+        <a href="/wall.html">Wall</a>
         <a href="/map.html">Map</a>
         <a href="/health.html">Health</a>
         <a href="/sites.html" id="sitesTab" hidden>Sites</a>
@@ -112,6 +113,13 @@
     </div>
 
     <!-- 4. -->
+    <!-- Following someone: where this camera leads, at the moment on screen -->
+    <div class="pb-follow" id="follow" hidden>
+      <button type="button" id="followBack" class="pb-follow-back" hidden title="Back to the camera you came from">← Back</button>
+      <span class="pb-follow-title">Leads to</span>
+      <div class="pb-follow-list" id="followList"></div>
+    </div>
+
     <div class="pb-ticks" id="ticks" aria-hidden="true"></div>
 
     <!-- 5. speed left, transport centred, tools right -->

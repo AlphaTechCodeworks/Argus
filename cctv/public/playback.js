@@ -2018,3 +2018,112 @@ async function followExport(id) {
     exSay(job.progress?.message ?? job.progress?.step ?? 'Working…')
   }
 }
+
+// ---- following someone from camera to camera ---------------------------------
+//
+// The cameras here are not smart: nothing detects a person and hands them over. What makes a
+// follow quick is simply knowing which camera adjoins which (camera-links.mjs, drawn on the site
+// map) and keeping the moment when you switch — which reloadKeepingPosition already does.
+//
+// Following is trial and error: you guess a direction, find nothing, and go back. So the back
+// step matters as much as the forward one, and it must return you to the moment you left, not to
+// wherever the other camera has since played on to.
+
+const followEl = $('follow')
+const followListEl = $('followList')
+const followBackEl = $('followBack')
+
+let cameraLinks = {} // "<nvr>/<ch>" -> [{ to, label }]
+let followSuggestions = [] // guesses from the map, never stored
+const followTrail = [] // where we came from: { nvr, ch, atMs }
+
+// the existing camKey() is for the camera on screen; this one names any camera
+const keyOf = (nvr, ch) => `${nvr}/${ch}`
+
+/** Whoever is in the camera list, by key, for names. */
+const cameraNameOf = (key) => {
+  for (const o of cameraSel.options) if (o.value === key) return o.textContent
+  return key
+}
+
+async function loadCameraLinks() {
+  try {
+    const d = await api('/api/camera-links')
+    cameraLinks = d.links ?? {}
+    followSuggestions = d.suggestions ?? []
+  } catch {
+    cameraLinks = {} // without links the strip simply does not appear
+    followSuggestions = []
+  }
+  drawFollow()
+}
+
+function drawFollow() {
+  const key = keyOf(state.nvr, state.ch)
+  const links = cameraLinks[key] ?? []
+  // suggestions are guesses from the map: offered only when nothing has been drawn for this
+  // camera, and always labelled as guesses so nobody mistakes one for a known route
+  const guesses = links.length ? [] : followSuggestions.filter((s) => s.from === key)
+  const show = links.length > 0 || guesses.length > 0 || followTrail.length > 0
+  followEl.hidden = !show
+  followBackEl.hidden = followTrail.length === 0
+  if (!show) return
+
+  const button = (to, label, guess) => {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = `pb-follow-cam${guess ? ' pb-follow-guess' : ''}`
+    b.innerHTML = ''
+    const name = document.createElement('span')
+    name.className = 'pb-follow-name'
+    name.textContent = cameraNameOf(to)
+    const where = document.createElement('span')
+    where.className = 'pb-follow-where'
+    where.textContent = guess ? 'nearby on the map — not confirmed' : label || 'leads here'
+    b.append(name, where)
+    b.title = guess
+      ? `${cameraNameOf(to)} is close by on the map. Nobody has confirmed this route.`
+      : `Go to ${cameraNameOf(to)} at this moment${label ? ` — ${label}` : ''}`
+    b.addEventListener('click', () => followTo(to))
+    return b
+  }
+
+  followListEl.replaceChildren(
+    ...links.map((l) => button(l.to, l.label, false)),
+    ...guesses.map((s) => button(s.to, '', true))
+  )
+}
+
+/** Switch to a neighbouring camera, staying at the moment on screen. */
+async function followTo(key) {
+  const [nvr, ch] = key.split('/')
+  followTrail.push({ nvr: state.nvr, ch: state.ch, atMs: state.position })
+  await goToCamera(nvr, Number(ch), state.position)
+}
+
+followBackEl.addEventListener('click', async () => {
+  const back = followTrail.pop()
+  if (back) await goToCamera(back.nvr, back.ch, back.atMs)
+  drawFollow()
+})
+
+/** The camera switch the select does, but driven from code and with a moment to land on. */
+async function goToCamera(nvr, ch, atMs) {
+  state.nvr = nvr
+  state.ch = ch
+  cameraSel.value = keyOf(nvr, ch)
+  history.replaceState(null, '', `?${nvrQ()}&ch=${ch}`)
+  clearSearch(true)
+  resetZoom()
+  if (Number.isFinite(atMs)) state.position = atMs
+  await reloadKeepingPosition()
+  drawFollow()
+}
+
+cameraSel.addEventListener('change', () => {
+  // choosing from the list is a fresh start, not a step in a follow
+  followTrail.length = 0
+  drawFollow()
+})
+
+await loadCameraLinks()
