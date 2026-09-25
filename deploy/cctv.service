@@ -32,8 +32,10 @@ StateDirectoryMode=0700
 # recordings: prepared drives are mounted under /srv/cctv-rec (root:cctv-disk 2770, by the disk
 # helper). The cctv-disk group also lets the app reach the disk helper's socket
 # (/run/cctv-disk/helper.sock, cctv-disk-helper.socket); the app has no sudo and no root at all.
+# NAS shares are mounted under /srv/cctv-net the same way (netshares.mjs).
 SupplementaryGroups=cctv-disk
 ReadWritePaths=-/srv/cctv-rec
+ReadWritePaths=-/srv/cctv-net
 
 # the app's watchdog kills the process when SDK calls hang; come straight back (2 s), but in a
 # crash loop each further restart waits longer, up to 60 s (systemd 254+; Ubuntu 24.04 has 255)

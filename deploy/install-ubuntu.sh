@@ -25,9 +25,9 @@ done
 [ -f "$here/cctv/server.mjs" ] || { echo "not an unpacked release: $here" >&2; exit 1; }
 say() { printf '\n== %s\n' "$*"; }
 
-say "system packages (openssl: HTTPS certificate; ffmpeg: motion search decoding; xfsprogs, gdisk: preparing a USB drive)"
+say "system packages (openssl: HTTPS certificate; ffmpeg: motion search decoding; xfsprogs, gdisk: preparing a USB drive; cifs-utils, nfs-common: network drives)"
 need=()
-for p in ca-certificates curl xz-utils openssl ffmpeg xfsprogs gdisk; do dpkg -s "$p" >/dev/null 2>&1 || need+=("$p"); done
+for p in ca-certificates curl xz-utils openssl ffmpeg xfsprogs gdisk cifs-utils nfs-common; do dpkg -s "$p" >/dev/null 2>&1 || need+=("$p"); done
 if [ ${#need[@]} -gt 0 ]; then
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${need[@]}"
@@ -121,6 +121,8 @@ install -m 755 -o root -g root "$dest/deploy/cctv-disk-helper" /usr/local/sbin/c
 install -d -m 755 -o root -g root /usr/local/lib/cctv
 install -m 644 -o root -g root "$dest/deploy/cctv-disk-helperd.mjs" /usr/local/lib/cctv/cctv-disk-helperd.mjs
 install -d -m 755 /srv/cctv-rec
+# NAS shares (Settings -> Network drive) are mounted under here, one folder per share
+install -d -m 755 /srv/cctv-net
 # the sudo rule of earlier versions: gone (the service has no sudo at all)
 rm -f /etc/sudoers.d/cctv-disk
 install -m 644 "$dest/deploy/cctv-disk-helper.socket" /etc/systemd/system/cctv-disk-helper.socket
