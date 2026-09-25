@@ -132,7 +132,74 @@ const eng = (o = {}) => alertEngine({ raiseMs: 2 * MIN, clearMs: 1 * MIN, graceM
   check('a muted kind never opens', e.step(bad, T0 + 7 * MIN).opened.length === 0)
 }
 
-check('KINDS covers every kind used', ['server-restart', 'drive-missing', 'drive-full', 'not-recording', 'camera-offline', 'nvr-offline', 'nvr-refusing', 'nvr-login', 'nvr-clock'].every(k => KINDS.includes(k)), KINDS.join())
+// --- the NVR's own disk ------------------------------------------------------------------------
+//
+// The NVR keeps its own copy of roughly the last 30 days, and that copy is the only redundancy
+// this system has. A disk the NVR itself calls broken has to be worth a message; a disk we simply
+// could not ask about must not be.
+const withStorage = (storage, nvr = {}) => ok({ nvrs: [{ id: 'nvr1', name: 'Main site', online: true, loginError: null, refusalsLast10Min: 0, clockSkewMs: 0, storage, ...nvr }] })
+const healthyDisk = { available: true, disks: [{ name: 'disk1', state: 'ok', status: 'read/write' }], days: 33, worst: 'ok' }
+const brokenDisk = { available: true, disks: [{ name: 'disk1', state: 'ok', status: 'read/write' }, { name: 'disk2', state: 'bad', status: 'exception' }], days: 33, worst: 'bad' }
+{
+  const e = eng()
+  const bad = withStorage(brokenDisk)
+  check('a healthy disk opens nothing', e.step(withStorage(healthyDisk), T0 + 7 * MIN).opened.length === 0)
+  const e2 = eng()
+  check('a failed disk waits out raiseMs like the rest', e2.step(bad, T0 + 4 * MIN).opened.length === 0)
+  const r = e2.step(bad, T0 + 7 * MIN)
+  check('then nvr-disk opens', r.opened.length === 1 && r.opened[0].kind === 'nvr-disk', JSON.stringify(r.opened))
+  check('it is high severity: the safety net is gone', r.opened[0].severity === 'high')
+  check('it names the disk and what the NVR called it', /disk2/.test(r.opened[0].detail) && /exception/.test(r.opened[0].detail), r.opened[0].detail)
+  check('one alert per NVR, not one per disk', e2.step(bad, T0 + 9 * MIN).open.filter((a) => a.kind === 'nvr-disk').length === 1)
+  const c = e2.step(withStorage(healthyDisk), T0 + 11 * MIN)
+  check('and it clears when the disk comes back', c.cleared.length === 1 && c.cleared[0].kind === 'nvr-disk')
+}
+{
+  const e = eng()
+  const none = withStorage({ available: true, disks: [], days: null, worst: 'missing' })
+  e.step(none, T0 + 4 * MIN)
+  const r = e.step(none, T0 + 7 * MIN)
+  check('an NVR that reports no disk at all raises it', r.opened.length === 1 && /no disk/.test(r.opened[0].title), JSON.stringify(r.opened))
+}
+{
+  // The important half of the rule: silence when we do not know, rather than a guess.
+  const e = eng()
+  for (const s of [null, undefined, { available: false, why: 'not supported', disks: [], days: null, worst: 'unknown' }]) {
+    e.step(withStorage(s), T0 + 4 * MIN)
+    check('an NVR we could not ask raises nothing', e.step(withStorage(s), T0 + 7 * MIN).opened.length === 0, JSON.stringify(s))
+  }
+}
+{
+  // A word we have never seen ('unknown') is not evidence of a fault.
+  const e = eng()
+  const odd = withStorage({ available: true, disks: [{ name: 'disk1', state: 'unknown', status: 'quantum flux' }], days: null, worst: 'unknown' })
+  e.step(odd, T0 + 4 * MIN)
+  check('an unrecognised disk state raises nothing', e.step(odd, T0 + 7 * MIN).opened.length === 0)
+}
+{
+  // An offline NVR has its own alert; its stale disk reading must not add a second one.
+  const e = eng()
+  const off = withStorage(brokenDisk, { online: false })
+  e.step(off, T0 + 4 * MIN)
+  const r = e.step(off, T0 + 7 * MIN)
+  check('an offline NVR raises nvr-offline only', r.opened.length === 1 && r.opened[0].kind === 'nvr-offline', JSON.stringify(r.opened.map((a) => a.kind)))
+}
+{
+  const e = eng({ muted: ['nvr-disk'] })
+  const bad = withStorage(brokenDisk)
+  e.step(bad, T0 + 4 * MIN)
+  check('nvr-disk can be muted like any other kind', e.step(bad, T0 + 7 * MIN).opened.length === 0)
+}
+
+// --- refusals that nobody counted ---------------------------------------------------------------
+{
+  const e = eng()
+  const unmeasured = ok({ nvrs: [{ id: 'nvr1', name: 'Main site', online: true, loginError: null, refusalsLast10Min: null, clockSkewMs: 0 }] })
+  e.step(unmeasured, T0 + 4 * MIN)
+  check('a refusal count of null never fires nvr-refusing', e.step(unmeasured, T0 + 7 * MIN).opened.length === 0)
+}
+
+check('KINDS covers every kind used', ['server-restart', 'drive-missing', 'drive-full', 'not-recording', 'camera-offline', 'nvr-offline', 'nvr-disk', 'nvr-refusing', 'nvr-login', 'nvr-clock'].every(k => KINDS.includes(k)), KINDS.join())
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

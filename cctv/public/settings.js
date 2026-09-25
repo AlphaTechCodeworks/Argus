@@ -594,6 +594,7 @@ const KIND_TEXT = {
   'not-recording': 'a camera stops recording',
   'camera-offline': 'a camera goes offline',
   'nvr-offline': 'an NVR goes offline',
+  'nvr-disk': "an NVR's own disk fails or goes missing",
   'nvr-refusing': 'an NVR refuses streams',
   'nvr-login': 'an NVR refuses the login',
   'nvr-clock': "an NVR's clock drifts"

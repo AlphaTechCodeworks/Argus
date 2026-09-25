@@ -12,7 +12,7 @@
 /** Every kind, in the order they are shown. */
 export const KINDS = Object.freeze([
   'server-restart', 'drive-missing', 'drive-full', 'not-recording',
-  'camera-offline', 'nvr-offline', 'nvr-refusing', 'nvr-login', 'nvr-clock'
+  'camera-offline', 'nvr-offline', 'nvr-disk', 'nvr-refusing', 'nvr-login', 'nvr-clock'
 ])
 
 /** Kinds that open on the first sighting rather than after raiseMs. */
@@ -21,7 +21,7 @@ const IMMEDIATE = new Set(['server-restart', 'nvr-login', 'nvr-refusing'])
 /** Kinds reported once with no clear (nothing to recover from). */
 const ONE_SHOT = new Set(['server-restart'])
 
-const HIGH = new Set(['server-restart', 'drive-missing', 'drive-full', 'nvr-offline', 'nvr-login'])
+const HIGH = new Set(['server-restart', 'drive-missing', 'drive-full', 'nvr-offline', 'nvr-login', 'nvr-disk'])
 
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 const names = (list, max = 4) =>
@@ -104,6 +104,28 @@ function candidates(snap, { notRecordingMs, clockSkewMs, nowMs }) {
     if (n.loginError) out.push({ key: `nvr-login/${n.id}`, kind: 'nvr-login', title: `${n.id} refused the login`, detail: n.loginError })
     if (!n.online) { offlineNvrs.add(n.id); out.push({ key: `nvr-offline/${n.id}`, kind: 'nvr-offline', title: `${n.id} is offline`, detail: `${n.name}: the server cannot reach it.` }) }
     if (n.refusalsLast10Min >= 3) out.push({ key: `nvr-refusing/${n.id}`, kind: 'nvr-refusing', title: `${n.id} is refusing streams`, detail: `${n.refusalsLast10Min} refused in the last 10 minutes; it may be at its limit.` })
+    // The NVR's own disk: roughly 30 days of recordings, and the only copy besides the server's.
+    // Only a disk the NVR itself calls broken, or an NVR that reports no disk at all, raises this.
+    // An NVR that cannot be asked (offline, or firmware that does not answer the query) reports
+    // `available: false` and is silent: a guess is not worth waking somebody for, and the Health
+    // page says "not available" instead. An offline NVR is already covered by its own alert.
+    const st = n.storage
+    if (n.online && st?.available) {
+      if (!st.disks?.length) {
+        out.push({ key: `nvr-disk/${n.id}`, kind: 'nvr-disk', title: `${n.id} reports no disk`, detail: `${n.name} is not keeping its own copy of the recordings.` })
+      } else {
+        const broken = st.disks.filter((d) => d.state === 'bad')
+        if (broken.length) {
+          out.push({
+            key: `nvr-disk/${n.id}`,
+            kind: 'nvr-disk',
+            title: `${n.id}: ${plural(broken.length, 'disk')} failed`,
+            detail: `${names(broken.map((d) => `${d.name}${d.status ? ` (${d.status})` : ''}`))} — ${n.name} may no longer hold its own copy of the recordings.`
+          })
+        }
+      }
+    }
+
     const skew = Math.abs(n.clockSkewMs ?? 0)
     if (skew >= clockSkewMs) {
       const secs = Math.round(skew / 1000)
