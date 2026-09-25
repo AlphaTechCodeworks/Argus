@@ -30,7 +30,7 @@ const HEALTHY_MS = 60_000 // this long without problems resets the back-off
 // stream asks at once; the sub stream used to wait 1.5 s, which is most of the delay people feel
 // when a grid of tiles opens. 250 ms still lets a keyframe that is already on its way win, so the
 // NVR is not asked needlessly, without the wait being noticeable.
-const KEYFRAME_WAIT_MS = { 0: 0, 1: 250 }
+const KEYFRAME_WAIT_MS = { 0: 0, 1: 1500 }
 const KEYFRAME_EVERY_MS = 5000 // at most one keyframe request per stream per this
 const BUSY_RETRY_MS = 5000 // retry delay while the NVR has calls stuck in the SDK or is cooling down
 // a start refused this fast is the NVR saying no (stream limit, no permission, camera offline),

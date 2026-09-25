@@ -1362,6 +1362,8 @@ document.addEventListener('keydown', (e) => {
     selectClipEnd()
   } else if (e.key === 'b' || e.key === 'B') {
     addBookmark()
+  } else if (e.key === 'f' || e.key === 'F') {
+    toggleFullscreen()
   } else if (e.key === '?') {
     shortcutsDlg.showModal()
   }
@@ -1790,3 +1792,28 @@ videoEl.addEventListener('dblclick', (e) => { if (!zoomBusy()) { e.preventDefaul
 // a zoomed picture must not follow you to another camera or another moment
 $('camera').addEventListener('change', resetZoom)
 new ResizeObserver(applyZoom).observe(videoEl)
+
+// ---- full screen -------------------------------------------------------------
+//
+// The video and its controls go full screen together, not the picture alone: reviewing footage
+// means scrubbing, and a timeline you cannot reach is worse than a slightly smaller picture.
+
+const fullBtn = $('fullscreen')
+const fullTarget = document.body
+
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+  else fullTarget.requestFullscreen?.().catch(() => {})
+}
+
+fullBtn?.addEventListener('click', toggleFullscreen)
+document.addEventListener('fullscreenchange', () => {
+  const on = Boolean(document.fullscreenElement)
+  document.body.classList.toggle('is-fullscreen', on)
+  if (fullBtn) {
+    fullBtn.setAttribute('aria-pressed', String(on))
+    fullBtn.textContent = on ? 'Exit full screen' : 'Full screen'
+  }
+  applyZoom() // the picture changed size, so the pan limits did too
+})
+if (!document.fullscreenEnabled && fullBtn) fullBtn.hidden = true

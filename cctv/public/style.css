@@ -908,3 +908,7 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .pb-video.zoomed { cursor: grab; }
 .pb-video.zoomed:active { cursor: grabbing; }
 .pb-zoom-badge { position: absolute; bottom: 8px; right: 10px; padding: 2px 7px; border-radius: 10px; background: rgb(0 0 0 / 55%); color: #e6e8eb; font: 600 12px ui-monospace, Consolas, monospace; pointer-events: none; }
+
+/* Full screen on the playback page: the picture takes the space the page chrome gives back. */
+body.is-fullscreen > header { display: none; }
+body.is-fullscreen .alert-banner { display: none; }
