@@ -119,6 +119,23 @@
       </form>
     </section>
 
+    <section class="se-section" aria-labelledby="nas-title">
+      <h2 id="nas-title">Network drive</h2>
+      <p class="st-help">Adds a NAS share (SMB or NFS) as a place for recordings. The whole share is mounted under /srv/cctv-net and, if you name a folder inside it, that folder is used. Test first: it mounts, writes a file, reads it back and undoes everything. The password is only ever held by the machine itself, never by this page and never in the settings file.</p>
+      <div id="netshares" class="st-cards"></div>
+      <form id="addShare" class="se-grid" autocomplete="off">
+        <label>Protocol <select id="n-proto"><option value="smb">SMB (Windows share)</option><option value="nfs">NFS</option></select></label>
+        <label>Server <input id="n-server" required maxlength="253" placeholder="192.168.0.121" spellcheck="false" autocapitalize="off" /></label>
+        <label id="n-share-row">Share <input id="n-share" required maxlength="64" placeholder="Backups" spellcheck="false" autocapitalize="off" /></label>
+        <label>Folder inside the share (optional) <input id="n-subdir" maxlength="255" placeholder="CCTV Backup" spellcheck="false" autocapitalize="off" /></label>
+        <label id="n-user-row">User name <input id="n-user" maxlength="64" placeholder="cctv" spellcheck="false" autocapitalize="off" autocomplete="off" /></label>
+        <label id="n-pass-row">Password <input id="n-pass" type="password" maxlength="256" autocomplete="new-password" /></label>
+        <label>Role <select id="n-role"><option value="main">Main</option><option value="overflow">Overflow</option><option value="archive">Archive</option></select></label>
+        <div class="se-actions"><button type="button" id="n-test">Test</button><button type="submit" id="n-add">Add</button><span id="n-msg" class="st-meta"></span></div>
+      </form>
+      <div id="netjob" class="se-job" hidden></div>
+    </section>
+
     <section class="se-section" aria-labelledby="usb-title">
       <h2 id="usb-title">Prepare USB drive</h2>
       <p class="st-help">Erases a USB/eSATA drive, formats it for recordings and adds it as a location. Only drives that are not the system disk, not mounted and not in a pool are offered.</p>
