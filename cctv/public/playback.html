@@ -24,6 +24,7 @@
       <label>Date <input id="date" type="date" /></label>
     </div>
     <div class="account">
+      <span id="build" class="build" title="Running build"></span>
       <span id="whoami"></span>
       <button id="logout" type="button">Sign out</button>
     </div>
@@ -32,6 +33,7 @@
   <main class="pb-main">
     <div class="tile pb-video" id="video">
       <canvas></canvas>
+      <div class="pb-zoom-badge" id="zoomBadge" hidden></div>
       <pre class="stats"></pre>
       <div class="pb-badge" id="srcBadge" hidden title="The server has not recorded this stretch: it plays from the NVR">from NVR</div>
       <div class="pb-notice" id="pbNotice" role="status" hidden></div>
@@ -174,5 +176,6 @@
 
   <script type="module" src="playback.js"></script>
   <script type="module" src="alert-banner.js"></script>
+  <script type="module" src="build-badge.js"></script>
 </body>
 </html>

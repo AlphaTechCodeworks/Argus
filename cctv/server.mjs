@@ -40,7 +40,7 @@
 //   bytes 6-7   reserved
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
-import { createReadStream, existsSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { extname, join } from 'node:path'
@@ -213,6 +213,16 @@ const SECURITY_HEADERS = {
 
 // CCTV_AUTH=off is for local development only: never publish such an instance beyond 127.0.0.1
 const AUTH_OFF = process.env.CCTV_AUTH === 'off'
+
+// Which build is actually running, shown in every page's header. Without it there is no way to
+// tell from the screen whether a deploy landed, which has already cost us time.
+const BUILD = (() => {
+  try {
+    return readFileSync(new URL('../RELEASE', import.meta.url), 'utf8').trim() || 'dev'
+  } catch {
+    return 'dev'
+  }
+})()
 if (AUTH_OFF) console.warn('WARNING: CCTV_AUTH=off, sign-in is disabled. Development use only.')
 
 const clientIp = (req) => req.socket.remoteAddress ?? ''
@@ -338,7 +348,7 @@ const handleRequest = async (req, res) => {
     return
   }
 
-  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: AUTH_OFF || auth.isAdmin(user), p2p: P2P_ENABLED })
+  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: AUTH_OFF || auth.isAdmin(user), p2p: P2P_ENABLED, build: BUILD })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
   if (pathname.startsWith('/api/admin/')) {
     if (!AUTH_OFF && !auth.isAdmin(user)) return sendJson(res, 403, { error: 'Only admins can manage NVRs and sites' })

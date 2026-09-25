@@ -899,3 +899,12 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
   .tile .dot-rec { animation: dot-rec-pulse 2s ease-in-out infinite; }
 }
 @keyframes dot-rec-pulse { 50% { opacity: 0.55; } }
+
+/* The running build, top right: the only way to tell from the screen whether a deploy landed. */
+.build { color: var(--muted); font-size: 11px; font-family: ui-monospace, Consolas, monospace; letter-spacing: 0.02em; }
+
+/* Digital zoom on the playback picture (playback.js): magnifies what is on screen only. */
+.pb-video { overflow: hidden; }
+.pb-video.zoomed { cursor: grab; }
+.pb-video.zoomed:active { cursor: grabbing; }
+.pb-zoom-badge { position: absolute; bottom: 8px; right: 10px; padding: 2px 7px; border-radius: 10px; background: rgb(0 0 0 / 55%); color: #e6e8eb; font: 600 12px ui-monospace, Consolas, monospace; pointer-events: none; }
