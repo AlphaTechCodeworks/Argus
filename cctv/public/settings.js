@@ -1,5 +1,7 @@
 // Settings page (admins only): recording, memory/thumbnails, storage locations, preparing a USB
-// drive. The server checks every value again (settings.mjs, storage.mjs, disks.mjs).
+// drive, adding a network drive. The server checks every value again (settings.mjs, storage.mjs,
+// disks.mjs, netshares.mjs). The NAS password is sent once and cleared: the page never keeps it,
+// and no answer from the server ever contains it.
 const $ = (id) => document.getElementById(id)
 const notice = $('notice')
 
@@ -432,6 +434,154 @@ $('prepForm').addEventListener('submit', async (e) => {
   }
 })
 
+// ---- network drive (NAS) --------------------------------------------------------------------------------
+
+let netTimer = null
+
+function renderShares(list) {
+  if (!list.length) {
+    $('netshares').replaceChildren(el('p', { className: 'st-empty', textContent: 'No network drives yet.' }))
+    return
+  }
+  $('netshares').replaceChildren(
+    ...list.map((s) => {
+      const remove = el('button', { type: 'button', className: 'st-danger', textContent: 'Remove' })
+      remove.addEventListener('click', () => {
+        if (confirm(`Unmount and forget ${s.path}? Nothing on the NAS itself is deleted.`)) shareAction({ action: 'remove', id: s.id })
+      })
+      const where = s.proto === 'smb' ? `//${s.server}/${s.share}` : `${s.server}:${s.share}`
+      return el(
+        'article',
+        { className: 'st-card' },
+        el(
+          'div',
+          { className: 'st-card-head' },
+          el('h3', { textContent: s.path }),
+          el('span', { className: `st-status ${s.mounted ? 'st-online' : 'st-offline'}`, textContent: s.mounted ? 'Mounted' : 'Not mounted' })
+        ),
+        el('p', { className: 'st-meta', textContent: `${s.proto.toUpperCase()} ${where}${s.subdir ? ` · folder "${s.subdir}"` : ''}${s.user ? ` · user ${s.user}` : ''}` }),
+        s.mounted && s.totalBytes ? el('p', { className: 'st-meta', textContent: `${gb(s.freeBytes)} free of ${gb(s.totalBytes)}` }) : null,
+        s.mounted ? null : el('p', { className: 'st-warn-text', textContent: 'Not mounted: the NAS is off or unreachable. Recording moves to another location until it comes back.' }),
+        el('div', { className: 'st-card-actions' }, remove)
+      )
+    })
+  )
+}
+
+const NET_STEP_NAMES = { check: 'Check what was typed', credentials: 'Store the password (root only)', unit: 'Write the mount unit', mount: 'Mount', verify: 'Write a test file and read it back', cleanup: 'Undo the test mount', done: 'Done' }
+
+function renderNetJob(job) {
+  const box = $('netjob')
+  if (!job) {
+    box.hidden = true
+    return
+  }
+  box.hidden = false
+  const what = job.action === 'remove' ? 'Removing' : job.action === 'test' ? 'Testing' : 'Adding'
+  const title =
+    job.state === 'running'
+      ? `${what} ${job.server}/${job.share}…`
+      : job.state === 'done'
+        ? job.action === 'test'
+          ? 'The share works: it mounted and a test file was written and read back'
+          : job.action === 'remove'
+            ? 'Removed'
+            : `${job.path} is ready`
+        : job.state === 'mounted'
+          ? 'Mounted, but not added as a storage location'
+          : `${what} the share failed`
+  const p = job.progress ?? { steps: Object.keys(NET_STEP_NAMES), done: 0, of: 5, pct: 0, step: 'check' }
+  const latest = new Map()
+  for (const s of job.steps ?? []) latest.set(s.step, s)
+  const stepState = (name, i) => {
+    if (name === 'done') return job.state === 'done' ? 'done' : 'waiting'
+    const s = latest.get(name)
+    if (s?.state === 'failed') return 'failed'
+    if (i < p.done || s?.state === 'done') return 'done'
+    if (job.state === 'running' && name === p.step) return 'working'
+    return 'waiting'
+  }
+  const bar = el('progress', { className: 'se-progress', max: 100, value: p.pct })
+  bar.setAttribute('aria-label', `${what} ${job.server}/${job.share}: ${p.pct}%`)
+  box.replaceChildren(
+    el('h3', { textContent: title }),
+    bar,
+    el(
+      'ul',
+      { className: 'se-parts' },
+      ...p.steps.map((name, i) => {
+        const st = stepState(name, i)
+        const msg = latest.get(name)?.message
+        return el('li', { className: `st-step st-step-${st}`, textContent: `${NET_STEP_NAMES[name] ?? name}${st === 'working' ? '…' : st === 'failed' ? ': failed' : ''}${msg ? ` — ${msg}` : ''}` })
+      })
+    ),
+    job.state === 'done' && job.vers ? el('p', { className: 'st-meta', textContent: `Mounted with version ${job.vers}.` }) : null,
+    job.state === 'failed' && job.error ? el('p', { className: 'st-error-text', textContent: job.error }) : null,
+    job.state === 'mounted' && job.nextStep ? el('p', { className: 'st-warn-text', textContent: job.nextStep }) : null,
+    job.location ? el('p', { className: 'st-meta', textContent: `Added as a storage location: ${job.location.path} (${job.location.role})` }) : null
+  )
+}
+
+async function loadShares() {
+  try {
+    const r = await api('GET', '/api/admin/netshares')
+    renderShares(r.shares)
+    renderNetJob(r.job)
+    clearTimeout(netTimer)
+    if (r.job?.state === 'running') netTimer = setTimeout(loadShares, 1500)
+    else if (r.job?.state === 'done' && r.job.action !== 'test') loadStorage()
+  } catch (err) {
+    say('n-msg', err.message, true)
+  }
+}
+
+/** What the owner typed. The password is sent and then cleared: the page never keeps it. */
+const shareForm = (action) => ({
+  action,
+  proto: $('n-proto').value,
+  server: $('n-server').value.trim(),
+  share: $('n-share').value.trim(),
+  subdir: $('n-subdir').value.trim(),
+  user: $('n-user').value.trim(),
+  pass: $('n-pass').value,
+  ...(action === 'add' ? { role: $('n-role').value } : {})
+})
+
+async function shareAction(body) {
+  $('n-test').disabled = true
+  $('n-add').disabled = true
+  say('n-msg', body.action === 'test' ? 'Testing…' : 'Working…')
+  try {
+    const r = await api('POST', '/api/admin/netshares', body)
+    say('n-msg', '')
+    renderNetJob(r.job)
+  } catch (err) {
+    say('n-msg', err.message, true)
+  }
+  $('n-test').disabled = false
+  $('n-add').disabled = false
+  await loadShares()
+}
+
+// NFS has no user or password: the server decides by IP address
+$('n-proto').addEventListener('change', () => {
+  const nfs = $('n-proto').value === 'nfs'
+  $('n-user-row').hidden = nfs
+  $('n-pass-row').hidden = nfs
+  $('n-share-row').firstChild.textContent = nfs ? 'Export path ' : 'Share '
+  $('n-share').placeholder = nfs ? '/export/cctv' : 'Backups'
+})
+$('n-test').addEventListener('click', () => shareAction(shareForm('test')))
+$('addShare').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  await shareAction(shareForm('add'))
+  if (!$('n-msg').textContent) {
+    $('addShare').reset()
+    $('n-proto').dispatchEvent(new Event('change'))
+  }
+  $('n-pass').value = '' // whether it worked or not, the password does not stay in the page
+})
+
 // ---- start ----------------------------------------------------------------------------------------------
 
 // ---- alerts --------------------------------------------------------------------------------------
@@ -554,6 +704,7 @@ if (!me.admin) {
     render()
     await loadStorage()
     await loadDisks()
+    await loadShares()
     setInterval(() => {
       loadStorage()
       refreshRam()

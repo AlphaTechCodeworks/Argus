@@ -8,11 +8,19 @@
 // Protocol: one request per connection, one JSON line (at most 4 KB, within 5 s):
 //   {"op":"list"}
 //   {"op":"prepare","dev":"/dev/sdb","serial":"NAABC123","fs":"xfs"|"ext4"}
-// Answer: the helper's JSON lines as it prints them (progress for prepare), then {"exit":<code>}.
-// Anything else is refused ({"error":"refused: ..."} then {"exit":2}); nothing else can be run.
-// Only one prepare at a time. A prepare goes on when the client hangs up (stopping mkfs halfway
-// helps nobody); the helper re-checks the disk (not the system disk, nothing mounted, not in a
-// pool/LVM/RAID, serial matches) immediately before it erases anything.
+//   {"op":"netmount","proto":"smb"|"nfs","server":"...","share":"...","subdir":"...","id":"...",
+//    "user":"...","pass":"...","mode":"add"|"test"}   (subdir: the folder inside the share, or "")
+//   {"op":"netunmount","id":"..."}
+// Answer: the helper's JSON lines as it prints them (progress for prepare and netmount), then
+// {"exit":<code>}. Anything else is refused ({"error":"refused: ..."} then {"exit":2}); nothing
+// else can be run. Only one prepare at a time, and only one mount job at a time. A prepare goes on
+// when the client hangs up (stopping mkfs halfway helps nobody); the helper re-checks the disk
+// (not the system disk, nothing mounted, not in a pool/LVM/RAID, serial matches) immediately
+// before it erases anything.
+//
+// The NAS user name and password are the only fields that never become arguments: they go to the
+// helper on its stdin, because /proc/<pid>/cmdline is readable by every user on the machine. They
+// are never logged here either, and parseRequest keeps them out of the argument list by design.
 //
 // The helper always gets a fixed environment (never the caller's, never CCTV_DISK_DRYRUN):
 // the dry-run and fake-tree settings exist for tests only, which call serve() with their own.
@@ -25,9 +33,35 @@ export const SAFE_ENV = Object.freeze({ PATH: '/usr/local/sbin:/usr/local/bin:/u
 const DEV = /^\/dev\/(sd[a-z]{1,2}|vd[a-z]{1,2}|nvme[0-9]{1,2}n[0-9]{1,2}|mmcblk[0-9]{1,2})$/
 const SERIAL = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/
 const FS = ['xfs', 'ext4']
+// A NAS share: the same allowlists the helper script checks again before it writes or runs
+// anything. An IPv4 address or a host name; one SMB share name with no slash, backslash or space;
+// an NFS export whose every part starts with a letter or a digit (which rules out "." and "..",
+// so no traversal is possible); an id that is safe as a file name and as part of a unit name.
+const IPV4 = /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/
+const HOSTNAME = /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/
+// A share name, or one folder name inside it. A space is allowed (real shares have them:
+// "CCTV Backup"), but the name must start with a letter or a digit and must not end in a space:
+// that rules out ".", "..", hidden names and the trailing space systemd would strip from What=.
+const NAME = /^[A-Za-z0-9][A-Za-z0-9 ._()+&-]{0,63}$/
+const NFS_EXPORT = /^(\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){1,8}$/
+const isName = (v) => typeof v === 'string' && NAME.test(v) && !v.endsWith(' ')
+/** '' or a relative folder inside the share, at most four parts deep. */
+const isSubdir = (v) => typeof v === 'string' && (v === '' || (v.length <= 255 && v.split('/').length <= 4 && v.split('/').every(isName)))
+const SHARE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/
+const NAS_USER = /^([A-Za-z0-9][A-Za-z0-9_.-]{0,31}\\)?[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$/
+const PROTOS = ['smb', 'nfs']
+const MODES = ['add', 'test']
+const MAX_PASS = 256
 const MAX_REQUEST = 4096
 
-/** One request line -> the helper's arguments. @throws {Error} "refused: ..." */
+// A host name's last part may not be all digits: "999.1.1.1" looks like an address but is not one.
+const isServer = (v) => typeof v === 'string' && v.length <= 253 && (IPV4.test(v) || (HOSTNAME.test(v) && !/^\d+$/.test(v.split('.').at(-1))))
+
+/**
+ * One request line -> what to run: { args } for the helper, plus `stdin` when there is a secret
+ * (the NAS user name and password, one line each). Secrets are never put in args.
+ * @throws {Error} "refused: ..."
+ */
 export function parseRequest(line) {
   let r
   try {
@@ -39,16 +73,39 @@ export function parseRequest(line) {
   const keys = Object.keys(r).sort().join()
   if (r.op === 'list') {
     if (keys !== 'op') throw new Error('refused: list takes no arguments')
-    return ['list']
+    return { args: ['list'] }
   }
   if (r.op === 'prepare') {
     if (keys !== 'dev,fs,op,serial') throw new Error('refused: prepare takes exactly dev, serial, fs')
     if (typeof r.dev !== 'string' || !DEV.test(r.dev)) throw new Error('refused: dev must be a whole disk such as /dev/sdb')
     if (typeof r.serial !== 'string' || !SERIAL.test(r.serial)) throw new Error('refused: odd serial number')
     if (!FS.includes(r.fs)) throw new Error('refused: fs must be xfs or ext4')
-    return ['prepare', r.dev, r.serial, r.fs]
+    return { args: ['prepare', r.dev, r.serial, r.fs] }
   }
-  throw new Error('refused: unknown op (only list and prepare)')
+  if (r.op === 'netmount') {
+    if (keys !== 'id,mode,op,pass,proto,server,share,subdir,user') throw new Error('refused: netmount takes exactly proto, server, share, subdir, id, user, pass, mode')
+    if (!PROTOS.includes(r.proto)) throw new Error('refused: proto must be smb or nfs')
+    if (!MODES.includes(r.mode)) throw new Error('refused: mode must be add or test')
+    if (!isServer(r.server)) throw new Error('refused: server must be an IPv4 address or a host name')
+    if (r.proto === 'smb' ? !isName(r.share) : !(typeof r.share === 'string' && r.share.length <= 255 && NFS_EXPORT.test(r.share))) {
+      throw new Error(r.proto === 'smb' ? 'refused: odd share name' : 'refused: odd export path (/export/path)')
+    }
+    if (!isSubdir(r.subdir)) throw new Error('refused: odd folder inside the share')
+    if (typeof r.id !== 'string' || !SHARE_ID.test(r.id)) throw new Error('refused: odd share id (lower-case letters, digits and - only)')
+    if (typeof r.user !== 'string' || (r.user !== '' && !NAS_USER.test(r.user))) throw new Error('refused: odd user name')
+    // the password is never inspected beyond its length and shape: any control character would
+    // break the two-line stdin protocol, and nothing else about it is this service's business
+    if (typeof r.pass !== 'string' || r.pass.length > MAX_PASS) throw new Error(`refused: the password must be text of at most ${MAX_PASS} characters`)
+    if (/[\r\n\0]/.test(r.pass)) throw new Error('refused: the password must not contain line breaks')
+    if (r.proto === 'smb' && r.user === '') throw new Error('refused: SMB needs a user name')
+    return { args: ['netmount', r.proto, r.server, r.share, r.id, r.mode, r.subdir], stdin: `${r.user}\n${r.pass}\n` }
+  }
+  if (r.op === 'netunmount') {
+    if (keys !== 'id,op') throw new Error('refused: netunmount takes exactly id')
+    if (typeof r.id !== 'string' || !SHARE_ID.test(r.id)) throw new Error('refused: odd share id (lower-case letters, digits and - only)')
+    return { args: ['netunmount', r.id] }
+  }
+  throw new Error('refused: unknown op (only list, prepare, netmount and netunmount)')
 }
 
 /**
@@ -59,7 +116,8 @@ export function parseRequest(line) {
  */
 export function serve(server, { helper = HELPER, env = SAFE_ENV, requestTimeoutMs = 5000, log = (s) => console.log(s) } = {}) {
   let preparing = null // the dev being prepared
-  const state = { preparing: () => preparing }
+  let mounting = null // the share id being mounted or unmounted
+  const state = { preparing: () => preparing, mounting: () => mounting }
   server.on('connection', (sock) => {
     const send = (o) => {
       if (!sock.destroyed && sock.writable) sock.write(typeof o === 'string' ? `${o}\n` : `${JSON.stringify(o)}\n`)
@@ -86,13 +144,16 @@ export function serve(server, { helper = HELPER, env = SAFE_ENV, requestTimeoutM
       sock.off('data', onData)
       sock.pause() // one request per connection: anything after it is ignored
       if (i < 0 || i > MAX_REQUEST) return refuse('refused: request too long')
-      let args
+      let req
       try {
-        args = parseRequest(buf.slice(0, i))
+        req = parseRequest(buf.slice(0, i))
       } catch (e) {
         return refuse(e.message)
       }
-      if (args[0] === 'prepare') {
+      const args = req.args
+      const [op] = args
+      const isMount = op === 'netmount' || op === 'netunmount'
+      if (op === 'prepare') {
         if (preparing) {
           send({ step: 'start', state: 'failed', message: `another drive (${preparing}) is being prepared; wait for it to finish` })
           return finish(4)
@@ -100,10 +161,24 @@ export function serve(server, { helper = HELPER, env = SAFE_ENV, requestTimeoutM
         preparing = args[1]
         log(`[cctv-disk] prepare ${args[1]} serial ${args[2]} as ${args[3]}`)
       }
-      run(helper, args, env, send).then((code) => {
-        if (args[0] === 'prepare') {
+      if (isMount) {
+        if (mounting) {
+          send({ step: 'start', state: 'failed', message: `another share (${mounting}) is being mounted; wait for it to finish` })
+          return finish(4)
+        }
+        // the share id, the server and the share name only: never the user name or the password
+        mounting = op === 'netmount' ? args[4] : args[1]
+        log(op === 'netmount' ? `[cctv-disk] netmount ${args[4]}: ${args[1]} ${args[2]} ${args[3]} (${args[5]})` : `[cctv-disk] netunmount ${args[1]}`)
+      }
+      run(helper, args, env, send, req.stdin).then((code) => {
+        if (op === 'prepare') {
           preparing = null
           log(`[cctv-disk] prepare ${args[1]}: exit ${code}`)
+        }
+        if (isMount) {
+          const id = mounting
+          mounting = null
+          log(`[cctv-disk] ${op} ${id}: exit ${code}`)
         }
         finish(code)
       })
@@ -120,10 +195,17 @@ export function serve(server, { helper = HELPER, env = SAFE_ENV, requestTimeoutM
   return state
 }
 
-/** Runs the helper; each stdout line goes to send(). Resolves to its exit code. */
-function run(helper, args, env, send) {
+/**
+ * Runs the helper; each stdout line goes to send(). Resolves to its exit code. `stdin`, when
+ * given, is the secret (the NAS user name and password): it goes down the pipe and nowhere else.
+ */
+function run(helper, args, env, send, stdin) {
   return new Promise((resolve) => {
-    const p = spawn(helper, args, { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const p = spawn(helper, args, { env: { ...env }, stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] })
+    if (stdin !== undefined) {
+      p.stdin.on('error', () => {}) // the helper may refuse and exit before reading
+      p.stdin.end(stdin)
+    }
     let out = ''
     let err = ''
     p.stdout.setEncoding('utf8')

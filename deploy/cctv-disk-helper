@@ -20,13 +20,41 @@
 #       Prints JSON lines: {"step","state","message"}, finally {"done":true,"path","id"}.
 #       Exit 0 only when everything worked.
 #
+#   cctv-disk-helper netmount <smb|nfs> <server> <share> <id> <add|test> <subdir|''>
+#       The WHOLE share is mounted, at /srv/cctv-net/<id>, and <subdir> names the folder inside it
+#       that the recordings go in (e.g. share "Backups", subdir "CCTV Backup" -> the location is
+#       /srv/cctv-net/<id>/CCTV Backup). Mounting the share rather than the folder means renaming
+#       or recreating that folder never means rewriting and reloading a mount unit, and it keeps
+#       the mount point (and so the unit name) free of spaces. A space in the share name or the
+#       folder is fine: every command is an argument list, never a shell string.
+#       Mounts through a systemd .mount unit (not fstab), with
+#       nofail and _netdev so a NAS that is off can never hold up the boot. Every field is checked
+#       against an allowlist first. The user name and the password are read from stdin, one line
+#       each, NEVER from an argument or the environment: /proc/<pid>/cmdline is world-readable.
+#       For SMB the password is written only to /etc/cctv/nas-<id>.cred (root, 0600) and the unit
+#       refers to that file; it is never echoed, logged or put in a unit, an argument or a message.
+#       SMB tries vers=3.1.1 and falls back to 3.0; NFS is 4.1. After mounting, a small file is
+#       written, read back and deleted: an unusable mount is reported as a failure and undone.
+#       mode "test" leaves nothing behind (no enable, and the unit, mount point and credentials
+#       file are removed again); mode "add" enables the unit so it comes back after a reboot.
+#       Prints JSON lines: {"step","state","message"}, finally
+#       {"done":true,"path","mount","subdir","id","unit","proto","vers","mode"} ("path" is the
+#       recordings folder, "mount" the mount point).
+#   cctv-disk-helper netunmount <id>
+#       Stops and disables the unit, removes it, shreds the credentials file and removes the empty
+#       mount point. Files on the NAS itself are never touched.
+#
 #   CCTV_DISK_DRYRUN=1: prints each command as {"run":"..."} instead of running it (tests).
 #   Only in dry run: CCTV_DISK_FAKE_TREE=<file> (lsblk -P lines for <dev>) and
 #   CCTV_DISK_FAKE_ROOT=<dev> replace the real device tree; CCTV_DISK_FAKE_TREE_AGAIN=<file> is the
 #   tree read the second time (just before wiping); CCTV_DISK_FAKE_UUID, CCTV_DISK_FAKE_FSTAB=<file>
 #   and CCTV_DISK_FAKE_MOUNTS=<file> (mount points, one per line) replace the new UUID, /etc/fstab
-#   and the mount table. The helper service runs this script
-#   with a fixed environment (never these), so a call from the app is always real.
+#   and the mount table. For netmount: CCTV_DISK_FAKE_NET_BASE, CCTV_DISK_FAKE_ETC and
+#   CCTV_DISK_FAKE_UNITS move the mount point, the credentials file and the unit into a temp tree,
+#   CCTV_DISK_FAKE_GID replaces the cctv-disk gid, CCTV_DISK_FAKE_MOUNT_FAIL=<versions> makes those
+#   SMB versions refuse, and CCTV_DISK_FAKE_VERIFY_FAIL=1 makes the write check fail. The helper
+#   service runs this script with a fixed environment (never these), so a call from the app is
+#   always real.
 set -euo pipefail
 export LC_ALL=C
 
@@ -63,6 +91,145 @@ run() { # the only way a command is executed
   else
     "$@" >/dev/null 2>&1 || return 1
   fi
+}
+
+# ---- network shares (netmount / netunmount) ----------------------------------------------------
+# Only in dry run (the guard above refuses every CCTV_DISK_FAKE_* outside it) the three places the
+# helper writes to are moved into a temp tree, so the tests can read back what was written.
+NET_BASE="${CCTV_DISK_FAKE_NET_BASE:-/srv/cctv-net}"
+ETC_BASE="${CCTV_DISK_FAKE_ETC:-/etc/cctv}"
+UNIT_DIR="${CCTV_DISK_FAKE_UNITS:-/etc/systemd/system}"
+# cache=strict and actimeo=1 because recordings are written continuously and read back by the same
+# machine: loose caching hands out stale sizes and short reads. nofail and _netdev so a NAS that is
+# off (or moved) can never hold up the boot.
+SMB_OPTS='cache=strict,actimeo=1,_netdev,nofail'
+NFS_OPTS='hard,timeo=600,retrans=2,_netdev,nofail'
+
+# Every field is checked against an allowlist before anything is written or run. Nothing here is
+# ever put into a shell string: the commands are always argument lists.
+valid_server() { # an IPv4 address or a host name
+  local s="$1"
+  [ "${#s}" -ge 1 ] && [ "${#s}" -le 253 ] || return 1
+  [[ $s =~ ^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$ ]] && return 0
+  # a host name's last part may not be all digits: "999.1.1.1" looks like an address but is not one
+  [[ ${s##*.} =~ ^[0-9]+$ ]] && return 1
+  [[ $s =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]]
+}
+# One SMB share name, or one folder name inside the share. A space is allowed because real shares
+# have them ("CCTV Backup"), but the name must start with a letter or a digit and must not end in a
+# space: that rules out "." and ".." (so no traversal), hidden names, option-looking names, and the
+# trailing space systemd would strip from a unit's What=. No slash, backslash, quote, semicolon,
+# backtick, dollar or control character can get in.
+NAME_RE='^[A-Za-z0-9][A-Za-z0-9 ._()+&-]{0,63}$'
+valid_name() { [[ $1 =~ $NAME_RE ]] && [[ $1 != *' ' ]]; }
+valid_smb_share() { valid_name "$1"; }
+# an NFS export path: every part must start with a letter or a digit, which rules out "." and ".."
+# (and therefore any traversal) without a separate check
+valid_nfs_export() { [ "${#1}" -le 255 ] && [[ $1 =~ ^(/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){1,8}$ ]]; }
+valid_id() { [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; }
+# '' or a relative folder path inside the share, at most four parts deep ("CCTV Backup", "a/b").
+# The whole share is mounted and this names the folder the recordings go in, so that renaming or
+# recreating the folder never means rewriting a mount unit.
+valid_subdir() {
+  local p="$1" part n=0
+  if [ -z "$p" ]; then return 0; fi
+  [ "${#p}" -le 255 ] || return 1
+  case "$p" in /* | */ | *//*) return 1 ;; esac
+  while IFS= read -r part; do
+    n=$((n + 1))
+    [ "$n" -le 4 ] || return 1
+    valid_name "$part" || return 1
+  done < <(printf '%s\n' "${p//\//$'\n'}")
+  return 0
+}
+
+disk_gid() {
+  if [ $DRY = 1 ]; then printf '%s' "${CCTV_DISK_FAKE_GID:-900}"; else getent group "$GROUP" | cut -d: -f3; fi
+}
+
+# /srv/cctv-net/nas1 -> srv-cctv\x2dnet-nas1.mount (systemd's own path escaping, worked out here so
+# the unit name is known without running systemd-escape)
+unit_name() {
+  local p="${1#/}"
+  p="${p//-/\\x2d}"
+  printf '%s.mount' "${p//\//-}"
+}
+
+# The password lives in exactly one place: this file, root-owned and 0600. It is never an argument,
+# never in the environment, never in the mount unit and never in a message or a log line.
+write_cred() { # file user pass
+  local f="$1" u="$2" p="$3" dom=''
+  if [[ $u == *\\* ]]; then
+    dom="${u%%\\*}"
+    u="${u#*\\}"
+  fi
+  (
+    umask 077
+    : >"$f"
+  ) || return 1
+  chmod 600 "$f" || return 1
+  run chown root:root "$f" || true
+  {
+    printf 'username=%s\npassword=%s\n' "$u" "$p"
+    if [ -n "$dom" ]; then printf 'domain=%s\n' "$dom"; fi
+  } >"$f" || return 1
+  chmod 600 "$f"
+}
+
+write_unit() { # unit id what where type options
+  local f="$UNIT_DIR/$1"
+  mkdir -p "$UNIT_DIR" || return 1
+  {
+    printf '# Written by cctv-disk-helper for the CCTV network share "%s". Do not edit by hand.\n' "$2"
+    printf '[Unit]\nDescription=CCTV network share %s\nAfter=network-online.target\nWants=network-online.target\n\n' "$2"
+    printf '[Mount]\nWhat=%s\nWhere=%s\nType=%s\nOptions=%s\nTimeoutSec=30\n\n' "$3" "$4" "$5" "$6"
+    printf '[Install]\nWantedBy=multi-user.target\n'
+  } >"$f" || return 1
+  chmod 644 "$f"
+}
+
+try_mount() { # unit version
+  if [ $DRY = 1 ] && [[ " ${CCTV_DISK_FAKE_MOUNT_FAIL:-} " == *" $2 "* ]]; then
+    printf '{"run":%s}\n' "$(jstr "systemctl restart $1 (refused: fake)")"
+    return 1
+  fi
+  run systemctl restart "$1"
+}
+
+# a mount is only usable when a file can be written, read back and removed again
+verify_write() { # folder (may contain a space: always quoted, never a shell string)
+  local f="$1/.cctv-write-test" token
+  if [ "${CCTV_DISK_FAKE_VERIFY_FAIL:-}" = 1 ]; then return 1; fi
+  if [ $DRY = 1 ]; then
+    printf '{"run":%s}\n' "$(jstr "verify: write, read back and delete $f")"
+    return 0
+  fi
+  token="cctv-${RANDOM}${RANDOM}-$(date -u +%s)"
+  printf '%s\n' "$token" >"$f" 2>/dev/null || return 1
+  if [ "$(cat "$f" 2>/dev/null)" != "$token" ]; then
+    rm -f "$f"
+    return 1
+  fi
+  rm -f "$f"
+}
+
+# undoes everything netmount made: after a failure, after a test mount, and on netunmount
+cleanup_net() { # unit mount cred
+  run systemctl stop "$1" || true
+  run systemctl disable "$1" || true
+  if [ $DRY = 1 ]; then
+    printf '{"run":%s}\n' "$(jstr "rm -f $UNIT_DIR/$1")"
+  else
+    rm -f "$UNIT_DIR/$1"
+  fi
+  run systemctl daemon-reload || true
+  # the credentials file goes with the mount: the password must not outlive it
+  if [ $DRY = 1 ]; then
+    printf '{"run":%s}\n' "$(jstr "shred -u $3")"
+  else
+    shred -u "$3" 2>/dev/null || rm -f "$3"
+  fi
+  run rmdir "$2" || true
 }
 
 # the disk(s) holding "/" (through partitions, LVM, RAID, crypt), one per line
@@ -217,8 +384,129 @@ case "$cmd" in
     say marker done
     printf '{"done":true,"path":%s,"id":%s}\n' "$(jstr "$mnt")" "$(jstr "$id")"
     ;;
+  netmount)
+    # netmount <smb|nfs> <server> <share> <id> <add|test>
+    # The username and the password come on stdin, one per line, and never through an argument or
+    # the environment: /proc/<pid>/cmdline and `ps` are readable by every user on the machine.
+    [ $# = 7 ] || fail check "usage: netmount <smb|nfs> <server> <share> <id> <add|test> <subdir|''>"
+    proto="$2"
+    server="$3"
+    share="$4"
+    id="$5"
+    mode="$6"
+    subdir="$7"
+    say check start "checking the share"
+    case "$proto" in smb | nfs) ;; *) fail check "protocol must be smb or nfs" ;; esac
+    case "$mode" in add | test) ;; *) fail check "mode must be add or test" ;; esac
+    valid_server "$server" || fail check "odd server (an IPv4 address or a host name is expected)"
+    valid_id "$id" || fail check "odd share id (lower-case letters, digits and - only)"
+    if [ "$proto" = smb ]; then
+      valid_smb_share "$share" || fail check "odd share name (letters, digits, . _ - only, no slash or space)"
+    else
+      valid_nfs_export "$share" || fail check "odd export path (/export/path, each part starting with a letter or digit)"
+    fi
+    valid_subdir "$subdir" || fail check "odd folder inside the share (at most four parts, each starting with a letter or digit)"
+    [ $DRY = 1 ] || [ "$(id -u)" = 0 ] || fail check "run as root (by cctv-disk-helper.service)"
+
+    # the user name and the password, one line each, straight off stdin
+    nas_user=''
+    nas_pass=''
+    IFS= read -r nas_user || true
+    IFS= read -r nas_pass || true
+    [ -z "$nas_user" ] || [[ $nas_user =~ ^([A-Za-z0-9][A-Za-z0-9_.-]{0,31}\\)?[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$ ]] || fail check "odd user name (letters, digits, . _ @ - and an optional DOMAIN backslash only)"
+    [ "${#nas_pass}" -le 256 ] || fail check "the password is too long (256 characters at most)"
+    if [ "$proto" = smb ] && [ -z "$nas_user" ]; then fail check "SMB needs a user name"; fi
+
+    mnt="$NET_BASE/$id"
+    unit="$(unit_name "$mnt")"
+    cred="$ETC_BASE/nas-$id.cred"
+    gid="$(disk_gid)"
+    [ -n "$gid" ] || fail check "the $GROUP group does not exist (run the installer)"
+    if [ $DRY = 1 ]; then mounts="$(cat "${CCTV_DISK_FAKE_MOUNTS:-/dev/null}")"; else mounts="$(findmnt -rno TARGET)"; fi
+    if printf '%s\n' "$mounts" | grep -qxF "$mnt"; then fail check "$mnt is already mounted: unmount it first"; fi
+    say check done
+
+    say credentials start "writing the credentials file"
+    mkdir -p "$ETC_BASE" || fail credentials "cannot make $ETC_BASE"
+    chmod 700 "$ETC_BASE" || true
+    if [ "$proto" = smb ]; then
+      # The password exists in exactly one place: this root-only file. It is never an argument,
+      # never in the environment, never in the mount unit and never in a message.
+      write_cred "$cred" "$nas_user" "$nas_pass" || fail credentials "cannot write the credentials file"
+    fi
+    nas_pass=''
+    say credentials done
+
+    say unit start "writing $unit"
+    if [ "$proto" = smb ]; then
+      what="//$server/$share"
+      type=cifs
+      opts="credentials=$cred,$SMB_OPTS,uid=0,gid=$gid,file_mode=0660,dir_mode=2770,vers="
+    else
+      what="$server:$share"
+      type=nfs4
+      opts="$NFS_OPTS,vers="
+    fi
+    run mkdir -p "$mnt" || fail unit "cannot make $mnt"
+    run chown "root:$GROUP" "$mnt" || true
+    run chmod 2770 "$mnt" || true
+    say unit done
+
+    # SMB: 3.1.1 first, then 3.0 for older NAS firmware. NFS: 4.1 only.
+    if [ "$proto" = smb ]; then versions="3.1.1 3.0"; else versions="4.1"; fi
+    mounted=0
+    used=''
+    for v in $versions; do
+      say mount start "mounting $what (version $v)"
+      write_unit "$unit" "$id" "$what" "$mnt" "$type" "$opts$v" || fail mount "cannot write $unit"
+      run systemctl daemon-reload || fail mount "systemctl daemon-reload failed"
+      if [ "$mode" = add ]; then run systemctl enable "$unit" || fail mount "systemctl enable $unit failed"; fi
+      if try_mount "$unit" "$v"; then
+        mounted=1
+        used="$v"
+        break
+      fi
+      say mount start "version $v was refused"
+    done
+    [ $mounted = 1 ] || { cleanup_net "$unit" "$mnt" "$cred"; fail mount "the share could not be mounted (wrong name, password, or the NAS is not reachable)"; }
+    say mount done "mounted with version $used"
+
+    # the recordings folder inside the share (it may contain a space, so it is always quoted and
+    # never built into a shell string); "" means the share root
+    if [ -n "$subdir" ]; then data="$mnt/$subdir"; else data="$mnt"; fi
+    say verify start "writing a test file in $data"
+    if [ -n "$subdir" ]; then
+      run mkdir -p "$data" || { cleanup_net "$unit" "$mnt" "$cred"; fail verify "cannot make $data on the share"; }
+      run chown "root:$GROUP" "$data" || true
+    fi
+    if ! verify_write "$data"; then
+      cleanup_net "$unit" "$mnt" "$cred"
+      fail verify "the share mounted but $data could not be written to and read back (permissions on the NAS?)"
+    fi
+    say verify done
+    if [ "$mode" = test ]; then
+      say cleanup start "undoing the test mount"
+      cleanup_net "$unit" "$mnt" "$cred"
+      say cleanup done
+    fi
+    printf '{"done":true,"path":%s,"mount":%s,"subdir":%s,"id":%s,"unit":%s,"proto":%s,"vers":%s,"mode":%s}\n' \
+      "$(jstr "$data")" "$(jstr "$mnt")" "$(jstr "$subdir")" "$(jstr "$id")" "$(jstr "$unit")" "$(jstr "$proto")" "$(jstr "$used")" "$(jstr "$mode")"
+    ;;
+  netunmount)
+    [ $# = 2 ] || fail check "usage: netunmount <id>"
+    id="$2"
+    valid_id "$id" || fail check "odd share id (lower-case letters, digits and - only)"
+    [ $DRY = 1 ] || [ "$(id -u)" = 0 ] || fail check "run as root (by cctv-disk-helper.service)"
+    mnt="$NET_BASE/$id"
+    unit="$(unit_name "$mnt")"
+    say check done
+    say mount start "unmounting $mnt"
+    cleanup_net "$unit" "$mnt" "$ETC_BASE/nas-$id.cred"
+    say mount done
+    printf '{"done":true,"path":%s,"id":%s,"unit":%s}\n' "$(jstr "$mnt")" "$(jstr "$id")" "$(jstr "$unit")"
+    ;;
   *)
-    echo "usage: cctv-disk-helper list | prepare <dev> <serial> <xfs|ext4>" >&2
+    echo "usage: cctv-disk-helper list | prepare <dev> <serial> <xfs|ext4> | netmount <smb|nfs> <server> <share> <id> <add|test> | netunmount <id>" >&2
     exit 2
     ;;
 esac
