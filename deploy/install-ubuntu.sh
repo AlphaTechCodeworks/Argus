@@ -48,6 +48,19 @@ if ! /usr/local/bin/node -v 2>/dev/null | grep -q "^v$NODE_MAJOR\."; then
 fi
 /usr/local/bin/node -v
 
+say "npm packages"
+# A release built by deploy/bundle.sh already carries node_modules. Installing straight from a
+# git checkout (which is how this is done now that the Docker image is gone) does not, so fetch
+# them here. Only the three runtime packages; koffi ships a prebuilt Linux x86-64 binary, so
+# nothing is compiled.
+if [ -d "$here/node_modules/koffi" ]; then
+  echo "bundled with the release"
+else
+  command -v npm >/dev/null 2>&1 || ln -sf /opt/node/bin/npm /usr/local/bin/npm
+  (cd "$here" && /usr/local/bin/npm install --omit=dev --no-audit --no-fund --loglevel=error)
+  [ -d "$here/node_modules/koffi" ] || { echo "npm install did not produce koffi; the app cannot talk to the NVRs" >&2; exit 1; }
+fi
+
 say "app files"
 release="$(cat "$here/RELEASE" 2>/dev/null || date -u +%Y%m%d-%H%M%S)"
 dest="/opt/cctv/releases/$release"
