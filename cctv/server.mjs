@@ -63,6 +63,7 @@ import { handleStreams } from './streams.mjs'
 import { handleCameraNotes, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
+import { handleClockWrite, startClockSync } from './nvr-clock.mjs'
 import { handleSettings } from './settings-api.mjs'
 import { cameraRecording, getSettings } from './settings.mjs'
 import { startAlerts } from './alert-checks.mjs'
@@ -187,6 +188,11 @@ const nvrStorage = makeNvrStorage({
     return target ? tcpReachable(target.host, target.port) : { ok: true, why: '', skipped: true }
   }
 })
+
+// The server is the master clock: it keeps its own time by NTP and every recording is stamped
+// with it, so the NVRs are kept in step with the server rather than each hoping to reach a time
+// server of its own -- which a remote site may not be able to reach at all.
+const clockSync = startClockSync(nvrs, { enabled: () => getSettings().clockSync?.enabled !== false })
 
 const alerts = startAlerts({
   dataDir: DATA_DIR,
@@ -442,6 +448,8 @@ const handleRequest = async (req, res) => {
     if (probe) return sendJson(res, probe[0], probe[1])
     const clocks = await handleClocks(req.method, pathname, nvrs)
     if (clocks) return sendJson(res, clocks[0], clocks[1])
+    const clockWrite = await handleClockWrite(req.method, pathname, () => readJsonObject(req, 2048), nvrs, user)
+    if (clockWrite) return sendJson(res, clockWrite[0], clockWrite[1])
 
     // GET /api/admin/nvrs/:id/disks[?discover=1] — what this NVR says about its own disks.
     // Without discover: the cached snapshot the Health page uses, read again now.
