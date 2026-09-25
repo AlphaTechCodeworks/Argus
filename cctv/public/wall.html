@@ -22,6 +22,25 @@
     </div>
     <div class="controls">
       <button id="pickCameras" type="button" title="Choose the cameras on the wall">Cameras…</button>
+      <label>View
+        <select id="viewSel" title="A saved set of cameras, kept with your account">
+          <option value="">(not saved)</option>
+        </select>
+      </label>
+      <button id="saveView" type="button" title="Save these cameras and this grid as a named view">Save view…</button>
+      <button id="deleteView" type="button" title="Delete the saved view shown" hidden>Delete view</button>
+      <label>Grid
+        <select id="layout" title="A fixed grid streams only the cameras on the page; the rest wait on the next page">
+          <option value="2x2">2 × 2</option>
+          <option value="3x3">3 × 3</option>
+          <option value="auto">Fit them all</option>
+        </select>
+      </label>
+      <span class="wall-pager" id="pager" hidden>
+        <button id="pagePrev" type="button" aria-label="Previous page of cameras">◀</button>
+        <span id="pageLabel"></span>
+        <button id="pageNext" type="button" aria-label="Next page of cameras">▶</button>
+      </span>
       <label>Date <input id="date" type="date" /></label>
       <label>Quality
         <select id="quality" title="Sub-streams are much lighter on this PC; the server's own recordings ask nothing of the NVR">
@@ -90,6 +109,13 @@
         <button id="fwd" type="button" title="Forward 30 s (→)" aria-label="Forward 30 seconds">+30s</button>
       </div>
       <div class="pb-tools">
+        <label>Lanes
+          <select id="laneMode" title="Show a lane for the one camera you are working on, or for every camera on this page">
+            <option value="all">All cameras in view</option>
+            <option value="one">This camera only</option>
+          </select>
+        </label>
+        <button id="exportView" type="button" title="Export every camera in this view over the stretch on screen">Export view…</button>
         <span class="pb-hint" id="wallHint">Click a lane to jump · scroll to zoom · drag to pan · click a tile's name to open it on the playback page</span>
       </div>
     </div>
@@ -112,11 +138,54 @@
   <dialog id="pickDlg" class="wall-pick">
     <form method="dialog">
       <h2>Cameras on the wall</h2>
+      <label class="wall-pick-search">Search
+        <input id="pickSearch" type="search" placeholder="name, NVR, site or channel" autocomplete="off" />
+      </label>
       <p class="wall-pick-note" id="pickNote" role="status"></p>
       <div class="wall-pick-list" id="pickList"></div>
       <div class="pb-ex-actions">
         <button type="submit" value="cancel">Cancel</button>
         <button type="button" id="pickSave" class="pb-primary">Show these</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="saveViewDlg" class="wall-pick">
+    <form method="dialog">
+      <h2>Save this view</h2>
+      <p class="wall-pick-note">The cameras chosen and the grid, kept with your account so they follow you to any screen.</p>
+      <label>Name <input id="viewName" type="text" maxlength="60" placeholder="Yard and gates" /></label>
+      <p class="pb-ex-msg" id="viewMsg" role="status"></p>
+      <div class="pb-ex-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="button" id="viewSave" class="pb-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="wallExportDlg" class="wall-pick">
+    <form method="dialog">
+      <h2 id="wallExTitle">Export</h2>
+      <p class="wall-pick-note">
+        The stretch of time below is the one the timeline is showing. Every camera ticked is exported
+        over it, as one job — the same export the playback page makes.
+      </p>
+      <p><label>From <input id="wallExFrom" type="text" inputmode="numeric" placeholder="hh:mm:ss" /></label>
+         <label>To <input id="wallExTo" type="text" inputmode="numeric" placeholder="hh:mm:ss" /></label>
+         <span id="wallExSpan" class="pb-hint"></span></p>
+      <div class="wall-pick-list" id="wallExCameras"></div>
+      <p>
+        <label><input type="radio" name="wallExFormat" value="pack" checked /> Evidence pack (signed)</label>
+        <label><input type="radio" name="wallExFormat" value="mp4" /> MP4</label>
+        <label><input type="radio" name="wallExFormat" value="stills" /> Stills</label>
+      </p>
+      <label>Name <input id="wallExName" type="text" maxlength="120" /></label>
+      <label>Notes <textarea id="wallExNotes" rows="2"></textarea></label>
+      <p class="pb-ex-msg" id="wallExMsg" role="status"></p>
+      <progress id="wallExProgress" max="100" value="0" hidden></progress>
+      <div class="pb-ex-actions">
+        <button type="submit" value="cancel">Close</button>
+        <button type="button" id="wallExStart" class="pb-primary">Start the export</button>
       </div>
     </form>
   </dialog>

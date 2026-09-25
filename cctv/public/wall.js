@@ -36,6 +36,23 @@ import {
   tileState,
   wallMode
 } from './wall-clock.js'
+import {
+  afterRefusal,
+  afterVideo,
+  applyViews,
+  checkView,
+  colsOf,
+  exportClipsFor,
+  groupCameras,
+  laneSet,
+  layoutFor,
+  normaliseViews,
+  openNote,
+  openPlan,
+  pageOf,
+  searchCameras,
+  slotsOf
+} from './grid-view.js'
 
 const DAY = 86_400_000
 const MIN_SPAN = 10_000
@@ -74,11 +91,26 @@ const shuttleLabelEl = $('shuttleLabel')
 const pickDlg = $('pickDlg')
 const pickList = $('pickList')
 const pickNote = $('pickNote')
+const pickSearch = $('pickSearch')
+const layoutSel = $('layout')
+const laneModeSel = $('laneMode')
+const viewSel = $('viewSel')
+const pagerEl = $('pager')
+const pageLabel = $('pageLabel')
 
 const state = {
   user: '',
   all: [], // every camera from /api/cameras
-  tiles: [], // Tile, in the chosen order
+  cameras: [], // every camera CHOSEN, which may be more than one page of the grid holds
+  tiles: [], // Tile, for the cameras on this page only — the only ones that ever stream
+  layout: '2x2',
+  page: 0,
+  laneMode: 'all',
+  focusKey: null, // the tile the toolbar last acted on, for the "this camera" lane
+  maximised: null, // the key of the tile filling the grid, if any
+  views: [], // this user's saved views, from /api/me/views
+  viewsVersion: 0,
+  viewId: '', // the saved view on screen, if the cameras still match it
   date: null,
   tz: 0, // the site's time-zone offset (local - UTC): the day shown is the cameras' day, not ours
   quality: 'sd', // 'sd' = the NVR's sub-streams, 'hd' = the server's own recordings
@@ -158,16 +190,36 @@ class Tile {
     this.ws = null
     this.shownKind = null
     this.blankOpens = 0 // sockets opened in a row that produced no picture at all
+    // How this camera has been treated by its NVR lately: the refusal count and the moment before
+    // which it must not ask again (grid-view.js). Held per tile, so one full NVR does not stop the
+    // cameras on a different one from opening.
+    this.stream = {}
 
     this.el = document.createElement('div')
     this.el.className = 'wall-tile'
     this.el.innerHTML = `
       <canvas></canvas>
       <div class="wall-tile-msg" hidden></div>
+      <div class="wall-tile-tools" role="group">
+        <button type="button" data-act="snapshot" title="Save the picture on screen as a JPEG" aria-label="Snapshot">⤓</button>
+        <button type="button" data-act="copy" title="Copy the picture on screen to the clipboard" aria-label="Copy picture">⧉</button>
+        <button type="button" data-act="export" title="Export this camera over the stretch on screen" aria-label="Export this camera">⎘</button>
+        <button type="button" data-act="max" title="Fill the grid with this camera (the others stop streaming)" aria-label="Maximise">⛶</button>
+      </div>
       <div class="wall-tile-label">
         <a class="wall-tile-name" title="Open this camera on the playback page at this moment"></a>
         <span class="wall-tile-time"></span>
       </div>`
+    this.el.querySelector('.wall-tile-tools').addEventListener('click', (e) => {
+      const act = e.target.closest('button')?.dataset.act
+      if (!act) return
+      state.focusKey = this.key
+      if (act === 'snapshot') this.snapshot()
+      if (act === 'copy') this.copyPicture()
+      if (act === 'export') openWallExport([this.key], `Export ${this.name}`)
+      if (act === 'max') toggleMaximised(this.key)
+      if (act !== 'snapshot' && act !== 'copy') scheduleDraw() // the lane set may have changed
+    })
     this.msgEl = this.el.querySelector('.wall-tile-msg')
     this.nameEl = this.el.querySelector('.wall-tile-name')
     this.timeEl = this.el.querySelector('.wall-tile-time')
@@ -181,6 +233,9 @@ class Tile {
         // already server time (skew 0 below), the NVR's playback is the NVR's clock.
         this.position = serverTime(ts, this.sourceSkew())
         this.blankOpens = 0 // pictures are arriving again
+        // The NVR found room after all, so the refusal count and its backoff are cleared: they only
+        // ever mean anything in a row.
+        if (this.stream.refusals) this.stream = afterVideo(this.stream)
       },
       onUnsupported: (codecId) => {
         this.undecodable = true
@@ -247,28 +302,58 @@ class Tile {
     })
   }
 
-  /** Puts the tile where the shared clock says, opening, re-seeking or stopping it as needed. */
+  /**
+   * Whether this tile should be holding a stream open at all at this moment.
+   *
+   * Every "no" here is bandwidth handed straight back to the NVR, which is bandwidth it can spend
+   * on recording. A tile on another page of the grid, a tile behind a maximised one, a tile whose
+   * camera recorded nothing at this moment, and every tile on a page nobody is even looking at,
+   * all answer no — and are stopped at once rather than left running out of sight.
+   */
+  wantsStream(atMs) {
+    if (document.hidden || !pageAwake) return false
+    if (state.maximised && state.maximised !== this.key) return false
+    return this.status(atMs).kind === 'playing'
+  }
+
+  /** Whether the picture has drifted far enough from the shared clock to be worth re-seeking. */
+  drifted(atMs) {
+    if (!this.ws || this.position === null) return false
+    return needsResync(this.position, atMs) && performance.now() - this.lastSeekAt > RESYNC_EVERY_MS
+  }
+
+  /**
+   * What this tile should be showing, and whether it is paused. It no longer opens anything itself:
+   * opening is decided for the grid as a whole by openPlan (pump below), so that nine tiles can
+   * never ask nine NVR channels for a stream in the same instant.
+   */
   sync(atMs, playing) {
     const st = this.status(atMs)
     this.show(st)
     if (st.kind !== 'playing') {
-      this.close()
       this.position = null
       return
     }
     const since = performance.now() - this.lastSeekAt
+    // Refused by the NVR and serving out its backoff. Said on the tile, because a viewer looking at
+    // a black square concludes the camera is broken and asks for more streams — the last thing an
+    // NVR that has just run out of bandwidth needs.
+    if (!this.ws && (this.stream.refusals ?? 0) > 0) {
+      const waitS = Math.max(0, Math.ceil(((this.stream.blockedUntil ?? 0) - performance.now()) / 1000))
+      return this.show({
+        kind: 'waiting',
+        text: this.stream.why === 'quiet'
+          ? `No picture came from this camera. Trying again in ${waitS} s.`
+          : `The NVR has no bandwidth left for another playback. Trying again in ${waitS} s — showing fewer cameras, or HD (the server's own recordings, which ask the NVR for nothing), would avoid this.`
+      })
+    }
     // Opened, or opened and closed again, without a single picture: say so rather than leaving a
     // black square, which reads as "nothing happened here" when it means the pictures are not
-    // arriving — and stop reopening as fast as the loop runs, which would only make it worse.
-    if (this.position === null && (this.blankOpens >= 2 || since > NO_PICTURE_MS)) {
+    // arriving.
+    if (this.position === null && this.ws && (this.blankOpens >= 2 || since > NO_PICTURE_MS)) {
       this.show({ kind: 'waiting', text: 'No picture from this camera. Trying again.' })
     }
-    if (!this.ws) {
-      if (this.blankOpens >= 2 && since < NO_PICTURE_MS) return
-      return this.open(atMs)
-    }
-    if (needsResync(this.position, atMs) && since > RESYNC_EVERY_MS) return this.open(atMs)
-    this.setPaused(!playing)
+    if (this.ws) this.setPaused(!playing)
   }
 
   show(st) {
@@ -289,6 +374,10 @@ class Tile {
     this.close()
     this.lastSeekAt = performance.now()
     this.position = null
+    // A refusal or a decoder complaint from the last attempt is cleared here, not when it happened:
+    // the message has to stay on screen for the whole backoff, or the tile would go quietly blank
+    // and the viewer would never learn why the picture stopped.
+    if (!this.undecodable) this.error = null
     const server = this.mode() === 'server'
     const target = server ? (recordedFrom(this.stretches, atMs) ?? atMs) : atMs
     const start = Math.round(server ? target : cameraTime(target, this.skew))
@@ -311,9 +400,24 @@ class Tile {
       if (this.ws !== sock) return
       this.ws = null
       if (this.position === null) this.blankOpens++ // it closed without ever showing anything
+      // Two openings in a row that produced nothing at all is not a refusal, but asking again
+      // straight away is just as wasteful: the same backoff applies, with its own explanation.
+      if (e.code !== 1013 && this.position === null && this.blankOpens >= 2) {
+        this.stream = afterRefusal({ ...this.stream, why: 'quiet' }, performance.now())
+      }
       if (e.code === 1013) {
-        // one playback session per tile is one per tile on the NVR as well
-        this.error = 'The NVR is busy with other playbacks. Fewer cameras, or HD (server recordings), would avoid this.'
+        this.stream = { ...this.stream, why: 'busy' }
+        // One playback session per tile is one per tile on the NVR as well, and an NVR at its
+        // bandwidth ceiling refuses rather than queues. Back off hard — doubling, up to five
+        // minutes — instead of trying again on the next tick: a grid that retries in a loop spends
+        // the bandwidth the NVR needs to record, which is how eleven of nvr-2's cameras came to be
+        // recording nothing at all (stream-choice.mjs).
+        //
+        // The refusal is deliberately NOT recorded as this.error: an error stops the tile wanting a
+        // stream at all, and a tile that does not want one is never reopened, so the camera would
+        // stay blank for ever after a single busy moment. It stays a tile that wants to play and is
+        // made to wait, and the waiting is enforced by openPlan.
+        this.stream = afterRefusal(this.stream, performance.now())
       }
     }
     this.player.seekReset()
@@ -361,6 +465,72 @@ class Tile {
     this.ws = null
   }
 
+  // ---- the tile's own toolbar ----------------------------------------------------------------
+
+  /** The moment this tile is showing, for a file name: its own position, or the shared clock. */
+  whenMs() {
+    return this.position ?? clock.atMs
+  }
+
+  /** The picture on screen, as a canvas, or null when there is nothing to take. */
+  picture() {
+    const src = this.player.canvas
+    if (!src.width || !src.height) return null
+    const out = document.createElement('canvas')
+    out.width = src.width
+    out.height = src.height
+    out.getContext('2d').drawImage(src, 0, 0)
+    return out
+  }
+
+  /** A file name a Windows machine will accept, naming the camera and the moment. */
+  fileName(ext) {
+    const when = this.whenMs()
+    const name = `${this.name} ${this.nvrName} ${fmtDate(when)} ${fmtClock(when, { tzOffsetMs: state.tz }).replaceAll(':', '-')}.${ext}`
+    return name.replace(/[\\/:*?"<>|]/g, '-')
+  }
+
+  /** The picture on screen saved as a JPEG, the same as the playback page's snapshot button. */
+  snapshot() {
+    const out = this.picture()
+    if (!out) return this.flash('There is no picture to save yet.')
+    out.toBlob((blob) => {
+      if (!blob) return this.flash('The picture could not be saved.')
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = this.fileName('jpg')
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(a.href), 10_000)
+    }, 'image/jpeg', 0.92)
+  }
+
+  /**
+   * The picture on screen on the clipboard, so it can go straight into an email or a report. PNG
+   * because that is the only image type browsers reliably accept on the clipboard. A browser that
+   * refuses (an insecure page, or no permission) is told about plainly rather than silently doing
+   * nothing, since a copy that quietly fails is worse than one that was never offered.
+   */
+  async copyPicture() {
+    const out = this.picture()
+    if (!out) return this.flash('There is no picture to copy yet.')
+    try {
+      const blob = await new Promise((resolve) => out.toBlob(resolve, 'image/png'))
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      this.flash('Picture copied.')
+    } catch {
+      this.flash('This browser would not let the picture be copied. Use the snapshot button instead.')
+    }
+  }
+
+  /** A line over the tile for a moment: the toolbar's own answer, without a dialog. */
+  flash(text) {
+    this.msgEl.textContent = text
+    this.msgEl.hidden = false
+    this.shownKind = null // so the next sync redraws whatever the tile should really be saying
+    clearTimeout(this.flashTimer)
+    this.flashTimer = setTimeout(() => syncTiles(), 3000)
+  }
+
   destroy() {
     this.close()
     this.player.close()
@@ -371,11 +541,27 @@ class Tile {
 // ---- the wall -------------------------------------------------------------------------------
 
 let dayToken = 0
+/** False while the tab is hidden: every tile stops streaming, because nobody is watching it. */
+let pageAwake = true
+/** When the last tile was allowed to open, so openPlan can space the next one out. */
+let lastOpenAt = -Infinity
 
-/** Builds the tiles for the chosen cameras (keeping the ones already up and playing). */
+/** The cameras chosen, of which only one page is ever built into tiles and streamed. */
 function setCameras(keys) {
-  const wanted = normaliseChoice(keys, { known: new Set(state.all.map((c) => `${c.nvr}/${c.ch}`)) })
+  state.cameras = normaliseChoice(keys, { known: new Set(state.all.map((c) => `${c.nvr}/${c.ch}`)) })
+  state.page = 0
+  state.maximised = null
+  showPage()
+}
+
+/** Builds the tiles for the cameras on this page (keeping the ones already up and playing). */
+function showPage() {
+  const page = pageOf(state.cameras, state.layout, state.page)
+  state.page = page.page
+  const wanted = page.keys
   const have = new Map(state.tiles.map((t) => [t.key, t]))
+  // A tile leaving the page is destroyed, which closes its stream: the bandwidth goes back to the
+  // NVR the instant the camera is off screen, rather than when somebody happens to reload.
   for (const [key, tile] of have) if (!wanted.includes(key)) tile.destroy()
   state.tiles = wanted.map((key) => {
     const existing = have.get(key)
@@ -392,21 +578,64 @@ function setCameras(keys) {
   setTimeout(layoutGrid, 0)
   renderLaneNames()
   renderSpeeds()
+  renderPager()
   updateLoadNote()
   loadDay()
 }
 
+function renderPager() {
+  const { page, pages } = pageOf(state.cameras, state.layout, state.page)
+  pagerEl.hidden = pages <= 1
+  pageLabel.textContent = `Page ${page + 1} of ${pages}`
+  viewSel.value = state.viewId
+  $('deleteView').hidden = !state.viewId
+}
+
+function goPage(delta) {
+  const { pages } = pageOf(state.cameras, state.layout, state.page)
+  state.page = Math.min(Math.max(0, state.page + delta), pages - 1)
+  state.maximised = null
+  showPage()
+}
+
+/**
+ * What this page is asking of this PC and of the NVRs. The load warning counts the tiles actually
+ * streaming — a page of four out of twelve cameras costs four streams, not twelve — and the opening
+ * note explains a grid that is still coming up or one an NVR has refused.
+ */
 function updateLoadNote() {
-  const w = loadWarning(state.tiles.length, state.quality)
-  loadNote.textContent = w.text
-  loadNote.dataset.level = w.level
+  const refused = state.tiles.filter((t) => (t.stream.refusals ?? 0) > 0 && t.stream.why === 'busy').length
+  const waiting = state.tiles.filter((t) => t.wantsStream(clock.atMs) && !t.ws).length
+  const opening = openNote({ waiting, refused })
+  const load = loadWarning(state.tiles.length, state.quality)
+  const off = state.cameras.length - state.tiles.length
+  const parts = [
+    load.text,
+    off > 0 ? `${off} more on other pages, not streaming.` : '',
+    opening.text
+  ].filter(Boolean)
+  loadNote.textContent = parts.join(' ')
+  loadNote.dataset.level = opening.level === 'ok' ? load.level : opening.level
   loadNote.hidden = state.tiles.length === 0
 }
 
-/** The grid: the column count that makes each picture biggest in the space there is. */
+/** The grid: a fixed 2x2 or 3x3, or the column count that makes each picture biggest. */
 function layoutGrid() {
-  const { cols } = gridLayout(state.tiles.length, { width: gridEl.clientWidth || 1600, height: gridEl.clientHeight || 900 })
+  const cols = state.layout === 'auto'
+    ? gridLayout(state.tiles.length, { width: gridEl.clientWidth || 1600, height: gridEl.clientHeight || 900 }).cols
+    : colsOf(state.layout, state.tiles.length)
   gridEl.style.setProperty('--wall-cols', String(Math.max(1, cols)))
+  // A maximised tile fills the grid; the rest stay in the page (so the lanes and the ordering are
+  // unchanged) but are hidden, which is what makes them stop streaming.
+  gridEl.classList.toggle('wall-maximised', Boolean(state.maximised))
+  for (const t of state.tiles) t.el.classList.toggle('wall-tile-max', state.maximised === t.key)
+}
+
+/** One tile fills the grid, or back to all of them. The others stop streaming while it does. */
+function toggleMaximised(key) {
+  state.maximised = state.maximised === key ? null : key
+  layoutGrid()
+  syncTiles()
 }
 
 /** Loads the day's timeline for every tile: one database request each, never the NVR. */
@@ -460,9 +689,17 @@ function scheduleDraw() {
   }, 16)
 }
 
+/**
+ * The tiles that get a lane. "All cameras in view" lines the whole page up so a gap on one camera
+ * stands out against the others; "this camera only" is the single-camera playback page's lane for
+ * the tile being worked on. Only cameras on this page are ever offered a lane: a lane for a camera
+ * on another page would be a promise the grid is not keeping.
+ */
+const lanedTiles = () => laneSet(state.laneMode, state.tiles, state.focusKey)
+
 function renderLaneNames() {
   laneNamesEl.replaceChildren(
-    ...state.tiles.map((t) => {
+    ...lanedTiles().map((t) => {
       const el = document.createElement('div')
       el.className = 'wall-lane-name'
       el.textContent = t.name
@@ -475,16 +712,18 @@ function renderLaneNames() {
 /** A lane per camera, plus the ticks, the playhead and the clock. */
 function drawLanes() {
   const v = state.view
+  const laned = lanedTiles()
+  renderLaneNames()
   const rows = buildLaneRows(
     v,
     // the gaps are drawn after the recorded stretches so a thin gap sits on top of them
-    state.tiles.map((t) => ({ key: t.key, name: t.name, stretches: t.available ? [...t.stretches, ...(t.gaps ?? [])] : [] }))
+    laned.map((t) => ({ key: t.key, name: t.name, stretches: t.available ? [...t.stretches, ...(t.gaps ?? [])] : [] }))
   )
   laneRowsEl.replaceChildren(
     ...rows.map((row, i) => {
       const lane = document.createElement('div')
       lane.className = 'wall-lane pb-lane'
-      const tile = state.tiles[i]
+      const tile = laned[i]
       if (!tile?.available) lane.classList.add('wall-lane-unknown')
       for (const b of row.boxes) {
         const box = document.createElement('div')
@@ -592,7 +831,15 @@ function seek(t) {
     dateInput.value = date
     loadDay()
   }
-  for (const tile of state.tiles) tile.open(clock.atMs)
+  // Every tile has to move, but they are NOT all reopened here. Nine sockets asked for in one tick
+  // is the burst an NVR at its bandwidth ceiling refuses, and a viewer dragging along the timeline
+  // would send that burst several times a second. The streams are stopped at once (that part costs
+  // the NVR nothing and gives bandwidth straight back) and pump() opens them again one at a time.
+  for (const tile of state.tiles) {
+    tile.close()
+    tile.position = null
+  }
+  lastOpenAt = -Infinity // the first tile of the new moment need not wait out a stagger
   drawPlayhead() // the new moment reads on the clock straight away, not on the next frame
   scheduleDraw()
 }
@@ -604,9 +851,51 @@ function seek(t) {
  * PC busy decoding, gets few frames, and that is exactly when tiles drift. The animation frame only
  * moves the playhead, which nobody misses if it is late.
  */
+/**
+ * The whole grid's stream decisions for this tick, made together rather than tile by tile.
+ *
+ * This is the single place a stream is ever opened, and it opens at most one per call and no oftener
+ * than OPEN_STAGGER_MS. That is deliberately slow: a 3x3 grid takes about six seconds to fill. The
+ * alternative — nine requests in one instant against NVRs that share one fixed bandwidth budget with
+ * their own recording — is what puts an NVR over its ceiling, and an NVR over its ceiling stops
+ * recording cameras rather than merely refusing this page (see stream-choice.mjs). Six seconds of
+ * waiting is a nuisance; a day of a camera not recording is gone for good.
+ *
+ * Stopping is not rate limited and happens first, for the same reason in reverse.
+ */
+function pump(atMs) {
+  const now = performance.now()
+  const plan = openPlan(
+    state.tiles.map((t) => ({
+      key: t.key,
+      wants: t.wantsStream(atMs),
+      // A tile still waiting for its first picture is "opening": nothing else may open behind it.
+      opening: Boolean(t.ws) && t.position === null,
+      // A tile that has drifted off the shared clock counts as neither, so it is re-seeked through
+      // the same gate as a first opening rather than jumping the queue.
+      streaming: Boolean(t.ws) && t.position !== null && !t.drifted(atMs),
+      blockedUntil: t.stream.blockedUntil
+    })),
+    now,
+    { lastOpenAt }
+  )
+  const byKey = new Map(state.tiles.map((t) => [t.key, t]))
+  for (const key of plan.close) {
+    byKey.get(key)?.close()
+    const t = byKey.get(key)
+    if (t) t.position = null
+  }
+  if (plan.open) {
+    byKey.get(plan.open)?.open(atMs)
+    lastOpenAt = now
+  }
+}
+
 function syncTiles() {
   clock.tick()
   for (const t of state.tiles) t.sync(clock.atMs, clock.playing)
+  pump(clock.atMs)
+  updateLoadNote()
   if (state.follow) {
     const next = followView(state.view, clock.atMs)
     if (next !== state.view) {
@@ -691,7 +980,46 @@ qualitySel.addEventListener('change', () => {
   state.quality = qualitySel.value === 'hd' ? 'hd' : 'sd'
   updateLoadNote()
   renderSpeeds()
-  for (const t of state.tiles) t.open(clock.atMs) // the source changed: reopen in the new one
+  // The source changed, so every stream must be replaced — stopped now, reopened by pump() one at
+  // a time, for the same reason a seek does not reopen them all at once.
+  for (const t of state.tiles) {
+    t.close()
+    t.position = null
+  }
+  lastOpenAt = -Infinity
+})
+
+layoutSel.addEventListener('change', () => {
+  state.layout = layoutSel.value
+  state.page = 0
+  state.maximised = null
+  showPage()
+})
+
+laneModeSel.addEventListener('change', () => {
+  state.laneMode = laneModeSel.value === 'one' ? 'one' : 'all'
+  drawLanes()
+})
+
+$('pagePrev').addEventListener('click', () => goPage(-1))
+$('pageNext').addEventListener('click', () => goPage(1))
+
+/**
+ * A tab nobody is looking at streams nothing. The browser would go on decoding in the background and
+ * the NVRs would go on sending — a grid left open on a forgotten tab is bandwidth spent on nobody,
+ * and on a site whose NVR is already near its ceiling that is bandwidth taken from recording.
+ */
+document.addEventListener('visibilitychange', () => {
+  pageAwake = !document.hidden
+  if (document.hidden) {
+    for (const t of state.tiles) {
+      t.close()
+      t.position = null
+    }
+  } else {
+    lastOpenAt = -Infinity
+  }
+  syncTiles()
 })
 
 // the shuttle springs back to the middle: the wall plays while it is held away from it
@@ -746,50 +1074,297 @@ window.addEventListener('resize', layoutGrid)
 
 // ---- choosing the cameras ---------------------------------------------------------------------
 
+// What is ticked, kept apart from the list on screen: a search redraws the list, and a choice that
+// vanished because it no longer matched what someone had typed would be a nasty surprise.
+const picked = new Set()
+
 $('pickCameras').addEventListener('click', () => {
-  const chosen = new Set(state.tiles.map((t) => t.key))
-  const groups = Map.groupBy(state.all, (c) => `${c.site} · ${c.nvrName}`)
+  picked.clear()
+  for (const k of state.cameras) picked.add(k)
+  pickSearch.value = ''
+  renderPickList()
+  pickDlg.showModal()
+  pickSearch.focus()
+})
+
+/** The camera list, filtered by what has been typed, grouped by site and NVR. */
+function renderPickList() {
+  const matches = searchCameras(state.all, pickSearch.value)
+  const groups = groupCameras(matches)
   pickList.replaceChildren(
-    ...[...groups].flatMap(([label, list]) => {
+    ...groups.flatMap(({ label, cameras }) => {
       const h = document.createElement('h3')
       h.textContent = label
       return [
         h,
-        ...list.map((c) => {
+        ...cameras.map((c) => {
           const key = `${c.nvr}/${c.ch}`
           const row = document.createElement('label')
           row.className = 'wall-pick-row'
           const box = document.createElement('input')
           box.type = 'checkbox'
           box.value = key
-          box.checked = chosen.has(key)
-          box.addEventListener('change', updatePickNote)
+          box.checked = picked.has(key)
+          box.addEventListener('change', () => {
+            if (box.checked) picked.add(key)
+            else picked.delete(key)
+            updatePickNote()
+          })
           row.append(box, document.createTextNode(` ${c.ch + 1} · ${c.name}${c.online ? '' : ' (offline)'}`))
           return row
         })
       ]
     })
   )
+  if (groups.length === 0) {
+    const none = document.createElement('p')
+    none.className = 'wall-pick-note'
+    none.textContent = `No camera matches “${pickSearch.value.trim()}”.`
+    pickList.append(none)
+  }
   updatePickNote()
-  pickDlg.showModal()
-})
+}
+
+pickSearch.addEventListener('input', renderPickList)
 
 /** What choosing this many will mean, said before they press the button rather than after. */
 function updatePickNote() {
-  const n = pickList.querySelectorAll('input:checked').length
-  const w = loadWarning(n, state.quality)
+  const n = picked.size
+  const slots = slotsOf(state.layout)
+  const w = loadWarning(Math.min(n, slots || n), state.quality)
+  const paged = slots > 0 && n > slots ? ` Only ${slots} stream at a time; the rest wait on the next page.` : ''
   pickNote.textContent = n > MAX_TILES
-    ? `${n} cameras: the wall shows the first ${MAX_TILES}. ${w.text}`
-    : w.text
+    ? `${n} cameras: the wall keeps the first ${MAX_TILES}. ${w.text}${paged}`
+    : `${n} chosen. ${w.text}${paged}`
   pickNote.dataset.level = n > MAX_TILES ? 'over' : w.level
 }
 
 $('pickSave').addEventListener('click', () => {
-  const keys = [...pickList.querySelectorAll('input:checked')].map((b) => b.value)
-  const saved = writeStore(normaliseChoice(keys))
+  const saved = writeStore(normaliseChoice([...picked]))
+  state.viewId = '' // these are not a saved view's cameras any more
   setCameras(saved.cameras)
   pickDlg.close()
 })
+
+// ---- saved views -------------------------------------------------------------------------------
+//
+// Kept with the account (views.mjs), not the browser, so somebody's "Yard and gates" follows them to
+// whichever screen they sit at — which is the whole point of naming it. Versioned exactly as the
+// live grid's camera order is: a save made on a version that is no longer the latest is refused, and
+// the page reloads rather than overwriting what another screen saved.
+
+const viewDlg = $('saveViewDlg')
+const viewNameEl = $('viewName')
+const viewMsgEl = $('viewMsg')
+
+async function loadViews() {
+  try {
+    const got = await api('/api/me/views')
+    state.views = normaliseViews(got.views).views
+    state.viewsVersion = Number.isSafeInteger(got.version) ? got.version : 0
+  } catch {
+    state.views = [] // a page that cannot read the saved views still shows the wall
+  }
+  renderViewSel()
+}
+
+function renderViewSel() {
+  const options = [new Option('(not saved)', '')]
+  for (const v of state.views) options.push(new Option(v.name, v.id))
+  viewSel.replaceChildren(...options)
+  viewSel.value = state.viewId
+  $('deleteView').hidden = !state.viewId
+}
+
+/** Saves the views as they now are, telling the viewer when another screen got there first. */
+async function putViews(views) {
+  const next = applyViews({ views: state.views, version: state.viewsVersion }, { views, version: state.viewsVersion })
+  if (!next.saved) return { ok: false, error: 'Your views were changed on another screen. Reloading them.' }
+  const res = await fetch('/api/me/views', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ views, version: state.viewsVersion })
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    if (res.status === 409) {
+      state.views = normaliseViews(body.views).views
+      state.viewsVersion = body.version ?? state.viewsVersion
+      renderViewSel()
+    }
+    return { ok: false, error: body.error ?? `HTTP ${res.status}` }
+  }
+  state.views = normaliseViews(body.views).views
+  state.viewsVersion = body.version
+  renderViewSel()
+  return { ok: true, error: null }
+}
+
+$('saveView').addEventListener('click', () => {
+  if (state.cameras.length === 0) return
+  viewNameEl.value = state.views.find((v) => v.id === state.viewId)?.name ?? ''
+  viewMsgEl.textContent = ''
+  viewDlg.showModal()
+  viewNameEl.focus()
+})
+
+$('viewSave').addEventListener('click', async () => {
+  // A view saved under a name that is already in use replaces it, rather than leaving two identical
+  // entries in the menu that nobody can tell apart.
+  const name = viewNameEl.value
+  const existing = state.views.find((v) => v.name.trim().toLowerCase() === name.trim().toLowerCase())
+  const candidate = {
+    id: existing?.id ?? `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
+    name,
+    cameras: state.cameras,
+    layout: state.layout
+  }
+  const { ok, error, value } = checkView(candidate)
+  if (!ok) return (viewMsgEl.textContent = error)
+  const saved = await putViews([...state.views.filter((v) => v.id !== value.id), value])
+  if (!saved.ok) return (viewMsgEl.textContent = saved.error)
+  state.viewId = value.id
+  renderViewSel()
+  viewDlg.close()
+})
+
+viewSel.addEventListener('change', () => {
+  const view = state.views.find((v) => v.id === viewSel.value)
+  state.viewId = view?.id ?? ''
+  if (!view) return renderPager()
+  state.layout = view.layout ?? layoutFor(view.cameras.length)
+  layoutSel.value = state.layout
+  writeStore(normaliseChoice(view.cameras))
+  setCameras(view.cameras)
+})
+
+$('deleteView').addEventListener('click', async () => {
+  if (!state.viewId) return
+  const saved = await putViews(state.views.filter((v) => v.id !== state.viewId))
+  if (!saved.ok) return
+  state.viewId = ''
+  renderViewSel()
+})
+
+// ---- exporting a view, or one tile of it -------------------------------------------------------
+//
+// The same job the single-camera playback page starts: POST /api/exports with one clip per camera
+// (export-api.mjs, export-job.mjs). There is one export path in this app and this is it — the only
+// thing this page adds is filling in every camera of the view instead of one.
+
+const exDlg = $('wallExportDlg')
+const exFrom = $('wallExFrom')
+const exTo = $('wallExTo')
+const exCamsEl = $('wallExCameras')
+const exMsgEl = $('wallExMsg')
+const exProgressEl = $('wallExProgress')
+const exStartBtn = $('wallExStart')
+
+const exSay = (text, bad = false) => {
+  exMsgEl.textContent = text
+  exMsgEl.className = `pb-ex-msg${bad ? ' pb-ex-bad' : ''}`
+}
+
+/** "hh:mm:ss" on the day shown, back as an absolute moment; null when it is not a time. */
+function timeOnDay(text) {
+  const m = /^(\d{1,2}):?(\d{2})?:?(\d{2})?$/.exec(String(text).trim())
+  if (!m) return null
+  return dayStartOf(state.date) + (Number(m[1]) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0)) * 1000
+}
+
+/**
+ * The export dialog, with `preselect` ticked. A tile's toolbar passes its own camera; the "Export
+ * view" button passes every camera in the view — including the ones on other pages, because the view
+ * is what somebody named, not the nine of it that happen to be on screen.
+ */
+function openWallExport(preselect, title = 'Export this view') {
+  const chosen = new Set(preselect)
+  $('wallExTitle').textContent = title
+  // The stretch the timeline is showing, which is what somebody has just been looking at.
+  exFrom.value = fmtClock(state.view.startMs, { tzOffsetMs: state.tz })
+  exTo.value = fmtClock(Math.min(state.view.endMs, state.view.dayEndMs - 1), { tzOffsetMs: state.tz })
+  exCamsEl.replaceChildren(
+    ...state.cameras.map((key) => {
+      const tile = state.tiles.find((t) => t.key === key)
+      const cam = state.all.find((c) => `${c.nvr}/${c.ch}` === key)
+      const row = document.createElement('label')
+      row.className = 'wall-pick-row'
+      const box = document.createElement('input')
+      box.type = 'checkbox'
+      box.value = key
+      box.checked = chosen.has(key)
+      row.append(box, document.createTextNode(` ${cam?.name ?? tile?.name ?? key} · ${cam?.nvrName ?? ''}`))
+      return row
+    })
+  )
+  $('wallExName').value = `${state.date} ${exFrom.value.slice(0, 5)} ${state.views.find((v) => v.id === state.viewId)?.name ?? 'wall'}`
+  $('wallExNotes').value = ''
+  exProgressEl.hidden = true
+  exStartBtn.disabled = false
+  exSay('')
+  $('wallExSpan').textContent = `on ${state.date}`
+  exDlg.showModal()
+}
+
+$('exportView').addEventListener('click', () => openWallExport(state.cameras))
+
+exStartBtn.addEventListener('click', async () => {
+  const keys = [...exCamsEl.querySelectorAll('input:checked')].map((b) => b.value)
+  const from = timeOnDay(exFrom.value)
+  const to = timeOnDay(exTo.value)
+  const { clips, dropped, error } = exportClipsFor(keys, from, to)
+  if (error) return exSay(error, true)
+
+  exStartBtn.disabled = true
+  exProgressEl.hidden = false
+  exProgressEl.value = 0
+  exSay(dropped > 0 ? `Starting… (one job takes at most ${clips.length} cameras, so ${dropped} were left out)` : 'Starting…')
+  try {
+    const started = await fetch('/api/exports', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ clips, format: document.querySelector('input[name="wallExFormat"]:checked')?.value ?? 'pack', name: $('wallExName').value, notes: $('wallExNotes').value })
+    }).then(async (r) => {
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(d.error ?? `HTTP ${r.status}`)
+      return d
+    })
+    await followWallExport(started.id)
+  } catch (e) {
+    exSay(e.message, true)
+    exStartBtn.disabled = false
+    exProgressEl.hidden = true
+  }
+})
+
+/** Polls until the export finishes, then offers it — the same loop the playback page uses. */
+async function followWallExport(id) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000))
+    let job
+    try {
+      job = await fetch(`/api/exports/${encodeURIComponent(id)}`).then((r) => r.json())
+    } catch {
+      continue // a blip in polling is not a failed export
+    }
+    exProgressEl.value = Math.round((job.progress ?? 0) * 100)
+    if (job.state === 'done') {
+      exSay('Ready.')
+      const a = document.createElement('a')
+      a.href = `/api/exports/${encodeURIComponent(id)}/download`
+      a.download = job.downloadName ?? 'export.zip'
+      a.click()
+      exStartBtn.disabled = false
+      return
+    }
+    if (job.state === 'failed' || job.state === 'cancelled') {
+      exSay(job.error ?? 'The export did not finish.', true)
+      exStartBtn.disabled = false
+      exProgressEl.hidden = true
+      return
+    }
+  }
+}
 
 // ---- start ----------------------------------------------------------------------------------
 
@@ -831,7 +1406,12 @@ if (Number.isFinite(at) && at > 0) {
   state.date = fmtDate(at)
   dateInput.value = state.date
 }
+layoutSel.value = state.layout
+laneModeSel.value = state.laneMode
 setCameras(wanted ? wanted.split(',') : readStore().cameras)
+// The saved views come after the cameras are up: the wall must not wait on a preferences file to
+// show anything, and a view chosen from the menu replaces what is on screen anyway.
+loadViews()
 setPlaying(false)
 drawLanes()
 syncTiles()
