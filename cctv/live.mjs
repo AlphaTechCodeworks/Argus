@@ -25,7 +25,12 @@ const RESTART_BACKOFF_MS = [5000, 15_000, 60_000]
 const HEALTHY_MS = 60_000 // this long without problems resets the back-off
 // ask the NVR for a keyframe only if none arrived this soon after start; main streams (full
 // screen, where someone is waiting for the picture) ask straight away
-const KEYFRAME_WAIT_MS = { 0: 0, 1: 1500 }
+// How long to wait for a keyframe to turn up by itself before asking the NVR for one. Nothing can
+// be shown until a keyframe arrives, so this is dead time in front of every picture. The main
+// stream asks at once; the sub stream used to wait 1.5 s, which is most of the delay people feel
+// when a grid of tiles opens. 250 ms still lets a keyframe that is already on its way win, so the
+// NVR is not asked needlessly, without the wait being noticeable.
+const KEYFRAME_WAIT_MS = { 0: 0, 1: 250 }
 const KEYFRAME_EVERY_MS = 5000 // at most one keyframe request per stream per this
 const BUSY_RETRY_MS = 5000 // retry delay while the NVR has calls stuck in the SDK or is cooling down
 // a start refused this fast is the NVR saying no (stream limit, no permission, camera offline),
