@@ -59,6 +59,7 @@ import { handleLens } from './lens.mjs'
 import { handleStreams } from './streams.mjs'
 import { handleCameraNotes, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
+import { handleProbe } from './nvr-probe.mjs'
 import { handleSettings } from './settings-api.mjs'
 import { cameraRecording, getSettings } from './settings.mjs'
 import { startAlerts } from './alert-checks.mjs'
@@ -386,6 +387,12 @@ const handleRequest = async (req, res) => {
         return sendJson(res, 403, { error: 'Forbidden' })
       }
     }
+    // Read-only: what this NVR actually supports. The firmware offers far more than this app
+    // uses (tamper detection, face matching, its own disk state), but whether a given NVR has any
+    // of it depends on its model, firmware and licence, so the only honest answer is to ask it.
+    const probe = await handleProbe(req.method, pathname, nvrs)
+    if (probe) return sendJson(res, probe[0], probe[1])
+
     const sub = /^\/api\/admin\/nvrs\/([^/]+)\/substreams(\/job)?$/.exec(pathname)
     if (sub) {
       let id
