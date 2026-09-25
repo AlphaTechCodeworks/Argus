@@ -80,3 +80,45 @@ export async function handleProbe(method, pathname, nvrs) {
   if (!nvr.online) return [409, { error: `${nvr.name} is offline` }]
   return [200, { nvr: nvr.id, name: nvr.name, model: nvr.model ?? null, serial: nvr.serial ?? null, results: await probeNvr(nvr) }]
 }
+
+/**
+ * Every NVR's clock settings, in full.
+ *
+ * Read-only. Worth its own route because the clocks are the one setting where a difference
+ * between sites quietly ruins evidence: two cameras an hour apart tell a story that did not
+ * happen, and nobody notices until someone compares them.
+ *
+ *   GET /api/admin/nvr-clocks
+ */
+export async function handleClocks(method, pathname, nvrs) {
+  if (pathname !== '/api/admin/nvr-clocks') return null
+  if (method !== 'GET') return [405, { error: 'Method not allowed' }]
+  const out = []
+  for (const nvr of nvrs.values()) {
+    if (!nvr.online) {
+      out.push({ nvr: nvr.id, name: nvr.name, online: false })
+      continue
+    }
+    try {
+      const xml = String((await transparent(nvr, 'queryTimeCfg', body(), 'clock', { outBytes: 16 * 1024 })) ?? '')
+      const pick = (tag) => new RegExp(`<${tag}>\s*(?:<!\[CDATA\[)?([^<\]]*)`, 'i').exec(xml)?.[1]?.trim() ?? null
+      out.push({
+        nvr: nvr.id,
+        name: nvr.name,
+        online: true,
+        model: nvr.model ?? null,
+        timeZone: pick('timeZone'),
+        daylightSwitch: pick('daylightSwitch'),
+        synchronizeType: pick('synchronizeType'),
+        ntpServer: pick('ntpServer') ?? pick('serverAddr'),
+        ntpInterval: pick('updateInterval') ?? pick('interval'),
+        // what the server believes this NVR's clock reads, from the playback clock it already keeps
+        skewMs: nvr.playback?.lastClock?.()?.skewMs ?? null,
+        raw: xml.replace(/>\s+</g, '><')
+      })
+    } catch (e) {
+      out.push({ nvr: nvr.id, name: nvr.name, online: true, error: e.message.slice(0, 120) })
+    }
+  }
+  return [200, { clocks: out }]
+}

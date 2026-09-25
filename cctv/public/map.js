@@ -59,6 +59,7 @@ class MapView {
     this.pointers = new Map()
     this.gesture = null
     this.frame = 0
+    this.flyFrame = 0 // a "fly to" in progress
     // set by the page
     this.onDraw = () => {}
     this.hitTest = () => null // (event, point) -> { move, end, click } for dragging something, or null to pan
@@ -171,6 +172,74 @@ class MapView {
     this.cy = y
     this.#clampCentre()
     this.requestRender()
+  }
+
+  /**
+   * Travel to another place instead of jumping there: zoom out far enough to see both, move
+   * across, then zoom back in. Jumping between two sites gives no sense of where the new one is;
+   * watching the map pull back and fly over does, and it costs nothing but a second.
+   *
+   * The curve is the standard "fly to" one: zoom follows a hump so the pull-back is proportional
+   * to the distance travelled. A short hop barely zooms out; crossing a county zooms right out.
+   *
+   * @param {{cx:number, cy:number, zoom:number}} to where to end up
+   * @param {number} ms how long to take
+   * @returns {Promise<void>} resolves when it lands
+   */
+  flyTo(to, ms = 1100) {
+    this.cancelFly()
+    const from = { cx: this.cx, cy: this.cy, zoom: this.zoom }
+    // distance in screen pixels at the starting zoom: that, not raw coordinates, is what decides
+    // how far back we need to pull to show both ends
+    const scale = 2 ** from.zoom
+    const dx = (to.cx - from.cx) * scale
+    const dy = (to.cy - from.cy) * scale
+    const dist = Math.hypot(dx, dy)
+    const { w, h } = this.size()
+    const span = Math.max(w, h, 1)
+
+    // how much to pull back: enough that the whole journey fits on screen at the midpoint,
+    // capped so a trip across the world does not end up at zoom -20
+    const out = dist <= span ? 0 : Math.min(Math.log2(dist / span), 4)
+    const lowest = Math.max(this.minZoom, Math.min(from.zoom, to.zoom) - out)
+    const worthIt = out > 0.15 // a short hop should just glide, not lurch outwards and back
+
+    // a person in the room may prefer no animation at all
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches || ms <= 0) {
+      this.cx = to.cx; this.cy = to.cy; this.zoom = to.zoom
+      this.#clampCentre(); this.requestRender()
+      return Promise.resolve()
+    }
+
+    const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2) // slow, quick, slow
+    const start = performance.now()
+    return new Promise((done) => {
+      const step = (now) => {
+        const t = Math.min(1, (now - start) / ms)
+        const e = ease(t)
+        this.cx = from.cx + (to.cx - from.cx) * e
+        this.cy = from.cy + (to.cy - from.cy) * e
+        if (worthIt) {
+          // a hump: out on the way, back in on arrival. sin gives 0 at both ends, 1 in the middle.
+          const hump = Math.sin(Math.PI * e)
+          const straight = from.zoom + (to.zoom - from.zoom) * e
+          this.zoom = straight - (straight - lowest) * hump
+        } else {
+          this.zoom = from.zoom + (to.zoom - from.zoom) * e
+        }
+        this.#clampCentre()
+        this.render()
+        if (t < 1) this.flyFrame = requestAnimationFrame(step)
+        else { this.flyFrame = 0; this.cx = to.cx; this.cy = to.cy; this.zoom = to.zoom; this.#clampCentre(); this.requestRender(); done() }
+      }
+      this.flyFrame = requestAnimationFrame(step)
+    })
+  }
+
+  /** Stops a flight in its tracks: any touch of the map should take control back at once. */
+  cancelFly() {
+    if (this.flyFrame) cancelAnimationFrame(this.flyFrame)
+    this.flyFrame = 0
   }
 
   zoomAt(z, sx, sy) {
@@ -288,6 +357,8 @@ class MapView {
   }
 
   #down(e) {
+    // touching the map takes control back at once: nobody wants to fight an animation
+    this.cancelFly()
     if (!this.mode || (e.pointerType === 'mouse' && e.button !== 0)) return
     if (e.target.closest?.('button, a, .map-live, .map-empty')) return
     const p = this.#local(e)
@@ -352,6 +423,7 @@ class MapView {
   }
 
   #wheel(e) {
+    this.cancelFly()
     if (!this.mode) return
     e.preventDefault()
     const p = this.#local(e)
@@ -1272,6 +1344,11 @@ namesBox.addEventListener('change', () => {
 })
 
 siteSelect.addEventListener('change', () => {
+  // Where we are now, so we can travel from it rather than blink to the new site. Only worth it
+  // between two street/satellite maps: flying from a floor plan to a map of the world is
+  // meaningless, because they are not the same space.
+  const from = view.mode === 'geo' ? { cx: view.cx, cy: view.cy, zoom: view.zoom } : null
+
   site = siteSelect.value
   selected = null
   try { localStorage.setItem('cctv.mapSite', site) } catch {}
@@ -1279,6 +1356,18 @@ siteSelect.addEventListener('change', () => {
   applyView(false)
   renderSide()
   fitAll()
+
+  // fitAll has put us at the destination; if we can travel there instead, go back and fly
+  if (from && view.mode === 'geo') {
+    const to = { cx: view.cx, cy: view.cy, zoom: view.zoom }
+    const moved = Math.hypot(to.cx - from.cx, to.cy - from.cy) > 1e-9 || Math.abs(to.zoom - from.zoom) > 0.01
+    if (moved) {
+      view.cx = from.cx
+      view.cy = from.cy
+      view.zoom = from.zoom
+      view.flyTo(to)
+    }
+  }
 })
 
 $('logout').addEventListener('click', async () => {
