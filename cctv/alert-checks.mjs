@@ -56,7 +56,7 @@ export function buildSnapshot(deps, nowMs) {
 
 /**
  * @param {object} deps everything buildSnapshot needs, plus:
- *   dataDir, sender ({ deliver, test, pending }), lastBackup?, now?, log?,
+ *   dataDir, sender ({ deliver, test, pending }), lastBackup?, sysinfo? ({ sample }), now?, log?,
  *   autoStart? (false in tests: tick() is then called by hand)
  */
 export function startAlerts(deps) {
@@ -133,6 +133,13 @@ export function startAlerts(deps) {
      */
     health() {
       const snap = last.snapshot ?? buildSnapshot(deps, now())
+      let system = null
+      try {
+        system = deps.sysinfo?.sample() ?? null
+      } catch (e) {
+        // sample() promises not to throw, but the Health page must not die if that promise breaks.
+        log(`[alerts] could not read the system figures: ${e.message}`)
+      }
       let history = []
       try {
         history = readAlerts(deps.dataDir, now() - HISTORY_SHOWN_DAYS * 86_400_000)
@@ -149,7 +156,10 @@ export function startAlerts(deps) {
         cameras: snap.cameras,
         sending: deps.sender.pending(),
         history,
-        backup: deps.lastBackup?.() ?? null
+        backup: deps.lastBackup?.() ?? null,
+        // Injected like every other collaborator so health() stays testable without a /proc.
+        // Null when no sampler was given (tests, and any host that is not Linux).
+        system
       }
     }
   }

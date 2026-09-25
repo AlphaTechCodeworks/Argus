@@ -23,7 +23,8 @@
 //   /api/admin/sites/:site/notes -> a site's mains frequency (app data), see camera-notes.mjs
 //   /api/admin/settings, /api/admin/storage, /api/admin/disks[/prepare] -> Settings tab
 //     (recording, storage locations, preparing a USB drive), see settings-api.mjs
-//   GET  /api/health           -> the Health page: alerts, NVRs, cameras, drive, last backup
+//   GET  /api/health           -> the Health page: alerts, NVRs, cameras, drive, last backup,
+//                                 and live CPU/memory/network/disk/GPU figures
 //   POST /api/admin/alerts/test { method: 'ntfy'|'email' } -> sends a test message (admins)
 //   GET  /healthz              -> used by the Docker healthcheck
 //   WS   /live?nvr=ID&ch=N&stream=S -> binary frames, S: 0 = main, 1 = sub
@@ -58,6 +59,7 @@ import { handleSubstreams } from './substreams.mjs'
 import { handleSettings } from './settings-api.mjs'
 import { cameraRecording, getSettings } from './settings.mjs'
 import { startAlerts } from './alert-checks.mjs'
+import { makeSysinfo } from './sysinfo.mjs'
 import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freePercent, listLocations } from './storage.mjs'
@@ -169,7 +171,9 @@ const alerts = startAlerts({
       })),
   locationState,
   lastBackup: () => lastBackup(DATA_DIR),
-  sender: makeSender({ settings: getSettings().alerts, log: console.log })
+  sender: makeSender({ settings: getSettings().alerts, log: console.log }),
+  // Reads /proc on every health poll; on Windows every figure simply comes back null.
+  sysinfo: makeSysinfo()
 })
 
 // Nightly at 02:00, plus one at every start so a change made today is copied before the next one.
