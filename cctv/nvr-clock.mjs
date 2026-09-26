@@ -118,7 +118,9 @@ export async function handleClockWrite(method, pathname, readJson, nvrs, user) {
 // It corrects only when a clock has drifted past a threshold, so a healthy NVR is left alone.
 
 const DRIFT_MS = 10_000 // leave a clock alone until it is this far out
-const SYNC_EVERY_MS = 60 * 60_000 // check every hour
+const SYNC_EVERY_MS = 15 * 60_000 // check every 15 minutes
+/** An NVR that could not be checked or set is tried again this soon, not at the next full pass. */
+const RETRY_MS = 5 * 60_000
 /**
  * Puts one NVR's clock to the server's, if it has drifted far enough to be worth writing.
  * @returns {Promise<{nvr:string, drift:number|null, changed:boolean, why:string}>} never throws
@@ -157,21 +159,38 @@ export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 
  * Checks every NVR every hour and corrects any that have drifted.
  * @returns {{ stop: () => void, runNow: () => Promise<object[]> }}
  */
-export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 10 * 60_000, log = console.log, enabled = () => true } = {}) {
-  const runNow = async () => {
+export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 3 * 60_000, retryMs = RETRY_MS, log = console.log, enabled = () => true } = {}) {
+  // NVRs whose last check failed (a busy NVR times out a write: nvr-2 on 2026-09-26, twice), tried
+  // again every retryMs until one works, instead of waiting for the next full pass. An hour of a
+  // wrong clock was an hour of footage with the wrong time on it.
+  const failed = new Set()
+  let retryTimer = null
+  const scheduleRetry = () => {
+    if (retryTimer || failed.size === 0) return
+    retryTimer = setTimeout(() => {
+      retryTimer = null
+      runNow([...failed]).catch(() => {})
+    }, retryMs)
+    retryTimer.unref?.()
+  }
+  const runNow = async (only = null) => {
     if (!enabled()) return []
     const out = []
     // one at a time: a clock write takes the NVR's change lock, and nothing here is urgent
     for (const nvr of nvrs.values()) {
+      if (only && !only.includes(nvr.id)) continue
       if (!nvr.online) continue
       const r = await syncOne(nvr)
       out.push(r)
+      if (/could not be checked|still reports the old time/.test(r.why)) failed.add(nvr.id)
+      else failed.delete(nvr.id)
       // Every outcome, not only the changes. A background job that speaks only when it acts cannot
       // be told apart from one that is not running at all: when nvr-2 was seen four minutes out on
       // 2026-09-25 there was no way to find out whether the sync had skipped it, failed on it, or
       // never run, because doing nothing looked exactly like being switched off.
       log(`[clock] ${r.nvr}: ${r.why}${r.drift === null ? '' : ` (${Math.round(r.drift / 1000)} s out)`}`)
     }
+    scheduleRetry()
     return out
   }
   const timer = setInterval(() => { runNow().catch(() => {}) }, everyMs)
@@ -179,6 +198,8 @@ export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 10 * 6
   // A first pass soon after start, not an hour later: a clock that is wrong is wrong now, and
   // waiting an hour to notice defeats the point. Ten minutes rather than three, because at three
   // the server is still re-establishing every stream on every NVR and the busy ones time out --
+  // (now three minutes again, because anything that fails is retried every five: the ten-minute wait
+  // meant a day of restarts never got as far as the first check) --
   // on 2026-09-25 three of four failed at the three-minute mark and all of them answered once
   // things had settled.
   const first = setTimeout(() => { runNow().catch(() => {}) }, startMs)
