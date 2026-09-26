@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SPOOL_ID, drainSpool, spoolCapBytes, spoolLocation, trimSpool } from '../ram-spool.mjs'
+import { MIN_FREE_BYTES, SPOOL_ID, drainSpool, spoolCapBytes, spoolLocation, trimSpool } from '../ram-spool.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -56,7 +56,14 @@ check('full is not a reason to stop: still handed out', spoolLocation({ index, p
   const r = await trimSpool({ index, cap: 1500, dir }) // 1500 held: full; one dropped leaves 1200, under 85 %
   check('full: the oldest is dropped to make room', r.removed === 1 && !existsSync(extra) && !rows.has(extra), JSON.stringify(r))
   check('and the newer footage is kept', index.locationUse(SPOOL_ID).segments === 2)
-  check('under the cap nothing is dropped', (await trimSpool({ index, cap: 1e6, dir })).removed === 0)
+  check('under the cap nothing is dropped', (await trimSpool({ index, cap: 1e6, dir, freeOf: () => null })).removed === 0)
+  // on disk: under the cap, but the disk itself is running low -> room is made anyway, oldest first
+  const early = join(dir, 'n1', '0', 'early.h265')
+  writeFileSync(early, 'early')
+  rows.set(early, { path: early, loc: SPOOL_ID, startMs: -3, bytes: 400 })
+  const low = await trimSpool({ index, cap: 1e6, dir, freeOf: () => MIN_FREE_BYTES - 300 })
+  check('disk low (under the cap): the oldest go until the disk has its margin back', low.removed === 1 && !existsSync(early) && !rows.has(early) && index.locationUse(SPOOL_ID).segments === 2, JSON.stringify(low))
+  check('disk with room and under the cap: nothing is dropped', (await trimSpool({ index, cap: 1e6, dir, freeOf: () => MIN_FREE_BYTES * 4 })).removed === 0)
 }
 
 // a row whose file a restart cleared out of memory

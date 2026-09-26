@@ -752,7 +752,7 @@ function watchSpool() {
     const real = healthyLocations()
     const on = !real.length && Boolean(spoolLocation({ index }))
     if (on !== spoolWasOn) {
-      console.warn(on ? '[spool] every storage location is down: recording into memory until one is back (the oldest dropped as it fills)' : '[spool] a storage location is back: recording goes to it')
+      console.warn(on ? '[spool] every storage location is down: recording into the outage buffer until one is back (the oldest dropped as it fills)' : '[spool] a storage location is back: recording goes to it')
       spoolWasOn = on
       pushRecording()
     }
@@ -803,6 +803,12 @@ const recoverFor = (nvrId, beforeMs) => {
   } catch {
     return
   }
+  // the outage buffer too: on disk it outlives a restart, and a segment left open there has to be
+  // indexed, or it would never be copied to a real location nor counted towards the buffer's size
+  try {
+    const sp = spoolLocation({ index })
+    if (sp && existsSync(sp.path) && !locs.some((l) => l.id === sp.id)) locs.push(sp)
+  } catch {}
   const idx = index
   ;(async () => {
     for (const loc of locs) {

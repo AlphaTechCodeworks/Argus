@@ -14,7 +14,7 @@
 // default) it rotates: the oldest footage in memory is deleted to make room (trimSpool), so it always
 // holds the latest stretch rather than stopping. A local disk is the real answer.
 import { copyFile, mkdir, stat, unlink } from 'node:fs/promises'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, statfsSync } from 'node:fs'
 import { totalmem } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 
@@ -49,23 +49,41 @@ export function spoolLocation({ index, cap = spoolCapBytes(), platform = process
 /** Deletion starts at this share of the cap and frees down to TRIM_TO, so it runs now and then, not every segment. */
 export const TRIM_AT = 0.95
 export const TRIM_TO = 0.85
+// The disk under the spool keeps at least this much free whatever the index says: files it does not
+// count (a segment still being written, its .idx) or another user of the same disk must never fill
+// it, because a full disk would stop recording just when the spool is the only place left for it.
+export const MIN_FREE_BYTES = 1.5 * 1024 ** 3
+
+/** Free bytes on the filesystem holding `dir` (for this process), or null when it cannot be told. */
+export function freeBytesOf(dir) {
+  try {
+    const st = statfsSync(dir)
+    return Number(st.bavail) * Number(st.bsize)
+  } catch {
+    return null
+  }
+}
 
 /**
  * Makes room: deletes the oldest footage in memory until it holds under TRIM_TO of the cap. Never
  * throws. Only ever touches files under the spool folder.
  * @returns {Promise<{ removed: number, bytes: number }>}
  */
-export async function trimSpool({ index, cap = spoolCapBytes(), dir = SPOOL_DIR, log = () => {} }) {
+export async function trimSpool({ index, cap = spoolCapBytes(), dir = SPOOL_DIR, log = () => {}, freeOf = freeBytesOf }) {
   let removed = 0
   let bytes = 0
   try {
     let used = index.locationUse(SPOOL_ID).bytes
-    if (used < cap * TRIM_AT) return { removed, bytes }
-    while (used > cap * TRIM_TO) {
+    // the disk itself running low: make that much room as well, whatever the cap says
+    const free = freeOf(dir)
+    const short = free !== null && free < MIN_FREE_BYTES ? MIN_FREE_BYTES - free : 0
+    if (!short && used < cap * TRIM_AT) return { removed, bytes }
+    const target = Math.min(cap * TRIM_TO, Math.max(0, used - short))
+    while (used > target) {
       const rows = index.oldest(50, { loc: SPOOL_ID })
       if (!rows.length) break
       for (const row of rows) {
-        if (used <= cap * TRIM_TO) break
+        if (used <= target) break
         if (relative(dir, row.path).startsWith('..')) continue
         index.remove(row.path)
         await unlink(row.path).catch(() => {})
@@ -78,7 +96,7 @@ export async function trimSpool({ index, cap = spoolCapBytes(), dir = SPOOL_DIR,
   } catch (e) {
     log(`[spool] making room failed: ${e.message}`)
   }
-  if (removed) log(`[spool] memory full: dropped the oldest ${removed} segments (${Math.round(bytes / 1e6)} MB) to keep recording`)
+  if (removed) log(`[spool] outage buffer full: dropped the oldest ${removed} segments (${Math.round(bytes / 1e6)} MB) to keep recording`)
   return { removed, bytes }
 }
 
