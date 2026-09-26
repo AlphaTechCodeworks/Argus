@@ -387,7 +387,38 @@ export function renderHealth(d) {
       ? { state: 'warn', text: `${open.length} ${open.length === 1 ? 'thing needs' : 'things need'} a look`, note: '' }
       : { state: 'ok', text: 'Everything is working', note: 'All NVRs, cameras and storage are as they should be.' }
   const openAlerts = open.map((a) => ({ title: a.title, severity: a.severity ?? 'medium' }))
-  return { overall, openAlerts, cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, criticalText, sendingProblem, admins, adminText, adminState }
+  // remote viewing: what goes out over the internet, who is watching from outside and at what
+  // frame rate, and what the video conversions cost the server
+  const vw = d.viewing
+  const mbps = (bps) => `${((bps ?? 0) * 8 / 1e6).toFixed(1)} Mb/s`
+  const levels = vw ? Object.entries(vw.remote.viewers.reduce((m, v) => ((m[v.level] = (m[v.level] ?? 0) + 1), m), {})).map(([l, n]) => `${n} at ${l === 'full' ? 'full' : `${l} fps`}`).join(' · ') : ''
+  const running = vw ? vw.conversions.playback.running + vw.conversions.phones.running : 0 // phones and remote viewers share one pool
+  const cap = vw ? vw.conversions.playback.cap + vw.conversions.phones.cap : 0
+  const cpu = vw?.conversions.cpu?.percent
+  const viewingCards = !vw ? null : {
+    internet: {
+      label: 'Out to the internet',
+      value: mbps(vw.traffic.internet.bps),
+      state: vw.remote.budgetBps && vw.traffic.internet.bps > vw.remote.budgetBps * 0.9 ? 'warn' : 'ok',
+      pct: vw.remote.budgetBps ? (vw.traffic.internet.bps / vw.remote.budgetBps) * 100 : null,
+      note: `of ${mbps(vw.remote.budgetBps)} allowed · ${vw.traffic.internet.sockets} stream${vw.traffic.internet.sockets === 1 ? '' : 's'}`
+    },
+    local: { label: 'On the local network', value: mbps(vw.traffic.local.bps), state: 'ok', note: `${vw.traffic.local.sockets} stream${vw.traffic.local.sockets === 1 ? '' : 's'}` },
+    remote: {
+      label: 'Remote viewers',
+      value: String(vw.remote.viewers.length),
+      state: 'ok',
+      note: levels || 'nobody watching from outside'
+    },
+    encoding: {
+      label: 'Video conversions',
+      value: `${running} running`,
+      state: cap && running >= cap ? 'warn' : Number.isFinite(cpu) && cpu > 300 ? 'warn' : 'ok',
+      pct: cap ? (running / cap) * 100 : null,
+      note: `of ${cap} allowed${Number.isFinite(cpu) ? ` · ${cpu} % of a core` : ''}`
+    }
+  }
+  return { overall, openAlerts, viewingCards, cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, criticalText, sendingProblem, admins, adminText, adminState }
 }
 
 // ---- the page itself (skipped when a test imports this module: there is no document) ------------
@@ -435,6 +466,7 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     }
     paintCards('cards', r.cards)
     paintCards('system', r.systemCards)
+    if (r.viewingCards) paintCards('viewing', r.viewingCards)
 
     // Each NVR folded to a tile of the few numbers that matter; the full detail opens on a click.
     // Which ones are open is kept across the 15 s refresh.

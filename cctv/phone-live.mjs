@@ -74,8 +74,9 @@ export class PhoneStream {
    * @param {{ source: { add: Function, remove: Function }, type: number, slot: { release: Function },
    *   makeTranscoder?: Function, onEmpty?: Function, log?: Function, stopDelayMs?: number }} o
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS }) {
-    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs })
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS }) {
+    // fps / crf / kbps: the level this stream is thinned to (adaptive-live.mjs picks one per viewer)
+    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps })
     this.clients = new Set()
     this.gop = []
     this.samples = []
@@ -123,7 +124,7 @@ export class PhoneStream {
         return
       }
       const fps = frameRate(this.samples)
-      const keepEvery = keepEveryFor(fps)
+      const keepEvery = keepEveryFor(fps, this.fps)
       if (keepEvery === 1 && this.type !== 0) {
         this.held = null
         // already 15 fps or less and small: converting would only cost CPU and picture
@@ -137,13 +138,13 @@ export class PhoneStream {
         keepEvery,
         maxWidth: this.type === 0 ? PHONE_MAX_WIDTH : 0,
         // a phone's small screen: lighter than the original, not heavier (crf 26 came out bigger)
-        crf: PHONE_CRF,
-        maxKbps: this.type === 0 ? PHONE_MAIN_KBPS : PHONE_SUB_KBPS,
+        crf: this.crf,
+        maxKbps: this.type === 0 ? this.mainKbps : this.subKbps,
         onFrame: (ts, isKey, out) => this.#onConverted(ts, isKey, out),
         onFail: (e) => this.log(`[phone-live] conversion failed: ${e.message}`),
         log: this.log
       })
-      this.log(`[phone-live] converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps: keeping 1 in ${keepEvery}`)
+      this.log(`[phone-live] converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps to about ${this.fps}: keeping 1 in ${keepEvery}`)
       const held = this.held ?? []
       this.held = null
       for (const h of held) this.xcode.push(h.ts, h.isKey, h.payload)

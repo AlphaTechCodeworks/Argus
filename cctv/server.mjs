@@ -47,6 +47,7 @@
 //   bytes 6-7   reserved
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
+import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
@@ -72,6 +73,9 @@ import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
 import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
+import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
+import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
+import { pool as playbackTranscodes } from './transcode.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
 import { ADMIN_LINKS_PATH, BODY_LIMIT as LINKS_BODY_LIMIT, LINKS_PATH, handleCameraLinks } from './camera-links.mjs'
@@ -702,7 +706,24 @@ const handleRequest = async (req, res) => {
   }
   // The Health page: everything anyone signed in may see about how the server is doing. It
   // carries no secret, so it is not admin-only (see alert-checks.mjs health()).
-  if (pathname === '/api/health') return sendJson(res, 200, alerts.health())
+  if (pathname === '/api/health') {
+    // plus remote viewing: what goes out over the internet, the levels remote viewers are on, and
+    // what the video conversions cost (Health: "Remote viewing")
+    const remote = adaptiveLive.summary()
+    return sendJson(res, 200, {
+      ...alerts.health(),
+      viewing: {
+        traffic: trafficSummary(),
+        remote,
+        conversions: {
+          playback: { running: playbackTranscodes.active, cap: playbackTranscodes.max },
+          remote: { running: remote.conversions, cap: remote.conversionCap },
+          phones: { running: phoneLive.pool.active, cap: phoneLive.pool.max },
+          cpu: ffmpegCpuPercent()
+        }
+      }
+    })
+  }
   if (pathname === '/api/sites') return sendJson(res, 200, [...nvrs.values()].map((n) => n.info()))
   if (pathname === '/api/cameras') return sendJson(res, 200, allCameras())
   if (handleMapsRead(pathname, res, sendJson, SECURITY_HEADERS)) return
@@ -758,6 +779,7 @@ const wss = new WebSocketServer({ noServer: true })
 keepAlive(wss) // ping every 15 s; a socket that misses a pong is terminated (backpressure.mjs)
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost')
+  meterSocket(ws, req.socket.remoteAddress)
   const nvr = nvrs.get(url.searchParams.get('nvr') ?? '')
   if (!nvr) {
     ws.close(1013, 'unknown NVR')
@@ -788,11 +810,18 @@ wss.on('connection', (ws, req) => {
   }
   const stream = nvr.getStream(ch, streamType)
   // a phone asking for 15 fps gets the shared thinned stream (phone-live.mjs), when there is room
+  // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry
+  if (isRemoteAddress(req.socket.remoteAddress)) {
+    const who = `${currentUser(req) ?? '?'}|${req.headers['user-agent'] ?? ''}|${req.headers.cookie ?? ''}`
+    adaptiveLive.attach(createHash('sha1').update(who).digest('hex'), { ws, nvrId: nvr.id, ch, type: streamType, source: stream })
+    return
+  }
   if (url.searchParams.get('fps') === '15' && isPhoneRequest(req.headers) && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws)) return
   stream.add(ws)
   ws.on('close', () => stream.remove(ws))
 })
 const phoneLive = new PhoneLive()
+const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on conversions for phones and remote viewers together
 
 const onUpgrade = (req, socket, head) => {
   // this listener is synchronous: anything that throws here would take the whole process
