@@ -1561,3 +1561,5 @@ body.phone-full #grid { position: fixed; inset: 0; z-index: 90; background: #000
 body.phone-full #grid > .tile.single-overlay { inset: 0; border-radius: 0; }
 body.phone-full .shell-bar, body.phone-full .shell-sheet, body.phone-full .alert-banner, body.phone-full .live-tip { display: none !important; }
 body.phone-full .tile.single-overlay canvas { object-fit: contain; }
+body.phone-full #grid { overflow: hidden; }
+body.phone-full #grid > .tile.single-overlay { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; aspect-ratio: auto; max-height: none; z-index: 91; }
