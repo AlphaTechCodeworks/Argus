@@ -37,7 +37,7 @@ function render(parts, me) {
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
   const version = me.build?.version ? esc(me.build.version) : ''
   side.innerHTML = `
-    <a class="shell-brand" href="/"><span class="shell-logo">${icon('live')}</span><span>CCTV</span></a>
+    <a class="shell-brand" href="/"><img class="shell-logo" src="/logo.svg" alt="" /><span>Argus</span></a>
     <nav class="shell-nav">
       ${groups.map((g) => `<div class="shell-group"><div class="shell-group-label">${esc(g.label)}</div>${g.items.map((i) => link(i, here)).join('')}</div>`).join('')}
     </nav>

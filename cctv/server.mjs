@@ -360,7 +360,7 @@ const MIME = {
   '.png': 'image/png'
 }
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/healthz'])
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/healthz'])
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',

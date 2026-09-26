@@ -1448,3 +1448,5 @@ body.playback-page.is-fullscreen.pb-idle { cursor: none; }
 body.playback-page.is-fullscreen .pb-legend { display: none; }
 body.playback-page.is-fullscreen .pb-bar { gap: 6px; padding: 10px 14px; }
 body.playback-page.is-fullscreen .pb-timeline { height: 48px; }
+.login-brand { display: flex; align-items: center; gap: 12px; }
+.login-brand img { border-radius: 10px; }

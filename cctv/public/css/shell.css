@@ -9,7 +9,7 @@ body.has-shell .app-main { display: flex; flex-direction: column; min-width: 0; 
   background: var(--surface-1); border-right: 1px solid var(--border); overflow-y: auto; }
 .shell-brand { display: flex; align-items: center; gap: var(--s3); padding: 2px var(--s2) var(--s5); color: var(--text);
   font-weight: 600; font-size: var(--fs-section); text-decoration: none; }
-.shell-logo { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); }
+.shell-logo { width: 32px; height: 32px; border-radius: 9px; display: block; }
 .shell-logo .icon { width: 18px; height: 18px; }
 .shell-group-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint);
   padding: var(--s4) var(--s3) var(--s2); }
