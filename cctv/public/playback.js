@@ -114,6 +114,20 @@ const fmtDate = (ms) => {
 }
 /** Start of an NVR-local day (YYYY-MM-DD), as UTC ms. */
 const dayStartOf = (date) => Date.parse(`${date}T00:00:00Z`) - state.tz
+/** A day kept between the first recorded day and today (the NVR's today). YYYY-MM-DD compares as text. */
+function clampDay(day) {
+  const max = fmtDate(state.nvrNow)
+  if (day > max) return max
+  if (dateInput.min && day < dateInput.min) return dateInput.min
+  return day
+}
+/** ‹ › for the day: › stops at today, ‹ at the first recorded day. */
+function updateDayArrows() {
+  const next = document.getElementById('dayNext')
+  const prev = document.getElementById('dayPrev')
+  if (next) next.disabled = Boolean(state.date) && state.date >= fmtDate(state.nvrNow)
+  if (prev) prev.disabled = Boolean(state.date && dateInput.min) && state.date <= dateInput.min
+}
 
 const state = {
   nvr: null, // NVR id
@@ -356,6 +370,7 @@ function enterServerDay(tl, token, after) {
   state.speed = speedFor('server', state.speed)
   rebuildStretches()
   dateInput.max = fmtDate(state.nvrNow)
+  updateDayArrows()
   updateDateMin()
   updateModeUi()
   drawTimeline()
@@ -453,6 +468,7 @@ async function refreshServer() {
   state.live = reachesNow(tl)
   state.gaps = tl.gaps ?? []
   dateInput.max = fmtDate(state.nvrNow)
+  updateDayArrows()
   rebuildStretches()
   updateModeUi()
   scheduleDraw()
@@ -1173,11 +1189,14 @@ for (const b of zoomBtns) {
 }
 followBtn.addEventListener('click', () => setFollow(!state.follow))
 
-// the day arrows move the date picker, so the existing change handler does the loading
+// the day arrows move the date picker, so the existing change handler does the loading (which
+// keeps the day between the first recorded day and today: clampDay)
 const shiftDay = (days) => {
   const d = new Date(`${state.date}T00:00:00Z`)
   d.setUTCDate(d.getUTCDate() + days)
-  dateInput.value = d.toISOString().slice(0, 10)
+  const next = clampDay(d.toISOString().slice(0, 10))
+  if (next === state.date) return
+  dateInput.value = next
   dateInput.dispatchEvent(new Event('change'))
 }
 $('dayPrev').addEventListener('click', () => shiftDay(-1))
@@ -1714,13 +1733,23 @@ async function loadNvrInfo() {
   state.tz = clock.tzOffsetMs ?? 0
   state.skew = clock.skewMs ?? state.skew
   dateInput.max = fmtDate(state.nvrNow)
+  updateDayArrows()
   dateInput.min = (Array.isArray(dates) && dates[0]) || ''
   return null
 }
 
 dateInput.addEventListener('change', async () => {
   if (!dateInput.value) return
+  // no day after today (the NVR's today) and none before the first recorded day: the picker's
+  // max/min are not enforced everywhere (typing a date, an iPhone's date wheel), and the › button
+  // used to walk on into the future (2026-10-12 on the 26th of September)
+  const day = clampDay(dateInput.value)
+  if (day !== dateInput.value) {
+    if (dateInput.value > day) showMessage('That day has not happened yet: showing today.')
+    dateInput.value = day
+  }
   state.date = dateInput.value
+  updateDayArrows()
   viewWholeDay()
   if (ws?.kind === 'server' && ws.readyState === WebSocket.OPEN) {
     // server mode keeps its socket: paused, and what it still sends is dropped
@@ -2143,7 +2172,8 @@ function startNvrDay() {
 await start().catch((e) => console.error('[playback] start', e))
 // ?t=ms: open at that moment (from Many cameras, an alarm, a shared link)
 {
-  const t0 = Number(params.get('t'))
+  // (a link never opens in the future: at the latest, now)
+  const t0 = Math.min(Number(params.get('t')), state.nvrNow)
   if (Number.isFinite(t0) && t0 > 0) {
     const day = fmtDate(t0)
     if (day !== state.date) {
