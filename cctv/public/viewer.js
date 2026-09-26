@@ -24,14 +24,17 @@ const orderNoteEl = document.getElementById('orderNote')
 // "Smooth": a bigger playout buffer absorbs uneven delivery (more delay, steadier motion)
 const SMOOTH_CLOCK = { startDelayMs: 400, minDelayMs: 300, maxDelayMs: 1200 }
 const clockOptions = () => (smoothBox.checked ? SMOOTH_CLOCK : undefined)
-// cameras whose main stream this browser can't play: full screen stays on the sub stream
-const noMain = new Set()
-try {
-  for (const k of JSON.parse(sessionStorage.getItem('cctv.noMain') ?? '[]')) noMain.add(k)
-} catch {}
+// cameras whose main stream this browser could not play: full screen stays on the sub stream, for a
+// while. Not for the whole session any more: the server now converts H.265 for phones and remote
+// viewers, and a phone that once failed (before it did) was kept on the blurry sub-stream for good.
+// A phone is never put on this list at all -- what it is sent is always H.264 it can play.
+const NO_MAIN_MS = 2 * 60_000
+const noMainUntil = new Map()
+const noMain = { has: (key) => (noMainUntil.get(key) ?? 0) > Date.now() }
+try { sessionStorage.removeItem('cctv.noMain') } catch {} // the old, session-long list
 const rememberNoMain = (key) => {
-  noMain.add(key)
-  try { sessionStorage.setItem('cctv.noMain', JSON.stringify([...noMain])) } catch {}
+  if (isPhone()) return
+  noMainUntil.set(key, Date.now() + NO_MAIN_MS)
 }
 
 let cameras = [] // every camera on every NVR, in this user's order: { nvr, site, nvrName, ch, name, online }
