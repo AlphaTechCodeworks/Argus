@@ -1220,3 +1220,45 @@ body.is-fullscreen .alert-banner { display: none; }
 .al-tune-live .tile canvas { width: 100%; height: 100%; object-fit: contain; }
 .al-tune-overlay { position: absolute; inset: 0; pointer-events: none; }
 .al-meter { font-variant-numeric: tabular-nums; }
+
+/* Phones.
+   The camera grid divides the window's height by however many rows the layout picker chose. That
+   is right on a monitor and wrong on a phone: a 3x3 on a 375px screen gives nine slivers about
+   120px wide and twice as tall, so every landscape picture sits letterboxed in a portrait box and
+   is too small to recognise anyone in.
+   On a narrow screen the pictures keep their own shape and the page scrolls instead: one camera at
+   a time, full width. The layout picker still chooses which cameras are on the page; it just stops
+   deciding how they are stacked.
+   These rules come after #grid and .tile deliberately -- they override both, and a media query
+   carries no extra weight of its own. */
+@media (max-width: 700px) {
+  html, body { height: auto; min-height: 100%; }
+  #grid {
+    /* flex: 1 stretches the grid to the window, and a stretched grid shares that height out among
+       its rows, which beats the tiles' own shape. Let it take the height its contents need. */
+    flex: none;
+    align-content: start;
+    grid-template-columns: 1fr !important;
+    grid-template-rows: none !important;
+    grid-auto-rows: auto;
+  }
+  /* the page sets each tile's grid-area from the chosen layout, including the featured ones with a
+     large first tile; in a single column there is nothing for those to mean */
+  #grid > * { grid-area: auto !important; }
+  .tile { aspect-ratio: 16 / 9; min-height: 0; }
+}
+
+/* Wide tables on a phone.
+   The disk and SMART tables carry six columns of figures. At 375px they cannot fit however they
+   are squeezed, and a table that does not fit stretches the whole page sideways -- which breaks
+   every other page element rather than just itself. Letting them scroll on their own keeps the
+   damage inside the card. */
+@media (max-width: 700px) {
+  .hp-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .hp-table th, .hp-table td { white-space: nowrap; }
+  /* the reason each attribute matters is a sentence, and a sentence that may not wrap is a very
+     wide column; this one keeps its wrapping and a sensible width */
+  .hp-smart-table td.hp-sub { white-space: normal; min-width: 220px; }
+  .hp-smart-summary { gap: 8px; }
+  .hp-smart-fact { flex: 1 1 100%; max-width: none; }
+}

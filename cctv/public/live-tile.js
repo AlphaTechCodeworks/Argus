@@ -172,7 +172,10 @@ export class LiveTile {
     msg.className = 'tile-msg'
     msg.textContent =
       codecId === CODEC_H265
-        ? 'This camera sends H.265, which this browser cannot play. Set the camera’s sub-stream to H.264 on the NVR.'
+        // Same correction as playback.js: on Windows this is nearly always a missing codec, not a
+        // machine that cannot cope. Saying "change it on the NVR" first sends people to reconfigure
+        // a camera when installing one extension would have done.
+        ? 'This camera sends H.265, which this browser cannot play. On Windows, Chrome and Edge need the "HEVC Video Extensions" from the Microsoft Store — installing it usually fixes this. Otherwise set the camera’s sub-stream to H.264 on the NVR.'
         : 'This browser cannot play this camera’s video format.'
     this.tile.append(msg)
     this.closed = true

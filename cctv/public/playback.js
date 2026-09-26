@@ -42,7 +42,14 @@ import { allowedSpeeds, clampSpeed, frameStep, shuttleLabel, shuttleRate } from 
 // Video is decoded here in the browser, exactly as the camera encoded it; the
 // server never converts it. Recordings in H.265 need a browser/PC that can decode H.265.
 const H265_HELP =
-  'This recording is H.265, which this browser cannot play. Open it on a PC whose graphics card decodes H.265 (most from 2017 on) in Chrome or Edge, or set this camera to record in H.264 on the NVR.'
+  // The old wording blamed the graphics card and told people to find another PC. That is usually
+  // wrong and sends them off to solve the wrong problem: on Windows the commonest cause by far is
+  // that the machine has no H.265 decoder installed at all, whatever its graphics card can do.
+  // Windows does not ship one, because the codec is licensed -- a brand new laptop with a good GPU
+  // fails exactly like an old one until the extension is added, and then works immediately.
+  'This recording is H.265, which this browser cannot play.\n\n' +
+  'On Windows this is usually a missing codec rather than a slow machine: Chrome and Edge need the "HEVC Video Extensions" from the Microsoft Store, which Windows does not include. Installing it normally fixes this straight away, whatever graphics card you have.\n\n' +
+  'Otherwise: open it in Chrome or Edge on a machine that has H.265 (Safari on a Mac plays it without anything extra), or set this camera to record in H.264 on the NVR.'
 
 const HEADER_SIZE = 16
 const DAY = 86_400_000
