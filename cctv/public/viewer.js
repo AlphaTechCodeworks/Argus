@@ -1020,8 +1020,11 @@ async function loadCameras(pre = null) {
   syncSingle(single !== null && overlay !== null && singleTiles.some((t) => !t.closed))
 }
 
-await early
-await loadCameras(prefetched)
+// A first load that fails (the server restarting: Cloudflare answers 502/530 in HTML) must not stop
+// this module here: the timers below would never start and the page would stay empty until someone
+// reloaded it. It is retried by the 5 s refresh instead.
+await early.catch(() => {})
+await loadCameras(prefetched).catch(() => listSoon())
 if (sync.unsaved) sync.refresh()
 // the camera list, and this user's order (another screen may have changed it)
 setInterval(() => {
