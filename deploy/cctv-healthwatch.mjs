@@ -28,7 +28,7 @@ import { execFile } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { request } from 'node:https'
 import { join } from 'node:path'
-import { FAILS_TO_OPEN, decide, recoveryPlan, summarise, tailscalePlan } from './healthwatch-core.mjs'
+import { FAILS_TO_OPEN, arpConflict, decide, ownAddress, recoveryPlan, summarise, tailscalePlan } from './healthwatch-core.mjs'
 
 const URL_HEALTH = process.env.CCTV_WATCH_URL ?? 'https://127.0.0.1:8443/healthz'
 const EVERY_MS = Number(process.env.CCTV_WATCH_EVERY_MS ?? 30_000)
@@ -209,8 +209,31 @@ async function checkTailscale() {
   } else if (r.why) log('tailscale-no-restart', { why: r.why })
 }
 
+// ---- another device on the server's fixed address (healthwatch-core.mjs arpConflict) ----
+// Every ADDR_EVERY ticks (30 s each: every 5 minutes). Told once when it starts and once when it ends.
+const ADDR_EVERY = 10
+let addrTick = 0
+let addrConflictSince = null
+async function checkAddress() {
+  if (addrTick++ % ADDR_EVERY !== 0) return
+  const own = ownAddress(await run('ip', ['-4', '-o', 'addr', 'show', 'scope', 'global']))
+  if (!own) return
+  const r = arpConflict(await run('arping', ['-D', '-I', own.iface, '-c', '2', '-w', '3', own.ip], 8000))
+  if (!r.known) return
+  if (r.conflict && addrConflictSince === null) {
+    addrConflictSince = Date.now()
+    log('address-conflict', { ip: own.ip, otherMac: r.mac })
+    await notify('CCTV: another device has the server address',`Another device${r.mac ? ` (${r.mac})` : ''} is answering for ${own.ip}, the CCTV server's fixed address: the server may drop off the network. Give that device another address, or reserve ${own.ip} for the server in the router.`)
+  } else if (!r.conflict && addrConflictSince !== null) {
+    log('address-conflict-over', { ip: own.ip, forMs: Date.now() - addrConflictSince })
+    await notify('CCTV: address conflict over', `Nothing else is answering for ${own.ip} any more.`)
+    addrConflictSince = null
+  }
+}
+
 async function tick() {
   checkTailscale().catch((e) => log('tailscale-check-error', { error: e.message }))
+  checkAddress().catch((e) => log('address-check-error', { error: e.message }))
   const p = await probe()
   const d = decide(state, p.ok, Date.now())
   state = d.state

@@ -2,7 +2,7 @@
 //   node cctv/test/healthwatch.test.mjs
 // The case it exists for, 2026-09-26: the server frozen for 40 minutes in a network-share call
 // while the NAS refused SMB sessions, with nothing logged and nobody told.
-import { FAILS_TO_OPEN, MAX_RECOVERIES, REALERT_MS, TS_FAILS_TO_RESTART, decide, recoveryPlan, summarise, tailscalePlan } from '../../deploy/healthwatch-core.mjs'
+import { FAILS_TO_OPEN, MAX_RECOVERIES, REALERT_MS, TS_FAILS_TO_RESTART, arpConflict, decide, ownAddress, recoveryPlan, summarise, tailscalePlan } from '../../deploy/healthwatch-core.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -84,6 +84,18 @@ check('no evidence at all is not a crash', typeof summarise() === 'string')
   check('not installed: never restarted', !tailscalePlan({ fails: 9 }, { installed: false, online: false, now: T }).restart)
   const busy = { fails: 2, restarts: [T - 1000, T - 2000, T - 3000] }
   check('three restarts in the hour already: left to a person', !tailscalePlan(busy, { installed: true, online: false, now: T }).restart)
+}
+
+// ---- another device on the server's fixed address ----
+{
+  const own = ownAddress('2: ens34    inet 192.168.1.232/22 brd 192.168.3.255 scope global ens34\\       valid_lft forever preferred_lft forever')
+  check('own address and interface from ip -o', own?.iface === 'ens34' && own?.ip === '192.168.1.232', JSON.stringify(own))
+  check('no global address: nothing to check', ownAddress('') === null)
+  const clear = arpConflict('ARPING 192.168.1.232 from 0.0.0.0 ens34\nSent 2 probes (2 broadcast(s))\nReceived 0 response(s)')
+  check('nobody answers: no conflict', clear.known && !clear.conflict)
+  const clash = arpConflict('ARPING 192.168.1.232 from 0.0.0.0 ens34\nUnicast reply from 192.168.1.232 [3C:84:6A:12:AB:CD]  1.402ms\nSent 1 probes (1 broadcast(s))\nReceived 1 response(s)')
+  check('another device answers: conflict, with its MAC', clash.known && clash.conflict && clash.mac === '3C:84:6A:12:AB:CD', JSON.stringify(clash))
+  check('arping missing or timed out: not known (no alert)', !arpConflict('(timed out after 8000 ms)').known && !arpConflict('arping: not found').conflict)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

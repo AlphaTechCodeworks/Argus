@@ -23,8 +23,10 @@ if (tabs.length > 1) {
   const show = (id) => {
     const t = tabs.find((x) => x.id === id) ?? tabs[0]
     for (const a of bar.children) a.toggleAttribute('aria-current', a.dataset.tab === t.id)
-    // (a section some script keeps hidden -- e.g. accounts for a non-admin -- stays hidden)
-    for (const s of sections) s.classList.toggle('se-off', s.dataset.tab !== t.id)
+    // its own class and rule (style.css .tab-off), not a page's own section style: 'se-off' only
+    // hid Settings-style sections, and the Alarms page showed all three tabs at once. A section
+    // some script keeps hidden (accounts for a non-admin) stays hidden: the attribute is not touched.
+    for (const s of sections) s.classList.toggle('tab-off', s.dataset.tab !== t.id)
     help.textContent = t.help
   }
   addEventListener('hashchange', () => show(location.hash.slice(1)))

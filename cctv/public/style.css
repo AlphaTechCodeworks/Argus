@@ -1381,6 +1381,8 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
 }
 .se-tab-help { flex-shrink: 0; margin: 0; color: var(--muted); font-size: 13px; }
 .se-section.se-off { display: none; }
+/* page-tabs.js: the sections of the tabs not showing, on any page */
+main > section[data-tab].tab-off { display: none !important; }
 /* Sites: a block per site, a row per NVR */
 .st-site { display: flex; flex-direction: column; gap: 8px; }
 .st-site + .st-site { margin-top: 12px; }

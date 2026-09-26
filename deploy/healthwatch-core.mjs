@@ -93,3 +93,23 @@ export function tailscalePlan(s = {}, { installed, online, now }) {
   if (recent.length >= MAX_RECOVERIES) return { state: { ...st, fails, restarts: recent }, restart: false, why: 'restarted 3 times in the last hour already: needs a person' }
   return { state: { fails: 0, restarts: [...recent, now] }, restart: true, why: `offline for ${fails} checks in a row` }
 }
+
+// ---- the server's own address ----------------------------------------------------------------
+// Since 2026-09-26 the server has a fixed address (192.168.1.232) and holds no DHCP lease, so the
+// router could hand the same address to a new device: the server would then drop off the network
+// now and then, with nothing to say why. `arping -D` asks "does anyone else have this address?".
+
+/** The server's IPv4 address and interface, from `ip -4 -o addr show scope global`. */
+export function ownAddress(ipOutput) {
+  const m = /^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+)\//m.exec(String(ipOutput ?? ''))
+  return m ? { iface: m[1], ip: m[2] } : null
+}
+
+/** What `arping -D` said: another device answering for our address is a conflict. */
+export function arpConflict(arpingOutput) {
+  const s = String(arpingOutput ?? '')
+  const n = /Received\s+(\d+)\s+response/i.exec(s)
+  if (!n) return { known: false, conflict: false, mac: null }
+  const mac = /\[([0-9a-f]{2}(?::[0-9a-f]{2}){5})\]/i.exec(s)?.[1] ?? null
+  return { known: true, conflict: Number(n[1]) > 0, mac }
+}
