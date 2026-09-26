@@ -1190,21 +1190,36 @@ body.is-fullscreen .alert-banner { display: none; }
 .al-filters label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 2px; }
 .al-summary { color: var(--muted); margin: 4px 0 10px; }
 .al-table { width: 100%; border-collapse: collapse; }
-.al-table th, .al-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #222a32; vertical-align: top; }
-.al-table td:first-child { text-transform: capitalize; font-weight: 600; }
-.al-table tr.needs-ack { border-left: 3px solid currentColor; }
-.al-table tr.pri-critical { color: #ff6b6b; }
-.al-table tr.pri-high { color: #ffa94d; }
-.al-table tr.pri-medium { color: #ffd43b; }
-.al-table tr.pri-low { color: var(--muted); }
+.al-table th { text-align: left; padding: 8px 10px; color: var(--text-muted); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--border); }
+.al-table td { text-align: left; padding: 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.al-table tbody tr:hover { background: var(--surface-hover); }
+.al-table tr.needs-ack td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.al-pri { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; text-transform: capitalize; }
+.al-pri.pri-critical { background: var(--bad-soft); color: var(--bad); }
+.al-pri.pri-high { background: var(--warn-soft); color: var(--warn); }
+.al-pri.pri-medium { background: var(--accent-soft); color: var(--accent-strong); }
+.al-pri.pri-low { background: var(--surface-3); color: var(--text-muted); }
+.al-when small { display: block; color: var(--text-muted); font-size: 12px; }
 /* the rest of a row reads as ordinary text: only the urgency cell and the edge bar are coloured */
 .al-table td:not(:first-child) { color: var(--text); }
 .al-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.al-actions { justify-content: flex-end; }
 .al-actions button, .al-actions a {
-  background: var(--panel); color: var(--text); border: 1px solid #2a3139; border-radius: 3px;
-  font-size: 12px; padding: 3px 6px; cursor: pointer; text-decoration: none;
+  background: none; color: var(--text-muted); border: 1px solid transparent; border-radius: var(--r-sm);
+  font-size: 12px; padding: 4px 8px; cursor: pointer; text-decoration: none;
 }
-.al-actions button:hover, .al-actions a:hover { background: var(--accent); color: #fff; }
+.al-actions button:hover, .al-actions a:hover { background: var(--surface-hover); color: var(--text); }
+.al-actions button.st-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+/* the filter bar: three filters and Apply; the rest folded away */
+.al-filters .al-search { flex: 1; min-width: 180px; }
+.al-filters .al-search input { width: 100%; }
+.al-more { flex-basis: 100%; }
+.al-more > summary { cursor: pointer; color: var(--text-muted); font-size: 13px; width: max-content; }
+.al-more-body { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.al-where { margin-top: 16px; color: var(--text-muted); }
+.al-where > summary { cursor: pointer; font-size: 13px; }
+.alarms > section { display: flex; flex-direction: column; gap: 10px; }
+.alarms > section[hidden] { display: none; }
 .al-sources { color: var(--muted); font-size: 13px; }
 .al-sources h3 { margin: 8px 0 2px; font-size: 13px; color: var(--text); }
 .al-rules { list-style: none; padding: 0; }

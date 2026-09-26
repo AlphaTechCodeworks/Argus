@@ -76,11 +76,22 @@ function paintAlarms(rows) {
       td.textContent = text ?? '—'
       return td
     }
-    tr.append(cell(r.priority), cell(`${r.when} (${r.ago})`), cell(r.camera), cell(r.what), cell(r.lasted), cell(r.ack || (r.needsAck ? 'not yet' : '')))
+    // urgency as a tag, the time with how long ago under it: read at a glance, not parsed
+    const pri = document.createElement('td')
+    const tag = document.createElement('span')
+    tag.className = `al-pri ${priorityClass(r.priority)}`
+    tag.textContent = r.priority
+    pri.append(tag)
+    const when = document.createElement('td')
+    when.className = 'al-when'
+    const ago = document.createElement('small')
+    ago.textContent = r.ago
+    when.append(r.when, ago)
+    tr.append(pri, when, cell(r.camera), cell(r.what), cell(r.lasted), cell(r.ack || (r.needsAck ? 'not yet' : '')))
 
     const actions = document.createElement('td')
     actions.className = 'al-actions'
-    if (r.needsAck) actions.append(button('Acknowledge…', () => acknowledge(r)))
+    if (r.needsAck) actions.append(button('Acknowledge…', () => acknowledge(r), 'st-primary'))
     // Opening in playback a little before the alarm: the useful part starts before the trigger.
     actions.append(link('Playback', `/playback.html?nvr=${encodeURIComponent(r.nvr)}&ch=${r.ch}&t=${r.startMs - 30_000}`))
     actions.append(button('Bookmark', () => bookmark(r)))
@@ -90,9 +101,10 @@ function paintAlarms(rows) {
   }
 }
 
-const button = (text, fn) => {
+const button = (text, fn, cls = '') => {
   const b = document.createElement('button')
   b.type = 'button'
+  if (cls) b.className = cls
   b.textContent = text
   b.addEventListener('click', fn)
   return b

@@ -24,14 +24,10 @@
   </header>
 
   <main class="alarms">
+    <section data-tab="list" data-tab-label="Alarms" data-tab-help="What happened on the cameras, newest first. Acknowledge what you have looked at.">
     <!-- The filters. Everything left alone means "no restriction", so the page opens on everything
          from the last week rather than on an empty list waiting to be configured. -->
     <form id="filters" class="al-filters" aria-label="Filters">
-      <label>From <input type="date" name="from" /></label>
-      <label>To <input type="date" name="to" /></label>
-      <label>Camera <select name="camera"><option value="">any</option></select></label>
-      <label>Kind <select name="type"><option value="">any</option></select></label>
-      <label>Urgency <select name="priority"><option value="">any</option></select></label>
       <label>Show
         <select name="acked">
           <option value="false">still needing a look</option>
@@ -39,8 +35,18 @@
           <option value="true">already acknowledged</option>
         </select>
       </label>
-      <label>Search <input type="search" name="text" placeholder="camera, kind, note" /></label>
-      <button type="submit">Apply</button>
+      <label>Camera <select name="camera"><option value="">any</option></select></label>
+      <label class="al-search">Search <input type="search" name="text" placeholder="camera, kind, note" /></label>
+      <button type="submit" class="st-primary">Apply</button>
+      <details class="al-more">
+        <summary>More filters</summary>
+        <div class="al-more-body">
+          <label>From <input type="date" name="from" /></label>
+          <label>To <input type="date" name="to" /></label>
+          <label>Kind <select name="type"><option value="">any</option></select></label>
+          <label>Urgency <select name="priority"><option value="">any</option></select></label>
+        </div>
+      </details>
     </form>
 
     <p id="summary" class="al-summary" role="status"></p>
@@ -54,10 +60,13 @@
 
     <!-- What this page cannot tell you. Printed, not hidden: an empty list must never be read as
          "nothing happened" when the real answer is "we cannot see that kind of thing yet". -->
-    <h2>Where these come from</h2>
-    <div id="sources" class="al-sources"></div>
+    <details class="al-where">
+      <summary>Where these come from, and what this page cannot see</summary>
+      <div id="sources" class="al-sources"></div>
+    </details>
+    </section>
 
-    <h2>Alarm rules</h2>
+    <section data-tab="rules" data-tab-label="Rules" data-tab-help="How urgent each kind of event is, and whether anyone is sent a message.">
     <p class="hp-note">A rule decides how urgent an event is and whether anyone is told. Messages go
       out through the same delivery the health alerts use — set up in <a href="/settings.html">Settings</a>.</p>
     <ul id="rules" class="al-rules"></ul>
@@ -77,7 +86,9 @@
 
     <!-- Motion tuning. Its own section rather than its own page: whether a camera's sensitivity is
          right is a question people ask while looking at that camera's alarms. -->
-    <h2>Motion tuning</h2>
+    </section>
+
+    <section data-tab="tuning" data-tab-label="Motion tuning" data-tab-help="How much movement each camera sees, against what the NVR is set to trigger on.">
     <p class="hp-note">Live activity measured by this server, against what the NVR is set to.
       Changing the NVR's setting is a change to the owner's equipment and is confirmed per camera.</p>
     <div class="al-tune">
@@ -97,9 +108,11 @@
       </form>
       <p id="tuneResult" class="hp-note" role="status"></p>
     </div>
+    </section>
   </main>
 
   <script type="module" src="shell.js"></script>
   <script type="module" src="alarms.js"></script>
+  <script type="module" src="page-tabs.js"></script>
 </body>
 </html>
