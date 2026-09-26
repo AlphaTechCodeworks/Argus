@@ -48,6 +48,7 @@
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
 import { createHash } from 'node:crypto'
+import { handleNvrLog } from './nvr-log.mjs'
 import { handleRelays } from './relays.mjs'
 import { transparent } from './nvr-xml.mjs'
 import { readAlerts } from './alert-log.mjs'
@@ -576,6 +577,9 @@ const handleRequest = async (req, res) => {
   // NVR alarm outputs, read only (relays.mjs)
   const relays = await handleRelays(req.method, pathname, { nvrs, admin: who.admin, query: transparent })
   if (relays) return sendJson(res, ...relays)
+  // an NVR's own event log, read only (nvr-log.mjs)
+  const nvrLog = await handleNvrLog(req.method, pathname, url.search, { nvrs, admin: who.admin, query: transparent })
+  if (nvrLog) return sendJson(res, ...nvrLog)
   if (al) return sendJson(res, ...al)
   const store = await handleStorage(req.method, pathname, () => readJsonObject(req, 4096), who)  // accepts the { user, admin } shape
   if (store) return sendJson(res, ...store)
