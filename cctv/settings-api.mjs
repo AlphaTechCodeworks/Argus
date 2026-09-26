@@ -37,6 +37,8 @@ const CHOICES = { modes: MODES, after: AFTER, recentMinutes: RECENT_MINUTES, thu
 function forPage() {
   const s = getSettings() // already a deep clone, so this cannot alter what is stored
   if (s.alerts?.email) s.alerts.email.pass = s.alerts.email.pass ? 'set' : ''
+  // a webhook's secret is shown as 'set' too (sending 'set' back keeps it: settings.mjs webhookList)
+  if (Array.isArray(s.alerts?.webhooks)) s.alerts.webhooks = s.alerts.webhooks.map((h) => ({ url: h.url, secret: h.secret ? 'set' : '' }))
   return s
 }
 

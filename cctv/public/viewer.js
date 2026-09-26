@@ -764,7 +764,7 @@ function relayout() {
         fillSlot(s, gridArea(cell))
         old.replaceWith(s.el)
         if (single !== null) s.live?.suspend()
-      } else if (was?.name !== s.cam?.name) s.el.querySelector('.name').textContent = tileLabel(s.cam)
+      } else if (tileLabel(was) !== tileLabel(s.cam)) s.el.querySelector('.name').textContent = tileLabel(s.cam) // (name or site)
       return s
     }
     const s = { cam: v.visible[i], el: null, live: null }
@@ -774,6 +774,9 @@ function relayout() {
     if (single !== null) s.live?.suspend()
     return s
   })
+  // the page in slot order: on a phone the grid places tiles by their order in the page, not their
+  // grid-area, so an arriving camera appended at the end showed last (moving a tile does not restart it)
+  for (const s of gridSlots) grid.insertBefore(s.el, before)
   syncTiles()
   updatePager(v.pages)
 }

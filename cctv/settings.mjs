@@ -37,6 +37,8 @@ export const DEFAULTS = Object.freeze({
   alerts: {
     ntfy: { url: 'https://ntfy.sh', topic: '' },
     email: { host: '', port: 587, secure: false, user: '', pass: '', from: '', to: [] },
+    // other systems told of alerts and alarms: [{ url, secret }] (alert-send.mjs webhook)
+    webhooks: [],
     muted: [],
     notRecordingMinutes: 5,
     clockSkewSeconds: 30
@@ -193,6 +195,7 @@ function fromFile(j) {
       tryPart(() => (s.alerts.ntfy.url = str('', 200)(a.ntfy.url)))
       tryPart(() => (s.alerts.ntfy.topic = topic(a.ntfy.topic)))
     }
+    if (Array.isArray(a.webhooks)) tryPart(() => (s.alerts.webhooks = webhookList(a.webhooks, [])))
     if (isPlainObject(a.email)) {
       for (const k of ['host', 'user', 'pass', 'from']) tryPart(() => (s.alerts.email[k] = str('', 200)(a.email[k])))
       tryPart(() => (s.alerts.email.port = int('', 1, 65535)(a.email.port)))
@@ -240,6 +243,28 @@ function write(settings) {
 
 const listeners = new Set()
 /** cb(settings) after every save (e.g. to tell the recorders). Returns an unsubscribe function. */
+/**
+ * Webhooks (alerts.webhooks): at most 5 of { url, secret }. The URL must be http(s); the secret is
+ * optional (it signs each POST, alert-send.mjs). 'set' as a secret means "keep the stored one".
+ */
+function webhookList(list, before) {
+  if (!Array.isArray(list) || list.length > 5) throw new HttpError(400, 'alerts.webhooks must be a list of at most 5')
+  return list.map((h, i) => {
+    if (!isPlainObject(h)) throw new HttpError(400, `alerts.webhooks[${i}] must be { url, secret }`)
+    const url = str(`alerts.webhooks[${i}].url`, 500)(h.url)
+    let u
+    try {
+      u = new URL(url)
+    } catch {
+      throw new HttpError(400, `alerts.webhooks[${i}].url is not an address`)
+    }
+    if (!/^https?:$/.test(u.protocol)) throw new HttpError(400, `alerts.webhooks[${i}].url must start with https:// or http://`)
+    const kept = before.find((b) => b?.url === url)?.secret ?? ''
+    const secret = h.secret === 'set' ? kept : str(`alerts.webhooks[${i}].secret`, 128)(h.secret ?? '')
+    return { url, secret }
+  })
+}
+
 export function onSettingsChange(cb) {
   listeners.add(cb)
   return () => listeners.delete(cb)
@@ -297,7 +322,9 @@ export function saveSettings(patch, user, { internal = false } = {}) {
   }
   if ('alerts' in patch) {
     const al = needObject(patch.alerts, 'alerts')
-    knownKeys(al, ['ntfy', 'email', 'muted', 'notRecordingMinutes', 'clockSkewSeconds'], 'alerts.')
+    knownKeys(al, ['ntfy', 'email', 'webhooks', 'muted', 'notRecordingMinutes', 'clockSkewSeconds'], 'alerts.')
+    // a secret given back as 'set' (how the API shows one) keeps the one already stored for that URL
+    if ('webhooks' in al) next.alerts.webhooks = webhookList(al.webhooks, next.alerts.webhooks ?? [])
     if ('ntfy' in al) {
       const n = needObject(al.ntfy, 'alerts.ntfy')
       knownKeys(n, ['url', 'topic'], 'alerts.ntfy.')

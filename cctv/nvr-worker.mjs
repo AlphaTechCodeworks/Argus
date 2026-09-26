@@ -102,7 +102,7 @@ process.on('message', (m) => {
     const key = streamKey(m.ch, m.type)
     const had = taps.get(key)
     if (had) {
-      if (!m.background) had.tap.background = false // a viewer now wants it too
+      had.tap.background = m.background === true // a viewer wants it now, or only warm-ups again
       return
     }
     taps.set(key, { tap: tapFor(key, m.background === true), stream: null, ch: m.ch, type: m.type })

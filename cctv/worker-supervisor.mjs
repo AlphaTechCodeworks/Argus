@@ -82,7 +82,7 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
         if (again) {
           console.log(`[worker ${nvrId}] ready again`)
           hub.onWorkerRestart()
-        } else for (const s of hub.streams.values()) if (s.wanted) c.send(want(s.ch, s.type))
+        } else for (const s of hub.streams.values()) if (s.wanted) c.send(want(s.ch, s.type, !s.fg))
       } else if (m?.t === MSG.STATS) {
         stats = m
         onStats?.(m)

@@ -880,7 +880,7 @@ const makeNvr = (cfg) => {
 /** @type {Map<string, Nvr>} */
 export const nvrs = new Map()
 
-const STOP_WAIT_MS = 5000
+const STOP_WAIT_MS = 8500 // the workers get 8 s to close their segments and log out (worker-supervisor.mjs)
 const bounded = (p) => Promise.race([p, sleep(STOP_WAIT_MS)])
 
 let syncing = Promise.resolve()
@@ -957,7 +957,7 @@ async function startEvents() {
   const [{ makeEventIntake }, { buildWindowMessage }, { eventsOfCamera }, { makeAlarmNotifier }, { makeSender }] = await Promise.all([
     import('./events.mjs'), import('./rec-modes.mjs'), import('./events-db.mjs'), import('./alarms.mjs'), import('./alert-send.mjs')
   ])
-  const sender = makeSender({ settings: getSettings().alerts ?? {} })
+  const sender = makeSender({ settings: () => getSettings().alerts ?? {} })
   const notifier = makeAlarmNotifier({ sender, nameOf: (key) => allCameras().find((c) => `${c.nvr}/${c.ch}` === key)?.name ?? key })
 
   eventIntake = makeEventIntake({
@@ -1011,7 +1011,12 @@ export const startNvrs = () => {
 }
 
 /** Every camera on every NVR, grouped by site then NVR. (Only fields the grid uses: it re-renders on any change.) */
-export const allCameras = () =>
+/**
+ * Every camera. live: `online` follows the NVR's video login (the worker's, up in ~4.5 s after a
+ * start) for the Live grid and the warm-up; otherwise the control login, as before, for events
+ * (camera-offline), alarms and health: a worker restarting must not read as every camera going offline.
+ */
+export const allCameras = ({ live = false } = {}) =>
   [...nvrs.values()]
     .sort((a, b) => a.site.localeCompare(b.site) || a.name.localeCompare(b.name))
     .flatMap((nvr) =>
@@ -1021,9 +1026,8 @@ export const allCameras = () =>
         nvrName: nvr.name,
         ch: c.ch,
         name: c.name,
-        // the video login (the worker's, up in ~4.5 s after a start), not the control login (one NVR
-        // at a time, up to ~31 s): Live waited for the wrong one after every restart
-        online: c.online && nvr.liveOnline,
+        // live: the video login (Live waited for the control login, one NVR at a time, up to ~31 s)
+        online: c.online && (live ? nvr.liveOnline : nvr.online),
         // false for an empty channel slot on the NVR: there is no camera there to be offline
         configured: c.configured !== false,
         model: c.model || null,

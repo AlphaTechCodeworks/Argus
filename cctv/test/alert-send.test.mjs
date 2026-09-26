@@ -120,5 +120,28 @@ const alert = (o = {}) => ({ key: 'nvr-offline/nvr-2', kind: 'nvr-offline', titl
   check('a damaged line does not throw', !threw)
 }
 
+{
+  // webhooks: the batch as signed JSON; settings read at each send (a change applies at once)
+  const { createHmac } = await import('node:crypto')
+  const posts = []
+  const fetchImpl = async (url, opts) => { posts.push({ url, opts }); return { ok: true, status: 200 } }
+  let current = { ntfy: { topic: '' }, webhooks: [] }
+  const s = makeSender({ settings: () => current, fetchImpl, retryDelayMs: 1, log: () => {} })
+  const alert = [{ key: 'offline:nvr1/3', kind: 'camera-offline', title: 'Camera 4 offline', detail: 'Main site', severity: 'high', nvr: 'nvr1', ch: 3 }]
+  await s.deliver(alert, 'opened')
+  check('no webhook set: nothing posted', posts.length === 0)
+  current = { ntfy: { topic: '' }, webhooks: [{ url: 'https://example.test/hook', secret: 'k3y' }, { url: 'https://example.test/plain', secret: '' }] }
+  const r = await s.deliver(alert, 'opened')
+  check('a webhook added in Settings is used at the next send (settings read live)', posts.length === 2 && r.webhook1 === true && r.webhook2 === true, JSON.stringify(r))
+  const signed = posts.find((p) => p.url.endsWith('/hook'))
+  const body = JSON.parse(signed.opts.body)
+  check('the body names the alert, its camera (1-based) and the kind', body.source === 'argus' && body.kind === 'opened' && body.alerts[0].camera === 4 && body.alerts[0].title === 'Camera 4 offline')
+  const want = `sha256=${createHmac('sha256', 'k3y').update(signed.opts.body).digest('hex')}`
+  check('with a secret: X-Argus-Signature is the HMAC-SHA256 of the exact body', signed.opts.headers['x-argus-signature'] === want)
+  check('without a secret: no signature header', !('x-argus-signature' in posts.find((p) => p.url.endsWith('/plain')).opts.headers))
+  const t = await s.test('webhook')
+  check('the Test button posts to every webhook', t.ok && posts.length === 4 && JSON.parse(posts.at(-1).opts.body).kind === 'test')
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

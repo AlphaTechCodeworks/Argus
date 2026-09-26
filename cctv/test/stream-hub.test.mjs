@@ -92,6 +92,14 @@ check('frames for an unwanted stream are ignored', !hub.streams.has('18:0') && a
   const s8 = h.getStream(8, 1)
   s8.add(fakeWs())
   check('a viewer first: foreground straight away', msgs.at(-1).ch === 8 && msgs.at(-1).background === false)
+  // the viewers leave, the warm-up stays: back to background, so it waits behind real viewers again
+  const s6 = h.getStream(6, 1)
+  const warm = { ...fakeWs(), background: true }
+  const viewer = fakeWs()
+  s6.add(warm)
+  s6.add(viewer)
+  s6.remove(viewer)
+  check('the last viewer leaves a warm-up stream: the worker is told it is background again', msgs.at(-1).ch === 6 && msgs.at(-1).t === MSG.WANT && msgs.at(-1).background === true && s6.fg === false, JSON.stringify(msgs.at(-1)))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

@@ -337,7 +337,7 @@ const alerts = startAlerts({
       })),
   locationState,
   lastBackup: () => lastBackup(DATA_DIR),
-  sender: makeSender({ settings: getSettings().alerts, log: console.log }),
+  sender: makeSender({ settings: () => getSettings().alerts ?? {}, log: console.log }),
   // Reads /proc on every health poll; on Windows every figure simply comes back null.
   sysinfo: makeSysinfo()
 })
@@ -781,7 +781,7 @@ const handleRequest = async (req, res) => {
   }
   if (pathname === '/api/sites') return sendJson(res, 200, [...nvrs.values()].map((n) => n.info()))
   // only the cameras this user may watch live (rights.mjs; an admin sees all)
-  if (pathname === '/api/cameras') return sendJson(res, 200, who.admin ? allCameras() : allCameras().filter((c) => can(who, 'live', { nvr: c.nvr, ch: c.ch })))
+  if (pathname === '/api/cameras') return sendJson(res, 200, who.admin ? allCameras({ live: true }) : allCameras({ live: true }).filter((c) => can(who, 'live', { nvr: c.nvr, ch: c.ch })))
   if (handleMapsRead(pathname, res, sendJson, SECURITY_HEADERS)) return
   if (pathname.startsWith('/api/exports')) {
     const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
@@ -891,7 +891,7 @@ wss.on('connection', (ws, req) => {
 const phoneLive = new PhoneLive()
 // each user's first screen of cameras, streaming before anyone opens Live (warm-streams.mjs)
 startWarmStreams({
-  cameras: allCameras,
+  cameras: () => allCameras({ live: true }),
   orders: allGridOrders,
   // every camera of an NVR with no refused stream in the last 10 minutes (warm-streams.mjs)
   roomy: (id) => {

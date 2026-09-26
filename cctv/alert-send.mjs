@@ -1,4 +1,4 @@
-// Delivery: pushes alerts to ntfy and email. Never throws at the caller and never blocks the
+// Delivery: pushes alerts to ntfy, email and webhooks (other systems: a signed JSON POST). Never throws at the caller and never blocks the
 // check loop — a send that fails is retried up to 3 times, then logged and reported by pending()
 // so the Health page can say "email failing".
 //
@@ -10,7 +10,10 @@
 // code path stay so nothing has to be rewired later, but mailImpl defaults to a stub that fails.
 // A caller that wants email passes a real sender in.
 
+import { createHmac } from 'node:crypto'
+
 const TRIES = 3
+export const MAX_WEBHOOKS = 5
 const RETRY_DELAY_MS = 100_000 // ~5 min over 3 tries
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -20,7 +23,8 @@ const noMailer = async () => { throw new Error('email is not set up yet') }
 
 /**
  * @param {object} o
- * @param {object} o.settings   settings.alerts
+ * @param {object | (() => object)} o.settings   settings.alerts, or a function giving the current one
+ *   (the sender reads it at each send: a topic or webhook changed in Settings applies at once)
  * @param {typeof fetch} [o.fetchImpl]
  * @param {(cfg: object, msg: object) => Promise<void>} [o.mailImpl]
  * @param {() => number} [o.now]
@@ -28,10 +32,12 @@ const noMailer = async () => { throw new Error('email is not set up yet') }
  * @param {(line: string) => void} [o.log]
  */
 export function makeSender({ settings, fetchImpl = fetch, mailImpl = noMailer, now = Date.now, retryDelayMs = RETRY_DELAY_MS, log = console.log }) {
-  const status = { ntfyError: null, emailError: null }
+  const status = { ntfyError: null, emailError: null, webhookError: null }
+  const cfg = () => (typeof settings === 'function' ? settings() : settings) ?? {}
 
-  const ntfyOn = () => Boolean(settings.ntfy?.topic)
-  const emailOn = () => Boolean(settings.email?.host && settings.email?.to?.length)
+  const ntfyOn = () => Boolean(cfg().ntfy?.topic)
+  const emailOn = () => Boolean(cfg().email?.host && cfg().email?.to?.length)
+  const hooks = () => (Array.isArray(cfg().webhooks) ? cfg().webhooks.filter((h) => h?.url).slice(0, MAX_WEBHOOKS) : [])
 
   async function attempt(name, fn) {
     let last = null
@@ -54,8 +60,9 @@ export function makeSender({ settings, fetchImpl = fetch, mailImpl = noMailer, n
   }
 
   async function ntfy(alerts, kind) {
-    const base = (settings.ntfy.url || 'https://ntfy.sh').replace(/\/+$/, '')
-    const url = `${base}/${settings.ntfy.topic}`
+    const n = cfg().ntfy
+    const base = (n.url || 'https://ntfy.sh').replace(/\/+$/, '')
+    const url = `${base}/${n.topic}`
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: {
@@ -70,11 +77,38 @@ export function makeSender({ settings, fetchImpl = fetch, mailImpl = noMailer, n
   }
 
   async function email(alerts, kind) {
-    const e = settings.email
+    const e = cfg().email
     await mailImpl(
       { host: e.host, port: e.port, secure: e.secure, user: e.user, pass: e.pass, from: e.from },
       { to: e.to, subject: subject(alerts), text: text(alerts, kind) }
     )
+  }
+
+  /**
+   * One webhook: the batch as JSON. With a secret, the body is signed: X-Argus-Signature is
+   * "sha256=" + the hex HMAC-SHA256 of the exact body with that secret, so the other system can tell
+   * it came from this server. Never logged: the URL may carry a token.
+   */
+  async function webhook(hook, alerts, kind) {
+    const body = JSON.stringify({
+      source: 'argus',
+      kind, // 'opened' | 'cleared' | 'test'
+      at: new Date(now()).toISOString(),
+      alerts: alerts.map((a) => ({
+        key: a.key ?? null,
+        kind: a.kind ?? a.type ?? null,
+        title: a.title ?? null,
+        detail: a.detail ?? '',
+        severity: a.severity ?? a.priority ?? null,
+        nvr: a.nvr ?? null,
+        camera: Number.isInteger(a.ch) ? a.ch + 1 : null,
+        startMs: a.startMs ?? null
+      }))
+    })
+    const headers = { 'content-type': 'application/json', 'user-agent': 'Argus-CCTV' }
+    if (hook.secret) headers['x-argus-signature'] = `sha256=${createHmac('sha256', String(hook.secret)).update(body).digest('hex')}`
+    const res = await fetchImpl(hook.url, { method: 'POST', headers, body, signal: AbortSignal.timeout(8000) })
+    if (!res?.ok) throw new Error(`the webhook answered ${res?.status ?? 'nothing'}`)
   }
 
   return {
@@ -84,15 +118,20 @@ export function makeSender({ settings, fetchImpl = fetch, mailImpl = noMailer, n
       const jobs = []
       if (ntfyOn()) jobs.push(attempt('ntfy', () => ntfy(alerts, kind)).then((ok) => ['ntfy', ok]))
       if (emailOn()) jobs.push(attempt('email', () => email(alerts, kind)).then((ok) => ['email', ok]))
+      for (const [i, h] of hooks().entries()) jobs.push(attempt('webhook', () => webhook(h, alerts, kind)).then((ok) => [`webhook${i + 1}`, ok]))
       const done = await Promise.all(jobs)
       return Object.fromEntries(done)
     },
 
-    /** The Test button. method: 'ntfy' | 'email'. */
+    /** The Test button. method: 'ntfy' | 'email' | 'webhook' (every webhook set). */
     async test(method) {
       const a = [{ key: 'test', kind: 'test', title: 'Test message', detail: 'If you can read this, alerts are working.', severity: 'medium' }]
       try {
         if (method === 'ntfy') { if (!ntfyOn()) return { ok: false, error: 'no ntfy topic set' }; await ntfy(a, 'opened') }
+        else if (method === 'webhook') {
+          if (!hooks().length) return { ok: false, error: 'no webhook set' }
+          for (const h of hooks()) await webhook(h, a, 'test')
+        }
         else { if (!emailOn()) return { ok: false, error: 'no mail server or recipient set' }; await email(a, 'opened') }
         return { ok: true }
       } catch (e) { return { ok: false, error: e.message } }

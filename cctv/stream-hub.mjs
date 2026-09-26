@@ -49,6 +49,11 @@ export class HubStream {
 
   remove(ws) {
     this.clients.delete(ws)
+    // only warm-ups left: the worker may start it behind real viewers again
+    if (this.fg && this.clients.size > 0 && ![...this.clients].some((c) => c.background !== true)) {
+      this.fg = false
+      this.hub.send(want(this.ch, this.type, true))
+    }
     if (this.clients.size > 0 || this.closed) return
     clearTimeout(this.stopTimer)
     this.stopTimer = setTimeout(() => {
