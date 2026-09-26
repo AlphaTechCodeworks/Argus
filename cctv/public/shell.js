@@ -132,3 +132,8 @@ export function mountShell() {
 }
 
 mountShell()
+
+// keep the app's own files on the device (sw.js): Argus opens at once on a weak signal
+if ('serviceWorker' in navigator && isSecureContext) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {})
+}

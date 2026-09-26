@@ -75,6 +75,7 @@ import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs
 import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
+import { fileResponse } from './static-files.mjs'
 import { pool as playbackTranscodes } from './transcode.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
@@ -365,7 +366,7 @@ const MIME = {
   '.webmanifest': 'application/manifest+json'
 }
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/healthz'])
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
@@ -434,19 +435,22 @@ const sendJson = (res, status, data, headers = {}) => {
   res.end(JSON.stringify(data))
 }
 
-const serveFile = (res, pathname) => {
+const serveFile = (res, pathname, req = null) => {
   // join() resolves any ../ segments, so the prefix check blocks path traversal
   const file = join(PUBLIC_DIR, pathname === '/' ? '/index.html' : pathname)
   if (!file.startsWith(`${PUBLIC_DIR}/`) || !existsSync(file) || !statSync(file).isFile()) {
     res.writeHead(404, SECURITY_HEADERS).end('Not found')
     return
   }
-  res.writeHead(200, {
-    'content-type': MIME[extname(file)] ?? 'application/octet-stream',
-    'cache-control': 'no-cache',
-    ...SECURITY_HEADERS
+  // compressed, and 304 when the browser's copy is current (static-files.mjs)
+  const r = fileResponse({
+    path: file,
+    type: MIME[extname(file)] ?? 'application/octet-stream',
+    ifNoneMatch: req?.headers['if-none-match'],
+    acceptEncoding: req?.headers['accept-encoding']
   })
-  createReadStream(file).pipe(res)
+  res.writeHead(r.status, { ...r.headers, ...SECURITY_HEADERS })
+  res.end(r.body ?? undefined)
 }
 
 const handleLogin = async (req, res) => {
@@ -514,7 +518,7 @@ const handleRequest = async (req, res) => {
     if (leaving) audit(auth.DATA_DIR, { user: leaving, action: 'logout', ip: clientIp(req) })
     return sendJson(res, 200, { ok: true }, { 'set-cookie': auth.clearCookie() })
   }
-  if (PUBLIC_PATHS.has(pathname)) return serveFile(res, pathname)
+  if (PUBLIC_PATHS.has(pathname)) return serveFile(res, pathname, req)
 
   const user = currentUser(req)
   if (!user) {
@@ -767,7 +771,7 @@ const handleRequest = async (req, res) => {
     const [status, body, headers] = await playbackApi(nvrs.get(url.searchParams.get('nvr') ?? ''), pathname, url.searchParams)
     return sendJson(res, status, body, headers)
   }
-  serveFile(res, pathname)
+  serveFile(res, pathname, req)
 }
 
 const onRequest = (req, res) =>
