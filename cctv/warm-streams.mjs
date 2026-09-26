@@ -9,11 +9,15 @@
 // that drops off the list is let go (and lingers the usual 3 minutes, stream-hub.mjs).
 export const FIRST_SCREEN = 9
 export const CAP = 16
-// ...and, beyond that, EVERY online camera of an NVR that is not refusing streams (roomy(nvrId)):
-// an NVR takes 3.5 s on average to start a stream (up to 30 s), so any camera already streaming
-// opens at once. An NVR that has refused a stream in the last 10 minutes (nvr-2 at its bandwidth
-// budget) is left at the first-screen rule, so warm-ups never cost it a recording.
+// ...and, beyond that, up to PER_NVR online cameras of each NVR that is not refusing streams
+// (roomy(nvrId)): an NVR takes 3.5 s on average to start a stream (up to 30 s), so a camera
+// already streaming opens at once. Every extra sub-stream is also pulled by the NVR from its
+// camera: with all 29 of value4u's warmed at once it refused streams and four cameras dropped off
+// it. So at most PER_NVR each, and an NVR that refuses is left at the first-screen rule for
+// STAY_OUT_MS (startWarmStreams), not warmed again ten quiet minutes later.
 export const ALL_CAP = 200
+export const PER_NVR = 16
+export const STAY_OUT_MS = 6 * 60 * 60_000
 const EVERY_MS = 60_000
 
 /**
@@ -26,10 +30,14 @@ export function pickWarm({ cameras, orders, perUser = FIRST_SCREEN, cap = CAP, r
   const first = pickFirst({ cameras, orders, perUser, cap })
   if (!roomy) return first
   const out = [...first]
+  const per = new Map()
+  for (const k of out) per.set(k.slice(0, k.lastIndexOf('/')), (per.get(k.slice(0, k.lastIndexOf('/'))) ?? 0) + 1)
   for (const c of cameras) {
     if (out.length >= ALL_CAP) break
     const k = `${c.nvr}/${c.ch}`
-    if (c.online && c.configured !== false && roomy(c.nvr) && !out.includes(k)) out.push(k)
+    if (!c.online || c.configured === false || out.includes(k) || (per.get(c.nvr) ?? 0) >= PER_NVR || !roomy(c.nvr)) continue
+    out.push(k)
+    per.set(c.nvr, (per.get(c.nvr) ?? 0) + 1)
   }
   return out
 }
@@ -59,12 +67,23 @@ const quietViewer = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, send() {
  * Keeps the picked sub-streams running.
  * @param {{ cameras: () => object[], orders: () => object, streamOf: (nvrId: string, ch: number) => {add: Function, remove: Function}|null, log?: Function }} o
  */
-export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log = console.log, everyMs = EVERY_MS }) {
+export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log = console.log, everyMs = EVERY_MS, now = Date.now }) {
   const held = new Map() // key -> { stream, viewer }
+  // an NVR that refused is kept out of the extra warm-up for STAY_OUT_MS, not just while it refuses
+  const outUntil = new Map()
+  const calm = roomy && ((id) => {
+    const t = now()
+    if (!roomy(id)) {
+      if (!outUntil.has(id) || outUntil.get(id) <= t) log(`[warm] ${id} is refusing streams: only its first-screen cameras are kept ready for the next ${STAY_OUT_MS / 3_600_000} h`)
+      outUntil.set(id, t + STAY_OUT_MS)
+      return false
+    }
+    return (outUntil.get(id) ?? 0) <= t
+  })
   const run = () => {
     let want
     try {
-      want = new Set(pickWarm({ cameras: cameras(), orders: orders(), roomy }))
+      want = new Set(pickWarm({ cameras: cameras(), orders: orders(), roomy: calm }))
     } catch (e) {
       return log(`[warm] ${e.message}`)
     }
@@ -85,7 +104,7 @@ export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log 
       held.set(k, { stream, viewer })
       added++
     }
-    if (added) log(`[warm] keeping ${held.size} first-screen camera${held.size === 1 ? '' : 's'} streaming, ready for Live`)
+    if (added) log(`[warm] keeping ${held.size} camera${held.size === 1 ? '' : 's'} streaming, ready for Live`)
   }
   const t = setInterval(run, everyMs)
   t.unref?.()
