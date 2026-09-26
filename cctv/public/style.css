@@ -1274,10 +1274,49 @@ body.is-fullscreen .alert-banner { display: none; }
 /* The overlay placement picker on the Settings page. Nine buttons laid out as the picture itself
    is, so the button you press is in the place the text will appear -- that mapping is the whole
    point of the control, which is why it is a grid and not a drop-down list. */
-.osd-place { border: 1px solid var(--line, #3a4048); border-radius: 4px; padding: 10px 12px; }
+/* Controls beside the picture they change, rather than above it. The preview used to sit below
+   the corner buttons, so on a wide screen you clicked a corner with the result off-screen while
+   the right half of the page stayed empty. */
+.osd-place { border: 1px solid var(--line, #3a4048); border-radius: 4px; padding: 12px 14px; display: grid; grid-template-columns: minmax(280px, 26rem) minmax(260px, 1fr); gap: 20px; align-items: start; }
+.osd-place > legend { padding: 0 4px; }
+.osd-controls { min-width: 0; }
+.osd-preview { min-width: 0; }
+.osd-preview p { margin: 6px 0 0; }
+/* one column once there is no room for two: the preview goes under the buttons rather than being
+   squeezed to a postage stamp beside them */
+@media (max-width: 900px) { .osd-place { grid-template-columns: 1fr; } }
 .osd-corners { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; max-width: 420px; }
 .osd-corner { padding: 8px 4px; font: inherit; font-size: 12px; cursor: pointer; border: 1px solid var(--line, #3a4048); border-radius: 3px; background: none; color: inherit; }
 .osd-corner.on { background: var(--accent, #3d7eff); color: #fff; border-color: transparent; }
-.osd-fine { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
-.osd-fine label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
-.osd-preview canvas { width: 100%; max-width: 480px; height: auto; border-radius: 3px; display: block; }
+.osd-fine { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+.osd-fine label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.osd-fine .se-num { width: 100%; }
+.osd-fine .st-meta { font-size: 11px; }
+.osd-preview canvas { width: 100%; height: auto; border-radius: 3px; display: block; background: #000; }
+
+/* Settings form fields.
+   The grid packs as many 220px columns as the window allows, and anything marked se-wide spans the
+   lot. On a 1400px screen that stretched the "Settings for" dropdown and the text box clear across
+   the page while the two checkboxes sat in narrow columns far apart from each other -- a form that
+   is technically responsive and reads as though it were assembled by accident. A field only needs
+   to be as wide as what goes in it. */
+.se-grid label.se-wide { max-width: 34rem; }
+.se-grid label.se-wide select, .se-grid label.se-wide input { max-width: 22rem; }
+/* checkboxes belong next to each other, not one per column of a wide grid */
+.se-grid label.st-check { grid-column: auto; }
+
+/* The longer explanations, folded away. Every panel opened with two or three paragraphs before the
+   first control, which pushed the controls below the fold on a laptop. The sentence that matters
+   stays; the rest is here for whoever wants it. */
+.se-more { margin: -2px 0 12px; }
+.se-more > summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 2px 0; }
+.se-more > summary:hover { color: var(--text); }
+.se-more p { margin: 8px 0 0; }
+
+/* Form labels line up on the left with everything else.
+   A stray align-items:center was centring both the label text and its field inside the label box,
+   so on a wide panel "Settings for" and "Text" floated in the middle of the page while the
+   headings, help text and buttons around them were left-aligned. A form reads as a column of
+   things to fill in; centring each one breaks the line your eye follows down it. */
+.se-grid label:not(.st-check) { align-items: stretch; text-align: left; }
+.osd-fine label { align-items: stretch; text-align: left; }
