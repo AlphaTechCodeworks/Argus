@@ -26,7 +26,10 @@ command -v tailscale >/dev/null || { echo "tailscale is not installed" >&2; exit
 data_dir=""
 for d in /var/lib/private/cctv /var/lib/cctv; do [ -d "$d" ] && { data_dir="$d"; break; }; done
 [ -n "$data_dir" ] || { echo "cannot find the app's data directory" >&2; exit 1; }
-certs="$data_dir/certs"
+# Its own folder, beside the self-signed certificate rather than on top of it. The app serves
+# whichever certificate the browser asked for by name, so the LAN address keeps working exactly as
+# it did before -- installing this over the top is what broke it the first time.
+certs="$data_dir/certs/named"
 
 fqdn="$(tailscale status --json 2>/dev/null | sed -n 's/.*"DNSName": *"\([^"]*\)\.".*/\1/p' | head -1)"
 if [ -z "$fqdn" ]; then
@@ -58,10 +61,6 @@ else
   # Match whatever owns the data directory: under DynamicUser that is a number, not a name.
   owner="$(stat -c '%u:%g' "$data_dir")"
   chown "$owner" "$certs/cert.pem" "$certs/key.pem" "$certs" 2>/dev/null || true
-  # The app regenerates its self-signed certificate whenever the host list changes, and it decides
-  # a certificate is its own by the presence of this marker. Removing it means "this one is mine,
-  # leave it alone" -- see cctv/tls.mjs.
-  rm -f "$certs/hosts"
   echo "installed into $certs"
   systemctl restart cctv
   echo "cctv restarted"

@@ -96,7 +96,7 @@ import { handleEvents } from './events.mjs'
 import { handleAlarms } from './alarms.mjs'
 import { handleOsd } from './osd.mjs'
 import { runRetention, runThinning } from './thinning.mjs'
-import { loadCertificate } from './tls.mjs'
+import { httpsOptions } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
 
@@ -794,7 +794,7 @@ httpServer.on('upgrade', onUpgrade)
 httpServer.listen(Number(HTTP_PORT), () => console.log(`HTTP  on port ${HTTP_PORT} (use http://localhost on this PC)`))
 
 const certHosts = CERT_HOSTS.split(',').map((h) => h.trim()).filter(Boolean)
-const httpsServer = createHttpsServer(loadCertificate(certHosts), onRequest)
+const httpsServer = createHttpsServer(httpsOptions(certHosts), onRequest)
 httpsServer.on('upgrade', onUpgrade)
 httpsServer.listen(Number(HTTPS_PORT), () => console.log(`HTTPS on port ${HTTPS_PORT} (for other PCs and phones)`))
 
