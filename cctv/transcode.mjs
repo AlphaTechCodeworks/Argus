@@ -140,7 +140,9 @@ export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEver
     ...input,
     ...(filters.length ? ['-vf', filters.join(',')] : []),
     '-c:v', 'libx264', '-preset', PRESET, '-crf', String(crf), '-tune', 'zerolatency', '-bf', '0', '-g', '50', '-pix_fmt', 'yuv420p',
-    ...(maxKbps > 0 ? ['-maxrate', `${maxKbps}k`, '-bufsize', `${maxKbps * 2}k`] : []),
+    // a buffer of 4 s at the cap: the keyframe (many times a normal frame) can be sent whole and
+    // sharp, instead of being squeezed to the cap and arriving as blocks
+    ...(maxKbps > 0 ? ['-maxrate', `${maxKbps}k`, '-bufsize', `${maxKbps * 4}k`] : []),
     ...tail
   ]
 }

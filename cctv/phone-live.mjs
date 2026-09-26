@@ -16,9 +16,9 @@ import { Transcoder, TranscodePool, CODEC_H264, CODEC_H265 } from './transcode.m
 export const PHONE_FPS = 15
 export const PHONE_MAX_WIDTH = 1280
 /** Picture quality for phones, and a ceiling on the bitrate (kbit/s) so it never costs more data. */
-export const PHONE_CRF = 30
-export const PHONE_SUB_KBPS = 300
-export const PHONE_MAIN_KBPS = 1200
+export const PHONE_CRF = 25
+export const PHONE_SUB_KBPS = 700
+export const PHONE_MAIN_KBPS = 2500
 const HEADER_SIZE = 16 // sdk.mjs encodeFrame: key flag, codec, size, time (us); then the payload
 const MAX_GOP_FRAMES = 200
 const STOP_DELAY_MS = 10_000

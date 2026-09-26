@@ -24,9 +24,11 @@ import { TranscodePool } from './transcode.mjs'
 
 export const LEVELS = Object.freeze([
   { id: 'full' },
-  { id: '15', fps: 15, crf: 30, subKbps: 300, mainKbps: 1200 },
-  { id: '8', fps: 8, crf: 32, subKbps: 180, mainKbps: 600 },
-  { id: '4', fps: 4, crf: 34, subKbps: 100, mainKbps: 300 }
+  // Quality first, then frame rate: a sharp picture at 15 fps beats a blocky one at 30, and the
+  // first rounds (crf 30-34, 100-300 kbit/s) came out grainy and blocky, worst on the first frames.
+  { id: '15', fps: 15, crf: 25, subKbps: 700, mainKbps: 2500 },
+  { id: '8', fps: 8, crf: 27, subKbps: 450, mainKbps: 1500 },
+  { id: '4', fps: 4, crf: 29, subKbps: 280, mainKbps: 900 }
 ])
 export const TICK_MS = 2000
 /** A socket with this much waiting to go out is a link that is not keeping up. */
