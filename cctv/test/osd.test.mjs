@@ -92,7 +92,10 @@ const OK = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryIPChlOR
 // ---- the probe ---------------------------------------------------------------------------------
 {
   const shapes = probeShapes(CHL)
-  check('the shape the picture settings already use is tried first', shapes[0][1] === osdRequest(CHL))
+  // Round one named the channel six ways and changed nothing, so round two tries naming the
+  // fields instead -- copying queryNodeEncodeInfo, which works on these NVRs every day.
+  check('the field-naming shape is tried first now', shapes[0][1].includes('<requireField>') && !shapes[0][1].includes('<condition>'), shapes[0][1])
+  check('the shape from round one is kept, so the two runs can be compared', shapes.some(([, d]) => d === osdRequest(CHL)))
   check('every shape names the channel or is deliberately bodyless', shapes.every(([, d]) => d.includes(CHL) || d.includes('</request>')))
   // A probe that could write would be a probe nobody should run.
   check('nothing in the probe is a write', shapes.every(([, d]) => !/edit|set|add|del/i.test(d)))

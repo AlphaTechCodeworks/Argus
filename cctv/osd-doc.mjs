@@ -24,13 +24,26 @@ export const osdRequest = (chlId) => `${XML_HEADER}<condition><chlId>${esc(chlId
  * Read-only: every one of these is a query, and none of them changes anything.
  */
 export function probeShapes(chlId) {
+  const cond = `<condition><chlId>${esc(chlId)}</chlId></condition>`
+  // Second round, after the first told us something useful. Naming the channel six different ways
+  // changed nothing: solus answered every one of them with 536870923, which is the same code
+  // queryDiskSmartInfo gives when it has not been told what to fetch. nvr1 answered a different
+  // code again (536871059) to all six, so that firmware does not support the command at all --
+  // one probe, two quite different conclusions, which is why it was worth running on both.
+  //
+  // So the missing piece is probably not the channel but the fields. queryNodeEncodeInfo, which
+  // works on these NVRs every day, asks with a <requireField> block and no condition at all. These
+  // shapes copy that, starting with the field names that command already uses successfully, then
+  // trying the ones an OSD would plausibly carry.
   return [
-    ['condition/chlId (as the picture settings do)', osdRequest(chlId)],
-    ['no body', `${XML_HEADER}</request>`],
-    ['condition/chlId + requireField', `${XML_HEADER}<condition><chlId>${esc(chlId)}</chlId></condition><requireField><chlOsd/></requireField></request>`],
-    ['condition/id', `${XML_HEADER}<condition><id>${esc(chlId)}</id></condition></request>`],
-    ['content list item id', `${XML_HEADER}<content type="list"><item id="${esc(chlId)}"></item></content></request>`],
-    ['condition/chlIdList', `${XML_HEADER}<condition><chlIdList type="list"><item id="${esc(chlId)}"></item></chlIdList></condition></request>`]
+    ['requireField, no condition, names that already work elsewhere', `${XML_HEADER}<requireField><name/><chlType/></requireField></request>`],
+    ['requireField + condition, same names', `${XML_HEADER}${cond}<requireField><name/><chlType/></requireField></request>`],
+    ['requireField: name only', `${XML_HEADER}<requireField><name/></requireField></request>`],
+    ['requireField: osd', `${XML_HEADER}<requireField><osd/></requireField></request>`],
+    ['requireField: switch and position', `${XML_HEADER}<requireField><switch/><X/><Y/></requireField></request>`],
+    ['requireField: displayInfo', `${XML_HEADER}<requireField><displayInfo/><name/></requireField></request>`],
+    ['condition/chlId alone (round one, kept so the two runs can be compared)', osdRequest(chlId)],
+    ['no body at all', `${XML_HEADER}</request>`]
   ]
 }
 
