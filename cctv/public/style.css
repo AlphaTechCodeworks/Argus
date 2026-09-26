@@ -1395,3 +1395,14 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
   .st-nvr-cams, .st-nvr-actions { grid-column: 2; }
   .st-nvr-actions { justify-content: flex-start; flex-wrap: wrap; }
 }
+/* Settings, per camera: grouped by NVR, folded, one line per camera */
+.se-cam-tools { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.se-cam-tools input[type="search"] { flex: 1; min-width: 180px; max-width: 320px; }
+.se-cam-group td { padding: 0 !important; background: var(--surface-2); }
+.se-cam-toggle { all: unset; box-sizing: border-box; display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 9px 10px; cursor: pointer; }
+.se-cam-toggle:hover { background: var(--surface-hover); }
+.se-cam-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.se-caret { color: var(--text-muted); width: 10px; }
+.se-cam-name { white-space: nowrap; }
+.se-cam-name .st-meta { display: inline-block; min-width: 22px; font-variant-numeric: tabular-nums; }
+.se-table td select, .se-table td input { padding: 4px 6px; font-size: 13px; }

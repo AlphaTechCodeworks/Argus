@@ -97,17 +97,53 @@ function camNumber(value, dflt, max, onChange) {
   return i
 }
 
+// Grouped by NVR, each group folded until opened: a site with a hundred cameras is a hundred rows,
+// and almost all of them just use the defaults. The header of each group says how many do not.
+const openGroups = new Set()
+const setDifferently = (key) => Object.values(settings.recording.cameras?.[key] ?? {}).some((v) => v !== null && v !== undefined && v !== '') || camEdits.has(key)
+
 function renderCameras() {
   const d = settings.recording.defaults
-  const body = $('cams').tBodies[0]
+  const table = $('cams')
+  for (const b of [...table.tBodies]) b.remove()
   if (!cameras.length) {
-    body.replaceChildren(el('tr', {}, el('td', { colSpan: 6, className: 'st-meta', textContent: 'No cameras (no NVR online yet).' })))
+    table.append(el('tbody', {}, el('tr', {}, el('td', { colSpan: 6, className: 'st-meta', textContent: 'No cameras (no NVR online yet).' }))))
     return
   }
-  body.replaceChildren(
-    ...cameras.map((c) => {
+  const q = $('camSearch').value.trim().toLowerCase()
+  const onlyChanged = $('camChanged').checked
+  const shown = cameras.filter((c) => (!q || `${c.name} ${c.nvrName} ${c.site}`.toLowerCase().includes(q)) && (!onlyChanged || setDifferently(`${c.nvr}/${c.ch}`)))
+  if (!shown.length) {
+    table.append(el('tbody', {}, el('tr', {}, el('td', { colSpan: 6, className: 'st-meta', textContent: onlyChanged ? 'Every camera uses the defaults.' : 'No camera matches.' }))))
+    return
+  }
+  for (const [nvr, list] of Map.groupBy(shown, (c) => c.nvr)) {
+    const all = cameras.filter((c) => c.nvr === nvr)
+    const changed = all.filter((c) => setDifferently(`${c.nvr}/${c.ch}`)).length
+    // a search or the "set differently" filter opens what it found
+    const open = openGroups.has(nvr) || Boolean(q) || onlyChanged
+    const btn = el('button', { type: 'button', className: 'se-cam-toggle' },
+      el('span', { className: 'se-caret', textContent: open ? '▾' : '▸' }),
+      el('strong', { textContent: list[0].nvrName }),
+      el('span', { className: 'st-meta', textContent: ` ${list[0].site} · ${all.length} camera${all.length === 1 ? '' : 's'}${changed ? ` · ${changed} set differently` : ' · all on the defaults'}` }))
+    btn.setAttribute('aria-expanded', String(open))
+    btn.addEventListener('click', () => {
+      if (openGroups.has(nvr)) openGroups.delete(nvr)
+      else openGroups.add(nvr)
+      renderCameras()
+    })
+    const body = el('tbody', {}, el('tr', { className: 'se-cam-group' }, el('td', { colSpan: 6 }, btn)))
+    if (open) body.append(...camRows(list, d))
+    table.append(body)
+  }
+}
+$('camSearch').addEventListener('input', () => renderCameras())
+$('camChanged').addEventListener('change', () => renderCameras())
+
+function camRows(list, d) {
+  return list.map((c) => {
       const key = `${c.nvr}/${c.ch}`
-      const o = settings.recording.cameras[key] ?? {}
+      const o = settings.recording.cameras?.[key] ?? {}
       const edit = (field) => (v) => {
         const p = camEdits.get(key) ?? {}
         p[field] = v
@@ -124,15 +160,14 @@ function renderCameras() {
       return el(
         'tr',
         {},
-        el('td', {}, el('div', { textContent: c.name }), el('div', { className: 'st-meta', textContent: `${c.site} · ${c.nvrName} · ch ${c.ch + 1}` })),
+        el('td', { className: 'se-cam-name' }, el('span', { className: 'st-meta', textContent: `${c.ch + 1}` }), ` ${c.name}`),
         el('td', {}, camSelect(choices.modes, MODE_TEXT, o.mode, d.mode, edit('mode'))),
         el('td', {}, camNumber(o.fullDays, d.fullDays, choices.maxRetentionDays, edit('fullDays'))),
         el('td', {}, camSelect(choices.after, AFTER_TEXT, o.after, d.after, edit('after'))),
         el('td', {}, camNumber(o.retentionDays, d.retentionDays, choices.maxRetentionDays, edit('retentionDays'))),
         el('td', {}, locSel)
       )
-    })
-  )
+  })
 }
 
 $('saveCams').addEventListener('click', async () => {

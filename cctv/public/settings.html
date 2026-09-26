@@ -40,7 +40,11 @@
         <div class="se-actions"><button type="submit" class="st-primary">Save defaults</button><span id="d-msg" class="st-meta"></span></div>
       </form>
       <h3>Per camera</h3>
-      <p class="st-help">Empty fields use the defaults above.</p>
+      <p class="st-help">Empty fields use the defaults above. Open an NVR to change its cameras.</p>
+      <div class="se-cam-tools">
+        <input id="camSearch" type="search" placeholder="Find a camera" aria-label="Find a camera" />
+        <label class="st-check"><input id="camChanged" type="checkbox" /> Only cameras set differently</label>
+      </div>
       <div class="se-table-wrap">
         <table class="se-table" id="cams">
           <thead><tr><th>Camera</th><th>Mode</th><th>Full days</th><th>After that</th><th>Retention days</th><th>Location</th></tr></thead>
