@@ -1679,3 +1679,10 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
 .tile.has-still { background-size: contain; background-position: center; background-repeat: no-repeat; }
 .tile.has-still::after { content: ''; position: absolute; inset: 0; background: rgba(0,0,0,.28); pointer-events: none; z-index: 0; }
 .tile.has-still > canvas:not(.osd) { visibility: hidden; } /* the player canvas is opaque black until its first frame */
+/* Health: the live indicator */
+.hp-live { display: inline-flex; align-items: center; gap: 6px; align-self: flex-end; font-size: 12px; color: var(--text-muted); }
+.hp-live::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.hp-live.pulse::before { animation: hp-pulse 1.2s ease-out 1; }
+.hp-live.stale { color: var(--warn); }
+.hp-live.stale::before { background: var(--text-faint); }
+@keyframes hp-pulse { 0% { box-shadow: 0 0 0 0 var(--ok-soft); } 100% { box-shadow: 0 0 0 8px transparent; } }

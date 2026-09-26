@@ -102,6 +102,7 @@ export function startAlerts(deps) {
   })
 
   let last = { open: [], snapshot: null }
+  const fresh = { snap: null, snapAt: 0, history: null, historyAt: 0 } // health(): what the page is shown between alert checks
   let timer = null
   let pruneTimer = null
 
@@ -170,7 +171,14 @@ export function startAlerts(deps) {
      * because the page is served to every signed-in user, not only admins.
      */
     health() {
-      const snap = last.snapshot ?? buildSnapshot(deps, now())
+      // Health updates live (every 2 s): the state is rebuilt when it is over 2 s old -- it only
+      // reads what is in memory -- rather than waiting for the next alert check. The history file is
+      // re-read at most every 30 s.
+      if (!fresh.snap || now() - fresh.snapAt > 2000) {
+        fresh.snap = buildSnapshot(deps, now())
+        fresh.snapAt = now()
+      }
+      const snap = fresh.snap
       let system = null
       try {
         system = deps.sysinfo?.sample() ?? null
@@ -178,11 +186,15 @@ export function startAlerts(deps) {
         // sample() promises not to throw, but the Health page must not die if that promise breaks.
         log(`[alerts] could not read the system figures: ${e.message}`)
       }
-      let history = []
-      try {
-        history = readAlerts(deps.dataDir, now() - HISTORY_SHOWN_DAYS * 86_400_000)
-      } catch (e) {
-        log(`[alerts] could not read the history: ${e.message}`)
+      let history = fresh.history ?? []
+      if (!fresh.history || now() - fresh.historyAt > 30_000) {
+        try {
+          history = readAlerts(deps.dataDir, now() - HISTORY_SHOWN_DAYS * 86_400_000)
+          fresh.history = history
+          fresh.historyAt = now()
+        } catch (e) {
+          log(`[alerts] could not read the history: ${e.message}`)
+        }
       }
       return {
         now: now(),

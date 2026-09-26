@@ -625,5 +625,29 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
 
   const load = () => fetch('/api/health').then((x) => x.json()).then(paint).catch(() => {})
   load()
-  setInterval(load, 15_000)
+  // live: every 2 s while the page is visible (a hidden tab asks nothing), with a dot that pulses at
+  // each fresh answer and goes grey when the server stops answering
+  const liveDot = document.createElement('span')
+  liveDot.className = 'hp-live'
+  liveDot.title = 'Updating live'
+  liveDot.textContent = 'Live'
+  document.querySelector('main')?.prepend(liveDot)
+  let lastOk = 0
+  const tick = async () => {
+    if (document.hidden) return
+    try {
+      const r = await fetch('/api/health')
+      if (!r.ok) throw new Error(String(r.status))
+      paint(await r.json())
+      lastOk = Date.now()
+      liveDot.classList.remove('stale')
+      liveDot.classList.remove('pulse')
+      void liveDot.offsetWidth // restart the animation
+      liveDot.classList.add('pulse')
+    } catch {
+      if (Date.now() - lastOk > 8000) liveDot.classList.add('stale')
+    }
+  }
+  setInterval(tick, 2000)
+  document.addEventListener('visibilitychange', tick)
 }

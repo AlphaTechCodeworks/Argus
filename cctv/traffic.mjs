@@ -9,7 +9,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { isRemoteAddress } from './adaptive-live.mjs'
 
-const RATE_WINDOW_MS = 5000
+const RATE_WINDOW_MS = 2000 // Health refreshes every 2 s
 const make = () => ({ bytes: 0, sockets: 0, bps: 0 })
 const counters = { internet: make(), local: make() }
 let windowStart = Date.now()
