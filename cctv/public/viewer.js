@@ -922,3 +922,56 @@ function stepArrows() {
     }
   }, true)
 }
+
+// ---- phones: the cameras as a list ----
+// A phone shows four cameras at most; to reach the one you want, a list: every camera by site, with
+// a search and whether it is online. A tap opens it full screen, where a flick goes on to the next.
+{
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.id = 'cameraListBtn'
+  btn.className = 'phone-list-btn'
+  btn.textContent = 'Cameras'
+  siteSelect.closest('label')?.before(btn)
+
+  const sheet = document.createElement('div')
+  sheet.className = 'cam-sheet'
+  sheet.hidden = true
+  sheet.innerHTML = '<div class="cam-sheet-head"><input type="search" placeholder="Find a camera" aria-label="Find a camera" /><button type="button" class="cam-sheet-close" aria-label="Close">✕</button></div><div class="cam-sheet-list" role="list"></div>'
+  document.body.append(sheet)
+  const search = sheet.querySelector('input')
+  const list = sheet.querySelector('.cam-sheet-list')
+
+  const draw = () => {
+    const q = search.value.trim().toLowerCase()
+    const shown = cameras.filter((c) => !q || `${c.name} ${c.site} ${c.nvrName} ${c.ch + 1}`.toLowerCase().includes(q))
+    const bySite = Map.groupBy(shown, (c) => c.site || c.nvrName)
+    list.replaceChildren(...[...bySite].flatMap(([site, cams]) => {
+      const h = document.createElement('div')
+      h.className = 'cam-sheet-site'
+      h.textContent = `${site} · ${cams.filter((c) => c.online).length} of ${cams.length} online`
+      return [h, ...cams.map((c) => {
+        const row = document.createElement('button')
+        row.type = 'button'
+        row.className = `cam-sheet-row${c.online ? '' : ' off'}`
+        row.disabled = !c.online
+        row.innerHTML = '<span class="cam-dot"></span><span class="cam-name"></span><span class="cam-ch"></span>'
+        row.querySelector('.cam-name').textContent = c.name
+        row.querySelector('.cam-ch').textContent = c.online ? `ch ${c.ch + 1}` : 'offline'
+        row.addEventListener('click', () => {
+          sheet.hidden = true
+          openSingle(c, { fromTap: true })
+        })
+        return row
+      })]
+    }))
+    if (!shown.length) list.textContent = 'No camera matches.'
+  }
+  btn.addEventListener('click', () => {
+    sheet.hidden = false
+    search.value = ''
+    draw()
+  })
+  search.addEventListener('input', draw)
+  sheet.querySelector('.cam-sheet-close').addEventListener('click', () => (sheet.hidden = true))
+}

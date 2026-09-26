@@ -1644,3 +1644,21 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
 .single-overlay > .label, .single-overlay > .stats, .single-overlay > canvas.osd { z-index: 4; }
 .single-overlay > .tile-upgrade { z-index: 2; }
 .single-overlay > .phone-fs-btn, .single-overlay > .phone-step, .single-overlay > .phone-fs-note { z-index: 6; }
+/* phones: the camera list */
+.phone-list-btn { display: none; }
+.cam-sheet { position: fixed; inset: 0; z-index: 95; display: flex; flex-direction: column; background: color-mix(in srgb, var(--bg) 88%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(160%); backdrop-filter: blur(20px) saturate(160%); padding-top: env(safe-area-inset-top); }
+.cam-sheet[hidden] { display: none; }
+.cam-sheet-head { display: flex; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.cam-sheet-head input { flex: 1; height: 40px; border-radius: 10px; padding: 0 12px; font-size: 16px; }
+.cam-sheet-close { width: 40px; height: 40px; border-radius: 10px; font-size: 16px; }
+.cam-sheet-list { flex: 1; overflow-y: auto; padding: 6px 0 calc(20px + env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; }
+.cam-sheet-site { padding: 14px 16px 6px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-muted); }
+.cam-sheet-row { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 12px; width: 100%; padding: 13px 16px; border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); font-size: 15px; cursor: pointer; }
+.cam-sheet-row:active { background: var(--surface-hover); }
+.cam-sheet-row .cam-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); flex: none; }
+.cam-sheet-row.off { opacity: .45; }
+.cam-sheet-row.off .cam-dot { background: var(--text-faint); box-shadow: none; }
+.cam-sheet-row .cam-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cam-sheet-row .cam-ch { color: var(--text-muted); font-size: 13px; }
+@media (max-width: 699px) { .phone-list-btn { display: inline-flex; align-items: center; font-weight: 600; } }
