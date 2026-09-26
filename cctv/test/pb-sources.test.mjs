@@ -193,7 +193,7 @@ function fakeTimers() {
 }
 
 // ---- clock-skew hint, time bases, speeds ------------------------------------------------------------------
-check('describeSkew: nothing up to 5 s', describeSkew(0) === '' && describeSkew(5000) === '' && describeSkew(-5000) === '' && describeSkew(undefined) === '')
+check('describeSkew: nothing up to 10 s (the clock sync puts that right)', describeSkew(0) === '' && describeSkew(5000) === '' && describeSkew(-10_000) === '' && describeSkew(undefined) === '')
 check("  nvr1's 3 min 40 s fast", describeSkew(220_000) === "Server time. This NVR's clock is 3 min 40 s fast; the time printed on the picture differs.", describeSkew(220_000))
 check('  slow, seconds only, and hours', /12 s slow/.test(describeSkew(-12_000)) && /1 h 2 min fast/.test(describeSkew(3_720_000)) && /1 min fast/.test(describeSkew(60_400)), `${describeSkew(-12_000)} | ${describeSkew(3_720_000)} | ${describeSkew(60_400)}`)
 check('convertTime: server -> nvr adds the skew, nvr -> server subtracts it', convertTime(1000, 'server', 'nvr', { toSkew: 220 }) === 1220 && convertTime(1220, 'nvr', 'server', { fromSkew: 220 }) === 1000)

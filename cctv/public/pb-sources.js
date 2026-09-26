@@ -191,9 +191,13 @@ function duration(ms) {
   return [h && `${h} h`, m && `${m} min`, s && `${s} s`].filter(Boolean).join(' ')
 }
 
-/** The hint shown in server mode when the NVR's clock is more than 5 s off; '' otherwise. */
+/**
+ * The hint shown in server mode when the NVR's clock is more than 10 s off; '' otherwise. Below that
+ * the picture's printed time and the timeline differ by too little to matter, and the clock sync
+ * (nvr-clock.mjs, anything over 4 s) puts it right within a quarter of an hour.
+ */
 export function describeSkew(skewMs) {
-  if (!Number.isFinite(skewMs) || Math.abs(skewMs) <= 5000) return ''
+  if (!Number.isFinite(skewMs) || Math.abs(skewMs) <= 10_000) return ''
   return `Server time. This NVR's clock is ${duration(skewMs)} ${skewMs > 0 ? 'fast' : 'slow'}; the time printed on the picture differs.`
 }
 

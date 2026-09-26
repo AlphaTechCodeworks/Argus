@@ -117,7 +117,9 @@ export async function handleClockWrite(method, pathname, readJson, nvrs, user) {
 //
 // It corrects only when a clock has drifted past a threshold, so a healthy NVR is left alone.
 
-const DRIFT_MS = 10_000 // leave a clock alone until it is this far out
+// Leave a clock alone until it is this far out. 4 s, not 10: at 10, an NVR sat 5-9 s out for good
+// and Playback kept saying so; under 4 is the whole-second rounding these NVRs report in.
+const DRIFT_MS = 4_000
 
 // Each NVR's clock as the sync last measured it ({ driftMs, at }), for Health: its alert used to go
 // by a reading taken only when someone opened playback, kept for ever -- it said nvr-2 was 47 s
