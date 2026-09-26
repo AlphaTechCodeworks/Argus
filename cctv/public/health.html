@@ -42,14 +42,18 @@
     <p id="admins" class="hp-note"></p>
     <p class="hp-note">Rights and the audit trail are on the <a href="/audit.html">Audit</a> page.</p>
 
-    <h2>Alerts in the last 7 days</h2>
-    <table class="hp-table">
-      <thead>
-        <tr><th>Problem</th><th>Started</th><th>Cleared</th></tr>
-      </thead>
-      <tbody id="history"></tbody>
-    </table>
-    <p class="hp-note">Where these are sent is set in <a href="/settings.html">Settings</a>.</p>
+    <!-- folded away: it is history, not what is wrong now (the cards above say that); the summary
+         carries the count so nothing is hidden by the fold -->
+    <details class="hp-history">
+      <summary><h2>Alerts in the last 7 days <span id="historyCount" class="hp-count"></span></h2></summary>
+      <table class="hp-table">
+        <thead>
+          <tr><th>Problem</th><th>Started</th><th>Cleared</th></tr>
+        </thead>
+        <tbody id="history"></tbody>
+      </table>
+      <p class="hp-note">Where these are sent is set in <a href="/settings.html">Settings</a>.</p>
+    </details>
   </main>
 
   <script type="module" src="shell.js"></script>

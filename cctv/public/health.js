@@ -490,6 +490,7 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
       return panel
     }))
 
+    document.getElementById('historyCount').textContent = `(${r.historyRows.length})`
     document.getElementById('history').replaceChildren(...r.historyRows.map((h) => {
       const tr = el('tr')
       for (const text of [h.title, h.started, h.cleared]) tr.append(el('td', { textContent: text }))

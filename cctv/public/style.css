@@ -1332,3 +1332,10 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
 }
 /* a phone's tapped camera, full screen: edge to edge, no gap round it */
 #grid:fullscreen > .tile.single-overlay { inset: 0; border-radius: 0; }
+/* Health: the alert history folds away under its heading */
+.hp-history > summary { cursor: pointer; list-style: none; }
+.hp-history > summary::-webkit-details-marker { display: none; }
+.hp-history > summary h2 { display: inline-flex; align-items: center; gap: 8px; }
+.hp-history > summary h2::before { content: '▸'; color: var(--muted); font-size: 0.8em; transition: transform var(--t-fast); }
+.hp-history[open] > summary h2::before { transform: rotate(90deg); }
+.hp-count { color: var(--muted); font-weight: 400; font-size: 0.85em; }
