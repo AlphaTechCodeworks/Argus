@@ -138,13 +138,15 @@ export class LiveStream {
     }
     let callStart = 0
     let callError = null
+    // someone is waiting to see this camera (not only the recorder or a warm-up): start it first
+    const urgent = () => [...this.clients].some((c) => !c.background)
     const timed = () => {
       callStart = Date.now()
       return call()
     }
     const handle = await (this.streamType === 0
-      ? connectLane.run(timed) // opens a new NVR connection: one at a time, process-wide
-      : nvr.lane.run(timed, { priority: PRIORITY.NORMAL })
+      ? connectLane.run(timed, { urgent }) // opens a new NVR connection: one at a time, process-wide
+      : nvr.lane.run(timed, { priority: PRIORITY.NORMAL, urgent })
     ).catch((e) => {
       callError = e
       return -1

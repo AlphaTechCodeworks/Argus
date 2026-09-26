@@ -329,6 +329,7 @@ export class Recorder {
   #tapFor(cam) {
     const rec = this
     return {
+      background: true, // nobody is watching: a viewer's stream starts ahead of this one (lanes.mjs)
       OPEN: 1,
       readyState: 1,
       bufferedAmount: 0, // the writer has its own queue limits (segment-writer.mjs)

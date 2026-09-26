@@ -63,6 +63,7 @@ export function startWarmStreams({ cameras, orders, streamOf, log = console.log,
       const stream = streamOf(k.slice(0, i), Number(k.slice(i + 1)))
       if (!stream) continue
       const viewer = quietViewer()
+      viewer.background = true // (a real viewer's start goes ahead of this one)
       stream.add(viewer)
       held.set(k, { stream, viewer })
       added++
