@@ -100,9 +100,29 @@ export class MotionTuner {
 
   #drawMeter() {
     const r = meterReading(this.history)
-    this.els.meter.textContent = r.samples
-      ? `Movement in the watched area: now ${pct(r.now)}, average ${pct(r.average)}, highest seen ${pct(r.peak)} (${r.samples} samples)`
-      : 'Waiting for video from this camera…'
+    const m = this.els.meter
+    if (!r.samples) {
+      m.textContent = 'Waiting for video from this camera…'
+      return
+    }
+    // three figures side by side, the words under them (was one long sentence)
+    const stat = (value, words) => {
+      const d = document.createElement('div')
+      d.className = 'al-stat'
+      const b = document.createElement('b')
+      b.textContent = pct(value)
+      const s = document.createElement('span')
+      s.textContent = words
+      d.append(b, s)
+      return d
+    }
+    const grid = document.createElement('div')
+    grid.className = 'al-stats'
+    grid.append(stat(r.now, 'moving now'), stat(r.average, 'average'), stat(r.peak, 'highest seen'))
+    const note = document.createElement('p')
+    note.className = 'hp-note'
+    note.textContent = `Share of the watched area changing between two pictures, over the last ${r.samples} samples (two a second).`
+    m.replaceChildren(grid, note)
   }
 
   /** The NVR's watched zones, shaded over the picture. Nothing is drawn when it did not tell us. */

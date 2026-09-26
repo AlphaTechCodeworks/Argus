@@ -7,6 +7,7 @@
 // why the kinds, the words and the priorities live in alarms-view.js and the server imports them
 // from there rather than the other way round.
 import { EVENT_KINDS, PRIORITIES, alarmRows, filterSummary, labelOf, priorityClass, ruleSummary } from './alarms-view.js'
+import { fillCameraSelect } from './camera-choice.js'
 import { MotionTuner } from './motion-tune.js'
 
 const $ = (id) => document.getElementById(id)
@@ -226,14 +227,10 @@ async function addRule(e) {
 // ---- setting the page up ----------------------------------------------------------------------------
 
 function fillChoices() {
-  const cams = $('filters').elements.camera
-  const ruleCams = $('ruleForm').elements.cameras
-  for (const c of cameras) {
-    const key = `${c.nvr}/${c.ch}`
-    cams.append(new Option(c.name ?? key, key))
-    ruleCams.append(new Option(c.name ?? key, key))
-    $('tuneCamera').append(new Option(c.name ?? key, key))
-  }
+  // grouped by site, "3 · North Gate" (camera-choice.js); tuning lists only cameras it can measure
+  fillCameraSelect($('filters').elements.camera, cameras)
+  fillCameraSelect($('ruleForm').elements.cameras, cameras)
+  fillCameraSelect($('tuneCamera'), cameras, { onlineOnly: true })
   for (const t of EVENT_KINDS) {
     // An unconfirmed kind is listed, because a rule may be written for the day it works, but it is
     // labelled so nobody sits waiting for alarms that cannot arrive yet.
@@ -269,6 +266,9 @@ async function start() {
   })
   $('tuneCamera').addEventListener('change', (e) => {
     const [nvr, ch] = e.target.value.split('/')
+    // nothing but the picker until a camera is chosen (it was a black box under it)
+    $('tuneEmpty').hidden = Boolean(nvr)
+    $('tuneBody').hidden = !nvr
     tuner.show(nvr ? { nvr, ch: Number(ch), name: e.target.selectedOptions[0].textContent } : null)
   })
   // Nothing is streamed until somebody picks a camera: this page is opened far more often than the

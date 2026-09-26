@@ -101,21 +101,29 @@
     <p class="hp-note">Live activity measured by this server, against what the NVR is set to.
       Changing the NVR's setting is a change to the owner's equipment and is confirmed per camera.</p>
     <div class="al-tune">
-      <label>Camera <select id="tuneCamera"></select></label>
-      <!-- The live picture comes from the same LiveTile the grid and the map use (sub-stream, so
-           tuning one camera costs the NVR very little), with the NVR's watched zones drawn over it. -->
-      <div class="al-tune-live">
-        <div id="tuneTile" class="tile"></div>
-        <canvas id="tuneOverlay" class="al-tune-overlay"></canvas>
+      <label class="al-tune-pick">Camera <select id="tuneCamera"></select></label>
+      <p id="tuneEmpty" class="al-tune-empty">Choose a camera to see how much movement it picks up, against what its NVR is set to trigger on.</p>
+      <div id="tuneBody" class="al-tune-body" hidden>
+        <!-- The live picture comes from the same LiveTile the grid and the map use (sub-stream, so
+             tuning one camera costs the NVR very little), with the NVR's watched zones drawn over it. -->
+        <div class="al-tune-live">
+          <div id="tuneTile" class="tile"></div>
+          <canvas id="tuneOverlay" class="al-tune-overlay"></canvas>
+        </div>
+        <div class="al-tune-side">
+          <div id="tuneMeter" class="al-meter" role="status"></div>
+          <div class="al-tune-nvr">
+            <h3>The NVR's setting</h3>
+            <p id="tuneNote" class="hp-note"></p>
+            <form id="tuneForm" hidden>
+              <label>New sensitivity <input name="threshold" type="number" min="0" max="100" /></label>
+              <button type="submit">Change it on the NVR…</button>
+              <span id="tuneError" class="al-error" role="alert"></span>
+            </form>
+            <p id="tuneResult" class="hp-note" role="status"></p>
+          </div>
+        </div>
       </div>
-      <p id="tuneMeter" class="al-meter" role="status"></p>
-      <p id="tuneNote" class="hp-note"></p>
-      <form id="tuneForm" hidden>
-        <label>New sensitivity <input name="threshold" type="number" min="0" max="100" /></label>
-        <button type="submit">Change it on the NVR…</button>
-        <span id="tuneError" class="al-error" role="alert"></span>
-      </form>
-      <p id="tuneResult" class="hp-note" role="status"></p>
     </div>
     </section>
   </main>

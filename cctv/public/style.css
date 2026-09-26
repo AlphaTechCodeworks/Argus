@@ -1238,7 +1238,21 @@ body.is-fullscreen .alert-banner { display: none; }
 .al-rule-form label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 2px; }
 .al-error { color: #ff6b6b; }
 /* The tuning view: the live picture with the NVR's watched zones over it, and the meter under it. */
-.al-tune { display: flex; flex-direction: column; gap: 8px; max-width: 720px; }
+.al-tune { display: flex; flex-direction: column; gap: 12px; max-width: 1100px; }
+.al-tune-pick { display: flex; align-items: center; gap: 8px; }
+.al-tune-pick select { min-width: 240px; max-width: 100%; }
+.al-tune-empty { margin: 0; padding: 28px 16px; border: 1px dashed var(--border); border-radius: 10px; color: var(--muted); text-align: center; }
+.al-tune-body { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+.al-tune-body[hidden] { display: none; }
+@media (min-width: 900px) { .al-tune-body { grid-template-columns: minmax(0, 3fr) minmax(260px, 2fr); } }
+.al-tune-side { display: flex; flex-direction: column; gap: 12px; }
+.al-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.al-stat { background: var(--panel); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+.al-stat b { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.al-stat span { color: var(--muted); font-size: 12px; }
+.al-tune-nvr { background: var(--panel); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.al-tune-nvr h3 { margin: 0; font-size: 14px; }
+.al-tune-nvr form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
 .al-tune-live { position: relative; }
 .al-tune-live .tile { position: relative; background: #000; aspect-ratio: 16 / 9; }
 .al-tune-live .tile canvas { width: 100%; height: 100%; object-fit: contain; }
