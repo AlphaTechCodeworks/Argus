@@ -176,12 +176,23 @@ export class AdaptiveLive {
       // overSince: backpressure.mjs gateSend sets it while the socket is over its cap (and clears it
       // once it drains). waitForKey is not used: a move sets it on purpose.
       const pressure = [...v.sockets].some((e) => (e.ws.bufferedAmount ?? 0) > PRESSURE_BYTES || e.ws.overSince != null)
-      let n = nextLevel(v, { pressure, now, overBudget: v === heaviest })
-      // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
-      // without the HEVC codec, and the server cannot know which laptop that is. The last keyframe
-      // the camera sent says which it is (byte 1 of a frame: 0 H.264, 1 H.265).
-      if (n.level === 0 && [...v.sockets].some((e) => e.source.gop?.[0]?.[1] === 1 && !e.clientH265)) n = { ...n, level: 1, changedAt: v.changedAt }
+      const n = nextLevel(v, { pressure, now, overBudget: v === heaviest })
       if (n.level !== v.level) this.#move(v, n.level, n.why)
+      // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
+      // without the HEVC codec (#streamFor converts it). A camera found to be H.265 only after its
+      // socket was attached (no keyframe seen yet then) moves to its conversion here -- that socket
+      // alone. This used to move the whole viewer to 15 fps: every tile of the browser went through
+      // a conversion because one full-screen main stream was H.265 (slow starts, 15 fps, the
+      // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
+      else if (v.level === 0) {
+        for (const e of v.sockets) {
+          const want = this.#streamFor(e, 0)
+          if (want === e.stream) continue
+          e.stream.remove(e.ws)
+          e.stream = want
+          want.add(e.ws)
+        }
+      }
       v.changedAt = n.changedAt
       v.cleanSince = n.cleanSince
     }

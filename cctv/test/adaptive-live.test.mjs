@@ -95,6 +95,24 @@ function fakeWs() {
   check('no conversion slot left: gets the camera own stream', src.viewers.has(ws))
   clearInterval(live.timer)
 }
+{
+  // one H.265 camera does not drag the viewer's other cameras into conversions (2026-09-26)
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9 })
+  const h264 = fakeSource('sub')
+  h264.gop = [Buffer.from([1, 0])]
+  const h265 = fakeSource('main')
+  const wsA = fakeWs()
+  const wsB = fakeWs()
+  live.attach('mix', { ws: wsA, nvrId: 'n1', ch: 5, type: 1, source: h264 })
+  live.attach('mix', { ws: wsB, nvrId: 'n1', ch: 5, type: 0, source: h265 }) // no keyframe seen yet
+  h265.gop = [Buffer.from([1, 1])] // ...then it turns out to be H.265
+  live.tick()
+  const v = live.viewers.get('mix')
+  check('mixed: the viewer stays at full', v.level === 0, String(v.level))
+  check('mixed: the H.264 camera stays on its own stream', h264.viewers.has(wsA))
+  check('mixed: only the H.265 one is converted', !h265.viewers.has(wsB) && live.streams.size === 1, String(live.streams.size))
+  clearInterval(live.timer)
+}
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

@@ -118,6 +118,42 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   check('socket still connecting: badge stays "connecting…"', /connecting/.test(parts['.status'].textContent) && !w3.closed, parts['.status'].textContent)
   t3.close()
 }
+// back from the full-size view: the stream kept since its last keyframe is shown at once, on the
+// same socket (a reconnect through the internet link was 1.7-4.5 s, 2026-09-26)
+{
+  const t4 = new LiveTile(tileEl, { nvr: 'n1', ch: 5 }, 1, 0, { now: () => now })
+  clearTimeout(t4.retry)
+  const pushed = []
+  t4.player.push = (f) => pushed.push(f.isKey ? 'K' : 'd')
+  t4.player.reset = () => pushed.push('reset')
+  t4.connect()
+  const w4 = sockets.at(-1)
+  w4.readyState = 1
+  const send = (key) => {
+    const b = new Uint8Array(40)
+    b[0] = key ? 1 : 0
+    w4.onmessage({ data: b.buffer })
+  }
+  send(true)
+  t4.suspend()
+  send(false) // (no keyframe seen yet while suspended: nothing to keep)
+  send(true)
+  send(false)
+  send(false)
+  check('suspended: frames are not decoded', pushed.join('') === 'K', pushed.join(''))
+  const socketsBefore = sockets.length
+  t4.resume()
+  check('resume: no new socket', sockets.length === socketsBefore && !w4.closed)
+  check('resume: the kept keyframe and the frames after it are decoded at once', pushed.slice(1).join(',') === 'reset,K,d,d', pushed.join(','))
+  send(false)
+  check('resume: and the stream carries on', pushed.at(-1) === 'd')
+  // nothing kept (no keyframe while suspended): reconnects, as before
+  t4.suspend()
+  send(false)
+  t4.resume()
+  check('nothing kept: reconnects', w4.closed && sockets.length === socketsBefore + 1)
+  t4.close()
+}
 t.close()
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

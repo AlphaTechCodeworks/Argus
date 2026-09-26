@@ -21,6 +21,11 @@ export const STALL_RECONNECT_MS = 8000
 // reconnect back-off: 1, 2, 4, 8 s then every 8 s (with jitter). It was up to 30 s: a camera that
 // dropped for a moment stayed black half a minute after it was back.
 export const RECONNECT_MAX_MS = 8000
+// A tile under the full-size view keeps its connection and, without decoding, the stream from its
+// last keyframe (at most this much): back on the grid it shows that at once and carries on. It used
+// to reconnect, and through the internet link that was 1.7 s before the first tile moved again and
+// 4.5 s before all nine did (2026-09-26). Past the limit it reconnects as before.
+export const HOLD_MAX_BYTES = 3_000_000
 export const reconnectDelay = (attempts) => Math.min(RECONNECT_MAX_MS, 1000 * 2 ** attempts)
 
 // Every tile on the page, so that the network coming back (a phone moving between Wi-Fi and mobile
@@ -260,7 +265,8 @@ export class LiveTile {
   }
 
   onMessage(buf) {
-    if (this.suspended || buf.length <= HEADER_SIZE) return
+    if (buf.length <= HEADER_SIZE) return
+    if (this.suspended) return this.#hold(buf)
     const view = new DataView(buf.buffer, buf.byteOffset)
     this.player.push({
       isKey: (buf[0] & 1) === 1,
@@ -302,15 +308,42 @@ export class LiveTile {
   /** Keeps the connection and the last picture, but decodes nothing (hidden under a full-size view). */
   suspend() {
     this.suspended = true
+    this.held = null
+    this.heldBytes = 0
+  }
+
+  /** While suspended: the frames since the last keyframe, not decoded (see HOLD_MAX_BYTES). */
+  #hold(buf) {
+    if ((buf[0] & 1) === 1) {
+      this.held = [buf]
+      this.heldBytes = buf.length
+      return
+    }
+    if (!this.held) return
+    if (this.heldBytes + buf.length > HOLD_MAX_BYTES) {
+      this.held = null // too long a stretch to keep: resume() reconnects instead
+      return
+    }
+    this.held.push(buf)
+    this.heldBytes += buf.length
   }
 
   /**
-   * Picks up again at once: reconnects, and the server starts the new connection with the
-   * stream's latest keyframe, so the picture moves again without waiting for the next one.
+   * Picks up again at once. Still connected, with the stream kept from its last keyframe: that is
+   * decoded now and the frames carry on (no reconnect). Otherwise it reconnects, and the server
+   * starts the new connection with the stream's latest keyframe.
    */
   resume() {
     if (!this.suspended || this.closed) return
     this.suspended = false
+    const held = this.held
+    this.held = null
+    this.heldBytes = 0
+    if (held?.length && this.ws?.readyState === 1 && this.lastDataAt && this.now() - this.lastDataAt < 3000) {
+      this.player.reset()
+      for (const m of held) this.onMessage(m)
+      return
+    }
     this.player.reset() // the last picture stays on the canvas until the new frames arrive
     clearTimeout(this.retry)
     if (this.ws) {
