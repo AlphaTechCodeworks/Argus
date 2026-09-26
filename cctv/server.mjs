@@ -898,7 +898,8 @@ if (Object.keys(auth.loadUsers()).length === 0) {
 
 const shutdown = async () => {
   // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
-  await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 3000))])
+  // (6 s: time for every recorder to close its open segment, so a restart leaves no files to recover)
+  await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 6000))])
   process.kill(process.pid, 'SIGKILL')
 }
 process.on('SIGINT', shutdown)
