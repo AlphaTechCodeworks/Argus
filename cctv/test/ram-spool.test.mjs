@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SPOOL_ID, drainSpool, spoolCapBytes, spoolLocation } from '../ram-spool.mjs'
+import { SPOOL_ID, drainSpool, spoolCapBytes, spoolLocation, trimSpool } from '../ram-spool.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -23,6 +23,7 @@ const index = {
     return { bytes: r.reduce((a, x) => a + x.bytes, 0), segments: r.length }
   },
   oldest: (limit, { loc }) => [...rows.values()].filter((x) => x.loc === loc).sort((a, b) => a.startMs - b.startMs).slice(0, limit),
+  remove(p) { rows.delete(p) },
   moveSegment(oldPath, newPath, loc) {
     const r = rows.get(oldPath)
     rows.delete(oldPath)
@@ -45,9 +46,23 @@ for (const [i, name] of [[0, 'a'], [1, 'b']]) {
   writeFileSync(`${p}.idx`, 'idx')
   rows.set(p, { path: p, loc: SPOOL_ID, startMs: i, bytes: 600 })
 }
-check('full: no more memory handed out', spoolLocation({ index, platform: 'linux', cap: 1000, dir }) === null)
+check('full is not a reason to stop: still handed out', spoolLocation({ index, platform: 'linux', cap: 1000, dir }) !== null)
+{
+  // it rotates: over 95 % of the cap, the oldest go until it is under 85 %
+  const extra = join(dir, 'n1', '0', 'old.h265')
+  writeFileSync(extra, 'oldest')
+  rows.set(extra, { path: extra, loc: SPOOL_ID, startMs: -1, bytes: 300 })
+  const r = await trimSpool({ index, cap: 1500, dir }) // 1500 held: full; one dropped leaves 1200, under 85 %
+  check('full: the oldest is dropped to make room', r.removed === 1 && !existsSync(extra) && !rows.has(extra), JSON.stringify(r))
+  check('and the newer footage is kept', index.locationUse(SPOOL_ID).segments === 2)
+  check('under the cap nothing is dropped', (await trimSpool({ index, cap: 1e6, dir })).removed === 0)
+}
 
+// a row whose file a restart cleared out of memory
+const ghost = join(dir, 'n1', '0', 'ghost.h265')
+rows.set(ghost, { path: ghost, loc: SPOOL_ID, startMs: -5, bytes: 1 })
 const r = await drainSpool({ index, target: drive, dir })
+check('a file gone from memory is dropped from the index, not copied', !rows.has(ghost))
 const moved = join(drive.path, 'n1', '0', '2026-09-26', '13', 'a.h265')
 check('a drive back: both segments copied onto it', r.moved === 2 && readFileSync(moved, 'utf8') === 'video-a' && existsSync(`${moved}.idx`), JSON.stringify(r))
 check('their rows now point at the drive', rows.has(moved) && rows.get(moved).loc === 'loc-nas')

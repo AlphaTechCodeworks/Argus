@@ -26,7 +26,7 @@ import { createWarmer } from './rec-cache.mjs'
 import { downtimeGaps, recoverOrphans } from './rec-recover.mjs'
 import { cameraRecording, getSettings, onSettingsChange } from './settings.mjs'
 import { checkHealth, listLocations, onChange as onStorageChange, startHealthChecks } from './storage.mjs'
-import { SPOOL_ID, drainSpool, spoolLocation } from './ram-spool.mjs'
+import { SPOOL_ID, drainSpool, spoolLocation, trimSpool } from './ram-spool.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
 
@@ -748,10 +748,12 @@ function watchSpool() {
     const real = healthyLocations()
     const on = !real.length && Boolean(spoolLocation({ index }))
     if (on !== spoolWasOn) {
-      console.warn(on ? '[spool] every storage location is down: recording into memory until one is back' : real.length ? '[spool] a storage location is back: recording goes to it' : '[spool] memory for recordings is full: recording stops until a drive is back')
+      console.warn(on ? '[spool] every storage location is down: recording into memory until one is back (the oldest dropped as it fills)' : '[spool] a storage location is back: recording goes to it')
       spoolWasOn = on
       pushRecording()
     }
+    // full: drop the oldest so it keeps the latest stretch (only while nothing else can take it)
+    if (!real.length) await trimSpool({ index, log: (l) => console.warn(l) })
     if (real.length && !draining && index.locationUse(SPOOL_ID).segments > 0) {
       draining = true
       const target = real.find((l) => l.role === 'main') ?? real[0]

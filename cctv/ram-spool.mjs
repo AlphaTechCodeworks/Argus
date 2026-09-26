@@ -10,8 +10,9 @@
 // What it is and is not: the cameras' main streams fill memory quickly (roughly 10 GB is minutes
 // for a site's worth of 4K cameras, hours for a few), so this rides out a blip, a restart of the
 // NAS, a cable pulled for a minute. It is not a place to keep footage: a server restart loses
-// whatever has not been copied yet, and when it is full (CCTV_RAM_SPOOL_GB, a quarter of the RAM by
-// default) recording stops again, with the gap logged as before. A local disk is the real answer.
+// whatever has not been copied yet. When it is full (CCTV_RAM_SPOOL_GB, a quarter of the RAM by
+// default) it rotates: the oldest footage in memory is deleted to make room (trimSpool), so it always
+// holds the latest stretch rather than stopping. A local disk is the real answer.
 import { copyFile, mkdir, stat, unlink } from 'node:fs/promises'
 import { existsSync, mkdirSync } from 'node:fs'
 import { totalmem } from 'node:os'
@@ -30,20 +31,55 @@ export function spoolCapBytes(env = process.env, ram = totalmem()) {
 }
 
 /**
- * The memory location to hand the workers, or null: not on Linux, no /dev/shm, switched off
- * (CCTV_RAM_SPOOL_GB=0), or already full.
+ * The memory location to hand the workers, or null: not on Linux, no /dev/shm, or switched off
+ * (CCTV_RAM_SPOOL_GB=0). Full is not a reason: trimSpool makes room.
  * @param {{ index: { locationUse: (loc: string) => { bytes: number } }, cap?: number, platform?: string }} o
  */
 export function spoolLocation({ index, cap = spoolCapBytes(), platform = process.platform, dir = SPOOL_DIR } = {}) {
   if (platform !== 'linux' || cap <= 0 || !index) return null
   if (!existsSync(dirname(dir))) return null
-  if (index.locationUse(SPOOL_ID).bytes >= cap) return null
   try {
     mkdirSync(dir, { recursive: true, mode: 0o750 })
   } catch {
     return null
   }
   return { id: SPOOL_ID, path: dir, role: 'overflow' }
+}
+
+/** Deletion starts at this share of the cap and frees down to TRIM_TO, so it runs now and then, not every segment. */
+export const TRIM_AT = 0.95
+export const TRIM_TO = 0.85
+
+/**
+ * Makes room: deletes the oldest footage in memory until it holds under TRIM_TO of the cap. Never
+ * throws. Only ever touches files under the spool folder.
+ * @returns {Promise<{ removed: number, bytes: number }>}
+ */
+export async function trimSpool({ index, cap = spoolCapBytes(), dir = SPOOL_DIR, log = () => {} }) {
+  let removed = 0
+  let bytes = 0
+  try {
+    let used = index.locationUse(SPOOL_ID).bytes
+    if (used < cap * TRIM_AT) return { removed, bytes }
+    while (used > cap * TRIM_TO) {
+      const rows = index.oldest(50, { loc: SPOOL_ID })
+      if (!rows.length) break
+      for (const row of rows) {
+        if (used <= cap * TRIM_TO) break
+        if (relative(dir, row.path).startsWith('..')) continue
+        index.remove(row.path)
+        await unlink(row.path).catch(() => {})
+        await unlink(`${row.path}.idx`).catch(() => {})
+        used -= row.bytes
+        bytes += row.bytes
+        removed++
+      }
+    }
+  } catch (e) {
+    log(`[spool] making room failed: ${e.message}`)
+  }
+  if (removed) log(`[spool] memory full: dropped the oldest ${removed} segments (${Math.round(bytes / 1e6)} MB) to keep recording`)
+  return { removed, bytes }
 }
 
 /**
@@ -57,6 +93,12 @@ export async function drainSpool({ index, target, dir = SPOOL_DIR, batch = DRAIN
     for (const row of index.oldest(batch, { loc: SPOOL_ID })) {
       const rel = relative(dir, row.path)
       if (rel.startsWith('..')) continue // not ours: never touched
+      // gone from memory (a restart: systemd clears /dev/shm for this service): nothing to copy,
+      // and a row pointing at nothing would stop every later copy at this one
+      if (!existsSync(row.path)) {
+        index.remove(row.path)
+        continue
+      }
       const dest = join(target.path, rel)
       await mkdir(dirname(dest), { recursive: true })
       await copyFile(row.path, dest)
