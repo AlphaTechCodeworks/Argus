@@ -99,7 +99,11 @@ export async function drainSpool({ index, target, dir = SPOOL_DIR, batch = DRAIN
         index.remove(row.path)
         continue
       }
-      const dest = join(target.path, rel)
+      let dest = join(target.path, rel)
+      // The minute recording moved back from memory to the drive, both hold a file for it under the
+      // same name, and the index takes one row per name ("UNIQUE constraint failed", 2026-09-26).
+      // Both are real footage, so the copy from memory is kept beside it under its own name.
+      if (index.has?.(dest) || existsSync(dest)) dest = dest.replace(/(.[^./]+)$/, '.spool$1')
       await mkdir(dirname(dest), { recursive: true })
       await copyFile(row.path, dest)
       const idx = `${row.path}.idx`

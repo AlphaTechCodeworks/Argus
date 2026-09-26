@@ -24,6 +24,7 @@ const index = {
   },
   oldest: (limit, { loc }) => [...rows.values()].filter((x) => x.loc === loc).sort((a, b) => a.startMs - b.startMs).slice(0, limit),
   remove(p) { rows.delete(p) },
+  has: (p) => rows.has(p),
   moveSegment(oldPath, newPath, loc) {
     const r = rows.get(oldPath)
     rows.delete(oldPath)
@@ -78,6 +79,20 @@ check('and memory is freed', !existsSync(join(dir, 'n1', '0', '2026-09-26', '13'
   const r2 = await drainSpool({ index, target: bad, dir })
   check('a copy that fails stops, and says so', r2.error && r2.left === 1, JSON.stringify(r2))
   check('the footage is still in memory and still indexed there', existsSync(p) && rows.get(p).loc === SPOOL_ID)
+}
+
+{
+  // the minute memory handed back to the drive: a file of that name is on the drive already
+  const same = join(dir, 'n1', '0', 'clash.h265')
+  writeFileSync(same, 'from-memory')
+  rows.set(same, { path: same, loc: SPOOL_ID, startMs: 9, bytes: 11 })
+  const onDrive = join(drive.path, 'n1', '0', 'clash.h265')
+  mkdirSync(join(drive.path, 'n1', '0'), { recursive: true })
+  writeFileSync(onDrive, 'from-drive')
+  rows.set(onDrive, { path: onDrive, loc: 'loc-nas', startMs: 9, bytes: 10 })
+  const r3 = await drainSpool({ index, target: drive, dir })
+  const kept = join(drive.path, 'n1', '0', 'clash.spool.h265')
+  check('a name already on the drive: the copy is kept beside it, both indexed', !r3.error && readFileSync(kept, 'utf8') === 'from-memory' && readFileSync(onDrive, 'utf8') === 'from-drive' && rows.has(kept) && rows.has(onDrive), JSON.stringify(r3))
 }
 
 rmSync(base, { recursive: true, force: true })
