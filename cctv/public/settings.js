@@ -406,7 +406,7 @@ function renderJob(job) {
   }
   const bar = el('progress', { className: 'se-progress', max: 100, value: p.pct })
   bar.setAttribute('aria-label', `Preparing ${job.dev}: ${p.pct}%`)
-  box.replaceChildren(
+  box.replaceChildren(...[
     el('h3', { textContent: title }),
     bar,
     el(
@@ -421,7 +421,7 @@ function renderJob(job) {
     job.state === 'failed' && job.error ? el('p', { className: 'st-error-text', textContent: job.error }) : null,
     job.state === 'prepared' && job.nextStep ? el('p', { className: 'st-warn-text', textContent: job.nextStep }) : null,
     job.location ? el('p', { className: 'st-meta', textContent: `Added as a storage location: ${job.location.path} (${job.location.role})` }) : null
-  )
+  ].filter(Boolean)) // (replaceChildren writes a null as the word "null")
 }
 
 async function loadDisks() {
@@ -540,7 +540,7 @@ function renderNetJob(job) {
   }
   const bar = el('progress', { className: 'se-progress', max: 100, value: p.pct })
   bar.setAttribute('aria-label', `${what} ${job.server}/${job.share}: ${p.pct}%`)
-  box.replaceChildren(
+  box.replaceChildren(...[
     el('h3', { textContent: title }),
     bar,
     el(
@@ -556,7 +556,7 @@ function renderNetJob(job) {
     job.state === 'failed' && job.error ? el('p', { className: 'st-error-text', textContent: job.error }) : null,
     job.state === 'mounted' && job.nextStep ? el('p', { className: 'st-warn-text', textContent: job.nextStep }) : null,
     job.location ? el('p', { className: 'st-meta', textContent: `Added as a storage location: ${job.location.path} (${job.location.role})` }) : null
-  )
+  ].filter(Boolean)) // (replaceChildren writes a null as the word "null")
 }
 
 async function loadShares() {
