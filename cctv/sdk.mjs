@@ -416,6 +416,30 @@ export const initSdk = () => {
 
 export const FRAME_TYPE_VIDEO = 1
 export const FRAME_TYPE_VIDEO_FORMAT = 5
+/** dvrdvstypedef.h DD_FRAME_TYPE_AUDIO / _AUDIO_FORMAT: a camera microphone's sound, and its format. */
+export const FRAME_TYPE_AUDIO = 2
+export const FRAME_TYPE_AUDIO_FORMAT = 6
+
+// Which cameras send sound: noted once per channel, with the format announcement's bytes, so the
+// log says which cameras have a working microphone and what encoding it is (G.711, AAC ...). The
+// frames themselves are not used yet.
+const audioNoted = new Map() // "device/channel" -> { formatHex }
+export const audioSeen = () => Object.fromEntries(audioNoted)
+function noteAudio(info, buf) {
+  const key = `${info.deviceID}/${info.channel}`
+  const prev = audioNoted.get(key)
+  if (info.frameType === FRAME_TYPE_AUDIO_FORMAT) {
+    const hex = Buffer.from(new Uint8Array(koffi.view(buf, Math.min(info.length, 64)))).toString('hex')
+    if (prev?.formatHex === hex) return
+    audioNoted.set(key, { formatHex: hex, frames: prev?.frames ?? 0 })
+    console.log(`[audio] channel ${info.channel + 1}: audio format announced (${info.length} bytes: ${hex})`)
+    return
+  }
+  if (!prev) {
+    audioNoted.set(key, { formatHex: null, frames: 1 })
+    console.log(`[audio] channel ${info.channel + 1}: audio frames arriving (${info.length} bytes each, first frame head ${Buffer.from(new Uint8Array(koffi.view(buf, Math.min(info.length, 16)))).toString('hex')})`)
+  }
+}
 export const CODEC_H264 = 0
 export const CODEC_H265 = 1
 export const HEADER_SIZE = 16
@@ -481,6 +505,9 @@ const makeRouter = (keepEarly) => {
   const dead = new Map() // handle -> released at; frames still arriving for a stream being stopped are dropped
   const copy = (info, buf) => ({ info: { ...info }, data: Buffer.from(new Uint8Array(koffi.view(buf, info.length))) })
   const callback = koffi.register((handle, info, buf) => {
+    if (info.frameType === FRAME_TYPE_AUDIO || info.frameType === FRAME_TYPE_AUDIO_FORMAT) {
+      try { noteAudio(info, buf) } catch {}
+    }
     const route = routes.get(handle)
     if (route) return route(info, buf)
     if (!keepEarly || info.length === 0 || dead.has(handle)) return
