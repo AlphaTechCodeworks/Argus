@@ -1253,6 +1253,7 @@ body.is-fullscreen .alert-banner { display: none; }
 .al-tune-nvr { background: var(--panel); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
 .al-tune-nvr h3 { margin: 0; font-size: 14px; }
 .al-tune-nvr form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.al-tune-nvr form[hidden] { display: none; }
 .al-tune-live { position: relative; }
 .al-tune-live .tile { position: relative; background: #000; aspect-ratio: 16 / 9; }
 .al-tune-live .tile canvas { width: 100%; height: 100%; object-fit: contain; }

@@ -18,6 +18,14 @@ const W = 64
 const H = 48
 /** How many samples the meter remembers. About a minute at two a second. */
 const HISTORY = 120
+/** Samples not counted after a camera is chosen: the stored still giving way to the live picture read as 87 % 'movement'. */
+const WARMUP_SAMPLES = 4
+/** Starts with a capital, ends with a full stop. */
+const sentence = (s) => {
+  const t = String(s ?? '').trim()
+  if (!t) return ''
+  return `${t[0].toUpperCase()}${t.slice(1)}${/[.!?]$/.test(t) ? '' : '.'}`
+}
 
 export class MotionTuner {
   /**
@@ -46,6 +54,8 @@ export class MotionTuner {
     this.camera = camera
     this.history = []
     this.prev = null
+    // the first pictures are the stored still, then the live one arriving: not movement
+    this.warmup = WARMUP_SAMPLES
     if (!camera) return
     this.els.tile.innerHTML = TILE_HTML
     // (a LiveTile connects itself as soon as it is made)
@@ -56,10 +66,11 @@ export class MotionTuner {
     this.motion = await fetch(`/api/admin/nvrs/${encodeURIComponent(camera.nvr)}/channels/${camera.ch}/motion-tune`, { headers: { accept: 'application/json' } })
       .then((r) => r.json())
       .catch((e) => ({ available: false, why: `the server could not be asked: ${e.message}` }))
-    this.els.note.textContent = thresholdNote(this.motion)
+    this.els.note.textContent = sentence(thresholdNote(this.motion))
     const masked = maskFromArea(this.motion?.area, W, H)
     this.mask = masked.mask
-    if (masked.why) this.els.note.textContent += ` ${masked.why}`
+    // two sentences, not one run-on line
+    if (masked.why) this.els.note.textContent = `${sentence(this.els.note.textContent)} ${sentence(masked.why)}`
     this.#drawZones()
     // The write control appears only when we actually read a current value, because a change is
     // built by sending the NVR's own answer back with one number altered — with no answer there is
@@ -91,6 +102,10 @@ export class MotionTuner {
     }
     const f = changedFraction(this.prev, grey, this.mask)
     this.prev = grey
+    if (this.warmup > 0) {
+      this.warmup--
+      return
+    }
     if (f !== null) {
       this.history.push(f)
       if (this.history.length > HISTORY) this.history.shift()
@@ -170,6 +185,6 @@ export class MotionTuner {
         ? `Changed on the NVR: ${body.before.sensitivity} → ${body.after.sensitivity}. It is in data/motion-changes.log.`
         : body.warning ?? 'The NVR accepted the change but did not report the new value.'
     this.motion = body.after?.available ? { ...this.motion, ...body.after } : this.motion
-    this.els.note.textContent = thresholdNote(this.motion)
+    this.els.note.textContent = sentence(thresholdNote(this.motion))
   }
 }
