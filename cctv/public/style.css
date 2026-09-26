@@ -1450,3 +1450,12 @@ body.playback-page.is-fullscreen .pb-bar { gap: 6px; padding: 10px 14px; }
 body.playback-page.is-fullscreen .pb-timeline { height: 48px; }
 .login-brand { display: flex; align-items: center; gap: 12px; }
 .login-brand img { border-radius: 10px; }
+/* Settings > Storage: the rarely needed parts folded under their heading */
+.se-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
+.se-fold > summary::-webkit-details-marker { display: none; }
+.se-fold > summary::before { content: '▸'; color: var(--text-muted); font-size: 12px; transition: transform var(--t-fast); }
+.se-fold[open] > summary::before { transform: rotate(90deg); }
+.se-fold > summary h2 { margin: 0; }
+.se-fold[open] > summary { margin-bottom: 10px; }
+.se-add > summary { color: var(--accent-strong); font-weight: 500; }
+.sr-cams > summary { cursor: pointer; color: var(--text-muted); font-size: 13px; margin-top: 8px; }

@@ -142,10 +142,20 @@
       </form>
     </section>
 
+    <section class="se-section" data-tab="storage" aria-labelledby="sr-title">
+      <h2 id="sr-title">Overview</h2>
+      <p id="sr-totals" class="st-help" role="status"></p>
+      <ul id="sr-warnings" class="hp-note"></ul>
+      <!-- storage.js: one panel per location, how full, how fast it fills, how far back each camera goes -->
+      <div id="sr-locations" class="nvr-panels"></div>
+    </section>
+
     <section class="se-section" data-tab="storage" aria-labelledby="loc-title">
-      <h2 id="loc-title">Storage locations</h2>
+      <h2 id="loc-title">Your locations</h2>
       <p class="st-help">Folders where recordings are written. Each holds a marker file; a location without it (drive unplugged, share down) is never written and recording moves to the next one.</p>
       <div id="locations" class="st-cards"></div>
+      <details class="se-fold se-add">
+        <summary>Add a folder…</summary>
       <form id="addLoc" class="se-grid" autocomplete="off">
         <div class="se-wide se-path-row">
           <label>Folder <input id="l-path" required maxlength="256" placeholder="/srv/cctv-rec/usb1" /></label>
@@ -157,10 +167,12 @@
         <label class="st-check se-wide" id="l-same-row" hidden><input id="l-same" type="checkbox" /> Same disk as the system (recordings could fill the system disk)</label>
         <div class="se-actions"><button type="submit">Add location</button><span id="l-msg" class="st-meta"></span></div>
       </form>
+      </details>
     </section>
 
     <section class="se-section" data-tab="storage" aria-labelledby="nas-title">
-      <h2 id="nas-title">Network drive</h2>
+      <details class="se-fold">
+        <summary><h2 id="nas-title">Add a network drive (NAS)</h2></summary>
       <p class="st-help">Adds a NAS share (SMB or NFS) as a place for recordings. The whole share is mounted under /srv/cctv-net and, if you name a folder inside it, that folder is used. Test first: it mounts, writes a file, reads it back and undoes everything. The password is only ever held by the machine itself, never by this page and never in the settings file.</p>
       <div id="netshares" class="st-cards"></div>
       <form id="addShare" class="se-grid" autocomplete="off">
@@ -174,18 +186,22 @@
         <div class="se-actions"><button type="button" id="n-test">Test</button><button type="submit" id="n-add">Add</button><span id="n-msg" class="st-meta"></span></div>
       </form>
       <div id="netjob" class="se-job" hidden></div>
+      </details>
     </section>
 
     <section class="se-section" data-tab="storage" aria-labelledby="usb-title">
-      <h2 id="usb-title">Prepare USB drive</h2>
+      <details class="se-fold">
+        <summary><h2 id="usb-title">Add a USB drive</h2></summary>
       <p class="st-help">Erases a USB/eSATA drive, formats it for recordings and adds it as a location. Only drives that are not the system disk, not mounted and not in a pool are offered.</p>
       <div class="se-actions"><button id="refreshDisks" type="button">Look for drives</button><span id="u-msg" class="st-meta"></span></div>
       <div id="disks" class="st-cards"></div>
       <div id="job" class="se-job" hidden></div>
+      </details>
     </section>
 
     <section class="se-section" data-tab="storage" aria-labelledby="mem-title">
-      <h2 id="mem-title">Memory, thumbnails and free space</h2>
+      <details class="se-fold">
+        <summary><h2 id="mem-title">Clean-up rules and memory</h2></summary>
       <form id="misc" class="se-grid" autocomplete="off">
         <label>Recent footage kept in RAM <select id="m-recent"></select></label>
         <label>Timeline thumbnails <select id="m-thumbs"></select></label>
@@ -194,6 +210,7 @@
         <p id="m-ram" class="st-help se-wide" hidden></p>
         <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="m-msg" class="st-meta"></span></div>
       </form>
+      </details>
     </section>
   </main>
 
@@ -238,6 +255,7 @@
   <script type="module" src="shell.js"></script>
   <script type="module" src="settings.js"></script>
   <script type="module" src="settings-tabs.js"></script>
+  <script type="module" src="storage.js"></script>
   <script type="module" src="alert-banner.js"></script>
   <script type="module" src="build-badge.js"></script>
 </body>

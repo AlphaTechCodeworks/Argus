@@ -2,46 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Storage now lives in one place: Settings > Storage (the overview from here, and the drives
+       and rules from there). Old links and bookmarks land on it. -->
+  <meta http-equiv="refresh" content="0; url=/settings.html#storage" />
   <link rel="icon" href="/logo.svg" type="image/svg+xml" />
   <title>Argus · Storage</title>
-  <script src="theme-boot.js"></script>
-  <link rel="stylesheet" href="css/tokens.css" />
-  <link rel="stylesheet" href="css/base.css" />
-  <link rel="stylesheet" href="css/components.css" />
-  <link rel="stylesheet" href="css/shell.css" />
-  <link rel="stylesheet" href="style.css" />
+  <script>location.replace('/settings.html#storage')</script>
 </head>
-<body class="health-page">
-  <header>
-    <div class="brand">
-      <h1>CCTV</h1>
-    </div>
-    <div class="account">
-      <span id="build" class="build" title="Running build"></span>
-      <span id="whoami"></span>
-      <button id="logout" type="button">Sign out</button>
-    </div>
-  </header>
-
-  <main class="health">
-    <p id="totals" class="hp-sending" role="status"></p>
-    <ul id="warnings" class="hp-note"></ul>
-
-    <h2>Locations</h2>
-    <!-- One panel per location: how full it is, how fast it is filling, how long it would take to
-         reach the free-space floor, and how far back each camera goes on it. "not available" is a
-         real answer here: a forecast off two hours of history would be a made-up date. -->
-    <div id="locations" class="nvr-panels"></div>
-
-    <p class="hp-note">
-      Retention days, full-video days and the time-lapse interval are set per camera in
-      <a href="/settings.html">Settings</a>.
-    </p>
-  </main>
-
-  <script type="module" src="shell.js"></script>
-  <script type="module" src="storage.js"></script>
-  <script type="module" src="build-badge.js"></script>
-</body>
+<body><a href="/settings.html#storage">Storage has moved to Settings › Storage.</a></body>
 </html>

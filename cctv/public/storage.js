@@ -110,12 +110,12 @@ if (typeof document !== 'undefined') {
 
   function paint(data) {
     const r = renderStorage(data)
-    document.getElementById('warnings').replaceChildren(...r.warnings.map((w) => el('li', { textContent: w })))
-    document.getElementById('totals').textContent = r.empty
+    document.getElementById('sr-warnings').replaceChildren(...r.warnings.map((w) => el('li', { textContent: w })))
+    document.getElementById('sr-totals').textContent = r.empty
       ? 'No storage locations are set up yet.'
       : `${r.totals.mounted} of ${r.totals.locations} locations mounted · ${r.totals.used} used · ${r.totals.free} free`
 
-    document.getElementById('locations').replaceChildren(
+    document.getElementById('sr-locations').replaceChildren(
       ...r.locations.map((l) => {
         const panel = el('section', { className: 'nvr-panel' })
         const head = el('div', { className: 'nvr-head' })
@@ -137,6 +137,9 @@ if (typeof document !== 'undefined') {
         panel.append(cards)
 
         if (l.cameras.length) {
+          // folded: a hundred cameras is a hundred rows, and the cards above already say how it stands
+          const fold = el('details', { className: 'sr-cams' })
+          fold.append(el('summary', { textContent: `How far back each camera goes (${l.cameras.length})` }))
           const table = el('table', { className: 'hp-table' })
           const thead = el('thead')
           const hr = el('tr')
@@ -149,30 +152,13 @@ if (typeof document !== 'undefined') {
             tbody.append(tr)
           }
           table.append(thead, tbody)
-          panel.append(table)
+          fold.append(table)
+          panel.append(fold)
         }
         return panel
       })
     )
   }
-
-  fetch('/api/me')
-    .then((x) => (x.ok ? x.json() : Promise.reject(new Error('signed out'))))
-    .then((me) => {
-      document.getElementById('whoami').textContent = me.user
-      if (me.admin) {
-        const st = document.getElementById('sitesTab'); if (st) st.hidden = false
-        const se = document.getElementById('settingsTab'); if (se) se.hidden = false
-      }
-    })
-    .catch(() => {
-      location.href = '/login.html'
-    })
-
-  document.getElementById('logout').addEventListener('click', async () => {
-    await fetch('/api/logout', { method: 'POST' })
-    location.href = '/login.html'
-  })
 
   const load = () => fetch('/api/storage').then((x) => x.json()).then(paint).catch(() => {})
   load()

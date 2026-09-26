@@ -33,7 +33,8 @@ const themeButton = (t, cls) => `<button type="button" class="${cls}" data-theme
 function render(parts, me) {
   const { side, bar, sheet } = parts
   const groups = navFor({ admin: me.admin === true })
-  const here = currentId(location.pathname)
+  // Storage is a tab of Settings (settings.html#storage), but has its own place in the menu
+  const here = location.hash === '#storage' && /settings.html$/.test(location.pathname) ? 'storage' : currentId(location.pathname)
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
   const version = me.build?.version ? esc(me.build.version) : ''
   side.innerHTML = `
@@ -105,6 +106,8 @@ export function mountShell() {
       location.href = '/login.html'
     }
   })
+
+  addEventListener('hashchange', () => render(parts, me))
 
   fetch('/api/me', { credentials: 'same-origin' })
     .then((r) => (r.ok ? r.json() : null))

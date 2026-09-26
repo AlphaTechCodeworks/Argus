@@ -31,7 +31,7 @@ check('an unknown page marks nothing', currentId('/login.html') === null)
 
 const pub = join(import.meta.dirname, '..', 'public')
 for (const i of NAV_GROUPS.flatMap((g) => g.items)) {
-  const file = i.href === '/' ? 'index.html' : i.href.slice(1)
+  const file = i.href === '/' ? 'index.html' : i.href.slice(1).split('#')[0] // settings.html#storage is settings.html
   check(`${i.label} points at a page that exists`, existsSync(join(pub, file)), file)
 }
 check('the phone bar is the four used most', PHONE_BAR.join() === 'live,playback,alarms,health')

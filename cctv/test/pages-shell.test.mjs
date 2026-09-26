@@ -10,7 +10,7 @@ let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
 const pub = join(import.meta.dirname, '..', 'public')
 for (const i of NAV_GROUPS.flatMap((g) => g.items)) {
-  const file = i.href === '/' ? 'index.html' : i.href.slice(1)
+  const file = i.href === '/' ? 'index.html' : i.href.slice(1).split('#')[0] // settings.html#storage is settings.html
   const html = readFileSync(join(pub, file), 'utf8')
   const pos = (s) => html.indexOf(s)
   check(`${file}: theme set before paint`, pos('src="theme-boot.js"') > 0 && pos('src="theme-boot.js"') < pos('</head>') && !/theme-boot\.js"[^>]*\b(defer|async|type="module")/.test(html))
