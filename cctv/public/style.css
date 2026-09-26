@@ -1573,3 +1573,43 @@ body.phone-full #grid > .tile.single-overlay { position: fixed; inset: 0; width:
     transform-origin: top left; transform: rotate(90deg);
   }
 }
+
+/* ---- Phones: a slim glass top bar, and only what matters under it ---- */
+.shell-top { display: none; }
+@media (max-width: 699px) {
+  .shell-top {
+    display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 40;
+    padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+    background: color-mix(in srgb, var(--bg) 72%, transparent);
+    -webkit-backdrop-filter: blur(18px) saturate(160%); backdrop-filter: blur(18px) saturate(160%);
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  }
+  .shell-top img { width: 28px; height: 28px; border-radius: 8px; }
+  .shell-top strong { font-size: 17px; letter-spacing: 0.01em; }
+  .shell-top span { margin-left: auto; color: var(--text-muted); font-size: 14px; }
+  /* the alert: one line, tap for the rest */
+  .alert-banner { padding: 8px 14px !important; font-size: 13px; cursor: pointer; }
+  .alert-banner:not(.open) .alert-lines > * { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+  .alert-banner:not(.open) .alert-lines > * + * { display: none; }
+  .alert-banner.critical .alert-critical { font-size: 13px; }
+  /* page bars: compact, and the rarely used switches left to bigger screens */
+  body.has-shell .app-main > header { min-height: 0; padding: 8px 12px; gap: 8px; }
+  body.live-page .app-main > header label:has(#smooth), body.live-page .app-main > header label:has(#layout),
+  body.live-page .app-main > header #fullscreen, body.live-page .app-main > header label:has(#hideOffline) { display: none !important; }
+}
+
+/* the camera's own full-screen button (a phone): the phone's native player, like a YouTube video */
+.phone-fs-btn { display: none; }
+@media (max-width: 899px) and (pointer: coarse) {
+  .single-overlay .phone-fs-btn { display: grid; place-items: center; position: absolute; right: 12px; top: 12px; z-index: 5;
+    width: 44px; height: 44px; border-radius: 12px; border: 1px solid rgba(255,255,255,.2); color: #fff;
+    background: rgba(20,22,26,.45); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); font-size: 20px; }
+}
+body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-banner { flex-shrink: 0; }
+@media (max-width: 699px) {
+  body.has-shell .app-main > header > * { max-width: 100%; }
+  body.has-shell .app-main > header .pb-mode { display: flex; width: 100%; }
+  body.has-shell .app-main > header .pb-mode button { flex: 1; }
+  body.has-shell .app-main > header .controls, body.playback-page .app-main > header > div:not(.pb-mode) { width: 100%; }
+  body.has-shell .app-main > header select { max-width: 60vw; }
+}

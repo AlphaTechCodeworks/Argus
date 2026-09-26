@@ -345,6 +345,49 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
  * sub stream (already running, so it shows at once) and upgrades to the main stream when its
  * first frame is on screen; if this browser can't play the main stream, the sub stream stays.
  */
+// ---- phones: the phone's own video player, as YouTube uses ----
+// A camera here is drawn on a canvas, which an iPhone will not put full screen. Its picture is
+// turned into a live video (canvas.captureStream) as soon as the view opens, so that by the time
+// the button is tapped the video is ready: the iPhone only enters its player straight from a tap,
+// and only for a video that has loaded. That player then rotates with the phone by itself.
+function nativeFullButton(tile) {
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'phone-fs-btn'
+  btn.setAttribute('aria-label', 'Full screen')
+  btn.textContent = '⛶'
+  const video = document.createElement('video')
+  video.muted = true
+  video.playsInline = true
+  video.setAttribute('playsinline', '')
+  video.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none'
+  tile.append(video)
+  const canvasNow = () => tile.querySelector('.tile-upgrade:not(.pending) canvas') ?? tile.querySelector('canvas')
+  const attach = () => {
+    const cv = canvasNow()
+    if (!cv?.captureStream) return false
+    if (video.dataset.from !== cv.dataset.fsid) {
+      cv.dataset.fsid ||= String(Math.random())
+      video.dataset.from = cv.dataset.fsid
+      video.srcObject = cv.captureStream(15)
+      video.play().catch(() => {})
+    }
+    return true
+  }
+  attach()
+  // the full-size stream replaces the first picture a moment later: follow it
+  const follow = setInterval(() => (tile.isConnected ? attach() : clearInterval(follow)), 1000)
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (video.webkitEnterFullscreen && attach()) {
+      try { video.webkitEnterFullscreen(); return } catch {}
+    }
+    // everything else: the page's own full screen and a landscape lock
+    grid.requestFullscreen?.({ navigationUI: 'hide' }).then(() => screen.orientation?.lock?.('landscape')).catch(() => {})
+  })
+  return btn
+}
+
 // ---- phones: a tapped camera fills the screen, turned to landscape ----
 // The grid (not the camera's own tile) goes full screen: the tile is rebuilt when the camera list
 // refreshes, and taking a full-screen element out of the page drops out of full screen. Android
@@ -409,6 +452,7 @@ function openSingle(cam, { fromTap = false } = {}) {
     links.append(pic)
   }
   overlay.querySelector('.name').after(links)
+  if (isPhone()) overlay.append(nativeFullButton(overlay))
   // closing the view discards the panel's unsent changes: ask first
   overlay.addEventListener('click', () => {
     if (imagePanel.confirmDiscard()) closeSingle()

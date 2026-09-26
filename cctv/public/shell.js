@@ -83,6 +83,13 @@ export function mountShell() {
   let me = cachedMe()
   render(parts, me)
 
+  // the phone's top bar: the logo, the name and where you are (css shows it on phones only)
+  const top = document.createElement('div')
+  top.className = 'shell-top'
+  const label = navFor({ admin: true }).flatMap((g) => g.items).find((i) => i.id === (/wall.html$/.test(location.pathname) ? 'playback' : currentId(location.pathname)))?.label ?? ''
+  top.innerHTML = `<img src="/logo.svg" alt="" /><strong>Argus</strong><span>${esc(label)}</span>`
+  main.prepend(top)
+
   document.body.prepend(side)
   side.after(main)
   document.body.append(bar, sheet)

@@ -47,10 +47,16 @@ async function poll() {
   text.append(...lines)
   bar.replaceChildren(text, link)
   bar.classList.toggle('critical', Boolean(criticalText))
+  // phones: one line until tapped (css clamps it)
+  if (!bar.dataset.tap) {
+    bar.dataset.tap = '1'
+    bar.addEventListener('click', (e) => { if (e.target.tagName !== 'A') bar.classList.toggle('open') })
+  }
   bar.hidden = false
   // inside the page's own column once the shell is there (body is then the two-column frame)
   const host = document.querySelector('.app-main') ?? document.body
-  if (bar.parentElement !== host) host.prepend(bar)
+  const after = host.querySelector(':scope > .shell-top')
+  if (bar.parentElement !== host) (after ? after.after(bar) : host.prepend(bar))
 }
 
 poll()
