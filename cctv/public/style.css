@@ -1373,6 +1373,12 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
 .se-tabs a { padding: 10px 14px; color: var(--muted); text-decoration: none; font-weight: 500; white-space: nowrap; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .se-tabs a:hover { color: var(--text); }
 .se-tabs a[aria-current] { color: var(--text); border-bottom-color: var(--accent); }
+/* narrow screens: the tabs wrap onto a second row rather than scrolling out of sight (a phone could
+   not see the Server tab, and nothing showed the row scrolled) */
+@media (max-width: 699px), (pointer: coarse) and (max-height: 500px) {
+  .se-tabs { flex-wrap: wrap; overflow-x: visible; row-gap: 0; }
+  .se-tabs a { padding: 9px 10px; }
+}
 .se-tab-help { flex-shrink: 0; margin: 0; color: var(--muted); font-size: 13px; }
 .se-section.se-off { display: none; }
 /* Sites: a block per site, a row per NVR */
