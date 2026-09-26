@@ -135,7 +135,9 @@ async function tick() {
 
 if (process.env.CCTV_WATCH_ONCE) {
   const p = await probe()
-  console.log(JSON.stringify({ probe: p, summary: summarise(await evidence()) }, null, 2))
+  // The diagnosis explains a failure; printed for a healthy server it would claim a fault that is
+  // not there.
+  console.log(JSON.stringify({ probe: p, summary: p.ok ? 'The server is answering its health check.' : summarise(await evidence()) }, null, 2))
 } else {
   log('start', { url: URL_HEALTH, everyMs: EVERY_MS, dir: DIR })
   for (;;) {
