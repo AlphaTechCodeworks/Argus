@@ -38,7 +38,9 @@ async function released(req, url) {
   const cache = await caches.open(CACHE)
   const kept = await cache.match(req)
   if (kept) return kept
-  const res = await fetch(req)
+  // never waits for ever: a download that hangs (a server restarting behind Cloudflare) fails, and
+  // the page can say so rather than stay blank
+  const res = await fetch(req, { signal: AbortSignal.timeout(20_000) })
   if (res.ok && res.type === 'basic' && !res.redirected) {
     await cache.put(req, res.clone())
     // this file's copies from other releases are of no further use

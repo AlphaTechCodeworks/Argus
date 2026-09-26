@@ -1023,8 +1023,13 @@ async function loadCameras(pre = null) {
 // A first load that fails (the server restarting: Cloudflare answers 502/530 in HTML) must not stop
 // this module here: the timers below would never start and the page would stay empty until someone
 // reloaded it. It is retried by the 5 s refresh instead.
-await early.catch(() => {})
-await loadCameras(prefetched).catch(() => listSoon())
+// Nor may one that never answers: just after a restart two of these requests hung for over a minute
+// (Cloudflare holding them on a connection to the old process) and the grid never appeared. The page
+// goes on after a few seconds; the order and the overlay settings arrive with their own refreshes.
+const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(r, ms))])
+await within(early.catch(() => {}), 6000)
+await within(loadCameras(prefetched).catch(() => listSoon()), 8000)
+listSoon() // (whatever happened above, the list is re-read every 5 s for the next minute)
 if (sync.unsaved) sync.refresh()
 // the camera list, and this user's order (another screen may have changed it)
 setInterval(() => {
