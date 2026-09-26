@@ -225,6 +225,11 @@
       <p class="st-help">Stops and starts the Argus server. Live video and server recording pause for about 10 seconds, then every camera reconnects by itself. The NVRs keep recording to their own disks throughout. Only an admin can do this.</p>
       <p><button type="button" id="restartBtn" class="danger">Restart server</button> <span id="restartMsg" class="st-meta" role="status"></span></p>
     </section>
+    <section class="se-section" data-tab="server" aria-labelledby="reboot-title" id="rebootSection" hidden>
+      <h2 id="reboot-title">Reboot the machine</h2>
+      <p class="st-help">Restarts the whole Linux machine the server runs on: for when restarting the server is not enough. Live video and server recording stop for about a minute or two while it starts up again and logs back in to the NVRs. The NVRs keep recording to their own disks throughout. Not possible within 5 minutes of the last start. Only an admin can do this.</p>
+      <p><button type="button" id="rebootBtn" class="danger">Reboot the machine</button> <span id="rebootMsg" class="st-meta" role="status"></span></p>
+    </section>
   </main>
 
   <dialog id="prep" class="st-dialog">

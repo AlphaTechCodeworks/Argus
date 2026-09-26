@@ -648,6 +648,9 @@ function upgradeToMain(tile, cam, sub, opts) {
       layer.classList.remove('pending')
       const links = tile.querySelector(':scope > .label .links')
       if (links) layer.querySelector('.name').after(links)
+      // the sub-stream's LIVE badge goes with it: it sits above the layer, and where the two do not
+      // line up exactly (an iPhone turned sideways) the view showed LIVE twice
+      tile.querySelector(':scope > .status')?.remove()
       sub.close()
     },
     onUnsupported: () => {

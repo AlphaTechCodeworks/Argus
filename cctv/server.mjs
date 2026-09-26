@@ -99,6 +99,7 @@ import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
 import { can, handleRights } from './rights.mjs'
 import { handleUsers } from './users-api.mjs'
+import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
 import { audit, handleAudit, pruneAudit } from './audit.mjs'
 import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
@@ -553,7 +554,7 @@ const handleRequest = async (req, res) => {
   // changed, never who is doing the changing.
   const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
 
-  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, p2p: P2P_ENABLED, build: BUILD })
+  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
 
   // Signed in is enough for these; what each user may actually see is settled inside them.
@@ -629,6 +630,19 @@ const handleRequest = async (req, res) => {
       sendJson(res, 200, { restarting: true })
       setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500)
       return
+    }
+    // Settings > Server: reboot the whole machine (machine-reboot.mjs: a root unit does it)
+    if (req.method === 'POST' && pathname === '/api/admin/reboot') {
+      if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can reboot the machine' })
+      let r
+      try {
+        r = requestReboot({ dataDir: auth.DATA_DIR })
+      } catch (e) {
+        r = { status: 500, body: { error: `Could not ask for the reboot: ${e.message}` } }
+      }
+      audit(auth.DATA_DIR, { user: who.user, action: 'machine-reboot', target: 'server', ok: r.status === 200, detail: r.body.error })
+      console.log(`[server] machine reboot asked for by ${who.user}: ${r.status === 200 ? 'rebooting' : r.body.error}`)
+      return sendJson(res, r.status, r.body)
     }
     const auditRoute = handleAudit(req.method, pathname, url.searchParams, who, auth.DATA_DIR, { can })
     if (auditRoute) return sendJson(res, ...auditRoute)
