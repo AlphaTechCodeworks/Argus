@@ -2,7 +2,7 @@
 //   node cctv/test/healthwatch.test.mjs
 // The case it exists for, 2026-09-26: the server frozen for 40 minutes in a network-share call
 // while the NAS refused SMB sessions, with nothing logged and nobody told.
-import { FAILS_TO_OPEN, REALERT_MS, decide, summarise } from '../../deploy/healthwatch-core.mjs'
+import { FAILS_TO_OPEN, MAX_RECOVERIES, REALERT_MS, decide, recoveryPlan, summarise } from '../../deploy/healthwatch-core.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -51,6 +51,22 @@ check('a stopped service says so', /not running/.test(summarise({ service: 'fail
 check('stuck on a local disk is told apart from the share', /stuck waiting on the disk/.test(summarise({ service: 'active', processState: 'D', blockedIn: 'io_schedule', kernelStack: ['ext4'] })))
 check('with nothing to go on it does not invent a cause', summarise({ service: 'active', processState: 'S' }) === 'The server is running but not answering its health check.')
 check('no evidence at all is not a crash', typeof summarise() === 'string')
+
+// ---- when the watcher may fix it itself ----
+{
+  const stale = {
+    blockedIn: 'wait_for_response', kernelStack: ['[<0>] SMB2_open+0x368/0x600 [cifs]'],
+    nas: [{ host: '192.168.0.121', ping: 'answers', smb445: 'open' }],
+    networkMounts: ['//192.168.0.121/backups /srv/cctv-net/backups cifs rw,soft 0 0']
+  }
+  const p = recoveryPlan(stale, [], T)
+  check('stuck on a stale share with the NAS up: remount and restart', p.recover && p.mounts[0] === '/srv/cctv-net/backups', JSON.stringify(p))
+  check('not when the NAS is off (a remount would hang too)', !recoveryPlan({ ...stale, nas: [{ host: 'x', ping: 'no answer', smb445: 'closed' }] }, [], T).recover)
+  check('not when stuck on something else', !recoveryPlan({ ...stale, blockedIn: 'futex', kernelStack: [] }, [], T).recover)
+  const many = Array.from({ length: MAX_RECOVERIES }, (_, i) => T - i * 60_000)
+  check('not a fourth time in an hour: then it needs a person', !recoveryPlan(stale, many, T).recover)
+  check('but again once the hour has passed', recoveryPlan(stale, many, T + 2 * 3_600_000).recover)
+}
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

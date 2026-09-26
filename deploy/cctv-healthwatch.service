@@ -2,8 +2,8 @@
 #
 # Deliberately its own service with no dependency on cctv.service: it exists to notice when that
 # service is running but frozen, which is exactly when anything inside it -- logging, alerts -- has
-# stopped. It runs as root only because reading another process's kernel stack and the kernel log
-# needs it; it only reads, never writes, anywhere but its own incident folder.
+# stopped. It runs as root because reading another process's kernel stack and the kernel log needs
+# it, and so does the one fix it makes itself: remounting a stale network share and restarting cctv.
 [Unit]
 Description=Outside watcher for the CCTV server
 After=network-online.target

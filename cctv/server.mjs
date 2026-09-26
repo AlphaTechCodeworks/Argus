@@ -70,7 +70,7 @@ import { startAlerts } from './alert-checks.mjs'
 import { makeSysinfo } from './sysinfo.mjs'
 import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
-import { freePercent, listLocations } from './storage.mjs'
+import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
 import { ADMIN_LINKS_PATH, BODY_LIMIT as LINKS_BODY_LIMIT, LINKS_PATH, handleCameraLinks } from './camera-links.mjs'
@@ -143,8 +143,8 @@ async function thinAndRetain() {
     for (const w of r.warnings ?? []) console.warn(`[${what}] ${w}`)
   }
   try {
-    say('thinning', await runThinning({ index, settings: getSettings(), dryRun, protectedRanges }))
-    say('retention', await runRetention({ index, settings: getSettings(), dryRun, protectedRanges }))
+    say('thinning', await runThinning({ index, settings: getSettings(), dryRun, protectedRanges, present: markerMatches }))
+    say('retention', await runRetention({ index, settings: getSettings(), dryRun, protectedRanges, present: markerMatches }))
   } catch (e) {
     console.warn(`[thinning] did not run: ${e.message}`)
   }
@@ -278,7 +278,7 @@ const alerts = startAlerts({
   // It stays quiet for a drive that has already reached its retention and is overwriting, because
   // a cycling recorder is permanently full and an alert that fires every night is one nobody reads.
   extraCandidates: () => driveFullCandidates(
-    buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR) }),
+    buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf }),
     { days: 7 }
   ),
   listNvrs: () =>

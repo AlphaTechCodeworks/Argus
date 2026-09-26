@@ -42,3 +42,26 @@ export function summarise(ev = {}) {
   if (/^D/.test(ev.processState ?? '')) return `The server process is stuck waiting on the disk (state ${ev.processState}, in ${ev.blockedIn || 'unknown'}).`
   return 'The server is running but not answering its health check.'
 }
+
+/** Automatic recoveries allowed in RECOVER_WINDOW_MS; past that it is left to a person. */
+export const MAX_RECOVERIES = 3
+export const RECOVER_WINDOW_MS = 60 * 60_000
+
+/**
+ * Whether to remount the share and restart the server, from the evidence. Only for the one fault
+ * a remount cures: the server stuck in a call on a share whose NAS still answers (its SMB session
+ * went stale; 2026-09-26, twice). A NAS that is really off gets no remount -- a new mount would hang
+ * the same way -- and a server stuck on anything else is not ours to guess at.
+ * @returns {{ recover: boolean, why: string, mounts?: string[] }}
+ */
+export function recoveryPlan(ev = {}, recentRecoveries = [], nowMs = 0) {
+  const stuckOnShare = /cifs|smb|nfs/i.test(`${ev.blockedIn ?? ''} ${(ev.kernelStack ?? []).join(' ')}`)
+  if (!stuckOnShare) return { recover: false, why: 'not stuck on a network share' }
+  const nasUp = (ev.nas ?? []).length > 0 && ev.nas.every((n) => n.ping === 'answers' && n.smb445 === 'open')
+  if (!nasUp) return { recover: false, why: 'the NAS itself is not answering: a remount would hang too' }
+  const recent = recentRecoveries.filter((t) => nowMs - t < RECOVER_WINDOW_MS)
+  if (recent.length >= MAX_RECOVERIES) return { recover: false, why: `already recovered ${recent.length} times in the last hour: needs a person` }
+  const mounts = (ev.networkMounts ?? []).map((l) => l.split(' ')[1]).filter(Boolean)
+  if (!mounts.length) return { recover: false, why: 'no network mount found to reset' }
+  return { recover: true, why: 'stuck on a stale share while the NAS answers', mounts }
+}

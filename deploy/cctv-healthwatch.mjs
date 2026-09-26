@@ -12,9 +12,14 @@
 // the NAS answers -- logs one structured line, and sends the alert the frozen server could not.
 //
 // It must never hang the way the server did, so it never reads or stats anything on the NAS mount:
-// mounts are read from /proc/mounts, and every command it runs has a hard timeout. It does not
-// restart anything. A restart while the NAS is still wedged just freezes again, and knowing why is
-// worth more than a blind retry; the incident file says what to do.
+// mounts are read from /proc/mounts, and every command it runs has a hard timeout.
+//
+// It fixes one fault itself, the one seen twice on 2026-09-26: the server stuck in a call on a
+// share whose NAS still answers, because the kernel's SMB session went stale. A person fixed that
+// by detaching the share, mounting it again and restarting the server, so it does the same, with
+// the evidence written first. Nothing else is restarted blindly: with the NAS really off a remount
+// would hang too, and a server stuck on anything else needs someone to know why (healthwatch-core
+// recoveryPlan). After three recoveries in an hour it stops and leaves it to a person.
 //
 //   node deploy/cctv-healthwatch.mjs            (run by cctv-healthwatch.service)
 //   CCTV_WATCH_ONCE=1 node deploy/cctv-healthwatch.mjs   one check, printed, for testing
@@ -23,7 +28,7 @@ import { execFile } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { request } from 'node:https'
 import { join } from 'node:path'
-import { decide, summarise } from './healthwatch-core.mjs'
+import { decide, recoveryPlan, summarise } from './healthwatch-core.mjs'
 
 const URL_HEALTH = process.env.CCTV_WATCH_URL ?? 'https://127.0.0.1:8443/healthz'
 const EVERY_MS = Number(process.env.CCTV_WATCH_EVERY_MS ?? 30_000)
@@ -106,6 +111,36 @@ function notify(title, body) {
 const log = (event, fields) => console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }))
 
 let state = { fails: 0, open: null, lastAlertAt: 0 }
+const recoveries = [] // times of automatic recoveries
+let lastTryAt = 0
+const RETRY_MS = 5 * 60_000
+
+/** Detaches and remounts each share, then restarts the server. Returns what each step said. */
+async function recover(mounts) {
+  const steps = []
+  for (const m of mounts) {
+    steps.push(['umount', await run('umount', ['-l', '-f', m], 15_000)])
+    const unit = (await run('systemd-escape', ['--path', '--suffix=mount', m])).trim()
+    steps.push([`restart ${unit}`, await run('systemctl', ['restart', unit], 30_000)])
+  }
+  steps.push(['kill cctv', await run('systemctl', ['kill', '-s', 'KILL', 'cctv'], 10_000)])
+  steps.push(['restart cctv', await run('systemctl', ['restart', 'cctv'], 30_000)])
+  return steps.map(([k, v]) => `${k}: ${v || 'ok'}`)
+}
+
+/** Recovers if the evidence says a remount cures it. Returns a line for the alert, or ''. */
+async function maybeRecover(ev) {
+  lastTryAt = Date.now()
+  const plan = recoveryPlan(ev, recoveries, Date.now())
+  if (!plan.recover) {
+    log('no-recovery', { why: plan.why })
+    return `Not fixed automatically: ${plan.why}.`
+  }
+  recoveries.push(Date.now())
+  const steps = await recover(plan.mounts)
+  log('recovered', { why: plan.why, mounts: plan.mounts, steps })
+  return `Fixed automatically: remounted ${plan.mounts.join(', ')} and restarted the server (${plan.why}).`
+}
 
 async function tick() {
   const p = await probe()
@@ -122,13 +157,19 @@ async function tick() {
     } catch (e) {
       file = `(could not write: ${e.message})`
     }
-    const sent = await notify('CCTV server not answering', `${incident.summary}\nDetails: ${file}`)
-    log('incident-open', { summary: incident.summary, file, alert: sent, probe: p })
+    const action = await maybeRecover(ev)
+    const sent = await notify('CCTV server not answering', `${incident.summary}\n${action}\nDetails: ${file}`)
+    log('incident-open', { summary: incident.summary, action, file, alert: sent, probe: p })
   } else if (d.action === 'close') {
     const sent = await notify('CCTV server answering again', `Recovered after ${Math.round(d.downMs / 1000)} s.`)
     log('incident-close', { downMs: d.downMs, alert: sent })
   } else if (!p.ok) {
     log('probe-failed', { fails: state.fails, probe: p })
+    // still down after a recovery, or one that was not allowed: look again every few minutes
+    if (state.open !== null && Date.now() - lastTryAt >= RETRY_MS) {
+      const action = await maybeRecover(await evidence())
+      if (action.startsWith('Fixed')) await notify('CCTV server: tried again', action)
+    }
   }
   return p
 }

@@ -10,97 +10,93 @@
 //
 // Recording goes to the camera's own location when healthy, else a healthy main one, else a
 // healthy overflow one (archive locations are for moving old footage to, later).
+import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, statSync, statfsSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
+import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
+import { MARKER, _setStatfs, freePercent, healthOf, markerId, probeWriteSpeed } from './location-health.mjs'
 import { HttpError, isPlainObject } from './nvr-xml.mjs'
 import { cameraRecording, getSettings, saveSettings } from './settings.mjs'
 
-export const MARKER = '.cctv-recordings'
+export { MARKER, freePercent, probeWriteSpeed }
 export const TYPES = ['internal', 'usb', 'network']
 export const ROLES = ['main', 'overflow', 'archive']
-const PROBE_BYTES = 8 * 1024 * 1024
 const CHECK_EVERY_MS = 30_000
+/** How long a network share gets to answer its check before it is called down. */
+export const SHARE_ANSWER_MS = 10_000
 
 // replaceable for the offline tests
 let devOf = (p) => statSync(p).dev
-let statfs = (p) => statfsSync(p)
-
-export const freePercent = (h) => (h.totalBytes > 0 ? (h.freeBytes / h.totalBytes) * 100 : 0)
 
 const writeMBps = new Map() // id -> last write-speed probe (MB/s)
 
-/** The marker's id, or null (missing or unreadable). */
-function markerId(path) {
-  try {
-    const j = JSON.parse(readFileSync(join(path, MARKER), 'utf8'))
-    return typeof j?.id === 'string' ? j.id : null
-  } catch {
-    return null
-  }
+// ---- network shares: never touched by this process -----------------------------------------------
+//
+// A share whose SMB session has gone stale takes any file call made on it and never gives it back,
+// and the process that made it cannot even be killed. On 2026-09-26 that froze the whole server
+// twice. So this process never makes a file call on a share to learn its health: a child process
+// (location-probe.mjs) does, with SHARE_ANSWER_MS to answer, and what it last said is the share's
+// health. A child that does not answer leaves the share marked down, and no second child is sent
+// after it while the first is still stuck.
+
+let PROBE = join(import.meta.dirname, 'location-probe.mjs')
+const netHealth = new Map() // id -> last health
+const stuck = new Map() // id -> { since } while a probe has not come back
+
+const downHealth = (reason) => ({ ok: false, reason, marker: false, writable: false, freeBytes: 0, totalBytes: 0, writeMBps: null })
+
+/** Checks one share from a child process. Always resolves, within SHARE_ANSWER_MS. */
+function probeShare(loc, floor, speed) {
+  const prev = stuck.get(loc.id)
+  if (prev) return Promise.resolve(downHealth(`share not answering: a check has been stuck for ${Math.round((Date.now() - prev.since) / 1000)} s`))
+  return new Promise((done) => {
+    let settled = false
+    const finish = (h) => {
+      if (!settled) {
+        settled = true
+        done(h)
+      }
+    }
+    const since = Date.now()
+    stuck.set(loc.id, { since })
+    const child = execFile(process.execPath, [PROBE, JSON.stringify({ id: loc.id, path: loc.path }), String(floor), speed ? 'speed' : ''], { timeout: SHARE_ANSWER_MS * (speed ? 3 : 1), killSignal: 'SIGKILL' }, (err, out) => {
+      stuck.delete(loc.id)
+      try {
+        if (err) throw err
+        finish(JSON.parse(String(out).trim()))
+      } catch (e) {
+        finish(downHealth(err?.killed ? 'share not answering' : `share check failed: ${e.message}`))
+      }
+    })
+    child.unref()
+    // the child may be stuck where even SIGKILL cannot reach it: do not wait for it to exit
+    setTimeout(() => finish(downHealth('share not answering')), SHARE_ANSWER_MS * (speed ? 3 : 1) + 500).unref()
+  })
 }
 
-/** Whether the location's folder holds its own marker (the drive/share is really there). */
-export const markerMatches = (loc) => markerId(loc.path) === loc.id
-
-function canWrite(path) {
-  const f = join(path, `.cctv-write-test-${process.pid}`)
-  try {
-    writeFileSync(f, 'x')
-    unlinkSync(f)
-    return true
-  } catch {
-    try {
-      unlinkSync(f)
-    } catch {}
-    return false
-  }
+/** Health of any location: a share's comes from its last check, never from the share itself. */
+function locationHealth(loc, floor) {
+  if (loc.type === 'network') return netHealth.get(loc.id) ?? downHealth('not checked yet')
+  return healthOf(loc, floor, writeMBps.get(loc.id) ?? null)
 }
 
-/** Health of one location, without the write-speed probe (fast, synchronous). */
-function healthOf(loc, floorFreePct) {
-  const h = { ok: false, reason: '', marker: false, writable: false, freeBytes: 0, totalBytes: 0, writeMBps: writeMBps.get(loc.id) ?? null }
-  let st
-  try {
-    st = statSync(loc.path)
-  } catch {
-    h.reason = 'folder missing (drive or share not connected?)'
-    return h
+/** Whether the location's folder holds its own marker. A share's answer is its last check's. */
+export const markerMatches = (loc) => (loc.type === 'network' ? netHealth.get(loc.id)?.marker === true : markerId(loc.path) === loc.id)
+
+/**
+ * Free and total bytes of a location. A share's are from its last check, never asked of the share;
+ * one that is down throws, like an unreadable drive. For reports only: a loop that deletes until
+ * space is free needs the live number, or it would never see its own deletions free anything.
+ */
+export function freeOf(loc) {
+  if (loc.type !== 'network') {
+    const h = healthOf(loc, 0)
+    if (h.totalBytes > 0) return { freeBytes: h.freeBytes, totalBytes: h.totalBytes }
+    throw new Error(h.reason || 'free space unknown')
   }
-  if (!st.isDirectory()) {
-    h.reason = 'not a folder'
-    return h
-  }
-  const id = markerId(loc.path)
-  if (!id) {
-    h.reason = 'no marker file: not prepared, or the drive/share is not mounted'
-    return h
-  }
-  if (id !== loc.id) {
-    h.reason = `the marker belongs to another location (${id}): a different drive is mounted here`
-    return h
-  }
-  h.marker = true
-  try {
-    const s = statfs(loc.path)
-    h.freeBytes = Number(s.bavail) * Number(s.bsize)
-    h.totalBytes = Number(s.blocks) * Number(s.bsize)
-  } catch (e) {
-    h.reason = `free space unknown: ${e.message}`
-    return h
-  }
-  h.writable = canWrite(loc.path)
-  if (!h.writable) {
-    h.reason = 'not writable'
-    return h
-  }
-  const pct = freePercent(h)
-  if (pct < floorFreePct) {
-    h.reason = `below the hard floor (${pct.toFixed(1)}% free, floor ${floorFreePct}%)`
-    return h
-  }
-  h.ok = true
-  return h
+  const h = netHealth.get(loc.id)
+  if (!h?.marker || !(h.totalBytes > 0)) throw new Error(h?.reason || 'share not checked yet')
+  return { freeBytes: h.freeBytes, totalBytes: h.totalBytes }
 }
 
 const withHealth = (loc, floor) => ({
@@ -110,36 +106,13 @@ const withHealth = (loc, floor) => ({
   role: loc.role,
   limitGB: loc.limitGB ?? null,
   ...(loc.sameDisk ? { sameDisk: true } : {}),
-  health: healthOf(loc, floor)
+  health: locationHealth(loc, floor)
 })
 
-/** Every location with its current health. */
+/** Every location with its current health. Never waits on a network share. */
 export function listLocations() {
   const s = getSettings()
   return s.storage.locations.map((l) => withHealth(l, s.storage.floorFreePct))
-}
-
-/**
- * Measures write speed: writes a small temp file (fsync'd) in the folder, then removes it.
- * @returns {Promise<number>} MB/s
- */
-export async function probeWriteSpeed(path, bytes = PROBE_BYTES) {
-  const f = join(path, `.cctv-speed-test-${process.pid}-${randomBytes(3).toString('hex')}`)
-  const buf = Buffer.alloc(1024 * 1024, 0x5a)
-  let fd
-  const t0 = process.hrtime.bigint()
-  try {
-    fd = openSync(f, 'w')
-    for (let n = 0; n < bytes; n += buf.length) writeSync(fd, buf, 0, Math.min(buf.length, bytes - n))
-    fsyncSync(fd)
-  } finally {
-    if (fd !== undefined) closeSync(fd)
-    try {
-      unlinkSync(f)
-    } catch {}
-  }
-  const s = Math.max(Number(process.hrtime.bigint() - t0) / 1e9, 1e-6)
-  return Math.round((bytes / 1e6 / s) * 10) / 10
 }
 
 const cleanRole = (v) => {
@@ -198,6 +171,7 @@ export function addLocation({ path, type, role, limitGB = null, sameDisk = false
   if (!existing) writeFileSync(join(path, MARKER), `${JSON.stringify({ id, created: new Date().toISOString() })}\n`, { flag: 'wx' })
   const loc = { id, path, type, role, limitGB, ...(sameAsSystem ? { sameDisk: true } : {}), added: new Date().toISOString(), addedBy: user ?? '?' }
   saveLocations([...s.storage.locations, loc], user)
+  if (type === 'network') checkHealth().catch(() => {}) // its health is not known until checked
   console.log(`[storage] ${user} added ${id} at ${path} (${type}, ${role})${sameAsSystem ? ' on the system disk' : ''}`)
   return withHealth(loc, s.storage.floorFreePct)
 }
@@ -248,9 +222,17 @@ export function onChange(cb) {
 
 /** Checks every location now (with probe: also measures write speed) and tells listeners of changes. */
 export async function checkHealth({ probe = false } = {}) {
+  const s = getSettings()
+  const floor = s.storage.floorFreePct
+  // shares all at once, each in its own process; a stuck one costs SHARE_ANSWER_MS, not the server
+  await Promise.all(s.storage.locations.filter((l) => l.type === 'network').map(async (l) => {
+    const h = await probeShare(l, floor, probe)
+    if (h.writeMBps == null) h.writeMBps = netHealth.get(l.id)?.writeMBps ?? null
+    netHealth.set(l.id, h)
+  }))
   if (probe) {
     for (const l of listLocations()) {
-      if (!l.health.ok) continue
+      if (!l.health.ok || l.type === 'network') continue
       try {
         writeMBps.set(l.id, await probeWriteSpeed(l.path))
       } catch (e) {
@@ -295,6 +277,14 @@ export const _test = {
     devOf = fn
   },
   setStatfs(fn) {
-    statfs = fn
+    _setStatfs(fn)
+  },
+  setShareHealth(id, h) {
+    if (h) netHealth.set(id, h)
+    else netHealth.delete(id)
+  },
+  probeShare,
+  setProbe(p) {
+    PROBE = p
   }
 }
