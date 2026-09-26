@@ -618,6 +618,15 @@ const handleRequest = async (req, res) => {
     // accounts: add a viewer or an admin from the app (users-api.mjs)
     const usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who)
     if (usersRoute) return sendJson(res, ...usersRoute)
+    // Settings > Server: restart. The answer goes out first; systemd (Restart=always) starts it again.
+    if (req.method === 'POST' && pathname === '/api/admin/restart') {
+      if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can restart the server' })
+      audit(auth.DATA_DIR, { user: who.user, action: 'server-restart', target: 'server', ok: true })
+      console.log(`[server] restart asked for by ${who.user}`)
+      sendJson(res, 200, { restarting: true })
+      setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500)
+      return
+    }
     const auditRoute = handleAudit(req.method, pathname, url.searchParams, who, auth.DATA_DIR, { can })
     if (auditRoute) return sendJson(res, ...auditRoute)
 

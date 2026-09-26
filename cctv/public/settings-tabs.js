@@ -6,7 +6,8 @@ const TABS = [
   { id: 'recording', label: 'Recording', help: 'What each camera records, and how long it is kept.' },
   { id: 'storage', label: 'Storage', help: 'How full each place is and how long it will last; your drives and shares; when old footage is cleared.' },
   { id: 'overlay', label: 'On-screen text', help: 'The camera name and the time drawn over the picture.' },
-  { id: 'alerts', label: 'Alerts', help: 'Who is told when something goes wrong, and how.' }
+  { id: 'alerts', label: 'Alerts', help: 'Who is told when something goes wrong, and how.' },
+  { id: 'server', label: 'Server', help: 'Restart the server.' }
 ]
 
 const main = document.querySelector('.st-main')

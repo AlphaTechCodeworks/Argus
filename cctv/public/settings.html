@@ -220,6 +220,11 @@
       </form>
       </details>
     </section>
+    <section class="se-section" data-tab="server" aria-labelledby="srv-title">
+      <h2 id="srv-title">Restart the server</h2>
+      <p class="st-help">Stops and starts the Argus server. Live video and server recording pause for about 10 seconds, then every camera reconnects by itself. The NVRs keep recording to their own disks throughout. Only an admin can do this.</p>
+      <p><button type="button" id="restartBtn" class="danger">Restart server</button> <span id="restartMsg" class="st-meta" role="status"></span></p>
+    </section>
   </main>
 
   <dialog id="prep" class="st-dialog">
@@ -266,5 +271,6 @@
   <script type="module" src="storage.js"></script>
   <script type="module" src="alert-banner.js"></script>
   <script type="module" src="build-badge.js"></script>
+  <script type="module" src="server-restart.js"></script>
 </body>
 </html>
