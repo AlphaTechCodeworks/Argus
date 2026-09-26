@@ -1424,11 +1424,17 @@ requestAnimationFrame(frame)
 // investigator goes next once the wall has told them which camera to look at
 setInterval(() => {
   for (const t of state.tiles) {
-    t.nameEl.href = `/playback.html?nvr=${encodeURIComponent(t.nvr)}&ch=${t.ch}`
-    // the playback page opens the camera; the moment is shown here in case it is wanted by hand
+    t.nameEl.href = `/playback.html?nvr=${encodeURIComponent(t.nvr)}&ch=${t.ch}&t=${Math.round(clock.atMs)}`
     t.nameEl.title = `${t.name} · ${t.nvrName} — open on the playback page (this wall is at ${fmtClock(clock.atMs, { tzOffsetMs: state.tz })} server time)`
   }
 }, 1000)
+
+// One camera | Many cameras: back to one camera (the first on the wall), at the wall's moment
+document.getElementById('modeOne')?.addEventListener('click', () => {
+  const t = state.tiles[0]
+  const cam = t ? `nvr=${encodeURIComponent(t.nvr)}&ch=${t.ch}&` : ''
+  location.href = `/playback.html?${cam}t=${Math.round(clock.atMs)}`
+})
 
 // the day's timelines again every minute, so today's wall sees footage as it is recorded
 setInterval(() => {

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="icon" href="/logo.svg" type="image/svg+xml" />
-  <title>Argus · Wall</title>
+  <title>Argus · Playback</title>
   <script src="theme-boot.js"></script>
   <link rel="stylesheet" href="css/tokens.css" />
   <link rel="stylesheet" href="css/base.css" />
@@ -14,6 +14,10 @@
 </head>
 <body class="wall-page">
   <header>
+    <div class="pb-mode" role="group" aria-label="View">
+      <button type="button" id="modeOne" aria-pressed="false">One camera</button>
+      <button type="button" aria-pressed="true">Many cameras</button>
+    </div>
     <div class="brand">
       <h1>CCTV</h1>
     </div>

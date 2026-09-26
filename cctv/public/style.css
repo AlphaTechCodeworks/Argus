@@ -1532,3 +1532,22 @@ body.health-page .alert-banner { display: none; }
   .pb-row.pb-simple { grid-template-columns: 1fr; justify-items: center; gap: 8px; }
   .pb-simple .pb-transport, .pb-simple .pb-tools { grid-column: 1; justify-self: center; }
 }
+/* Playback: One camera | Many cameras */
+.pb-mode { display: inline-flex; padding: 3px; gap: 2px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border); }
+.pb-mode button { border: 0; background: none; color: var(--text-muted); padding: 5px 12px; border-radius: 7px; font-weight: 500; }
+.pb-mode button[aria-pressed="true"] { background: var(--surface-3); color: var(--text); box-shadow: var(--shadow); }
+.pb-mode button:hover:not([aria-pressed="true"]) { color: var(--text); }
+
+/* ---- Every page's top bar: one tidy row ---- */
+body.has-shell .app-main > header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  min-height: 56px; padding: 8px 16px; background: var(--bg); border-bottom: 1px solid var(--border);
+}
+body.has-shell .app-main > header .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; flex: 1; min-width: 0; }
+body.has-shell .app-main > header .brand:empty, body.has-shell .app-main > header .account { display: none; }
+body.has-shell .app-main > header label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); white-space: nowrap; }
+body.has-shell .app-main > header button { white-space: nowrap; }
+body.has-shell .app-main > header select, body.has-shell .app-main > header input[type="date"],
+body.has-shell .app-main > header button:not(.pb-mode button) { height: 32px; padding-top: 0; padding-bottom: 0; border-radius: 8px; }
+body.has-shell .app-main > header .wall-pager, body.has-shell .app-main > header #pager { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 13px; }
+body.has-shell .app-main > header .wall-pager[hidden] { display: none; }

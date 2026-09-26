@@ -9,7 +9,6 @@ export const NAV_GROUPS = Object.freeze([
   { id: 'watch', label: 'Watch', adminOnly: false, items: [
     { id: 'live', label: 'Live', href: '/', icon: 'live' },
     { id: 'playback', label: 'Playback', href: '/playback.html', icon: 'playback' },
-    { id: 'wall', label: 'Wall', href: '/wall.html', icon: 'wall' },
     { id: 'map', label: 'Map', href: '/map.html', icon: 'map' }
   ] },
   { id: 'monitor', label: 'Monitor', adminOnly: false, items: [

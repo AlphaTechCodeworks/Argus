@@ -12,15 +12,15 @@ const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PAS
 
 const ids = (groups) => groups.flatMap((g) => g.items.map((i) => i.id))
 check('three groups in order', NAV_GROUPS.map((g) => g.id).join() === 'watch,monitor,admin')
-check('watch holds live, playback, wall, map', ids([NAV_GROUPS[0]]).join() === 'live,playback,wall,map')
+check('watch holds live, playback, map (the wall is Many cameras in Playback)', ids([NAV_GROUPS[0]]).join() === 'live,playback,map')
 check('monitor holds alarms, health', ids([NAV_GROUPS[1]]).join() === 'alarms,health')
 check('admin holds sites, settings, storage, audit', ids([NAV_GROUPS[2]]).join() === 'sites,settings,storage,audit')
 check('no item appears twice', new Set(ids(NAV_GROUPS)).size === ids(NAV_GROUPS).length)
 check('only the admin group is admin-only', NAV_GROUPS.filter((g) => g.adminOnly).map((g) => g.id).join() === 'admin')
 
-check('an admin sees all ten', ids(navFor({ admin: true })).length === 10)
+check('an admin sees all nine', ids(navFor({ admin: true })).length === 9)
 check('a viewer never sees the admin pages', !ids(navFor({ admin: false })).some((i) => ['sites', 'settings', 'storage', 'audit'].includes(i)))
-check('an unknown user is treated as a viewer', ids(navFor({})).length === 6)
+check('an unknown user is treated as a viewer', ids(navFor({})).length === 5)
 
 check('/ is live', currentId('/') === 'live')
 check('/index.html is live', currentId('/index.html') === 'live')

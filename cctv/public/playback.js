@@ -2140,7 +2140,29 @@ function startNvrDay() {
   if (state.ranges.length) seek(Math.min(state.nvrNow - START_BACK_MS, state.ranges.at(-1)[1] - START_BACK_MS))
 }
 await start()
+// ?t=ms: open at that moment (from Many cameras, an alarm, a shared link)
+{
+  const t0 = Number(params.get('t'))
+  if (Number.isFinite(t0) && t0 > 0) {
+    const day = fmtDate(t0)
+    if (day !== state.date) {
+      state.date = day
+      dateInput.value = day
+      viewWholeDay()
+    }
+    state.position = t0
+    await reloadKeepingPosition()
+    ensureVisible(t0)
+    seek(t0)
+  }
+}
 updatePlayButton()
+
+// One camera | Many cameras: the camera and the moment go with you
+$('modeMany')?.addEventListener('click', () => {
+  const at = Number.isFinite(state.position) ? `&at=${Math.round(state.position)}` : ''
+  location.href = `/wall.html?cameras=${encodeURIComponent(keyOf(state.nvr, state.ch))}${at}`
+})
 
 // ---- digital zoom on the picture ---------------------------------------------
 //

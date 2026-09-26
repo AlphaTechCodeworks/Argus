@@ -34,7 +34,8 @@ function render(parts, me) {
   const { side, bar, sheet } = parts
   const groups = navFor({ admin: me.admin === true })
   // Storage is a tab of Settings (settings.html#storage), but has its own place in the menu
-  const here = location.hash === '#storage' && /settings.html$/.test(location.pathname) ? 'storage' : currentId(location.pathname)
+  // Many cameras (wall.html) is a view of Playback, not a page of its own in the menu
+  const here = /wall.html$/.test(location.pathname) ? 'playback' : location.hash === '#storage' && /settings.html$/.test(location.pathname) ? 'storage' : currentId(location.pathname)
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
   const version = me.build?.version ? esc(me.build.version) : ''
   side.innerHTML = `
