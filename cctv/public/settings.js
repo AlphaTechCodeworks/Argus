@@ -668,6 +668,8 @@ function renderAlerts() {
   $('a-pass').value = a.email.pass === 'set' ? 'set' : ''
   $('a-from').value = a.email.from
   $('a-to').value = (a.email.to ?? []).join(', ')
+  $('a-daily').checked = a.dailySummary !== false
+  renderHooks(a.webhooks ?? [])
 
   // A ticked box means "tell me", so the muted list is the unticked ones.
   const muted = new Set(a.muted ?? [])
@@ -677,6 +679,41 @@ function renderAlerts() {
       el('label', {}, el('input', { type: 'checkbox', value: k, checked: !muted.has(k), className: 'a-kind' }), ` ${KIND_TEXT[k] ?? k}`))
   )
 }
+
+// Webhooks: a row each, the address and an optional secret. The server shows a stored secret as 'set'
+// and keeps it when 'set' comes back (settings.mjs webhookList), so a secret is never sent to a browser.
+function hookRow(h = { url: '', secret: '' }) {
+  const row = el('div', { className: 'a-hook' })
+  const url = el('input', { type: 'url', className: 'a-hook-url', placeholder: 'https://example.com/argus-hook', value: h.url ?? '' })
+  const secret = el('input', { type: 'password', className: 'a-hook-secret', placeholder: 'secret (optional)', autocomplete: 'new-password', value: h.secret === 'set' ? 'set' : '' })
+  const remove = el('button', { type: 'button', textContent: 'Remove' })
+  remove.addEventListener('click', () => row.remove())
+  row.append(url, secret, remove)
+  return row
+}
+function renderHooks(list) {
+  $('a-hooks').replaceChildren(...list.map(hookRow))
+}
+function collectHooks() {
+  return [...document.querySelectorAll('.a-hook')]
+    .map((r) => ({ url: r.querySelector('.a-hook-url').value.trim(), secret: r.querySelector('.a-hook-secret').value }))
+    .filter((h) => h.url)
+}
+$('a-hook-add').addEventListener('click', () => {
+  if (document.querySelectorAll('.a-hook').length >= 5) return say('a-hook-msg', 'At most five.', true)
+  $('a-hooks').append(hookRow())
+})
+$('a-hook-test').addEventListener('click', async () => {
+  say('a-hook-msg', 'Sending…')
+  try {
+    const saved = (settings.alerts.webhooks ?? []).map((h) => h.url).join('|')
+    if (collectHooks().map((h) => h.url).join('|') !== saved) return say('a-hook-msg', 'Save first, then test.', true)
+    const out = await api('POST', '/api/admin/alerts/test', { method: 'webhook' })
+    say('a-hook-msg', out.ok ? 'Sent to every webhook.' : `Could not send: ${out.error}`, !out.ok)
+  } catch (err) {
+    say('a-hook-msg', err.message, true)
+  }
+})
 
 $('a-new').addEventListener('click', () => {
   // Long and random: the topic is effectively the password to the owner's phone.
@@ -720,7 +757,9 @@ $('alerts').addEventListener('submit', async (e) => {
           email,
           muted: [...document.querySelectorAll('.a-kind')].filter((c) => !c.checked).map((c) => c.value),
           notRecordingMinutes: Number($('a-notrec').value),
-          clockSkewSeconds: Number($('a-skew').value)
+          clockSkewSeconds: Number($('a-skew').value),
+          webhooks: collectHooks(),
+          dailySummary: $('a-daily').checked
         }
       })
     ).settings

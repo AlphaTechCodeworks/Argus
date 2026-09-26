@@ -146,6 +146,14 @@
           <label class="se-wide">To <input id="a-to" placeholder="one or more addresses, separated by commas" /></label>
         </details>
 
+        <details class="se-wide">
+          <summary>Other systems (webhooks)</summary>
+          <p class="st-help">Each alert, and the daily summary, is also sent as JSON to these addresses: an access-control or building system, a chat bot, a script. With a secret, every message is signed: its <code>X-Argus-Signature</code> header is <code>sha256=</code> followed by the HMAC-SHA256 of the body, so the other end can tell it came from here. At most five.</p>
+          <div id="a-hooks" class="a-hooks"></div>
+          <p><button type="button" id="a-hook-add">Add a webhook</button> <button type="button" id="a-hook-test">Send a test</button> <span id="a-hook-msg" class="st-meta" role="status"></span></p>
+        </details>
+        <label class="se-wide"><input id="a-daily" type="checkbox" /> Send a summary of yesterday at 07:00 through the same channels (the same figures as the Reports page)</label>
+
         <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="a-msg" class="st-meta"></span></div>
       </form>
     </section>

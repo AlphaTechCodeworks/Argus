@@ -1749,3 +1749,8 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .rp-all > summary { cursor: pointer; list-style: none; }
 .rp-all > summary::-webkit-details-marker { display: none; }
 .rp-all > summary h2 { display: inline; }
+
+/* Settings > Alerts: webhooks */
+.a-hooks { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+.a-hook { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; gap: 6px; }
+@media (max-width: 600px) { .a-hook { grid-template-columns: 1fr; } }

@@ -744,7 +744,7 @@ const handleRequest = async (req, res) => {
     }
     if (pathname === '/api/admin/alerts/test' && req.method === 'POST') {
       const { method } = await readJsonObject(req, 1024)
-      if (method !== 'ntfy' && method !== 'email') return sendJson(res, 400, { error: 'method must be ntfy or email' })
+      if (!['ntfy', 'email', 'webhook'].includes(method)) return sendJson(res, 400, { error: 'method must be ntfy, email or webhook' })
       return sendJson(res, 200, await alerts.testSend(method))
     }
     if (pathname === '/api/admin/vpn') {
