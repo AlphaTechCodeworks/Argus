@@ -65,6 +65,7 @@ export class LiveTile {
     this.attempts = 0 // reconnects since video last arrived
     this.now = opts.now ?? (() => Date.now()) // (tests)
     this.lastDataAt = 0 // the last frame on this socket, or when it opened
+    this.maxFps = opts.maxFps ?? null // a phone asks the server for its 15 fps stream (phone-live.mjs)
     let shown = false
     this.player = new VideoPlayer(tile.querySelector('canvas'), {
       pacing: opts.pacing ?? true,
@@ -185,7 +186,7 @@ export class LiveTile {
   connect() {
     this.setStatus('connecting…')
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    this.ws = new WebSocket(`${proto}://${location.host}/live?nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${this.streamType}`)
+    this.ws = new WebSocket(`${proto}://${location.host}/live?nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${this.streamType}${this.maxFps === 15 ? '&fps=15' : ''}`)
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
     this.ws.onopen = () => (this.lastDataAt = this.now())

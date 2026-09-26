@@ -1323,7 +1323,7 @@ body.is-fullscreen .alert-banner { display: none; }
 
 /* In the shell, body is the two-column frame and .app-main is the page's own column. The rules above
    made body that column; these hand the job over without editing every page. */
-body.has-shell { display: grid; height: auto; }
+body.has-shell { display: grid; }
 body.has-shell .app-main > header { background: none; border-bottom: 1px solid var(--border); }
 /* tablet widths: the tools get a row of their own instead of being squeezed beside the transport
    into a column of one button per line */

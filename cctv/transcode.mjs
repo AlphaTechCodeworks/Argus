@@ -103,9 +103,12 @@ export const pool = new TranscodePool(maxTranscodes())
  * No container either way, so nothing has to be demuxed or muxed and there is no latency but the
  * encoder's own. -bf 0 keeps the output in input order (see Transcoder for why that matters), and
  * -g 50 puts a keyframe in often enough that a decoder joining late recovers quickly.
- * @param {{ encoder?: 'libx264'|'h264_vaapi', inCodec?: number }} o
+ * keepEvery / maxWidth (phones, phone-live.mjs): keep one frame in every keepEvery, and scale down to at
+ * most maxWidth wide. Software only: the GPU path would need its own filters, and phones do not
+ * need it.
+ * @param {{ encoder?: 'libx264'|'h264_vaapi', inCodec?: number, keepEvery?: number, maxWidth?: number }} o
  */
-export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265 } = {}) {
+export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0 } = {}) {
   const head = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-fflags', 'nobuffer', '-flags', 'low_delay', '-probesize', '32', '-analyzeduration', '0']
   const input = ['-f', inCodec === CODEC_H265 ? 'hevc' : 'h264', '-i', 'pipe:0', '-an']
   const tail = ['-fps_mode', 'passthrough', '-flush_packets', '1', '-f', 'h264', 'pipe:1']
@@ -121,9 +124,15 @@ export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265 } = {}) {
       ...tail
     ]
   }
+  const filters = []
+  // by frame number, not by time: raw Annex B has no timestamps for a time-based filter to use,
+  // and a fixed ratio is what lets Transcoder hand each kept frame the right capture time
+  if (keepEvery > 1) filters.push(`select=not(mod(n\\,${keepEvery}))`)
+  if (maxWidth > 0) filters.push(`scale=min(${maxWidth}\\,iw):-2`)
   return [
     ...head,
     ...input,
+    ...(filters.length ? ['-vf', filters.join(',')] : []),
     '-c:v', 'libx264', '-preset', PRESET, '-crf', String(CRF), '-tune', 'zerolatency', '-bf', '0', '-g', '50', '-pix_fmt', 'yuv420p',
     ...tail
   ]
@@ -292,7 +301,9 @@ export class Transcoder {
    */
   constructor({
     inCodec = CODEC_H265,
-    encoder = encoderNow(),
+    keepEvery = 1,
+    maxWidth = 0,
+    encoder = keepEvery > 1 || maxWidth > 0 ? 'libx264' : encoderNow(),
     onFrame,
     onFail = () => {},
     onHardwareFailed = () => {},
@@ -306,7 +317,7 @@ export class Transcoder {
     clearTimer = clearTimeout,
     flushIdleMs = FLUSH_IDLE_MS
   } = {}) {
-    Object.assign(this, { inCodec, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
+    Object.assign(this, { inCodec, keepEvery, maxWidth, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
     this.proc = null
     this.closed = false
     this.times = [] // the times of the frames pushed in and not yet handed back, smallest first
@@ -321,13 +332,14 @@ export class Transcoder {
   }
 
   #start() {
-    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec })
+    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth })
     const { bin, args: full } = niceWrap('ffmpeg', args, { platform: this.platform, hasNice: this.hasNice, hasIonice: this.hasIonice })
     const proc = this.spawn(bin, full, { stdio: ['pipe', 'pipe', 'pipe'] })
     this.proc = proc
     this.out = 0
     this.buf = Buffer.alloc(0)
     this.times = []
+    this.inCount = 0 // frames fed to this ffmpeg: with keepEvery, only every keepEvery-th comes back
     this.stderr = ''
     // Where nice is not available (or the wrapper was skipped), ask the kernel directly. It is the
     // same intent: this work is never allowed to slow the recorder down.
@@ -355,13 +367,15 @@ export class Transcoder {
       if (!isKey) return
       this.#start()
     }
+    const n = this.inCount++
+    try {
+      this.proc.stdin.write(buf)
+    } catch {}
+    if (this.keepEvery > 1 && n % this.keepEvery !== 0) return // dropped by ffmpeg's select filter
     const t = this.times
     let i = t.length
     while (i > 0 && t[i - 1] > tsMs) i--
     t.splice(i, 0, tsMs)
-    try {
-      this.proc.stdin.write(buf)
-    } catch {}
   }
 
   #onData(proc, chunk) {

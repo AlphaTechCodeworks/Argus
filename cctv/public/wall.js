@@ -1089,7 +1089,9 @@ $('pickCameras').addEventListener('click', () => {
 
 /** The camera list, filtered by what has been typed, grouped by site and NVR. */
 function renderPickList() {
-  const matches = searchCameras(state.all, pickSearch.value)
+  // offline cameras cannot be watched: left out, unless already on the wall (so they can be removed)
+  const usable = state.all.filter((c) => c.online || picked.has(`${c.nvr}/${c.ch}`))
+  const matches = searchCameras(usable, pickSearch.value)
   const groups = groupCameras(matches)
   pickList.replaceChildren(
     ...groups.flatMap(({ label, cameras }) => {

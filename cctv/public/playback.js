@@ -2041,18 +2041,33 @@ if (me.admin) { const st = $('sitesTab'); if (st) st.hidden = false; const se = 
 viewer = { user: me.user, admin: me.admin === true }
 state.h265 = await canDecodeH265()
 
-// camera list grouped by site and NVR
-const groups = Map.groupBy(cameras, (c) => `${c.site} · ${c.nvrName}`)
-for (const [label, list] of groups) {
-  const group = document.createElement('optgroup')
-  group.label = label
-  for (const cam of list) group.append(new Option(`${cam.ch + 1} · ${cam.name}${cam.online ? '' : ' (offline)'}`, `${cam.nvr}/${cam.ch}`))
-  cameraSel.append(group)
+// camera list grouped by site and NVR: online cameras only, so the list holds nothing that cannot
+// be used. The camera being watched stays even if it goes offline (marked so), rather than vanishing
+// from under the viewer. Re-read every 30 s, so a camera that comes back appears by itself.
+let cameraListSig = ''
+function fillCameraList(list, keep) {
+  const shown = list.filter((c) => c.online || `${c.nvr}/${c.ch}` === keep)
+  const sig = JSON.stringify(shown.map((c) => [c.nvr, c.ch, c.name, c.online]))
+  if (sig === cameraListSig) return
+  cameraListSig = sig
+  const groups = Map.groupBy(shown, (c) => `${c.site} · ${c.nvrName}`)
+  cameraSel.replaceChildren(...[...groups].map(([label, cams]) => {
+    const group = document.createElement('optgroup')
+    group.label = label
+    for (const cam of cams) group.append(new Option(`${cam.ch + 1} · ${cam.name}${cam.online ? '' : ' (offline)'}`, `${cam.nvr}/${cam.ch}`))
+    return group
+  }))
+  if (keep) cameraSel.value = keep
 }
 // ?nvr=ID&ch=N from the Live view; otherwise the first online camera
 const params = new URLSearchParams(location.search)
 const wanted = cameras.find((c) => c.nvr === params.get('nvr') && String(c.ch) === params.get('ch'))
 const first = wanted ?? cameras.find((c) => c.online) ?? cameras[0]
+if (first) fillCameraList(cameras, `${first.nvr}/${first.ch}`)
+setInterval(async () => {
+  const list = await fetch('/api/cameras').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+  if (Array.isArray(list)) fillCameraList(list, cameraSel.value || null)
+}, 30_000)
 if (!first) {
   showMessage('No cameras yet. Add an NVR with: docker exec -it tvt-cctv node cctv/nvr.mjs add')
   throw new Error('no cameras')

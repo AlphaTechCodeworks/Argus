@@ -71,6 +71,7 @@ import { makeSysinfo } from './sysinfo.mjs'
 import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
+import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
 import { ADMIN_LINKS_PATH, BODY_LIMIT as LINKS_BODY_LIMIT, LINKS_PATH, handleCameraLinks } from './camera-links.mjs'
@@ -786,9 +787,12 @@ wss.on('connection', (ws, req) => {
     return
   }
   const stream = nvr.getStream(ch, streamType)
+  // a phone asking for 15 fps gets the shared thinned stream (phone-live.mjs), when there is room
+  if (url.searchParams.get('fps') === '15' && isPhoneRequest(req.headers) && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws)) return
   stream.add(ws)
   ws.on('close', () => stream.remove(ws))
 })
+const phoneLive = new PhoneLive()
 
 const onUpgrade = (req, socket, head) => {
   // this listener is synchronous: anything that throws here would take the whole process

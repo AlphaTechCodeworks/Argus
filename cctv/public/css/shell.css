@@ -1,6 +1,9 @@
 /* The frame: sidebar, rail, phone bar. Pages keep their own layout inside .app-main. */
-body.has-shell { display: grid; grid-template-columns: var(--shell-w) minmax(0, 1fr); min-height: 100vh; margin: 0; }
-body.has-shell .app-main { display: flex; flex-direction: column; min-width: 0; min-height: 100vh; }
+/* Exactly the window's height, the main column scrolling inside it: pages built to fit the window
+   (Live, Playback, Wall) keep fitting it -- with only a minimum height, Playback's video grew and
+   pushed its controls off the bottom -- and long pages scroll with the sidebar staying put. */
+body.has-shell { display: grid; grid-template-columns: var(--shell-w) minmax(0, 1fr); height: 100vh; height: 100dvh; overflow: hidden; margin: 0; }
+body.has-shell .app-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; overflow: auto; }
 
 .app-shell { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; padding: var(--s4) var(--s3);
   background: var(--surface-1); border-right: 1px solid var(--border); overflow-y: auto; }
