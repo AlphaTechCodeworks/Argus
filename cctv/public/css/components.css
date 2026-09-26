@@ -1,0 +1,80 @@
+/* The parts every page is built from, defined once. Page stylesheets may place them but not
+   restyle them -- that rule is what stops each page drifting into its own look again. */
+
+/* ---- buttons ---- */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--s2); height: 32px; padding: 0 var(--s3);
+  border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2); color: var(--text);
+  font: 500 var(--fs-dense)/1 var(--font); cursor: pointer; transition: background var(--t-fast), border-color var(--t-fast); }
+.btn:hover { background: var(--surface-hover); }
+.btn:disabled, .btn[aria-busy="true"] { opacity: 0.5; cursor: default; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn-primary:hover { background: var(--accent-strong); }
+.btn-danger { background: var(--bad-soft); border-color: transparent; color: var(--bad); }
+.btn-ghost { background: none; border-color: transparent; color: var(--text-muted); }
+.btn-ghost:hover { color: var(--text); background: var(--surface-hover); }
+.btn-sm { height: 28px; padding: 0 var(--s2); }
+.btn-icon { width: 32px; padding: 0; }
+.btn svg, .btn-icon svg { width: 18px; height: 18px; }
+
+/* ---- segmented control and pills ---- */
+.seg { display: inline-flex; padding: 2px; gap: 2px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); }
+.seg button { border: 0; background: none; color: var(--text-muted); font: 500 var(--fs-meta)/1 var(--font); padding: 6px 10px; border-radius: 4px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--surface-3); color: var(--text); }
+.pills { display: flex; flex-wrap: wrap; gap: var(--s1); }
+.pills button { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); font: 500 var(--fs-dense)/1 var(--font);
+  padding: 7px 14px; border-radius: 999px; cursor: pointer; }
+.pills button[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+
+/* ---- panels and cards ---- */
+.panel { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s5); box-shadow: var(--shadow); }
+.panel-head { display: flex; align-items: center; gap: var(--s3); margin: 0 0 var(--s4); }
+.panel-head h2 { font-size: var(--fs-section); font-weight: 600; margin: 0; }
+.panel-head > :last-child { margin-left: auto; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s4); }
+.card-label { color: var(--text-muted); font-size: var(--fs-meta); }
+.card-figure { font-size: var(--fs-figure); font-weight: 600; margin: 2px 0; }
+.card-meta { color: var(--text-faint); font-size: var(--fs-meta); }
+
+/* ---- forms ---- */
+.field { display: flex; flex-direction: column; gap: var(--s1); font-size: var(--fs-dense); color: var(--text-muted); min-width: 0; }
+.field-row { display: flex; flex-wrap: wrap; gap: var(--s3) var(--s4); align-items: flex-end; }
+.field-help { color: var(--text-faint); font-size: var(--fs-meta); }
+.input, .field input:not([type="checkbox"]):not([type="radio"]), .field select, .field textarea {
+  height: 34px; padding: 0 var(--s3); background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--r-sm); font: var(--fs-body) var(--font); max-width: 22rem; }
+.field textarea { height: auto; padding: var(--s2) var(--s3); }
+
+/* a checkbox sits beside its words, on the same line */
+.field-check { display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--fs-dense); color: var(--text-muted); cursor: pointer; }
+.seg .seg-label { padding: 6px 8px; font-size: var(--fs-meta); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* ---- tables ---- */
+/* scrolls inside its own box on a narrow screen instead of dragging the whole page sideways */
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); }
+.table { width: 100%; border-collapse: collapse; font-size: var(--fs-dense); }
+.table th { background: var(--surface-2); color: var(--text-muted); font-weight: 500; text-align: left; padding: var(--s2) var(--s3); white-space: nowrap; }
+.table td { padding: var(--s2) var(--s3); border-top: 1px solid var(--border); }
+.table tr:hover td { background: var(--surface-hover); }
+.table .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---- status ---- */
+.badge { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-meta); font-weight: 500; border-radius: 999px; padding: 2px 9px; }
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge-ok { color: var(--ok); background: var(--ok-soft); }
+.badge-warn { color: var(--warn); background: var(--warn-soft); }
+.badge-bad { color: var(--bad); background: var(--bad-soft); }
+.badge-neutral { color: var(--text-muted); background: var(--surface-2); }
+.statusbar { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.stat { display: inline-flex; align-items: center; gap: var(--s2); padding: 7px 12px; border-radius: var(--r-md);
+  background: var(--surface-1); border: 1px solid var(--border); font-size: var(--fs-dense); font-weight: 500; }
+.stat-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
+.stat-dot.ok { background: var(--ok); } .stat-dot.warn { background: var(--warn); } .stat-dot.bad { background: var(--bad); }
+
+/* ---- page header ---- */
+.page-head { display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--s3) var(--s4); padding: var(--s5) var(--s5) var(--s4); }
+.page-title { font-size: var(--fs-title); font-weight: 600; letter-spacing: -0.02em; margin: 0; line-height: 1.15; }
+.page-sub { color: var(--text-muted); font-size: var(--fs-dense); margin-top: 2px; }
+.page-actions { margin-left: auto; display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); }
+
+/* ---- empty state ---- */
+.empty { display: grid; place-items: center; gap: var(--s2); padding: var(--s6); color: var(--text-faint); text-align: center; }
