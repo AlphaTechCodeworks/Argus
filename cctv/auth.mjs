@@ -5,6 +5,7 @@ import { createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'no
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
+import { fileCache } from './file-cache.mjs'
 
 const scrypt = promisify(scryptCb)
 
@@ -29,7 +30,13 @@ const loadSecret = () => {
  * Older files stored just the hash per user; those accounts were created before
  * roles existed (by the owner), so they become admins.
  */
-export const loadUsers = () => {
+// read on every request and video socket (verifySession, isAdmin): from memory while the file is
+// unchanged (one stat per use, so adduser.mjs changes apply at once: file-cache.mjs)
+const usersCache = fileCache(USERS_FILE, () => readUsers())
+/** A fresh copy: callers change it and saveUsers() it. */
+export const loadUsers = () => ({ ...usersCache.get() })
+
+const readUsers = () => {
   if (!existsSync(USERS_FILE)) return {}
   const raw = JSON.parse(readFileSync(USERS_FILE, 'utf8'))
   return Object.fromEntries(
@@ -46,6 +53,7 @@ export const isAdmin = (user) => {
 export const saveUsers = (users) => {
   ensureDir(USERS_FILE)
   writeFileSync(USERS_FILE, `${JSON.stringify(users, null, 2)}\n`, { mode: 0o600 })
+  usersCache.forget()
 }
 
 export const hashPassword = async (password) => {

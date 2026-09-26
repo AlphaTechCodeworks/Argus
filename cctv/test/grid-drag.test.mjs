@@ -369,7 +369,7 @@ const listening = (win) => ['pointermove', 'pointerup', 'pointercancel', 'keydow
 {
   const { readFileSync } = await import('node:fs')
   const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8')
-  check('narrow screens: the header controls wrap (pager arrows stay visible)', /@media \(max-width: 700px\) \{ \.controls \{ flex-wrap: wrap; \} \}/.test(css))
+  check('narrow screens: the header controls wrap (pager arrows stay visible)', /@media \(max-width: 700px\)[^{]*\{ \.controls \{ flex-wrap: wrap; \} \}/.test(css))
 }
 
 // ---- stop -------------------------------------------------------------------------------------------------------------------------------------------------

@@ -232,8 +232,9 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
 
 // ---- the page's files ---------------------------------------------------------------------------
 {
-  const html = readFileSync(new URL('../public/storage.html', import.meta.url), 'utf8')
-  check('the page loads storage.js and has the ids it paints into', /storage\.js/.test(html) && ['locations', 'warnings', 'totals', 'whoami', 'logout'].every((id) => html.includes(`id="${id}"`)))
+  // (Storage is a tab of Settings now; storage.html only sends old links there)
+  const html = readFileSync(new URL('../public/settings.html', import.meta.url), 'utf8')
+  check('the page loads storage.js and has the ids it paints into', /storage\.js/.test(html) && ['sr-locations', 'sr-warnings', 'sr-totals'].every((id) => html.includes(`id="${id}"`)))
 }
 
 rmSync(data, { recursive: true, force: true })

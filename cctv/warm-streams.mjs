@@ -9,6 +9,11 @@
 // that drops off the list is let go (and lingers the usual 3 minutes, stream-hub.mjs).
 export const FIRST_SCREEN = 9
 export const CAP = 16
+// ...and, beyond that, EVERY online camera of an NVR that is not refusing streams (roomy(nvrId)):
+// an NVR takes 3.5 s on average to start a stream (up to 30 s), so any camera already streaming
+// opens at once. An NVR that has refused a stream in the last 10 minutes (nvr-2 at its bandwidth
+// budget) is left at the first-screen rule, so warm-ups never cost it a recording.
+export const ALL_CAP = 200
 const EVERY_MS = 60_000
 
 /**
@@ -17,7 +22,19 @@ const EVERY_MS = 60_000
  * @param {{ cameras: {nvr:string,ch:number,online:boolean,configured?:boolean}[], orders: Record<string,string[]> }} o
  * @returns {string[]} "nvr/ch" keys
  */
-export function pickWarm({ cameras, orders, perUser = FIRST_SCREEN, cap = CAP }) {
+export function pickWarm({ cameras, orders, perUser = FIRST_SCREEN, cap = CAP, roomy = null }) {
+  const first = pickFirst({ cameras, orders, perUser, cap })
+  if (!roomy) return first
+  const out = [...first]
+  for (const c of cameras) {
+    if (out.length >= ALL_CAP) break
+    const k = `${c.nvr}/${c.ch}`
+    if (c.online && c.configured !== false && roomy(c.nvr) && !out.includes(k)) out.push(k)
+  }
+  return out
+}
+
+function pickFirst({ cameras, orders, perUser, cap }) {
   const live = cameras.filter((c) => c.online && c.configured !== false)
   const known = new Set(live.map((c) => `${c.nvr}/${c.ch}`))
   const defaultOrder = live.map((c) => `${c.nvr}/${c.ch}`)
@@ -42,12 +59,12 @@ const quietViewer = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, send() {
  * Keeps the picked sub-streams running.
  * @param {{ cameras: () => object[], orders: () => object, streamOf: (nvrId: string, ch: number) => {add: Function, remove: Function}|null, log?: Function }} o
  */
-export function startWarmStreams({ cameras, orders, streamOf, log = console.log, everyMs = EVERY_MS }) {
+export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log = console.log, everyMs = EVERY_MS }) {
   const held = new Map() // key -> { stream, viewer }
   const run = () => {
     let want
     try {
-      want = new Set(pickWarm({ cameras: cameras(), orders: orders() }))
+      want = new Set(pickWarm({ cameras: cameras(), orders: orders(), roomy }))
     } catch (e) {
       return log(`[warm] ${e.message}`)
     }

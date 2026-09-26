@@ -18,6 +18,9 @@ const COMPRESSIBLE = /^(text\/|application\/(json|javascript|manifest\+json)|ima
 const MIN_BYTES = 1024
 const cache = new Map() // path -> { etag, raw, br, gz }
 
+/** Already served once (so it exists and is a file): serveFile skips its own checks. */
+export const isCached = (path) => cache.has(path)
+
 /** The file as it is now, compressed forms made on first use and kept until it changes. */
 export function loadFile(path, type) {
   const st = statSync(path)

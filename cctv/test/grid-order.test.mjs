@@ -574,7 +574,7 @@ const swap = (s, a, b) => s.sync.change(swapOp(s.sync.order, a, b, base()))
 
 // ---- viewer.js / index.html wiring (source scan: the viewer needs a browser) ---------------------------------------------------------------
 {
-  const src = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8')
+  const src = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8').replaceAll('\r\n', '\n') // (a Windows checkout has CRLF)
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8')
   const fn = (name) => {
     const i = src.indexOf(`function ${name}(`)
@@ -585,8 +585,8 @@ const swap = (s, a, b) => s.sync.change(swapOp(s.sync.order, a, b, base()))
   check('viewer imports the order logic and the drag controller', /from '\.\/grid-order\.js'/.test(src) && /import \{ enableGridDrag \} from '\.\/grid-drag\.js'/.test(src))
   const load = src.slice(src.indexOf('async function loadCameras'))
   check('loadCameras keeps the server\'s list (default order) and shows it in the user\'s order', /serverList = fresh/.test(load) && /const list = applyOrder\(fresh, sync\.order\)/.test(load))
-  check('the order is loaded before the first camera list', src.indexOf('await sync.load()') > 0 && src.indexOf('await sync.load()') < src.indexOf('await loadCameras()'))
-  check('unsaved changes from before are sent once the camera list is known', /await loadCameras\(\)\nif \(sync\.unsaved\) sync\.refresh\(\)/.test(src))
+  check('the order is loaded before the first camera list', src.includes('const early = Promise.all([sync.load()') && src.indexOf('await early') > 0 && src.indexOf('await early') < src.indexOf('await loadCameras(prefetched)'))
+  check('unsaved changes from before are sent once the camera list is known', /await loadCameras\(prefetched\)\r?\nif \(sync\.unsaved\) sync\.refresh\(\)/.test(src))
   check('the order is re-read with every camera-list refresh (30 s)', /setInterval\([\s\S]{0,120}loadCameras\(\)[\s\S]{0,240}sync\.refresh\(\)[\s\S]{0,40}30_000\)/.test(src))
   const vis = src.slice(src.indexOf("document.addEventListener('visibilitychange'"), src.indexOf("document.addEventListener('visibilitychange'") + 600)
   check('  and when the tab shows again', /sync\.refresh\(\)/.test(vis))

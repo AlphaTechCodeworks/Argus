@@ -2139,7 +2139,8 @@ function startNvrDay() {
   setView({ startMs: state.nvrNow - 60 * 60_000, spanMs: 2 * 60 * 60_000 })
   if (state.ranges.length) seek(Math.min(state.nvrNow - START_BACK_MS, state.ranges.at(-1)[1] - START_BACK_MS))
 }
-await start()
+// a failure here (a busy NVR, a bad answer) must not leave the rest of the page unwired
+await start().catch((e) => console.error('[playback] start', e))
 // ?t=ms: open at that moment (from Many cameras, an alarm, a shared link)
 {
   const t0 = Number(params.get('t'))
@@ -2524,10 +2525,11 @@ cameraSel.addEventListener('change', () => {
   drawFollow()
 })
 
-await loadCameraLinks()
+// (not awaited in turn: these three are independent and were three round trips one after another)
+loadCameraLinks().catch(() => {})
 
 // The diamonds belong on the timeline whether or not the list beside the picture is open.
-await loadBookmarks()
+loadBookmarks().catch(() => {})
 
 // ---- the on-screen display this app draws (osd-overlay.js) ---------------------------------------
 //
@@ -2606,5 +2608,5 @@ function drawOverlay() {
   drawOsd(ctx, layout)
 }
 
-await loadOsd()
+loadOsd().catch(() => {})
 setInterval(drawOverlay, 1000)

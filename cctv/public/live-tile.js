@@ -26,6 +26,23 @@ export const reconnectDelay = (attempts) => Math.min(RECONNECT_MAX_MS, 1000 * 2 
 // Every tile on the page, so that the network coming back (a phone moving between Wi-Fi and mobile
 // data, a laptop waking) reconnects the waiting ones at once instead of at the end of their timer.
 const liveTiles = new Set()
+
+// One timer for every tile's once-a-second status (fps badge, stall check, overlay clock): a big
+// grid had one interval per tile.
+let ticker = null
+function tickAll() {
+  if (liveTiles.size === 0) {
+    clearInterval(ticker)
+    ticker = null
+    return
+  }
+  for (const t of liveTiles) if (!t.closed) t.updateStatus()
+}
+const startTicker = () => {
+  if (ticker) return
+  ticker = setInterval(tickAll, 1000)
+  ticker.unref?.() // (Node, in tests: never what keeps the process alive)
+}
 if (typeof addEventListener === 'function') {
   addEventListener('online', () => { for (const t of liveTiles) t.reconnectNow() })
   addEventListener('pageshow', (e) => { if (e.persisted) for (const t of liveTiles) t.reconnectNow() })
@@ -109,7 +126,8 @@ export class LiveTile {
     if (typeof document !== 'undefined' && !opts.noStill) showStill(tile, this.nvr, this.ch)
     this.retry = setTimeout(() => this.connect(), startDelayMs)
     liveTiles.add(this)
-    this.statusTimer = setInterval(() => this.updateStatus(), 1000)
+    this.statusTimer = null // (the shared ticker above drives updateStatus)
+    startTicker()
   }
 
   setStatus(text, live = false) {
@@ -273,8 +291,10 @@ export class LiveTile {
         ? 'This camera sends H.265, which this browser cannot play. On Windows, Chrome and Edge need the "HEVC Video Extensions" from the Microsoft Store — installing it usually fixes this. Otherwise set the camera’s sub-stream to H.264 on the NVR.'
         : 'This browser cannot play this camera’s video format.'
     this.tile.append(msg)
-    liveTiles.delete(this)
+    liveTiles.delete(this) // (off the ticker too)
     this.closed = true
+    // its decoder and timers: this tile will never play (called from inside the player: after this turn)
+    queueMicrotask(() => { try { this.player.close() } catch {} })
     clearTimeout(this.retry)
     this.ws?.close()
   }
@@ -324,7 +344,6 @@ export class LiveTile {
     liveTiles.delete(this)
     this.closed = true
     clearTimeout(this.retry)
-    clearInterval(this.statusTimer)
     this.ws?.close()
     this.player.close()
   }

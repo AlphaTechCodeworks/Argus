@@ -29,6 +29,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DATA_DIR, loadUsers } from './auth.mjs'
+import { fileCache } from './file-cache.mjs'
 import { audit, useRights } from './audit.mjs'
 
 export const RIGHTS_FILE = join(DATA_DIR, 'rights.json')
@@ -98,7 +99,14 @@ export function cleanRights(raw) {
  * silent grant.
  * @returns {{version:number, users:Record<string, ReturnType<typeof emptyRights>>}}
  */
+// read on nearly every request (can): from memory while the file is unchanged (file-cache.mjs)
+const rightsCache = fileCache(RIGHTS_FILE, () => readRights())
+/** The stored rights (a fresh outer object: a caller may replace .users without touching the cache). */
 export function loadRights() {
+  return { ...rightsCache.get() }
+}
+
+function readRights() {
   if (!existsSync(RIGHTS_FILE)) return migrateRights()
   let raw
   try {
@@ -172,6 +180,7 @@ function writeStore(store) {
   const tmp = `${RIGHTS_FILE}.tmp-${process.pid}`
   writeFileSync(tmp, `${JSON.stringify(store, null, 1)}\n`, { mode: 0o600 })
   renameSync(tmp, RIGHTS_FILE)
+  rightsCache.forget()
 }
 
 /**

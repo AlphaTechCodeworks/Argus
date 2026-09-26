@@ -2,6 +2,7 @@
 // out to every viewer. The worker sends each stream once; everything per viewer (GOP replay, slow
 // sockets) happens here, with the same rules as live.mjs LiveStream.
 import { CAP_BYTES, gateSend } from './backpressure.mjs'
+import { replayGop } from './gop-replay.mjs'
 import { MSG, restart, streamKey, want, unwant } from './worker-ipc.mjs'
 
 const MAX_GOP_FRAMES = 400 // frames kept since the last keyframe, so new viewers start instantly
@@ -36,7 +37,7 @@ export class HubStream {
       this.hub.send(want(this.ch, this.type))
     }
     // replay the current GOP so the picture appears without waiting for the next keyframe
-    if (this.gop.length > 0) for (const msg of this.gop) ws.send(msg)
+    if (this.gop.length > 0) replayGop(this.gop, ws)
     else ws.waitForKey = true
   }
 

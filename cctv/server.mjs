@@ -75,7 +75,7 @@ import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs
 import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
-import { fileResponse, warmFiles } from './static-files.mjs'
+import { isCached, fileResponse, warmFiles } from './static-files.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
 import { allGridOrders } from './user-prefs.mjs'
 import { pool as playbackTranscodes } from './transcode.mjs'
@@ -456,7 +456,8 @@ const sendJson = (res, status, data, headers = {}) => {
 const serveFile = (res, pathname, req = null) => {
   // join() resolves any ../ segments, so the prefix check blocks path traversal
   const file = join(PUBLIC_DIR, pathname === '/' ? '/index.html' : pathname)
-  if (!file.startsWith(`${PUBLIC_DIR}/`) || !existsSync(file) || !statSync(file).isFile()) {
+  // (a file already served skips the two disk checks: loadFile's own stat still sees a change)
+  if (!file.startsWith(`${PUBLIC_DIR}/`) || (!isCached(file) && (!existsSync(file) || !statSync(file).isFile()))) {
     res.writeHead(404, SECURITY_HEADERS).end('Not found')
     return
   }
@@ -760,7 +761,8 @@ const handleRequest = async (req, res) => {
     })
   }
   if (pathname === '/api/sites') return sendJson(res, 200, [...nvrs.values()].map((n) => n.info()))
-  if (pathname === '/api/cameras') return sendJson(res, 200, allCameras())
+  // only the cameras this user may watch live (rights.mjs; an admin sees all)
+  if (pathname === '/api/cameras') return sendJson(res, 200, who.admin ? allCameras() : allCameras().filter((c) => can(who, 'live', { nvr: c.nvr, ch: c.ch })))
   if (handleMapsRead(pathname, res, sendJson, SECURITY_HEADERS)) return
   if (pathname.startsWith('/api/exports')) {
     const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
@@ -820,11 +822,14 @@ wss.on('connection', (ws, req) => {
     ws.close(1013, 'unknown NVR')
     return
   }
+  const user = currentUser(req)
+  const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
+  const target = { nvr: nvr.id, ch: Number(url.searchParams.get('ch')) }
   if (url.pathname === '/playback') {
     // server recordings (src=auto) or the NVR as before; the "NVR offline" refusal is for NVR
     // sessions only (server playback runs without the NVR), see rec-playback.mjs
-    const user = currentUser(req)
-    connectPlayback({ nvr, ws, url, who: { user, admin: AUTH_OFF || auth.isAdmin(user) }, index: recIndex() })
+    if (!can(who, 'playback-server', target) && !can(who, 'playback-nvr', target)) return ws.close(1008, 'not allowed')
+    connectPlayback({ nvr, ws, url, who, index: recIndex() })
     return
   }
   if (url.pathname === '/motion') {
@@ -832,6 +837,7 @@ wss.on('connection', (ws, req) => {
     motionScan(nvr, ws, url)
     return
   }
+  if (url.pathname !== '/motion' && !can(who, 'live', target)) return ws.close(1008, 'not allowed')
   // live video: with a live worker, the worker's own login decides (it polls the camera list)
   if (!nvr.liveOnline) {
     ws.close(1013, 'NVR offline')
@@ -860,6 +866,11 @@ const phoneLive = new PhoneLive()
 startWarmStreams({
   cameras: allCameras,
   orders: allGridOrders,
+  // every camera of an NVR with no refused stream in the last 10 minutes (warm-streams.mjs)
+  roomy: (id) => {
+    const n = nvrs.get(id)
+    return Boolean(n?.liveOnline) && refusalsOf(n) === 0
+  },
   streamOf: (id, ch) => {
     const n = nvrs.get(id)
     return n?.liveOnline ? n.getStream(ch, 1) : null

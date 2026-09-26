@@ -11,6 +11,7 @@
 // A phone asks with &fps=15 on its /live socket; the server grants it only to a browser that says
 // it is a phone (isPhoneRequest), so a PC can never end up on the thinned stream by accident.
 import { CAP_BYTES, gateSend } from './backpressure.mjs'
+import { replayGop } from './gop-replay.mjs'
 import { Transcoder, TranscodePool, CODEC_H264, CODEC_H265 } from './transcode.mjs'
 
 export const PHONE_FPS = 15
@@ -94,7 +95,7 @@ export class PhoneStream {
     clearTimeout(this.stopTimer)
     this.stopTimer = null
     this.clients.add(ws)
-    if (this.gop.length > 0) for (const m of this.gop) ws.send(m)
+    if (this.gop.length > 0) replayGop(this.gop, ws)
     else ws.waitForKey = true
   }
 

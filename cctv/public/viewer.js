@@ -840,6 +840,13 @@ document.getElementById('logout').addEventListener('click', async () => {
   location.href = '/login.html'
 })
 
+// Everything the first screen needs is asked for at once: the session, this user's order, the
+// overlay settings and the camera list were four round trips one after another (about a second of
+// empty page over mobile data).
+const fetchLists = () => Promise.all([fetch('/api/cameras').then((r) => r.json()), fetch('/api/sites').then((r) => r.json())])
+const prefetched = fetchLists()
+prefetched.catch(() => {}) // (handled where it is used; a signed-out session is sent to sign-in first)
+const early = Promise.all([sync.load(), loadOsd().catch(() => {})])
 const me = await checkSession()
 if (me) document.getElementById('whoami').textContent = me.user
 if (me?.admin) { const st = document.getElementById('sitesTab'); if (st) st.hidden = false; const se = document.getElementById('settingsTab'); if (se) se.hidden = false }
@@ -852,11 +859,8 @@ function multiSite() {
 }
 
 /** Loads cameras from every NVR; keeps the grid as is unless the list changed. */
-async function loadCameras() {
-  const [fresh, sites] = await Promise.all([
-    fetch('/api/cameras').then((r) => r.json()),
-    fetch('/api/sites').then((r) => r.json())
-  ])
+async function loadCameras(pre = null) {
+  const [fresh, sites] = await (pre ?? fetchLists())
   serverList = fresh
   const list = applyOrder(fresh, sync.order) // this user's order (the grid, the diff and the pages all use it)
   resetBtn.hidden = sync.order.length === 0
@@ -893,9 +897,8 @@ async function loadCameras() {
   else updateTiles(diff.changed)
 }
 
-await sync.load()
-await loadOsd()
-await loadCameras()
+await early
+await loadCameras(prefetched)
 if (sync.unsaved) sync.refresh()
 // the camera list, and this user's order (another screen may have changed it)
 setInterval(() => {

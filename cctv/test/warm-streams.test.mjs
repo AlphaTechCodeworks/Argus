@@ -33,5 +33,18 @@ check('a camera no longer there is not kept', !pickWarm({ cameras: cams, orders:
   check('a camera that went offline is let go', streams.get('a/0').viewers.size === 0)
 }
 
+{
+  // every online camera of an NVR that is not refusing streams, on top of the first screens
+  const cams = [
+    ...Array.from({ length: 20 }, (_, i) => ({ nvr: 'calm', ch: i, online: true })),
+    ...Array.from({ length: 20 }, (_, i) => ({ nvr: 'busy', ch: i, online: true })),
+    { nvr: 'calm', ch: 99, online: false }
+  ]
+  const got = pickWarm({ cameras: cams, orders: {}, roomy: (id) => id === 'calm' })
+  check('a calm NVR: all its online cameras are kept ready', cams.filter((c) => c.nvr === 'calm' && c.online).every((c) => got.includes(`calm/${c.ch}`)))
+  check('an offline camera is not', !got.includes('calm/99'))
+  check('a refusing NVR: only what the first-screen rule picked', got.filter((k) => k.startsWith('busy/')).length === 0)
+  check('without roomy: the old first-screen rule', pickWarm({ cameras: cams, orders: {} }).length === 9)
+}
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

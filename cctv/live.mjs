@@ -8,6 +8,7 @@
 // and repeated restarts back off. While the NVR is cooling down after late calls
 // (sdk.mjs nvrCooling), starts wait instead of adding calls to a slow NVR.
 import { CAP_BYTES, gateSend } from './backpressure.mjs'
+import { replayGop } from './gop-replay.mjs'
 import { PRIORITY, connectLane } from './lanes.mjs'
 import { CODEC_H264, FRAME_TYPE_VIDEO, FRAME_TYPE_VIDEO_FORMAT, NET_SDK, codecOf, encodeFrame, lastError, liveFrames, nvrCooling, sdkCallT } from './sdk.mjs'
 
@@ -241,7 +242,7 @@ export class LiveStream {
     this.stopTimer = null
     this.clients.add(ws)
     // replay the current GOP so the picture appears without waiting for the next keyframe
-    if (this.gop.length > 0) for (const msg of this.gop) ws.send(msg)
+    if (this.gop.length > 0) replayGop(this.gop, ws)
     else {
       ws.waitForKey = true
       this.#askKeyframe()
