@@ -1624,19 +1624,18 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
   body.phone-g2 #grid { grid-template-columns: 1fr 1fr !important; }
   body.phone-g2 .tile .name { font-size: 11px; }
 }
-/* the ‹ › on a phone's full-size camera */
+/* the ‹ › on the full-size camera: every screen (a PC had no way to step; ← → keys as well) */
 .phone-step { display: none; }
-@media (max-width: 899px) and (pointer: coarse), (pointer: coarse) and (max-height: 500px) {
-  .single-overlay .phone-step {
-    display: grid; place-items: center; position: absolute; top: 50%; z-index: 5; transform: translateY(-50%);
-    width: 40px; height: 56px; padding: 0 0 4px; border-radius: 14px; border: 1px solid rgba(255,255,255,.18);
-    background: rgba(20,22,26,.35); color: rgba(255,255,255,.85); font-size: 30px; line-height: 1;
-    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
-    animation: phone-step-hint 2.4s ease-out 1;
-  }
-  .single-overlay .phone-step-prev { left: 10px; }
-  .single-overlay .phone-step-next { right: 10px; }
+.single-overlay .phone-step {
+  display: grid; place-items: center; position: absolute; top: 50%; z-index: 5; transform: translateY(-50%);
+  width: 40px; height: 56px; padding: 0 0 4px; border-radius: 14px; border: 1px solid rgba(255,255,255,.18);
+  background: rgba(20,22,26,.35); color: rgba(255,255,255,.85); font-size: 30px; line-height: 1; cursor: pointer;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  animation: phone-step-hint 2.4s ease-out 1;
 }
+.single-overlay .phone-step:hover { background: rgba(20,22,26,.6); color: #fff; }
+.single-overlay .phone-step-prev { left: 10px; }
+.single-overlay .phone-step-next { right: 10px; }
 /* a small nudge when the camera opens, so the eye finds them */
 @keyframes phone-step-hint { 0%, 60% { opacity: 1; } 30% { opacity: .5; } 100% { opacity: .75; } }
 .phone-fs-note { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; max-width: 80%;

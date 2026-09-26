@@ -136,7 +136,7 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   }
   send(true)
   t4.suspend()
-  send(false) // (no keyframe seen yet while suspended: nothing to keep)
+  send(false)
   send(true)
   send(false)
   send(false)
@@ -147,12 +147,64 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   check('resume: the kept keyframe and the frames after it are decoded at once', pushed.slice(1).join(',') === 'reset,K,d,d', pushed.join(','))
   send(false)
   check('resume: and the stream carries on', pushed.at(-1) === 'd')
-  // nothing kept (no keyframe while suspended): reconnects, as before
+  // hidden for less than a keyframe interval: the stretch from before still counts (it was a
+  // reconnect of 0.9-2.4 s for a third of the tiles)
   t4.suspend()
   send(false)
+  pushed.length = 0
   t4.resume()
-  check('nothing kept: reconnects', w4.closed && sockets.length === socketsBefore + 1)
+  check('short hide: resumes from the keyframe before it, no reconnect', !w4.closed && pushed.join(',') === 'reset,K,d,d,d,d', pushed.join(','))
   t4.close()
+}
+// never had a keyframe (nothing kept): back from the full-size view reconnects, as before
+{
+  const t5 = new LiveTile(tileEl, { nvr: 'n1', ch: 6 }, 1, 0, { now: () => now })
+  clearTimeout(t5.retry)
+  t5.player.push = () => {}
+  t5.connect()
+  const w5 = sockets.at(-1)
+  w5.readyState = 1
+  const b = new Uint8Array(40)
+  w5.onmessage({ data: b.buffer })
+  t5.suspend()
+  const before = sockets.length
+  t5.resume()
+  check('nothing kept: reconnects', w5.closed && sockets.length === before + 1)
+  t5.close()
+}
+// the full-size view borrows the grid tile's stream of the same camera: no second connection
+{
+  const grid = new LiveTile(tileEl, { nvr: 'n1', ch: 7 }, 1, 0, { now: () => now })
+  clearTimeout(grid.retry)
+  grid.player.push = () => {}
+  grid.connect()
+  const wg = sockets.at(-1)
+  wg.readyState = 1
+  const sendG = (key) => {
+    const b = new Uint8Array(40)
+    b[0] = key ? 1 : 0
+    wg.onmessage({ data: b.buffer })
+  }
+  sendG(true)
+  sendG(false)
+  grid.suspend() // hidden under the full-size view
+  const before = sockets.length
+  const got = []
+  const overlayEl = { querySelector: (s) => ({ ...parts, '.status': el() })[s], append() {} }
+  const full = new LiveTile(overlayEl, { nvr: 'n1', ch: 7 }, 1, 0, { now: () => now, borrowFrom: grid })
+  full.player.push = (f) => got.push(f.isKey ? 'K' : 'd')
+  check('borrow: no new socket for the full-size view', sockets.length === before && full.source === grid)
+  sendG(false)
+  check('borrow: new frames reach the full-size view', got.at(-1) === 'd', got.join(','))
+  const other = new LiveTile(overlayEl, { nvr: 'n1', ch: 8 }, 1, 0, { now: () => now, borrowFrom: grid })
+  clearTimeout(other.retry)
+  check('borrow: never from a different camera', other.source === null)
+  other.close()
+  // the grid tile goes away: the full-size view connects by itself
+  grid.close()
+  full.updateStatus()
+  check('source closed: the full-size view opens its own connection', full.source === null && sockets.length === before + 1, `sockets ${sockets.length - before}`)
+  full.close()
 }
 t.close()
 console.log(failures ? `\n${failures} failed` : '\nall passed')

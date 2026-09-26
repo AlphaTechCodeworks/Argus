@@ -108,6 +108,11 @@ export class LiveTile {
     this.now = opts.now ?? (() => Date.now()) // (tests)
     this.lastDataAt = 0 // the last frame on this socket, or when it opened
     this.maxFps = opts.maxFps ?? null // a phone asks the server for its 15 fps stream (phone-live.mjs)
+    this.taps = new Set() // tiles borrowing this one's stream (#borrow)
+    this.gop = null // the stream since its last keyframe (#keep)
+    this.gopBytes = 0
+    this.source = null // the tile whose stream this one shows, when borrowing
+    this.tap = null
     let shown = false
     this.player = new VideoPlayer(tile.querySelector('canvas'), {
       pacing: opts.pacing ?? true,
@@ -129,7 +134,9 @@ export class LiveTile {
     this.setStatus('connecting…')
     // the last picture seen of this camera, at once, until its live picture arrives (stills.js)
     if (typeof document !== 'undefined' && !opts.noStill) showStill(tile, this.nvr, this.ch)
-    this.retry = setTimeout(() => this.connect(), startDelayMs)
+    // the same camera already streaming in another tile (the grid, or a camera started ahead):
+    // show its stream at once rather than open a connection of our own
+    if (!this.#borrow(opts.borrowFrom)) this.retry = setTimeout(() => this.connect(), startDelayMs)
     liveTiles.add(this)
     this.statusTimer = null // (the shared ticker above drives updateStatus)
     startTicker()
@@ -201,11 +208,20 @@ export class LiveTile {
   }
 
   updateStatus() {
+    // borrowing from a tile that has closed or lost its connection: connect by ourselves
+    if (this.source && (this.source.closed || this.source.ws?.readyState !== 1) && !this.closed) {
+      this.#unborrow()
+      this.connect()
+    }
     const s = this.player.stats
     const ws = this.ws
-    const open = ws && ws.readyState === 1 && !this.suspended && !this.closed
+    const open = (this.source ? true : ws && ws.readyState === 1) && !this.suspended && !this.closed
     const since = open ? this.now() - (this.lastDataAt || this.now()) : 0
-    if (open && since >= STALL_RECONNECT_MS) {
+    if (open && since >= STALL_RECONNECT_MS && this.source) {
+      // the borrowed stream stopped: a connection of our own
+      this.#unborrow()
+      this.connect()
+    } else if (open && since >= STALL_RECONNECT_MS) {
       // frames stopped on a socket that stays open: drop it (without waiting for its close
       // handshake, which may be stuck behind the backlog) and connect again with the back-off
       this.lastDataAt = 0
@@ -266,7 +282,12 @@ export class LiveTile {
 
   onMessage(buf) {
     if (buf.length <= HEADER_SIZE) return
-    if (this.suspended) return this.#hold(buf)
+    this.#keep(buf)
+    for (const tap of this.taps) tap(buf)
+    if (!this.suspended) this.#decode(buf)
+  }
+
+  #decode(buf) {
     const view = new DataView(buf.buffer, buf.byteOffset)
     this.player.push({
       isKey: (buf[0] & 1) === 1,
@@ -274,6 +295,58 @@ export class LiveTile {
       timestampUs: Number(view.getBigInt64(8, true)),
       data: buf.subarray(HEADER_SIZE)
     })
+  }
+
+  /**
+   * The stream since its last keyframe, kept always (at most HOLD_MAX_BYTES): what lets this tile
+   * pick up at once after being hidden (resume) and lend its picture to the full-size view (borrow).
+   */
+  #keep(buf) {
+    if ((buf[0] & 1) === 1) {
+      this.gop = [buf]
+      this.gopBytes = buf.length
+      return
+    }
+    if (!this.gop) return
+    if (this.gopBytes + buf.length > HOLD_MAX_BYTES) {
+      this.gop = null // too long a stretch to keep: nothing to lend until the next keyframe
+      return
+    }
+    this.gop.push(buf)
+    this.gopBytes += buf.length
+  }
+
+  /** Connected, with a picture's worth kept: something another tile can start from at once. */
+  get lendable() {
+    return !this.closed && this.ws?.readyState === 1 && Boolean(this.gop?.length) && this.lastDataAt > 0 && this.now() - this.lastDataAt < 3000
+  }
+
+  /**
+   * Shows another tile's stream of the same camera instead of opening a connection of its own: its
+   * kept stretch at once, then every frame it receives. Through the internet link a new connection
+   * was 1-1.8 s before the full-size view showed anything (2026-09-26). If that tile stops (closed,
+   * reconnecting), this one connects by itself (updateStatus).
+   * @returns {boolean} false: nothing to borrow (the caller connects as usual)
+   */
+  #borrow(src) {
+    if (!src?.lendable || src.streamType !== this.streamType || src.nvr !== this.nvr || src.ch !== this.ch) return false
+    this.source = src
+    this.lastDataAt = this.now()
+    for (const m of src.gop) this.onMessage(m)
+    this.tap = (buf) => {
+      this.lastDataAt = this.now()
+      this.onMessage(buf)
+    }
+    src.taps.add(this.tap)
+    return true
+  }
+
+  /** Stops borrowing (the source went away, or this tile closes). */
+  #unborrow() {
+    if (!this.source) return
+    this.source.taps.delete(this.tap)
+    this.source = null
+    this.tap = null
   }
 
   onUnsupported(codecId) {
@@ -305,27 +378,12 @@ export class LiveTile {
     this.ws?.close()
   }
 
-  /** Keeps the connection and the last picture, but decodes nothing (hidden under a full-size view). */
+  /**
+   * Keeps the connection and keeps the stream from its last keyframe (#keep), but decodes nothing:
+   * hidden under a full-size view, or started ahead as the full-size view's next camera.
+   */
   suspend() {
     this.suspended = true
-    this.held = null
-    this.heldBytes = 0
-  }
-
-  /** While suspended: the frames since the last keyframe, not decoded (see HOLD_MAX_BYTES). */
-  #hold(buf) {
-    if ((buf[0] & 1) === 1) {
-      this.held = [buf]
-      this.heldBytes = buf.length
-      return
-    }
-    if (!this.held) return
-    if (this.heldBytes + buf.length > HOLD_MAX_BYTES) {
-      this.held = null // too long a stretch to keep: resume() reconnects instead
-      return
-    }
-    this.held.push(buf)
-    this.heldBytes += buf.length
   }
 
   /**
@@ -336,12 +394,9 @@ export class LiveTile {
   resume() {
     if (!this.suspended || this.closed) return
     this.suspended = false
-    const held = this.held
-    this.held = null
-    this.heldBytes = 0
-    if (held?.length && this.ws?.readyState === 1 && this.lastDataAt && this.now() - this.lastDataAt < 3000) {
+    if (this.lendable) {
       this.player.reset()
-      for (const m of held) this.onMessage(m)
+      for (const m of this.gop) this.#decode(m)
       return
     }
     this.player.reset() // the last picture stays on the canvas until the new frames arrive
@@ -357,7 +412,7 @@ export class LiveTile {
 
   /** Waiting to reconnect (or on a dead socket): try again now, from the start of the back-off. */
   reconnectNow() {
-    if (this.closed || this.suspended) return
+    if (this.closed || this.suspended || this.source) return
     // left alone: a socket still opening, and an open one with frames in the last 2 s. An open one
     // gone quiet is replaced: after a network change a phone's socket can stay 'open' on a dead
     // connection until TCP gives up, minutes later.
@@ -376,6 +431,9 @@ export class LiveTile {
   close() {
     liveTiles.delete(this)
     this.closed = true
+    this.#unborrow()
+    this.taps.clear()
+    this.gop = null
     clearTimeout(this.retry)
     this.ws?.close()
     this.player.close()

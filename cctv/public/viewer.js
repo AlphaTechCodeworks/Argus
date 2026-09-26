@@ -151,6 +151,7 @@ function render({ keepSingle = false } = {}) {
   if (!keep) {
     singleTiles = []
     overlay = null
+    stopAhead()
   }
   grid.classList.toggle('show-stats', showStats)
   // the kept view and its panel stay in place (moving them would close an open dialog)
@@ -488,6 +489,54 @@ function leavePhoneFull() {
   if (document.fullscreenElement === grid) document.exitFullscreen().catch(() => {})
 }
 
+// ---- the full-size view: instant pictures ----
+// The full-size view shows a camera that is usually streaming already: in its grid tile (hidden
+// underneath), or started ahead as the camera either side of the one on screen (‹ ›, a flick, the
+// arrow keys). It borrows that stream (live-tile.js #borrow) instead of opening a connection of its
+// own, which through the internet link took 1-1.8 s before anything showed (2026-09-26).
+const ahead = new Map() // camKey -> LiveTile, connected but not decoded (suspended)
+function lenderFor(cam) {
+  const grid = gridTiles.find((t) => t.nvr === cam.nvr && t.ch === cam.ch && t.streamType === SUB_STREAM && t.lendable)
+  if (grid) return grid
+  const k = camKey(cam)
+  const t = ahead.get(k)
+  if (!t?.lendable) return null
+  // it becomes the full-size view's own (closed with it), no longer one started ahead
+  ahead.delete(k)
+  singleTiles.push(t)
+  return t
+}
+/** Starts the cameras either side of this one (not already on the grid page), and lets others go. */
+function startAhead(cam) {
+  const list = shownCameras(cameras, { site: siteSelect.value, hideOffline: hideOffline.checked })
+  const i = list.findIndex((c) => camKey(c) === camKey(cam))
+  const want = new Map()
+  if (i >= 0 && list.length > 1) {
+    for (const d of [1, -1]) {
+      const c = list[(i + d + list.length) % list.length]
+      if (camKey(c) !== camKey(cam)) want.set(camKey(c), c)
+    }
+  }
+  for (const [k, t] of ahead) {
+    if (want.has(k)) continue
+    t.close()
+    ahead.delete(k)
+  }
+  for (const [k, c] of want) {
+    if (ahead.has(k) || gridTiles.some((t) => t.nvr === c.nvr && t.ch === c.ch && t.streamType === SUB_STREAM && !t.closed)) continue
+    const el = document.createElement('div')
+    el.className = 'tile'
+    el.innerHTML = TILE_HTML
+    const t = new LiveTile(el, c, SUB_STREAM, 250, { ...tileOptions(c), noStill: true })
+    t.suspend()
+    ahead.set(k, t)
+  }
+}
+function stopAhead() {
+  for (const t of ahead.values()) t.close()
+  ahead.clear()
+}
+
 function openSingle(cam, { fromTap = false } = {}) {
   closeSingle({ resumeGrid: false })
   single = camKey(cam)
@@ -524,7 +573,8 @@ function openSingle(cam, { fromTap = false } = {}) {
     links.append(pic)
   }
   overlay.querySelector('.name').after(links)
-  if (isPhone()) overlay.append(nativeFullButton(overlay), ...stepArrows())
+  if (isPhone()) overlay.append(nativeFullButton(overlay))
+  overlay.append(...stepArrows()) // ‹ › on every screen (keys: ← →)
   // closing the view discards the panel's unsent changes: ask first
   overlay.addEventListener('click', () => {
     if (imagePanel.confirmDiscard()) closeSingle()
@@ -536,8 +586,9 @@ function openSingle(cam, { fromTap = false } = {}) {
   if (imagePanel.key === single) grid.append(imagePanel.el)
   else imagePanel.close()
   const opts = tileOptions(cam)
-  const sub = new LiveTile(overlay, cam, SUB_STREAM, 0, opts)
+  const sub = new LiveTile(overlay, cam, SUB_STREAM, 0, { ...opts, borrowFrom: lenderFor(cam) })
   singleTiles.push(sub)
+  startAhead(cam)
   // cameras reached through TVT P2P stay on the sub stream (the relay has little bandwidth)
   if (!noMain.has(single) && !cam.remote) upgradeToMain(overlay, cam, sub, opts)
   syncTiles()
@@ -551,6 +602,7 @@ function closeSingle({ resumeGrid = true } = {}) {
   overlay?.remove()
   overlay = null
   if (!resumeGrid) return
+  stopAhead()
   leavePhoneFull()
   imagePanel.close()
   single = null
@@ -803,6 +855,11 @@ prevBtn.addEventListener('click', () => { page--; render() })
 nextBtn.addEventListener('click', () => { page++; render() })
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && single !== null && !document.fullscreenElement && imagePanel.confirmDiscard()) closeSingle()
+  // the full-size view: ← → go through the cameras, the same as ‹ › and a flick
+  if (single !== null && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && !e.target.closest?.('input, select, textarea')) {
+    e.preventDefault()
+    stepCamera(e.key === 'ArrowRight' ? 1 : -1)
+  }
   if ((e.key === 'f' || e.key === 'F') && !e.target.closest?.('input, select, textarea')) toggleFullscreen()
   if (e.key === 'd' || e.key === 'D') {
     showStats = !showStats
