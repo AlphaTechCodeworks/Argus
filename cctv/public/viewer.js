@@ -559,7 +559,11 @@ function closeSingle({ resumeGrid = true } = {}) {
   // covered or stopped, and after the screen turned some never came back (blank tiles). A fresh
   // grid shows each camera's last picture at once and reconnects.
   if (isPhone()) {
+    // (kept where it was: rebuilding the list would otherwise jump back to the first camera)
+    const scroller = document.querySelector('.app-main') ?? document.scrollingElement
+    const top = scroller?.scrollTop ?? 0
     render()
+    if (scroller) scroller.scrollTop = top
     return
   }
   for (const t of gridTiles) t.resume()

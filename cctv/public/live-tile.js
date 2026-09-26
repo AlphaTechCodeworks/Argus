@@ -233,7 +233,7 @@ export class LiveTile {
       if (!this.closed) {
         this.opts.onDisconnect?.()
         this.setStatus('reconnecting…')
-        // back off (2, 4, 8 … 30 s) with jitter, so many tiles don't reconnect in lockstep
+        // back off (1, 2, 4, 8 s: reconnectDelay) with jitter, so many tiles don't reconnect in lockstep
         const delay = reconnectDelay(this.attempts) * (0.7 + Math.random() * 0.6)
         this.attempts++
         this.retry = setTimeout(() => this.connect(), delay)
@@ -273,6 +273,7 @@ export class LiveTile {
         ? 'This camera sends H.265, which this browser cannot play. On Windows, Chrome and Edge need the "HEVC Video Extensions" from the Microsoft Store — installing it usually fixes this. Otherwise set the camera’s sub-stream to H.264 on the NVR.'
         : 'This browser cannot play this camera’s video format.'
     this.tile.append(msg)
+    liveTiles.delete(this)
     this.closed = true
     clearTimeout(this.retry)
     this.ws?.close()
@@ -303,7 +304,12 @@ export class LiveTile {
 
   /** Waiting to reconnect (or on a dead socket): try again now, from the start of the back-off. */
   reconnectNow() {
-    if (this.closed || this.suspended || this.ws?.readyState === 1) return
+    if (this.closed || this.suspended) return
+    // left alone: a socket still opening, and an open one with frames in the last 2 s. An open one
+    // gone quiet is replaced: after a network change a phone's socket can stay 'open' on a dead
+    // connection until TCP gives up, minutes later.
+    if (this.ws?.readyState === 0) return
+    if (this.ws?.readyState === 1 && this.lastDataAt && this.now() - this.lastDataAt < 2000) return
     clearTimeout(this.retry)
     if (this.ws) {
       this.ws.onclose = null
