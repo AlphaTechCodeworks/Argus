@@ -7,7 +7,12 @@ import { MSG, restart, streamKey, want, unwant } from './worker-ipc.mjs'
 const MAX_GOP_FRAMES = 400 // frames kept since the last keyframe, so new viewers start instantly
 // slow sockets: nothing is sent over the cap (1 MB sub, 4 MB main), see backpressure.mjs
 // keep a stream wanted a while after the last viewer leaves (grid <-> full screen switching)
-const STOP_DELAY_MS = { 0: 10_000, 1: 30_000 }
+// A sub-stream (what every grid shows) is kept running for a while after its last viewer leaves, so
+// coming back to Live, paging, or closing a full-size view shows the picture at once instead of
+// waiting for the NVR to start the stream again (CCTV_SUB_LINGER_S, 180 by default). Sub-streams
+// are small; the main stream, the heavy one, still stops after 10 s.
+const SUB_LINGER_MS = (() => { const n = Number(process.env.CCTV_SUB_LINGER_S); return (Number.isFinite(n) && n >= 0 ? n : 180) * 1000 })()
+const STOP_DELAY_MS = { 0: 10_000, 1: SUB_LINGER_MS }
 
 export class HubStream {
   constructor(hub, ch, type) {
