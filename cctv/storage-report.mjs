@@ -327,7 +327,7 @@ export function driveFullCandidates(report, { days = ALERT_DAYS } = {}) {
 // The index lives in server.mjs; it hands it over once at startup rather than this module
 // reaching into it.
 
-let indexRef = null
+let indexRef = () => null
 let dataDirRef = null
 let settingsRef = null
 /**
@@ -335,7 +335,11 @@ let settingsRef = null
  * `settingsOf` is only for the offline tests, where settings.mjs cannot be loaded at all.
  */
 export function setStorageContext({ index = null, dataDir = null, settingsOf = null } = {}) {
-  indexRef = index
+  // `index` may be the recordings index itself or a function that returns it. The server has only
+  // the getter to hand at start-up, because the index is not open yet then -- and handing the
+  // getter straight through produced a page that threw "index.cameras is not a function" the first
+  // time anybody opened it. Taking either shape is cheaper than remembering which one it wants.
+  indexRef = typeof index === 'function' ? index : () => index
   dataDirRef = dataDir
   settingsRef = settingsOf
 }
@@ -352,13 +356,13 @@ export async function handleStorage(method, pathname, _readJson, user) {
   let history = {}
   try {
     if (dataDirRef) {
-      const report = buildStorageReport({ settings, index: indexRef })
+      const report = buildStorageReport({ settings, index: indexRef() })
       history = recordSample(dataDirRef, report.locations, Date.now())
     }
   } catch (e) {
     console.warn(`[storage-report] sample not taken: ${e.message}`)
   }
-  return [200, buildStorageReport({ settings, index: indexRef, history })]
+  return [200, buildStorageReport({ settings, index: indexRef(), history })]
 }
 
 export const _test = { HISTORY_FILE }
