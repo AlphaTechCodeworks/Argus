@@ -60,3 +60,10 @@ body.has-shell header .brand h1, body.has-shell header nav.tabs, body.has-shell 
     color: var(--text); font: 500 var(--fs-body) var(--font); text-decoration: none; border-radius: var(--r-sm); cursor: pointer; text-align: left; }
   .shell-sheet .icon { width: 20px; height: 20px; color: var(--text-muted); }
 }
+
+/* Before shell.js has run (theme-boot.js sets .shell-pending): hold the sidebar's space open and hide
+   what the shell replaces, so the first paint already has the final layout and nothing jumps. */
+html.shell-pending body { padding-left: var(--shell-w); }
+html.shell-pending body header .brand h1, html.shell-pending body header nav.tabs, html.shell-pending body header .account { display: none; }
+@media (max-width: 1199px) { html.shell-pending body { padding-left: var(--rail-w); } }
+@media (max-width: 699px) { html.shell-pending body { padding-left: 0; padding-bottom: calc(var(--bar-h) + env(safe-area-inset-bottom)); } }
