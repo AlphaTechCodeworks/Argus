@@ -1594,7 +1594,7 @@ body.phone-full #grid > .tile.single-overlay { position: fixed; inset: 0; width:
   .alert-banner.critical .alert-critical { font-size: 13px; }
   /* page bars: compact, and the rarely used switches left to bigger screens */
   body.has-shell .app-main > header { min-height: 0; padding: 8px 12px; gap: 8px; }
-  body.live-page .app-main > header label:has(#smooth), body.live-page .app-main > header label:has(#layout),
+  body.live-page .app-main > header label:has(#smooth),
   body.live-page .app-main > header #fullscreen, body.live-page .app-main > header label:has(#hideOffline) { display: none !important; }
 }
 
@@ -1613,3 +1613,25 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
   body.has-shell .app-main > header .controls, body.playback-page .app-main > header > div:not(.pb-mode) { width: 100%; }
   body.has-shell .app-main > header select { max-width: 60vw; }
 }
+
+/* a phone's 2 x 2: two cameras across, the page scrolling to the second row */
+@media (max-width: 700px) {
+  body.phone-g2 #grid { grid-template-columns: 1fr 1fr !important; }
+  body.phone-g2 .tile .name { font-size: 11px; }
+  body.phone-g2 .tile .status { display: none; }
+}
+/* the ‹ › on a phone's full-size camera */
+.phone-step { display: none; }
+@media (max-width: 899px) and (pointer: coarse) {
+  .single-overlay .phone-step {
+    display: grid; place-items: center; position: absolute; top: 50%; z-index: 5; transform: translateY(-50%);
+    width: 40px; height: 56px; padding: 0 0 4px; border-radius: 14px; border: 1px solid rgba(255,255,255,.18);
+    background: rgba(20,22,26,.35); color: rgba(255,255,255,.85); font-size: 30px; line-height: 1;
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    animation: phone-step-hint 2.4s ease-out 1;
+  }
+  .single-overlay .phone-step-prev { left: 10px; }
+  .single-overlay .phone-step-next { right: 10px; }
+}
+/* a small nudge when the camera opens, so the eye finds them */
+@keyframes phone-step-hint { 0%, 60% { opacity: 1; } 30% { opacity: .5; } 100% { opacity: .75; } }

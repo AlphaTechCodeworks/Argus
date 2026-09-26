@@ -452,7 +452,7 @@ function openSingle(cam, { fromTap = false } = {}) {
     links.append(pic)
   }
   overlay.querySelector('.name').after(links)
-  if (isPhone()) overlay.append(nativeFullButton(overlay))
+  if (isPhone()) overlay.append(nativeFullButton(overlay), ...stepArrows())
   // closing the view discards the panel's unsent changes: ask first
   overlay.addEventListener('click', () => {
     if (imagePanel.confirmDiscard()) closeSingle()
@@ -674,13 +674,25 @@ smoothBox.addEventListener('change', () => {
   render()
 })
 
+// A phone has room for one camera, or four: the other layouts are taken off its menu, and it keeps
+// its own choice (a PC's 4 x 4 must not follow the same user onto a phone).
+const PHONE_LAYOUTS = ['g1', 'g2']
+const LAYOUT_KEY = isPhone() ? 'cctv.layout.phone' : 'cctv.layout'
+if (isPhone()) {
+  for (const o of [...layoutSelect.querySelectorAll('option')]) if (!PHONE_LAYOUTS.includes(o.value)) o.remove()
+  for (const g of [...layoutSelect.querySelectorAll('optgroup')]) if (!g.children.length) g.remove()
+  layoutSelect.value = 'g2'
+}
+const markPhoneLayout = () => document.body.classList.toggle('phone-g2', isPhone() && layoutSelect.value === 'g2')
 try {
-  const saved = localStorage.getItem('cctv.layout')
-  if (saved && LAYOUTS[saved]) layoutSelect.value = saved
+  const saved = localStorage.getItem(LAYOUT_KEY)
+  if (saved && LAYOUTS[saved] && (!isPhone() || PHONE_LAYOUTS.includes(saved))) layoutSelect.value = saved
 } catch {}
+markPhoneLayout()
 layoutSelect.addEventListener('change', () => {
   page = 0
-  try { localStorage.setItem('cctv.layout', layoutSelect.value) } catch {}
+  markPhoneLayout()
+  try { localStorage.setItem(LAYOUT_KEY, layoutSelect.value) } catch {}
   render({ keepSingle: true })
 })
 try {
@@ -822,6 +834,31 @@ setInterval(() => {
 }
 
 // ---- phones: flick left and right to go through the cameras ----
+/** The next (dir 1) or previous (-1) camera of the grid, full-size. */
+function stepCamera(dir) {
+  const list = shownCameras(cameras, { site: siteSelect.value, hideOffline: hideOffline.checked })
+  if (list.length < 2 || single === null) return
+  const i = list.findIndex((c) => camKey(c) === single)
+  const next = list[(i + dir + list.length) % list.length]
+  if (imagePanel.confirmDiscard()) openSingle(next)
+}
+
+/** The ‹ › on a phone's full-size camera: they say a flick works, and a tap on one works too. */
+function stepArrows() {
+  return ['prev', 'next'].map((which) => {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = `phone-step phone-step-${which}`
+    b.setAttribute('aria-label', which === 'next' ? 'Next camera' : 'Previous camera')
+    b.textContent = which === 'next' ? '›' : '‹'
+    b.addEventListener('click', (e) => {
+      e.stopPropagation()
+      stepCamera(which === 'next' ? 1 : -1)
+    })
+    return b
+  })
+}
+
 // In the full-screen view, a flick moves to the next or previous camera of the grid (the same
 // site filter, offline hidden the same way, in this user's order). A tap still closes. When the
 // picture is shown turned a quarter (an upright phone that would not rotate), "left and right"
@@ -845,12 +882,8 @@ setInterval(() => {
     const along = rotated() ? dy : dx
     const across = rotated() ? dx : dy
     if (Math.abs(along) < SWIPE_PX || Math.abs(along) < Math.abs(across) * 1.5) return
-    const list = shownCameras(cameras, { site: siteSelect.value, hideOffline: hideOffline.checked })
-    if (list.length < 2) return
-    const i = list.findIndex((c) => camKey(c) === single)
-    const next = list[(i + (along < 0 ? 1 : -1) + list.length) % list.length]
     swipedAt = performance.now()
-    if (imagePanel.confirmDiscard()) openSingle(next)
+    stepCamera(along < 0 ? 1 : -1)
   }, { passive: true })
   // the click a browser sends after the flick must not close the view
   document.addEventListener('click', (e) => {
