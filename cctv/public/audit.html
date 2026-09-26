@@ -12,7 +12,7 @@
   <meta name="apple-mobile-web-app-title" content="Argus" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#0e1012" />
-  <title>Argus · Audit</title>
+  <title>Argus · Users &amp; audit</title>
   <script src="theme-boot.js"></script>
   <link rel="stylesheet" href="css/tokens.css" />
   <link rel="stylesheet" href="css/base.css" />
@@ -33,7 +33,28 @@
   </header>
 
   <main class="st-main">
-    <section class="se-section" aria-labelledby="audit-title">
+    <section class="se-section" data-tab="access" data-tab-label="Users &amp; access" data-tab-help="Who can sign in, and what each of them may watch, play back and export, per site or per camera." aria-labelledby="users-title" id="usersSection" hidden>
+      <h2 id="users-title">Accounts</h2>
+      <p class="st-help">Who can sign in. A <b>viewer</b> watches and plays back what the Rights below allow; an <b>admin</b> can change everything. Type the new person's password yourself and give it to them in person.</p>
+      <table class="hp-table"><thead><tr><th>Name</th><th>Role</th><th></th></tr></thead><tbody id="userRows"></tbody></table>
+      <form id="addUser" class="se-grid" autocomplete="off">
+        <label>Name <input id="u-name" required maxlength="64" pattern="[w.@-]{1,64}" autocapitalize="off" spellcheck="false" /></label>
+        <label>Password (8 or more) <input id="u-pass" type="password" minlength="8" autocomplete="new-password" /></label>
+        <label>Role <select id="u-role"><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label>
+        <div class="se-actions"><button type="submit" class="st-primary">Add or update</button><span id="u-msg" class="st-meta"></span></div>
+      </form>
+    </section>
+
+    <section class="se-section" data-tab="access" aria-labelledby="rights-title">
+      <h2 id="rights-title">Rights</h2>
+      <p class="st-help">What each account may do, per site or per camera. Anything not listed here is refused.</p>
+      <p id="rightsNote" class="hp-note"></p>
+      <table class="hp-table">
+        <thead id="rightsHead"></thead>
+        <tbody id="rightsRows"></tbody>
+      </table>
+    </section>
+    <section class="se-section" data-tab="log" data-tab-label="Audit log" data-tab-help="Who looked at which camera, when, and every change made." aria-labelledby="audit-title">
       <h2 id="audit-title">Audit trail</h2>
       <p class="st-help">Every sign-in, refused sign-in, settings change, export and playback view. Append-only: nothing here can be edited or removed from this page.</p>
 
@@ -59,31 +80,11 @@
       <p id="retention" class="hp-note"></p>
     </section>
 
-    <section class="se-section" aria-labelledby="users-title" id="usersSection" hidden>
-      <h2 id="users-title">Accounts</h2>
-      <p class="st-help">Who can sign in. A <b>viewer</b> watches and plays back what the Rights below allow; an <b>admin</b> can change everything. Type the new person's password yourself and give it to them in person.</p>
-      <table class="hp-table"><thead><tr><th>Name</th><th>Role</th><th></th></tr></thead><tbody id="userRows"></tbody></table>
-      <form id="addUser" class="se-grid" autocomplete="off">
-        <label>Name <input id="u-name" required maxlength="64" pattern="[w.@-]{1,64}" autocapitalize="off" spellcheck="false" /></label>
-        <label>Password (8 or more) <input id="u-pass" type="password" minlength="8" autocomplete="new-password" /></label>
-        <label>Role <select id="u-role"><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label>
-        <div class="se-actions"><button type="submit" class="st-primary">Add or update</button><span id="u-msg" class="st-meta"></span></div>
-      </form>
-    </section>
-
-    <section class="se-section" aria-labelledby="rights-title">
-      <h2 id="rights-title">Rights</h2>
-      <p class="st-help">What each account may do, per site or per camera. Anything not listed here is refused.</p>
-      <p id="rightsNote" class="hp-note"></p>
-      <table class="hp-table">
-        <thead id="rightsHead"></thead>
-        <tbody id="rightsRows"></tbody>
-      </table>
-    </section>
   </main>
 
   <script type="module" src="shell.js"></script>
   <script type="module" src="audit.js"></script>
+  <script type="module" src="page-tabs.js"></script>
   <script type="module" src="build-badge.js"></script>
 </body>
 </html>
