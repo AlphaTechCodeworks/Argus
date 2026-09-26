@@ -76,6 +76,16 @@ function fakeWs() {
   clearInterval(live.timer)
 }
 {
+  // a device that plays H.265 is sent the H.265 camera as it is: half the data, no conversion
+  const live = new AdaptiveLive({ pool: new TranscodePool(4), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9 })
+  const src = fakeSource('h265')
+  src.gop = [Buffer.from([1, 1])]
+  const ws = fakeWs()
+  live.attach('s3', { ws, nvrId: 'n1', ch: 4, type: 1, source: src, clientH265: true })
+  check('a device that plays H.265 gets the H.265 camera untouched', src.viewers.has(ws) && live.streams.size === 0)
+  clearInterval(live.timer)
+}
+{
   // no room for a conversion: the camera's own stream, never nothing
   const live = new AdaptiveLive({ pool: new TranscodePool(0), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9 })
   const src = fakeSource('cam')

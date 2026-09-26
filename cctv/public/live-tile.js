@@ -1,7 +1,14 @@
 // One live camera in a tile: streams it over WebSocket into a VideoPlayer, with reconnects.
 // Used by the live grid (viewer.js) and the map's live popup (map.js).
 import { clearStill, maybeKeepStill, showStill } from './stills.js'
-import { CODEC_H265, VideoPlayer } from './player.js'
+import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+
+// Whether this device can play H.265, told to the server with each live stream: a remote viewer
+// who can is sent an H.265 camera as it is (about half the data of H.264 for the same picture)
+// instead of a conversion. Unknown until the check answers (a moment after the page loads); a
+// stream opened before then is simply not told, and gets the safe H.264.
+let deviceH265 = null
+if (typeof window !== 'undefined') canDecodeH265().then((v) => (deviceH265 = v)).catch(() => {})
 import { drawOsd, osdIsOff, osdLayout } from './osd-overlay.js'
 
 const HEADER_SIZE = 16
@@ -195,7 +202,7 @@ export class LiveTile {
   connect() {
     this.setStatus('connecting…')
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    this.ws = new WebSocket(`${proto}://${location.host}/live?nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${this.streamType}${this.maxFps === 15 ? '&fps=15' : ''}`)
+    this.ws = new WebSocket(`${proto}://${location.host}/live?nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${this.streamType}${this.maxFps === 15 ? '&fps=15' : ''}${deviceH265 === null ? '' : `&h265=${deviceH265 ? 1 : 0}`}`)
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
     this.ws.onopen = () => (this.lastDataAt = this.now())

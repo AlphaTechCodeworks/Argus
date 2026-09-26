@@ -839,7 +839,7 @@ wss.on('connection', (ws, req) => {
   // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry
   if (isRemoteAddress(req.socket.remoteAddress)) {
     const who = `${currentUser(req) ?? '?'}|${req.headers['user-agent'] ?? ''}|${req.headers.cookie ?? ''}`
-    adaptiveLive.attach(createHash('sha1').update(who).digest('hex'), { ws, nvrId: nvr.id, ch, type: streamType, source: stream })
+    adaptiveLive.attach(createHash('sha1').update(who).digest('hex'), { ws, nvrId: nvr.id, ch, type: streamType, source: stream, clientH265: url.searchParams.get('h265') === '1' })
     return
   }
   if (url.searchParams.get('fps') === '15' && isPhoneRequest(req.headers) && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws)) return

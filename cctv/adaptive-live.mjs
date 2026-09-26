@@ -103,9 +103,10 @@ export class AdaptiveLive {
 
   /** Where a socket's frames come from at this level: a shared thinned stream, or the camera's own. */
   #streamFor(entry, level) {
-    // the camera's own stream only where it is H.264 (byte 1 of its last keyframe): an H.265 one would
-    // be black on a laptop without the HEVC codec, so that camera is converted at the next level
-    if (level === 0 && entry.source.gop?.[0]?.[1] === 1) level = 1
+    // the camera's own stream where this device can play it: H.264 always; H.265 only for a device
+    // that said it can (&h265=1) -- half the data of H.264 for the same picture. Otherwise an H.265
+    // camera is converted at the next level, never sent raw to a laptop that would show black.
+    if (level === 0 && entry.source.gop?.[0]?.[1] === 1 && !entry.clientH265) level = 1
     if (level === 0) return entry.source
     const key = `${entry.nvrId}/${entry.ch}/${entry.type}@${LEVELS[level].id}`
     let s = this.streams.get(key)
@@ -123,11 +124,11 @@ export class AdaptiveLive {
    * Takes a remote viewer's /live socket.
    * @param {string} viewerKey one per browser (the session), so all its tiles move together
    */
-  attach(viewerKey, { ws, nvrId, ch, type, source }) {
+  attach(viewerKey, { ws, nvrId, ch, type, source, clientH265 = false }) {
     const now = this.now()
     let v = this.viewers.get(viewerKey)
     if (!v) this.viewers.set(viewerKey, (v = new Viewer(viewerKey, now)))
-    const entry = { ws, nvrId, ch, type, source, stream: null }
+    const entry = { ws, nvrId, ch, type, source, clientH265, stream: null }
     entry.stream = this.#streamFor(entry, v.level)
     entry.stream.add(ws)
     v.sockets.add(entry)
@@ -179,7 +180,7 @@ export class AdaptiveLive {
       // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
       // without the HEVC codec, and the server cannot know which laptop that is. The last keyframe
       // the camera sent says which it is (byte 1 of a frame: 0 H.264, 1 H.265).
-      if (n.level === 0 && [...v.sockets].some((e) => e.source.gop?.[0]?.[1] === 1)) n = { ...n, level: 1, changedAt: v.changedAt }
+      if (n.level === 0 && [...v.sockets].some((e) => e.source.gop?.[0]?.[1] === 1 && !e.clientH265)) n = { ...n, level: 1, changedAt: v.changedAt }
       if (n.level !== v.level) this.#move(v, n.level, n.why)
       v.changedAt = n.changedAt
       v.cleanSince = n.cleanSince
