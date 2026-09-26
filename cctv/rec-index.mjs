@@ -154,6 +154,9 @@ export function openRecIndex(file) {
     oldestOf: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND loc = ? ORDER BY start_ms LIMIT ?`),
     olderThan: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND end_ms < ? ORDER BY start_ms LIMIT ?`),
     remove: db.prepare('DELETE FROM segments WHERE path = ?'),
+    // ram-spool.mjs: a segment copied from memory to a drive keeps its row, with its new place
+    moveSeg: db.prepare('UPDATE segments SET path = ?, loc = ? WHERE path = ?'),
+    locBytes: db.prepare('SELECT COALESCE(SUM(bytes), 0) AS b, COUNT(*) AS n FROM segments WHERE loc = ?'),
     has: db.prepare('SELECT 1 AS one FROM segments WHERE path = ?'),
     cameras: db.prepare('SELECT DISTINCT nvr, ch FROM segments ORDER BY nvr, ch'),
     oldGaps: db.prepare('DELETE FROM gaps WHERE to_ms < ?'),
@@ -220,6 +223,15 @@ export function openRecIndex(file) {
     byPath: (path) => one(q.byPath.get(String(path))),
     gaps: (nvr, ch, fromMs, toMs) => q.gaps.all(String(nvr), Number(ch), fromMs, toMs).map(plain),
     /** The oldest segments (all locations, or one location id). */
+    /** A segment now lives elsewhere (same footage, new file). */
+    moveSegment(oldPath, newPath, loc) {
+      q.moveSeg.run(String(newPath), loc, String(oldPath))
+    },
+    /** { bytes, segments } held at one location. */
+    locationUse: (loc) => {
+      const r = q.locBytes.get(String(loc))
+      return { bytes: Number(r.b), segments: Number(r.n) }
+    },
     oldest: (limit, { loc } = {}) => (loc ? q.oldestAt.all(loc, limit) : q.oldest.all(limit)).map(plain),
     /** One camera's oldest segments on one location. */
     oldestOf: (nvr, ch, loc, limit) => q.oldestOf.all(String(nvr), Number(ch), loc, limit).map(plain),

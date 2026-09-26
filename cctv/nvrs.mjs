@@ -26,6 +26,7 @@ import { createWarmer } from './rec-cache.mjs'
 import { downtimeGaps, recoverOrphans } from './rec-recover.mjs'
 import { cameraRecording, getSettings, onSettingsChange } from './settings.mjs'
 import { checkHealth, listLocations, onChange as onStorageChange, startHealthChecks } from './storage.mjs'
+import { SPOOL_ID, drainSpool, spoolLocation } from './ram-spool.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
 
@@ -728,12 +729,38 @@ let warmer = null
 /** "Recent footage in RAM": reads each finished segment once into the file cache (rec-cache.mjs), or null (no live worker). */
 export const recWarmer = () => warmer
 
-const recordingMsg = () => ({
-  recording: getSettings().recording,
-  locations: listLocations()
-    .filter((l) => l.health.ok)
-    .map(({ id, path, role }) => ({ id, path, role }))
-})
+const healthyLocations = () => listLocations().filter((l) => l.health.ok).map(({ id, path, role }) => ({ id, path, role }))
+const recordingMsg = () => {
+  const locations = healthyLocations()
+  // every drive down: record into memory meanwhile (ram-spool.mjs), until a drive is back or it fills
+  if (!locations.length) {
+    const spool = spoolLocation({ index })
+    if (spool) locations.push(spool)
+  }
+  return { recording: getSettings().recording, locations }
+}
+let spoolWasOn = false
+let draining = false
+/** Every 30 s: memory full or a drive back -> tell the workers; a drive back -> copy memory onto it. */
+function watchSpool() {
+  const t = setInterval(async () => {
+    if (!index) return
+    const real = healthyLocations()
+    const on = !real.length && Boolean(spoolLocation({ index }))
+    if (on !== spoolWasOn) {
+      console.warn(on ? '[spool] every storage location is down: recording into memory until one is back' : real.length ? '[spool] a storage location is back: recording goes to it' : '[spool] memory for recordings is full: recording stops until a drive is back')
+      spoolWasOn = on
+      pushRecording()
+    }
+    if (real.length && !draining && index.locationUse(SPOOL_ID).segments > 0) {
+      draining = true
+      const target = real.find((l) => l.role === 'main') ?? real[0]
+      await drainSpool({ index, target, log: (l) => console.log(l) }).catch(() => {})
+      draining = false
+    }
+  }, 30_000)
+  t.unref?.()
+}
 const pushRecording = () => {
   let msg
   try {
@@ -818,6 +845,7 @@ function startRecording() {
   onSettingsChange(pushRecording)
   onStorageChange(pushRecording)
   startHealthChecks()
+  watchSpool()
 }
 
 /** A new Nvr, with its live worker when CCTV_LIVE_WORKER=on. */
