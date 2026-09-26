@@ -1636,6 +1636,14 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
 .single-overlay .phone-step:hover { background: rgba(20,22,26,.6); color: #fff; }
 .single-overlay .phone-step-prev { left: 10px; }
 .single-overlay .phone-step-next { right: 10px; }
+/* A phone's full-size camera covers the whole screen (viewport-fit=cover), status bar and notch
+   included: what sits at its edges keeps clear of the clock, the notch and the home bar (the LIVE
+   badge was under the iPhone's clock in portrait). env() is 0 where there is nothing to avoid. */
+body.phone-full .single-overlay .status { top: calc(8px + env(safe-area-inset-top)); left: calc(8px + env(safe-area-inset-left)); }
+body.phone-full .single-overlay > .phone-fs-btn { top: calc(12px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); }
+body.phone-full .single-overlay .phone-step-prev { left: calc(10px + env(safe-area-inset-left)); }
+body.phone-full .single-overlay .phone-step-next { right: calc(10px + env(safe-area-inset-right)); }
+body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-inset-left)); padding-right: calc(8px + env(safe-area-inset-right)); padding-bottom: calc(4px + env(safe-area-inset-bottom)); }
 /* a small nudge when the camera opens, so the eye finds them */
 @keyframes phone-step-hint { 0%, 60% { opacity: 1; } 30% { opacity: .5; } 100% { opacity: .75; } }
 .phone-fs-note { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; max-width: 80%;
@@ -1669,6 +1677,9 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
 @media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   body.phone-list #grid { gap: 14px; padding: 12px 12px 24px; }
   body.phone-list #grid > .tile { border-radius: 16px; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+  /* the list has 48 cells; with a site chosen (or few cameras) the rest were black boxes all the way
+     down, which looked as if the site filter had done nothing */
+  body.phone-list .tile.tile-empty { display: none; }
   body.phone-list .tile .label { padding: 22px 12px 10px; background: linear-gradient(to top, rgba(0,0,0,.72), transparent); font-size: 14px; }
   body.phone-list .tile .label .name { font-weight: 600; }
   body.phone-list .tile:has(.dot-live, .dot-rec)::before {

@@ -132,6 +132,8 @@ export class VideoPlayer {
     this.onUnsupported = options.onUnsupported
     this.onFrame = options.onFrame
     this.onPoster = options.onPoster
+    this.paintFirst = options.paintFirst === true // live: the first picture at once (see #onDecoded)
+    this.firstPainted = false
     this.minDrawGapMs = options.maxFps > 0 ? 1000 / options.maxFps - 4 : 0 // -4: one display refresh of slack
     this.lastDrawAt = 0
     this.clock = new PlayoutClock(options.clock)
@@ -345,6 +347,15 @@ export class VideoPlayer {
       return
     }
     if (!this.paused) this.clock.schedule(ts, performance.now())
+    // The first picture after a (re)start is painted the moment it is decoded rather than after
+    // the playout delay (350 ms, more with Smooth): the camera appears at once, and the frames
+    // after it still play out through the buffer that evens out the NVRs' bursts. (A camera opened
+    // full-size took 0.5-1.1 s to show anything even with its stream already here, 2026-09-26.)
+    if (this.paintFirst && !this.firstPainted && !this.paused) {
+      this.firstPainted = true
+      this.#draw(frame.clone(), performance.now())
+      this.onFrame?.(ts)
+    }
     this.queue.push({ frame, ts })
     while (this.queue.length > (this.paused ? MAX_PAUSED_FRAMES : MAX_QUEUED_FRAMES)) {
       this.queue.shift().frame.close()
@@ -674,6 +685,7 @@ export class VideoPlayer {
     for (const { frame } of this.queue) frame.close()
     this.queue = []
     this.clock.reset()
+    this.firstPainted = false
     this.needKey = true
     if (this.held) this.held.length = 0
     this.skipTs = null

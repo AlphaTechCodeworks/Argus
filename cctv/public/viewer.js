@@ -122,7 +122,8 @@ function tileLabel(cam) {
 
 function makeTile(cam) {
   const tile = document.createElement('div')
-  tile.className = 'tile'
+  // an unused cell: a grid keeps its shape with it; the phone's list leaves it out (style.css)
+  tile.className = cam ? 'tile' : 'tile tile-empty'
   tile.innerHTML = TILE_HTML
   tile.querySelector('.name').textContent = tileLabel(cam)
   return tile
@@ -538,7 +539,17 @@ function stopAhead() {
 }
 
 function openSingle(cam, { fromTap = false } = {}) {
-  closeSingle({ resumeGrid: false })
+  // the camera being left (a step with ‹ ›): the connection that carries its stream is kept, started
+  // ahead as the new camera's neighbour, rather than closed and opened again a moment later
+  const leftCam = singleCam
+  const leaving = leftCam && singleTiles.find((t) => t.streamType === SUB_STREAM && t.nvr === leftCam.nvr && t.ch === leftCam.ch && !t.closed)
+  const owner = leaving ? (leaving.source ?? leaving) : null
+  const keep = owner && !gridTiles.includes(owner) && owner.ws?.readyState === 1 && !ahead.has(camKey(leftCam)) ? owner : null
+  closeSingle({ resumeGrid: false, keep })
+  if (keep) {
+    keep.suspend()
+    ahead.set(camKey(leftCam), keep)
+  }
   single = camKey(cam)
   singleCam = cam
   for (const t of gridTiles) t.suspend()
@@ -596,8 +607,8 @@ function openSingle(cam, { fromTap = false } = {}) {
 }
 
 /** Back to the grid: the grid tiles pick up again straight away. */
-function closeSingle({ resumeGrid = true } = {}) {
-  for (const t of singleTiles) t.close()
+function closeSingle({ resumeGrid = true, keep = null } = {}) {
+  for (const t of singleTiles) if (t !== keep) t.close()
   singleTiles = []
   overlay?.remove()
   overlay = null

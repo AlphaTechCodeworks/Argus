@@ -116,6 +116,7 @@ export class LiveTile {
     let shown = false
     this.player = new VideoPlayer(tile.querySelector('canvas'), {
       pacing: opts.pacing ?? true,
+      paintFirst: true, // the camera appears the moment its first keyframe is decoded
       clock: opts.clock,
       maxFps: opts.maxFps,
       onUnsupported: (codecId) => (opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)),
