@@ -190,7 +190,10 @@ export function coverageAt(cameras, t) {
  */
 export function tileState({ available = true, codec = 'h264', h265 = true, stretches = [], atMs = null, undecodable = false, error = null } = {}) {
   if (error) return { kind: 'error', text: error }
-  if (undecodable || (codec === 'h265' && !h265)) {
+  // Only when playing it actually failed: the server converts H.265 for a browser that cannot play
+  // it (NVR sub-streams and server recordings alike), so a codec known in advance is no reason to
+  // give up before trying -- the wall used to refuse every H.265 camera on such a laptop.
+  if (undecodable) {
     return { kind: 'undecodable', text: 'H.265 — this PC cannot decode it. Set this camera to H.264, or open it on a PC that can.' }
   }
   if (!available) return { kind: 'unavailable', text: 'No recordings of this camera on the server.' }
