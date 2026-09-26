@@ -65,6 +65,10 @@ check('no evidence at all is not a crash', typeof summarise() === 'string')
   check('not when stuck on something else', !recoveryPlan({ ...stale, blockedIn: 'futex', kernelStack: [] }, [], T).recover)
   const many = Array.from({ length: MAX_RECOVERIES }, (_, i) => T - i * 60_000)
   check('not a fourth time in an hour: then it needs a person', !recoveryPlan(stale, many, T).recover)
+  const quiet = { nas: stale.nas, shareStuck: ['/srv/cctv-net/backups'] }
+  const q = recoveryPlan(quiet, [], T)
+  check('a share stuck while the server still answers is remounted too', q.recover && q.mounts[0] === '/srv/cctv-net/backups', JSON.stringify(q))
+  check('  but not with the NAS off', !recoveryPlan({ ...quiet, nas: [{ host: 'x', ping: 'answers', smb445: 'closed' }] }, [], T).recover)
   check('but again once the hour has passed', recoveryPlan(stale, many, T + 2 * 3_600_000).recover)
 }
 

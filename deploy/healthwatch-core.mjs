@@ -55,13 +55,17 @@ export const RECOVER_WINDOW_MS = 60 * 60_000
  * @returns {{ recover: boolean, why: string, mounts?: string[] }}
  */
 export function recoveryPlan(ev = {}, recentRecoveries = [], nowMs = 0) {
-  const stuckOnShare = /cifs|smb|nfs/i.test(`${ev.blockedIn ?? ''} ${(ev.kernelStack ?? []).join(' ')}`)
+  // either the server itself is stuck in a share call, or the watcher's own check of a share is
+  // (ev.shareStuck: mount points): the server no longer waits on shares, so it can be answering
+  // perfectly well while every recording has nowhere to go
+  const shareStuck = ev.shareStuck ?? []
+  const stuckOnShare = shareStuck.length > 0 || /cifs|smb|nfs/i.test(`${ev.blockedIn ?? ''} ${(ev.kernelStack ?? []).join(' ')}`)
   if (!stuckOnShare) return { recover: false, why: 'not stuck on a network share' }
   const nasUp = (ev.nas ?? []).length > 0 && ev.nas.every((n) => n.ping === 'answers' && n.smb445 === 'open')
   if (!nasUp) return { recover: false, why: 'the NAS itself is not answering: a remount would hang too' }
   const recent = recentRecoveries.filter((t) => nowMs - t < RECOVER_WINDOW_MS)
   if (recent.length >= MAX_RECOVERIES) return { recover: false, why: `already recovered ${recent.length} times in the last hour: needs a person` }
-  const mounts = (ev.networkMounts ?? []).map((l) => l.split(' ')[1]).filter(Boolean)
+  const mounts = shareStuck.length ? shareStuck : (ev.networkMounts ?? []).map((l) => l.split(' ')[1]).filter(Boolean)
   if (!mounts.length) return { recover: false, why: 'no network mount found to reset' }
   return { recover: true, why: 'stuck on a stale share while the NAS answers', mounts }
 }

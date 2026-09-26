@@ -28,21 +28,74 @@ import { execFile } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { request } from 'node:https'
 import { join } from 'node:path'
-import { decide, recoveryPlan, summarise } from './healthwatch-core.mjs'
+import { FAILS_TO_OPEN, decide, recoveryPlan, summarise } from './healthwatch-core.mjs'
 
 const URL_HEALTH = process.env.CCTV_WATCH_URL ?? 'https://127.0.0.1:8443/healthz'
 const EVERY_MS = Number(process.env.CCTV_WATCH_EVERY_MS ?? 30_000)
 const DIR = process.env.CCTV_WATCH_DIR ?? '/var/log/cctv/incidents'
 const SETTINGS = process.env.CCTV_SETTINGS ?? '/var/lib/private/cctv/settings.json'
 
-/** Runs a command with a hard timeout; never throws, always returns text. */
+/**
+ * Runs a command with a hard timeout; never throws, always returns text, and always within the
+ * timeout: a command stuck in a stale share cannot be killed, and waiting for it to exit would
+ * hang the watcher exactly the way the server hung.
+ */
 function run(cmd, args, ms = 5000) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: ms, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, out, errOut) => {
-      if (err && err.killed) return resolve(`(timed out after ${ms} ms)`)
-      resolve(String(out || errOut || err?.message || '').trim())
+    let done = false
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    const child = execFile(cmd, args, { timeout: ms, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, out, errOut) => {
+      if (err && err.killed) return finish(`(timed out after ${ms} ms)`)
+      finish(String(out || errOut || err?.message || '').trim())
     })
+    child.unref()
+    setTimeout(() => finish(`(timed out after ${ms} ms)`), ms + 1000).unref()
   })
+}
+
+// ---- the shares themselves ----------------------------------------------------------------------
+// One small check per share per tick (statfs, what a recording needs to know first). A check still
+// stuck from before is not joined by another: stuck processes would pile up by the hundred.
+const SHARE_CHECK_MS = 10_000
+const shareChecks = new Map() // mount -> { child, since } while a check is out
+const shareFails = new Map() // mount -> failed checks in a row
+
+function networkMountPoints() {
+  try {
+    return readFileSync('/proc/mounts', 'utf8').split('\n').filter((l) => /\s(cifs|smb3|nfs4?)\s/.test(l)).map((l) => l.split(' ')[1])
+  } catch {
+    return []
+  }
+}
+
+/** Whether a share answers a statfs within SHARE_CHECK_MS. */
+function checkShare(mount) {
+  const prev = shareChecks.get(mount)
+  if (prev) return Promise.resolve(false)
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (ok) => { if (!done) { done = true; resolve(ok) } }
+    const child = execFile('stat', ['-f', '-c', '%b', mount], { timeout: SHARE_CHECK_MS, killSignal: 'SIGKILL' }, (err) => {
+      shareChecks.delete(mount)
+      finish(!err)
+    })
+    child.unref()
+    shareChecks.set(mount, { child, since: Date.now() })
+    setTimeout(() => finish(false), SHARE_CHECK_MS + 500).unref()
+  })
+}
+
+/** Mount points whose checks have failed FAILS_TO_OPEN times in a row. */
+async function stuckShares(needed) {
+  const out = []
+  for (const m of networkMountPoints()) {
+    const ok = await checkShare(m)
+    const n = ok ? 0 : (shareFails.get(m) ?? 0) + 1
+    shareFails.set(m, n)
+    if (n >= needed) out.push(m)
+    if (!ok) log('share-check-failed', { mount: m, inARow: n, stuckFor: shareChecks.get(m) ? Date.now() - shareChecks.get(m).since : 0 })
+  }
+  return out
 }
 
 /** One health probe: { ok, ms, status, error }. Never throws. */
@@ -169,6 +222,18 @@ async function tick() {
     if (state.open !== null && Date.now() - lastTryAt >= RETRY_MS) {
       const action = await maybeRecover(await evidence())
       if (action.startsWith('Fixed')) await notify('CCTV server: tried again', action)
+    }
+  }
+  if (p.ok && Date.now() - lastTryAt >= RETRY_MS) {
+    // the server answers, but a share it records to may be stuck: it no longer freezes the server,
+    // so nothing else would notice while recordings have nowhere to go
+    const stuck = await stuckShares(FAILS_TO_OPEN)
+    if (stuck.length) {
+      const ev = { ...(await evidence()), shareStuck: stuck }
+      const action = await maybeRecover(ev)
+      await notify('CCTV: network share stuck', `${stuck.join(', ')} stopped answering; recordings to it were paused.
+${action}`)
+      for (const m of stuck) shareFails.set(m, 0)
     }
   }
   return p
