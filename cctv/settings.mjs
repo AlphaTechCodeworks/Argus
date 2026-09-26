@@ -39,6 +39,8 @@ export const DEFAULTS = Object.freeze({
     email: { host: '', port: 587, secure: false, user: '', pass: '', from: '', to: [] },
     // other systems told of alerts and alarms: [{ url, secret }] (alert-send.mjs webhook)
     webhooks: [],
+    // yesterday's report at 07:00 site time, through the same channels (reports.mjs)
+    dailySummary: true,
     muted: [],
     notRecordingMinutes: 5,
     clockSkewSeconds: 30
@@ -196,6 +198,7 @@ function fromFile(j) {
       tryPart(() => (s.alerts.ntfy.topic = topic(a.ntfy.topic)))
     }
     if (Array.isArray(a.webhooks)) tryPart(() => (s.alerts.webhooks = webhookList(a.webhooks, [])))
+    if (typeof a.dailySummary === 'boolean') s.alerts.dailySummary = a.dailySummary
     if (isPlainObject(a.email)) {
       for (const k of ['host', 'user', 'pass', 'from']) tryPart(() => (s.alerts.email[k] = str('', 200)(a.email[k])))
       tryPart(() => (s.alerts.email.port = int('', 1, 65535)(a.email.port)))
@@ -322,7 +325,8 @@ export function saveSettings(patch, user, { internal = false } = {}) {
   }
   if ('alerts' in patch) {
     const al = needObject(patch.alerts, 'alerts')
-    knownKeys(al, ['ntfy', 'email', 'webhooks', 'muted', 'notRecordingMinutes', 'clockSkewSeconds'], 'alerts.')
+    knownKeys(al, ['ntfy', 'email', 'webhooks', 'dailySummary', 'muted', 'notRecordingMinutes', 'clockSkewSeconds'], 'alerts.')
+    if ('dailySummary' in al) next.alerts.dailySummary = Boolean(al.dailySummary)
     // a secret given back as 'set' (how the API shows one) keeps the one already stored for that URL
     if ('webhooks' in al) next.alerts.webhooks = webhookList(al.webhooks, next.alerts.webhooks ?? [])
     if ('ntfy' in al) {

@@ -127,6 +127,10 @@ const DRIFT_MS = 4_000
 const measured = new Map()
 /** The sync's last reading of this NVR's clock: { driftMs, at } or null. */
 export const measuredDrift = (nvrId) => measured.get(nvrId) ?? null
+
+/** Each NVR's time zone as read at its last clock check: minutes to add to UTC (site-time.mjs). */
+const zones = new Map()
+export const zoneOffsets = () => [...zones.values()]
 const SYNC_EVERY_MS = 15 * 60_000 // check every 15 minutes
 /** An NVR that could not be checked or set is tried again this soon, not at the next full pass. */
 const RETRY_MS = 5 * 60_000
@@ -145,9 +149,11 @@ export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 
       () => transparent(nvr, 'queryTimeCfg', QUERY_TIME, 'clock check', { outBytes: 16 * 1024 }),
       { tries, waitMs, sleep }
     )
+    // the site's time zone, as the NVRs have it (site-time.mjs), whatever their clock says
+    const offsetMs = zoneOffsetMs(cur.timeZone, cur.daylight)
+    if (offsetMs !== null) zones.set(nvr.id, offsetMs / 60_000)
     if (cur.sync === 'NTP') return { nvr: nvr.id, drift: null, changed: false, why: 'it takes its time from NTP itself' }
 
-    const offsetMs = zoneOffsetMs(cur.timeZone, cur.daylight)
     if (offsetMs === null) return { nvr: nvr.id, drift: null, changed: false, why: `its timezone (${cur.timeZone ?? 'unknown'}) is not one this can work out` }
 
     // what the NVR says its clock reads, read back as a moment

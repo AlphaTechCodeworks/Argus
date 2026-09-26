@@ -39,6 +39,7 @@
 //   POST /api/admin/backfill/run    -> starts the job (still only works inside the window)
 //   POST /api/admin/backfill/stop   -> stops it; anything in flight is closed cleanly
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { siteMinutesOfDay } from './site-time.mjs'
 import { join } from 'node:path'
 import { DATA_DIR, isAdmin } from './auth.mjs'
 
@@ -257,10 +258,9 @@ export function inWindow(minutes, startHhmm, endHhmm) {
 }
 
 /** Minutes past local midnight for a wall-clock time. */
-export const minutesOfDay = (ms) => {
-  const d = new Date(ms)
-  return d.getHours() * 60 + d.getMinutes()
-}
+// on the site's clock (site-time.mjs), not the server's: the server runs on UTC, so 01:00-05:00 was
+// 21:00-01:00 on site
+export const minutesOfDay = (ms) => siteMinutesOfDay(ms)
 
 /** How long until the window opens again (0 while it is open). */
 export function msUntilWindow(ms, startHhmm, endHhmm) {

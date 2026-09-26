@@ -1725,3 +1725,27 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .hp-live.stale { color: var(--warn); }
 .hp-live.stale::before { background: var(--text-faint); }
 @keyframes hp-pulse { 0% { box-shadow: 0 0 0 0 var(--ok-soft); } 100% { box-shadow: 0 0 0 8px transparent; } }
+
+/* ---- Reports (reports.html) ---- */
+.rp-main { max-width: 1100px; }
+.rp-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.rp-head h2 { margin: 0; font-size: 18px; }
+.rp-periods { display: inline-flex; gap: 4px; background: var(--panel); border-radius: 10px; padding: 3px; }
+.rp-periods button { border: 0; background: transparent; padding: 6px 12px; border-radius: 8px; color: var(--muted); }
+.rp-periods button[aria-pressed="true"] { background: var(--bg); color: var(--text); font-weight: 600; }
+.rp-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.rp-card { background: var(--panel); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; }
+.rp-card b { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.rp-card span { color: var(--muted); font-size: 12px; }
+.rp-card.warn b { color: var(--warn, #d29922); }
+.rp-two { display: grid; grid-template-columns: 1fr; gap: 14px; }
+@media (min-width: 800px) { .rp-two { grid-template-columns: 1fr 1fr; } }
+.rp-table td:last-child, .rp-table th:last-child { text-align: right; }
+.rp-share { display: inline-flex; align-items: center; gap: 8px; min-width: 160px; font-variant-numeric: tabular-nums; }
+.rp-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; min-width: 80px; }
+.rp-bar i { display: block; height: 100%; background: var(--live, #2ea043); }
+.rp-bar.mostly i { background: var(--warn, #d29922); }
+.rp-bar.poor i { background: var(--danger, #da3633); }
+.rp-all > summary { cursor: pointer; list-style: none; }
+.rp-all > summary::-webkit-details-marker { display: none; }
+.rp-all > summary h2 { display: inline; }

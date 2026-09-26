@@ -48,6 +48,9 @@
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
 import { createHash } from 'node:crypto'
+import { readAlerts } from './alert-log.mjs'
+import { PERIODS, composeReport, countInThread, periodWindow, startDailySummary } from './reports.mjs'
+import { commonOffset, useSiteOffset } from './site-time.mjs'
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
@@ -64,7 +67,7 @@ import { handleStreams } from './streams.mjs'
 import { ADMIN_OSD_PATH, OSD_PATH, handleCameraNotes, handleOsd as handleCameraOsd, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
-import { handleClockWrite, measuredDrift, startClockSync } from './nvr-clock.mjs'
+import { handleClockWrite, measuredDrift, startClockSync, zoneOffsets } from './nvr-clock.mjs'
 import { handleSettings } from './settings-api.mjs'
 import { cameraRecording, getSettings } from './settings.mjs'
 import { startAlerts } from './alert-checks.mjs'
@@ -82,7 +85,7 @@ import { pool as playbackTranscodes } from './transcode.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
 import { ADMIN_LINKS_PATH, BODY_LIMIT as LINKS_BODY_LIMIT, LINKS_PATH, handleCameraLinks } from './camera-links.mjs'
-import { LIVE_WORKER, P2P_ENABLED, allCameras, nvrs, readConfig, recIndex, startNvrs, stopNvrs } from './nvrs.mjs'
+import { LIVE_WORKER, P2P_ENABLED, REC_DB, allCameras, nvrs, readConfig, recIndex, startNvrs, stopNvrs } from './nvrs.mjs'
 import { runHousekeeping } from './housekeeping.mjs'
 import { playbackApi } from './playback.mjs'
 import { timelineApi } from './rec-api.mjs'
@@ -634,6 +637,16 @@ const handleRequest = async (req, res) => {
       setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500)
       return
     }
+    // Reports: a day, a week or a month of recording, per camera and in total (reports.mjs, admins)
+    if (req.method === 'GET' && pathname === '/api/admin/reports') {
+      if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can see reports' })
+      const period = PERIODS.includes(url.searchParams.get('period')) ? url.searchParams.get('period') : 'week'
+      try {
+        return sendJson(res, 200, await reportFor(period))
+      } catch (e) {
+        return sendJson(res, 500, { error: `The report could not be made: ${e.message}` })
+      }
+    }
     // Settings > Server: reboot the whole machine (machine-reboot.mjs: a root unit does it)
     if (req.method === 'POST' && pathname === '/api/admin/reboot') {
       if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can reboot the machine' })
@@ -931,6 +944,31 @@ const onUpgrade = (req, socket, head) => {
 
 const httpServer = createServer(onRequest)
 httpServer.on('upgrade', onUpgrade)
+// Reports (reports.mjs): made in their own thread, kept a few minutes (a page re-opened, the daily
+// summary and the page asking for the same day) so the database is not counted again for nothing
+const reportCache = new Map() // period -> { at, rep }
+async function reportFor(period) {
+  const hit = reportCache.get(period)
+  const keepMs = period === 'today' ? 60_000 : 5 * 60_000
+  if (hit && Date.now() - hit.at < keepMs) return hit.rep
+  const w = periodWindow(period)
+  const counts = await countInThread(REC_DB, w.fromMs, w.toMs)
+  const rep = composeReport({ counts, cameras: allCameras(), fromMs: w.fromMs, toMs: w.toMs, storageHistory: readHistory(auth.DATA_DIR), alerts: readAlerts(auth.DATA_DIR, w.fromMs), label: w.label })
+  reportCache.set(period, { at: Date.now(), rep })
+  return rep
+}
+// yesterday's report at 07:00 site time through the alert channels (ntfy, webhooks), unless switched off
+{
+  const reportSender = makeSender({ settings: () => getSettings().alerts ?? {}, log: console.log })
+  startDailySummary({
+    dataDir: auth.DATA_DIR,
+    buildYesterday: () => reportFor('yesterday'),
+    deliver: (alerts, kind) => reportSender.deliver(alerts, kind),
+    enabled: () => getSettings().alerts?.dailySummary !== false && Boolean(getSettings().alerts?.ntfy?.topic || getSettings().alerts?.webhooks?.length)
+  })
+}
+// the site's wall clock (backfill window, alarm schedules, reports): the NVRs' own time zone
+useSiteOffset(() => commonOffset(zoneOffsets()))
 // every link between app files carries this release, so no cache (Cloudflare's 4 h among them)
 // can hand a browser an old or mixed set of files after a deploy (static-files.mjs)
 setAssetStamp(RELEASE)

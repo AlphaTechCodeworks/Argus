@@ -55,6 +55,7 @@ export function makeSender({ settings, fetchImpl = fetch, mailImpl = noMailer, n
   const subject = (alerts) => `CCTV: ${alerts[0].title}${alerts.length > 1 ? ` (and ${alerts.length - 1} more)` : ''}`
 
   function text(alerts, kind) {
+    if (kind === 'report') return alerts.map((a) => a.detail ?? '').join('\n\n')
     const head = kind === 'cleared' ? 'OK again:' : 'Problem:'
     return [`${head}`, ...alerts.map((a) => `${stamp(now())}  ${line(a)}`)].join('\n')
   }
@@ -67,8 +68,8 @@ export function makeSender({ settings, fetchImpl = fetch, mailImpl = noMailer, n
       method: 'POST',
       headers: {
         Title: subject(alerts),
-        Priority: kind === 'cleared' ? 'default' : 'high',
-        Tags: kind === 'cleared' ? 'white_check_mark' : 'rotating_light'
+        Priority: kind === 'report' ? 'low' : kind === 'cleared' ? 'default' : 'high',
+        Tags: kind === 'report' ? 'bar_chart' : kind === 'cleared' ? 'white_check_mark' : 'rotating_light'
       },
       body: text(alerts, kind)
     })

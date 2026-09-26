@@ -10,6 +10,7 @@
 // SDK work for an NVR goes through its lane (a few operations at a time) and
 // every call has a time limit; see sdk.mjs, lanes.mjs and watchdog.mjs.
 import koffi from 'koffi'
+import { siteOffsetMin } from './site-time.mjs'
 import { existsSync, mkdirSync, readFileSync, watchFile, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -958,7 +959,7 @@ async function startEvents() {
     import('./events.mjs'), import('./rec-modes.mjs'), import('./events-db.mjs'), import('./alarms.mjs'), import('./alert-send.mjs')
   ])
   const sender = makeSender({ settings: () => getSettings().alerts ?? {} })
-  const notifier = makeAlarmNotifier({ sender, nameOf: (key) => allCameras().find((c) => `${c.nvr}/${c.ch}` === key)?.name ?? key })
+  const notifier = makeAlarmNotifier({ sender, tzOffsetMin: () => siteOffsetMin(), nameOf: (key) => allCameras().find((c) => `${c.nvr}/${c.ch}` === key)?.name ?? key })
 
   eventIntake = makeEventIntake({
     listNvrs: () => [...nvrs.values()],
