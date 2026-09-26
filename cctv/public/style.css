@@ -1406,3 +1406,45 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
 .se-cam-name { white-space: nowrap; }
 .se-cam-name .st-meta { display: inline-block; min-width: 22px; font-variant-numeric: tabular-nums; }
 .se-table td select, .se-table td input { padding: 4px 6px; font-size: 13px; }
+
+/* ---- Playback, full screen: the picture fills the screen, the controls float on glass ---- */
+body.playback-page.is-fullscreen .app-shell, body.playback-page.is-fullscreen .shell-bar,
+body.playback-page.is-fullscreen .app-main > header { display: none; }
+body.playback-page.is-fullscreen { grid-template-columns: minmax(0, 1fr); padding: 0; background: #000; }
+body.playback-page.is-fullscreen .app-main { position: relative; overflow: hidden; }
+body.playback-page.is-fullscreen .pb-main { flex: 1; height: 100%; }
+body.playback-page.is-fullscreen .pb-video { height: 100%; border-radius: 0; }
+body.playback-page.is-fullscreen .pb-bar {
+  /* always the dark glass, whichever theme the rest of the app is in */
+  --text: #f2f4f7; --text-muted: rgba(242, 244, 247, 0.7); --muted: rgba(242, 244, 247, 0.7);
+  --surface-2: rgba(255, 255, 255, 0.08); --surface-3: rgba(255, 255, 255, 0.14); --surface-hover: rgba(255, 255, 255, 0.12);
+  --border: rgba(255, 255, 255, 0.16); --panel: transparent; --tl-track: rgba(255, 255, 255, 0.08);
+  color-scheme: dark; color: var(--text);
+  position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+  width: min(1180px, calc(100% - 36px)); max-height: 60%; overflow: auto;
+  padding: 12px 16px; border-radius: 16px;
+  background: linear-gradient(180deg, rgba(40, 44, 52, 0.55), rgba(18, 20, 24, 0.62));
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  -webkit-backdrop-filter: blur(18px) saturate(150%); backdrop-filter: blur(18px) saturate(150%);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+  z-index: 20;
+}
+body.playback-page.is-fullscreen .pb-bar button, body.playback-page.is-fullscreen .pb-bar select,
+body.playback-page.is-fullscreen .pb-bar input[type="date"] {
+  background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.14); color: var(--text);
+}
+body.playback-page.is-fullscreen .pb-bar button:hover { background: rgba(255, 255, 255, 0.16); }
+body.playback-page.is-fullscreen .pb-search, body.playback-page.is-fullscreen .pb-bookmarks {
+  position: absolute; top: 18px; right: 18px; bottom: auto; max-height: calc(100% - 36px); z-index: 21;
+  background: rgba(18, 20, 24, 0.62); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 16px;
+  -webkit-backdrop-filter: blur(18px) saturate(150%); backdrop-filter: blur(18px) saturate(150%);
+}
+/* idle: the glass steps aside and the cursor goes with it */
+body.playback-page.is-fullscreen.pb-idle .pb-bar { opacity: 0; transform: translate(-50%, 12px); pointer-events: none; }
+body.playback-page.is-fullscreen.pb-idle { cursor: none; }
+@media (prefers-reduced-motion: reduce) { body.playback-page.is-fullscreen .pb-bar { transition: none; } }
+/* the glass is kept short: the colour key and the help line are for the page, not the picture */
+body.playback-page.is-fullscreen .pb-legend { display: none; }
+body.playback-page.is-fullscreen .pb-bar { gap: 6px; padding: 10px 14px; }
+body.playback-page.is-fullscreen .pb-timeline { height: 48px; }

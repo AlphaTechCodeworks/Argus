@@ -2226,9 +2226,30 @@ document.addEventListener('fullscreenchange', () => {
     fullBtn.setAttribute('aria-pressed', String(on))
     fullBtn.textContent = on ? 'Exit full screen' : 'Full screen'
   }
+  if (on) wakeControls()
+  else clearTimeout(idleTimer)
   applyZoom() // the picture changed size, so the pan limits did too
 })
 if (!document.fullscreenEnabled && fullBtn) fullBtn.hidden = true
+
+// In full screen the controls float over the picture on glass, and step out of the way when the
+// mouse is still: after IDLE_MS they fade (and the cursor with them); any movement, touch or key
+// brings them back. Never while the pointer is on them or something in them has focus.
+const IDLE_MS = 3000
+const pbBar = document.querySelector('.pb-bar')
+let idleTimer = 0
+function wakeControls() {
+  document.body.classList.remove('pb-idle')
+  clearTimeout(idleTimer)
+  idleTimer = setTimeout(() => {
+    if (!document.fullscreenElement) return
+    if (pbBar?.matches(':hover') || pbBar?.contains(document.activeElement)) return wakeControls()
+    document.body.classList.add('pb-idle')
+  }, IDLE_MS)
+}
+for (const ev of ['pointermove', 'pointerdown', 'keydown', 'touchstart']) {
+  document.addEventListener(ev, () => { if (document.fullscreenElement) wakeControls() }, { passive: true })
+}
 
 // ---- the export dialog -------------------------------------------------------
 //
