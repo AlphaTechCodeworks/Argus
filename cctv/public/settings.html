@@ -26,7 +26,7 @@
   <main class="st-main">
     <p id="notice" class="st-notice" hidden></p>
 
-    <section class="se-section" aria-labelledby="rec-title">
+    <section class="se-section" data-tab="recording" aria-labelledby="rec-title">
       <h2 id="rec-title">Recording</h2>
       <p class="st-help">Server recording of each camera's main stream. Off for every camera until you turn it on here. Motion and AI modes record continuously until event support arrives.</p>
       <form id="defaults" class="se-grid" autocomplete="off">
@@ -50,7 +50,7 @@
       <div class="se-actions"><button id="saveCams" type="button" class="st-primary" disabled>Save camera changes</button><span id="c-msg" class="st-meta"></span></div>
     </section>
 
-    <section class="se-section" aria-labelledby="osd-title">
+    <section class="se-section" data-tab="overlay" aria-labelledby="osd-title">
       <h2 id="osd-title">Camera name and time on the picture</h2>
       <p class="st-help">
         Drawn over the picture as you watch. <strong>The clock is this server's, not the camera's</strong> —
@@ -100,19 +100,7 @@
       </form>
     </section>
 
-    <section class="se-section" aria-labelledby="mem-title">
-      <h2 id="mem-title">Memory, thumbnails and free space</h2>
-      <form id="misc" class="se-grid" autocomplete="off">
-        <label>Recent footage kept in RAM <select id="m-recent"></select></label>
-        <label>Timeline thumbnails <select id="m-thumbs"></select></label>
-        <label>Low space: delete oldest below (% free) <input id="m-low" type="number" min="1" max="50" required /></label>
-        <label>Hard floor: full-video period touched only below (% free) <input id="m-floor" type="number" min="1" max="49" required /></label>
-        <p id="m-ram" class="st-help se-wide" hidden></p>
-        <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="m-msg" class="st-meta"></span></div>
-      </form>
-    </section>
-
-    <section class="se-section" aria-labelledby="al-title">
+    <section class="se-section" data-tab="alerts" aria-labelledby="al-title">
       <h2 id="al-title">Alerts</h2>
       <p class="st-help">Where to send a message when something is wrong. Leave a method empty to switch it off.</p>
       <form id="alerts" class="se-grid" autocomplete="off">
@@ -149,7 +137,7 @@
       </form>
     </section>
 
-    <section class="se-section" aria-labelledby="loc-title">
+    <section class="se-section" data-tab="storage" aria-labelledby="loc-title">
       <h2 id="loc-title">Storage locations</h2>
       <p class="st-help">Folders where recordings are written. Each holds a marker file; a location without it (drive unplugged, share down) is never written and recording moves to the next one.</p>
       <div id="locations" class="st-cards"></div>
@@ -166,7 +154,7 @@
       </form>
     </section>
 
-    <section class="se-section" aria-labelledby="nas-title">
+    <section class="se-section" data-tab="storage" aria-labelledby="nas-title">
       <h2 id="nas-title">Network drive</h2>
       <p class="st-help">Adds a NAS share (SMB or NFS) as a place for recordings. The whole share is mounted under /srv/cctv-net and, if you name a folder inside it, that folder is used. Test first: it mounts, writes a file, reads it back and undoes everything. The password is only ever held by the machine itself, never by this page and never in the settings file.</p>
       <div id="netshares" class="st-cards"></div>
@@ -183,12 +171,24 @@
       <div id="netjob" class="se-job" hidden></div>
     </section>
 
-    <section class="se-section" aria-labelledby="usb-title">
+    <section class="se-section" data-tab="storage" aria-labelledby="usb-title">
       <h2 id="usb-title">Prepare USB drive</h2>
       <p class="st-help">Erases a USB/eSATA drive, formats it for recordings and adds it as a location. Only drives that are not the system disk, not mounted and not in a pool are offered.</p>
       <div class="se-actions"><button id="refreshDisks" type="button">Look for drives</button><span id="u-msg" class="st-meta"></span></div>
       <div id="disks" class="st-cards"></div>
       <div id="job" class="se-job" hidden></div>
+    </section>
+
+    <section class="se-section" data-tab="storage" aria-labelledby="mem-title">
+      <h2 id="mem-title">Memory, thumbnails and free space</h2>
+      <form id="misc" class="se-grid" autocomplete="off">
+        <label>Recent footage kept in RAM <select id="m-recent"></select></label>
+        <label>Timeline thumbnails <select id="m-thumbs"></select></label>
+        <label>Low space: delete oldest below (% free) <input id="m-low" type="number" min="1" max="50" required /></label>
+        <label>Hard floor: full-video period touched only below (% free) <input id="m-floor" type="number" min="1" max="49" required /></label>
+        <p id="m-ram" class="st-help se-wide" hidden></p>
+        <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="m-msg" class="st-meta"></span></div>
+      </form>
     </section>
   </main>
 
@@ -232,6 +232,7 @@
 
   <script type="module" src="shell.js"></script>
   <script type="module" src="settings.js"></script>
+  <script type="module" src="settings-tabs.js"></script>
   <script type="module" src="alert-banner.js"></script>
   <script type="module" src="build-badge.js"></script>
 </body>

@@ -1344,3 +1344,10 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
 .alert-banner.critical { background: var(--bad); color: #fff; border-bottom: 0; padding: 12px 16px; }
 .alert-banner.critical .alert-critical { font-size: 15px; }
 .alert-banner.critical a { color: #fff; font-weight: 600; text-decoration: underline; }
+/* Settings: one tab at a time */
+.se-tabs { flex-shrink: 0; display: flex; gap: 4px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+.se-tabs a { padding: 10px 14px; color: var(--muted); text-decoration: none; font-weight: 500; white-space: nowrap; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.se-tabs a:hover { color: var(--text); }
+.se-tabs a[aria-current] { color: var(--text); border-bottom-color: var(--accent); }
+.se-tab-help { flex-shrink: 0; margin: 0; color: var(--muted); font-size: 13px; }
+.se-section.se-off { display: none; }
