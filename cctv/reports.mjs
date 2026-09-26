@@ -73,7 +73,7 @@ export function gapKind(reason) {
  * @param {{ counts: { coverage: object[], gaps: object[], events: object[] }, cameras: object[],
  *   fromMs: number, toMs: number, storageHistory?: object, alerts?: object[] }} o
  */
-export function composeReport({ counts, cameras, fromMs, toMs, storageHistory = {}, alerts = [], label = '' }) {
+export function composeReport({ counts, cameras, fromMs, toMs, storageHistory = {}, alerts = [], label = '', locationNames = {} }) {
   const span = Math.max(1, toMs - fromMs)
   const key = (nvr, ch) => `${nvr}/${ch}`
   const cov = new Map(counts.coverage.map((r) => [key(r.nvr, r.ch), r]))
@@ -162,7 +162,7 @@ export function composeReport({ counts, cameras, fromMs, toMs, storageHistory = 
     worst: [...recorded].sort((a, b) => a.recordedShare - b.recordedShare).slice(0, 10),
     mostOffline: rows.filter((r) => r.offlineMs > 0).sort((a, b) => b.offlineMs - a.offlineMs).slice(0, 10),
     cameras: rows,
-    storage: storageSummary(storageHistory, fromMs, toMs, { recordedBytesPerDay: rows.reduce((a, r) => a + r.bytes, 0) / Math.max(1 / 24, expected / Math.max(1, recorded.length) / DAY) })
+    storage: storageSummary(storageHistory, fromMs, toMs, { names: locationNames, recordedBytesPerDay: rows.reduce((a, r) => a + r.bytes, 0) / Math.max(1 / 24, expected / Math.max(1, recorded.length) / DAY) })
   }
 }
 
@@ -171,7 +171,7 @@ export function composeReport({ counts, cameras, fromMs, toMs, storageHistory = 
  * the storage history (up to its last 7 days); while that is too short (a new install: two samples an
  * hour apart) and there is one location, from what was recorded over the report's window instead.
  */
-export function storageSummary(history, fromMs, toMs, { recordedBytesPerDay = null } = {}) {
+export function storageSummary(history, fromMs, toMs, { recordedBytesPerDay = null, names = {} } = {}) {
   const out = []
   const single = Object.keys(history ?? {}).length === 1
   for (const [loc, samples] of Object.entries(history ?? {})) {
@@ -186,7 +186,7 @@ export function storageSummary(history, fromMs, toMs, { recordedBytesPerDay = nu
     const perDay = fromHistory ?? (single && recordedBytesPerDay > 0 ? recordedBytesPerDay : null)
     const free = Number.isFinite(last.totalBytes) ? last.totalBytes - last.usedBytes : null
     out.push({
-      location: loc,
+      location: names[loc] ?? loc, // its path, where known (the id otherwise)
       usedBytes: last.usedBytes,
       totalBytes: last.totalBytes ?? null,
       usedShare: Number.isFinite(last.totalBytes) && last.totalBytes > 0 ? last.usedBytes / last.totalBytes : null,

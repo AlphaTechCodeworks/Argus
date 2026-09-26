@@ -48,6 +48,8 @@
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
 import { createHash } from 'node:crypto'
+import { handleRelays } from './relays.mjs'
+import { transparent } from './nvr-xml.mjs'
 import { readAlerts } from './alert-log.mjs'
 import { PERIODS, composeReport, countInThread, periodWindow, startDailySummary } from './reports.mjs'
 import { commonOffset, useSiteOffset } from './site-time.mjs'
@@ -571,6 +573,9 @@ const handleRequest = async (req, res) => {
   const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null, canSee })
   if (ev) return sendJson(res, ...ev)
   const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: who.admin, cameras: allCameras, canSee })
+  // NVR alarm outputs, read only (relays.mjs)
+  const relays = await handleRelays(req.method, pathname, { nvrs, admin: who.admin, query: transparent })
+  if (relays) return sendJson(res, ...relays)
   if (al) return sendJson(res, ...al)
   const store = await handleStorage(req.method, pathname, () => readJsonObject(req, 4096), who)  // accepts the { user, admin } shape
   if (store) return sendJson(res, ...store)
@@ -953,7 +958,7 @@ async function reportFor(period) {
   if (hit && Date.now() - hit.at < keepMs) return hit.rep
   const w = periodWindow(period)
   const counts = await countInThread(REC_DB, w.fromMs, w.toMs)
-  const rep = composeReport({ counts, cameras: allCameras(), fromMs: w.fromMs, toMs: w.toMs, storageHistory: readHistory(auth.DATA_DIR), alerts: readAlerts(auth.DATA_DIR, w.fromMs), label: w.label })
+  const rep = composeReport({ counts, cameras: allCameras(), fromMs: w.fromMs, toMs: w.toMs, storageHistory: readHistory(auth.DATA_DIR), alerts: readAlerts(auth.DATA_DIR, w.fromMs), label: w.label, locationNames: Object.fromEntries((getSettings().storage?.locations ?? []).map((l) => [l.id, l.path])) })
   reportCache.set(period, { at: Date.now(), rep })
   return rep
 }
