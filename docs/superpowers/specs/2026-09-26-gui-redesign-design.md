@@ -1,7 +1,7 @@
 # GUI redesign — design
 
 **Date:** 2026-09-26
-**Status:** approved direction (UniFi Protect), spec awaiting review
+**Status:** approved — UniFi Protect style, dark by default with a light toggle (owner, 2026-09-26, after seeing before/after mockups)
 
 ## Why
 
@@ -79,6 +79,26 @@ titles), 20 (page titles), 28 (big figures on cards). Weights 400 / 500 / 600 on
 **Radius** — `--r-sm` 6px (inputs, buttons, badges), `--r-md` 10px (cards, panels, video tiles).
 
 **Motion** — 120ms ease for hover/press; none under `prefers-reduced-motion`.
+
+## 1a. Themes
+
+Dark is the default. A light theme is available from a toggle in the sidebar foot (and in the phone *More* sheet). Themes are two sets of the same tokens: `:root` holds dark, `[data-theme="light"]` overrides surfaces, borders and text; accent and status colours stay the same hues, adjusted only for contrast. The choice is remembered per browser in `localStorage` (wrapped in try/catch — a blocked store just means the default), applied by `shell.js` before first paint so the page never flashes the wrong theme. Light values, from the approved mockup:
+
+| token | light |
+|---|---|
+| `--bg` | `#f4f5f7` |
+| `--surface-1` | `#ffffff` |
+| `--surface-2` | `#f7f8fa` |
+| `--surface-3` | `#eaf1ff` (selected) / `#eef0f3` (hover) |
+| `--border` | `#e6e8ec` |
+| `--text` | `#16181b` |
+| `--text-muted` | `#4b5260` |
+| `--text-faint` | `#8a919c` |
+| `--accent` | `#1e56d6` |
+
+Video tiles keep a black picture area in both themes; only the card around the picture changes.
+
+Camera cards put the name and time *under* the picture, not over the video — the approved mockup showed this is the single biggest difference from the current look.
 
 ## 2. Base — `public/css/base.css`
 
@@ -170,6 +190,5 @@ the form as the user left it.
 ## Out of scope
 
 - Changing what any page does. This is presentation and navigation only.
-- Light mode. The tokens make it possible later; nobody has asked for it.
 - The evidence pack player (`pack-player.html`), which is self-contained by design and travels with
   exported evidence.
