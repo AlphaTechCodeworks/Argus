@@ -45,6 +45,7 @@ function systemCards(sys) {
     label: 'CPU',
     value: Number.isFinite(cpuPct) ? `${Math.round(cpuPct)} %` : '—',
     state: !Number.isFinite(cpuPct) ? 'ok' : cpuPct >= 95 ? 'bad' : cpuPct >= 80 ? 'warn' : 'ok',
+    pct: Number.isFinite(cpuPct) ? cpuPct : null,
     note: [
       Number.isFinite(s.cpu?.load1) ? `load ${s.cpu.load1.toFixed(2)}` : null,
       Number.isFinite(s.cpu?.cores) ? `${s.cpu.cores} cores` : null
@@ -60,6 +61,7 @@ function systemCards(sys) {
     value: Number.isFinite(used) && Number.isFinite(total) ? `${bytes(used)} of ${bytes(total)}` : '—',
     // Available, not free: Linux "free" counts the page cache as used and always looks alarming.
     state: availPct === null ? 'ok' : availPct < 5 ? 'bad' : availPct < 10 ? 'warn' : 'ok',
+    pct: Number.isFinite(used) && Number.isFinite(total) && total > 0 ? (used / total) * 100 : null,
     note: Number.isFinite(avail) ? `${bytes(avail)} available` : ''
   }
 
@@ -221,6 +223,13 @@ function nvrPanel(n, mine, nowMs) {
     id: n.id,
     name: n.name,
     status,
+    // what the folded tile shows: the few numbers that say whether this NVR is all right
+    glance: {
+      cameras: { value: `${camerasOnline} / ${mine.length}`, pct: mine.length ? (camerasOnline / mine.length) * 100 : 0, state: mine.length && camerasOnline === mine.length ? 'ok' : 'warn' },
+      holds: { value: Number.isFinite(held) ? `${held} days` : '—', state: retention.state },
+      disks: { value: disks.value, state: disks.state },
+      load: bw ? { value: `${bw.pct} %`, pct: bw.pct, state: bw.pct >= 85 ? 'bad' : bw.pct >= 65 ? 'warn' : 'ok' } : null
+    },
     disks,
     diskRows,
     retention,
@@ -271,7 +280,7 @@ export function renderHealth(d) {
     ? { value: 'None set', state: 'warn', note: 'No recording location is configured.' }
     : !loc.mounted
       ? { value: 'Not mounted', state: 'bad', note: `${loc.name}: nothing can be recorded.` }
-      : { value: `${Math.round(100 - loc.freePct)} % used`, state: loc.freePct <= loc.lowFreePct ? 'bad' : 'ok', note: loc.name }
+      : { value: `${Math.round(100 - loc.freePct)} % used`, state: loc.freePct <= loc.lowFreePct ? 'bad' : 'ok', note: loc.name, pct: 100 - loc.freePct }
 
   const backup = d.backup?.at
     ? {
@@ -293,6 +302,7 @@ export function renderHealth(d) {
       label: 'Cameras recording',
       value: `${recording} / ${cameras.length}`,
       state: recording === cameras.length ? 'ok' : 'warn',
+      pct: cameras.length ? (recording / cameras.length) * 100 : null,
       note: `${cameras.filter((c) => !c.online).length} offline`
     },
     backup: { label: 'Last settings backup', ...backup }
@@ -370,12 +380,29 @@ export function renderHealth(d) {
     : `${admins.length} ${admins.length === 1 ? 'admin' : 'admins'}: ${admins.join(', ')}`
   const adminState = admins.length === 0 ? 'bad' : admins.length > 4 ? 'warn' : 'ok'
 
-  return { cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, criticalText, sendingProblem, admins, adminText, adminState }
+  // the headline at the top of the page: one sentence and a colour
+  const overall = criticalText
+    ? { state: 'bad', text: criticalText.startsWith('Recording stopped') ? 'Recording stopped' : 'Storage not mounted', note: criticalText.replace(/^Recording stopped: /, '') }
+    : open.length
+      ? { state: 'warn', text: `${open.length} ${open.length === 1 ? 'thing needs' : 'things need'} a look`, note: '' }
+      : { state: 'ok', text: 'Everything is working', note: 'All NVRs, cameras and storage are as they should be.' }
+  const openAlerts = open.map((a) => ({ title: a.title, severity: a.severity ?? 'medium' }))
+  return { overall, openAlerts, cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, criticalText, sendingProblem, admins, adminText, adminState }
 }
 
 // ---- the page itself (skipped when a test imports this module: there is no document) ------------
 if (typeof document !== 'undefined' && document.getElementById('cards')) {
-  const el = (tag, props = {}) => Object.assign(document.createElement(tag), props)
+  const el = (tag, props = {}, ...kids) => {
+    const node = Object.assign(document.createElement(tag), props)
+    node.append(...kids.filter((k) => k !== null && k !== undefined && k !== ''))
+    return node
+  }
+  /** A thin bar, filled to pct, coloured by state. */
+  const meter = (pct, state = 'ok') => {
+    const bar = el('span', { className: `hp-meter ${state}` })
+    bar.append(el('span', { style: `width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%` }))
+    return bar
+  }
 
   const paint = (d) => {
     const r = renderHealth(d)
@@ -387,23 +414,51 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
         const node = el('div', { className: `card ${c.state}` })
         node.append(
           el('div', { className: 'lbl', textContent: c.label }),
-          el('div', { className: 'big', textContent: c.value }),
-          el('div', { className: 'note', textContent: c.note ?? '' })
+          el('div', { className: 'big', textContent: c.value })
         )
+        if (Number.isFinite(c.pct)) node.append(meter(c.pct, c.state))
+        node.append(el('div', { className: 'note', textContent: c.note ?? '' }))
         return node
       }))
+    }
+    // the headline: one colour and one sentence, then each open problem as a tag
+    const hero = document.getElementById('hero')
+    if (hero) {
+      hero.className = `hp-hero ${r.overall.state}`
+      const tags = el('div', { className: 'hp-hero-tags' })
+      for (const a of r.openAlerts) tags.append(el('span', { className: `hp-tag ${a.severity === 'high' || a.severity === 'critical' ? 'bad' : 'warn'}`, textContent: a.title }))
+      hero.replaceChildren(
+        el('span', { className: 'hp-hero-dot' }),
+        el('div', { className: 'hp-hero-text' }, el('strong', { textContent: r.overall.text }), el('span', { textContent: r.overall.note })),
+        tags
+      )
     }
     paintCards('cards', r.cards)
     paintCards('system', r.systemCards)
 
+    // Each NVR folded to a tile of the few numbers that matter; the full detail opens on a click.
+    // Which ones are open is kept across the 15 s refresh.
+    const wasOpen = new Set([...document.querySelectorAll('#nvrs details[open]')].map((x) => x.dataset.id))
     document.getElementById('nvrs').replaceChildren(...r.nvrPanels.map((n) => {
-      const panel = el('section', { className: 'nvr-panel' })
+      const panel = el('details', { className: `nvr-panel nvr-tile ${n.status.state}` })
+      panel.dataset.id = n.id
+      panel.open = wasOpen.has(n.id)
+      const g = n.glance
+      const stat = (label, x, withBar) => {
+        const box = el('div', { className: `nvr-stat ${x?.state ?? ''}` }, el('span', { className: 'lbl', textContent: label }), el('span', { className: 'val', textContent: x?.value ?? '—' }))
+        if (withBar && Number.isFinite(x?.pct)) box.append(meter(x.pct, x.state))
+        return box
+      }
+      const summary = el('summary', { className: 'nvr-sum' },
+        el('div', { className: 'nvr-sum-head' },
+          el('span', { className: `hp-dot ${n.status.state}` }),
+          el('strong', { textContent: n.name }),
+          el('span', { className: `pill ${n.status.state}`, textContent: n.status.value })),
+        el('div', { className: 'nvr-stats' }, stat('Cameras', g.cameras, true), stat('Disks hold', g.holds), stat('Disks', g.disks), stat('Load', g.load, true)),
+        n.status.state !== 'ok' && n.status.note ? el('div', { className: 'nvr-why', textContent: n.status.note }) : '')
       const head = el('div', { className: 'nvr-head' })
-      head.append(
-        el('h3', { textContent: `${n.id} · ${n.name}` }),
-        el('span', { className: `pill ${n.status.state}`, textContent: n.status.value }),
-        el('span', { className: 'nvr-why', textContent: n.status.note ?? '' })
-      )
+      head.append(el('span', { className: 'hp-sub', textContent: `${n.id}${n.status.note ? ` · ${n.status.note}` : ''}` }))
+      panel.append(summary)
 
       const headline = el('div', { className: 'cards nvr-headline' })
       for (const c of [{ label: 'NVR disks', ...n.disks }, { label: 'It holds', ...n.retention }]) {
