@@ -9,7 +9,8 @@
 //     file that has not changed is answered 304, a few bytes, instead of the file
 //   - still "no-cache": the browser always asks, so a deploy is picked up on the very next load
 // Nothing here touches video. Pure enough to test without a server: test/static-files.test.mjs.
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { extname, join } from 'node:path'
 import { brotliCompressSync, constants, gzipSync } from 'node:zlib'
 
 /** Types worth compressing (text); images like PNG are already compressed. */
@@ -56,4 +57,20 @@ export function fileResponse({ path, type, ifNoneMatch, acceptEncoding }) {
   if (enc) headers['content-encoding'] = enc
   headers['content-length'] = String(body.length)
   return { status: 200, headers, body }
+}
+
+/**
+ * Compresses every app file now, in the background, a file at a time: the first visitor after a
+ * deploy should not wait for a stylesheet to be compressed (it took 2.7 s over the public link).
+ */
+export function warmFiles(dir, mime, { pause = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]))
+  ;(async () => {
+    for (const f of walk(dir)) {
+      const type = mime[extname(f)]
+      if (!type) continue
+      try { loadFile(f, type) } catch {}
+      await pause(20) // a little at a time: the server has live video to serve meanwhile
+    }
+  })().catch(() => {})
 }

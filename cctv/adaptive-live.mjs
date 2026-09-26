@@ -52,8 +52,13 @@ export function isRemoteAddress(addr) {
   return Boolean(m && Number(m[1]) >= 64 && Number(m[1]) <= 127) // 100.64.0.0/10, the tailnet
 }
 
-/** The level a viewer starts on: a phone at 15, a remote PC at 15 too until its link has shown it can take more. */
-export const startLevel = () => 1
+/**
+ * The level a viewer starts on: the camera's own stream. Starting at 15 meant waiting for a conversion
+ * to start before the first picture; the link shows within seconds whether it can carry more, and
+ * the controller steps down at once if not. (An H.265 camera still gets its converted H.264 stream:
+ * #streamFor.)
+ */
+export const startLevel = () => 0
 
 /**
  * The next level for one viewer, from what its sockets showed this tick. Pure: the tests drive it.
@@ -98,6 +103,9 @@ export class AdaptiveLive {
 
   /** Where a socket's frames come from at this level: a shared thinned stream, or the camera's own. */
   #streamFor(entry, level) {
+    // the camera's own stream only where it is H.264 (byte 1 of its last keyframe): an H.265 one would
+    // be black on a laptop without the HEVC codec, so that camera is converted at the next level
+    if (level === 0 && entry.source.gop?.[0]?.[1] === 1) level = 1
     if (level === 0) return entry.source
     const key = `${entry.nvrId}/${entry.ch}/${entry.type}@${LEVELS[level].id}`
     let s = this.streams.get(key)

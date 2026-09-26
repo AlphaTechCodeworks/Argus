@@ -76,6 +76,31 @@ import { nvrLegs } from './rec-fallback.mjs'
 import { SegmentReader, keyAtOrAfter, keyAtOrBefore } from './rec-reader.mjs'
 import { CODEC_H264, Transcoder, clientCanDecodeH265, pool as transcodePool, wantsTranscode } from './transcode.mjs'
 
+// ---- read-ahead: the next file of a playback, read once in the background ----
+// When playback opens a file, the one after it is read through (1 MB at a time into one reused
+// buffer, nothing kept) so the operating system has it cached by the time playback -- or a jump
+// forward -- gets there: from memory instead of from the disk or the share. Each file at most once.
+const aheadDone = new Set()
+let aheadBusy = false
+const aheadBuf = Buffer.allocUnsafe(1024 * 1024)
+async function readAhead(path) {
+  if (!path || aheadBusy || aheadDone.has(path)) return
+  aheadBusy = true
+  aheadDone.add(path)
+  if (aheadDone.size > 500) aheadDone.delete(aheadDone.values().next().value)
+  let fh
+  try {
+    fh = await fsp.open(path, 'r')
+    for (;;) {
+      const { bytesRead } = await fh.read(aheadBuf, 0, aheadBuf.length, null)
+      if (bytesRead < aheadBuf.length) break
+    }
+  } catch {} finally {
+    await fh?.close().catch(() => {})
+    aheadBusy = false
+  }
+}
+
 export const HEADER_SIZE = 16
 /** Speeds a server playback accepts (R9). */
 export const SPEEDS = Object.freeze([-32, -16, -8, -4, -2, -1, 1, 2, 4, 8, 16, 32])
@@ -1155,12 +1180,15 @@ export class ServerPlayback {
     } else {
       // the neighbours: the last GOP runs up to the next file's first keyframe (a seamless minute join), and a
       // catch-up burst at this file's start may take its time back to the previous file's end
-      const nextStartMs = seg.open ? null : this.#nextStartOf(seg)
+      const after = seg.open ? null : this.index.next(this.nvr.id, this.ch, seg.startMs)
+      const nextStartMs = Number.isFinite(after?.startMs) ? after.startMs : null
       const prevEndMs = this.index.prev(this.nvr.id, this.ch, seg.startMs)?.endMs ?? null
       r = new SegmentReader({ path: seg.path, endMs: seg.endMs ?? null, growing: Boolean(seg.open), fs: this.fs, nextStartMs, prevEndMs })
       await r.open()
       this.readers.set(seg.path, r) // (closed with the rest if the session closed meanwhile)
       this.#evict()
+      // the next file, ready before it is needed (not the one still being written)
+      if (after && !after.open) readAhead(after.path)
     }
     r.lastUsed = this.now()
     return r

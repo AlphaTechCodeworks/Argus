@@ -22,7 +22,7 @@ export const SETTINGS_FILE = join(DATA_DIR, 'settings.json')
 
 export const MODES = ['off', 'continuous', 'motion', 'ai', 'ai-or-motion']
 export const AFTER = ['timelapse', 'keep', 'delete']
-export const RECENT_MINUTES = [0, 1, 2, 5, 10]
+export const RECENT_MINUTES = [0, 1, 2, 5, 10, 15, 20]
 export const THUMBNAILS = ['off', '1m', '5m']
 export const MAX_RETENTION_DAYS = 366
 

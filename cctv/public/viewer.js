@@ -184,7 +184,9 @@ function render({ keepSingle = false } = {}) {
     gridSlots.push(slot)
     const n = openedPerNvr.get(cam?.nvr) ?? 0
     openedPerNvr.set(cam?.nvr, n + 1)
-    fillSlot(slot, gridArea(cells[i]), n * 60)
+    // 15 ms, not 60: the server queues its own calls to each NVR (and a stream it already has costs
+    // the NVR nothing), so the page's spacing mostly held back pictures that were ready
+    fillSlot(slot, gridArea(cells[i]), n * 15)
     grid.insertBefore(slot.el, before)
   }
   syncTiles()
@@ -569,6 +571,7 @@ function upgradeToMain(tile, cam, sub, opts) {
   tile.append(layer)
   const main = new LiveTile(layer, cam, MAIN_STREAM, 0, {
     ...opts,
+    noStill: true, // the sub-stream below it already shows the still
     onFirstFrame: () => {
       layer.classList.remove('pending')
       const links = tile.querySelector(':scope > .label .links')

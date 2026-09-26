@@ -239,3 +239,13 @@ export async function handleGridOrder(req, user) {
   if (!saved) return [409, { error: 'The camera order was changed on another screen', order, version }, NO_STORE]
   return [200, { order, version }, NO_STORE]
 }
+
+/** Every user's saved camera order ({ user: ["nvr/ch", ...] }), or {} when it cannot be read. */
+export function allGridOrders() {
+  try {
+    const { all } = loadAll()
+    return Object.fromEntries(Object.entries(all).map(([u, e]) => [u, Array.isArray(e?.gridOrder) ? e.gridOrder : []]))
+  } catch {
+    return {}
+  }
+}

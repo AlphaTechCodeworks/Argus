@@ -75,7 +75,9 @@ import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs
 import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
-import { fileResponse } from './static-files.mjs'
+import { fileResponse, warmFiles } from './static-files.mjs'
+import { startWarmStreams } from './warm-streams.mjs'
+import { allGridOrders } from './user-prefs.mjs'
 import { pool as playbackTranscodes } from './transcode.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
@@ -826,6 +828,15 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => stream.remove(ws))
 })
 const phoneLive = new PhoneLive()
+// each user's first screen of cameras, streaming before anyone opens Live (warm-streams.mjs)
+startWarmStreams({
+  cameras: allCameras,
+  orders: allGridOrders,
+  streamOf: (id, ch) => {
+    const n = nvrs.get(id)
+    return n?.liveOnline ? n.getStream(ch, 1) : null
+  }
+})
 const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on conversions for phones and remote viewers together
 
 const onUpgrade = (req, socket, head) => {
@@ -854,6 +865,7 @@ const onUpgrade = (req, socket, head) => {
 
 const httpServer = createServer(onRequest)
 httpServer.on('upgrade', onUpgrade)
+warmFiles(PUBLIC_DIR, MIME)
 httpServer.listen(Number(HTTP_PORT), () => console.log(`HTTP  on port ${HTTP_PORT} (use http://localhost on this PC)`))
 
 const certHosts = CERT_HOSTS.split(',').map((h) => h.trim()).filter(Boolean)

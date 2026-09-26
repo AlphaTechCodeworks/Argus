@@ -1675,3 +1675,7 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
   }
   body.phone-list .tile.offline { opacity: .5; }
 }
+/* a tile's last-seen still, shown until its live picture arrives (stills.js) */
+.tile.has-still { background-size: contain; background-position: center; background-repeat: no-repeat; }
+.tile.has-still::after { content: ''; position: absolute; inset: 0; background: rgba(0,0,0,.28); pointer-events: none; z-index: 0; }
+.tile.has-still > canvas:not(.osd) { visibility: hidden; } /* the player canvas is opaque black until its first frame */

@@ -1,5 +1,6 @@
 // One live camera in a tile: streams it over WebSocket into a VideoPlayer, with reconnects.
 // Used by the live grid (viewer.js) and the map's live popup (map.js).
+import { clearStill, maybeKeepStill, showStill } from './stills.js'
 import { CODEC_H265, VideoPlayer } from './player.js'
 import { drawOsd, osdIsOff, osdLayout } from './osd-overlay.js'
 
@@ -73,6 +74,9 @@ export class LiveTile {
       maxFps: opts.maxFps,
       onUnsupported: (codecId) => (opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)),
       onFrame: () => {
+        if (!shown) clearStill(tile)
+        // keep the last picture of this camera on this device, for the next time its tile appears
+        if (typeof document !== 'undefined') maybeKeepStill(this.player.canvas, this.nvr, this.ch)
         // a picture on screen is live, whatever the badge said a moment ago ("connecting…" stayed
         // up until a whole second of frames had been counted, over a picture already moving)
         if (/connecting|no video/.test(this.status.textContent)) this.setStatus('live', true)
@@ -82,6 +86,8 @@ export class LiveTile {
       }
     })
     this.setStatus('connecting…')
+    // the last picture seen of this camera, at once, until its live picture arrives (stills.js)
+    if (typeof document !== 'undefined' && !opts.noStill) showStill(tile, this.nvr, this.ch)
     this.retry = setTimeout(() => this.connect(), startDelayMs)
     this.statusTimer = setInterval(() => this.updateStatus(), 1000)
   }

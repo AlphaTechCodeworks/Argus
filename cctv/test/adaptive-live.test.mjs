@@ -40,24 +40,25 @@ function fakeWs() {
   let now = T
   const logs = []
   const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => now })
-  const src = fakeSource('cam')
+  const src = fakeSource('cam') // an H.264 camera (no H.265 keyframe seen)
   const ws = fakeWs()
   live.attach('session-a', { ws, nvrId: 'n1', ch: 0, type: 1, source: src })
   const v = live.viewers.get('session-a')
-  check('a remote viewer starts on 15 fps', LEVELS[v.level].id === '15')
-  check('its socket is on the shared thinned stream, not the camera\'s own', !src.viewers.has(ws) && live.streams.size === 1)
+  check('a remote viewer starts on the camera own stream (no wait for a conversion)', LEVELS[v.level].id === 'full' && src.viewers.has(ws))
   ws.bufferedAmount = 1e6
   now += SETTLE_MS
   live.tick()
-  check('backing up: moved down to 8 fps', LEVELS[v.level].id === '8', logs.at(-1))
+  check('its link backing up: onto the shared 15 fps stream', LEVELS[v.level].id === '15' && !src.viewers.has(ws) && live.streams.size === 1, logs.at(-1))
+  now += SETTLE_MS
+  live.tick()
+  check('still backing up: 8 fps', LEVELS[v.level].id === '8')
   ws.bufferedAmount = 0
-  ws.waitForKey = false
   now += CLIMB_AFTER_MS
   live.tick()
   check('clean for 20 s: back up to 15', LEVELS[v.level].id === '15')
   now += CLIMB_AFTER_MS
   live.tick()
-  check('and on to the camera\'s own stream', v.level === 0 && src.viewers.has(ws))
+  check('and on to the camera own stream', v.level === 0 && src.viewers.has(ws))
   const sum = live.summary()
   check('the summary counts the viewer and its level', sum.viewers.length === 1 && sum.viewers[0].level === 'full')
   ws.handlers.close()
@@ -65,12 +66,23 @@ function fakeWs() {
   clearInterval(live.timer)
 }
 {
+  // an H.265 camera at the top level: converted, never sent raw (a laptop without HEVC shows black)
+  const live = new AdaptiveLive({ pool: new TranscodePool(4), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9 })
+  const src = fakeSource('h265')
+  src.gop = [Buffer.from([1, 1])]
+  const ws = fakeWs()
+  live.attach('s2', { ws, nvrId: 'n1', ch: 3, type: 1, source: src })
+  check('an H.265 camera is converted even at the top level', !src.viewers.has(ws) && live.streams.size === 1)
+  clearInterval(live.timer)
+}
+{
   // no room for a conversion: the camera's own stream, never nothing
   const live = new AdaptiveLive({ pool: new TranscodePool(0), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9 })
   const src = fakeSource('cam')
+  src.gop = [Buffer.from([1, 1])]
   const ws = fakeWs()
   live.attach('s', { ws, nvrId: 'n1', ch: 0, type: 1, source: src })
-  check('no conversion slot left: gets the camera\'s own stream', src.viewers.has(ws))
+  check('no conversion slot left: gets the camera own stream', src.viewers.has(ws))
   clearInterval(live.timer)
 }
 
