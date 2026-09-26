@@ -255,7 +255,7 @@ const runToEnd = async () => {
 
 {
   job._test.reset()
-  job._test.setPause(25) // make the reads slow enough to cancel in the middle
+  job._test.setPause(200) // reads slow enough that the cancel (at 40 ms) always lands mid-job; at 25 the whole job could finish first
   const started = job.startExport(request(), { dataDir, index: fakeIndex(), who: ADMIN, user: 'boss', clockOf })
   await wait(40)
   job.cancelExport(dataDir, started.id)

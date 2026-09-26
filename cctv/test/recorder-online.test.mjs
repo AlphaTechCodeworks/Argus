@@ -103,7 +103,17 @@ say('after the back-off: tapped again', s2.clients.size === 1)
 s2.lastFailure = { at: now + 1, fast: true, silent: true, reason: 'no video within 8 s of starting' }
 now += 10
 rec.sync()
-say('silent refusal: backs off too', s2.clients.size === 0 && rec.cams.get(2).refusedUntil > now + 4 * 60_000)
+// Counted like any refusal: either it backs off, or -- since the sub-stream fallback
+// (stream-choice.mjs, 2026-09-25) -- a camera refused again moves at once to its sub-stream,
+// rather than recording nothing for the length of the back-off.
+{
+  const c2 = rec.cams.get(2)
+  const backedOff = s2.clients.size === 0 && c2.refusedUntil > now + 4 * 60_000
+  // (onSub is only set once the sub-stream is attached, on the next pass; refusedUntil 0 after a
+  // refusal is the recorder choosing it: the only branch that clears the back-off)
+  const movedToSub = c2.refusedUntil === 0 && c2.pick?.refusals >= 2
+  say('silent refusal: counted like a refusal (backs off, or moves to the sub-stream)', backedOff || movedToSub, JSON.stringify({ refusedUntil: c2.refusedUntil - now, pick: c2.pick }))
+}
 // a slow failure (e.g. timeout) does not trigger the long back-off
 now = rec.cams.get(2).refusedUntil + 1
 rec.sync()
