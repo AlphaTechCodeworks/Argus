@@ -190,6 +190,8 @@ async function maybeRecover(ev) {
 // three offline checks in a row (tailscalePlan), at most three times an hour.
 let tsState = {}
 async function checkTailscale() {
+  // turned off on purpose (remote access is the Cloudflare tunnel now): never brought back
+  if (!/^enabled/.test((await run('systemctl', ['is-enabled', 'tailscaled'], 5000)).trim())) return
   const out = await run('tailscale', ['status', '--json'], 8000)
   let installed = true
   let online = null

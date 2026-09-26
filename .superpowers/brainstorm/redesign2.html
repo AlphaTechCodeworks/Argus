@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CCTV redesign — before and after</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#050607;color:#e8eaed;font:14px/1.45 "Inter",system-ui,-apple-system,"Segoe UI",sans-serif;padding:36px 28px 90px}
+h1{font-size:26px;font-weight:650;letter-spacing:-.01em;margin:0 0 6px}
+.lede{color:#9aa0a6;margin:0 0 34px;max-width:820px;font-size:15px}
+.sec{margin:0 0 56px}
+.sec-h{display:flex;align-items:center;gap:12px;margin:0 0 14px}
+.sec-h .n{font-weight:700;font-size:13px;border-radius:7px;padding:3px 10px;background:#3b82f6;color:#fff}
+.sec-h .n.gray{background:#2a2e33;color:#cfd3d8}
+.sec-h h2{font-size:18px;font-weight:600;margin:0}
+.sec-h p{margin:0;color:#8b9198;font-size:13px}
+.shot{border-radius:14px;overflow:hidden;box-shadow:0 30px 70px rgba(0,0,0,.6);border:1px solid #23262a}
+svg.i{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+
+/* ================= BEFORE (the current app, recreated) ================= */
+.old{background:#15181c;height:520px;display:flex;flex-direction:column;font:14px/1.4 system-ui,sans-serif}
+.old .hdr{display:flex;align-items:center;gap:4px;padding:8px 10px;background:#1b1f24;flex-wrap:wrap}
+.old .hdr b{padding:0 10px 0 4px}
+.old .hdr a{padding:6px 10px;border-radius:4px;color:#8b95a1;font-size:14px}
+.old .hdr a.on{background:#232931;color:#e6e8eb}
+.old .ctl{display:flex;gap:8px;align-items:center;padding:8px 10px;background:#1b1f24;border-top:1px solid #262d36;flex-wrap:wrap;font-size:13px;color:#aeb6bf}
+.old select,.old .ob{background:#232931;border:1px solid #2f3742;color:#e6e8eb;border-radius:4px;padding:4px 8px;font:inherit;font-size:13px}
+.old .g{flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:4px}
+.old .t{position:relative;background:#000;border-radius:4px;overflow:hidden}
+.old .t .p{position:absolute;inset:0}
+.old .t .lb{position:absolute;left:6px;bottom:4px;font-size:12px;color:#fff;text-shadow:0 1px 2px #000}
+.old .t .st{position:absolute;right:6px;bottom:4px;font-size:11px;color:#9aa}
+
+/* ================= AFTER — shared ================= */
+.ui{display:grid;grid-template-columns:240px 1fr;height:620px}
+.nav{display:flex;flex-direction:column;padding:18px 14px}
+.brand{display:flex;align-items:center;gap:11px;padding:2px 8px 22px;font-weight:650;font-size:16px;letter-spacing:-.01em}
+.logo{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;color:#fff;background:linear-gradient(140deg,#4f8ff7,#1e56d6);box-shadow:0 4px 14px rgba(59,130,246,.35)}
+.grp{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;padding:16px 10px 7px}
+.nav a{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:9px;font-size:14px;font-weight:500;margin:1px 0;text-decoration:none}
+.nav a .ct{margin-left:auto;font-size:11px;font-weight:600;border-radius:999px;padding:1px 7px;background:#ef4444;color:#fff}
+.foot{margin-top:auto;display:flex;align-items:center;gap:10px;padding:14px 8px 2px;font-size:13px}
+.av{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:650;font-size:13px}
+.foot small{display:block;font-size:11px}
+.main{display:flex;flex-direction:column;min-width:0}
+.top{display:flex;align-items:flex-end;gap:14px;padding:24px 28px 16px}
+.top h3{margin:0;font-size:26px;font-weight:650;letter-spacing:-.02em}
+.top .sub{font-size:13px;margin-top:3px}
+.sp{flex:1}
+.pills{display:flex;gap:6px}
+.pill{font-size:13px;font-weight:500;border-radius:999px;padding:6px 14px}
+.stats{display:flex;gap:10px;padding:0 28px 16px}
+.stat{display:flex;align-items:center;gap:8px;border-radius:10px;padding:8px 13px;font-size:13px;font-weight:500}
+.dot{width:8px;height:8px;border-radius:50%}
+.cams{flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:0 28px 24px;align-content:start;overflow:hidden}
+.cam{border-radius:14px;overflow:hidden}
+.cam .pic{aspect-ratio:16/9;position:relative}
+.cam .live{position:absolute;top:10px;left:10px;font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:6px;padding:3px 8px;display:flex;align-items:center;gap:5px;color:#fff;background:rgba(0,0,0,.55);backdrop-filter:blur(6px)}
+.cam .live::before{content:"";width:6px;height:6px;border-radius:50%;background:#22c55e}
+.cam .live.idle::before{background:#f59e0b}
+.cam .live.off::before{background:#ef4444}
+.cam .meta{display:flex;align-items:center;justify-content:space-between;padding:11px 14px}
+.cam .meta b{font-size:14px;font-weight:600}
+.cam .meta span{font-size:12px}
+.cam.offcam .pic{display:grid;place-items:center;font-size:13px}
+
+/* ================= AFTER — dark ================= */
+.dark{background:#0e1012;color:#eceef1}
+.dark .nav{background:#121417;border-right:1px solid #1f2226}
+.dark .grp{color:#5d636b}
+.dark .nav a{color:#9aa0a8}
+.dark .nav a.on{background:#1d2530;color:#fff}
+.dark .nav a.on svg{color:#5b9bff}
+.dark .foot{border-top:1px solid #1f2226;color:#d7dadf}.dark .foot small{color:#6b7178}
+.dark .av{background:#252a31}
+.dark .top .sub{color:#8b9198}
+.dark .pill{background:#181b1f;color:#9aa0a8;border:1px solid #23272c}
+.dark .pill.on{background:#eceef1;color:#0e1012;border-color:#eceef1}
+.dark .stat{background:#15181b;border:1px solid #202328;color:#c9cdd2}
+.dark .cam{background:#15181b;border:1px solid #1f2226}
+.dark .cam .meta span{color:#7d838b}
+.dark .cam.offcam .pic{background:#111316;color:#5d636b}
+
+/* ================= AFTER — light ================= */
+.light{background:#f4f5f7;color:#16181b}
+.light .nav{background:#fff;border-right:1px solid #e6e8ec}
+.light .grp{color:#9aa1ab}
+.light .nav a{color:#4b5260}
+.light .nav a.on{background:#eaf1ff;color:#1e56d6}
+.light .foot{border-top:1px solid #eceef1;color:#16181b}.light .foot small{color:#8a919c}
+.light .av{background:#eceef1;color:#3b4250}
+.light .top .sub{color:#6b7280}
+.light .pill{background:#fff;color:#4b5260;border:1px solid #e3e6ea}
+.light .pill.on{background:#16181b;color:#fff;border-color:#16181b}
+.light .stat{background:#fff;border:1px solid #e6e8ec;color:#2b303a}
+.light .cam{background:#fff;border:1px solid #e6e8ec;box-shadow:0 1px 3px rgba(16,24,40,.06)}
+.light .cam .meta span{color:#8a919c}
+.light .cam.offcam .pic{background:#eceef1;color:#9aa1ab}
+
+/* ================= phones ================= */
+.phones{display:flex;gap:30px;flex-wrap:wrap}
+.ph{width:300px;height:620px;border-radius:38px;overflow:hidden;display:flex;flex-direction:column;border:8px solid #1b1d20;box-shadow:0 30px 60px rgba(0,0,0,.6)}
+.ph .pt{padding:22px 18px 12px}
+.ph .pt h4{margin:0;font-size:24px;font-weight:650;letter-spacing:-.02em}
+.ph .pt p{margin:2px 0 0;font-size:12px}
+.ph .pb{flex:1;overflow:hidden;padding:0 14px;display:flex;flex-direction:column;gap:12px}
+.ph .tabs{display:grid;grid-template-columns:repeat(5,1fr);padding:9px 0 20px}
+.ph .tabs a{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10px;font-weight:500}
+.ph.dark .tabs{background:#121417;border-top:1px solid #1f2226}.ph.dark .tabs a{color:#5d636b}.ph.dark .tabs a.on{color:#5b9bff}.ph.dark .pt p{color:#8b9198}
+.ph.light .tabs{background:#fff;border-top:1px solid #e6e8ec}.ph.light .tabs a{color:#9aa1ab}.ph.light .tabs a.on{color:#1e56d6}.ph.light .pt p{color:#6b7280}
+</style>
+</head>
+<body>
+<h1>CCTV — before and after</h1>
+<p class="lede">The top one is what you have now. The two below are the redesign: same layout, one dark and one light. Tell me <b>dark</b> or <b>light</b> — or point at anything you don't like. Pictures are placeholders.</p>
+
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="live" viewBox="0 0 24 24"><rect x="3" y="5" width="13" height="14" rx="2.5"/><path d="M16 10l5-3v10l-5-3"/></symbol>
+  <symbol id="play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="wall" viewBox="0 0 24 24"><rect x="3" y="4" width="8" height="7" rx="2"/><rect x="13" y="4" width="8" height="7" rx="2"/><rect x="3" y="13" width="8" height="7" rx="2"/><rect x="13" y="13" width="8" height="7" rx="2"/></symbol>
+  <symbol id="map" viewBox="0 0 24 24"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></symbol>
+  <symbol id="bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 1112 0v5l2 2H4l2-2zM10 20a2 2 0 004 0"/></symbol>
+  <symbol id="pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></symbol>
+  <symbol id="site" viewBox="0 0 24 24"><path d="M4 20V9l8-5 8 5v11M9 20v-6h6v6"/></symbol>
+  <symbol id="disk" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+  <symbol id="cog" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></symbol>
+</svg>
+
+<section class="sec">
+  <div class="sec-h"><span class="n gray">Before</span><h2>What you have now</h2><p>Ten tabs, controls crammed into strips, labels on top of the picture.</p></div>
+  <div class="shot old">
+    <div class="hdr"><b>CCTV</b><a class="on">Live</a><a>Playback</a><a>Wall</a><a>Map</a><a>Alarms</a><a>Health</a><a>Storage</a><a>Audit</a><a>Sites</a><a>Settings</a></div>
+    <div class="ctl">Site <select><option>All sites</option></select> Layout <select><option>3 × 3</option></select><label><input type="checkbox" checked> Hide offline</label><label><input type="checkbox"> Smooth</label><span class="ob">‹</span> 1 / 7 <span class="ob">›</span><span class="ob">⛶</span><span style="flex:1"></span>v0.4 mike <span class="ob">Sign out</span></div>
+    <div class="g" id="old"></div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sec-h"><span class="n">After</span><h2>Dark</h2><p>Grouped sidebar, a proper page title, camera cards with the name underneath the picture, status you can read at a glance.</p></div>
+  <div class="shot ui dark" id="uiDark"></div>
+</section>
+
+<section class="sec">
+  <div class="sec-h"><span class="n">After</span><h2>Light</h2><p>Exactly the same layout. Brighter and cleaner in an office; video still looks right because each camera sits on its own card.</p></div>
+  <div class="shot ui light" id="uiLight"></div>
+</section>
+
+<section class="sec">
+  <div class="sec-h"><span class="n">After</span><h2>On a phone</h2><p>Both themes.</p></div>
+  <div class="phones">
+    <div class="ph dark" id="pDark"></div>
+    <div class="ph light" id="pLight"></div>
+  </div>
+</section>
+
+<script>
+const S = [
+  ['Main Gate','#3e5234','#8fa274'],['Wharf South','#1d3a52','#6f9bb5'],['Gear Room','#4a3a2a','#a5875f'],
+  ['Lockers','#30343c','#7d8594'],['Car Park','#28394a','#7f98ad'],['Cashier Front','#4a3434','#a07b70'],
+  ['Loading Bay','#363b27','#8a916a'],['Office','#3b3044','#8f7ca3'],['Fence East','#243a2e','#6b9178']
+]
+const pic = (b, a) => `radial-gradient(130% 100% at 28% 18%, ${a} 0%, ${b} 52%, #0a0b0c 100%)`
+const t = () => new Date().toLocaleTimeString('en-GB')
+
+document.getElementById('old').innerHTML = S.map(([n, b, a], i) =>
+  `<div class="t"><div class="p" style="background:${pic(b, a)}"></div><span class="lb">${i + 1} · ${n}</span><span class="st">● live</span></div>`).join('')
+
+function ui(el) {
+  const status = (i) => i === 4 ? ['idle', 'Not recording'] : i === 8 ? ['off', 'Offline'] : ['', 'Recording']
+  el.innerHTML = `
+  <aside class="nav">
+    <div class="brand"><div class="logo"><svg class="i"><use href="#live"/></svg></div>CCTV</div>
+    <div class="grp">Watch</div>
+    <a class="on"><svg class="i"><use href="#live"/></svg>Live</a>
+    <a><svg class="i"><use href="#play"/></svg>Playback</a>
+    <a><svg class="i"><use href="#wall"/></svg>Wall</a>
+    <a><svg class="i"><use href="#map"/></svg>Map</a>
+    <div class="grp">Monitor</div>
+    <a><svg class="i"><use href="#bell"/></svg>Alarms<span class="ct">3</span></a>
+    <a><svg class="i"><use href="#pulse"/></svg>Health</a>
+    <div class="grp">Admin</div>
+    <a><svg class="i"><use href="#site"/></svg>Sites</a>
+    <a><svg class="i"><use href="#disk"/></svg>Storage</a>
+    <a><svg class="i"><use href="#cog"/></svg>Settings</a>
+    <div class="foot"><div class="av">M</div><div>Mike<small>Administrator</small></div></div>
+  </aside>
+  <div class="main">
+    <div class="top">
+      <div><h3>Live</h3><div class="sub">Main site · Tuesday 26 September</div></div>
+      <div class="sp"></div>
+      <div class="pills"><span class="pill">All sites</span><span class="pill on">Main</span><span class="pill">Solus</span><span class="pill">Rigginglot</span></div>
+    </div>
+    <div class="stats">
+      <span class="stat"><span class="dot" style="background:#22c55e"></span>29 recording</span>
+      <span class="stat"><span class="dot" style="background:#f59e0b"></span>2 not recording</span>
+      <span class="stat"><span class="dot" style="background:#ef4444"></span>1 offline</span>
+    </div>
+    <div class="cams">${S.map(([n, b, a], i) => {
+      const [cls, word] = status(i)
+      const off = cls === 'off'
+      return `<div class="cam${off ? ' offcam' : ''}"><div class="pic" style="${off ? '' : `background:${pic(b, a)}`}">${off ? 'Camera offline' : `<span class="live ${cls}">${cls === 'idle' ? 'IDLE' : 'LIVE'}</span>`}</div>
+        <div class="meta"><b>${n}</b><span class="tt">${off ? word : t()}</span></div></div>`
+    }).join('')}</div>
+  </div>`
+}
+ui(document.getElementById('uiDark'))
+ui(document.getElementById('uiLight'))
+
+function phone(el) {
+  el.innerHTML = `<div class="pt"><h4>Live</h4><p>Main site · 29 recording</p></div>
+  <div class="pb">${S.slice(0, 3).map(([n, b, a]) => `<div class="cam"><div class="pic" style="background:${pic(b, a)}"><span class="live">LIVE</span></div><div class="meta"><b>${n}</b><span class="tt">${t()}</span></div></div>`).join('')}</div>
+  <div class="tabs">
+    <a class="on"><svg class="i"><use href="#live"/></svg>Live</a><a><svg class="i"><use href="#play"/></svg>Playback</a>
+    <a><svg class="i"><use href="#bell"/></svg>Alarms</a><a><svg class="i"><use href="#pulse"/></svg>Health</a><a><svg class="i"><use href="#more"/></svg>More</a>
+  </div>`
+}
+phone(document.getElementById('pDark'))
+phone(document.getElementById('pLight'))
+setInterval(() => { for (const e of document.querySelectorAll('.tt')) if (/\d/.test(e.textContent)) e.textContent = t() }, 1000)
+</script>
+</body>
+</html>

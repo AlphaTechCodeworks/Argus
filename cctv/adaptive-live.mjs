@@ -47,7 +47,7 @@ export function wanBudgetBps(env = process.env) {
 /** Whether this address is a remote viewer (through Tailscale), not the local network. */
 export function isRemoteAddress(addr) {
   const a = String(addr ?? '').replace(/^::ffff:/, '')
-  if (a === '127.0.0.1' || a === '::1') return true // Funnel: tailscaled forwards from this machine
+  if (a === '127.0.0.1' || a === '::1') return true // the Cloudflare tunnel (cloudflared) forwards from this machine
   const m = /^100\.(\d+)\./.exec(a)
   return Boolean(m && Number(m[1]) >= 64 && Number(m[1]) <= 127) // 100.64.0.0/10, the tailnet
 }
