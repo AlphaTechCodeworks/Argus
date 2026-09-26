@@ -26,6 +26,7 @@ import { PRIORITY } from './lanes.mjs'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
+import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, Transcoder, clientCanDecodeH265, pool as transcodePool } from './transcode.mjs'
 import { bind, codecOf, coolingLeftMs, encodeFrame, playFrames, sdkCallT, sniffCodec } from './sdk.mjs'
 
 // FindNext* result codes continue the SDK error enum: NET_SDK_FILE_SUCCESS is 85
@@ -281,8 +282,14 @@ export function createPlayback(nvr) {
   }
 
   class PlaybackSession {
-    constructor(ws, ch, mainStream, start) {
+    constructor(ws, ch, mainStream, start, clientH265 = true) {
       this.ws = ws
+      // A browser that cannot decode H.265 (no HEVC extension on Windows) gets the NVR's H.265
+      // converted to H.264 here, as rec-playback.mjs does for the server's own recordings; with the
+      // NAS down, the NVR is where all playback comes from.
+      this.clientH265 = clientH265
+      this.xcode = null
+      this.slot = null
       this.ch = ch
       this.mainStream = mainStream
       this.start = start
@@ -452,8 +459,35 @@ export function createPlayback(nvr) {
       }
     }
 
-    #deliver({ msg }) {
-      if (this.ws.readyState === this.ws.OPEN) this.ws.send(msg)
+    #deliver({ msg, codec, ts }) {
+      if (this.ws.readyState !== this.ws.OPEN) return
+      if (this.clientH265 || codec !== X_H265) return this.ws.send(msg)
+      if (!this.xcode) {
+        this.slot = transcodePool.acquire()
+        if (!this.slot) {
+          this.send({ type: 'error', message: `This recording is H.265 and the server is already converting ${transcodePool.max} for other viewers. Try again in a moment.` })
+          return this.close()
+        }
+        this.xcode = new Transcoder({
+          inCodec: X_H265,
+          onFrame: (t, isKey, out) => {
+            if (this.closed || this.ws.readyState !== this.ws.OPEN) return
+            const m = Buffer.allocUnsafe(16 + out.length)
+            m.writeUInt8(isKey ? 1 : 0, 0)
+            m.writeUInt8(X_H264, 1)
+            m.writeUInt16LE(0, 2)
+            m.writeUInt16LE(0, 4)
+            m.writeUInt16LE(0, 6)
+            m.writeBigInt64LE(BigInt(Math.round(t * 1000)), 8)
+            out.copy(m, 16)
+            this.ws.send(m)
+          },
+          onFail: (e) => this.send({ type: 'error', message: `Could not convert this H.265 recording (${e.message}).` }),
+          log: (l) => console.log(`[${nvr.id}] playback ch${this.ch + 1}: ${l}`)
+        })
+        console.log(`[${nvr.id}] playback ch${this.ch + 1}: converting the NVR's H.265 to H.264 for this browser`)
+      }
+      this.xcode.push(ts, (msg[0] & 1) === 1, msg.subarray(16))
     }
 
     /** Pauses or resumes the NVR: it runs unless the viewer paused, the link is backed up or the buffer is full. */
@@ -526,6 +560,7 @@ export function createPlayback(nvr) {
       this.anchor = null
       this.buffered = false
       this.nvrRunning = true
+      this.xcode?.reset()
       if (this.closed) return this.#unregister()
       console.log(`[${nvr.id}] playback ch${this.ch + 1}: no SD recording, switching to HD`)
       markHdOnly(this.ch)
@@ -562,6 +597,10 @@ export function createPlayback(nvr) {
       clearInterval(this.timer)
       clearInterval(this.pacer)
       this.queue = []
+      this.xcode?.close()
+      this.xcode = null
+      this.slot?.release()
+      this.slot = null
       sessions.delete(this)
       // if PlayBackByTimeEx is still in flight, #open() releases once it returns;
       // if SetPlayDataCallBack is stuck with the handle, its late handler does
@@ -580,7 +619,7 @@ export function createPlayback(nvr) {
     }
     const main = hdOnly.has(ch) || stream === 0
     if (main && stream !== 0) ws.send(JSON.stringify({ type: 'stream', stream: 0 }))
-    new PlaybackSession(ws, ch, main, start)
+    new PlaybackSession(ws, ch, main, start, clientCanDecodeH265(url.searchParams))
   }
 
   /** The NVR is reconnecting or was removed: end every playback and tell its viewer. */

@@ -570,7 +570,7 @@ function open(start) {
     ws.close()
   }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=${state.stream}&start=${start}`)
+  const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=${state.stream}&start=${start}&h265=${state.h265 ? 1 : 0}`)
   sock.binaryType = 'arraybuffer'
   sock.kind = 'nvr'
   sock.onopen = () => {

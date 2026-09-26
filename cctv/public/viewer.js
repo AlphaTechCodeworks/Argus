@@ -353,14 +353,20 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
 let phoneFull = false
 
 function enterPhoneFull() {
-  if (!isPhone() || document.fullscreenElement || !grid.requestFullscreen) return
+  if (!isPhone()) return
   phoneFull = true
+  // Filling the screen does not depend on the browser allowing it: an iPhone has no full screen
+  // for a page element at all, so the camera covers the page itself (css: body.phone-full), and
+  // real full screen (hiding the browser's own bars) is added where the phone allows it.
+  document.body.classList.add('phone-full')
+  if (document.fullscreenElement || !grid.requestFullscreen) return
   grid.requestFullscreen({ navigationUI: 'hide' })
     .then(() => screen.orientation?.lock?.('landscape'))
     .catch(() => {}) // refused, or no lock on this phone: it still fills the screen as far as it can
 }
 
 function leavePhoneFull() {
+  document.body.classList.remove('phone-full')
   if (!phoneFull) return
   phoneFull = false
   try { screen.orientation?.unlock?.() } catch {}
@@ -609,6 +615,7 @@ document.addEventListener('fullscreenchange', () => {
   // the phone's back gesture left full screen: back to the grid too
   if (!on && phoneFull) {
     phoneFull = false
+    document.body.classList.remove('phone-full')
     try { screen.orientation?.unlock?.() } catch {}
     if (single !== null) closeSingle()
   }

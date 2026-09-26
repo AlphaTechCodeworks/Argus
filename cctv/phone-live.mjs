@@ -15,6 +15,10 @@ import { Transcoder, TranscodePool, CODEC_H264, CODEC_H265 } from './transcode.m
 
 export const PHONE_FPS = 15
 export const PHONE_MAX_WIDTH = 1280
+/** Picture quality for phones, and a ceiling on the bitrate (kbit/s) so it never costs more data. */
+export const PHONE_CRF = 30
+export const PHONE_SUB_KBPS = 300
+export const PHONE_MAIN_KBPS = 1200
 const HEADER_SIZE = 16 // sdk.mjs encodeFrame: key flag, codec, size, time (us); then the payload
 const MAX_GOP_FRAMES = 200
 const STOP_DELAY_MS = 10_000
@@ -75,6 +79,7 @@ export class PhoneStream {
     this.clients = new Set()
     this.gop = []
     this.samples = []
+    this.held = null // frames since the last keyframe, while the frame rate is being learned
     this.xcode = null
     this.passthrough = false
     this.closed = false
@@ -108,7 +113,11 @@ export class PhoneStream {
     const f = parseFrame(buf)
     if (this.passthrough) return this.#fanOut(buf, f.isKey)
     if (!this.xcode) {
-      // learn the frame rate first; then start on a keyframe (Transcoder ignores deltas until one)
+      // Learn the frame rate from the frames at hand, keeping them from the last keyframe on: the
+      // normal stream replays its current GOP to a new viewer, so this is usually over at once and
+      // the conversion starts from that keyframe instead of waiting seconds for the next one.
+      if (f.isKey) this.held = []
+      if (this.held) this.held.push(f)
       if (this.samples.length < RATE_SAMPLES) {
         this.samples.push(f.ts)
         return
@@ -116,6 +125,7 @@ export class PhoneStream {
       const fps = frameRate(this.samples)
       const keepEvery = keepEveryFor(fps)
       if (keepEvery === 1 && this.type !== 0) {
+        this.held = null
         // already 15 fps or less and small: converting would only cost CPU and picture
         this.passthrough = true
         this.slot.release() // costs nothing: the slot is for streams that cost a core
@@ -126,11 +136,18 @@ export class PhoneStream {
         inCodec: f.codec === CODEC_H265 ? CODEC_H265 : CODEC_H264,
         keepEvery,
         maxWidth: this.type === 0 ? PHONE_MAX_WIDTH : 0,
+        // a phone's small screen: lighter than the original, not heavier (crf 26 came out bigger)
+        crf: PHONE_CRF,
+        maxKbps: this.type === 0 ? PHONE_MAIN_KBPS : PHONE_SUB_KBPS,
         onFrame: (ts, isKey, out) => this.#onConverted(ts, isKey, out),
         onFail: (e) => this.log(`[phone-live] conversion failed: ${e.message}`),
         log: this.log
       })
       this.log(`[phone-live] converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps: keeping 1 in ${keepEvery}`)
+      const held = this.held ?? []
+      this.held = null
+      for (const h of held) this.xcode.push(h.ts, h.isKey, h.payload)
+      if (held.at(-1) === f) return
     }
     this.xcode.push(f.ts, f.isKey, f.payload)
   }

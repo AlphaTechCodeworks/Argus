@@ -108,7 +108,7 @@ export const pool = new TranscodePool(maxTranscodes())
  * need it.
  * @param {{ encoder?: 'libx264'|'h264_vaapi', inCodec?: number, keepEvery?: number, maxWidth?: number }} o
  */
-export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0 } = {}) {
+export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0 } = {}) {
   const head = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-fflags', 'nobuffer', '-flags', 'low_delay', '-probesize', '32', '-analyzeduration', '0']
   const input = ['-f', inCodec === CODEC_H265 ? 'hevc' : 'h264', '-i', 'pipe:0', '-an']
   const tail = ['-fps_mode', 'passthrough', '-flush_packets', '1', '-f', 'h264', 'pipe:1']
@@ -133,7 +133,8 @@ export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEver
     ...head,
     ...input,
     ...(filters.length ? ['-vf', filters.join(',')] : []),
-    '-c:v', 'libx264', '-preset', PRESET, '-crf', String(CRF), '-tune', 'zerolatency', '-bf', '0', '-g', '50', '-pix_fmt', 'yuv420p',
+    '-c:v', 'libx264', '-preset', PRESET, '-crf', String(crf), '-tune', 'zerolatency', '-bf', '0', '-g', '50', '-pix_fmt', 'yuv420p',
+    ...(maxKbps > 0 ? ['-maxrate', `${maxKbps}k`, '-bufsize', `${maxKbps * 2}k`] : []),
     ...tail
   ]
 }
@@ -303,6 +304,8 @@ export class Transcoder {
     inCodec = CODEC_H265,
     keepEvery = 1,
     maxWidth = 0,
+    crf = CRF,
+    maxKbps = 0,
     encoder = keepEvery > 1 || maxWidth > 0 ? 'libx264' : encoderNow(),
     onFrame,
     onFail = () => {},
@@ -317,7 +320,7 @@ export class Transcoder {
     clearTimer = clearTimeout,
     flushIdleMs = FLUSH_IDLE_MS
   } = {}) {
-    Object.assign(this, { inCodec, keepEvery, maxWidth, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
+    Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
     this.proc = null
     this.closed = false
     this.times = [] // the times of the frames pushed in and not yet handed back, smallest first
@@ -332,7 +335,7 @@ export class Transcoder {
   }
 
   #start() {
-    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth })
+    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth, crf: this.crf, maxKbps: this.maxKbps })
     const { bin, args: full } = niceWrap('ffmpeg', args, { platform: this.platform, hasNice: this.hasNice, hasIonice: this.hasIonice })
     const proc = this.spawn(bin, full, { stdio: ['pipe', 'pipe', 'pipe'] })
     this.proc = proc
