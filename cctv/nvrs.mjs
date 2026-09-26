@@ -526,7 +526,11 @@ export class Nvr {
       // address and no name has no camera in it; counting those as offline cameras made the
       // alerts claim 21 of rigginglot's 11 cameras were down.
       const configured = Boolean(String(ipc.szServer ?? '').trim() || String(ipc.szChlname ?? '').trim())
-      list.push({ ch: ipc.channel, name: ipc.szChlname || `Camera ${ipc.channel + 1}`, online: ipc.status === 1, configured })
+      // the camera's own make and model, as the NVR reports them: how a spec sheet is found (does
+      // it have a microphone, a speaker, how wide is it ...)
+      const model = String(ipc.productModel ?? '').replace(/\0.*$/, '').trim()
+      const maker = String(ipc.manufacturerName ?? '').replace(/\0.*$/, '').trim()
+      list.push({ ch: ipc.channel, name: ipc.szChlname || `Camera ${ipc.channel + 1}`, online: ipc.status === 1, configured, model, maker })
     }
     if (list.length > 0) this.channels = list.sort((a, b) => a.ch - b.ch)
     return true
@@ -1013,6 +1017,8 @@ export const allCameras = () =>
         online: c.online && nvr.online,
         // false for an empty channel slot on the NVR: there is no camera there to be offline
         configured: c.configured !== false,
+        model: c.model || null,
+        maker: c.maker || null,
         // whether the server is set to record this camera, so a live tile can show the red dot
         // that tells a viewer at a glance this one is being kept
         recording: cameraRecording(nvr.id, c.ch).mode !== 'off',
