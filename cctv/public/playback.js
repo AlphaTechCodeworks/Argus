@@ -487,7 +487,25 @@ function renderSpeeds() {
     speedsEl.dataset.kind = state.mode
   }
   for (const b of speedsEl.children) b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === state.speed))
+  speedCycleBtn.textContent = speedLabel(state.speed)
 }
+
+// The one speed button on the bar: each click goes to the next faster forward speed, and from the
+// fastest back to normal. Slow motion and reverse are under More, with the full ladder.
+const speedCycleBtn = $('speedCycle')
+speedCycleBtn.addEventListener('click', () => {
+  const ladder = allowedSpeeds(state.mode).filter((x) => x >= 1)
+  const next = ladder.find((x) => x > state.speed) ?? 1
+  setSpeed(next)
+})
+
+// More: the controls used now and then, one click away
+const moreBtn = $('moreBtn')
+const moreEl = $('pbMore')
+moreBtn.addEventListener('click', () => {
+  moreEl.hidden = !moreEl.hidden
+  moreBtn.setAttribute('aria-expanded', String(!moreEl.hidden))
+})
 
 /** Speeds, quality choices, legend, skew hint and source badge for the mode shown. */
 function updateModeUi() {
@@ -2224,7 +2242,8 @@ document.addEventListener('fullscreenchange', () => {
   document.body.classList.toggle('is-fullscreen', on)
   if (fullBtn) {
     fullBtn.setAttribute('aria-pressed', String(on))
-    fullBtn.textContent = on ? 'Exit full screen' : 'Full screen'
+    fullBtn.title = on ? 'Leave full screen (F or Esc)' : 'Full screen (F)'
+    fullBtn.setAttribute('aria-label', on ? 'Leave full screen' : 'Full screen')
   }
   if (on) wakeControls()
   else clearTimeout(idleTimer)
