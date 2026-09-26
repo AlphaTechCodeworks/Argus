@@ -1,5 +1,6 @@
 // Camera grid: each tile streams one camera over WebSocket into a VideoPlayer.
 import { isPhone, maxLiveFps } from './device.js'
+import { attachZoom } from './pinch-zoom.js'
 import { diffCameras, shownCameras, visibleCameras } from './grid-diff.js'
 import { enableGridDrag } from './grid-drag.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
@@ -41,6 +42,8 @@ let cameras = [] // every camera on every NVR, in this user's order: { nvr, site
 let serverList = [] // the same, as the server sends them (the default order: site, NVR, channel)
 let user = null
 let page = 0
+let fastUntil = Date.now() + 60_000 // the camera list is re-read every 5 s until then (listSoon)
+let overlayZoom = null // the full-size view's zoom (pinch-zoom.js), while it is open
 let single = null // key (nvr/ch) of the camera shown full-size, or null for the grid
 const camKey = (cam) => `${cam.nvr}/${cam.ch}`
 let tiles = []
@@ -374,7 +377,10 @@ const tileOptions = (cam) => ({
   pacing: PACING,
   clock: clockOptions(),
   statsVisible: () => showStats,
-  onDisconnect: checkSession,
+  onDisconnect: () => {
+    checkSession()
+    listSoon() // the server may be restarting: its cameras come back one NVR at a time
+  },
   osd: () => osdForTile(cam),
   maxFps: maxLiveFps()
 })
@@ -590,6 +596,27 @@ function openSingle(cam, { fromTap = false } = {}) {
   overlay.addEventListener('click', () => {
     if (imagePanel.confirmDiscard()) closeSingle()
   })
+  // zoom: the wheel, a pinch, drag to pan, double-click / double-tap back (pinch-zoom.js). Only the
+  // pictures move (style.css .single-overlay canvas); the name, the badge and the buttons stay put.
+  // While zoomed a tap does not close the view and a flick does not change camera.
+  const view = overlay
+  overlayZoom = attachZoom(view, {
+    apply: (z, x, y) => {
+      view.style.setProperty('--zs', String(z))
+      view.style.setProperty('--zx', `${x}px`)
+      view.style.setProperty('--zy', `${y}px`)
+      view.classList.toggle('zoomed', z > 1)
+      const badge = view.querySelector(':scope > .zoom-badge')
+      if (badge) {
+        badge.hidden = z === 1
+        badge.textContent = `${z.toFixed(1)}×`
+      }
+    }
+  })
+  const badge = document.createElement('span')
+  badge.className = 'zoom-badge'
+  badge.hidden = true
+  overlay.append(badge)
   grid.append(overlay)
   // inside the tap itself: a browser allows full screen only in answer to one
   if (fromTap) enterPhoneFull()
@@ -608,6 +635,7 @@ function openSingle(cam, { fromTap = false } = {}) {
 
 /** Back to the grid: the grid tiles pick up again straight away. */
 function closeSingle({ resumeGrid = true, keep = null } = {}) {
+  overlayZoom = null
   for (const t of singleTiles) if (t !== keep) t.close()
   singleTiles = []
   overlay?.remove()
@@ -1001,6 +1029,15 @@ setInterval(() => {
   loadOsd().catch(() => {}) // an overlay changed in Settings reaches every screen within half a minute
   sync.refresh()
 }, 30_000)
+// ...and every 5 s for a minute after the page opens or its streams drop: after a server restart the
+// NVRs' cameras come back one NVR at a time over 10-30 s, and waiting for the 30 s refresh left
+// them missing from the grid for up to half a minute longer.
+function listSoon() {
+  fastUntil = Date.now() + 60_000
+}
+setInterval(() => {
+  if (Date.now() < fastUntil && !document.hidden) loadCameras().catch(() => {})
+}, 5000)
 
 // Once per browser: say that the grid can be rearranged, which nothing on screen otherwise shows.
 {
@@ -1059,10 +1096,12 @@ function stepArrows() {
   const rotated = () => false // the picture is no longer turned sideways on an upright phone
   document.addEventListener('touchstart', (e) => {
     if (!document.body.classList.contains('phone-full') || e.touches.length !== 1) return (t0 = null)
+    if (overlayZoom && overlayZoom.zoom > 1) return (t0 = null) // zoomed: one finger moves the picture
     t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }
   }, { passive: true })
   document.addEventListener('touchend', (e) => {
     if (!t0 || single === null) return
+    if (overlayZoom && overlayZoom.zoom > 1) return (t0 = null) // (a pinch that started as one finger)
     const t = e.changedTouches[0]
     const dx = t.clientX - t0.x
     const dy = t.clientY - t0.y

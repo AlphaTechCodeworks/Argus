@@ -21,6 +21,7 @@
 // Switching between them (quality "SD (NVR)", or a camera or day in the other mode) converts the
 // position by the NVR's clock skew.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { attachZoom } from './pinch-zoom.js'
 import {
   ScrubThrottle,
   convertTime,
@@ -2232,45 +2233,20 @@ function applyZoom() {
   }
 }
 
-/** Zooms about a point, so whatever is under the pointer stays under it. */
-function zoomVideoAt(factor, clientX, clientY) {
-  const r = zoomCanvas.getBoundingClientRect()
-  const next = Math.min(MAX_ZOOM, Math.max(1, zoomState.z * factor))
-  if (next === zoomState.z) return
-  // the picture coordinate under the pointer, before and after
-  const px = (clientX - r.left - zoomState.x) / zoomState.z
-  const py = (clientY - r.top - zoomState.y) / zoomState.z
-  zoomState.z = next
-  zoomState.x = clientX - r.left - px * next
-  zoomState.y = clientY - r.top - py * next
-  if (next === 1) { zoomState.x = 0; zoomState.y = 0 }
-  applyZoom()
-}
-
-const resetZoom = () => { zoomState.z = 1; zoomState.x = 0; zoomState.y = 0; applyZoom() }
-
-videoEl.addEventListener('wheel', (e) => {
-  if (zoomBusy()) return
-  e.preventDefault()
-  zoomVideoAt(e.deltaY > 0 ? 1 / 1.25 : 1.25, e.clientX, e.clientY)
-}, { passive: false })
-
-let zoomDrag = null
-videoEl.addEventListener('pointerdown', (e) => {
-  if (zoomBusy() || zoomState.z === 1) return
-  zoomDrag = { x: e.clientX, y: e.clientY, ox: zoomState.x, oy: zoomState.y }
-  videoEl.setPointerCapture(e.pointerId)
+// wheel, two-finger pinch, drag to pan, double-click / double-tap back (pinch-zoom.js: the same as
+// Live's full-size view; phones could not zoom here at all before)
+const zoomer = attachZoom(videoEl, {
+  apply: (z, x, y) => {
+    zoomState.z = z
+    zoomState.x = x
+    zoomState.y = y
+    applyZoom()
+  },
+  rect: () => zoomCanvas.getBoundingClientRect(),
+  max: MAX_ZOOM,
+  busy: zoomBusy
 })
-videoEl.addEventListener('pointermove', (e) => {
-  if (!zoomDrag) return
-  zoomState.x = zoomDrag.ox + (e.clientX - zoomDrag.x)
-  zoomState.y = zoomDrag.oy + (e.clientY - zoomDrag.y)
-  applyZoom()
-})
-const endZoomDrag = () => { zoomDrag = null }
-videoEl.addEventListener('pointerup', endZoomDrag)
-videoEl.addEventListener('pointercancel', endZoomDrag)
-videoEl.addEventListener('dblclick', (e) => { if (!zoomBusy()) { e.preventDefault(); resetZoom() } })
+const resetZoom = () => zoomer.reset()
 
 // a zoomed picture must not follow you to another camera or another moment
 $('camera').addEventListener('change', resetZoom)
