@@ -4,6 +4,7 @@ import { enableGridDrag } from './grid-drag.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
 import { ImagePanel } from './image-panel.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
+import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 // ?pacing=off draws frames as soon as they decode (for before/after comparison)
 const PACING = new URLSearchParams(location.search).get('pacing') !== 'off'
 
@@ -203,7 +204,7 @@ function fillSlot(slot, gridArea, startDelayMs = 0) {
     tile.querySelector('.status').textContent = 'offline'
     return
   }
-  slot.live = new LiveTile(tile, cam, SUB_STREAM, startDelayMs, tileOptions())
+  slot.live = new LiveTile(tile, cam, SUB_STREAM, startDelayMs, tileOptions(cam))
   gridTiles.push(slot.live)
   tile.addEventListener('click', () => openSingle(slot.cam))
 }
@@ -273,7 +274,61 @@ function offlineNote(on) {
   }
 }
 
-const tileOptions = () => ({ pacing: PACING, clock: clockOptions(), statsVisible: () => showStats, onDisconnect: checkSession })
+// ---- the overlay this app draws over the picture (osd-overlay.js) --------------------------------
+
+// The settings, fetched once at start and refreshed with the camera list. An empty default until
+// then, which draws nothing: better a tile with no overlay for a second than an overlay that jumps
+// into place with the wrong text.
+let osdSettings = { default: DEFAULT_OSD, cameras: {} }
+/**
+ * The server's clock minus this browser's. The overlay must show the SERVER's time, because that is
+ * the clock we have made authoritative, and a viewing PC's own clock may be minutes out with nobody
+ * the wiser. Measured from the Date header of requests the page already makes, so it costs nothing.
+ */
+let clockOffsetMs = 0
+const serverNow = () => Date.now() + clockOffsetMs
+/** The time zone the overlay is written in: this browser's, the same one the rest of the page uses. */
+const osdTzMs = () => -new Date().getTimezoneOffset() * 60_000
+
+/** Takes the server's clock off any response that carries a Date header. */
+function noteServerClock(res) {
+  const off = clockOffsetFrom(res?.headers?.get?.('date'))
+  if (off !== null) clockOffsetMs = off
+}
+
+async function loadOsd() {
+  const res = await fetch('/api/osd').catch(() => null)
+  if (!res?.ok) return
+  noteServerClock(res)
+  const data = await res.json().catch(() => null)
+  if (data?.default) osdSettings = { default: data.default, cameras: data.cameras ?? {} }
+}
+
+/** What a tile should draw: this camera's settings over the site-wide default, and the moment. */
+function osdForTile(cam) {
+  if (!cam) return null
+  const key = camKey(cam)
+  try {
+    return {
+      settings: osdSettings.cameras[key] ?? osdSettings.default,
+      // The name is the camera's own, as the NVR reports it. A camera whose name we do not know
+      // draws no name line at all rather than a placeholder somebody might read as a fact.
+      camera: { name: cam.name },
+      atMs: serverNow(),
+      tzMs: osdTzMs()
+    }
+  } catch {
+    return null
+  }
+}
+
+const tileOptions = (cam) => ({
+  pacing: PACING,
+  clock: clockOptions(),
+  statsVisible: () => showStats,
+  onDisconnect: checkSession,
+  osd: () => osdForTile(cam)
+})
 
 function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
   pageLabel.dataset.pages = String(pages)
@@ -332,7 +387,7 @@ function openSingle(cam) {
   // open for this camera: keep it (and its unsent changes) across a rebuild of the view
   if (imagePanel.key === single) grid.append(imagePanel.el)
   else imagePanel.close()
-  const opts = tileOptions()
+  const opts = tileOptions(cam)
   const sub = new LiveTile(overlay, cam, SUB_STREAM, 0, opts)
   singleTiles.push(sub)
   // cameras reached through TVT P2P stay on the sub stream (the relay has little bandwidth)
@@ -588,6 +643,7 @@ document.addEventListener('visibilitychange', () => {
 /** Sends the browser to the sign-in page if the session has expired or been revoked. */
 async function checkSession() {
   const res = await fetch('/api/me').catch(() => null)
+  noteServerClock(res) // this runs every minute, so the overlay's clock never drifts from the server's
   if (res?.status === 401) location.href = '/login.html'
   return res?.ok ? res.json() : null
 }
@@ -651,10 +707,12 @@ async function loadCameras() {
 }
 
 await sync.load()
+await loadOsd()
 await loadCameras()
 if (sync.unsaved) sync.refresh()
 // the camera list, and this user's order (another screen may have changed it)
 setInterval(() => {
   loadCameras().catch(() => {})
+  loadOsd().catch(() => {}) // an overlay changed in Settings reaches every screen within half a minute
   sync.refresh()
 }, 30_000)

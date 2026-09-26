@@ -37,6 +37,8 @@
   <main class="pb-main">
     <div class="tile pb-video" id="video">
       <canvas></canvas>
+      <!-- This app's own on-screen display, drawn over the picture by playback.js (osd-overlay.js). -->
+      <canvas class="osd"></canvas>
       <div class="pb-zoom-badge" id="zoomBadge" hidden></div>
       <pre class="stats"></pre>
       <div class="pb-badge" id="srcBadge" hidden title="The server has not recorded this stretch: it plays from the NVR">from NVR</div>

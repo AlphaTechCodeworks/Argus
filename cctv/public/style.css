@@ -1262,3 +1262,22 @@ body.is-fullscreen .alert-banner { display: none; }
   .hp-smart-summary { gap: 8px; }
   .hp-smart-fact { flex: 1 1 100%; max-width: none; }
 }
+
+/* The on-screen display this app draws (public/osd-overlay.js). It is a second canvas laid exactly
+   over the video canvas, with the same object-fit, so both letterbox the same way and the text sits
+   where the settings put it relative to the picture rather than to the tile's black bars. It takes
+   no pointer events, so clicking a tile still opens it full size; the drag handler on the playback
+   preview listens on the tile itself, not here. Digital zoom transforms the video canvas only, which
+   is deliberate: the overlay is an app label, not part of the picture, and should not zoom away. */
+.tile canvas.osd { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+
+/* The overlay placement picker on the Settings page. Nine buttons laid out as the picture itself
+   is, so the button you press is in the place the text will appear -- that mapping is the whole
+   point of the control, which is why it is a grid and not a drop-down list. */
+.osd-place { border: 1px solid var(--line, #3a4048); border-radius: 4px; padding: 10px 12px; }
+.osd-corners { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; max-width: 420px; }
+.osd-corner { padding: 8px 4px; font: inherit; font-size: 12px; cursor: pointer; border: 1px solid var(--line, #3a4048); border-radius: 3px; background: none; color: inherit; }
+.osd-corner.on { background: var(--accent, #3d7eff); color: #fff; border-color: transparent; }
+.osd-fine { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+.osd-fine label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.osd-preview canvas { width: 100%; max-width: 480px; height: auto; border-radius: 3px; display: block; }

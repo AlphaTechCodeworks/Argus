@@ -1,6 +1,7 @@
 // One live camera in a tile: streams it over WebSocket into a VideoPlayer, with reconnects.
 // Used by the live grid (viewer.js) and the map's live popup (map.js).
 import { CODEC_H265, VideoPlayer } from './player.js'
+import { drawOsd, osdIsOff, osdLayout } from './osd-overlay.js'
 
 const HEADER_SIZE = 16
 export const SUB_STREAM = 1
@@ -11,7 +12,11 @@ export const NO_VIDEO_MS = 5000
 export const STALL_RECONNECT_MS = 18_000
 
 /** The markup a LiveTile expects inside its tile element. */
-export const TILE_HTML = '<canvas></canvas><pre class="stats"></pre><div class="label"><span class="dot dot-off" title="No video: nothing is arriving from this camera"></span><span class="name"></span><span class="status"></span></div>'
+// The .osd canvas sits over the video canvas and is drawn by this app (osd-overlay.js), never by
+// the camera. It is a second canvas rather than drawing onto the player's own, because the player
+// redraws that one on every frame and would wipe the text, and because the overlay must be able to
+// come and go without the streaming path knowing anything about it.
+export const TILE_HTML = '<canvas></canvas><canvas class="osd"></canvas><pre class="stats"></pre><div class="label"><span class="dot dot-off" title="No video: nothing is arriving from this camera"></span><span class="name"></span><span class="status"></span></div>'
 
 /**
  * The state dot on a tile, the way Milestone shows it: green when video is arriving, red when
@@ -53,6 +58,8 @@ export class LiveTile {
     this.status = tile.querySelector('.status')
     this.statsEl = tile.querySelector('.stats')
     this.dotEl = tile.querySelector('.dot') // absent in older markup: the dot is then simply not drawn
+    this.osdEl = tile.querySelector('canvas.osd') // absent in older markup: no overlay is drawn
+    this.osdSig = '' // what is on the overlay canvas now, so it is only repainted when it changes
     this.closed = false
     this.suspended = false // connected, but frames are dropped (not decoded): see suspend()
     this.attempts = 0 // reconnects since video last arrived
@@ -88,6 +95,57 @@ export class LiveTile {
     if (this.dotEl.title !== title) this.dotEl.title = title
   }
 
+  /**
+   * Paints this app's overlay (osd-overlay.js) over the picture.
+   *
+   * The overlay canvas is given exactly the same pixel size as the player's canvas and the same
+   * `object-fit: contain` in the stylesheet, so the two letterbox identically and the text sits
+   * where the settings say it does relative to the PICTURE, not to the tile's black bars.
+   *
+   * `opts.osd()` gives the settings, the camera and the moment. The moment must be on the SERVER's
+   * clock (viewer.js measures the difference from the server's Date header), because that is the
+   * authoritative clock here and the whole reason this overlay exists rather than the camera's own.
+   * Nothing is drawn when the tile has no picture yet: a time over a black tile looks like footage.
+   */
+  drawOverlay() {
+    const el = this.osdEl
+    if (!el) return
+    const info = this.opts.osd?.(this)
+    const vw = this.player?.canvas?.width ?? 0
+    const vh = this.player?.canvas?.height ?? 0
+    if (!info || osdIsOff(info.settings) || !this.player?.videoWidth || vw < 2 || vh < 2) {
+      if (this.osdSig !== '') {
+        el.width = 0 // a zero-sized canvas draws nothing and costs nothing
+        this.osdSig = ''
+      }
+      return
+    }
+    const ctx = el.getContext('2d')
+    if (!ctx) return
+    const layout = osdLayout({
+      settings: info.settings,
+      camera: info.camera ?? {},
+      atMs: info.atMs ?? null,
+      width: vw,
+      height: vh,
+      tzMs: info.tzMs ?? 0,
+      // A real measurement rather than the estimate, so a long camera name is cut at the right place
+      // in whatever font this browser actually resolved.
+      measure: (text, fontPx) => {
+        ctx.font = `600 ${fontPx}px system-ui, "Segoe UI", Roboto, sans-serif`
+        return ctx.measureText(text).width
+      }
+    })
+    const sig = `${vw}x${vh}|${layout.lines.map((l) => `${l.text}@${Math.round(l.x)},${Math.round(l.y)}`).join('|')}`
+    if (sig === this.osdSig && el.width === vw) return // a wall of tiles is not repainted for nothing
+    this.osdSig = sig
+    if (el.width !== vw || el.height !== vh) {
+      el.width = vw
+      el.height = vh
+    } else ctx.clearRect(0, 0, vw, vh)
+    drawOsd(ctx, layout)
+  }
+
   updateStatus() {
     const s = this.player.stats
     const ws = this.ws
@@ -119,6 +177,8 @@ export class LiveTile {
         `dropped ${s.dropped} · late ${s.late} · resync ${s.resyncs}`
       ].join('\n')
     }
+    // Once a second, which is exactly the resolution of the clock being shown.
+    this.drawOverlay()
   }
 
   connect() {

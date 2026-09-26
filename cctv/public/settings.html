@@ -57,6 +57,45 @@
       <div class="se-actions"><button id="saveCams" type="button" class="st-primary" disabled>Save camera changes</button><span id="c-msg" class="st-meta"></span></div>
     </section>
 
+    <section class="se-section" aria-labelledby="osd-title">
+      <h2 id="osd-title">Camera name and time on the picture</h2>
+      <p class="st-help">
+        This app draws the name and the time over the picture as you watch it. The cameras are not touched and
+        nothing is changed on the NVR, so moving it here is always reversible and never spoils recorded footage.
+      </p>
+      <p class="st-help">
+        <strong>The clock is this server's, not the camera's.</strong> The server is the clock we keep correct;
+        a camera's own burnt-in time can be minutes out without anyone noticing. On the Recordings page the overlay
+        shows the moment being played, written the same way as the timeline underneath it.
+      </p>
+      <p class="st-help">
+        It is drawn while you watch, so it is <strong>not</strong> in an exported MP4: exports copy the recorded
+        video exactly as the camera made it, which is what keeps them good evidence.
+      </p>
+      <form id="osd" class="se-grid" autocomplete="off">
+        <label class="se-wide">Settings for <select id="o-cam"></select></label>
+        <label class="st-check"><input id="o-name" type="checkbox" /> Show the name</label>
+        <label class="st-check"><input id="o-time" type="checkbox" /> Show the time (this server's clock)</label>
+        <label class="se-wide">Text <input id="o-text" maxlength="40" placeholder="the camera's own name" /></label>
+        <fieldset class="se-wide osd-place">
+          <legend>Where on the picture</legend>
+          <div class="osd-corners" id="o-corners"></div>
+          <div class="osd-fine">
+            <label>Across (0 left - 1 right) <input id="o-x" type="number" min="0" max="1" step="0.01" class="se-num" /></label>
+            <label>Down (0 top - 1 bottom) <input id="o-y" type="number" min="0" max="1" step="0.01" class="se-num" /></label>
+            <label>Size (% of the picture height) <input id="o-size" type="number" min="1" max="12" step="0.1" class="se-num" /></label>
+          </div>
+          <div class="osd-preview"><canvas id="o-preview" width="480" height="270" aria-label="Preview of the overlay"></canvas></div>
+          <p class="st-help">The position is held as a fraction of the picture, so it stays put on a phone, a 1080p screen and a 4K one alike.</p>
+        </fieldset>
+        <div class="se-actions">
+          <button type="submit" class="st-primary">Save</button>
+          <button type="button" id="o-reset" hidden>Use the default for this camera</button>
+          <span id="o-msg" class="st-meta"></span>
+        </div>
+      </form>
+    </section>
+
     <section class="se-section" aria-labelledby="mem-title">
       <h2 id="mem-title">Memory, thumbnails and free space</h2>
       <form id="misc" class="se-grid" autocomplete="off">

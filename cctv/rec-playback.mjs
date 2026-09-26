@@ -60,6 +60,12 @@
 //    Any other failure sends {type:'error'} and closes the socket (1011); it never throws.
 //  - Flow control: reading stops while the socket has more than pauseAbove bytes queued and starts
 //    again below resumeBelow; at most readAheadMs x |speed| of footage and maxQueueBytes are queued.
+//  - H.265 for a browser that cannot decode it (&h265=0 on the URL, transcode.mjs): the frames go
+//    through ffmpeg and H.264 goes out instead, in this same wire format and with the same times, so
+//    the page needs no new decoding path. Only that parameter switches it on, so a browser that can
+//    decode H.265 always gets the recording itself. At most CCTV_TRANSCODE_MAX (2) of these run at
+//    once; over that the viewer is told plainly and the socket closes, rather than joining a queue.
+//    The ffmpeg is killed on close, on error and on every seek: recording always wins.
 //  - Parsed files are kept per session (an LRU of 64 open readers, closed after 60 s unused), so
 //    scrubbing and seeking back and forth do not read an .idx twice.
 import * as fsp from 'node:fs/promises'
@@ -68,6 +74,7 @@ import { audit } from './audit.mjs'
 import { DATA_DIR } from './auth.mjs'
 import { nvrLegs } from './rec-fallback.mjs'
 import { SegmentReader, keyAtOrAfter, keyAtOrBefore } from './rec-reader.mjs'
+import { CODEC_H264, Transcoder, clientCanDecodeH265, pool as transcodePool, wantsTranscode } from './transcode.mjs'
 
 export const HEADER_SIZE = 16
 /** Speeds a server playback accepts (R9). */
@@ -174,7 +181,10 @@ export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlaySer
     return null
   }
   note(who, nvr, ch, 'server', start)
-  return new ServerPlayback({ ws, nvr, ch, start, stream, index, legs, ...opts })
+  // The page tells us what it can decode (&h265=0 when canDecodeH265() said no). Nothing else may
+  // switch the conversion on, so H.264 can never reach a client that did not ask for it.
+  const clientH265 = clientCanDecodeH265(p)
+  return new ServerPlayback({ ws, nvr, ch, start, stream, index, legs, clientH265, ...opts })
 }
 
 /** HH:MM:SS of a server time, in the NVR's time zone when known (else the server's). */
@@ -202,7 +212,9 @@ export class ServerPlayback {
    *   before {type:'end'} (a file closing and the next opening are not an end); noticeGapMs: gaps
    *   this long are announced, or played from the NVR (legs); legWaitMs: the longest wait for the
    *   NVR's coverage; legSpanMs: a start with no server footage after it asks the NVR this far;
-   *   prefetchMs: the coverage of a hole is asked for when the reader is this close to it
+   *   prefetchMs: the coverage of a hole is asked for when the reader is this close to it;
+   *   clientH265: the browser can decode H.265 (false: its H.265 frames are converted, transcode.mjs);
+   *   pool, makeTranscoder: the concurrency cap and the converter, injectable for tests
    */
   constructor({
     ws,
@@ -228,8 +240,14 @@ export class ServerPlayback {
     legWaitMs = 5000,
     legSpanMs = 6 * 3_600_000,
     prefetchMs = 10_000,
+    clientH265 = true,
+    pool = transcodePool,
+    makeTranscoder = (o) => new Transcoder(o),
     log = (line) => console.log(line)
   }) {
+    Object.assign(this, { clientH265, pool, makeTranscoder })
+    this.xcode = null // the running conversion (H.265 recordings, a browser that cannot decode them)
+    this.slot = null // its place under the concurrency cap
     Object.assign(this, { ws, nvr, ch, start, index, legs, fs, now, readAheadMs, maxQueueBytes, pauseAbove, resumeBelow, gapMs, lagMs, maxKeysPerS, tailPollMs, endGraceMs, noticeGapMs, legWaitMs, legSpanMs, prefetchMs, log })
     this.leg = null // { handle, gen, fromMs, toMs, keyMode }: an NVR leg is playing (the pacer is idle)
     this.closed = false
@@ -307,6 +325,7 @@ export class ServerPlayback {
   #reset() {
     this.#bumpEpoch()
     this.#closeLeg()
+    this.#stopTranscode(false)
     this.queue = []
     this.queueBytes = 0
     this.gapPending = false
@@ -468,10 +487,78 @@ export class ServerPlayback {
   #deliver(item) {
     if (item.text) return this.#send(item.text)
     if (this.ws.readyState !== this.ws.OPEN) return
+    if (wantsTranscode({ clientH265: this.clientH265, codec: item.codec })) {
+      // The browser cannot decode what was recorded: ffmpeg turns it into H.264 and the converted
+      // frame is sent from the callback below, in this same wire format and at this same time. The
+      // position is moved on here all the same, so pacing does not wait on the encoder.
+      if (this.#transcode(item)) {
+        this.lastTs = item.ts
+        if (this.preroll !== null && item.ts >= this.preroll) this.preroll = null
+        return
+      }
+      return // the cap is full: #transcode has told the viewer and closed the session
+    }
     this.ws.send(encodeDiskFrame(item.buf, item.isKey, item.codec, item.ts))
     this.lastTs = item.ts
     if (this.preroll !== null && item.ts >= this.preroll) this.preroll = null
     if (this.timing.first === null) this.timing.first = this.now() - this.t0
+  }
+
+  // ---- H.265 -> H.264 conversion (transcode.mjs) -----------------------------------------------
+
+  /**
+   * Feeds one H.265 frame to the conversion, starting it the first time. False means the server is
+   * already converting as many streams as it will (the cap): the viewer is told so plainly and the
+   * session ends, because a queue for something this heavy is a page that waits for ever.
+   */
+  #transcode(item) {
+    if (!this.xcode) {
+      this.slot = this.pool.acquire()
+      if (!this.slot) {
+        this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: H.265 conversion refused, ${this.pool.active} already running`)
+        this.#send({
+          type: 'error',
+          message:
+            'This recording is H.265 and this browser cannot play it. The server can convert it, but it is already converting as many streams as it can. Try again in a few minutes, or choose "SD (NVR)".'
+        })
+        // Not 1013: the page turns that into "the NVR is busy", which would replace the message
+        // above with one about the wrong machine entirely.
+        this.ws.close(1011, 'transcode busy')
+        this.close()
+        return false
+      }
+      this.xcode = this.makeTranscoder({
+        onFrame: (ts, isKey, buf) => this.#sendConverted(ts, isKey, buf),
+        onFail: (e) => this.#fail(new Error(`could not convert this H.265 recording (${e.message})`)),
+        log: this.log
+      })
+      this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: converting H.265 to H.264 for this browser`)
+    }
+    this.xcode.push(item.ts, item.isKey, item.buf)
+    return true
+  }
+
+  #sendConverted(ts, isKey, buf) {
+    if (this.closed || this.ws.readyState !== this.ws.OPEN) return
+    this.ws.send(encodeDiskFrame(buf, isKey, CODEC_H264, ts))
+    if (this.timing.first === null) this.timing.first = this.now() - this.t0
+  }
+
+  /**
+   * Stops the conversion dead. Called on every jump (seek, scrub, speed change, a new epoch) and on
+   * close: an ffmpeg still chewing on footage nobody is watching is stealing cores from the
+   * recorder, so it is killed rather than allowed to drain.
+   */
+  #stopTranscode(final) {
+    if (!this.xcode) return
+    if (final) {
+      this.xcode.close()
+      this.xcode = null
+      this.slot?.release()
+      this.slot = null
+      return
+    }
+    this.xcode.reset() // the slot is kept: the same viewer plays on from the new position
   }
 
   /** The newest frame reached faster than 1x; the end of the footage. Checked when the queue is empty. */
@@ -1125,6 +1212,7 @@ export class ServerPlayback {
     this.closed = true
     clearInterval(this.pacer)
     this.#closeLeg()
+    this.#stopTranscode(true)
     this.#bumpEpoch()
     this.queue = []
     this.queueBytes = 0

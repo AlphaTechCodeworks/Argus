@@ -22,11 +22,24 @@
 //   POST /api/admin/nvrs/:id/channels/:ch/figures    { device, period, profile, stream, width, height, codec?, settingsHash?, displayCheck?, figures }
 //   GET  /api/admin/sites/:site/notes                -> { site, mains }
 //   POST /api/admin/sites/:site/notes                { mains, confirm: true }
+//
+// The same file also holds the on-screen display the app draws over the picture (public/osd-overlay.js):
+//     { osd: { default: <settings>, cameras: { "<nvr>/<ch>": <settings> } } }
+//   - This is app data like everything else here: nothing is ever sent to a camera or an NVR. The
+//     NVR's own OSD calls exist but both our NVRs refuse them outright, and drawing it ourselves is
+//     better anyway (see the top of public/osd-overlay.js for why).
+//   - It is keyed by "<nvr>/<ch>" rather than by "<device>|<chlId>" like the camera notes above,
+//     because these settings are read and written by the pages, which speak in NVR ids and channel
+//     numbers, exactly as camera-links.mjs does. The notes above are keyed by the NVR's hardware
+//     address because they outlive an NVR being re-added; an overlay position is cheap to set again.
+//   GET  /api/osd          -> { default, cameras }   (everyone signed in: every page draws it)
+//   PUT  /api/admin/osd    { default?, cameras? }    (admins; a camera set to null goes back to the default)
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 import { HttpError, cameraOf, deviceOf, errorAnswer, isPlainObject, readLogCached, rotateLog } from './nvr-xml.mjs'
 import { nvrs } from './nvrs.mjs'
+import { DEFAULT_OSD, cleanOsdSettings, osdFor } from './public/osd-overlay.js'
 
 const NOTES_FILE = join(DATA_DIR, 'camera-notes.json')
 export const FIGURES_FILE = join(DATA_DIR, 'picture-figures.log')
@@ -49,11 +62,19 @@ function load() {
     key = `${st.size}:${st.mtimeMs}`
   } catch {}
   if (cache?.key === key) return cache.notes
-  let notes = { site: {}, cameras: {} }
+  let notes = { site: {}, cameras: {}, osd: { default: null, cameras: {} } }
   if (key !== 'none') {
     try {
       const j = JSON.parse(readFileSync(NOTES_FILE, 'utf8'))
-      if (isPlainObject(j)) notes = { site: isPlainObject(j.site) ? j.site : {}, cameras: isPlainObject(j.cameras) ? j.cameras : {} }
+      if (isPlainObject(j))
+        notes = {
+          site: isPlainObject(j.site) ? j.site : {},
+          cameras: isPlainObject(j.cameras) ? j.cameras : {},
+          osd: {
+            default: isPlainObject(j.osd?.default) ? j.osd.default : null,
+            cameras: isPlainObject(j.osd?.cameras) ? j.osd.cameras : {}
+          }
+        }
     } catch (e) {
       console.warn(`[notes] ${NOTES_FILE} unreadable (${e.message}); starting empty`)
     }
@@ -184,6 +205,105 @@ export function recentFigures(device, chlId, now = Date.now()) {
     .reverse()
 }
 
+// ---- the overlay this app draws (public/osd-overlay.js) ----------------------------------------
+
+export const OSD_PATH = '/api/osd'
+export const ADMIN_OSD_PATH = '/api/admin/osd'
+/** The same camera key every page and camera-links.mjs uses. */
+const OSD_KEY_RE = /^[A-Za-z0-9._-]{1,64}\/\d{1,4}$/
+const MAX_OSD_CAMERAS = 512
+
+/**
+ * The overlay settings as the pages want them: the site-wide default, already filled in, and only
+ * those cameras that have been given something of their own. Cameras are NOT expanded to one entry
+ * each — a site with 68 cameras that all use the default should send 68 nothings, not 68 copies —
+ * so a page merges a camera over the default itself (osdFor).
+ */
+export function osdSettings() {
+  const stored = load().osd ?? {}
+  const dflt = cleanOsdSettings(stored.default ?? null)
+  const cameras = {}
+  for (const [key, v] of Object.entries(stored.cameras ?? {})) {
+    if (!OSD_KEY_RE.test(key)) continue // a damaged entry is skipped, not allowed to fail the read
+    try {
+      cameras[key] = osdFor(dflt, v)
+    } catch {
+      // Same reasoning as camera-links.mjs: reading drops a damaged entry rather than leaving every
+      // page without an overlay; writing one is refused outright, below.
+    }
+  }
+  return { default: dflt, cameras }
+}
+
+/**
+ * /api/osd (read, everyone signed in) and /api/admin/osd (write, admins).
+ *
+ * There is no version check here, unlike camera-links.mjs. That is deliberate: a link drawn between
+ * two cameras is a fact two admins can genuinely disagree about, whereas an overlay position is a
+ * preference, is visible the moment it is wrong, and is fixed by dragging it again. A version check
+ * would only make the panel harder to use for no real protection.
+ *
+ * @param {string} method
+ * @param {string} pathname
+ * @param {() => Promise<any>} readJson
+ * @param {{ admin?: boolean }} ctx
+ * @returns {Promise<null | [number, any, object?]>} null when the path is not ours
+ */
+export async function handleOsd(method, pathname, readJson, ctx = {}) {
+  if (pathname !== OSD_PATH && pathname !== ADMIN_OSD_PATH) return null
+  try {
+    if (pathname === OSD_PATH) {
+      if (method !== 'GET') return [405, { error: 'Method not allowed' }]
+      // Never cached: an overlay moved on one screen should be right on the next page load.
+      return [200, osdSettings(), { 'cache-control': 'no-store' }]
+    }
+    if (!ctx.admin) return [403, { error: 'Only admins can change the overlay' }]
+    if (method !== 'PUT') return [405, { error: 'Method not allowed' }]
+    const body = await readJson()
+    if (!isPlainObject(body)) throw new HttpError(400, 'The request must be a JSON object')
+
+    let dflt
+    if (body.default !== undefined) {
+      try {
+        dflt = cleanOsdSettings(body.default)
+      } catch (e) {
+        throw new HttpError(400, e.message)
+      }
+    }
+    const patch = {}
+    if (body.cameras !== undefined) {
+      if (!isPlainObject(body.cameras)) throw new HttpError(400, 'cameras must be an object of "<nvr>/<ch>" settings')
+      const keys = Object.keys(body.cameras)
+      if (keys.length > MAX_OSD_CAMERAS) throw new HttpError(400, `more than ${MAX_OSD_CAMERAS} cameras in one change`)
+      for (const key of keys) {
+        if (!OSD_KEY_RE.test(key)) throw new HttpError(400, `bad camera "${key.slice(0, 40)}"; it must be "<nvr>/<channel>"`)
+        const v = body.cameras[key]
+        if (v === null) {
+          patch[key] = null // back to the default
+          continue
+        }
+        try {
+          patch[key] = cleanOsdSettings(v, { base: dflt ?? cleanOsdSettings(load().osd?.default ?? null) })
+        } catch (e) {
+          throw new HttpError(400, `${key}: ${e.message}`)
+        }
+      }
+    }
+
+    update((n) => {
+      n.osd ??= { default: null, cameras: {} }
+      if (dflt) n.osd.default = dflt
+      for (const [key, v] of Object.entries(patch)) {
+        if (v === null) delete n.osd.cameras[key]
+        else n.osd.cameras[key] = v
+      }
+    })
+    return [200, osdSettings()]
+  } catch (e) {
+    return errorAnswer(e)
+  }
+}
+
 // ---- API -------------------------------------------------------------------------------------
 
 /**
@@ -241,4 +361,4 @@ export async function handleSiteNotes(method, site, readJson) {
 }
 
 // for the offline tests
-export const _test = { cleanFigures, recordFigures, NOTES_FILE }
+export const _test = { cleanFigures, recordFigures, NOTES_FILE, DEFAULT_OSD }

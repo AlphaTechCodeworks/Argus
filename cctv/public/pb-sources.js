@@ -113,16 +113,23 @@ export function gapAt(gaps, t) {
  * Server or NVR playback for a day (plan R6): server when the timeline is available, the day has
  * server footage, the browser can decode its codec and the viewer has not chosen "SD (NVR)".
  * @param {{ timeline: object|null, h265: boolean, quality?: 'server'|'sd-nvr' }} o
- * @returns {{ mode: 'server'|'nvr', why: string }} why: a sentence for the viewer
+ * @returns {{ mode: 'server'|'nvr', transcode?: boolean, why: string }} why: a sentence for the viewer;
+ *   transcode: the server will convert the H.265 recording to H.264 because this browser cannot decode it
  */
 export function pickMode({ timeline, h265, quality }) {
   if (!timeline?.available) return { mode: 'nvr', why: 'Server recordings are not available for this camera.' }
   if (quality === 'sd-nvr') return { mode: 'nvr', why: 'SD (NVR) chosen.' }
   if (!timeline.ranges?.length) return { mode: 'nvr', why: 'The server has no recordings of this camera on this day.' }
   if (timeline.codec === 'h265' && !h265) {
-    return { mode: 'nvr', why: "This camera's server recordings are H.265, which this browser cannot decode: playing the NVR's SD stream instead." }
+    // This browser has no H.265 decoder (on Windows that is the normal state of affairs, because
+    // Chrome and Edge need a codec from the Microsoft Store that Windows does not ship). The server
+    // converts the recording to H.264 as it plays it, which keeps the full recorded resolution;
+    // falling back to the NVR's SD stream instead would throw the detail away. The socket says
+    // &h265=0 and the server does the rest (transcode.mjs); if it is too busy to convert, it says
+    // so and the viewer can still pick "SD (NVR)" by hand.
+    return { mode: 'server', transcode: true, why: 'This recording is H.265, which this browser cannot decode: the server is converting it to H.264 as it plays.' }
   }
-  return { mode: 'server', why: 'Server recordings.' }
+  return { mode: 'server', transcode: false, why: 'Server recordings.' }
 }
 
 /**

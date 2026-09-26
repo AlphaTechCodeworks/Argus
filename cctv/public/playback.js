@@ -38,6 +38,7 @@ import {
 import { follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
 import { allowedSpeeds, clampSpeed, frameStep, shuttleLabel, shuttleRate } from './pb-transport.js'
+import { DEFAULT_OSD, drawOsd, osdFont, osdIsOff, osdLayout } from './osd-overlay.js'
 
 // Video is decoded here in the browser, exactly as the camera encoded it; the
 // server never converts it. Recordings in H.265 need a browser/PC that can decode H.265.
@@ -295,7 +296,12 @@ async function loadDay(after, tzRetried = false) {
   }
   const pick = pickMode({ timeline: tl, h265: state.h265, quality: state.quality })
   lastPick = pick
-  if (pick.mode === 'server') return enterServerDay(tl, token, after)
+  if (pick.mode === 'server') {
+    // Said once per day loaded: the picture is a conversion, not the recording itself, and a viewer
+    // comparing it with the original later deserves to know that.
+    if (pick.transcode) showNotice(pick.why)
+    return enterServerDay(tl, token, after)
+  }
   leaveServerMode()
   if (state.avail && /H\.265/.test(pick.why)) showNotice(pick.why)
   try {
@@ -645,7 +651,10 @@ function openServer(start) {
   closeSocket()
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   // server footage is the main stream (stream=0); all times are the server's clock
-  const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=0&start=${Math.round(start)}&src=auto`)
+  // h265 tells the server what this browser can decode. It is the only thing that lets the server
+  // convert an H.265 recording to H.264 (transcode.mjs), so a browser that can decode H.265 always
+  // gets the recording exactly as the camera made it.
+  const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=0&start=${Math.round(start)}&src=auto&h265=${state.h265 ? 1 : 0}`)
   sock.binaryType = 'arraybuffer'
   sock.kind = 'server'
   sock.cam = camKey()
@@ -1237,6 +1246,10 @@ function snapshot() {
   out.width = src.width
   out.height = src.height
   out.getContext('2d').drawImage(src, 0, 0)
+  // The overlay goes into the saved still too. A picture taken off this page is often the thing
+  // that ends up in a report, and a still with no time on it is worth a great deal less than one
+  // with the time on it -- the same time the timeline and the clock box are showing.
+  drawOsd(out.getContext('2d'), osdLayoutNow(src.width, src.height, out.getContext('2d')))
   const when = state.position ?? state.nvrNow
   // colons are not allowed in a Windows file name, so the time is written with dashes
   const name = `${cameraSel.selectedOptions[0]?.textContent ?? camKey()} ${fmtDate(when)} ${fmtTime(when).replaceAll(':', '-')}.jpg`
@@ -2438,3 +2451,83 @@ await loadCameraLinks()
 
 // The diamonds belong on the timeline whether or not the list beside the picture is open.
 await loadBookmarks()
+
+// ---- the on-screen display this app draws (osd-overlay.js) ---------------------------------------
+//
+// Drawn on a second canvas laid over the video canvas, not on the video canvas itself, because the
+// player owns that one and redraws it on every frame. It is drawn from this page rather than from
+// the shared render loop (player.js) on purpose: the streaming path stays exactly as it is and
+// knows nothing about overlays.
+//
+// The moment shown is state.position, written with state.tz — deliberately the very same arithmetic
+// the timeline, the clock box and the snapshot's file name use, so that everything on this page
+// agrees. In server mode that position is already the server's clock. In NVR mode it is the NVR's,
+// which is the clock that matches the footage being played; the settings panel says plainly which
+// clock the overlay follows so nobody reads it as the camera's own burnt-in stamp.
+
+const osdCanvas = videoEl.querySelector('canvas.osd')
+let osdSettings = { default: DEFAULT_OSD, cameras: {} }
+let osdSig = ''
+
+async function loadOsd() {
+  try {
+    const data = await api('/api/osd')
+    if (data?.default) osdSettings = { default: data.default, cameras: data.cameras ?? {} }
+  } catch {
+    // Not being able to read the overlay settings must never stop playback: the page simply draws
+    // the built-in default, which is the least surprising thing it can do.
+  }
+}
+
+/** This camera's overlay settings: its own where it has them, otherwise the site-wide default. */
+const osdSettingsNow = () => osdSettings.cameras[camKey()] ?? osdSettings.default
+
+/**
+ * The layout for the picture at its current size. `ctx` is used only to measure text, so the same
+ * layout can be produced for the canvas on screen and for a snapshot being saved.
+ */
+function osdLayoutNow(width, height, ctx) {
+  return osdLayout({
+    settings: osdSettingsNow(),
+    // The camera's own name as the picker shows it. A camera with no name draws no name line.
+    camera: { name: cameraSel.selectedOptions[0]?.textContent ?? '' },
+    atMs: state.position ?? null,
+    width,
+    height,
+    tzMs: state.tz,
+    measure: ctx
+      ? (text, fontPx) => {
+          ctx.font = osdFont(fontPx)
+          return ctx.measureText(text).width
+        }
+      : undefined
+  })
+}
+
+/** Paints the overlay, once a second, which is the resolution of the clock it shows. */
+function drawOverlay() {
+  if (!osdCanvas) return
+  const w = player.canvas.width
+  const h = player.canvas.height
+  if (osdIsOff(osdSettingsNow()) || !player.videoWidth || w < 2 || h < 2) {
+    if (osdSig !== '') {
+      osdCanvas.width = 0 // a zero-sized canvas draws nothing and costs nothing
+      osdSig = ''
+    }
+    return
+  }
+  const ctx = osdCanvas.getContext('2d')
+  if (!ctx) return
+  const layout = osdLayoutNow(w, h, ctx)
+  const sig = `${w}x${h}|${layout.lines.map((l) => `${l.text}@${Math.round(l.x)},${Math.round(l.y)}`).join('|')}`
+  if (sig === osdSig && osdCanvas.width === w) return
+  osdSig = sig
+  if (osdCanvas.width !== w || osdCanvas.height !== h) {
+    osdCanvas.width = w
+    osdCanvas.height = h
+  } else ctx.clearRect(0, 0, w, h)
+  drawOsd(ctx, layout)
+}
+
+await loadOsd()
+setInterval(drawOverlay, 1000)

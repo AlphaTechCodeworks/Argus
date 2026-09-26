@@ -60,7 +60,7 @@ import { handleDiscovery } from './discovery.mjs'
 import { handleImaging } from './imaging.mjs'
 import { handleLens } from './lens.mjs'
 import { handleStreams } from './streams.mjs'
-import { handleCameraNotes, handleSiteNotes } from './camera-notes.mjs'
+import { ADMIN_OSD_PATH, OSD_PATH, handleCameraNotes, handleOsd as handleCameraOsd, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
 import { handleClockWrite, startClockSync } from './nvr-clock.mjs'
@@ -96,6 +96,7 @@ import { handleEvents } from './events.mjs'
 import { handleAlarms } from './alarms.mjs'
 import { handleOsd } from './osd.mjs'
 import { runRetention, runThinning } from './thinning.mjs'
+import { detectEncoder } from './transcode.mjs'
 import { httpsOptions } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
@@ -258,6 +259,7 @@ const nvrStorage = makeNvrStorage({
 // with it, so the NVRs are kept in step with the server rather than each hoping to reach a time
 // server of its own -- which a remote site may not be able to reach at all.
 const clockSync = startClockSync(nvrs, { enabled: () => getSettings().clockSync?.enabled !== false })
+// Which encoder the H.265 -> H.264 playback fallback will use, probed once at start rather than// on the first viewer: the probe runs a real short encode, and paying for that while somebody is// waiting for video is the wrong moment. It only ever logs; nothing fails if there is no hardware.detectEncoder().catch(() => {})
 
 const alerts = startAlerts({
   dataDir: DATA_DIR,
@@ -523,6 +525,13 @@ const handleRequest = async (req, res) => {
   if (pathname === LINKS_PATH) {
     const answer = await handleCameraLinks(req.method, pathname, () => readJsonObject(req, LINKS_BODY_LIMIT), { cameras: allCameras, maps: readMaps })
     if (answer) return sendJson(res, answer[0], answer[1], answer[2])
+  }
+  // What each camera draws over its own picture: its name and the clock. Read by everyone signed
+  // in, because every page that shows video draws it; changed by admins only, which the handler
+  // checks for itself. The NVRs refuse to say or set their own OSD, so this is the app's.
+  if (pathname === OSD_PATH || pathname === ADMIN_OSD_PATH) {
+    const answer = await handleCameraOsd(req.method, pathname, () => readJsonObject(req, 16 * 1024), { admin: who.admin })
+    if (answer) return sendJson(res, ...answer)
   }
   if (pathname.startsWith('/api/admin/')) {
     if (!AUTH_OFF && !auth.isAdmin(user)) return sendJson(res, 403, { error: 'Only admins can manage NVRs and sites' })

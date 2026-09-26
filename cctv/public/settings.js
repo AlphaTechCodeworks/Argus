@@ -2,6 +2,8 @@
 // drive, adding a network drive. The server checks every value again (settings.mjs, storage.mjs,
 // disks.mjs, netshares.mjs). The NAS password is sent once and cleared: the page never keeps it,
 // and no answer from the server ever contains it.
+import { DEFAULT_OSD, OSD_CORNERS, cleanOsdSettings, cornerOf, drawOsd, osdFont, osdLayout } from './osd-overlay.js'
+
 const $ = (id) => document.getElementById(id)
 const notice = $('notice')
 
@@ -676,6 +678,171 @@ $('alerts').addEventListener('submit', async (e) => {
   }
 })
 
+
+// ---- the name and time this app draws over the picture (public/osd-overlay.js) --------------------
+//
+// PLACEMENT: a nine-corner picker with a fine nudge and a live preview, rather than dragging the
+// overlay on a real camera picture. Two reasons, both about being solid rather than clever. First,
+// this panel also sets the default for ALL cameras, and there is no single live picture to drag it
+// on — the corner picker means the same control works for the default and for one camera. Second,
+// dragging on a live tile would have to map a pointer position through the canvas's letterboxing
+// (object-fit: contain) on a tile that is also click-to-open and pinch-to-zoom, which is exactly
+// where a subtle, hard-to-see bug would live. The preview below the picker is drawn by the very
+// same osdLayout() that draws the real thing, at a different size, so what it shows is what the
+// tiles will show — including the clamping when the text is too long for the tile.
+
+let osd = { default: { ...DEFAULT_OSD }, cameras: {} }
+let osdCam = '' // '' = the default for all cameras, otherwise "<nvr>/<ch>"
+let osdDraft = { ...DEFAULT_OSD }
+
+/** The settings being edited: the default, or one camera's own (falling back to the default). */
+const osdBase = () => (osdCam === '' ? osd.default : (osd.cameras[osdCam] ?? osd.default))
+const osdCamera = () => cameras.find((c) => `${c.nvr}/${c.ch}` === osdCam) ?? null
+
+function renderOsdCameras() {
+  const sel = $('o-cam')
+  const keep = sel.value
+  sel.replaceChildren(
+    option('', 'All cameras (the default)', false),
+    ...cameras.map((c) => option(`${c.nvr}/${c.ch}`, `${c.site} · ${c.name}${osd.cameras[`${c.nvr}/${c.ch}`] ? ' (its own)' : ''}`))
+  )
+  sel.value = cameras.some((c) => `${c.nvr}/${c.ch}` === keep) ? keep : ''
+  osdCam = sel.value
+}
+
+function drawOsdPreview() {
+  const c = $('o-preview')
+  const ctx = c.getContext('2d')
+  if (!ctx) return
+  // A plain grey stand-in for a picture: a real frame would only distract from where the text sits,
+  // and this panel must work with every camera offline.
+  ctx.fillStyle = '#3a4048'
+  ctx.fillRect(0, 0, c.width, c.height)
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)'
+  for (let i = 1; i < 3; i++) {
+    ctx.beginPath()
+    ctx.moveTo((c.width * i) / 3, 0)
+    ctx.lineTo((c.width * i) / 3, c.height)
+    ctx.moveTo(0, (c.height * i) / 3)
+    ctx.lineTo(c.width, (c.height * i) / 3)
+    ctx.stroke()
+  }
+  let settings
+  try {
+    settings = cleanOsdSettings(osdDraft)
+  } catch {
+    return // a half-typed figure: leave the last good preview up rather than flashing an error
+  }
+  drawOsd(
+    ctx,
+    osdLayout({
+      settings,
+      camera: { name: osdCamera()?.name ?? 'Camera name' },
+      atMs: Date.now(),
+      width: c.width,
+      height: c.height,
+      tzMs: -new Date().getTimezoneOffset() * 60_000,
+      measure: (text, fontPx) => {
+        ctx.font = osdFont(fontPx)
+        return ctx.measureText(text).width
+      }
+    })
+  )
+}
+
+function renderOsd() {
+  $('o-name').checked = osdDraft.showName
+  $('o-time').checked = osdDraft.showTime
+  $('o-text').value = osdDraft.text ?? ''
+  $('o-x').value = osdDraft.x
+  $('o-y').value = osdDraft.y
+  $('o-size').value = osdDraft.size
+  const here = cornerOf(osdDraft)
+  $('o-corners').replaceChildren(
+    ...OSD_CORNERS.map((corner) => {
+      const b = el('button', {
+        type: 'button',
+        textContent: corner.label,
+        className: corner.id === here ? 'osd-corner on' : 'osd-corner',
+        // The picker is a set of buttons, so it says out loud which one is chosen for a screen reader.
+        ariaPressed: String(corner.id === here)
+      })
+      b.addEventListener('click', () => {
+        osdDraft = { ...osdDraft, x: corner.x, y: corner.y }
+        renderOsd()
+      })
+      return b
+    })
+  )
+  $('o-reset').hidden = osdCam === '' || !osd.cameras[osdCam]
+  $('o-text').placeholder = osdCamera()?.name ? `${osdCamera().name} (the camera's own name)` : "the camera's own name"
+  drawOsdPreview()
+}
+
+function bindOsd() {
+  const edit = (field, read) => {
+    const input = $(field)
+    input.addEventListener('input', () => {
+      osdDraft = { ...osdDraft, ...read(input) }
+      drawOsdPreview()
+      // The corner buttons follow the fine nudge: moving x or y off a corner un-highlights it.
+      if (field === 'o-x' || field === 'o-y') renderOsd()
+    })
+  }
+  edit('o-name', (i) => ({ showName: i.checked }))
+  edit('o-time', (i) => ({ showTime: i.checked }))
+  edit('o-text', (i) => ({ text: i.value.trim() === '' ? null : i.value }))
+  edit('o-x', (i) => ({ x: Number(i.value) }))
+  edit('o-y', (i) => ({ y: Number(i.value) }))
+  edit('o-size', (i) => ({ size: Number(i.value) }))
+
+  $('o-cam').addEventListener('change', () => {
+    osdCam = $('o-cam').value
+    osdDraft = { ...osdBase() }
+    say('o-msg', '')
+    renderOsd()
+  })
+
+  $('o-reset').addEventListener('click', async () => {
+    try {
+      osd = await api('PUT', '/api/admin/osd', { cameras: { [osdCam]: null } })
+      osdDraft = { ...osdBase() }
+      renderOsdCameras()
+      renderOsd()
+      say('o-msg', 'This camera uses the default again')
+    } catch (err) {
+      say('o-msg', err.message, true)
+    }
+  })
+
+  $('osd').addEventListener('submit', async (e) => {
+    e.preventDefault()
+    try {
+      // Checked here so a mistyped figure is named before it is sent; the server checks it again
+      // with the very same function, because a page is never the last word on what gets stored.
+      const settings = cleanOsdSettings(osdDraft)
+      osd = await api('PUT', '/api/admin/osd', osdCam === '' ? { default: settings } : { cameras: { [osdCam]: settings } })
+      osdDraft = { ...osdBase() }
+      renderOsdCameras()
+      renderOsd()
+      say('o-msg', osdCam === '' ? 'Saved for every camera without its own settings' : 'Saved for this camera')
+    } catch (err) {
+      say('o-msg', err.message, true)
+    }
+  })
+}
+
+async function loadOsd() {
+  try {
+    osd = await api('GET', '/api/osd')
+  } catch {
+    osd = { default: { ...DEFAULT_OSD }, cameras: {} }
+  }
+  osdDraft = { ...osdBase() }
+  renderOsdCameras()
+  renderOsd()
+}
+
 function render() {
   renderDefaults()
   renderCameras()
@@ -703,6 +870,8 @@ if (!me.admin) {
     memory = s.memory ?? null
     cameras = cams
     render()
+    await loadOsd()
+    bindOsd()
     await loadStorage()
     await loadDisks()
     await loadShares()

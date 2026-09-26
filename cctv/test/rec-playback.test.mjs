@@ -101,8 +101,8 @@ const IDX = openRecIndex(join(process.env.DATA_DIR, 'recordings.db'))
 const NVR_ID = 'n1'
 
 /** Records groups of frames with a real SegmentWriter (one file or more per group) and indexes them. */
-async function recordGroups(ch, groups) {
-  const w = new SegmentWriter({ root: ROOT, nvrId: NVR_ID, ch, codec: 'h264' })
+async function recordGroups(ch, groups, codec = 'h264') {
+  const w = new SegmentWriter({ root: ROOT, nvrId: NVR_ID, ch, codec })
   const segs = []
   w.on('segment', (s) => segs.push(s))
   const accepted = []
@@ -234,9 +234,9 @@ const ADMIN = { user: 'admin', admin: true }
 const logs = []
 const N = fakeNvr()
 /** Opens a /playback socket through connectPlayback. */
-function open(ch, start, { nvr = N, index = IDX, who = ADMIN, src = 'auto', stream = 0, legs = null, allowed, opts = {}, chParam } = {}) {
+function open(ch, start, { nvr = N, index = IDX, who = ADMIN, src = 'auto', stream = 0, legs = null, allowed, opts = {}, chParam, extra = '' } = {}) {
   const ws = fakeWs()
-  const url = new URL(`ws://x/playback?nvr=${nvr.id}&ch=${chParam ?? ch}&stream=${stream}&start=${start}${src ? `&src=${src}` : ''}`)
+  const url = new URL(`ws://x/playback?nvr=${nvr.id}&ch=${chParam ?? ch}&stream=${stream}&start=${start}${src ? `&src=${src}` : ''}${extra}`)
   ws.t0 = performance.now()
   const args = { nvr, ws, url, who, index, legs, opts: { log: (l) => logs.push(l), ...opts } }
   if (allowed) args.allowed = allowed
@@ -866,6 +866,88 @@ for (const speed of [2, 4]) {
   check('close: every file handle is closed', openDuring > 0 && stats.open === 0, `${openDuring} while playing, ${stats.open} after`)
   check('close: nothing is sent afterwards', ws.bins.length === n)
   check('close: one log line with the start timings', lines.length === 1 && /^\[n1\] server playback ch1 from 2026-09-24T10:01:15\.900Z: index \d+ ms, idx \d+ ms, first frame \d+ ms$/.test(lines[0]), lines.join(' | '))
+}
+
+// ---- H.265 -> H.264 for a browser that cannot decode H.265 (transcode.mjs) ----------------------
+// The conversion's own logic is tested offline in transcode.test.mjs; what is checked here is the
+// wiring: which clients get converted frames, that nobody else can, and that the conversion is
+// stopped at a seek and at close. A stand-in for the Transcoder is injected, so no ffmpeg runs.
+{
+  // camera 9: 4 s recorded as .h265 (the codec is the file's extension; the bytes do not matter,
+  // because the stand-in never decodes anything). They are the same synthetic H.264 NALs the rest
+  // of this file uses, so the reader's H.265 parsing finds fewer frames in them than a real
+  // recording would: how many frames come out is not what is being checked here, which codec they
+  // carry is.
+  const T9 = Date.UTC(2026, 8, 24, 14, 0, 10)
+  const cam9 = await recordGroups(9, [makeFrames(prng(11), T9, 100)], 'h265')
+  check('h265 footage: recorded as .h265', cam9.segs.length > 0 && /\.h265$/.test(cam9.segs[0].path), cam9.segs[0]?.path)
+
+  /** A Transcoder stand-in: records what it was given and hands each frame straight back as H.264. */
+  const fakeXcode = (rec) => (o) => {
+    const x = {
+      pushed: [],
+      resets: 0,
+      closes: 0,
+      push: (ts, isKey, buf) => {
+        x.pushed.push(ts)
+        o.onFrame(ts, isKey, Buffer.concat([Buffer.from([0xaa]), buf.subarray(0, 4)]))
+      },
+      reset: () => x.resets++,
+      close: () => x.closes++
+    }
+    rec.push(x)
+    return x
+  }
+
+  {
+    const xs = []
+    const released = []
+    const pool = { active: 0, acquire: () => ({ release: () => released.push(1) }) }
+    const { ws, session } = open(9, T9 + 500, { extra: '&h265=0', opts: { pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.length >= 2, 2000)
+    check('a browser that cannot decode H.265 is sent H.264', ws.bins.length >= 2 && ws.bins.every((b) => b.codec === 0), `${ws.bins.length} frames, codecs ${[...new Set(ws.bins.map((b) => b.codec))].join()}`)
+    check('  every frame keeps the time it was recorded at', ws.bins.every((b, i) => Math.abs(b.tsMs - xs[0].pushed[i]) < 0.001), )
+    check('  exactly one conversion was started, holding one slot under the cap', xs.length === 1 && released.length === 0)
+    const n = xs[0].resets
+    session.close()
+    await sleep(20)
+    check('kill on close: the conversion is closed and its slot given back', xs[0].closes === 1 && released.length === 1)
+    check('  (close is not a seek)', xs[0].resets === n)
+  }
+  {
+    const xs = []
+    const pool = { active: 0, acquire: () => ({ release: () => {} }) }
+    const { ws, session } = open(9, T9 + 500, { extra: '&h265=0', opts: { pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.length >= 2, 2000)
+    ws.handlers.message(JSON.stringify({ seek: T9 + 2500, gen: 1 }), false)
+    check('kill on seek: the conversion is reset, so no ffmpeg keeps chewing on the old position', xs[0].resets === 1)
+    await until(() => ws.texts.some((t) => t.type === 'started' && t.gen === 1), 2000)
+    check('  and playback carries on converted after the seek', ws.bins.every((b) => b.codec === 0))
+    session.close()
+  }
+  {
+    // a browser that never said it cannot decode H.265 must never be sent anything but the recording
+    const xs = []
+    const pool = { active: 0, acquire: () => ({ release: () => {} }) }
+    const { ws, session } = open(9, T9 + 500, { opts: { pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.length >= 2, 2000)
+    check('a browser that did not ask is sent the H.265 recording, untouched', ws.bins.length >= 2 && ws.bins.every((b) => b.codec === 1) && xs.length === 0)
+    session.close()
+    const h1 = open(9, T9 + 500, { extra: '&h265=1', opts: { pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => h1.ws.bins.length >= 2, 2000)
+    check('  and so is one that says it can decode it', h1.ws.bins.every((b) => b.codec === 1) && xs.length === 0)
+    h1.session.close()
+  }
+  {
+    // over the cap: the honest message and the end of the session, never a queue nobody gets out of
+    const xs = []
+    const pool = { active: 2, acquire: () => null }
+    const { ws } = open(9, T9 + 500, { extra: '&h265=0', opts: { pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.texts.some((t) => t.type === 'error'), 2000)
+    const err = ws.texts.find((t) => t.type === 'error')
+    check('over the cap: an honest message, no frames and no ffmpeg', Boolean(err) && /already converting/.test(err.message) && ws.bins.length === 0 && xs.length === 0, err?.message)
+    check('  the socket is closed, and not with the code that means "the NVR is busy"', ws.closedWith === 1011, String(ws.closedWith))
+  }
 }
 
 check('the NVR was never called', N.calls === 0 && N.connects.length === 0)
