@@ -1496,7 +1496,11 @@ export class ImagePanel {
       this.update()
       this.status('Changing the recording stream…')
       const cur = si.current
-      const body = { device: this.settings.nvr.device, change, seen: { enct: cur.enct, res: cur.res, fps: cur.fps, QoI: cur.QoI, level: cur.level }, confirm: true }
+      // Every setting the server will compare, bitType included. The server rejects a `seen` that
+      // does not list them all -- the point being that nobody can confirm a change against a
+      // picture of the camera that has since moved on -- so a setting added there has to be added
+      // here in the same breath, or every stream change starts failing.
+      const body = { device: this.settings.nvr.device, change, seen: { enct: cur.enct, res: cur.res, fps: cur.fps, QoI: cur.QoI, level: cur.level, bitType: cur.bitType }, confirm: true }
       const r = await this.post('stream', body, { title: 'Change the recording stream?', shown: impacts.map((i) => i.text), action: 'Apply stream change' })
       if (seq !== this.seq) return
       if (r.cancelled) return this.status('Nothing was sent.')

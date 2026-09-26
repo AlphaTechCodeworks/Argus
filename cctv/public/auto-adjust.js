@@ -784,6 +784,21 @@ function streamBox(ctx, period, sub) {
   const sup = si.caps?.supEnct ?? []
   if (cur.enct === 'h265p' && sup.includes('h265')) push('S4', { enct: 'h265' }, 'H.265+ sends keyframes rarely and holds still areas: plain H.265 is steadier to seek in and to judge.', `The camera restarts its encoder (a few seconds without video), and the rate rises. ${storage}`)
   if (cur.enct === 'h264' && sup.includes('h265') && ctx.canH265 === true) push('S6', { enct: 'h265' }, 'H.265 gives a better picture for the same bitrate, and this browser can play it.', `The camera restarts its encoder (a few seconds without video); browsers without H.265 then fall back to the sub stream. ${storage}`)
+  // A camera on a fixed rate pays the same for an empty yard at 3 am as for a busy one: the
+  // encoder pads every frame to hit its number. Measured on 2026-09-25, nvr-2's fixed-rate cameras
+  // held 4.0, 3.8 and 3.2 Mb/s around the clock while its variable ones averaged under 1, and that
+  // NVR had 128 Mb of its 192 Mb budget permanently spent, refused streams, and left eleven
+  // cameras recording nothing.
+  //
+  // The cap does not move, so a busy scene encodes exactly as it does now. Not ticked by default:
+  // it is a change of what the cap means, and worth choosing deliberately rather than sweeping up
+  // with everything else.
+  const bitTypes = si.caps?.bitTypes ?? []
+  if (cur.bitType === 'CBR' && bitTypes.includes('VBR')) {
+    push('S7', { bitType: 'VBR' },
+      'The camera sends the same bitrate whether anything is happening or not. Letting it vary frees bandwidth on the NVR and keeps more days on its disk, and a busy scene still gets the full cap.',
+      'A still scene is recorded with fewer bits, so fine detail in an empty picture is softer. The cap, and so the quality of anything moving, is unchanged.')
+  }
   const res = [...(si.caps?.resolutions ?? [])].sort((a, b) => pixels(b.res) - pixels(a.res))
   const top = res[0]
   if (top && cur.res && pixels(top.res) > pixels(cur.res) && !(top.fps && top.fps < cur.fps)) {
