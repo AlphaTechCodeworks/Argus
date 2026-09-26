@@ -319,7 +319,12 @@ const alerts = startAlerts({
 
 // Nightly at 02:00, plus one at every start so a change made today is copied before the next one.
 const backupTargets = () => {
-  const onDrive = (getSettings().storage?.locations ?? []).filter((l) => l.path).map((l) => join(l.path, '_backup'))
+  // Only locations whose recordings marker is present: a network share that has dropped leaves an
+  // empty folder behind on the server's own disk, and on 2026-09-26 the nightly backup wrote into
+  // exactly that folder while recording -- which checks the marker -- rightly refused to. A backup
+  // that lands on the wrong disk is worse than a skipped one: it looks done and is not where
+  // anyone will look for it.
+  const onDrive = listLocations().filter((l) => l.path && l.health?.marker).map((l) => join(l.path, '_backup'))
   return [...onDrive, ...(process.env.CCTV_BACKUP_DIR ? [process.env.CCTV_BACKUP_DIR] : [])]
 }
 const runBackupNow = async () => {
