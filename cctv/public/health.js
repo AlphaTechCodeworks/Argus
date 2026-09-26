@@ -278,6 +278,8 @@ export function renderHealth(d) {
   // The drive is stated as "used", not "free": people think in how full a disk is.
   const drive = !loc
     ? { value: 'None set', state: 'warn', note: 'No recording location is configured.' }
+    : loc.mounted === null
+      ? { value: 'Checking…', state: 'warn', note: `${loc.name}: being checked after a restart.` }
     : !loc.mounted
       ? { value: 'Not mounted', state: 'bad', note: `${loc.name}: nothing can be recorded.` }
       : { value: `${Math.round(100 - loc.freePct)} % used`, state: loc.freePct <= loc.lowFreePct ? 'bad' : 'ok', note: loc.name, pct: 100 - loc.freePct }
@@ -350,7 +352,7 @@ export function renderHealth(d) {
   // Recording storage gone is not one problem among several: the server is saving nothing. It gets
   // its own line, above everything, on every page (alert-banner.js).
   const locs = d.locations ?? []
-  const down = locs.filter((l) => !l.mounted)
+  const down = locs.filter((l) => l.mounted === false) // null: not checked yet since a restart
   const criticalText = down.length === 0
     ? ''
     : down.length === locs.length

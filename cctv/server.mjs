@@ -213,8 +213,10 @@ const locationState = () =>
     id: l.id,
     // The folder is what the owner recognises a location by; locations carry no other name.
     name: l.path,
-    // The marker file is the test for "really mounted": an empty mount point has no marker.
-    mounted: l.health.marker,
+    // The marker file is the test for "really mounted": an empty mount point has no marker. A share
+    // not checked yet since the server started is unknown (null), not missing: saying "not mounted"
+    // for the half-minute after every restart was a false alarm.
+    mounted: l.health.reason === 'not checked yet' ? null : l.health.marker,
     freePct: l.health.marker ? freePercent(l.health) : 0
   }))
 

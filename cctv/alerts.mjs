@@ -104,6 +104,7 @@ function candidates(snap, { notRecordingMs, clockSkewMs, nowMs }) {
   }
 
   for (const l of snap.locations ?? []) {
+    if (l.mounted === null) continue // not checked yet since the server started: unknown, not missing
     if (!l.mounted) out.push({ key: `drive-missing/${l.id}`, kind: 'drive-missing', title: `${l.name} is not mounted`, detail: 'Nothing can be recorded to it.' })
     else if (l.freePct <= l.lowFreePct) out.push({ key: `drive-full/${l.id}`, kind: 'drive-full', title: `${l.name} is nearly full`, detail: `${Math.round(100 - l.freePct)} % used.` })
   }

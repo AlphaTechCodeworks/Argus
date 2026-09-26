@@ -262,7 +262,9 @@ let checks = 0
 /** Starts the 30-second health checks (write speed measured every 10 minutes). */
 export function startHealthChecks(everyMs = CHECK_EVERY_MS) {
   if (timer) return
-  const tick = () => checkHealth({ probe: checks++ % 20 === 0 }).catch((e) => console.warn(`[storage] health check failed: ${e.message}`))
+  // the first check is the quick one (no write-speed test): until a share has been checked it
+  // counts as unknown, and a slow first check meant a false "not mounted" after every restart
+  const tick = () => checkHealth({ probe: ++checks % 20 === 0 }).catch((e) => console.warn(`[storage] health check failed: ${e.message}`))
   tick()
   timer = setInterval(tick, everyMs)
   timer.unref()
