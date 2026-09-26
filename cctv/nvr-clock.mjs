@@ -118,6 +118,13 @@ export async function handleClockWrite(method, pathname, readJson, nvrs, user) {
 // It corrects only when a clock has drifted past a threshold, so a healthy NVR is left alone.
 
 const DRIFT_MS = 10_000 // leave a clock alone until it is this far out
+
+// Each NVR's clock as the sync last measured it ({ driftMs, at }), for Health: its alert used to go
+// by a reading taken only when someone opened playback, kept for ever -- it said nvr-2 was 47 s
+// slow long after the sync had measured it at 6 s.
+const measured = new Map()
+/** The sync's last reading of this NVR's clock: { driftMs, at } or null. */
+export const measuredDrift = (nvrId) => measured.get(nvrId) ?? null
 const SYNC_EVERY_MS = 15 * 60_000 // check every 15 minutes
 /** An NVR that could not be checked or set is tried again this soon, not at the next full pass. */
 const RETRY_MS = 5 * 60_000
@@ -182,6 +189,8 @@ export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 3 * 60
       if (!nvr.online) continue
       const r = await syncOne(nvr)
       out.push(r)
+      // after a write, the NVR's clock is the server's: what it was before is no longer true
+      if (r.drift !== null) measured.set(nvr.id, { driftMs: r.changed && /put right/.test(r.why) ? 0 : r.drift, at: Date.now() })
       if (/could not be checked|still reports the old time/.test(r.why)) failed.add(nvr.id)
       else failed.delete(nvr.id)
       // Every outcome, not only the changes. A background job that speaks only when it acts cannot

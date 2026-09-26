@@ -59,6 +59,23 @@ let settings = null
 let choices = null
 let cameras = []
 let locations = []
+
+/**
+ * Asks before a storage location or share is removed. When it is the only place recordings go, a
+ * click on OK is not enough: REMOVE must be typed. On 2026-09-26 the only location, the NAS, was
+ * removed with one confirm, and the server recorded nothing to disk for hours.
+ */
+function sureToRemove(what, onlyOne, note) {
+  if (!onlyOne) return confirm(`Remove ${what}?
+
+${note}`)
+  const typed = prompt(`${what} is the ONLY place recordings go. Removing it stops the server recording to disk until another is added.
+
+${note}
+
+Type REMOVE to go ahead.`, '')
+  return typed?.trim().toUpperCase() === 'REMOVE'
+}
 const camEdits = new Map() // "<nvr>/<ch>" -> patch
 
 const gb = (b) => (b >= 1e12 ? `${(b / 1e12).toFixed(1)} TB` : `${(b / 1e9).toFixed(1)} GB`)
@@ -239,7 +256,7 @@ function renderLocations() {
       role.addEventListener('change', () => locAction({ action: 'set', id: l.id, role: role.value }))
       const remove = el('button', { type: 'button', className: 'st-danger', textContent: 'Remove from list' })
       remove.addEventListener('click', () => {
-        if (confirm(`Stop using ${l.path}? Recordings already there are left in place.`)) locAction({ action: 'remove', id: l.id })
+        if (sureToRemove(l.path, locations.filter((x) => x.id !== l.id && x.role !== 'archive').length === 0, 'Recordings already there are left in place.')) locAction({ action: 'remove', id: l.id })
       })
       const pct = h.totalBytes ? Math.round((h.freeBytes / h.totalBytes) * 100) : null
       return el(
@@ -484,7 +501,8 @@ function renderShares(list) {
     ...list.map((s) => {
       const remove = el('button', { type: 'button', className: 'st-danger', textContent: 'Remove' })
       remove.addEventListener('click', () => {
-        if (confirm(`Unmount and forget ${s.path}? Nothing on the NAS itself is deleted.`)) shareAction({ action: 'remove', id: s.id })
+        const recordsHere = locations.some((l) => l.path === s.path || l.path.startsWith(`${s.path}/`))
+        if (sureToRemove(s.path, recordsHere && locations.filter((l) => !(l.path === s.path || l.path.startsWith(`${s.path}/`)) && l.role !== 'archive').length === 0, 'Nothing on the NAS itself is deleted, but its saved password is: adding it back needs the NAS login again.')) shareAction({ action: 'remove', id: s.id })
       })
       const where = s.proto === 'smb' ? `//${s.server}/${s.share}` : `${s.server}:${s.share}`
       return el(

@@ -2,7 +2,7 @@
 //   node cctv/test/healthwatch.test.mjs
 // The case it exists for, 2026-09-26: the server frozen for 40 minutes in a network-share call
 // while the NAS refused SMB sessions, with nothing logged and nobody told.
-import { FAILS_TO_OPEN, MAX_RECOVERIES, REALERT_MS, decide, recoveryPlan, summarise } from '../../deploy/healthwatch-core.mjs'
+import { FAILS_TO_OPEN, MAX_RECOVERIES, REALERT_MS, TS_FAILS_TO_RESTART, decide, recoveryPlan, summarise, tailscalePlan } from '../../deploy/healthwatch-core.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -70,6 +70,20 @@ check('no evidence at all is not a crash', typeof summarise() === 'string')
   check('a share stuck while the server still answers is remounted too', q.recover && q.mounts[0] === '/srv/cctv-net/backups', JSON.stringify(q))
   check('  but not with the NAS off', !recoveryPlan({ ...quiet, nas: [{ host: 'x', ping: 'answers', smb445: 'closed' }] }, [], T).recover)
   check('but again once the hour has passed', recoveryPlan(stale, many, T + 2 * 3_600_000).recover)
+}
+
+// ---- Tailscale stuck offline (2026-09-26: the public link down for 10+ minutes) ----
+{
+  let s = {}
+  let r
+  for (let i = 1; i < TS_FAILS_TO_RESTART; i++) { r = tailscalePlan(s, { installed: true, online: false, now: T + i }); s = r.state }
+  check('offline once or twice: not yet', !r.restart)
+  r = tailscalePlan(s, { installed: true, online: false, now: T + 10 })
+  check('offline three checks in a row: restart it', r.restart && r.state.restarts.length === 1, JSON.stringify(r))
+  check('online again: the count starts over', tailscalePlan({ fails: 2 }, { installed: true, online: true, now: T }).state.fails === 0)
+  check('not installed: never restarted', !tailscalePlan({ fails: 9 }, { installed: false, online: false, now: T }).restart)
+  const busy = { fails: 2, restarts: [T - 1000, T - 2000, T - 3000] }
+  check('three restarts in the hour already: left to a person', !tailscalePlan(busy, { installed: true, online: false, now: T }).restart)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

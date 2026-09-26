@@ -64,7 +64,7 @@ import { handleStreams } from './streams.mjs'
 import { ADMIN_OSD_PATH, OSD_PATH, handleCameraNotes, handleOsd as handleCameraOsd, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
-import { handleClockWrite, startClockSync } from './nvr-clock.mjs'
+import { handleClockWrite, measuredDrift, startClockSync } from './nvr-clock.mjs'
 import { handleSettings } from './settings-api.mjs'
 import { cameraRecording, getSettings } from './settings.mjs'
 import { startAlerts } from './alert-checks.mjs'
@@ -266,6 +266,19 @@ const nvrStorage = makeNvrStorage({
 // The server is the master clock: it keeps its own time by NTP and every recording is stamped
 // with it, so the NVRs are kept in step with the server rather than each hoping to reach a time
 // server of its own -- which a remote site may not be able to reach at all.
+/**
+ * An NVR's clock error for Health: the newer of the clock sync's reading and playback's, and none at
+ * all (no alert) when both are over 30 minutes old -- an old reading was alerted on for hours after
+ * the clock had been put right.
+ */
+const CLOCK_READING_MAX_AGE_MS = 30 * 60_000
+function freshSkewMs(n) {
+  const a = measuredDrift(n.id)
+  const pb = n.playback?.lastClock?.()
+  const b = pb ? { driftMs: pb.skewMs, at: pb.at } : null
+  const newest = [a, b].filter((x) => x && Date.now() - x.at < CLOCK_READING_MAX_AGE_MS).sort((x, y) => y.at - x.at)[0]
+  return newest ? newest.driftMs : 0
+}
 const clockSync = startClockSync(nvrs, { enabled: () => getSettings().clockSync?.enabled !== false })
 // Which encoder the H.265 -> H.264 playback fallback will use, probed once at start rather than on
 // the first viewer: the probe runs a real short encode, and paying for that while somebody is
@@ -302,7 +315,7 @@ const alerts = startAlerts({
       streams: n.worker ? (n.worker.stats()?.streams ?? null) : n.streams.size,
       cooling: nvrCooling(n.id),
       lastContactMs: lastContactOf(n.id),
-      clockSkewMs: n.playback?.lastClock?.()?.skewMs ?? 0,
+      clockSkewMs: freshSkewMs(n),
       refusalsLast10Min: refusalsOf(n)
     })),
   // Only slots that actually hold a camera: an NVR reports all 32 of its channels whether or not

@@ -69,3 +69,27 @@ export function recoveryPlan(ev = {}, recentRecoveries = [], nowMs = 0) {
   if (!mounts.length) return { recover: false, why: 'no network mount found to reset' }
   return { recover: true, why: 'stuck on a stale share while the NAS answers', mounts }
 }
+
+/** Tailscale checks in a row showing it offline before it is restarted (30 s apart: 90 s). */
+export const TS_FAILS_TO_RESTART = 3
+
+/**
+ * Whether to restart Tailscale, from one check. On 2026-09-26 tailscaled sat "offline" for over ten
+ * minutes, failing to reach its control servers every two minutes while the machine's own internet
+ * worked, and the public link was down from everywhere; a restart put it right at once. Not
+ * restarted when Tailscale is not installed or not running (that is not this fault), and at most
+ * MAX_RECOVERIES an hour, like the share.
+ * @param {{ fails?: number, restarts?: number[] }} s
+ * @param {{ installed: boolean, online: boolean|null, now: number }} o
+ * @returns {{ state: object, restart: boolean, why?: string }}
+ */
+export function tailscalePlan(s = {}, { installed, online, now }) {
+  const st = { fails: 0, restarts: [], ...s }
+  if (!installed || online === null) return { state: { ...st, fails: 0 }, restart: false }
+  if (online) return { state: { ...st, fails: 0 }, restart: false }
+  const fails = st.fails + 1
+  const recent = st.restarts.filter((t) => now - t < RECOVER_WINDOW_MS)
+  if (fails < TS_FAILS_TO_RESTART) return { state: { ...st, fails, restarts: recent }, restart: false }
+  if (recent.length >= MAX_RECOVERIES) return { state: { ...st, fails, restarts: recent }, restart: false, why: 'restarted 3 times in the last hour already: needs a person' }
+  return { state: { fails: 0, restarts: [...recent, now] }, restart: true, why: `offline for ${fails} checks in a row` }
+}

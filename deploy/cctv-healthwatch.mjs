@@ -28,7 +28,7 @@ import { execFile } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { request } from 'node:https'
 import { join } from 'node:path'
-import { FAILS_TO_OPEN, decide, recoveryPlan, summarise } from './healthwatch-core.mjs'
+import { FAILS_TO_OPEN, decide, recoveryPlan, summarise, tailscalePlan } from './healthwatch-core.mjs'
 
 const URL_HEALTH = process.env.CCTV_WATCH_URL ?? 'https://127.0.0.1:8443/healthz'
 const EVERY_MS = Number(process.env.CCTV_WATCH_EVERY_MS ?? 30_000)
@@ -184,7 +184,31 @@ async function maybeRecover(ev) {
   return `Fixed automatically: remounted ${plan.mounts.join(', ')} and restarted the server (${plan.why}).`
 }
 
+// ---- Tailscale: the public link ----
+// On 2026-09-26 tailscaled sat offline for over ten minutes (the public link down from everywhere)
+// while the machine's own internet worked; a restart fixed it. Checked each tick, restarted after
+// three offline checks in a row (tailscalePlan), at most three times an hour.
+let tsState = {}
+async function checkTailscale() {
+  const out = await run('tailscale', ['status', '--json'], 8000)
+  let installed = true
+  let online = null
+  if (/not found|ENOENT|timed out/i.test(out)) installed = !/not found|ENOENT/i.test(out)
+  else {
+    try { online = JSON.parse(out)?.Self?.Online === true } catch { online = null }
+  }
+  const r = tailscalePlan(tsState, { installed, online, now: Date.now() })
+  tsState = r.state
+  if (online === false) log('tailscale-offline', { fails: tsState.fails })
+  if (r.restart) {
+    const res = await run('systemctl', ['restart', 'tailscaled'], 30_000)
+    log('tailscale-restarted', { why: r.why, result: res || 'ok' })
+    await notify('CCTV: public link was down', `Tailscale was offline (${r.why}): restarted it.`)
+  } else if (r.why) log('tailscale-no-restart', { why: r.why })
+}
+
 async function tick() {
+  checkTailscale().catch((e) => log('tailscale-check-error', { error: e.message }))
   const p = await probe()
   const d = decide(state, p.ok, Date.now())
   state = d.state
