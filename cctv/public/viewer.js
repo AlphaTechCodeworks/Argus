@@ -776,3 +776,43 @@ setInterval(() => {
     document.body.append(tip)
   }
 }
+
+// ---- phones: flick left and right to go through the cameras ----
+// In the full-screen view, a flick moves to the next or previous camera of the grid (the same
+// site filter, offline hidden the same way, in this user's order). A tap still closes. When the
+// picture is shown turned a quarter (an upright phone that would not rotate), "left and right"
+// are along the phone's length, so the flick is read on that axis.
+{
+  const SWIPE_PX = 50
+  let t0 = null
+  let swipedAt = 0
+  const rotated = () => matchMedia('(orientation: portrait)').matches
+  document.addEventListener('touchstart', (e) => {
+    if (!document.body.classList.contains('phone-full') || e.touches.length !== 1) return (t0 = null)
+    t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+  }, { passive: true })
+  document.addEventListener('touchend', (e) => {
+    if (!t0 || single === null) return
+    const t = e.changedTouches[0]
+    const dx = t.clientX - t0.x
+    const dy = t.clientY - t0.y
+    t0 = null
+    // the picture's own left-right: across the screen, or down the screen when turned a quarter
+    const along = rotated() ? dy : dx
+    const across = rotated() ? dx : dy
+    if (Math.abs(along) < SWIPE_PX || Math.abs(along) < Math.abs(across) * 1.5) return
+    const list = shownCameras(cameras, { site: siteSelect.value, hideOffline: hideOffline.checked })
+    if (list.length < 2) return
+    const i = list.findIndex((c) => camKey(c) === single)
+    const next = list[(i + (along < 0 ? 1 : -1) + list.length) % list.length]
+    swipedAt = performance.now()
+    if (imagePanel.confirmDiscard()) openSingle(next)
+  }, { passive: true })
+  // the click a browser sends after the flick must not close the view
+  document.addEventListener('click', (e) => {
+    if (performance.now() - swipedAt < 500) {
+      e.stopPropagation()
+      e.preventDefault()
+    }
+  }, true)
+}
