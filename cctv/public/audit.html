@@ -59,6 +59,18 @@
       <p id="retention" class="hp-note"></p>
     </section>
 
+    <section class="se-section" aria-labelledby="users-title" id="usersSection" hidden>
+      <h2 id="users-title">Accounts</h2>
+      <p class="st-help">Who can sign in. A <b>viewer</b> watches and plays back what the Rights below allow; an <b>admin</b> can change everything. Type the new person's password yourself and give it to them in person.</p>
+      <table class="hp-table"><thead><tr><th>Name</th><th>Role</th><th></th></tr></thead><tbody id="userRows"></tbody></table>
+      <form id="addUser" class="se-grid" autocomplete="off">
+        <label>Name <input id="u-name" required maxlength="64" pattern="[w.@-]{1,64}" autocapitalize="off" spellcheck="false" /></label>
+        <label>Password (8 or more) <input id="u-pass" type="password" minlength="8" autocomplete="new-password" /></label>
+        <label>Role <select id="u-role"><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label>
+        <div class="se-actions"><button type="submit" class="st-primary">Add or update</button><span id="u-msg" class="st-meta"></span></div>
+      </form>
+    </section>
+
     <section class="se-section" aria-labelledby="rights-title">
       <h2 id="rights-title">Rights</h2>
       <p class="st-help">What each account may do, per site or per camera. Anything not listed here is refused.</p>

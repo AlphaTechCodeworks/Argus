@@ -98,6 +98,7 @@ import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
 import { can, handleRights } from './rights.mjs'
+import { handleUsers } from './users-api.mjs'
 import { audit, handleAudit, pruneAudit } from './audit.mjs'
 import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
@@ -612,6 +613,9 @@ const handleRequest = async (req, res) => {
     // Who may do what, and the record of who did.
     const rightsRoute = await handleRights(req.method, pathname, () => readJsonObject(req, 8192), who)
     if (rightsRoute) return sendJson(res, ...rightsRoute)
+    // accounts: add a viewer or an admin from the app (users-api.mjs)
+    const usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who)
+    if (usersRoute) return sendJson(res, ...usersRoute)
     const auditRoute = handleAudit(req.method, pathname, url.searchParams, who, auth.DATA_DIR, { can })
     if (auditRoute) return sendJson(res, ...auditRoute)
 

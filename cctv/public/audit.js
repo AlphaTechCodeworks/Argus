@@ -188,6 +188,51 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     }))
   }
 
+  // ---- accounts (users-api.mjs) ----
+  const usersApi = async (method, path = '', body) => {
+    const r = await fetch(`/api/admin/users${path}`, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(j.error ?? `${r.status}`)
+    return j
+  }
+  const uSay = (t, bad = false) => { const m = document.getElementById('u-msg'); m.textContent = t; m.classList.toggle('st-error-text', bad) }
+  const loadUsers = async () => {
+    const box = document.getElementById('usersSection')
+    let users
+    try { users = (await usersApi('GET')).users } catch { return } // not an admin: the section stays hidden
+    box.hidden = false
+    document.getElementById('userRows').replaceChildren(...users.map((u) => {
+      const tr = document.createElement('tr')
+      const rm = document.createElement('button')
+      rm.type = 'button'
+      rm.className = 'btn-ghost'
+      rm.textContent = 'Remove'
+      rm.addEventListener('click', async () => {
+        if (!confirm(`Remove the account ${u.name}? They can no longer sign in.`)) return
+        try { await usersApi('DELETE', `/${encodeURIComponent(u.name)}`); uSay(`Removed ${u.name}`); loadUsers(); loadRights() } catch (e) { uSay(e.message, true) }
+      })
+      const name = document.createElement('td'); name.textContent = u.name
+      const role = document.createElement('td'); role.textContent = u.role === 'admin' ? 'Admin' : 'Viewer'
+      const act = document.createElement('td'); act.append(rm)
+      tr.append(name, role, act)
+      return tr
+    }))
+  }
+  document.getElementById('addUser')?.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const name = document.getElementById('u-name').value.trim()
+    const password = document.getElementById('u-pass').value
+    const role = document.getElementById('u-role').value
+    try {
+      await usersApi('POST', '', { name, role, ...(password ? { password } : {}) })
+      document.getElementById('u-pass').value = ''
+      uSay(`Saved ${name} (${role})`)
+      loadUsers()
+      loadRights()
+    } catch (err) { uSay(err.message, true) }
+  })
+  loadUsers()
+
   const loadRights = () =>
     fetch('/api/admin/rights')
       .then((x) => x.json())
