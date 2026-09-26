@@ -1639,3 +1639,8 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
   padding: 10px 14px; border-radius: 12px; background: rgba(20,22,26,.75); color: #fff; font-size: 13px; text-align: center;
   -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
 .single-overlay canvas { position: relative; z-index: 1; }
+/* the full-size camera's own controls stay above its picture (the picture was raised a layer over
+   the hidden iPhone-player copy, and took the name bar, Recordings and Picture under it) */
+.single-overlay > .label, .single-overlay > .stats, .single-overlay > canvas.osd { z-index: 4; }
+.single-overlay > .tile-upgrade { z-index: 2; }
+.single-overlay > .phone-fs-btn, .single-overlay > .phone-step, .single-overlay > .phone-fs-note { z-index: 6; }
