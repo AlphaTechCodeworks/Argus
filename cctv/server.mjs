@@ -358,7 +358,8 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png'
 }
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/healthz'])
+// the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/healthz'])
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
@@ -482,7 +483,10 @@ const handleRequest = async (req, res) => {
       nvrs: list.length,
       online: list.filter((n) => n.online).length,
       streams,
-      sdk: { inFlight: s.inFlight, cap: s.cap, queued: s.queued, late: s.late, oldestMs: s.oldestMs, oldest: s.oldest }
+      sdk: { inFlight: s.inFlight, cap: s.cap, queued: s.queued, late: s.late, oldestMs: s.oldestMs, oldest: s.oldest },
+      // network shares as last checked (never checked here): the outside watcher remounts one that
+      // stopped answering, which the server itself, no longer frozen by it, would otherwise hide
+      shares: listLocations().filter((l) => l.type === 'network').map((l) => ({ path: l.path, ok: l.health.ok, reason: l.health.reason }))
     }
     // CCTV_LIVE_WORKER=on: each NVR's live worker (its own SDK calls are counted there, not above)
     if (list.some((n) => n.worker)) {

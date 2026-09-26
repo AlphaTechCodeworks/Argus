@@ -54,11 +54,10 @@ function run(cmd, args, ms = 5000) {
 }
 
 // ---- the shares themselves ----------------------------------------------------------------------
-// One small check per share per tick (statfs, what a recording needs to know first). A check still
-// stuck from before is not joined by another: stuck processes would pile up by the hundred.
-const SHARE_CHECK_MS = 10_000
-const shareChecks = new Map() // mount -> { child, since } while a check is out
-const shareFails = new Map() // mount -> failed checks in a row
+// The server checks its shares from a child process and reports them in /healthz; one it calls
+// "not answering" is stuck where no file call on it returns. The watcher cannot check that more
+// cheaply itself: a statfs still answered on 2026-09-26 while every file open on the share hung.
+const shareFails = new Map() // mount -> reports in a row of a stuck share on it
 
 function networkMountPoints() {
   try {
@@ -68,48 +67,18 @@ function networkMountPoints() {
   }
 }
 
-/** Whether a share answers a statfs within SHARE_CHECK_MS. */
-function checkShare(mount) {
-  const prev = shareChecks.get(mount)
-  if (prev) return Promise.resolve(false)
-  return new Promise((resolve) => {
-    let done = false
-    const finish = (ok) => { if (!done) { done = true; resolve(ok) } }
-    const child = execFile('stat', ['-f', '-c', '%b', mount], { timeout: SHARE_CHECK_MS, killSignal: 'SIGKILL' }, (err) => {
-      shareChecks.delete(mount)
-      finish(!err)
-    })
-    child.unref()
-    shareChecks.set(mount, { child, since: Date.now() })
-    setTimeout(() => finish(false), SHARE_CHECK_MS + 500).unref()
-  })
-}
-
-/** Mount points whose checks have failed FAILS_TO_OPEN times in a row. */
-async function stuckShares(needed) {
+/** Mount points the server has reported stuck `needed` times in a row. */
+function stuckShares(shares, needed) {
+  const mounts = networkMountPoints()
   const out = []
-  for (const m of networkMountPoints()) {
-    const ok = await checkShare(m)
-    const n = ok ? 0 : (shareFails.get(m) ?? 0) + 1
+  for (const m of mounts) {
+    const bad = shares.filter((x) => !x.ok && /not answering/.test(x.reason ?? '') && (x.path === m || String(x.path).startsWith(`${m}/`)))
+    const n = bad.length ? (shareFails.get(m) ?? 0) + 1 : 0
     shareFails.set(m, n)
+    if (bad.length) log('share-stuck', { mount: m, inARow: n, reason: bad[0].reason })
     if (n >= needed) out.push(m)
-    if (!ok) log('share-check-failed', { mount: m, inARow: n, stuckFor: shareChecks.get(m) ? Date.now() - shareChecks.get(m).since : 0 })
   }
   return out
-}
-
-/** One health probe: { ok, ms, status, error }. Never throws. */
-function probe(timeoutMs = 8000) {
-  const t0 = Date.now()
-  return new Promise((resolve) => {
-    const req = request(URL_HEALTH, { rejectUnauthorized: false, timeout: timeoutMs }, (res) => {
-      res.resume()
-      resolve({ ok: res.statusCode === 200, ms: Date.now() - t0, status: res.statusCode, error: null })
-    })
-    req.on('timeout', () => { req.destroy(); resolve({ ok: false, ms: Date.now() - t0, status: null, error: `no answer within ${timeoutMs} ms` }) })
-    req.on('error', (e) => resolve({ ok: false, ms: Date.now() - t0, status: null, error: e.code || e.message }))
-    req.end()
-  })
 }
 
 /** Everything worth knowing when the server has stopped answering. */
@@ -227,7 +196,7 @@ async function tick() {
   if (p.ok && Date.now() - lastTryAt >= RETRY_MS) {
     // the server answers, but a share it records to may be stuck: it no longer freezes the server,
     // so nothing else would notice while recordings have nowhere to go
-    const stuck = await stuckShares(FAILS_TO_OPEN)
+    const stuck = stuckShares(p.shares ?? [], FAILS_TO_OPEN)
     if (stuck.length) {
       const ev = { ...(await evidence()), shareStuck: stuck }
       const action = await maybeRecover(ev)
