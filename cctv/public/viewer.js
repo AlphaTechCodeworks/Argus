@@ -434,13 +434,13 @@ function nativeFullButton(tile) {
   }
   btn.addEventListener('click', async (e) => {
     e.stopPropagation()
-    // 1. the standard way (Android, tablets): the page's own full screen, then landscape
+    // 1. the standard way (Android, tablets): the page's own full screen (the phone is not turned:
+    // it follows however the viewer holds it)
     const target = document.documentElement
     if (target.requestFullscreen && document.fullscreenEnabled) {
       try {
         if (!document.fullscreenElement) await target.requestFullscreen({ navigationUI: 'hide' })
         document.body.classList.add('phone-full')
-        await screen.orientation?.lock?.('landscape').catch(() => {})
         return
       } catch {}
     }
@@ -477,9 +477,7 @@ function enterPhoneFull() {
   // real full screen (hiding the browser's own bars) is added where the phone allows it.
   document.body.classList.add('phone-full')
   if (document.fullscreenElement || !grid.requestFullscreen) return
-  grid.requestFullscreen({ navigationUI: 'hide' })
-    .then(() => screen.orientation?.lock?.('landscape'))
-    .catch(() => {}) // refused, or no lock on this phone: it still fills the screen as far as it can
+  grid.requestFullscreen({ navigationUI: 'hide' }).catch(() => {}) // refused: it still fills the page
 }
 
 function leavePhoneFull() {
@@ -949,7 +947,7 @@ function stepArrows() {
   const SWIPE_PX = 50
   let t0 = null
   let swipedAt = 0
-  const rotated = () => matchMedia('(orientation: portrait)').matches
+  const rotated = () => false // the picture is no longer turned sideways on an upright phone
   document.addEventListener('touchstart', (e) => {
     if (!document.body.classList.contains('phone-full') || e.touches.length !== 1) return (t0 = null)
     t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }
