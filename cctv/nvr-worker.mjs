@@ -4,6 +4,7 @@
 // the work, and each wanted stream has one "tap" (a fake WebSocket) that forwards its frames
 // to the parent, which fans them out to the viewers (stream-hub.mjs).
 import { recentRefusals } from './nvr-health.mjs'
+import { allowAllCloses } from './segment-writer.mjs'
 import { MSG, frameMsg, streamKey } from './worker-ipc.mjs'
 
 if (process.env.CCTV_WORKER_FAKE_SDK === '1') await import('./test/fake-sdk.mjs') // tests: replaces NET_SDK
@@ -127,6 +128,7 @@ async function shutdown() {
   if (slow) await new Promise((r) => setTimeout(r, slow))
   // closes (fsyncs) the open segments; their messages go out before the exit. A disk that does
   // not finish within 4 s: those files are picked up by the recovery scan at the next start
+  allowAllCloses()
   await Promise.race([recorder.stop(), new Promise((r) => setTimeout(r, 4000))])
   await new Promise((r) => setImmediate(r))
   // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads

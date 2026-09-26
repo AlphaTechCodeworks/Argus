@@ -34,10 +34,24 @@ const pad = (n) => String(n).padStart(2, '0')
 // would otherwise hit the disk together and fill the libuv pool the SDK calls share.
 export const MAX_CONCURRENT_CLOSES = 3
 let closesRunning = 0
+let maxCloses = MAX_CONCURRENT_CLOSES
 const closeWaiters = []
+
+/**
+ * Shutting down: every open file is closed at once, and three at a time over a network share did
+ * not finish in the time the worker has (about 60 files: restarts left them to the recovery scan).
+ * There are no SDK calls left to protect by then.
+ */
+export function allowAllCloses() {
+  maxCloses = Infinity
+  while (closeWaiters.length) {
+    closesRunning++
+    closeWaiters.shift()()
+  }
+}
 async function withCloseSlot(fn) {
   // (a finished close hands its slot straight to the next waiter)
-  if (closesRunning >= MAX_CONCURRENT_CLOSES) await new Promise((r) => closeWaiters.push(r))
+  if (closesRunning >= maxCloses) await new Promise((r) => closeWaiters.push(r))
   else closesRunning++
   try {
     return await fn()
