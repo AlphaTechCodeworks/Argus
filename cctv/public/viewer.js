@@ -96,11 +96,16 @@ const LAYOUTS = {
   '1+5': { size: 3, big: [[1, 1, 2, 2]] },
   '1+7': { size: 4, big: [[1, 1, 3, 3]] },
   '1+12': { size: 4, big: [[2, 2, 2, 2]] },
-  '2+8': { size: 4, big: [[1, 1, 2, 2], [3, 1, 2, 2]] }
+  '2+8': { size: 4, big: [[1, 1, 2, 2], [3, 1, 2, 2]] },
+  // phones: every camera in one scrolling column (up to LIST_PAGE a page), each streaming only
+  // while it is on screen
+  list: { size: 1, list: true }
 }
+const LIST_PAGE = 48
 
 /** Cells of a layout as [column, row, width, height], large tiles first. */
 function layoutCells(id) {
+  if (LAYOUTS[id]?.list) return { size: 1, cells: Array.from({ length: LIST_PAGE }, (_, i) => [1, i + 1, 1, 1]) }
   const { size, big = [] } = LAYOUTS[id] ?? LAYOUTS.g3
   const used = new Set()
   for (const [c, r, w, h] of big) for (let y = r; y < r + h; y++) for (let x = c; x < c + w; x++) used.add(`${x},${y}`)
@@ -208,9 +213,44 @@ function fillSlot(slot, gridArea, startDelayMs = 0) {
     tile.querySelector('.status').textContent = 'offline'
     return
   }
+  tile.addEventListener('click', () => openSingle(slot.cam, { fromTap: true }))
+  // the phone list: a camera streams only while it is on screen (48 at once would swamp a phone)
+  if (LAYOUTS[layoutSelect.value]?.list) return watchInView(slot, tile)
   slot.live = new LiveTile(tile, cam, SUB_STREAM, startDelayMs, tileOptions(cam))
   gridTiles.push(slot.live)
-  tile.addEventListener('click', () => openSingle(slot.cam, { fromTap: true }))
+}
+
+// Phone list: start a tile's stream when it scrolls into view, stop it a few seconds after it
+// leaves (a quick flick past does not start and stop a stream for nothing).
+const LEAVE_MS = 3000
+const inView = typeof IntersectionObserver === 'function' ? new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    const slot = e.target._slot
+    if (!slot || !slot.el?.isConnected) continue
+    clearTimeout(slot.leaveTimer)
+    if (e.isIntersecting) {
+      if (!slot.live) {
+        slot.live = new LiveTile(slot.el, slot.cam, SUB_STREAM, 0, tileOptions(slot.cam))
+        gridTiles.push(slot.live)
+      }
+    } else if (slot.live) {
+      slot.leaveTimer = setTimeout(() => {
+        if (!slot.live) return
+        slot.live.close()
+        const i = gridTiles.indexOf(slot.live)
+        if (i >= 0) gridTiles.splice(i, 1)
+        slot.live = null
+      }, LEAVE_MS)
+    }
+  }
+}, { rootMargin: '150px 0px' }) : null
+function watchInView(slot, tile) {
+  tile._slot = slot
+  if (inView) inView.observe(tile)
+  else {
+    slot.live = new LiveTile(tile, slot.cam, SUB_STREAM, 0, tileOptions(slot.cam))
+    gridTiles.push(slot.live)
+  }
 }
 
 /**
@@ -708,14 +748,21 @@ smoothBox.addEventListener('change', () => {
 
 // A phone has room for one camera, or four: the other layouts are taken off its menu, and it keeps
 // its own choice (a PC's 4 x 4 must not follow the same user onto a phone).
-const PHONE_LAYOUTS = ['g1', 'g2']
+const PHONE_LAYOUTS = ['list', 'g1', 'g2']
 const LAYOUT_KEY = isPhone() ? 'cctv.layout.phone' : 'cctv.layout'
 if (isPhone()) {
   for (const o of [...layoutSelect.querySelectorAll('option')]) if (!PHONE_LAYOUTS.includes(o.value)) o.remove()
   for (const g of [...layoutSelect.querySelectorAll('optgroup')]) if (!g.children.length) g.remove()
-  layoutSelect.value = 'g2'
+  const opt = document.createElement('option')
+  opt.value = 'list'
+  opt.textContent = 'List'
+  layoutSelect.prepend(opt)
+  layoutSelect.value = 'list'
 }
-const markPhoneLayout = () => document.body.classList.toggle('phone-g2', isPhone() && layoutSelect.value === 'g2')
+const markPhoneLayout = () => {
+  document.body.classList.toggle('phone-g2', isPhone() && layoutSelect.value === 'g2')
+  document.body.classList.toggle('phone-list', isPhone() && layoutSelect.value === 'list')
+}
 try {
   const saved = localStorage.getItem(LAYOUT_KEY)
   if (saved && LAYOUTS[saved] && (!isPhone() || PHONE_LAYOUTS.includes(saved))) layoutSelect.value = saved

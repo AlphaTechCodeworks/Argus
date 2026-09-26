@@ -1662,3 +1662,16 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
 .cam-sheet-row .cam-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cam-sheet-row .cam-ch { color: var(--text-muted); font-size: 13px; }
 @media (max-width: 699px) { .phone-list-btn { display: inline-flex; align-items: center; font-weight: 600; } }
+/* phones: the list of cameras, as cards (the redesign's phone mockup) */
+@media (max-width: 700px) {
+  body.phone-list #grid { gap: 14px; padding: 12px 12px 24px; }
+  body.phone-list #grid > .tile { border-radius: 16px; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+  body.phone-list .tile .label { padding: 22px 12px 10px; background: linear-gradient(to top, rgba(0,0,0,.72), transparent); font-size: 14px; }
+  body.phone-list .tile .label .name { font-weight: 600; }
+  body.phone-list .tile .status { display: none; }
+  body.phone-list .tile:has(.dot-live, .dot-rec)::before {
+    content: 'LIVE'; position: absolute; top: 10px; left: 10px; z-index: 3; padding: 3px 8px; border-radius: 6px;
+    font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #fff; background: rgba(229, 72, 77, .92);
+  }
+  body.phone-list .tile.offline { opacity: .5; }
+}
