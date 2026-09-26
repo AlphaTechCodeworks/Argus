@@ -75,7 +75,7 @@ import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs
 import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
-import { isCached, fileResponse, warmFiles } from './static-files.mjs'
+import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
 import { allGridOrders } from './user-prefs.mjs'
 import { pool as playbackTranscodes } from './transcode.mjs'
@@ -466,7 +466,9 @@ const serveFile = (res, pathname, req = null) => {
     path: file,
     type: MIME[extname(file)] ?? 'application/octet-stream',
     ifNoneMatch: req?.headers['if-none-match'],
-    acceptEncoding: req?.headers['accept-encoding']
+    acceptEncoding: req?.headers['accept-encoding'],
+    // this release's own name for the file (the pages link it so): kept for good (static-files.mjs)
+    versioned: /[?&]v=/.test(req?.url ?? '')
   })
   res.writeHead(r.status, { ...r.headers, ...SECURITY_HEADERS })
   res.end(r.body ?? undefined)
@@ -904,6 +906,9 @@ const onUpgrade = (req, socket, head) => {
 
 const httpServer = createServer(onRequest)
 httpServer.on('upgrade', onUpgrade)
+// every link between app files carries this release, so no cache (Cloudflare's 4 h among them)
+// can hand a browser an old or mixed set of files after a deploy (static-files.mjs)
+setAssetStamp(RELEASE)
 warmFiles(PUBLIC_DIR, MIME)
 httpServer.listen(Number(HTTP_PORT), () => console.log(`HTTP  on port ${HTTP_PORT} (use http://localhost on this PC)`))
 

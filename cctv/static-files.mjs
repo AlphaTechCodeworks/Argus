@@ -8,6 +8,12 @@
 //   - given an ETag from its size and modification time; the browser asks "still this one?" and a
 //     file that has not changed is answered 304, a few bytes, instead of the file
 //   - still "no-cache": the browser always asks, so a deploy is picked up on the very next load
+//   - stamped with the release (setAssetStamp): pages and scripts are sent with every link to
+//     another app file ending in ?v=<release>, and such a request may be kept for good
+//     (immutable): Cloudflare rewrites "no-cache" on scripts and styles to "keep 4 hours"
+//     (max-age=14400), so after a deploy remote browsers ran the old code for hours, even a mix of
+//     old and new files (2026-09-26). A new release is a new name for every file: nothing can be
+//     stale, and one page's files always come from one release.
 // Nothing here touches video. Pure enough to test without a server: test/static-files.test.mjs.
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { extname, join } from 'node:path'
@@ -18,16 +24,49 @@ const COMPRESSIBLE = /^(text\/|application\/(json|javascript|manifest\+json)|ima
 const MIN_BYTES = 1024
 const cache = new Map() // path -> { etag, raw, br, gz }
 
+let stamp = null // the release, or null (development: nothing stamped, nothing kept for good)
+/** Stamp app links with this release from now on (server start). */
+export function setAssetStamp(s) {
+  const clean = s == null ? '' : String(s).replace(/[^\w.-]/g, '')
+  stamp = clean && clean !== 'dev' ? clean : null
+  cache.clear()
+}
+
+// a local app file: no scheme, no query, one of these types
+const ASSET = /[^'"?#\s:]+\.(?:js|mjs|css|svg|png|webmanifest)/.source
+// in a page: src="x.js", href="/css/a.css" (not "//host/..." and not "https://...")
+const HTML_REF = new RegExp(`(\\s(?:src|href)=)(["'])(\\/?(?!\\/)${ASSET})\\2`, 'g')
+// in a script: from './x.js', import './x.js', import('./x.js')
+const JS_IMPORT = new RegExp(`((?:\\bfrom|\\bimport)\\s*\\(?\\s*)(["'])(\\.{1,2}\\/${ASSET})\\2`, 'g')
+// in a script: new URL('./x.js', import.meta.url)
+const JS_URL = new RegExp(`(new URL\\(\\s*)(["'])(\\.{1,2}\\/${ASSET})\\2(\\s*,\\s*import\\.meta\\.url)`, 'g')
+
+/**
+ * Adds ?v=<s> to every link to another app file: in a page, src= and href= to a local script,
+ * style, icon or manifest; in a script, its relative imports and new URL('./x', import.meta.url).
+ * Addresses with a scheme, protocol-relative ones and ones that already carry a query are left alone.
+ */
+export function stampAssets(text, kind, s) {
+  if (!s) return text
+  const v = `?v=${s}`
+  if (kind === 'html') return text.replace(HTML_REF, (_, a, q, p) => `${a}${q}${p}${v}${q}`)
+  if (kind === 'js') return text.replace(JS_IMPORT, (_, a, q, p) => `${a}${q}${p}${v}${q}`).replace(JS_URL, (_, a, q, p, b) => `${a}${q}${p}${v}${q}${b}`)
+  return text
+}
+const kindOf = (type) => (/^text\/html/.test(type) ? 'html' : /javascript/.test(type) ? 'js' : null)
+
 /** Already served once (so it exists and is a file): serveFile skips its own checks. */
 export const isCached = (path) => cache.has(path)
 
 /** The file as it is now, compressed forms made on first use and kept until it changes. */
 export function loadFile(path, type) {
   const st = statSync(path)
-  const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`
+  const kind = kindOf(type)
+  const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}${kind && stamp ? `-${stamp}` : ''}"`
   const hit = cache.get(path)
   if (hit && hit.etag === etag) return hit
-  const raw = readFileSync(path)
+  let raw = readFileSync(path)
+  if (kind && stamp) raw = Buffer.from(stampAssets(raw.toString('utf8'), kind, stamp))
   const entry = { etag, raw, br: null, gz: null }
   if (COMPRESSIBLE.test(type) && raw.length >= MIN_BYTES) {
     entry.br = brotliCompressSync(raw, { params: { [constants.BROTLI_PARAM_QUALITY]: 9, [constants.BROTLI_PARAM_SIZE_HINT]: raw.length } })
@@ -49,9 +88,11 @@ export function pickEncoding(accept = '', entry) {
  * The response for one file request: { status, headers, body }.
  * @param {{ path: string, type: string, ifNoneMatch?: string, acceptEncoding?: string }} o
  */
-export function fileResponse({ path, type, ifNoneMatch, acceptEncoding }) {
+export function fileResponse({ path, type, ifNoneMatch, acceptEncoding, versioned = false }) {
   const entry = loadFile(path, type)
-  const headers = { 'content-type': type, 'cache-control': 'no-cache', etag: entry.etag, vary: 'Accept-Encoding' }
+  // a request for this release's own name for the file (?v=): it never changes, keep it for good
+  const cacheControl = versioned && stamp ? 'public, max-age=31536000, immutable' : 'no-cache'
+  const headers = { 'content-type': type, 'cache-control': cacheControl, etag: entry.etag, vary: 'Accept-Encoding' }
   if (ifNoneMatch && String(ifNoneMatch).split(',').map((s) => s.trim()).includes(entry.etag)) {
     return { status: 304, headers, body: null }
   }
