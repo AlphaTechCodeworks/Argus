@@ -555,6 +555,13 @@ function closeSingle({ resumeGrid = true } = {}) {
   imagePanel.close()
   single = null
   singleCam = null
+  // A phone rebuilds its grid instead: under the full-size view the list's tiles were scrolled out,
+  // covered or stopped, and after the screen turned some never came back (blank tiles). A fresh
+  // grid shows each camera's last picture at once and reconnects.
+  if (isPhone()) {
+    render()
+    return
+  }
   for (const t of gridTiles) t.resume()
   syncTiles()
   updatePager()
