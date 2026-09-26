@@ -22,17 +22,35 @@ async function poll() {
   } catch {
     return
   }
-  const { bannerText } = renderHealth(data)
-  if (!bannerText) {
+  const { bannerText, criticalText } = renderHealth(data)
+  if (!bannerText && !criticalText) {
     bar.hidden = true
     return
   }
   const link = document.createElement('a')
   link.href = '/health.html'
   link.textContent = 'Open Health'
-  bar.replaceChildren(document.createTextNode(`⚠ ${bannerText} `), link)
+  const lines = []
+  if (criticalText) {
+    const c = document.createElement('strong')
+    c.className = 'alert-critical'
+    c.textContent = `⛔ ${criticalText}`
+    lines.push(c)
+  }
+  if (bannerText) {
+    const o = document.createElement('span')
+    o.textContent = `⚠ ${bannerText}`
+    lines.push(o)
+  }
+  const text = document.createElement('div')
+  text.className = 'alert-lines'
+  text.append(...lines)
+  bar.replaceChildren(text, link)
+  bar.classList.toggle('critical', Boolean(criticalText))
   bar.hidden = false
-  if (!bar.isConnected) document.body.prepend(bar)
+  // inside the page's own column once the shell is there (body is then the two-column frame)
+  const host = document.querySelector('.app-main') ?? document.body
+  if (bar.parentElement !== host) host.prepend(bar)
 }
 
 poll()

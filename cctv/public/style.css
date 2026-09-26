@@ -1339,3 +1339,8 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
 .hp-history > summary h2::before { content: '▸'; color: var(--muted); font-size: 0.8em; transition: transform var(--t-fast); }
 .hp-history[open] > summary h2::before { transform: rotate(90deg); }
 .hp-count { color: var(--muted); font-weight: 400; font-size: 0.85em; }
+/* Recording storage gone: the loudest thing on the page, on every page */
+.alert-lines { display: flex; flex-direction: column; gap: 4px; }
+.alert-banner.critical { background: var(--bad); color: #fff; border-bottom: 0; padding: 12px 16px; }
+.alert-banner.critical .alert-critical { font-size: 15px; }
+.alert-banner.critical a { color: #fff; font-weight: 600; text-decoration: underline; }

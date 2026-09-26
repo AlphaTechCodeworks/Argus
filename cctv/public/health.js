@@ -337,7 +337,17 @@ export function renderHealth(d) {
   }
   historyRows.sort((a, b) => b.at - a.at)
 
-  const open = d.open ?? []
+  // Recording storage gone is not one problem among several: the server is saving nothing. It gets
+  // its own line, above everything, on every page (alert-banner.js).
+  const locs = d.locations ?? []
+  const down = locs.filter((l) => !l.mounted)
+  const criticalText = down.length === 0
+    ? ''
+    : down.length === locs.length
+      ? `Recording stopped: ${down.map((l) => l.name).join(', ')} ${down.length === 1 ? 'is' : 'are'} not mounted. Nothing is being saved to the server; the NVRs are still recording to their own disks.`
+      : `${down.map((l) => l.name).join(', ')} ${down.length === 1 ? 'is' : 'are'} not mounted: recordings for ${down.length === 1 ? 'it' : 'them'} have moved to the other locations, or stopped.`
+
+  const open = (d.open ?? []).filter((a) => !(criticalText && a.kind === 'drive-missing'))
   const bannerText = open.length === 0
     ? ''
     : `${open.length} ${open.length === 1 ? 'problem' : 'problems'}: ${open.map((a) => a.title).join(' · ')}`
@@ -360,7 +370,7 @@ export function renderHealth(d) {
     : `${admins.length} ${admins.length === 1 ? 'admin' : 'admins'}: ${admins.join(', ')}`
   const adminState = admins.length === 0 ? 'bad' : admins.length > 4 ? 'warn' : 'ok'
 
-  return { cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, sendingProblem, admins, adminText, adminState }
+  return { cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, criticalText, sendingProblem, admins, adminText, adminState }
 }
 
 // ---- the page itself (skipped when a test imports this module: there is no document) ------------
