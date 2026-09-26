@@ -94,6 +94,7 @@ import { audit, handleAudit, pruneAudit } from './audit.mjs'
 import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
 import { handleAlarms } from './alarms.mjs'
+import { handleOsd } from './osd.mjs'
 import { loadCertificate } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
@@ -514,6 +515,9 @@ const handleRequest = async (req, res) => {
     if (pathname === '/api/admin/nvr-clocks' && req.method === 'GET' && url.searchParams.get('sync')) {
       return sendJson(res, 200, { ran: await clockSync.runNow() })
     }
+    // What a camera burns into its own picture: its name, the clock, and where they sit.
+    const osd = await handleOsd(req.method, pathname, url.searchParams, () => readJsonObject(req, 2048), nvrs, who)
+    if (osd) return sendJson(res, ...osd)
     const clocks = await handleClocks(req.method, pathname, nvrs)
     if (clocks) return sendJson(res, clocks[0], clocks[1])
     const clockWrite = await handleClockWrite(req.method, pathname, () => readJsonObject(req, 2048), nvrs, user)
