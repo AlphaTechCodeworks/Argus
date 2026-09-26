@@ -161,11 +161,20 @@ function render({ keepSingle = false } = {}) {
   const visible = v.visible
 
   gridSlots = []
+  // Tiles open staggered so a big grid does not ask one NVR for everything at once -- but the
+  // stagger is counted per NVR, because cameras on different recorders are not competing for
+  // anything. Counted across the whole grid, an 8x8 made its last tile wait 63 x 60 = nearly four
+  // seconds before it even began connecting, most of it queued behind cameras on other sites
+  // entirely. Per NVR, the same grid spread over four of them waits under a second, and each
+  // recorder sees exactly the same rate of requests as before.
+  const openedPerNvr = new Map()
   for (let i = 0; i < perPage; i++) {
     const cam = visible[i]
     const slot = { cam, el: null, live: null }
     gridSlots.push(slot)
-    fillSlot(slot, gridArea(cells[i]), gridTiles.length * 60)
+    const n = openedPerNvr.get(cam?.nvr) ?? 0
+    openedPerNvr.set(cam?.nvr, n + 1)
+    fillSlot(slot, gridArea(cells[i]), n * 60)
     grid.insertBefore(slot.el, before)
   }
   syncTiles()
