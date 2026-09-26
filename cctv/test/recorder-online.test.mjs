@@ -50,6 +50,7 @@ const rec = new Recorder({
   send: (m) => sent.push(m),
   now: () => now
 })
+rec.startedAt = -Infinity // long after startup: the full back-off (startup grace tested below)
 rec.apply({ recording: { defaults: DEFAULTS, cameras: {} }, locations: [L] })
 say('offline slot: no stream taken, no camera', !streams.has(1) && !rec.cams.has(1))
 say('online channels are tapped', streams.get(0)?.clients.size === 1 && streams.get(2)?.clients.size === 1)
@@ -139,6 +140,18 @@ say('refusal gap written with the reason', g2.some((g) => /refused/.test(g.reaso
   const { readFileSync } = await import('node:fs')
   const w = readFileSync(new URL('../nvr-worker.mjs', import.meta.url), 'utf8')
   say('nvr-worker passes each channel with its online flag', /channels: \(\) => nvr\.channels\.map\(\(c\) => \(\{ ch: c\.ch, online: c\.online/.test(w))
+}
+{
+  // just after startup, a refusal is retried within a minute (an NVR still holding the old process's connections)
+  const st = new Map()
+  const r3 = new Recorder({ nvrId: 'n3', getStream: (ch) => st.get(ch) ?? st.set(ch, fakeStream()).get(ch), online: () => true, channels: () => [0], send: () => {}, now: () => now })
+  r3.apply({ recording: { defaults: DEFAULTS, cameras: {} }, locations: [L] })
+  st.get(0).lastFailure = { at: now + 1, fast: true, reason: 'no video within 8 s of starting' }
+  now += 10
+  r3.sync()
+  const w3 = r3.cams.get(0).refusedUntil - now
+  say('refused just after startup: tried again within a minute', w3 >= 29_000 && w3 <= 60_000, `${w3} ms`)
+  await r3.stop()
 }
 await rec.stop()
 print(failures ? `\n${failures} failed` : '\nall passed')

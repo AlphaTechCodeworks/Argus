@@ -44,6 +44,11 @@ const MAX_HDR_STEP_MS = 60_000 // a header jump bigger than this is not trusted 
 // a stream the NVR refuses (LiveStream.lastFailure.fast: refused within 1 s, or no video within
 // 8 s of a valid handle) is left alone this long (random in the range, so cameras spread out)
 const REFUSED_BACKOFF_MS = [5 * 60_000, 10 * 60_000]
+// ...except just after the recorder starts: an NVR still holding the connections of the process
+// that just restarted refuses the same streams for a minute or so (nvr-2, cameras 25-32, after
+// every restart), and a 5-10 min wait there was a 'not recording' alert after each deploy
+const STARTUP_GRACE_MS = 3 * 60_000
+const STARTUP_BACKOFF_MS = [30_000, 60_000]
 
 export class Recorder {
   /**
@@ -58,6 +63,7 @@ export class Recorder {
     this.channels = channels
     this.send = send
     this.now = now
+    this.startedAt = now()
     this.writerOpts = writerOpts
     this.writers = new Set() // every writer with work outstanding (also ones being closed)
     this.recording = null
@@ -214,9 +220,10 @@ export class Recorder {
         cam.refusedUntil = 0
         console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}; ${next.why}`)
       } else {
-        cam.refusedUntil = now + REFUSED_BACKOFF_MS[0] + Math.round(Math.random() * (REFUSED_BACKOFF_MS[1] - REFUSED_BACKOFF_MS[0]))
-        if (!cam.refusedLogged) console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}; trying again in ${Math.round((cam.refusedUntil - now) / 60_000)} min`)
-        cam.refusedLogged = true
+        const [lo, hi] = now - this.startedAt < STARTUP_GRACE_MS ? STARTUP_BACKOFF_MS : REFUSED_BACKOFF_MS
+        cam.refusedUntil = now + lo + Math.round(Math.random() * (hi - lo))
+        if (!cam.refusedLogged) console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}; trying again in ${Math.round((cam.refusedUntil - now) / 1000)} s`)
+        if (lo === REFUSED_BACKOFF_MS[0]) cam.refusedLogged = true
       }
       return
     }
