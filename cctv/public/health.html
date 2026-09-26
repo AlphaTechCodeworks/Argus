@@ -4,24 +4,17 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CCTV Health</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body class="health-page">
   <header>
     <div class="brand">
       <h1>CCTV</h1>
-      <nav class="tabs" aria-label="Views">
-        <a href="/">Live</a>
-        <a href="/playback.html">Playback</a>
-        <a href="/wall.html">Wall</a>
-        <a href="/map.html">Map</a>
-        <a href="/alarms.html">Alarms</a>
-        <a href="/health.html" aria-current="page">Health</a>
-        <a href="/sites.html" id="sitesTab" hidden>Sites</a>
-        <a href="/settings.html" id="settingsTab" hidden>Settings</a>
-        <a href="/storage.html" id="storageTab" hidden>Storage</a>
-        <a href="/audit.html" id="auditTab" hidden>Audit</a>
-      </nav>
     </div>
     <div class="account">
       <span id="build" class="build" title="Running build"></span>
@@ -60,7 +53,7 @@
   </main>
 
   <script type="module" src="health.js"></script>
-  <script type="module" src="admin-tabs.js"></script>
   <script type="module" src="build-badge.js"></script>
+  <script type="module" src="shell.js"></script>
 </body>
 </html>

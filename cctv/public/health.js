@@ -511,10 +511,9 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     .then((me) => {
       document.getElementById('whoami').textContent = me.user
       if (me.admin) {
-        document.getElementById('sitesTab').hidden = false
-        document.getElementById('settingsTab').hidden = false
-        const at = document.getElementById('auditTab')
-        if (at) at.hidden = false
+        const sitesTab = document.getElementById('sitesTab'); if (sitesTab) sitesTab.hidden = false
+        const settingsTab = document.getElementById('settingsTab'); if (settingsTab) settingsTab.hidden = false
+        const at = document.getElementById('auditTab'); if (at) at.hidden = false
       }
     })
     .catch(() => { location.href = '/login.html' })

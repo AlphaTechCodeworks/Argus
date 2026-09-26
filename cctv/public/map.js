@@ -1460,7 +1460,7 @@ $('logout').addEventListener('click', async () => {
 const me = await checkSession()
 if (me) $('whoami').textContent = me.user
 isAdmin = Boolean(me?.admin)
-if (isAdmin) $('sitesTab').hidden = $('settingsTab').hidden = false
+if (isAdmin) { const st = $('sitesTab'); if (st) st.hidden = false; const se = $('settingsTab'); if (se) se.hidden = false }
 setInterval(checkSession, 60_000)
 
 /**

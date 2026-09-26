@@ -1377,7 +1377,7 @@ const [me, cameras] = await Promise.all([api('/api/me'), api('/api/cameras')])
 state.user = me.user
 state.all = cameras
 $('whoami').textContent = me.user
-if (me.admin) $('sitesTab').hidden = $('settingsTab').hidden = false
+if (me.admin) { const st = $('sitesTab'); if (st) st.hidden = false; const se = $('settingsTab'); if (se) se.hidden = false }
 state.h265 = await canDecodeH265()
 if (!('VideoDecoder' in window)) {
   loadNote.hidden = false

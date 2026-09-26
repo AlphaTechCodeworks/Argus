@@ -579,7 +579,7 @@ if (!me.admin) {
   notice.textContent = 'Only admins can manage NVRs and sites. Ask the owner to make your account an admin.'
   notice.hidden = false
 } else {
-  $('settingsTab').hidden = false
+  const se = $('settingsTab'); if (se) se.hidden = false
   await load()
   // show connection status as new NVRs log in
   setInterval(load, 5000)

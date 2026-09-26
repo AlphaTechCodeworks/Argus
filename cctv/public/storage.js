@@ -161,8 +161,8 @@ if (typeof document !== 'undefined') {
     .then((me) => {
       document.getElementById('whoami').textContent = me.user
       if (me.admin) {
-        document.getElementById('sitesTab').hidden = false
-        document.getElementById('settingsTab').hidden = false
+        const st = document.getElementById('sitesTab'); if (st) st.hidden = false
+        const se = document.getElementById('settingsTab'); if (se) se.hidden = false
       }
     })
     .catch(() => {

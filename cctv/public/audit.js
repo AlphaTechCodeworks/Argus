@@ -205,7 +205,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error('signed out'))))
     .then((me) => {
       id('whoami').textContent = me.user
-      if (me.admin) { id('sitesTab').hidden = false; id('settingsTab').hidden = false }
+      if (me.admin) { const st = id('sitesTab'); if (st) st.hidden = false; const se = id('settingsTab'); if (se) se.hidden = false }
       loadAudit()
       loadRights()
     })

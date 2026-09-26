@@ -655,7 +655,7 @@ document.getElementById('logout').addEventListener('click', async () => {
 
 const me = await checkSession()
 if (me) document.getElementById('whoami').textContent = me.user
-if (me?.admin) document.getElementById('sitesTab').hidden = document.getElementById('settingsTab').hidden = false
+if (me?.admin) { const st = document.getElementById('sitesTab'); if (st) st.hidden = false; const se = document.getElementById('settingsTab'); if (se) se.hidden = false }
 isAdmin = Boolean(me?.admin)
 user = me?.user ?? null
 setInterval(checkSession, 60_000)

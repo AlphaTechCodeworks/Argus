@@ -1320,3 +1320,8 @@ body.is-fullscreen .alert-banner { display: none; }
    things to fill in; centring each one breaks the line your eye follows down it. */
 .se-grid label:not(.st-check) { align-items: stretch; text-align: left; }
 .osd-fine label { align-items: stretch; text-align: left; }
+
+/* In the shell, body is the two-column frame and .app-main is the page's own column. The rules above
+   made body that column; these hand the job over without editing every page. */
+body.has-shell { display: grid; height: auto; }
+body.has-shell .app-main > header { background: none; border-bottom: 1px solid var(--border); }

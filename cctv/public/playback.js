@@ -2036,7 +2036,7 @@ if (!('VideoDecoder' in window)) {
 updateModeUi()
 const [me, cameras] = await Promise.all([api('/api/me'), api('/api/cameras')])
 $('whoami').textContent = me.user
-if (me.admin) $('sitesTab').hidden = $('settingsTab').hidden = false
+if (me.admin) { const st = $('sitesTab'); if (st) st.hidden = false; const se = $('settingsTab'); if (se) se.hidden = false }
 // who this is, for deciding which bookmarks offer Edit and Delete (the server decides again itself)
 viewer = { user: me.user, admin: me.admin === true }
 state.h265 = await canDecodeH265()
