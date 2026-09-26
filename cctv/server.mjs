@@ -361,10 +361,11 @@ const MIME = {
   '.js': 'text/javascript',
   '.css': 'text/css',
   '.svg': 'image/svg+xml',
-  '.png': 'image/png'
+  '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json'
 }
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/healthz'])
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/healthz'])
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',

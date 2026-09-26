@@ -350,6 +350,8 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
 // turned into a live video (canvas.captureStream) as soon as the view opens, so that by the time
 // the button is tapped the video is ready: the iPhone only enters its player straight from a tap,
 // and only for a video that has loaded. That player then rotates with the phone by itself.
+const standalone = () => matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches || navigator.standalone === true
+
 function nativeFullButton(tile) {
   const btn = document.createElement('button')
   btn.type = 'button'
@@ -397,15 +399,18 @@ function nativeFullButton(tile) {
         return
       } catch {}
     }
-    // 2. an iPhone: the phone's own video player
+    // 2. an iPhone: the phone's own video player. Safari does not start this video until a tap, so
+    // it is started here, inside the tap, and given a moment for its first frame before the player
+    // is asked for (it refuses a video with nothing in it yet).
     if (video.webkitEnterFullscreen && attach()) {
       try {
-        if (video.paused) video.play().catch(() => {})
+        if (video.paused) await video.play().catch(() => {})
+        for (let i = 0; i < 15 && video.readyState < 2; i++) await new Promise((r) => setTimeout(r, 100))
         video.webkitEnterFullscreen()
         return
-      } catch (err) {
-        return say(video.readyState < 1 ? 'The picture is still starting. Try again in a second.' : `This phone would not go full screen (${err.message}).`)
-      }
+      } catch {}
+      // Safari would not: the camera already fills the screen sideways; say how to lose Safari's bars
+      return say(standalone() ? 'This iPhone would not open its player. The picture already fills the screen: turn the phone sideways.' : 'For full screen on an iPhone: tap Share, then Add to Home Screen, and open Argus from there. Meanwhile, turn the phone sideways.')
     }
     say('This browser does not allow full screen here. Turn the phone sideways instead.')
   })
