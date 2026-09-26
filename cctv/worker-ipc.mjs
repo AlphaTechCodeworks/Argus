@@ -7,7 +7,8 @@
 export const MSG = { WANT: 'want', UNWANT: 'unwant', RESTART: 'restart', STOP: 'stop', READY: 'ready', STATE: 'state', FRAME: 'frame', STATS: 'stats', SETTINGS: 'settings', EVENTS: 'events', SEGOPEN: 'segopen', SEGMENT: 'segment', RECGAP: 'recgap' }
 export const restart = (ch, type, why) => ({ t: MSG.RESTART, ch, type, why })
 export const streamKey = (ch, type) => `${ch}:${type}`
-export const want = (ch, type) => ({ t: MSG.WANT, ch, type })
+/** background: only warm-ups want it (a viewer's stream starts ahead of it in the worker too) */
+export const want = (ch, type, background = false) => ({ t: MSG.WANT, ch, type, background })
 export const unwant = (ch, type) => ({ t: MSG.UNWANT, ch, type })
 /** A packed frame (sdk.mjs encodeFrame wire format) for stream `key`. */
 export const frameMsg = (key, buf, isKey) => ({ t: MSG.FRAME, key, buf, isKey: Boolean(isKey) })

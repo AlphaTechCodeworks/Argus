@@ -80,7 +80,10 @@ const edit = (list, i, fields) => list.map((c, j) => (j === i ? { ...c, ...field
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8')
   const load = src.slice(src.indexOf('async function loadCameras'))
-  check('loadCameras rebuilds only on a full diff, else updates tiles', /diffCameras\(before, list, view\)/.test(load) && /if \(diff\.full\) render\(\{ keepSingle: true \}\)\s*else updateTiles\(diff\.changed\)/.test(load))
+  check('loadCameras updates tiles in place when nothing moved', /diffCameras\(before, list, view\)/.test(load) && /if \(!diff\.full\) return updateTiles\(diff\.changed\)/.test(load))
+  // a camera coming onto or leaving the page moves the tiles that stay (relayout), not a rebuild
+  // of every tile (9-13 new connections at once, behind an open full-size view)
+  check('... and a camera arriving or leaving moves tiles (relayout), rebuilding only when the page frame changed', /relayout\(\)/.test(load.slice(0, load.indexOf('\n}\n'))) && /if \(!sameFrame \|\| !labelsSame\) return render\(\{ keepSingle: true \}\)/.test(load))
   check('render uses the same visible set as the diff', /visibleCameras\(cameras, gridView\(perPage\)\)/.test(src))
 }
 

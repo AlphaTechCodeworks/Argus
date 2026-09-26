@@ -751,8 +751,20 @@ function relayout() {
   gridSlots = cells.map((cell, i) => {
     if (from[i] >= 0) {
       const s = gridSlots[from[i]]
+      const was = s.cam
       s.cam = v.visible[i]
       s.el.style.gridArea = gridArea(cell)
+      if (Boolean(was?.online) !== Boolean(s.cam?.online)) {
+        // (a list refresh with Hide offline off: this camera went offline, or came back)
+        if (s.live) {
+          s.live.close()
+          gridTiles = gridTiles.filter((t) => t !== s.live)
+        }
+        const old = s.el
+        fillSlot(s, gridArea(cell))
+        old.replaceWith(s.el)
+        if (single !== null) s.live?.suspend()
+      } else if (was?.name !== s.cam?.name) s.el.querySelector('.name').textContent = tileLabel(s.cam)
       return s
     }
     const s = { cam: v.visible[i], el: null, live: null }
@@ -963,9 +975,18 @@ async function loadCameras(pre = null) {
   // a camera going offline, coming back or renamed touches only its own tile; the grid is
   // rebuilt only when the page shows other cameras (or in another order) than before
   const view = gridView()
-  const diff = gridSlots.length && view.site === beforeView.site ? diffCameras(before, list, view) : { full: true }
-  if (diff.full) render({ keepSingle: true })
-  else updateTiles(diff.changed)
+  const sameFrame = gridSlots.length > 0 && view.site === beforeView.site
+  const diff = sameFrame ? diffCameras(before, list, view) : { full: true }
+  if (!diff.full) return updateTiles(diff.changed)
+  // A camera came onto or left the page (Hide offline: cameras on nvr1/nvr-2 drop out together for
+  // a minute or two when their network blips). The tiles that stay move and keep playing; only a
+  // camera that left closes and only one that arrived opens. This rebuilt the whole grid, 9-13 new
+  // connections at once, even behind an open full-size view.
+  const labelsSame = (new Set(before.map((c) => c.site)).size > 1) === multiSite()
+  if (!sameFrame || !labelsSame) return render({ keepSingle: true })
+  drag.cancel()
+  relayout() // (falls back to render itself when the page or the layout no longer fits)
+  syncSingle(single !== null && overlay !== null && singleTiles.some((t) => !t.closed))
 }
 
 await early

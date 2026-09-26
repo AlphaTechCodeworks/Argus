@@ -188,7 +188,9 @@ const RULE = /^\/api\/alarms\/rules\/(\d+)$/
 export async function handleAlarms(method, pathname, readJson, deps = {}) {
   const [path, search = ''] = String(pathname ?? '').split('?')
   if (!path.startsWith('/api/alarms')) return null
-  const { user = null, admin = false, cameras = () => [], now = Date.now() } = deps
+  const { user = null, admin = false, cameras = () => [], now = Date.now(), canSee = () => true } = deps
+  // an alarm on a camera this user may not see does not exist for them (rights.mjs, via server.mjs)
+  const visible = (row) => Boolean(row) && canSee(row.nvr, row.ch)
   if (!user) return [401, { error: 'Not signed in' }, NO_STORE]
 
   try {
@@ -224,6 +226,7 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
     const ack = ACK.exec(path)
     if (ack) {
       if (method !== 'POST') return [405, { error: 'Method not allowed' }, { allow: 'POST' }]
+      if (!visible(getEvent(Number(ack[1])))) return [404, { error: 'No such alarm' }, NO_STORE]
       const checked = checkAck(await readJson())
       if (!checked.ok) return [400, { error: checked.error }, NO_STORE]
       const res = acknowledge(Number(ack[1]), user, checked.value.note, now)
@@ -241,7 +244,7 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
     if (clip) {
       if (method !== 'GET') return [405, { error: 'Method not allowed' }, { allow: 'GET' }]
       const row = getEvent(Number(clip[1]))
-      if (!row) return [404, { error: 'No such alarm' }, NO_STORE]
+      if (!visible(row)) return [404, { error: 'No such alarm' }, NO_STORE]
       // The times only. Exporting itself stays entirely in export-api.mjs; this route exists so the
       // page can open the export dialog already filled in, without a second way to make an export.
       return [200, { clip: clipOf(nameCameras([row], cameras())[0]) }, NO_STORE]
@@ -250,7 +253,7 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
     if (bm) {
       if (method !== 'POST') return [405, { error: 'Method not allowed' }, { allow: 'POST' }]
       const row = getEvent(Number(bm[1]))
-      if (!row) return [404, { error: 'No such alarm' }, NO_STORE]
+      if (!visible(row)) return [404, { error: 'No such alarm' }, NO_STORE]
       const res = await bookmarkAlarm(nameCameras([row], cameras())[0], await readJson(), user)
       return res.ok ? [201, { bookmark: res.bookmark }, NO_STORE] : [res.status, { error: res.error }, NO_STORE]
     }
@@ -261,7 +264,7 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
       const p = new URLSearchParams(search)
       const fromMs = num(p.get('from')) ?? now - DEFAULT_WINDOW_MS
       const toMs = num(p.get('to')) ?? now
-      const rows = nameCameras(listEvents({ fromMs, toMs, limit: num(p.get('limit')) ?? 500 }), cameras())
+      const rows = nameCameras(listEvents({ fromMs, toMs, limit: num(p.get('limit')) ?? 500 }).filter(visible), cameras())
       const filtered = filterAlarms(rows, {
         types: list(p.get('types')),
         cameras: list(p.get('cameras')),

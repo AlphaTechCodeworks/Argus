@@ -5,7 +5,7 @@ import { MSG, streamKey, want, unwant, frameMsg } from '../worker-ipc.mjs'
 let failures = 0
 const check = (name, ok, extra = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? `  (${extra})` : ''}`) }
 check('streamKey', streamKey(18, 0) === '18:0')
-check('want/unwant', JSON.stringify(want(3, 1)) === '{"t":"want","ch":3,"type":1}' && unwant(3, 1).t === MSG.UNWANT)
+check('want/unwant', JSON.stringify(want(3, 1)) === '{"t":"want","ch":3,"type":1,"background":false}' && want(3, 1, true).background === true && unwant(3, 1).t === MSG.UNWANT)
 const b = Buffer.from([1, 2, 3])
 const f = frameMsg('3:1', b, true)
 check('frame keeps the Buffer and the key flag', f.t === MSG.FRAME && f.key === '3:1' && f.buf === b && f.isKey === true)
@@ -73,6 +73,25 @@ check('frames for an unwanted stream are ignored', !hub.streams.has('18:0') && a
   h.restartStream(5, 1, 'sub-stream codec changed')
   const r = sent.at(-1)
   check('restartStream sends a restart message', r?.t === MSG.RESTART && r.ch === 5 && r.type === 1 && r.why === 'sub-stream codec changed')
+}
+
+{
+  // warm-ups ask the worker as background; a real viewer arriving later is told to it, so the
+  // worker starts that stream ahead of the other warm-ups (viewers first, in the worker too)
+  const msgs = []
+  const h = new StreamHub('n9', (m) => msgs.push(m), { stopDelayMs: { 0: 50, 1: 50 } })
+  const s9 = h.getStream(7, 1)
+  s9.add({ ...fakeWs(), background: true })
+  check('a warm-up asks for the stream as background', msgs.length === 1 && msgs[0].t === MSG.WANT && msgs[0].background === true, JSON.stringify(msgs))
+  s9.add(fakeWs())
+  check('a viewer then: the worker is told it is wanted in the foreground', msgs.length === 2 && msgs[1].t === MSG.WANT && msgs[1].background === false, JSON.stringify(msgs))
+  s9.add(fakeWs())
+  check('a second viewer: nothing more to tell', msgs.length === 2)
+  h.onWorkerRestart()
+  check('after a worker restart it is asked for again as foreground', msgs.at(-1).t === MSG.WANT && msgs.at(-1).background === false)
+  const s8 = h.getStream(8, 1)
+  s8.add(fakeWs())
+  check('a viewer first: foreground straight away', msgs.at(-1).ch === 8 && msgs.at(-1).background === false)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

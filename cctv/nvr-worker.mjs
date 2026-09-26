@@ -41,9 +41,11 @@ const TAP_CAP = 8 * 1024 * 1024
 const TAP_RESUME = 1024 * 1024
 
 /** A fake WebSocket for LiveStream: frames go to the parent; a slow parent makes it skip to the next keyframe. */
-const tapFor = (key) => {
+const tapFor = (key, background = false) => {
   let pending = 0
   return {
+    // only warm-ups asked for it: a real viewer's stream starts ahead of it (live.mjs urgent())
+    background,
     OPEN: 1,
     readyState: 1,
     capBytes: TAP_CAP,
@@ -70,7 +72,13 @@ const attach = (key) => {
 
 // streams are started only while the NVR is logged in (a LivePlay before that only fails and
 // backs off); after a relogin (LiveStream.fail dropped the taps) they are started again
+let lastSentStatus = ''
 setInterval(() => {
+  // the main process learns of a login (or a drop) at once, not at the next 5 s stats
+  if (nvr.status !== lastSentStatus) {
+    lastSentStatus = nvr.status
+    sendStats()
+  }
   if (nvr.userId < 0 || !nvr.online) return
   for (const [key, t] of taps) {
     if (t.stream && (t.stream.stopped || !t.stream.clients.has(t.tap))) t.stream = null
@@ -92,8 +100,12 @@ stallTimer.unref()
 process.on('message', (m) => {
   if (m?.t === MSG.WANT) {
     const key = streamKey(m.ch, m.type)
-    if (taps.has(key)) return
-    taps.set(key, { tap: tapFor(key), stream: null, ch: m.ch, type: m.type })
+    const had = taps.get(key)
+    if (had) {
+      if (!m.background) had.tap.background = false // a viewer now wants it too
+      return
+    }
+    taps.set(key, { tap: tapFor(key, m.background === true), stream: null, ch: m.ch, type: m.type })
     if (nvr.userId >= 0 && nvr.online) attach(key)
   } else if (m?.t === MSG.UNWANT) {
     const key = streamKey(m.ch, m.type)

@@ -43,7 +43,7 @@ Restart=always
 RestartSec=2
 RestartSteps=5
 RestartMaxDelaySec=60
-TimeoutStopSec=10
+TimeoutStopSec=15
 # the app ends itself with SIGKILL once its NVRs are logged out (server.mjs shutdown): that is a
 # clean stop, not a failure. KillMode=mixed: SIGTERM goes to the app alone, and whatever is left
 # after it (ffmpeg conversions, NVR workers) is killed at once instead of waiting out the timeout.

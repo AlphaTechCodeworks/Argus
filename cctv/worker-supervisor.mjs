@@ -6,7 +6,7 @@ import { MSG, want } from './worker-ipc.mjs'
 
 const BACKOFF_MS = [2000, 5000, 15_000, 60_000]
 const HEALTHY_MS = 5 * 60_000 // ready this long: the back-off starts again from the first step
-const STOP_WAIT_MS = 5000
+const STOP_WAIT_MS = 8000 // the worker's own shutdown takes up to 7 s (close segments 4 s, log out 3 s): it was killed at 5
 const KILL_WAIT_MS = 10_000 // after SIGKILL: the exit event normally follows at once
 
 /** Copies a child's output to `out`, each line prefixed. */

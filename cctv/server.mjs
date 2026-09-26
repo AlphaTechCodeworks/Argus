@@ -562,9 +562,12 @@ const handleRequest = async (req, res) => {
   if (marks) return sendJson(res, ...marks)
   const views = await handleViews(req.method, pathname, () => readJsonObject(req, 32768), user)
   if (views) return sendJson(res, ...views)
-  const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null })
+  // alarms and events of cameras this user may not see stay out of their lists (rights.mjs): watching
+  // live or playing back that camera is what lets them see what happened on it
+  const canSee = (nvr, ch) => who.admin || ['live', 'playback-server', 'playback-nvr'].some((a) => can(who, a, { nvr, ch }))
+  const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null, canSee })
   if (ev) return sendJson(res, ...ev)
-  const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: who.admin, cameras: allCameras })
+  const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: who.admin, cameras: allCameras, canSee })
   if (al) return sendJson(res, ...al)
   const store = await handleStorage(req.method, pathname, () => readJsonObject(req, 4096), who)  // accepts the { user, admin } shape
   if (store) return sendJson(res, ...store)
@@ -815,6 +818,12 @@ const handleRequest = async (req, res) => {
     return sendJson(res, status, body)
   }
   if (pathname.startsWith('/api/playback/')) {
+    // a camera's recordings on the NVR: only for a user who may play it back (rights.mjs)
+    if (pathname === '/api/playback/recordings') {
+      const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
+      const target = { nvr: url.searchParams.get('nvr') ?? '', ch: Number(url.searchParams.get('ch')) }
+      if (!can(who, 'playback-nvr', target) && !can(who, 'playback-server', target)) return sendJson(res, 403, { error: 'You may not play back this camera' })
+    }
     // (503 with retryAfterS while the NVR is busy, see playback.mjs)
     const [status, body, headers] = await playbackApi(nvrs.get(url.searchParams.get('nvr') ?? ''), pathname, url.searchParams)
     return sendJson(res, status, body, headers)
@@ -849,6 +858,8 @@ wss.on('connection', (ws, req) => {
     return
   }
   if (url.pathname === '/motion') {
+    // motion search reads a camera's recordings: the same right as playing them back
+    if (!can(who, 'playback-nvr', target) && !can(who, 'playback-server', target)) return ws.close(1008, 'not allowed')
     if (!nvr.online) return ws.close(1013, 'NVR offline')
     motionScan(nvr, ws, url)
     return
@@ -937,8 +948,8 @@ if (Object.keys(auth.loadUsers()).length === 0) {
 
 const shutdown = async () => {
   // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
-  // (6 s: time for every recorder to close its open segment, so a restart leaves no files to recover)
-  await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 6000))])
+  // (9 s: the NVR workers get 8 s to close their segments and log out; the unit allows 15)
+  await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 9000))])
   process.kill(process.pid, 'SIGKILL')
 }
 process.on('SIGINT', shutdown)

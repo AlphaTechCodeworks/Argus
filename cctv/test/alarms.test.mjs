@@ -267,6 +267,16 @@ const json = (o) => async () => o
   const filtered = await handleAlarms('GET', '/api/alarms?from=0&types=pos', json({}), who)
   check('the filters are applied server-side too', filtered[1].alarms.every((a) => a.type === 'pos'))
 
+  // rights: a viewer who may see no camera sees no alarm, and cannot act on one by its id
+  const blind = { user: 'carol', admin: false, cameras: who.cameras, now: who.now, canSee: () => false }
+  const none = await handleAlarms('GET', '/api/alarms?from=0', json({}), blind)
+  check('a camera the viewer may not see: its alarms are not listed', none[0] === 200 && none[1].alarms.length === 0, `${none[1].alarms?.length}`)
+  const someId = listed[1].alarms[0].id
+  check('... nor acknowledged, opened as a clip or bookmarked by id (404, as if absent)', (await handleAlarms('POST', `/api/alarms/${someId}/ack`, json({ note: 'x' }), blind))[0] === 404 && (await handleAlarms('GET', `/api/alarms/${someId}/clip`, json({}), blind))[0] === 404)
+  const onlyGate = { ...blind, canSee: (nvr, ch) => nvr === 'nvr1' && ch === 0 }
+  const some = await handleAlarms('GET', '/api/alarms?from=0', json({}), onlyGate)
+  check('may see one camera: only that camera\'s alarms', some[1].alarms.length > 0 && some[1].alarms.every((a) => a.nvr === 'nvr1' && a.ch === 0))
+
   const target = listed[1].alarms.find((a) => !a.ackMs)
   const acked = await handleAlarms('POST', `/api/alarms/${target.id}/ack`, json({ note: 'seen' }), who)
   check('acknowledging through the route works', acked[0] === 200 && acked[1].alarm.ackUser === 'alice')

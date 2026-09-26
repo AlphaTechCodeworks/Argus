@@ -508,7 +508,7 @@ const num = (v) => {
  */
 export async function handleEvents(method, pathname, readJson, deps = {}) {
   const [path, search = ''] = String(pathname ?? '').split('?')
-  const { nvrs, user = null, admin = false, intake = null, query = sdkQuery } = deps
+  const { nvrs, user = null, admin = false, intake = null, query = sdkQuery, canSee = () => true } = deps
 
   if (path === '/api/events/sources') {
     if (method !== 'GET') return [405, { error: 'Method not allowed' }]
@@ -521,7 +521,8 @@ export async function handleEvents(method, pathname, readJson, deps = {}) {
     const p = new URLSearchParams(search)
     const { listEvents } = await import('./events-db.mjs')
     return [200, {
-      events: listEvents({ fromMs: num(p.get('from')), toMs: num(p.get('to')), limit: num(p.get('limit')) ?? 500 }),
+      // only cameras this user may see (rights.mjs, via server.mjs)
+      events: listEvents({ fromMs: num(p.get('from')), toMs: num(p.get('to')), limit: num(p.get('limit')) ?? 500 }).filter((e) => canSee(e.nvr, e.ch)),
       sources: sourceReport()
     }, NO_STORE]
   }

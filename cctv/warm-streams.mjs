@@ -108,6 +108,6 @@ export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log 
   }
   const t = setInterval(run, everyMs)
   t.unref?.()
-  setTimeout(run, 30_000).unref?.() // after the NVRs have logged in
+  setTimeout(run, 10_000).unref?.() // after the video logins (~4.5 s); viewers still go first
   return { run, held }
 }

@@ -488,7 +488,8 @@ export class Nvr {
           this.serial = String(info.szSN ?? '').replace(/\0.*$/, '').trim()
           this.health = { channelFailures: 0, liveFailures: 0 }
           await sleep(1500) // the NVR pushes channel state right after login
-          await this.#queryChannels(PRIORITY.HIGH)
+          // a busy NVR just after a restart: the SDK gives up on this after 10 s; ask once more
+          if (!(await this.#queryChannels(PRIORITY.HIGH))) await this.#queryChannels(PRIORITY.HIGH)
           this.status = 'online'
           this.error = ''
           console.log(`[${this.id}] logged in to ${where} (${this.model || 'NVR'}) in ${Date.now() - t0} ms, ${this.channels.length} cameras`)
@@ -1020,7 +1021,9 @@ export const allCameras = () =>
         nvrName: nvr.name,
         ch: c.ch,
         name: c.name,
-        online: c.online && nvr.online,
+        // the video login (the worker's, up in ~4.5 s after a start), not the control login (one NVR
+        // at a time, up to ~31 s): Live waited for the wrong one after every restart
+        online: c.online && nvr.liveOnline,
         // false for an empty channel slot on the NVR: there is no camera there to be offline
         configured: c.configured !== false,
         model: c.model || null,

@@ -47,7 +47,7 @@ const BUDGETS = {
   NET_SDK_StopLivePlay: 10_000,
   NET_SDK_MakeKeyFrame: 5000,
   NET_SDK_MakeKeyFrameSub: 5000,
-  NET_SDK_GetDeviceIPCInfo: 10_000,
+  NET_SDK_GetDeviceIPCInfo: 12_000, // the SDK gives up by itself at ~10.02 s: that is a failure, not a late return
   NET_SDK_TransparentConfig: 20_000,
   NET_SDK_PlayBackByTimeEx: 20_000,
   NET_SDK_StopPlayBack: 10_000,
