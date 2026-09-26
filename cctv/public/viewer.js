@@ -360,7 +360,8 @@ function nativeFullButton(tile) {
   video.muted = true
   video.playsInline = true
   video.setAttribute('playsinline', '')
-  video.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none'
+  // full size behind the picture: iOS will not put a video it considers invisible into its player
+  video.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;opacity:0.01;pointer-events:none;z-index:0'
   tile.append(video)
   const canvasNow = () => tile.querySelector('.tile-upgrade:not(.pending) canvas') ?? tile.querySelector('canvas')
   const attach = () => {
@@ -377,13 +378,36 @@ function nativeFullButton(tile) {
   attach()
   // the full-size stream replaces the first picture a moment later: follow it
   const follow = setInterval(() => (tile.isConnected ? attach() : clearInterval(follow)), 1000)
-  btn.addEventListener('click', (e) => {
+  const say = (text) => {
+    const n = document.createElement('div')
+    n.className = 'phone-fs-note'
+    n.textContent = text
+    tile.append(n)
+    setTimeout(() => n.remove(), 4000)
+  }
+  btn.addEventListener('click', async (e) => {
     e.stopPropagation()
-    if (video.webkitEnterFullscreen && attach()) {
-      try { video.webkitEnterFullscreen(); return } catch {}
+    // 1. the standard way (Android, tablets): the page's own full screen, then landscape
+    const target = document.documentElement
+    if (target.requestFullscreen && document.fullscreenEnabled) {
+      try {
+        if (!document.fullscreenElement) await target.requestFullscreen({ navigationUI: 'hide' })
+        document.body.classList.add('phone-full')
+        await screen.orientation?.lock?.('landscape').catch(() => {})
+        return
+      } catch {}
     }
-    // everything else: the page's own full screen and a landscape lock
-    grid.requestFullscreen?.({ navigationUI: 'hide' }).then(() => screen.orientation?.lock?.('landscape')).catch(() => {})
+    // 2. an iPhone: the phone's own video player
+    if (video.webkitEnterFullscreen && attach()) {
+      try {
+        if (video.paused) video.play().catch(() => {})
+        video.webkitEnterFullscreen()
+        return
+      } catch (err) {
+        return say(video.readyState < 1 ? 'The picture is still starting. Try again in a second.' : `This phone would not go full screen (${err.message}).`)
+      }
+    }
+    say('This browser does not allow full screen here. Turn the phone sideways instead.')
   })
   return btn
 }

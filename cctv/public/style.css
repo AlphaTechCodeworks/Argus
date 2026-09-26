@@ -1635,3 +1635,7 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
 }
 /* a small nudge when the camera opens, so the eye finds them */
 @keyframes phone-step-hint { 0%, 60% { opacity: 1; } 30% { opacity: .5; } 100% { opacity: .75; } }
+.phone-fs-note { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; max-width: 80%;
+  padding: 10px 14px; border-radius: 12px; background: rgba(20,22,26,.75); color: #fff; font-size: 13px; text-align: center;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.single-overlay canvas { position: relative; z-index: 1; }
