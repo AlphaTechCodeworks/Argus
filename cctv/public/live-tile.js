@@ -73,6 +73,9 @@ export class LiveTile {
       maxFps: opts.maxFps,
       onUnsupported: (codecId) => (opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)),
       onFrame: () => {
+        // a picture on screen is live, whatever the badge said a moment ago ("connecting…" stayed
+        // up until a whole second of frames had been counted, over a picture already moving)
+        if (/connecting|no video/.test(this.status.textContent)) this.setStatus('live', true)
         if (shown) return
         shown = true
         opts.onFirstFrame?.()

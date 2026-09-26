@@ -95,6 +95,12 @@ export class TranscodePool {
 
 /** The process-wide cap (one pool for the whole server: the cores are shared, not per camera). */
 export const pool = new TranscodePool(maxTranscodes())
+/**
+ * Sub-stream (SD) conversions: a camera grid played back from the NVR on a laptop without HEVC. An
+ * SD picture costs a fraction of a full-size one to convert, and a grid needs one per tile, so these
+ * have their own, larger cap (CCTV_TRANSCODE_SD_MAX, 12 by default).
+ */
+export const lightPool = new TranscodePool((() => { const n = Number(process.env.CCTV_TRANSCODE_SD_MAX); return Number.isInteger(n) && n >= 0 && n <= 64 ? n : 12 })())
 
 // ---- ffmpeg arguments -------------------------------------------------------------------------
 

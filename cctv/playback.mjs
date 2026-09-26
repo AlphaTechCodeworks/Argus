@@ -26,7 +26,7 @@ import { PRIORITY } from './lanes.mjs'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
-import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, Transcoder, clientCanDecodeH265, pool as transcodePool } from './transcode.mjs'
+import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, Transcoder, clientCanDecodeH265, lightPool, pool as transcodePool } from './transcode.mjs'
 import { bind, codecOf, coolingLeftMs, encodeFrame, playFrames, sdkCallT, sniffCodec } from './sdk.mjs'
 
 // FindNext* result codes continue the SDK error enum: NET_SDK_FILE_SUCCESS is 85
@@ -463,9 +463,10 @@ export function createPlayback(nvr) {
       if (this.ws.readyState !== this.ws.OPEN) return
       if (this.clientH265 || codec !== X_H265) return this.ws.send(msg)
       if (!this.xcode) {
-        this.slot = transcodePool.acquire()
+        const pool = this.mainStream ? transcodePool : lightPool // an SD stream is cheap: its own, larger cap
+        this.slot = pool.acquire()
         if (!this.slot) {
-          this.send({ type: 'error', message: `This recording is H.265 and the server is already converting ${transcodePool.max} for other viewers. Try again in a moment.` })
+          this.send({ type: 'error', message: `This recording is H.265 and the server is already converting ${pool.max} for other viewers. Try again in a moment.` })
           return this.close()
         }
         this.xcode = new Transcoder({

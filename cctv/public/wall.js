@@ -383,7 +383,8 @@ class Tile {
     const start = Math.round(server ? target : cameraTime(target, this.skew))
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     // stream=1 is the camera's sub-stream (SD); server footage is always the main stream
-    const q = `nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${server ? 0 : 1}&start=${start}${server ? '&src=auto' : ''}`
+    // h265: tells the server this browser cannot play H.265, so it converts (NVR sub-streams too)
+    const q = `nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${server ? 0 : 1}&start=${start}${server ? '&src=auto' : ''}&h265=${state.h265 ? 1 : 0}`
     const sock = new WebSocket(`${proto}://${location.host}/playback?${q}`)
     sock.binaryType = 'arraybuffer'
     sock.onopen = () => {
@@ -804,7 +805,21 @@ function renderSpeeds() {
   const { speed } = clampSpeed(state.speed, mode)
   state.speed = speed
   for (const b of speedsEl.children) b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === speed))
+  if (speedCycleBtn) speedCycleBtn.textContent = speedLabel(speed)
 }
+
+// the one speed button on the bar: 1x -> 2x -> 4x -> 8x -> 1x; the full ladder is under More
+const speedCycleBtn = $('speedCycle')
+speedCycleBtn?.addEventListener('click', () => {
+  const mode = wallMode(state.tiles.map((t) => ({ mode: t.mode() })))
+  const ladder = allowedSpeeds(mode).filter((x) => x >= 1)
+  setSpeed(ladder.find((x) => x > state.speed) ?? 1)
+})
+$('moreBtn')?.addEventListener('click', () => {
+  const m = $('pbMore')
+  m.hidden = !m.hidden
+  $('moreBtn').setAttribute('aria-expanded', String(!m.hidden))
+})
 
 function setSpeed(speed) {
   const mode = wallMode(state.tiles.map((t) => ({ mode: t.mode() })))
