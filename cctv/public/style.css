@@ -160,7 +160,12 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
 
 /* ---- header tabs ---- */
 .brand { display: flex; align-items: center; gap: 16px; }
-.tabs { display: flex; gap: 4px; }
+/* Ten tabs no longer fit a narrow window, and a flex row simply pushes the last ones off the edge
+   with no sign they are there -- on a laptop that silently loses Sites and Settings, which are the
+   only way to reach those pages. It scrolls sideways instead, and each tab keeps its full label
+   rather than being squeezed to an unreadable stub. */
+.tabs { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
+.tabs a { flex: 0 0 auto; }
 .tabs a {
   color: var(--muted);
   text-decoration: none;

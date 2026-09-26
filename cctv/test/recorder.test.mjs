@@ -47,7 +47,9 @@ const wire = (isKey, codec, payload, ts = 0) => {
   idx.addSegment({ nvr: 'b', ch: 0, path: '/x/b/0/1.h264', startMs: 500, endMs: 59_000, bytes: 5, keyframes: 1, loc: 'L2' })
   idx.addGap({ nvr: 'a', ch: 1, fromMs: 120_000, toMs: 130_000, reason: 'location not writable' })
   check('index: segments by camera and time (overlap)', idx.segments('a', 1, 50_000, 70_000).length === 2 && idx.segments('a', 1, 61_000, 62_000).length === 1)
-  check('index: segment fields round-trip', JSON.stringify(idx.segments('b', 0, 0, 1e9)[0]) === JSON.stringify({ nvr: 'b', ch: 0, path: '/x/b/0/1.h264', startMs: 500, endMs: 59_000, bytes: 5, keyframes: 1, loc: 'L2' }))
+  // source and filledMs arrived with gap backfill: a segment pulled from an NVR to fill a hole is
+  // marked so an evidence export can say where it came from. An ordinary recording has neither.
+  check('index: segment fields round-trip', JSON.stringify(idx.segments('b', 0, 0, 1e9)[0]) === JSON.stringify({ nvr: 'b', ch: 0, path: '/x/b/0/1.h264', startMs: 500, endMs: 59_000, bytes: 5, keyframes: 1, loc: 'L2', source: null, filledMs: null }))
   check('index: oldest first', idx.oldest(2).map((s) => s.path).join() === '/x/b/0/1.h264,/x/a/1/1.h264')
   check('index: oldest on one location', idx.oldest(5, { loc: 'L1' }).length === 2)
   check('index: gaps', idx.gaps('a', 1, 0, 1e9)[0]?.reason === 'location not writable')

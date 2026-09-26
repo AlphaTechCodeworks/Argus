@@ -69,7 +69,17 @@ check('refused: lowering the cap', refuses(() => planChange(gate, sys, { QoI: 40
 check('refused: lowering the frame rate or quality level', refuses(() => planChange(gate, sys, { fps: 15 }), /frame rate/) && refuses(() => planChange(gate, sys, { level: 'medium' }), /quality level/))
 check('refused: a value not in the NVR\'s list', refuses(() => planChange(gate, sys, { QoI: 7000 }), /not one of the NVR's choices/))
 check('refused: over 6144 on poeMode 10', refuses(() => planChange(gate, { ...sys, poeMode: '10' }, { QoI: 8192 }), /6144/))
-check('refused: bitrate type or other attributes', refuses(() => planChange(gate, sys, { bitType: 'CBR' }), /cannot be changed here/) && refuses(() => planChange(gate, sys, { audio: 'OFF' }), /cannot be changed here/))
+check('refused: attributes outside the allow-list', refuses(() => planChange(gate, sys, { audio: 'OFF' }), /cannot be changed here/) && refuses(() => planChange(gate, sys, { recMode: 'manual' }), /cannot be changed here/))
+// Bitrate type became changeable on 2026-09-25: cameras pinned to a fixed rate cost the same
+// bandwidth and disk whether anything is happening or not, which is what filled nvr-2's budget.
+check('bitrate type can be changed to one the camera offers', planChange(gate, sys, { bitType: 'CBR' }).next.bitType === 'CBR')
+check('... and back again', planChange(gate, sys, { bitType: 'VBR' }).next.bitType === 'VBR')
+check('refused: a bitrate type that is not one of the two', refuses(() => planChange(gate, sys, { bitType: 'ABR' }), /bitrate type ABR/))
+// The camera's own list decides, never a guess: a model that offers only one must not be asked
+// for the other.
+check('refused: a bitrate type this camera does not offer',
+  refuses(() => planChange({ ...gate, bitTypes: ['VBR'] }, sys, { bitType: 'CBR' }), /not offered by this camera/))
+check('a camera whose list the NVR withheld keeps what it has', planChange({ ...gate, bitTypes: [] }, sys, { bitType: 'VBR' }).next.bitType === 'VBR')
 check('refused: a codec or size the camera does not offer', refuses(() => planChange(gate, sys, { enct: 'mjpeg' }), /codec/) && refuses(() => planChange(gate, sys, { res: '4000x3000' }), /resolution/))
 check('S5: a bigger picture alone is refused', refuses(() => planChange(driveWay, sys, { res: '3840x2160' }), /bitrate raised with it/))
 check('S5: ... and with too small a raise', refuses(() => planChange(driveWay, sys, { res: '3840x2160', QoI: 8192 }), /at least 10240/))
@@ -169,7 +179,8 @@ const remainCalls = calls.slice(before).filter((c) => c.url === 'queryRemainRecT
 check('estimate: the NVR asked twice, with all channels each time', stE === 200 && remainCalls.length === 2 && remainCalls.every((c) => (c.xml.match(/<item id=/g) ?? []).length === 5) && /<QoI>6144</.test(remainCalls[1].xml) && !/<QoI>6144</.test(remainCalls[0].xml))
 check('estimate: days before and after, bandwidth, worst case, impacts; nothing written', e.estimate.remain.before[0].days === 41 && e.estimate.remain.after[0].days === 37 && e.estimate.retention.minDays === 30 && e.estimate.retention.refused === null && e.estimate.bandwidth.freeBeforeMbps === 138.8 && e.estimate.worstCase.extraKbps === 1244 && e.estimate.impacts[0].key === 'storage' && edits().length === 0, JSON.stringify(e.estimate))
 
-const seen = { enct: 'h265', res: '3840x2160', fps: 20, QoI: 5120, level: 'higher' }
+// bitType joined the stream's settings on 2026-09-25, so the page now shows it and must say it saw it.
+const seen = { enct: 'h265', res: '3840x2160', fps: 20, QoI: 5120, level: 'higher', bitType: 'VBR' }
 const post = (ch, body) => handleStreams('stream', 'POST', nvr.id, ch, q(), async () => body, 'tester')
 
 // the site's minimum of 30 days of recordings (site facts): refused, never offered
@@ -207,10 +218,10 @@ const [s6, b6] = await post(13, { device: DEV, undo: true, seq: b3.result.seq, a
 check('undo: back to exactly the logged cap, with its acknowledgement', s5 === 409 && s6 === 200 && b6.result.status === 'done' && /QoI="5120"/.test(edits().at(-1).xml) && b6.stream.current.QoI === 5120, JSON.stringify(b6.result))
 const [s7] = await post(13, { device: DEV, undo: true, seq: b3.result.seq, confirm: true })
 check('undo: only once', s7 === 409)
-const [s8, b8] = await post(1, { device: DEV, change: { enct: 'h265' }, seen: { enct: 'h265p', res: '3200x1800', fps: 20, QoI: 4096, level: 'higher' }, confirm: true })
+const [s8, b8] = await post(1, { device: DEV, change: { enct: 'h265' }, seen: { enct: 'h265p', res: '3200x1800', fps: 20, QoI: 4096, level: 'higher', bitType: 'VBR' }, confirm: true })
 check('codec change: storage and encoder-restart acknowledgements', s8 === 409 && b8.needsAck.map((x) => x.key).join() === 'storage,encoder-restart')
 editAnswer = '<response><status>fail</status><errorCode>536871004</errorCode></response>'
-const [s9, b9] = await post(1, { device: DEV, change: { enct: 'h265' }, seen: { enct: 'h265p', res: '3200x1800', fps: 20, QoI: 4096, level: 'higher' }, ack: ['storage', 'encoder-restart'], ackToken: b8.ackToken, confirm: true })
+const [s9, b9] = await post(1, { device: DEV, change: { enct: 'h265' }, seen: { enct: 'h265p', res: '3200x1800', fps: 20, QoI: 4096, level: 'higher', bitType: 'VBR' }, ack: ['storage', 'encoder-restart'], ackToken: b8.ackToken, confirm: true })
 check('536871004 -> "over the NVR\'s bandwidth limit"', s9 === 200 && b9.result.status === 'failed' && /bandwidth limit/.test(b9.result.message), JSON.stringify(b9.result))
 editAnswer = '<response><status>success</status></response>'
 const [s10] = await post(30, { device: DEV, change: { QoI: 4096 }, seen: { enct: 'h264', res: '1280x960', fps: 30, QoI: 3072, level: 'higher' }, confirm: true })

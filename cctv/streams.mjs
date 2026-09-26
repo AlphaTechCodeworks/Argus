@@ -13,8 +13,19 @@
 //   write   editNodeEncodeInfo        <content type="list" total="1"><item id><an .../><ae .../><main enct aGOP ></main></item></content>
 //           every attribute echoed from a fresh read (recModeCfg.js getSaveData)
 // Only NVRs in automatic record mode (the an/ae streams) can be changed here; the manual-mode
-// page (eventRecStream.js) has not been seen. Record mode, bitrate type, audio, GOP and the
-// dual-stream switch (which restarts the NVR) are never written.
+// page (eventRecStream.js) has not been seen. Record mode, audio, GOP and the dual-stream switch
+// (which restarts the NVR) are never written.
+//
+// Bitrate type was in that list until 2026-09-25, and is now written. What changed: measuring the
+// recordings showed most cameras pinned to a fixed rate, so an empty yard at 3am cost exactly as
+// much bandwidth and disk as a busy one. On nvr-2 that held 128 Mb of a 192 Mb budget open around
+// the clock, which is why it refused streams and why eleven cameras were recording nothing at all.
+//
+// It is a change of meaning, not just a setting, and the page has to say so: under CBR the QoI
+// figure is the rate the camera holds constantly, and under VBR the same number becomes a ceiling
+// it stays below. Quality on a busy scene is unchanged, because the ceiling is unchanged; a still
+// scene simply stops paying for detail that is not there. Nothing switches by itself -- it goes
+// through the same seen/ack/confirm gate as every other change here, one camera at a time.
 //
 //   GET  /api/admin/nvrs/:id/channels/:ch/stream[?usage=0.96]   -> { stream }
 //   POST /api/admin/nvrs/:id/channels/:ch/stream/estimate       { change, measuredKbps? } -> { estimate }   (read only)
@@ -54,7 +65,12 @@ const CACHE_MS = 5000
 const LOG_FILE = join(DATA_DIR, 'stream-changes.log')
 const REQUIRE = '<requireField><name/><chlType/><mainCaps/><main/><an/><ae/><mn/><me/><mainStreamQualityCaps/><levelNote/></requireField>'
 const LEVELS = ['lowest', 'lower', 'medium', 'higher', 'highest']
-const KEYS = ['enct', 'res', 'fps', 'QoI', 'level'] // what a change may set
+// What a change may set. bitType joined this list on 2026-09-25: every camera was encoding at a
+// fixed rate around the clock, so an empty car park at 3am cost exactly as much bandwidth and disk
+// as a busy one. On nvr-2 that was 32 cameras holding 128 Mb of a 192 Mb budget open permanently,
+// which is why it refused streams and why eleven cameras recorded nothing. It also makes the
+// recordings searchable: under a fixed rate, frame sizes carry no trace of what happened.
+const KEYS = ['enct', 'res', 'fps', 'QoI', 'level', 'bitType']
 const OVER_BANDWIDTH = '536871004'
 export const TIMING = { verifyMs: 3000 } // tests shorten it
 export const MIN_RETENTION_DAYS = 30 // site rule: recordings must go back at least 30 days
@@ -225,6 +241,12 @@ function planChange(item, sys, change, { undoTo = null } = {}) {
   if (!Number.isInteger(next.QoI) || !choices.includes(next.QoI)) bad(`bitrate ${next.QoI} is not one of the NVR's choices${sys.poeMode === '10' ? ' (at most 6144 on this NVR\'s PoE mode)' : ''}`)
   if (!item.levels.includes(next.level)) bad(`quality level ${next.level}`)
   if (!['VBR', 'CBR'].includes(cur.bitType)) bad('the NVR reports no bitrate type for this camera')
+  // The camera's own list, not a guess: a model that only does one of the two must not be asked
+  // for the other. An NVR that does not report the list at all is taken at its word for what the
+  // camera is set to now, and nothing else is offered.
+  if (!['VBR', 'CBR'].includes(next.bitType)) bad(`bitrate type ${next.bitType}`)
+  const offered = item.bitTypes?.length ? item.bitTypes : [cur.bitType]
+  if (!offered.includes(next.bitType)) bad(`bitrate type ${next.bitType} is not offered by this camera (it offers ${offered.join(', ')})`)
   if (!undoTo) {
     if (next.QoI < cur.QoI) bad('this never lowers the bitrate cap (Undo can put back a raise)')
     if (next.fps < cur.fps) bad('this never lowers the frame rate')
@@ -247,7 +269,11 @@ function planChange(item, sys, change, { undoTo = null } = {}) {
 /** editNodeEncodeInfo for one channel, as the page's getSaveData writes it, every other attribute echoed. */
 function buildEdit(item, next) {
   const s = (x) =>
-    `res="${esc(next.res)}" fps="${esc(next.fps)}" QoI="${esc(next.QoI)}" audio="${esc(x.audio ?? '')}" type="${esc(x.type ?? '')}" bitType="${esc(x.bitType || 'CBR')}" level="${esc(next.level)}"`
+    // bitType follows `next` like the other settings, falling back to whatever this element already
+    // had. Under CBR the QoI figure is the rate the camera holds constantly; under VBR it becomes a
+    // ceiling it stays under, so the same number means something different either side of a switch
+    // -- which is why the change is stated in those words rather than as a bare setting.
+    `res="${esc(next.res)}" fps="${esc(next.fps)}" QoI="${esc(next.QoI)}" audio="${esc(x.audio ?? '')}" type="${esc(x.type ?? '')}" bitType="${esc(next.bitType || x.bitType || 'CBR')}" level="${esc(next.level)}"`
   const gop = item.main?.aGOP ? item.main.aGOP : String(4 * Number(next.fps))
   const enct = item.supEnct.find((e) => normEnct(e) === normEnct(next.enct)) ?? next.enct
   return (
