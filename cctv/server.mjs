@@ -259,7 +259,14 @@ const nvrStorage = makeNvrStorage({
 // with it, so the NVRs are kept in step with the server rather than each hoping to reach a time
 // server of its own -- which a remote site may not be able to reach at all.
 const clockSync = startClockSync(nvrs, { enabled: () => getSettings().clockSync?.enabled !== false })
-// Which encoder the H.265 -> H.264 playback fallback will use, probed once at start rather than// on the first viewer: the probe runs a real short encode, and paying for that while somebody is// waiting for video is the wrong moment. It only ever logs; nothing fails if there is no hardware.detectEncoder().catch(() => {})
+// Which encoder the H.265 -> H.264 playback fallback will use, probed once at start rather than on
+// the first viewer: the probe runs a real short encode, and paying for that while somebody is
+// waiting for video is the wrong moment.
+//
+// The failure is logged rather than swallowed. An earlier version threw the error away, which hid
+// the fact that this line had been commented out by a botched edit and was never running at all --
+// silence looked exactly like success.
+detectEncoder().catch((e) => console.warn(`[transcode] could not work out which encoder to use: ${e.message}`))
 
 const alerts = startAlerts({
   dataDir: DATA_DIR,
