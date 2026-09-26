@@ -1524,3 +1524,11 @@ body.playback-page.is-fullscreen .pb-timeline { height: 48px; }
 .nvr-tile .nvr-why { color: var(--bad); font-size: 12px; }
 /* the Health page says it all in its own headline */
 body.health-page .alert-banner { display: none; }
+/* the transport sits in the middle of the bar, the icons on the right */
+.pb-row.pb-simple { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+.pb-simple .pb-transport { grid-column: 2; justify-content: center; }
+.pb-simple .pb-tools { grid-column: 3; justify-self: end; }
+@media (max-width: 640px) {
+  .pb-row.pb-simple { grid-template-columns: 1fr; justify-items: center; gap: 8px; }
+  .pb-simple .pb-transport, .pb-simple .pb-tools { grid-column: 1; justify-self: center; }
+}
