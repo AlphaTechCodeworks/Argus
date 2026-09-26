@@ -81,6 +81,26 @@ function stuckShares(shares, needed) {
   return out
 }
 
+/** One health probe: { ok, ms, status, error }. Never throws. */
+function probe(timeoutMs = 8000) {
+  const t0 = Date.now()
+  return new Promise((resolve) => {
+    const req = request(URL_HEALTH, { rejectUnauthorized: false, timeout: timeoutMs }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (c) => { if (body.length < 65536) body += c })
+      res.on('end', () => {
+        let shares = []
+        try { shares = JSON.parse(body).shares ?? [] } catch {}
+        resolve({ ok: res.statusCode === 200, ms: Date.now() - t0, status: res.statusCode, error: null, shares })
+      })
+    })
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, ms: Date.now() - t0, status: null, error: `no answer within ${timeoutMs} ms` }) })
+    req.on('error', (e) => resolve({ ok: false, ms: Date.now() - t0, status: null, error: e.code || e.message }))
+    req.end()
+  })
+}
+
 /** Everything worth knowing when the server has stopped answering. */
 async function evidence() {
   const pid = (await run('systemctl', ['show', 'cctv', '-p', 'MainPID', '--value'])).trim()

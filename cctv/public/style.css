@@ -1325,3 +1325,8 @@ body.is-fullscreen .alert-banner { display: none; }
    made body that column; these hand the job over without editing every page. */
 body.has-shell { display: grid; height: auto; }
 body.has-shell .app-main > header { background: none; border-bottom: 1px solid var(--border); }
+/* tablet widths: the tools get a row of their own instead of being squeezed beside the transport
+   into a column of one button per line */
+@media (max-width: 1100px) and (min-width: 641px) {
+  .pb-tools { flex-basis: 100%; justify-content: center; }
+}
