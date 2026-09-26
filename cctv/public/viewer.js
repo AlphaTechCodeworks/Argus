@@ -206,7 +206,7 @@ function fillSlot(slot, gridArea, startDelayMs = 0) {
   }
   slot.live = new LiveTile(tile, cam, SUB_STREAM, startDelayMs, tileOptions(cam))
   gridTiles.push(slot.live)
-  tile.addEventListener('click', () => openSingle(slot.cam))
+  tile.addEventListener('click', () => openSingle(slot.cam, { fromTap: true }))
 }
 
 /**
@@ -343,7 +343,30 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
  * sub stream (already running, so it shows at once) and upgrades to the main stream when its
  * first frame is on screen; if this browser can't play the main stream, the sub stream stays.
  */
-function openSingle(cam) {
+// ---- phones: a tapped camera fills the screen, turned to landscape ----
+// The grid (not the camera's own tile) goes full screen: the tile is rebuilt when the camera list
+// refreshes, and taking a full-screen element out of the page drops out of full screen. Android
+// Chrome turns the screen with orientation.lock; an iPhone has no full screen for a page element
+// and no lock, so there the camera fills the page and turning the phone does the rest.
+const isPhone = () => matchMedia('(pointer: coarse) and (max-width: 900px), (pointer: coarse) and (max-height: 500px)').matches
+let phoneFull = false
+
+function enterPhoneFull() {
+  if (!isPhone() || document.fullscreenElement || !grid.requestFullscreen) return
+  phoneFull = true
+  grid.requestFullscreen({ navigationUI: 'hide' })
+    .then(() => screen.orientation?.lock?.('landscape'))
+    .catch(() => {}) // refused, or no lock on this phone: it still fills the screen as far as it can
+}
+
+function leavePhoneFull() {
+  if (!phoneFull) return
+  phoneFull = false
+  try { screen.orientation?.unlock?.() } catch {}
+  if (document.fullscreenElement === grid) document.exitFullscreen().catch(() => {})
+}
+
+function openSingle(cam, { fromTap = false } = {}) {
   closeSingle({ resumeGrid: false })
   single = camKey(cam)
   singleCam = cam
@@ -384,6 +407,8 @@ function openSingle(cam) {
     if (imagePanel.confirmDiscard()) closeSingle()
   })
   grid.append(overlay)
+  // inside the tap itself: a browser allows full screen only in answer to one
+  if (fromTap) enterPhoneFull()
   // open for this camera: keep it (and its unsent changes) across a rebuild of the view
   if (imagePanel.key === single) grid.append(imagePanel.el)
   else imagePanel.close()
@@ -403,6 +428,7 @@ function closeSingle({ resumeGrid = true } = {}) {
   overlay?.remove()
   overlay = null
   if (!resumeGrid) return
+  leavePhoneFull()
   imagePanel.close()
   single = null
   singleCam = null
@@ -579,6 +605,12 @@ document.addEventListener('fullscreenchange', () => {
   const on = Boolean(document.fullscreenElement)
   fullBtn.setAttribute('aria-label', on ? 'Leave full screen' : 'Full screen')
   fullBtn.title = on ? 'Leave full screen (F or Esc)' : 'Full screen (F)'
+  // the phone's back gesture left full screen: back to the grid too
+  if (!on && phoneFull) {
+    phoneFull = false
+    try { screen.orientation?.unlock?.() } catch {}
+    if (single !== null) closeSingle()
+  }
 })
 if (!document.fullscreenEnabled) fullBtn.hidden = true
 

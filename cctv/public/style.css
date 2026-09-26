@@ -1330,3 +1330,5 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
 @media (max-width: 1100px) and (min-width: 641px) {
   .pb-tools { flex-basis: 100%; justify-content: center; }
 }
+/* a phone's tapped camera, full screen: edge to edge, no gap round it */
+#grid:fullscreen > .tile.single-overlay { inset: 0; border-radius: 0; }
