@@ -1551,3 +1551,8 @@ body.has-shell .app-main > header select, body.has-shell .app-main > header inpu
 body.has-shell .app-main > header button:not(.pb-mode button) { height: 32px; padding-top: 0; padding-bottom: 0; border-radius: 8px; }
 body.has-shell .app-main > header .wall-pager, body.has-shell .app-main > header #pager { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 13px; }
 body.has-shell .app-main > header .wall-pager[hidden] { display: none; }
+/* Live: tiles can be dragged to rearrange them */
+@media (pointer: fine) { #grid .tile { cursor: grab; } #grid .tile:active { cursor: grabbing; } }
+.live-tip { position: fixed; right: 20px; bottom: 20px; z-index: 60; max-width: 360px; display: flex; gap: 12px; align-items: center;
+  padding: 12px 14px; border-radius: 12px; background: var(--surface-1); border: 1px solid var(--border); box-shadow: 0 8px 30px rgba(0,0,0,.35); font-size: 13px; }
+.live-tip button { flex: none; }

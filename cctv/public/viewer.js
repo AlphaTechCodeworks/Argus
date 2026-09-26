@@ -749,3 +749,23 @@ setInterval(() => {
   loadOsd().catch(() => {}) // an overlay changed in Settings reaches every screen within half a minute
   sync.refresh()
 }, 30_000)
+
+// Once per browser: say that the grid can be rearranged, which nothing on screen otherwise shows.
+{
+  let seen = false
+  try { seen = localStorage.getItem('cctv.tip.drag') === '1' } catch {}
+  if (!seen && !matchMedia('(pointer: coarse)').matches) {
+    const tip = document.createElement('div')
+    tip.className = 'live-tip'
+    tip.innerHTML = '<span>Tip: drag a camera onto another to swap them, or onto ‹ › to move it to another page. Your order is kept.</span>'
+    const ok = document.createElement('button')
+    ok.type = 'button'
+    ok.textContent = 'Got it'
+    ok.addEventListener('click', () => {
+      tip.remove()
+      try { localStorage.setItem('cctv.tip.drag', '1') } catch {}
+    })
+    tip.append(ok)
+    document.body.append(tip)
+  }
+}
