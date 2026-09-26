@@ -1,0 +1,59 @@
+/* The palette, type, spacing and shape of the whole app. Every colour anywhere under css/ comes
+   from here, and test/css-tokens.test.mjs fails the moment one does not -- the old style.css had
+   drifted to 69 distinct colours, which is most of why no two pages looked like the same product.
+   Dark is the default; the light theme overrides surfaces and text only, so status colours mean
+   the same thing in both. */
+:root {
+  color-scheme: dark;
+  --bg: #0e1012;
+  --surface-1: #121417;
+  --surface-2: #181b1f;
+  --surface-3: #1d2530;
+  --surface-hover: #1c1f24;
+  --border: #22262b;
+  --text: #eceef1;
+  --text-muted: #9aa0a8;
+  --text-faint: #5d636b;
+  --accent: #3b82f6;
+  --accent-strong: #5b9bff;
+  --accent-soft: rgba(59, 130, 246, 0.15);
+  --on-accent: #ffffff;
+  --ok: #22c55e;
+  --ok-soft: rgba(34, 197, 94, 0.15);
+  --warn: #f59e0b;
+  --warn-soft: rgba(245, 158, 11, 0.15);
+  --bad: #ef4444;
+  --bad-soft: rgba(239, 68, 68, 0.15);
+  /* video is black in both themes: only the card around a picture changes */
+  --video-bg: #000000;
+  --scrim: rgba(0, 0, 0, 0.55);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --focus: #5b9bff;
+
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px;
+  --fs-meta: 12px; --fs-dense: 13px; --fs-body: 14px; --fs-section: 16px; --fs-title: 24px; --fs-figure: 28px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --t-fast: 120ms ease;
+  --shell-w: 232px; --rail-w: 64px; --bar-h: 64px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f5f7;
+  --surface-1: #ffffff;
+  --surface-2: #f7f8fa;
+  --surface-3: #eaf1ff;
+  --surface-hover: #eef0f3;
+  --border: #e3e6ea;
+  --text: #16181b;
+  --text-muted: #4b5260;
+  --text-faint: #8a919c;
+  --accent: #1e56d6;
+  --accent-strong: #1e56d6;
+  --accent-soft: rgba(30, 86, 214, 0.1);
+  --shadow: 0 1px 3px rgba(16, 24, 40, 0.08);
+  --focus: #1e56d6;
+}
+
+@media (prefers-reduced-motion: reduce) { :root { --t-fast: 0ms linear; } }
