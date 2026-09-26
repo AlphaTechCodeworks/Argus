@@ -1,4 +1,5 @@
 // Camera grid: each tile streams one camera over WebSocket into a VideoPlayer.
+import { isPhone, maxLiveFps } from './device.js'
 import { diffCameras, shownCameras, visibleCameras } from './grid-diff.js'
 import { enableGridDrag } from './grid-drag.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
@@ -327,7 +328,8 @@ const tileOptions = (cam) => ({
   clock: clockOptions(),
   statsVisible: () => showStats,
   onDisconnect: checkSession,
-  osd: () => osdForTile(cam)
+  osd: () => osdForTile(cam),
+  maxFps: maxLiveFps()
 })
 
 function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
@@ -348,7 +350,6 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
 // refreshes, and taking a full-screen element out of the page drops out of full screen. Android
 // Chrome turns the screen with orientation.lock; an iPhone has no full screen for a page element
 // and no lock, so there the camera fills the page and turning the phone does the rest.
-const isPhone = () => matchMedia('(pointer: coarse) and (max-width: 900px), (pointer: coarse) and (max-height: 500px)').matches
 let phoneFull = false
 
 function enterPhoneFull() {

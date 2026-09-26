@@ -122,6 +122,8 @@ export class VideoPlayer {
    *   clock: PlayoutClock options (playback uses a larger buffer than live)
    *   onFrame: called with the capture time of each frame as it is shown
    *   onPoster: called when a preroll's keyframe is drawn as a poster (skipUntil; onFrame is not)
+   *   maxFps: draw at most this many frames a second (a phone gains nothing above 15); the frames
+   *     between are still decoded -- each depends on the one before -- just never drawn
    */
   constructor(canvas, options = {}) {
     this.canvas = canvas
@@ -130,6 +132,8 @@ export class VideoPlayer {
     this.onUnsupported = options.onUnsupported
     this.onFrame = options.onFrame
     this.onPoster = options.onPoster
+    this.minDrawGapMs = options.maxFps > 0 ? 1000 / options.maxFps - 4 : 0 // -4: one display refresh of slack
+    this.lastDrawAt = 0
     this.clock = new PlayoutClock(options.clock)
     this.paused = false
     this.decoder = null
@@ -355,6 +359,9 @@ export class VideoPlayer {
     let due = -1
     for (let i = 0; i < this.queue.length && this.clock.presentAt(this.queue[i].ts) <= now; i++) due = i
     if (due < 0) return
+    // held to maxFps: wait, and draw the newest due frame when the gap is up
+    if (this.minDrawGapMs && now - this.lastDrawAt < this.minDrawGapMs) return
+    this.lastDrawAt = now
     for (let i = 0; i < due; i++) {
       this.queue[i].frame.close()
       this.stats.dropped++
