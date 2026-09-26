@@ -63,6 +63,15 @@ const text = summaryText(rep)
 check('the summary gives the share, the camera to look at and why footage is missing', /75% of the time recorded/.test(text) && /Main site 2 Yard 50%/.test(text) && /12 h camera offline/.test(text) && /5 motion/.test(text), text)
 check('storage in the summary', /Storage: 26% full, about \d+ days left/.test(text), text)
 check('an empty storage history: nothing to say', storageSummary({}, 0, 1).length === 0)
+{
+  // a week's report on a server that has recorded for one day: measured from the first recording
+  const week = composeReport({ counts: { ...counts, firsts: [{ nvr: 'n1', ch: 0, first: D0 }] }, cameras: [cams[0]], fromMs: D0 - 6 * 86_400_000, toMs: D0 + 24 * H })
+  check('a camera first recorded partway through: its share counts from then (100%, not 14%)', Math.abs(week.cameras[0].recordedShare - 1) < 1e-9, String(week.cameras[0].recordedShare))
+  const later = composeReport({ counts: { ...counts, firsts: [{ nvr: 'n1', ch: 0, first: D0 + 48 * H }] }, cameras: [cams[0]], fromMs: D0, toMs: D0 + 24 * H })
+  check('first recorded after the window: no share at all', later.cameras[0].recordedShare === null)
+  const young = storageSummary({ nas: [{ ms: D0, usedBytes: 1e12, totalBytes: 11e12 }, { ms: D0 + H, usedBytes: 1.01e12, totalBytes: 11e12 }] }, D0, D0 + H, { recordedBytesPerDay: 1e12 })
+  check('storage history too short: growth from what was recorded (10 days left)', Math.round(young[0].daysLeft) === 10, JSON.stringify(young[0]))
+}
 
 // ---- the periods, on the site's calendar ----
 const now = Date.UTC(2026, 8, 26, 15) // 11:00 on site, the 26th

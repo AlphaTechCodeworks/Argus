@@ -26,6 +26,9 @@ export function countWindow(db, fromMs, toMs) {
       FROM gaps
      WHERE from_ms < :to AND to_ms > :from
      GROUP BY nvr, ch, reason`).all({ from: fromMs, to: toMs })
+  // when each camera was first recorded: a camera is only expected to have been recorded since then
+  // (the server recorded for a day and a half of a "last 7 days" report: 8% would say nothing true)
+  const firsts = db.prepare('SELECT nvr, ch, MIN(start_ms) AS first FROM segments GROUP BY nvr, ch').all()
   let events = []
   try {
     events = db.prepare(`
@@ -34,7 +37,7 @@ export function countWindow(db, fromMs, toMs) {
        WHERE start_ms >= :from AND start_ms < :to
        GROUP BY nvr, ch, type`).all({ from: fromMs, to: toMs })
   } catch {} // (a database from before the events table)
-  return { coverage: plain(coverage), gaps: plain(gaps), events: plain(events) }
+  return { coverage: plain(coverage), gaps: plain(gaps), events: plain(events), firsts: plain(firsts) }
 }
 
 if (parentPort && workerData?.dbFile) {

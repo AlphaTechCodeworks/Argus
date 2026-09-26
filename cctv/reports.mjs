@@ -83,6 +83,7 @@ export function composeReport({ counts, cameras, fromMs, toMs, storageHistory = 
     if (!gapsOf.has(k)) gapsOf.set(k, [])
     gapsOf.get(k).push(g)
   }
+  const firstOf = new Map((counts.firsts ?? []).map((r) => [key(r.nvr, r.ch), r.first]))
   const eventsOf = new Map()
   for (const e of counts.events) {
     const k = key(e.nvr, e.ch)
@@ -94,7 +95,10 @@ export function composeReport({ counts, cameras, fromMs, toMs, storageHistory = 
   for (const c of cameras) {
     if (c.configured === false) continue // an empty channel slot on the NVR
     const k = key(c.nvr, c.ch)
-    const recordedMs = Math.min(span, Math.max(0, cov.get(k)?.ms ?? 0))
+    // expected from when the server first recorded this camera (or the window start, if later)
+    const since = Math.max(fromMs, firstOf.get(k) ?? fromMs)
+    const expectedMs = Math.max(0, toMs - since)
+    const recordedMs = Math.min(expectedMs, Math.max(0, cov.get(k)?.ms ?? 0))
     const gaps = {}
     for (const g of gapsOf.get(k) ?? []) {
       const kind = gapKind(g.reason)
@@ -111,7 +115,9 @@ export function composeReport({ counts, cameras, fromMs, toMs, storageHistory = 
       online: c.online !== false,
       recording: c.recording !== false,
       recordedMs,
-      recordedShare: c.recording === false ? null : recordedMs / span,
+      expectedMs,
+      // null: not recorded by the server, or first recorded after this window
+      recordedShare: c.recording === false || expectedMs <= 0 ? null : recordedMs / expectedMs,
       bytes: cov.get(k)?.bytes ?? 0,
       gaps,
       gapMs: Object.values(gaps).reduce((a, b) => a + b, 0),
@@ -122,7 +128,8 @@ export function composeReport({ counts, cameras, fromMs, toMs, storageHistory = 
   }
 
   const recorded = rows.filter((r) => r.recordedShare !== null)
-  const share = recorded.length ? recorded.reduce((a, r) => a + r.recordedMs, 0) / (recorded.length * span) : null
+  const expected = recorded.reduce((a, r) => a + r.expectedMs, 0)
+  const share = expected > 0 ? recorded.reduce((a, r) => a + r.recordedMs, 0) / expected : null
   const gapByKind = {}
   for (const r of rows) for (const [k, ms] of Object.entries(r.gaps)) gapByKind[k] = (gapByKind[k] ?? 0) + ms
   const eventsByType = {}
@@ -155,13 +162,18 @@ export function composeReport({ counts, cameras, fromMs, toMs, storageHistory = 
     worst: [...recorded].sort((a, b) => a.recordedShare - b.recordedShare).slice(0, 10),
     mostOffline: rows.filter((r) => r.offlineMs > 0).sort((a, b) => b.offlineMs - a.offlineMs).slice(0, 10),
     cameras: rows,
-    storage: storageSummary(storageHistory, fromMs, toMs)
+    storage: storageSummary(storageHistory, fromMs, toMs, { recordedBytesPerDay: rows.reduce((a, r) => a + r.bytes, 0) / Math.max(1 / 24, expected / Math.max(1, recorded.length) / DAY) })
   }
 }
 
-/** Per storage location: used, size, growth over the window and how long the free space lasts. */
-export function storageSummary(history, fromMs, toMs) {
+/**
+ * Per storage location: used, size, growth and how long the free space lasts. The growth comes from
+ * the storage history (up to its last 7 days); while that is too short (a new install: two samples an
+ * hour apart) and there is one location, from what was recorded over the report's window instead.
+ */
+export function storageSummary(history, fromMs, toMs, { recordedBytesPerDay = null } = {}) {
   const out = []
+  const single = Object.keys(history ?? {}).length === 1
   for (const [loc, samples] of Object.entries(history ?? {})) {
     const all = [...samples].sort((a, b) => a.ms - b.ms)
     const last = all.at(-1)
@@ -170,7 +182,8 @@ export function storageSummary(history, fromMs, toMs) {
     // space lasts does not depend on whether you are looking at a day or a month
     const first = all.find((s) => s.ms >= last.ms - 7 * DAY) ?? all[0]
     const days = (last.ms - first.ms) / DAY
-    const perDay = days >= 0.5 ? (last.usedBytes - first.usedBytes) / days : null
+    const fromHistory = days >= 0.5 ? (last.usedBytes - first.usedBytes) / days : null
+    const perDay = fromHistory ?? (single && recordedBytesPerDay > 0 ? recordedBytesPerDay : null)
     const free = Number.isFinite(last.totalBytes) ? last.totalBytes - last.usedBytes : null
     out.push({
       location: loc,
