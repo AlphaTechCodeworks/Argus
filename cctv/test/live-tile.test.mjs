@@ -1,5 +1,5 @@
 // Live tile stall watchdog (public/live-tile.js): the badge says 'no video' after ~5 s without
-// frames (not a stale "N fps" with the live dot), and the tile reconnects by itself after 15-20 s
+// frames (not a stale "N fps" with the live dot), and the tile reconnects by itself after about 8 s
 // without frames on a socket that is still open. Stand-ins for the page and WebSocket; no server.
 // Run:  node cctv/test/live-tile.test.mjs
 let failures = 0
@@ -56,7 +56,7 @@ const { LiveTile, NO_VIDEO_MS, STALL_RECONNECT_MS, TILE_HTML, tileDot } = await 
   check('the tile markup holds a dot', /class="dot /.test(TILE_HTML), TILE_HTML)
 }
 
-check('no video after ~5 s, reconnect after 15-20 s', NO_VIDEO_MS >= 4000 && NO_VIDEO_MS <= 6000 && STALL_RECONNECT_MS >= 15_000 && STALL_RECONNECT_MS <= 20_000, `${NO_VIDEO_MS} ${STALL_RECONNECT_MS}`)
+check('no video after ~5 s, reconnect after ~8 s', NO_VIDEO_MS >= 4000 && NO_VIDEO_MS <= 6000 && STALL_RECONNECT_MS > NO_VIDEO_MS && STALL_RECONNECT_MS <= 10_000, `${NO_VIDEO_MS} ${STALL_RECONNECT_MS}`)
 
 let now = 1_000_000
 const t = new LiveTile(tileEl, { nvr: 'n1', ch: 2 }, 1, 0, { now: () => now })
@@ -76,12 +76,12 @@ t.player.stats.fps = 25 // as the player measures while frames arrive
 now += 1000
 t.updateStatus()
 const status = parts['.status']
-check('frames arriving: "25 fps" with the live dot', status.textContent === '25 fps' && status.classList.contains('live'), status.textContent)
+check('frames arriving: "LIVE" with the live dot', status.textContent === 'LIVE' && status.classList.contains('live'), status.textContent)
 check('... and the tile dot is green', /\bdot-live\b/.test(dotEl.className), dotEl.className)
 // frames stop; the player's last fps figure stays
 now += 3000
 t.updateStatus()
-check('3 s without frames: still the fps badge', status.textContent === '25 fps')
+check('3 s without frames: still the fps badge', status.textContent === 'LIVE')
 now += 3000
 t.updateStatus()
 check('6 s without frames: "no video", live dot off', status.textContent === 'no video' && !status.classList.contains('live'), status.textContent)

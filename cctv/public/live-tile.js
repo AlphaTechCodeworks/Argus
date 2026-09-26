@@ -17,14 +17,26 @@ export const MAIN_STREAM = 0
 // stall watchdog: an open socket that delivers no frames this long shows 'no video' (about 2-3
 // GOPs), and this long is closed and opened again (the server may have dropped a frozen stream)
 export const NO_VIDEO_MS = 5000
-export const STALL_RECONNECT_MS = 18_000
+export const STALL_RECONNECT_MS = 8000
+// reconnect back-off: 1, 2, 4, 8 s then every 8 s (with jitter). It was up to 30 s: a camera that
+// dropped for a moment stayed black half a minute after it was back.
+export const RECONNECT_MAX_MS = 8000
+export const reconnectDelay = (attempts) => Math.min(RECONNECT_MAX_MS, 1000 * 2 ** attempts)
+
+// Every tile on the page, so that the network coming back (a phone moving between Wi-Fi and mobile
+// data, a laptop waking) reconnects the waiting ones at once instead of at the end of their timer.
+const liveTiles = new Set()
+if (typeof addEventListener === 'function') {
+  addEventListener('online', () => { for (const t of liveTiles) t.reconnectNow() })
+  addEventListener('pageshow', (e) => { if (e.persisted) for (const t of liveTiles) t.reconnectNow() })
+}
 
 /** The markup a LiveTile expects inside its tile element. */
 // The .osd canvas sits over the video canvas and is drawn by this app (osd-overlay.js), never by
 // the camera. It is a second canvas rather than drawing onto the player's own, because the player
 // redraws that one on every frame and would wipe the text, and because the overlay must be able to
 // come and go without the streaming path knowing anything about it.
-export const TILE_HTML = '<canvas></canvas><canvas class="osd"></canvas><pre class="stats"></pre><div class="label"><span class="dot dot-off" title="No video: nothing is arriving from this camera"></span><span class="name"></span><span class="status"></span></div>'
+export const TILE_HTML = '<canvas></canvas><canvas class="osd"></canvas><pre class="stats"></pre><span class="status"></span><div class="label"><span class="dot dot-off" title="No video: nothing is arriving from this camera"></span><span class="name"></span></div>'
 
 /**
  * The state dot on a tile, the way Milestone shows it: green when video is arriving, red when
@@ -86,7 +98,7 @@ export class LiveTile {
         if (typeof document !== 'undefined') maybeKeepStill(this.player.canvas, this.nvr, this.ch)
         // a picture on screen is live, whatever the badge said a moment ago ("connecting…" stayed
         // up until a whole second of frames had been counted, over a picture already moving)
-        if (/connecting|no video/.test(this.status.textContent)) this.setStatus('live', true)
+        if (/connecting|no video/.test(this.status.textContent)) this.setStatus('LIVE', true)
         if (shown) return
         shown = true
         opts.onFirstFrame?.()
@@ -96,6 +108,7 @@ export class LiveTile {
     // the last picture seen of this camera, at once, until its live picture arrives (stills.js)
     if (typeof document !== 'undefined' && !opts.noStill) showStill(tile, this.nvr, this.ch)
     this.retry = setTimeout(() => this.connect(), startDelayMs)
+    liveTiles.add(this)
     this.statusTimer = setInterval(() => this.updateStatus(), 1000)
   }
 
@@ -179,7 +192,11 @@ export class LiveTile {
       ws.close()
       onclose?.()
     } else if (open && since >= NO_VIDEO_MS) this.setStatus('no video')
-    else if (s.fps > 0 && open) this.setStatus(`${s.fps} fps`, true)
+    else if (s.fps > 0 && open) {
+      this.setStatus('LIVE', true)
+      const fps = `${s.fps} fps`
+      if (this.status.title !== fps) this.status.title = fps
+    }
     this.setDot({
       hasVideo: Boolean(open && this.lastDataAt && s.fps > 0),
       stale: Boolean(open && since >= NO_VIDEO_MS),
@@ -217,7 +234,7 @@ export class LiveTile {
         this.opts.onDisconnect?.()
         this.setStatus('reconnecting…')
         // back off (2, 4, 8 … 30 s) with jitter, so many tiles don't reconnect in lockstep
-        const delay = Math.min(30_000, 2000 * 2 ** this.attempts) * (0.7 + Math.random() * 0.6)
+        const delay = reconnectDelay(this.attempts) * (0.7 + Math.random() * 0.6)
         this.attempts++
         this.retry = setTimeout(() => this.connect(), delay)
       }
@@ -284,7 +301,21 @@ export class LiveTile {
     this.connect()
   }
 
+  /** Waiting to reconnect (or on a dead socket): try again now, from the start of the back-off. */
+  reconnectNow() {
+    if (this.closed || this.suspended || this.ws?.readyState === 1) return
+    clearTimeout(this.retry)
+    if (this.ws) {
+      this.ws.onclose = null
+      this.ws.onmessage = null
+      this.ws.close()
+    }
+    this.attempts = 0
+    this.connect()
+  }
+
   close() {
+    liveTiles.delete(this)
     this.closed = true
     clearTimeout(this.retry)
     clearInterval(this.statusTimer)
