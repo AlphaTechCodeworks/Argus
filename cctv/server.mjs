@@ -86,7 +86,7 @@ import { nvrCooling, sdkStats } from './sdk.mjs'
 import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
 import { recentRefusals } from './nvr-health.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
-import { handleBookmarks } from './bookmarks.mjs'
+import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
 import { can, handleRights } from './rights.mjs'
@@ -95,6 +95,7 @@ import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
 import { handleAlarms } from './alarms.mjs'
 import { handleOsd } from './osd.mjs'
+import { runRetention, runThinning } from './thinning.mjs'
 import { loadCertificate } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
@@ -117,6 +118,37 @@ startWatchdog()
   setTimeout(startNvrs, delay)
 }
 
+/**
+ * Time-lapse thinning and retention, which between them are the only things in this system that
+ * delete or rewrite footage on purpose.
+ *
+ * They run in dry run until somebody deliberately says otherwise: `storage.thinning: 'on'`. In dry
+ * run they work out exactly what they would do, touch nothing, and say so in the log -- so a night
+ * or two of "would have removed N segments, freeing X GB" can be read before any of it is real.
+ * The first dry run on 2026-09-25 came back zero for both, because nothing recorded so far is old
+ * enough to have reached any threshold; the interesting numbers arrive as footage ages, and are
+ * worth seeing before the jobs are armed rather than after.
+ */
+async function thinAndRetain() {
+  const mode = getSettings().storage?.thinning ?? 'dry-run'
+  if (mode === 'off') return
+  const dryRun = mode !== 'on'
+  const index = recIndex()
+  if (!index) return
+  const say = (what, r) => {
+    const n = (r.thinned ?? r.deleted ?? []).length
+    if (!n && !r.warnings?.length) return
+    console.log(`[${what}]${dryRun ? ' (dry run, nothing touched)' : ''} ${n} segments, ${(r.freedBytes / 1e9).toFixed(2)} GB${r.skipped?.length ? `, ${r.skipped.length} skipped` : ''}`)
+    for (const w of r.warnings ?? []) console.warn(`[${what}] ${w}`)
+  }
+  try {
+    say('thinning', await runThinning({ index, settings: getSettings(), dryRun, protectedRanges }))
+    say('retention', await runRetention({ index, settings: getSettings(), dryRun, protectedRanges }))
+  } catch (e) {
+    console.warn(`[thinning] did not run: ${e.message}`)
+  }
+}
+
 // server recording (CCTV_LIVE_WORKER=on only): retention and low-space deletion every 5 minutes
 if (LIVE_WORKER) {
   let busy = false
@@ -125,6 +157,7 @@ if (LIVE_WORKER) {
     busy = true
     runHousekeeping({ index: recIndex() })
       .then(() => pruneAudit(auth.DATA_DIR)) // a year of audit is kept; older rows go with the rest
+      .then(() => thinAndRetain())
       .catch((e) => console.warn(`[housekeeping] failed: ${e.message}`))
       .finally(() => (busy = false))
   }, 5 * 60_000).unref()
