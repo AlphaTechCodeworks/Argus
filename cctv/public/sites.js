@@ -51,43 +51,51 @@ function render() {
     sitesEl.replaceChildren(el('p', { className: 'st-empty', textContent: 'No NVRs yet. Click “+ Add NVR” to add the first one.' }))
     return
   }
+  // one block per site: a heading that sums the site up, then one row per NVR
   const bySite = Map.groupBy(nvrList, (n) => n.site || 'Unassigned')
   const groups = [...bySite].sort(([a], [b]) => a.localeCompare(b)).map(([site, list]) => {
-    const rename = el('button', { type: 'button', className: 'st-link', textContent: 'Rename site' })
+    const rename = el('button', { type: 'button', className: 'btn-ghost st-site-rename', textContent: 'Rename' })
     rename.addEventListener('click', () => renameSite(site, list))
-    const cards = list.map((n) => {
+    const cams = list.reduce((t, n) => t + (n.cameras ?? 0), 0)
+    const camsUp = list.reduce((t, n) => t + (n.status === 'online' ? n.camerasOnline ?? 0 : 0), 0)
+    const down = list.filter((n) => n.status !== 'online').length
+    const summary = `${list.length} NVR${list.length === 1 ? '' : 's'} · ${camsUp} of ${cams} cameras online${down ? ` · ${down} NVR${down === 1 ? '' : 's'} not connected` : ''}`
+    const rows = list.map((n) => {
       const edit = el('button', { type: 'button', textContent: 'Edit' })
       edit.addEventListener('click', () => openForm(n))
-      const remove = el('button', { type: 'button', className: 'st-danger', textContent: 'Remove' })
+      const remove = el('button', { type: 'button', className: 'btn-ghost st-row-remove', textContent: 'Remove', title: `Remove ${n.name}` })
       remove.addEventListener('click', () => removeNvr(n))
       let subs = null
       if (n.status === 'online') {
         subs = el('button', { type: 'button', textContent: 'Sub-streams' })
         subs.addEventListener('click', () => openSubstreams(n))
       }
-      const status = el('span', { className: `st-status st-${n.status}`, textContent: STATUS_TEXT[n.status] ?? n.status })
+      const online = n.status === 'online'
+      const pct = online && n.cameras ? Math.round((100 * (n.camerasOnline ?? 0)) / n.cameras) : 0
+      const problem = n.vpnSite && !n.vpnSite.connected
+        ? `VPN tunnel to ${n.vpnSite.name}: ${tunnelText(n.vpnSite)}`
+        : !online && n.error ? n.error : ''
+      const note = subStreamNote(n.subStreamsSeen)
       return el(
-        'article',
-        { className: 'st-card' },
-        el('div', { className: 'st-card-head' }, el('h3', { textContent: n.name }), status),
-        el('p', { className: 'st-meta', textContent: `${whereText(n)} · user ${n.user}${n.model ? ` · ${n.model}` : ''}${n.serial && n.via !== 'p2p' ? ` · serial ${n.serial}` : ''}` }),
-        n.vpnSite && !n.vpnSite.connected
-          ? el('p', { className: 'st-error-text', textContent: `VPN tunnel to ${n.vpnSite.name}: ${tunnelText(n.vpnSite)}` })
-          : null,
-        n.status === 'online'
-          ? el('p', { className: 'st-meta', textContent: `${n.camerasOnline} of ${n.cameras} cameras online` })
-          : n.error
-            ? el('p', { className: 'st-error-text', textContent: n.error })
-            : null,
-        subStreamNote(n.subStreamsSeen),
-        el('div', { className: 'st-card-actions' }, edit, subs, remove)
+        'div',
+        { className: `st-nvr st-nvr-${n.status}` },
+        el('span', { className: `st-dot st-${n.status}`, title: STATUS_TEXT[n.status] ?? n.status }),
+        el('div', { className: 'st-nvr-main' },
+          el('div', { className: 'st-nvr-name', textContent: n.name }),
+          el('div', { className: 'st-meta', textContent: [whereText(n), n.model, `user ${n.user}`].filter(Boolean).join(' · ') }),
+          problem ? el('div', { className: 'st-error-text', textContent: problem }) : null,
+          note),
+        el('div', { className: 'st-nvr-cams' },
+          el('span', { textContent: online ? `${n.camerasOnline} / ${n.cameras}` : STATUS_TEXT[n.status] ?? n.status }),
+          online ? el('span', { className: 'st-bar' }, el('span', { style: `width:${pct}%` })) : null),
+        el('div', { className: 'st-nvr-actions' }, subs, edit, remove)
       )
     })
     return el(
       'section',
       { className: 'st-site' },
-      el('div', { className: 'st-site-head' }, el('h2', { textContent: site }), rename),
-      el('div', { className: 'st-cards' }, ...cards)
+      el('div', { className: 'st-site-head' }, el('div', {}, el('h2', { textContent: site }), el('p', { className: 'st-meta', textContent: summary })), rename),
+      el('div', { className: 'st-nvrs' }, ...rows)
     )
   })
   sitesEl.replaceChildren(...groups)

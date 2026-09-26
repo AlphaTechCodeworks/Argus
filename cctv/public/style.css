@@ -1351,3 +1351,32 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
 .se-tabs a[aria-current] { color: var(--text); border-bottom-color: var(--accent); }
 .se-tab-help { flex-shrink: 0; margin: 0; color: var(--muted); font-size: 13px; }
 .se-section.se-off { display: none; }
+/* Sites: a block per site, a row per NVR */
+.st-site { display: flex; flex-direction: column; gap: 8px; }
+.st-site + .st-site { margin-top: 12px; }
+.st-site-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.st-site-head h2 { margin: 0; font-size: 17px; }
+.st-site-head .st-meta { margin: 2px 0 0; }
+.st-nvrs { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; }
+.st-nvr { display: grid; grid-template-columns: 12px minmax(0, 1fr) 150px auto; gap: 14px; align-items: center; padding: 12px 16px; }
+.st-nvr + .st-nvr { border-top: 1px solid var(--border); }
+.st-nvr:hover { background: var(--surface-hover); }
+.st-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--text-faint); }
+.st-dot.st-online { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.st-dot.st-connecting { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.st-dot.st-offline { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+.st-nvr-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.st-nvr-name { font-weight: 600; }
+.st-nvr-main .st-meta, .st-nvr-main p { margin: 0; overflow: hidden; text-overflow: ellipsis; }
+.st-nvr-cams { display: flex; flex-direction: column; gap: 5px; font-variant-numeric: tabular-nums; font-size: 13px; }
+.st-nvr-offline .st-nvr-cams { color: var(--bad); }
+.st-bar { display: block; height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+.st-bar > span { display: block; height: 100%; background: var(--ok); }
+.st-nvr-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.st-row-remove { color: var(--text-muted); }
+.st-row-remove:hover { color: var(--bad); }
+@media (max-width: 760px) {
+  .st-nvr { grid-template-columns: 12px minmax(0, 1fr); }
+  .st-nvr-cams, .st-nvr-actions { grid-column: 2; }
+  .st-nvr-actions { justify-content: flex-start; flex-wrap: wrap; }
+}
