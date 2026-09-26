@@ -2,8 +2,9 @@
    from here, and test/css-tokens.test.mjs fails the moment one does not -- the old style.css had
    drifted to 69 distinct colours, which is most of why no two pages looked like the same product.
    Dark is the default; the light theme overrides surfaces and text only, so status colours mean
-   the same thing in both. */
-:root {
+   the same thing in both. Selectors use html:root so the old style.css, which reuses some names
+   on a plain :root, cannot override them. */
+html:root {
   color-scheme: dark;
   --bg: #0e1012;
   --surface-1: #121417;
@@ -30,6 +31,14 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
   --focus: #5b9bff;
 
+  /* The old style.css still styles most page bodies and names its colours --panel, --muted, --tile
+     and --offline. Pointing those names at the new tokens here, at higher specificity than its own
+     :root, makes the old pages follow the palette and the light/dark switch until each is rebuilt. */
+  --panel: var(--surface-1);
+  --muted: var(--text-muted);
+  --tile: var(--video-bg);
+  --offline: var(--text-faint);
+
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
   --r-sm: 6px; --r-md: 10px; --r-lg: 14px;
   --fs-meta: 12px; --fs-dense: 13px; --fs-body: 14px; --fs-section: 16px; --fs-title: 24px; --fs-figure: 28px;
@@ -38,7 +47,7 @@
   --shell-w: 232px; --rail-w: 64px; --bar-h: 64px;
 }
 
-:root[data-theme="light"] {
+html:root[data-theme="light"] {
   color-scheme: light;
   --bg: #f4f5f7;
   --surface-1: #ffffff;
@@ -56,4 +65,4 @@
   --focus: #1e56d6;
 }
 
-@media (prefers-reduced-motion: reduce) { :root { --t-fast: 0ms linear; } }
+@media (prefers-reduced-motion: reduce) { html:root { --t-fast: 0ms linear; } }
