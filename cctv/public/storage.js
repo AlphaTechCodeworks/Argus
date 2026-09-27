@@ -115,6 +115,8 @@ if (typeof document !== 'undefined') {
       ? 'No storage locations are set up yet.'
       : `${r.totals.mounted} of ${r.totals.locations} locations mounted · ${r.totals.used} used · ${r.totals.free} free`
 
+    // a camera table someone opened stays open across the minute's refresh (it was rebuilt closed)
+    const openFolds = new Set([...document.querySelectorAll('#sr-locations details.sr-cams[open]')].map((x) => x.dataset.key))
     document.getElementById('sr-locations').replaceChildren(
       ...r.locations.map((l) => {
         const panel = el('section', { className: 'nvr-panel' })
@@ -139,6 +141,8 @@ if (typeof document !== 'undefined') {
         if (l.cameras.length) {
           // folded: a hundred cameras is a hundred rows, and the cards above already say how it stands
           const fold = el('details', { className: 'sr-cams' })
+          fold.dataset.key = l.title
+          fold.open = openFolds.has(l.title)
           fold.append(el('summary', { textContent: `How far back each camera goes (${l.cameras.length})` }))
           const table = el('table', { className: 'hp-table' })
           const thead = el('thead')

@@ -472,7 +472,10 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
 
     // Each NVR folded to a tile of the few numbers that matter; the full detail opens on a click.
     // Which ones are open is kept across the 15 s refresh.
-    const wasOpen = new Set([...document.querySelectorAll('#nvrs details[open]')].map((x) => x.dataset.id))
+    const wasOpen = new Set([...document.querySelectorAll('#nvrs details.nvr-panel[open]')].map((x) => x.dataset.id))
+    // ...and so is each disk's SMART report: the 2 s refresh rebuilt it closed a moment after it
+    // was opened (the owner: "why does the SMART report drop down not stay open?")
+    const smartOpen = new Set([...document.querySelectorAll('#nvrs details.hp-smart[open]')].map((x) => x.dataset.key))
     document.getElementById('nvrs').replaceChildren(...r.nvrPanels.map((n) => {
       const panel = el('details', { className: `nvr-panel nvr-tile ${n.status.state}` })
       panel.dataset.id = n.id
@@ -544,6 +547,8 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
             const cell = el('td')
             cell.colSpan = 5
             const box = el('details', { className: 'hp-smart' })
+            box.dataset.key = `${n.id}/${row.name}`
+            box.open = smartOpen.has(box.dataset.key)
             box.append(el('summary', { textContent: `SMART report — ${row.name}${row.detail ? ` (${row.detail})` : ''}` }))
 
             // The few facts worth reading before the table.
