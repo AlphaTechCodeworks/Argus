@@ -75,7 +75,7 @@ export class PhoneStream {
    * @param {{ source: { add: Function, remove: Function }, type: number, slot: { release: Function },
    *   makeTranscoder?: Function, onEmpty?: Function, log?: Function, stopDelayMs?: number }} o
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, background = false }) {
     // fps / crf / kbps: the level this stream is thinned to (adaptive-live.mjs picks one per viewer)
     Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps })
     this.clients = new Set()
@@ -87,7 +87,8 @@ export class PhoneStream {
     this.closed = false
     this.stopTimer = null
     // what the normal stream sees: one more viewer, which never falls behind
-    this.tap = { OPEN: 1, readyState: 1, bufferedAmount: 0, send: (buf) => this.#onSource(buf) }
+    // (background: only a stand-in, live-attach.mjs: the NVR worker joins a main that plays for it, never starts one)
+    this.tap = { OPEN: 1, readyState: 1, bufferedAmount: 0, background, send: (buf) => this.#onSource(buf) }
     source.add(this.tap)
   }
 
@@ -192,12 +193,12 @@ export class PhoneLive {
    * Attaches a phone's socket to the thinned stream, or returns false when the cap is reached (the
    * caller then attaches it to the normal stream).
    */
-  attach(key, source, type, ws) {
+  attach(key, source, type, ws, { background = false } = {}) {
     let s = this.streams.get(key)
     if (!s || s.closed) {
       const slot = this.pool.acquire()
       if (!slot) return false
-      s = new PhoneStream({ source, type, slot, makeTranscoder: this.makeTranscoder, log: this.log, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source, type, slot, background, makeTranscoder: this.makeTranscoder, log: this.log, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
     }
     s.add(ws)
@@ -208,6 +209,12 @@ export class PhoneLive {
   /** Takes a socket off a thinned stream before it closes (sub-bridge.mjs: a stand-in that has ended). */
   detach(key, ws) {
     this.streams.get(key)?.remove(ws)
+  }
+
+  /** Whether a thinned stream runs under this key (joining it costs no conversion). */
+  has(key) {
+    const s = this.streams.get(key)
+    return Boolean(s) && !s.closed
   }
 
   /** How many more conversions may start (the cap, less those running). */

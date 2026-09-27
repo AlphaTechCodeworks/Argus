@@ -1,6 +1,6 @@
 // An NVR's sub-stream limit, learnt from its refusals (sub-cap.mjs). Pure: a fake clock.
 //   node cctv/test/sub-cap.test.mjs
-import { CONFIRM_MS, MIN_PLAYING, RETRY_MS, SAVED_MS, subCap } from '../sub-cap.mjs'
+import { CLIMB_MS, CONFIRM_MS, MIN_PLAYING, RETRY_MS, SAVED_MS, subCap } from '../sub-cap.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -60,6 +60,9 @@ const refusal = (playing, o = {}) => ({ code: 8, fast: true, playing, ...o })
   check('... refused: the limit stands again', c.refused(refusal(15)) === false && c.limit() === 15)
   t += RETRY_MS + 1
   check('... played: it rises', c.playing(16) === true && c.limit() === 16)
+  t += CLIMB_MS + 1
+  check('... and the next one is tried CLIMB_MS later, not RETRY_MS', c.limit() === 17)
+  check('... refused there: it stands for RETRY_MS again', c.refused(refusal(16)) === false && c.limit() === 16 && (t += CLIMB_MS + 1, c.limit() === 16))
 }
 
 {

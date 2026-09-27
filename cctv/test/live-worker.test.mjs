@@ -131,7 +131,7 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   const capData = mkdtempSync(join(tmpdir(), 'cctv-subcap-')) // its own sub-cap-w1.json, not the other tests'
   writeFileSync(join(capData, 'nvrs.json'), JSON.stringify({ nvrs: [{ id: 'w1', site: 'T', name: 'W1', host: 'w1.invalid', port: 6036, user: 'u', password: 'p' }] }))
-  const child = fork(new URL('../nvr-worker.mjs', import.meta.url), [], { serialization: 'advanced', stdio: ['ignore', 'pipe', 'inherit', 'ipc'], env: { ...process.env, DATA_DIR: capData, CCTV_WORKER_NVR: 'w1', CCTV_FAKE_LOG_CALLS: '1', CCTV_FAKE_MAX_SUBS: '5' } })
+  const child = fork(new URL('../nvr-worker.mjs', import.meta.url), [], { serialization: 'advanced', stdio: ['ignore', 'pipe', 'inherit', 'ipc'], env: { ...process.env, DATA_DIR: capData, CCTV_WORKER_NVR: 'w1', CCTV_FAKE_LOG_CALLS: '1', CCTV_FAKE_MAX_SUBS: '5', CCTV_FAKE_STOP_MS: '600' } })
   let wout = ''
   child.stdout.on('data', (d) => (wout += d))
   const got = []
@@ -146,6 +146,7 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   child.send({ t: 'want', ch: 6, type: 1 })
   check('sub limit: two refusals at 5 playing set the limit (stats say 5, the log says so)', await until(() => stats()?.subCap?.limit === 5 && wout.includes('plays at most 5 sub-streams at once'), 8000), JSON.stringify(stats()?.subCap))
   check('sub limit: the refused viewers\' sub-streams are held (in the stats at once)', await until(() => JSON.stringify(stats()?.subCap?.held) === '[5,6]', 3000), JSON.stringify(stats()?.subCap))
+  check('sub limit: ... and the stats say it is at the limit (a new tile is treated as held at once)', stats()?.subCap?.full === true, JSON.stringify(stats()?.subCap))
   const p5 = plays('5:1')
   const p6 = plays('6:1')
   await sleep(7000) // past the 5 s retry of a refused start
@@ -154,12 +155,68 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   await sleep(1500)
   check('sub limit: a warm-up is held back below the limit (no LivePlay)', plays('7:1') === 0 && !(stats()?.subCap?.held ?? []).includes(7), `${plays('7:1')} LivePlay`)
   check('sub limit: the limit is saved for the next start', existsSync(join(capData, 'sub-cap-w1.json')) && JSON.parse(readFileSync(join(capData, 'sub-cap-w1.json'), 'utf8')).limit === 5)
-  // viewer 0 leaves its tile, the stream lingers (background): a held viewer takes its place
+  // viewer 0 leaves its tile, the stream lingers (background): a held viewer takes its place, and
+  // only once the NVR has let go of it (its StopLivePlay takes 600 ms here): no refusal on the way
   const from = got.length
+  const markSwap = wout.length
   child.send({ t: 'want', ch: 0, type: 1, background: true })
   check('sub limit: a held viewer takes the place of a stream nobody watches (it stops)', await until(() => wout.includes('stream w1/1:sub stopped'), 6000))
   check('sub limit: ... and one held viewer\'s sub-stream plays', await until(() => framesOf('5:1', from) || framesOf('6:1', from), 6000))
   check('sub limit: ... the other is still held, and the warm-up is not started', await until(() => (stats()?.subCap?.held ?? []).length === 1, 3000) && plays('7:1') === 0 && plays('0:1') === 1, JSON.stringify(stats()?.subCap))
+  const swapFails = wout.slice(markSwap).split('\n').filter((l) => /stream w1\/(6|7):sub failed to start/.test(l))
+  check('sub limit: ... no refusal on the way (the viewer waited for the StopLivePlay)', swapFails.length === 0, swapFails.join(' | '))
+  check('sub limit: ... the stopped and the held warm-ups are reported as parked (their pictures in the parent are old)', [0, 7].every((ch) => (stats()?.subCap?.parked ?? []).includes(ch)), JSON.stringify(stats()?.subCap))
+  // warm-ups start only VIEWER_ROOM (2) below the limit: with 4 playing they wait, with 2 one starts
+  child.send({ t: 'unwant', ch: stats().subCap.held[0], type: 1 })
+  child.send({ t: 'unwant', ch: 4, type: 1 })
+  check('sub limit: a viewer leaves (4 left playing)', await until(() => wout.includes('stream w1/5:sub stopped'), 6000))
+  await sleep(1500)
+  check('sub limit: ... one below the limit, the warm-ups still wait (room is kept for viewers)', plays('7:1') === 0 && plays('0:1') === 1, `7:1 ${plays('7:1')}, 0:1 ${plays('0:1')}`)
+  child.send({ t: 'unwant', ch: 3, type: 1 })
+  child.send({ t: 'unwant', ch: 2, type: 1 })
+  check('sub limit: two more leave (2 left playing)', await until(() => wout.includes('stream w1/4:sub stopped') && wout.includes('stream w1/3:sub stopped'), 8000))
+  const warmStarts = () => plays('7:1') + plays('0:1') - 1
+  check('sub limit: ... then one warm-up starts (3 playing = 2 below the limit)', await until(() => warmStarts() === 1, 5000), String(warmStarts()))
+  await sleep(1500)
+  check('sub limit: ... and only one', warmStarts() === 1, String(warmStarts()))
+  child.send({ t: 'stop' })
+  await until(() => child.exitCode !== null || child.signalCode !== null, 6000)
+}
+
+// ---- at the limit, a recording sub-stream that restarts keeps its place: a held viewer never
+// takes it (a549c21), or the recorder's restart is refused and the camera goes unrecorded
+{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const capData = mkdtempSync(join(tmpdir(), 'cctv-subcap-rec-'))
+  writeFileSync(join(capData, 'nvrs.json'), JSON.stringify({ nvrs: [{ id: 'w1', site: 'T', name: 'W1', host: 'w1.invalid', port: 6036, user: 'u', password: 'p' }] }))
+  const loc = mkdtempSync(join(tmpdir(), 'rec-subcap-'))
+  writeFileSync(join(loc, '.cctv-recordings'), '{}')
+  const DEFAULTS = { mode: 'off', fullDays: 30, after: 'timelapse', timelapseS: 10, retentionDays: 183, preS: 10, postS: 20 }
+  const child = fork(new URL('../nvr-worker.mjs', import.meta.url), [], { serialization: 'advanced', stdio: ['ignore', 'pipe', 'inherit', 'ipc'], env: { ...process.env, DATA_DIR: capData, CCTV_WORKER_NVR: 'w1', CCTV_FAKE_LOG_CALLS: '1', CCTV_FAKE_MAX_SUBS: '5' } })
+  let wout = ''
+  child.stdout.on('data', (d) => (wout += d))
+  const got = []
+  child.on('message', (m) => got.push(m))
+  const plays = (key) => (wout.match(new RegExp(`^\\[fake-sdk\\] LivePlay ${key}$`, 'gm')) ?? []).length
+  const count = (text) => wout.split(text).length - 1
+  const framesOf = (key) => got.some((m) => m.t === 'frame' && m.key === key)
+  const stats = () => got.filter((m) => m.t === 'stats').at(-1)
+  check('rec at the limit: worker ready and logged in', (await until(() => got.some((m) => m.t === 'ready'))) && (await until(() => wout.includes('logged in'))))
+  child.send({ t: 'settings', recording: { defaults: DEFAULTS, cameras: { 'w1/0': { mode: 'continuous', stream: 'sub' } } }, locations: [{ id: 'LR', path: loc, role: 'main' }] })
+  check('rec at the limit: camera 1 is recorded on its sub-stream', await until(() => wout.includes('stream w1/1:sub started'), 6000))
+  for (let ch = 1; ch < 5; ch++) child.send({ t: 'want', ch, type: 1 })
+  check('rec at the limit: four viewers play next to it (5 = the limit)', await until(() => [1, 2, 3, 4].every((ch) => framesOf(`${ch}:1`)), 8000))
+  child.send({ t: 'want', ch: 5, type: 1 })
+  child.send({ t: 'want', ch: 6, type: 1 })
+  check('rec at the limit: two more are refused, the limit is learnt and they are held', await until(() => stats()?.subCap?.limit === 5 && JSON.stringify(stats()?.subCap?.held) === '[5,6]', 8000), JSON.stringify(stats()?.subCap))
+  const p5 = plays('5:1')
+  const p6 = plays('6:1')
+  const started = count('stream w1/1:sub started')
+  child.send({ t: 'restart', ch: 0, type: 1, why: 'test restart' }) // as after a stall, or a codec change
+  check('rec at the limit: the recording sub-stream restarts', await until(() => wout.includes('stream w1/1:sub test restart, restarting'), 3000))
+  check('rec at the limit: ... into its own place (started again, not refused)', await until(() => count('stream w1/1:sub started') === started + 1, 9000) && !wout.includes('[rec w1/1] refused'), wout.split('\n').filter((l) => l.includes('w1/1:sub')).slice(-3).join(' | '))
+  await sleep(500)
+  check('rec at the limit: ... no held viewer took it meanwhile', plays('5:1') === p5 && plays('6:1') === p6 && JSON.stringify(stats()?.subCap?.held) === '[5,6]', `5:1 ${p5}->${plays('5:1')}, 6:1 ${p6}->${plays('6:1')}, ${JSON.stringify(stats()?.subCap)}`)
   child.send({ t: 'stop' })
   await until(() => child.exitCode !== null || child.signalCode !== null, 6000)
 }

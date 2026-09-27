@@ -88,7 +88,8 @@ const parked = (t) => bridgeOnly(t) && nvr.streams.get(streamKey(t.ch, t.type))?
 // as background) VIEWER_ROOM below it, so a viewer's tile still starts at once. The others wait here,
 // "held", and the parent shows a held viewer's tile the camera's main stream meanwhile (nvrs.mjs
 // subHeld, sub-bridge.mjs). A held viewer takes the place of a playing warm-up, one at a time, and a
-// refused stream that only a held-back tap wants is let go instead of asked for every minute.
+// refused stream that only a held-back tap wants is let go instead of asked for every minute. The
+// recorder's sub-streams keep their places through their restarts: viewers never take them.
 const VIEWER_ROOM = 2
 const CAP_FILE = join(DATA_DIR, `sub-cap-${id}.json`) // so a restart does not learn it again with refusals
 const CAP_SAVE_EVERY_MS = 60 * 60_000 // a confirmed limit is written again this often (its time moves on)
@@ -121,16 +122,27 @@ const capChanged = () => {
   saveCap(true)
 }
 const subs = () => [...nvr.streams.values()].filter((s) => s.streamType === 1 && !s.stopped)
-/** Sub-streams that take one of the NVR's places: playing or on their way there, not one being let go. */
-const holding = (except) => subs().filter((s) => s !== except && !s.capStopping && (s.state === 'playing' || s.state === 'starting')).length
+// sub-streams let go for a held viewer (makeRoom): they keep their place at the NVR until their
+// StopLivePlay has returned, so the viewer's LivePlay does not land on a place still taken
+const freeing = new Set()
+/** Restarting, and coming back for its place: after a stall, not after a refusal at the limit. */
+const comingBack = (s) => s.state === 'restarting' && s.clients.size > 0 && !(s.lastFailure?.code === LIMIT_ERROR && s.lastFailure.at > s.playingSince)
+/**
+ * Sub-streams that take one of the NVR's places: playing or on their way there, restarting ones that
+ * will ask for theirs back, and the recorder's in any state -- a viewer never takes the place of a
+ * recording that restarts (a549c21): its restart would be refused and the camera left unrecorded for
+ * 5-10 minutes. (Refused, the recorder lets go of it at its next tick, and then it counts no more.)
+ */
+const holding = (except) => freeing.size + subs().filter((s) => s !== except && (s.recorded || s.state === 'playing' || s.state === 'starting' || comingBack(s))).length
 const room = (t) => {
   const limit = cap.limit()
   return limit === Infinity ? Infinity : (t.tap.background ? limit - VIEWER_ROOM : limit)
 }
 // a start refused at the limit (live.mjs lastFailure.code), counted with the others playing then
+// (those being let go still hold their places)
 nvr.onLiveFailed = (s) => {
   if (s.streamType !== 1) return
-  const playing = subs().filter((o) => o !== s && o.state === 'playing').length
+  const playing = subs().filter((o) => o !== s && o.state === 'playing').length + freeing.size
   const f = s.lastFailure
   if (f && cap.refused({ code: f.code, fast: f.fast, playing })) capChanged()
   else if (f?.code === LIMIT_ERROR && cap.known() !== null) saveCap(false)
@@ -140,8 +152,7 @@ nvr.onLiveFailed = (s) => {
 const capHeld = (t) => {
   if (t.type !== 1 || cap.limit() === Infinity) return false
   const s = nvr.streams.get(streamKey(t.ch, 1))
-  // (a warm-up let go for a viewer does not come back onto its stream while that stops)
-  if (s && !s.stopped && (s.recorded || (s.state === 'playing' && !(s.capStopping && t.tap.background)))) return false
+  if (s && !s.stopped && (s.recorded || s.state === 'playing')) return false
   return holding(s) >= room(t)
 }
 
@@ -162,7 +173,6 @@ const attach = (key) => {
   }
   t.held = false
   t.stream = nvr.getStream(t.ch, t.type)
-  if (!t.tap.background) t.stream.capStopping = false // a viewer back on a stream being let go: it plays on
   t.stream.add(t.tap)
 }
 
@@ -184,19 +194,29 @@ const letGo = (t) => {
   if (s.clients.size === 0 && !(s.handle > 0) && !s.nativeStarting) s.stop()
 }
 
-/** A held viewer's sub-stream takes the place of a playing warm-up's: one at a time. */
+/**
+ * A held viewer's sub-stream takes the place of a playing warm-up's (or a lingering one's), one at a
+ * time. It is stopped here, not through the idle-stop queue, and its place counts as taken until
+ * its StopLivePlay has returned (freeing): only then does the viewer's start go out.
+ */
 const makeRoom = () => {
-  if (cap.limit() === Infinity || subs().some((s) => s.capStopping)) return
+  if (cap.limit() === Infinity || freeing.size > 0) return
   if (![...taps.values()].some((t) => t.type === 1 && t.held && !t.stream && !t.tap.background)) return
   const warm = [...taps.values()].find((t) => t.type === 1 && t.tap.background && t.stream?.state === 'playing' && !t.stream.recorded && t.stream.clients.size === 1)
   if (!warm) return
-  warm.stream.capStopping = true
-  detach(warm) // StopLivePlay through the idle-stop queue (paced); its place is free once it has stopped
+  const s = warm.stream
+  detach(warm) // (queues an idle stop, which stop() below takes back)
   warm.held = true
+  freeing.add(s)
+  s.stop().finally(() => freeing.delete(s))
 }
 
 /** Viewers' sub-stream taps held at the limit: the parent shows those tiles the main stream. */
 const heldNow = () => [...taps.values()].filter((t) => t.type === 1 && t.held && !t.stream && !t.tap.background).map((t) => t.ch).sort((a, b) => a - b)
+/** Every sub-stream tap held (warm-ups and lingering ones too): the worker sends the parent nothing more for them. */
+const parkedNow = () => [...taps.values()].filter((t) => t.type === 1 && t.held && !t.stream).map((t) => t.ch).sort((a, b) => a - b)
+/** At the limit: a viewer's new sub-stream would be held (the parent treats a cold tile as held at once). */
+const fullNow = () => cap.limit() !== Infinity && holding() >= cap.limit()
 let heldSent = ''
 
 // streams are started only while the NVR is logged in (a LivePlay before that only fails and
@@ -221,7 +241,7 @@ const loop = setInterval(() => {
     if (!t.stream) attach(key)
   }
   makeRoom()
-  const held = heldNow().join(',')
+  const held = `${heldNow().join(',')}|${parkedNow().join(',')}|${fullNow()}`
   if (held !== heldSent) {
     heldSent = held
     sendStats() // the parent's tiles for these go to the main stream now, not at the next 5 s stats
@@ -313,10 +333,11 @@ process.send?.({ t: MSG.READY })
 const sendStats = (sent) => {
   if (!process.connected) return false
   try {
-    // subCap: the NVR's sub-stream limit (null: none known) and the viewers' sub-streams held at it;
+    // subCap: the NVR's sub-stream limit (null: none known), the viewers' sub-streams held at it, every
+    // sub-stream held (their pictures in the parent are old now), and whether it is at the limit;
     // mainPlaying: cameras whose main stream delivers video (a held tile's stand-in joins only those)
     const mainPlaying = [...nvr.streams.values()].filter((s) => s.streamType === 0 && s.state === 'playing' && s.gotVideo).map((s) => s.ch)
-    process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, streams: nvr.streams.size, refusals: recentRefusals(nvr.streams.values(), Date.now()), channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), subCap: { limit: cap.known(), held: heldNow() }, mainPlaying, sdk: sdkStats(), rec: recorder.status() }, typeof sent === 'function' ? () => sent() : undefined)
+    process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, streams: nvr.streams.size, refusals: recentRefusals(nvr.streams.values(), Date.now()), channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), subCap: { limit: cap.known(), held: heldNow(), parked: parkedNow(), full: fullNow() }, mainPlaying, sdk: sdkStats(), rec: recorder.status() }, typeof sent === 'function' ? () => sent() : undefined)
     return true
   } catch {
     return false

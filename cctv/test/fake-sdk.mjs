@@ -18,6 +18,8 @@ let stallUsed = false
 // tests: an NVR that plays at most this many sub-streams at once, like value4u (15): a sub-stream
 // LivePlay beyond it fails at once and GetLastError says 8, "cannot connect" (sub-cap.mjs)
 const MAX_SUBS = Number(process.env.CCTV_FAKE_MAX_SUBS || 0)
+// (a StopLivePlay that takes this long; its sub-stream's place is free only once it has returned)
+const STOP_MS = Number(process.env.CCTV_FAKE_STOP_MS || 5)
 const subHandles = new Set()
 let lastErr = 0
 
@@ -54,7 +56,7 @@ for (const name of Object.keys(NET_SDK)) {
       // the real one prints it; the supervisor watches for it, worker-supervisor.mjs)
       if (name === 'LivePlay' && process.env.CCTV_FAKE_NET_DOWN_CH !== undefined && String(args[1]?.lChannel) === process.env.CCTV_FAKE_NET_DOWN_CH) console.log('Net Disconnected...... m_deviceID = 1')
       log.push({ fn: name, args: args.slice(0, -1).map((a) => (typeof a === 'object' ? null : a)), at: Date.now() })
-      setTimeout(() => cb(null, answer(...args.slice(0, -1))), 5)
+      setTimeout(() => cb(null, answer(...args.slice(0, -1))), name === 'StopLivePlay' ? STOP_MS : 5)
     }
   }
 }

@@ -15,13 +15,15 @@
 // such refusals within CONFIRM_MS, at about the same count, so one "cannot connect" on a busy nvr1
 // sets none. A known limit follows what the NVR does: a refusal at it confirms it, CONFIRM refusals
 // below it lower it, a sub-stream playing beyond it raises it, and one not confirmed for RETRY_MS lets
-// one more stream through (refused: it stands; played: it rises). Pure: the worker hands in the
-// counts and the clock.
+// one more stream through (refused: it stands; played: it rises, and the next one is tried CLIMB_MS
+// later, so a limit lowered while something else held places climbs back in minutes, not hours).
+// Pure: the worker hands in the counts and the clock.
 export const LIMIT_ERROR = 8
 export const MIN_PLAYING = 4
 export const CONFIRM = 2
 export const CONFIRM_MS = 10 * 60_000
 export const RETRY_MS = 30 * 60_000
+export const CLIMB_MS = 2 * 60_000
 /** A limit saved before a restart is trusted this long (the worker saves it, sub-cap-<nvr>.json). */
 export const SAVED_MS = 24 * 60 * 60_000
 
@@ -68,7 +70,7 @@ export function subCap({ now = Date.now, saved = null } = {}) {
     playing(n) {
       if (limit === null || !(n > limit)) return false
       limit = n
-      seenAt = now()
+      seenAt = now() - RETRY_MS + CLIMB_MS // the next one is tried soon: it may go on rising
       return true
     },
     /** How many sub-streams may play: Infinity while none is known; one more once it is due a retry. */

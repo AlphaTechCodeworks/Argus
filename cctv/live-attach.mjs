@@ -20,15 +20,20 @@ export const PHONE_SPARE = 4
  * What stands in for a sub-stream that is not running (sub-bridge.mjs): the camera's main stream,
  * or, for a phone that cannot play the H.265 it is, that main as converted for phones (the tile
  * would get nothing: 09-27, value4u's tiles held at its sub-stream limit stayed dark on a phone
- * while full screen, the same main converted, played). Only onto a main that already plays --
- * a stand-in never makes the NVR start one (nvr-worker.mjs) -- and only while the conversions
- * leave PHONE_SPARE free.
+ * while full screen, the same main converted, played). Only for a sub-stream held at the NVR's
+ * limit, which may wait minutes: a cold one comes in about 2 s, less than a conversion takes to
+ * start, and a phone scrolling a list would start one per tile. Only onto a main that already
+ * plays, and only while the conversions leave PHONE_SPARE free. Its conversion is its own, and asks
+ * for the main in the background, as the plain stand-in does: the NVR worker joins a main that
+ * plays for it and never starts or keeps one for it (nvr-worker.mjs bridgeOnly). (A full-size
+ * phone view of the same camera has the foreground one: two conversions in that rare case.)
  */
-function standIn(nvr, ch, main, { phone, clientH265, phoneLive }) {
+function standIn(nvr, ch, main, { phone, held, clientH265, phoneLive }) {
   const h265 = nvr.codecSeen?.get?.(`${ch}:0`)?.codec === 'h265'
-  if (!phone || clientH265 || !h265 || !nvr.mainPlaying?.(ch) || !(phoneLive.room?.() >= PHONE_SPARE)) return main
-  const key = `${nvr.id}/${ch}/0`
-  return { gop: main.gop, add: (tap) => phoneLive.attach(key, main, 0, tap), remove: (tap) => phoneLive.detach(key, tap) }
+  if (!phone || !held || clientH265 || !h265 || !nvr.mainPlaying?.(ch)) return main
+  const key = `${nvr.id}/${ch}/0/standin`
+  if (!phoneLive.has?.(key) && !(phoneLive.room?.() >= PHONE_SPARE)) return main
+  return { gop: main.gop, add: (tap) => phoneLive.attach(key, main, 0, tap, { background: true }), remove: (tap) => phoneLive.detach(key, tap) }
 }
 
 /**
@@ -53,14 +58,16 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive }) {
     const stream = nvr.getStream(ch, streamType)
     const remote = isRemoteAddress(req.socket.remoteAddress)
     const phone = !remote && phone15 && isPhoneRequest(req.headers)
-    // held back at the NVR's sub-stream limit (nvrs.mjs subHeld): no picture of its own until there is room
-    const held = streamType === 1 && nvr.subHeld?.(ch) === true
+    // held back at the NVR's sub-stream limit (nvrs.mjs subHeld): no picture of its own until there
+    // is room. A tile's first request is not in the worker's list yet: with the NVR at its limit, a
+    // sub-stream not running yet will be held (subFull)
+    const held = streamType === 1 && (nvr.subHeld?.(ch) === true || (!(stream.gop?.length > 0) && nvr.subFull?.() === true))
     // a sub-stream that is not running yet (cold, refused by the NVR, or held at its limit): the
     // camera's main stream meanwhile, until the sub-stream's own first frame (sub-bridge.mjs)
     if (streamType === 1 && !(stream.gop?.length > 0)) {
       const main = nvr.getStream(ch, 0)
       const log = held ? (line) => console.log(`[${nvr.id}/${ch + 1}] sub-stream held at the NVR's limit: ${line}`) : undefined
-      bridgeSub(ws, { sub: stream, main: standIn(nvr, ch, main, { phone, clientH265, phoneLive }), clientH265, log })
+      bridgeSub(ws, { sub: stream, main: standIn(nvr, ch, main, { phone, held, clientH265, phoneLive }), clientH265, log })
     }
     // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry. One key
     // per browser, from the upgrade request: a page's /live and /live-mux sockets are one viewer.
@@ -71,8 +78,10 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive }) {
     }
     // a phone asking for 15 fps gets the shared thinned stream (phone-live.mjs), when there is room.
     // Not a held sub-stream: it has nothing to thin until there is room (small then: sent as it is),
-    // and a conversion place held open for it is one its stand-in may need.
-    if (phone && !held && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws)) return
+    // and a conversion place held open for it is one its stand-in may need -- unless it is H.265,
+    // which a phone may not play as it is (a sub tile that cannot decode its stream closes for good)
+    const subH265 = nvr.codecSeen?.get?.(`${ch}:1`)?.codec === 'h265'
+    if (phone && (!held || subH265) && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws)) return
     stream.add(ws)
     ws.on('close', () => stream.remove(ws))
   }

@@ -380,7 +380,9 @@ export class Nvr {
     // from the live worker's stats (workerStats): viewers' sub-streams held at the NVR's sub-stream
     // limit, that limit (null: none known), and the cameras whose main stream plays
     this.subsHeld = new Set()
+    this.subsParked = new Set()
     this.subLimit = null
+    this.subsFull = false // at the limit: a viewer's new sub-stream would be held
     this.mainsPlaying = new Set()
     this.health = { channelFailures: 0, liveFailures: 0 }
     this.stopped = false
@@ -666,6 +668,11 @@ export class Nvr {
     return Boolean(this.worker) && this.subsHeld.has(ch)
   }
 
+  /** The NVR is at its sub-stream limit: a tile's sub-stream not running yet will be held (the worker's word comes a moment later). */
+  subFull() {
+    return Boolean(this.worker) && this.subsFull
+  }
+
   /** This camera's main stream plays (in the live worker, as of its last stats): a stand-in joins it without starting it. */
   mainPlaying(ch) {
     return Boolean(this.worker) && this.mainsPlaying.has(ch)
@@ -760,13 +767,15 @@ export class Nvr {
     for (const [k, v] of Object.entries(stats?.codecSeen ?? {})) this.codecSeen.set(k, v)
     // viewers' sub-streams the worker holds at the NVR's sub-stream limit (nvr-worker.mjs, sub-cap.mjs),
     // and the cameras whose main stream plays: a held tile is shown that main meanwhile (live-attach.mjs)
-    const held = new Set((Array.isArray(stats?.subCap?.held) ? stats.subCap.held : []).filter(Number.isInteger))
-    for (const ch of held) {
-      // newly held: the picture it kept is old now, and a stale picture would keep the stand-in away
-      if (!this.subsHeld.has(ch)) this.worker?.hub?.streams.get(`${ch}:1`)?.reset()
-    }
-    this.subsHeld = held
+    const chs = (v) => new Set((Array.isArray(v) ? v : []).filter(Number.isInteger))
+    // every sub-stream held (a viewer's, a warm-up's, a lingering one's): newly so, the picture the
+    // hub kept of it is old now, and a stale picture would keep a returning viewer's stand-in away
+    const parked = chs(stats?.subCap?.parked ?? stats?.subCap?.held)
+    for (const ch of parked) if (!this.subsParked.has(ch)) this.worker?.hub?.streams.get(`${ch}:1`)?.reset()
+    this.subsParked = parked
+    this.subsHeld = chs(stats?.subCap?.held)
     this.subLimit = Number.isInteger(stats?.subCap?.limit) ? stats.subCap.limit : null
+    this.subsFull = stats?.subCap?.full === true
     if (Array.isArray(stats?.mainPlaying)) this.mainsPlaying = new Set(stats.mainPlaying.filter(Number.isInteger))
     // the worker's camera list (it polls; this process then does not, see #refresh)
     const list = stats?.channels
