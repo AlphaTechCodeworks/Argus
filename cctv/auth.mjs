@@ -102,13 +102,25 @@ export const verifySession = (token) => {
   return Object.hasOwn(loadUsers(), user) ? user : null // removed users lose access immediately
 }
 
+// A cookie value that is not valid percent-encoding ("cctv_session=%") made decodeURIComponent
+// throw. On a WebSocket upgrade nothing caught that, so one unauthenticated request with such a
+// header took the whole server down (security audit, 2026-09-27). A value that cannot be decoded is
+// kept as it came: it matches no session.
+const decodeCookie = (v) => {
+  try {
+    return decodeURIComponent(v)
+  } catch {
+    return v
+  }
+}
+
 export const parseCookies = (header = '') =>
   Object.fromEntries(
-    header
+    String(header ?? '')
       .split(';')
       .map((c) => c.trim().split('='))
       .filter(([k, v]) => k && v)
-      .map(([k, v]) => [k, decodeURIComponent(v)])
+      .map(([k, v]) => [k, decodeCookie(v)])
   )
 
 export const sessionCookie = (token, secure) =>
