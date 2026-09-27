@@ -132,7 +132,7 @@ const exclusiveTails = new Map()
 
 /**
  * Runs an SDK function on a worker thread with a time limit.
- * @param {{ timeoutMs?: number, tag?: string, nvr?: string, exclusive?: string, mayBlock?: boolean, onLate?: (result: any, err?: Error) => void }} opts
+ * @param {{ timeoutMs?: number, tag?: string, nvr?: string, exclusive?: string|string[], mayBlock?: boolean, onLate?: (result: any, err?: Error) => void }} opts
  *   mayBlock: this call is known to block inside the SDK when the NVR does not answer (logins),
  *   so the watchdog does not treat it on its own as a hung SDK
  *   onLate: called when the native call finishes after its timeout, with its result
@@ -218,14 +218,17 @@ export function sdkCallT(opts, fn, ...args) {
       else waiting.push({ start, queuedAt })
     }
     if (!opts.exclusive) return go()
-    const key = opts.exclusive
-    const prev = exclusiveTails.get(key) ?? Promise.resolve()
+    // one key or several: the call waits for the previous call on every key
+    const keys = [].concat(opts.exclusive)
+    const prev = Promise.all(keys.map((k) => exclusiveTails.get(k) ?? Promise.resolve()))
     const mine = new Promise((r) => (returned = r))
     const tail = prev.then(() => mine)
-    exclusiveTails.set(key, tail)
-    tail.then(() => {
-      if (exclusiveTails.get(key) === tail) exclusiveTails.delete(key)
-    })
+    for (const key of keys) {
+      exclusiveTails.set(key, tail)
+      tail.then(() => {
+        if (exclusiveTails.get(key) === tail) exclusiveTails.delete(key)
+      })
+    }
     prev.then(go)
   })
 }

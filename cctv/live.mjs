@@ -292,7 +292,9 @@ export class LiveStream {
         () =>
           sdkCallT(
             // a stop that returns after its timeout: now the handle value may be reused
-            { nvr: this.nvr.id, tag: `${this.label} stop`, exclusive: this.exclusive, onLate: () => liveFrames.forget(handle) },
+            // also one stop at a time per NVR, even after a timeout: when an NVR dropped every
+            // connection, six stops left inside the SDK together corrupted its heap (SIGABRT)
+            { nvr: this.nvr.id, tag: `${this.label} stop`, exclusive: [this.exclusive, `${this.nvr.id}/stops`], onLate: () => liveFrames.forget(handle) },
             NET_SDK.StopLivePlay, handle
           ),
         { priority: PRIORITY.HIGH }
