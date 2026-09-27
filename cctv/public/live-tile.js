@@ -2,6 +2,7 @@
 // Used by the live grid (viewer.js) and the map's live popup (map.js).
 import { clearStill, maybeKeepStill, showStill } from './stills.js'
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { liveSocket } from './live-mux.js'
 
 // Whether this device can play H.265, told to the server with each live stream: a remote viewer
 // who can is sent an H.265 camera as it is (about half the data of H.264 for the same picture)
@@ -279,6 +280,9 @@ export class LiveTile {
    * it is the oldest one waiting (the one the browser is actually trying; the rest wait behind it).
    */
   #stuckConnecting() {
+    // a channel waiting its turn on the page's open shared connection (live-mux.js: the server's
+    // limits hold its sub back for a moment) is not a stuck handshake
+    if (this.ws?.queued) return false
     const now = this.now()
     if (now - this.connectAt < CONNECT_TIMEOUT_MS || now - lastOpenAt < CONNECT_TIMEOUT_MS) return false
     for (const t of liveTiles) {
@@ -289,8 +293,9 @@ export class LiveTile {
 
   connect() {
     this.setStatus('connecting…')
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    this.ws = new WebSocket(`${proto}://${location.host}/live?nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${this.streamType}${this.maxFps === 15 ? '&fps=15' : ''}${deviceH265 === null ? '' : `&h265=${deviceH265 ? 1 : 0}`}`)
+    // On the Live page a channel on the page's one shared connection (live-mux.js), which behaves
+    // like a socket here; elsewhere a socket of its own to /live, as always
+    this.ws = liveSocket({ nvr: this.nvr, ch: this.ch, stream: this.streamType, fps: this.maxFps, h265: deviceH265 })
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
     this.connectAt = this.now()

@@ -32,6 +32,7 @@
 //   POST /api/admin/alerts/test { method: 'ntfy'|'email' } -> sends a test message (admins)
 //   GET  /healthz              -> used by the Docker healthcheck
 //   WS   /live?nvr=ID&ch=N&stream=S -> binary frames, S: 0 = main, 1 = sub
+//   WS   /live-mux             -> every live tile of a page on one socket, see live-mux.mjs
 //   /api/playback/*?nvr=ID, WS /playback?nvr=ID -> recorded video, see playback.mjs
 //   WS   /playback?nvr=ID&...&src=auto -> from the server's own recordings, see rec-playback.mjs
 //   GET  /api/playback/timeline?nvr=ID&ch=N&from=ms&to=ms -> the server's own recordings, see rec-api.mjs
@@ -47,7 +48,6 @@
 //   bytes 6-7   reserved
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
-import { createHash } from 'node:crypto'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleRelays } from './relays.mjs'
 import { transparent } from './nvr-xml.mjs'
@@ -78,9 +78,10 @@ import { makeSysinfo } from './sysinfo.mjs'
 import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
-import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
-import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
-import { bridgeSub } from './sub-bridge.mjs'
+import { PhoneLive } from './phone-live.mjs'
+import { AdaptiveLive } from './adaptive-live.mjs'
+import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
+import { liveAttacher } from './live-attach.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
@@ -861,10 +862,35 @@ const onRequest = (req, res) =>
   })
 
 const wss = new WebSocketServer({ noServer: true })
-keepAlive(wss) // ping every 15 s; a socket that misses a pong is terminated (backpressure.mjs)
-wss.on('connection', (ws, req) => {
+// /live-mux on a server of its own: a page sends it nothing over MAX_MESSAGE_BYTES, and ws refuses a
+// bigger message (1009) from its header, before reading it. The default maxPayload (100 MiB, kept
+// for the other paths) let a signed-in client make the server buffer 100 MiB per message.
+const muxWss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES })
+// ping every 15 s; a socket that misses a pong is terminated (backpressure.mjs)
+keepAlive(wss)
+keepAlive(muxWss)
+const onConnection = (ws, req) => {
+  // A frame ws cannot parse (a text frame with invalid UTF-8, a bad opcode) is an 'error' event on
+  // the socket, which then closes; with no listener Node treats it as unhandled and exits: one
+  // signed-in client could take the whole server down (found in the /live-mux review, 2026-09-27)
+  ws.on('error', () => {})
   const url = new URL(req.url, 'http://localhost')
   meterSocket(ws, req.socket.remoteAddress)
+  // every live tile of a page on this one socket (live-mux.mjs)
+  if (url.pathname === '/live-mux') {
+    serveMux(ws, {
+      // the session again on every "sub", as the upgrade checked it
+      session: () => currentUser(req),
+      attach: (channel, sub, user) => {
+        const nvr = nvrs.get(sub.nvr)
+        if (!nvr) return channel.close(1013, 'unknown NVR')
+        // the rights as they are now, on every "sub": a changed role counts from the next tile
+        const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
+        attachLive(channel, req, { nvr, who, ch: sub.ch, streamType: sub.stream, clientH265: sub.h265, phone15: sub.fps === 15 })
+      }
+    })
+    return
+  }
   const nvr = nvrs.get(url.searchParams.get('nvr') ?? '')
   if (!nvr) {
     ws.close(1013, 'unknown NVR')
@@ -887,35 +913,18 @@ wss.on('connection', (ws, req) => {
     motionScan(nvr, ws, url)
     return
   }
-  if (url.pathname !== '/motion' && !can(who, 'live', target)) return ws.close(1008, 'not allowed')
-  // live video: with a live worker, the worker's own login decides (it polls the camera list)
-  if (!nvr.liveOnline) {
-    ws.close(1013, 'NVR offline')
-    return
-  }
-  const ch = Number(url.searchParams.get('ch'))
-  const streamType = Number(url.searchParams.get('stream') ?? 1)
-  if (!Number.isInteger(ch) || ch < 0 || ![0, 1].includes(streamType)) {
-    ws.close(1008, 'bad channel or stream')
-    return
-  }
-  const stream = nvr.getStream(ch, streamType)
-  // a sub-stream that is not running yet (cold, or refused by the NVR): the camera's main stream
-  // meanwhile, until the sub-stream's own first frame (sub-bridge.mjs)
-  if (streamType === 1 && !(stream.gop?.length > 0)) {
-    bridgeSub(ws, { sub: stream, main: nvr.getStream(ch, 0), clientH265: url.searchParams.get('h265') === '1' })
-  }
-  // a phone asking for 15 fps gets the shared thinned stream (phone-live.mjs), when there is room
-  // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry
-  if (isRemoteAddress(req.socket.remoteAddress)) {
-    const who = `${currentUser(req) ?? '?'}|${req.headers['user-agent'] ?? ''}|${req.headers.cookie ?? ''}`
-    adaptiveLive.attach(createHash('sha1').update(who).digest('hex'), { ws, nvrId: nvr.id, ch, type: streamType, source: stream, clientH265: url.searchParams.get('h265') === '1' })
-    return
-  }
-  if (url.searchParams.get('fps') === '15' && isPhoneRequest(req.headers) && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws)) return
-  stream.add(ws)
-  ws.on('close', () => stream.remove(ws))
-})
+  // /live (a missing ch reads as 0, a missing stream as 1, as always)
+  attachLive(ws, req, {
+    nvr,
+    who,
+    ch: target.ch,
+    streamType: Number(url.searchParams.get('stream') ?? 1),
+    clientH265: url.searchParams.get('h265') === '1',
+    phone15: url.searchParams.get('fps') === '15'
+  })
+}
+wss.on('connection', onConnection)
+muxWss.on('connection', onConnection)
 const phoneLive = new PhoneLive()
 // each user's first screen of cameras, streaming before anyone opens Live (warm-streams.mjs)
 startWarmStreams({
@@ -932,6 +941,8 @@ startWarmStreams({
   }
 })
 const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on conversions for phones and remote viewers together
+// one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs)
+const attachLive = liveAttacher({ can, currentUser, adaptiveLive, phoneLive })
 
 const onUpgrade = (req, socket, head) => {
   // this listener is synchronous: anything that throws here would take the whole process
@@ -950,11 +961,12 @@ const onUpgrade = (req, socket, head) => {
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
     return
   }
-  if (!['/live', '/playback', '/motion'].includes(url.pathname) || !sameOrigin || !currentUser(req)) {
+  if (!['/live', '/live-mux', '/playback', '/motion'].includes(url.pathname) || !sameOrigin || !currentUser(req)) {
     socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n')
     return
   }
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
+  const server = url.pathname === '/live-mux' ? muxWss : wss
+  server.handleUpgrade(req, socket, head, (ws) => server.emit('connection', ws, req))
 }
 
 const httpServer = createServer(onRequest)

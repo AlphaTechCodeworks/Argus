@@ -8,8 +8,13 @@ export const REPLAY_MAX_BYTES = 1_500_000
 
 const size = (m) => m?.length ?? m?.byteLength ?? 0
 
-/** Sends gop (keyframe first) to ws, whole or just its keyframe. @returns {number} messages sent */
-export function replayGop(gop, ws, maxBytes = REPLAY_MAX_BYTES) {
+/**
+ * Sends gop (keyframe first) to ws, whole or just its keyframe. A socket can lower the limit for
+ * itself (ws.replayMaxBytes): a /live-mux channel shares its socket with a page's other tiles, and
+ * a replay there delays each of them (live-mux.mjs).
+ * @returns {number} messages sent
+ */
+export function replayGop(gop, ws, maxBytes = ws?.replayMaxBytes ?? REPLAY_MAX_BYTES) {
   if (!gop.length) return 0
   let bytes = 0
   for (const m of gop) bytes += size(m)

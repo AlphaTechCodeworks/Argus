@@ -174,8 +174,10 @@ export class AdaptiveLive {
     const heaviest = total > this.budgetBps ? [...this.viewers.values()].sort((a, b) => b.bps - a.bps)[0] : null
     for (const v of this.viewers.values()) {
       // overSince: backpressure.mjs gateSend sets it while the socket is over its cap (and clears it
-      // once it drains). waitForKey is not used: a move sets it on purpose.
-      const pressure = [...v.sockets].some((e) => (e.ws.bufferedAmount ?? 0) > PRESSURE_BYTES || e.ws.overSince != null)
+      // once it drains). waitForKey is not used: a move sets it on purpose. A /live-mux channel's own
+      // bufferedAmount is only its part of the page's socket: the whole socket's queue
+      // (sharedBufferedAmount) is what every tile of the page waits behind.
+      const pressure = [...v.sockets].some((e) => (e.ws.sharedBufferedAmount ?? e.ws.bufferedAmount ?? 0) > PRESSURE_BYTES || e.ws.overSince != null)
       const n = nextLevel(v, { pressure, now, overBudget: v === heaviest })
       if (n.level !== v.level) this.#move(v, n.level, n.why)
       // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop

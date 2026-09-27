@@ -5,10 +5,17 @@ import { diffCameras, shownCameras, visibleCameras } from './grid-diff.js'
 import { enableGridDrag } from './grid-drag.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
 import { ImagePanel } from './image-panel.js'
+import { muxState, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 // ?pacing=off draws frames as soon as they decode (for before/after comparison)
 const PACING = new URLSearchParams(location.search).get('pacing') !== 'off'
+// Every tile's stream on one connection (live-mux.js): the browser opens WebSockets one at a time,
+// and an 8x8 grid of sockets took ~16 s through the public link. localStorage 'argus.liveMux' = '0'
+// puts this browser back on a socket per tile.
+let liveMuxOff = false
+try { liveMuxOff = localStorage.getItem('argus.liveMux') === '0' } catch {}
+if (!liveMuxOff) useMux(true)
 
 const grid = document.getElementById('grid')
 const layoutSelect = document.getElementById('layout')
@@ -87,6 +94,8 @@ if (!('VideoDecoder' in window)) {
 window.cctvStats = () => tiles.map((t) => ({ nvr: t.nvr, ch: t.ch + 1, stream: t.streamType, ...t.player.stats }))
 // the cameras started ahead of a full-size view (‹ ›): whether each could be shown at once
 window.cctvAhead = () => [...ahead].map(([k, t]) => ({ k, ws: t.ws?.readyState ?? null, gop: t.gop?.length ?? 0, gopKB: Math.round(t.gopBytes / 1024), sinceData: t.lastDataAt ? Date.now() - t.lastDataAt : null, lendable: t.lendable }))
+// the shared live connection: open or not, its channels, messages sent, frames (live-mux.js)
+window.cctvMux = muxState
 
 // Layouts: a grid size plus the large tiles (column, row, width, height; 1-based).
 // Remaining cells are filled with single tiles in reading order.
