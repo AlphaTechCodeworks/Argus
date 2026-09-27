@@ -80,6 +80,7 @@ import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
 import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
+import { bridgeSub } from './sub-bridge.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
@@ -899,6 +900,11 @@ wss.on('connection', (ws, req) => {
     return
   }
   const stream = nvr.getStream(ch, streamType)
+  // a sub-stream that is not running yet (cold, or refused by the NVR): the camera's main stream
+  // meanwhile, until the sub-stream's own first frame (sub-bridge.mjs)
+  if (streamType === 1 && !(stream.gop?.length > 0)) {
+    bridgeSub(ws, { sub: stream, main: nvr.getStream(ch, 0), clientH265: url.searchParams.get('h265') === '1' })
+  }
   // a phone asking for 15 fps gets the shared thinned stream (phone-live.mjs), when there is room
   // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry
   if (isRemoteAddress(req.socket.remoteAddress)) {
