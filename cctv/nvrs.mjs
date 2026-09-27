@@ -532,7 +532,12 @@ export class Nvr {
       // it have a microphone, a speaker, how wide is it ...)
       const model = String(ipc.productModel ?? '').replace(/\0.*$/, '').trim()
       const maker = String(ipc.manufacturerName ?? '').replace(/\0.*$/, '').trim()
-      list.push({ ch: ipc.channel, name: ipc.szChlname || `Camera ${ipc.channel + 1}`, online: ipc.status === 1, configured, model, maker })
+      // the camera's own address and web port, as the NVR connects to it: settings the NVR cannot
+      // pass on (day/night on some models) are made on the camera's own page (admins only, see
+      // /api/admin/camera-addresses)
+      const ip = String(ipc.szServer ?? '').replace(/\0.*$/, '').trim()
+      const httpPort = Number(ipc.nHttpPort) || null
+      list.push({ ch: ipc.channel, name: ipc.szChlname || `Camera ${ipc.channel + 1}`, online: ipc.status === 1, configured, model, maker, ip, httpPort })
     }
     if (list.length > 0) this.channels = list.sort((a, b) => a.ch - b.ch)
     return true
@@ -716,7 +721,10 @@ export class Nvr {
     const list = stats?.channels
     if (Array.isArray(list) && list.length > 0 && list.every((c) => c && Number.isInteger(c.ch))) {
       // older workers do not send `configured`; assume a camera is there rather than hiding one
-      this.channels = list.map((c) => ({ ch: c.ch, name: String(c.name ?? `Camera ${c.ch + 1}`), online: c.online === true, configured: c.configured !== false })).sort((a, b) => a.ch - b.ch)
+      // (make, model and address come along too: they were dropped here, so the app showed every
+      // camera's make and model as unknown)
+      const text = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '')
+      this.channels = list.map((c) => ({ ch: c.ch, name: String(c.name ?? `Camera ${c.ch + 1}`), online: c.online === true, configured: c.configured !== false, model: text(c.model, 64), maker: text(c.maker, 64), ip: text(c.ip, 64), httpPort: Number.isInteger(c.httpPort) ? c.httpPort : null })).sort((a, b) => a.ch - b.ch)
       this.workerListAt = Date.now()
     }
   }

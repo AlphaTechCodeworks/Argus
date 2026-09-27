@@ -573,6 +573,15 @@ const handleRequest = async (req, res) => {
   const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null, canSee })
   if (ev) return sendJson(res, ...ev)
   const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: who.admin, cameras: allCameras, canSee })
+  // every camera's own address and web port, as its NVR connects to it (admins): for the settings an
+  // NVR cannot pass on, such as day/night on some models, made on the camera's own page
+  if (pathname === '/api/admin/camera-addresses') {
+    if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    return sendJson(res, 200, [...nvrs.values()].flatMap((n) => n.channels.filter((c) => c.configured !== false).map((c) => ({
+      nvr: n.id, site: n.site, ch: c.ch, name: c.name, online: c.online, ip: c.ip || null, httpPort: c.httpPort ?? null, model: c.model || null, maker: c.maker || null
+    }))))
+  }
   // NVR alarm outputs, read only (relays.mjs)
   const relays = await handleRelays(req.method, pathname, { nvrs, admin: who.admin, query: transparent })
   if (relays) return sendJson(res, ...relays)
