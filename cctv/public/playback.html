@@ -154,18 +154,18 @@
          button keeps its id, so playback.js and the keyboard shortcuts are unchanged. -->
     <div class="pb-row pb-controls pb-simple">
       <div class="pb-transport">
-        <button id="back" type="button" title="Back 30 s (←)" aria-label="Back 30 seconds">−30s</button>
-        <button id="play" type="button" class="pb-play" title="Play / pause (Space)" aria-label="Play">▶</button>
-        <button id="fwd" type="button" title="Forward 30 s (→)" aria-label="Forward 30 seconds">+30s</button>
-        <button id="speedCycle" type="button" class="pb-speed-cycle" title="Speed: click to go faster">1×</button>
+        <button class="pb-capped" id="back" type="button" title="Back 30 s (←)" aria-label="Back 30 seconds"><span class="pb-glyph">−30s</span><span class="pb-cap" aria-hidden="true">Back 30s</span></button>
+        <button id="play" type="button" class="pb-capped pb-play" title="Play / pause (Space)" aria-label="Play"><span class="pb-glyph">▶</span><span class="pb-cap" aria-hidden="true">Play</span></button>
+        <button class="pb-capped" id="fwd" type="button" title="Forward 30 s (→)" aria-label="Forward 30 seconds"><span class="pb-glyph">+30s</span><span class="pb-cap" aria-hidden="true">Fwd 30s</span></button>
+        <button id="speedCycle" type="button" class="pb-capped pb-speed-cycle" title="Speed: click to go faster"><span class="pb-glyph">1×</span><span class="pb-cap" aria-hidden="true">Speed</span></button>
       </div>
       <div class="pb-tools">
-        <button id="bookmark" type="button" class="pb-icon" title="Bookmarks (B)" aria-label="Bookmarks" aria-pressed="false"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg></button>
-        <button id="snapshot" type="button" class="pb-icon" title="Save the picture on screen" aria-label="Snapshot"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13" r="3.5"/></svg></button>
-        <button id="selectClip" type="button" class="pb-icon" title="Mark a clip to export ([ and ])" aria-label="Mark a clip" aria-pressed="false"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8 7.5 20 17M8 16.5 20 7"/></svg></button>
+        <button id="bookmark" type="button" class="pb-capped pb-icon" title="Bookmarks (B)" aria-label="Bookmarks" aria-pressed="false"><span class="pb-glyph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-6-4-6 4z"/></svg></span><span class="pb-cap" aria-hidden="true">Bookmarks</span></button>
+        <button id="snapshot" type="button" class="pb-capped pb-icon" title="Save the picture on screen" aria-label="Snapshot"><span class="pb-glyph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span><span class="pb-cap" aria-hidden="true">Snapshot</span></button>
+        <button id="selectClip" type="button" class="pb-capped pb-icon" title="Mark a clip to export ([ and ])" aria-label="Mark a clip" aria-pressed="false"><span class="pb-glyph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8 7.5 20 17M8 16.5 20 7"/></svg></span><span class="pb-cap" aria-hidden="true">Mark clip</span></button>
         <button id="exportClip" type="button" class="pb-primary pb-export" title="Export the marked clip" disabled>Export</button>
-        <button id="moreBtn" type="button" class="pb-icon" title="More controls" aria-label="More controls" aria-expanded="false" aria-controls="pbMore"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/></svg></button>
-        <button id="fullscreen" type="button" class="pb-icon" title="Full screen (F)" aria-label="Full screen" aria-pressed="false"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+        <button id="moreBtn" type="button" class="pb-capped pb-icon" title="More controls" aria-label="More controls" aria-expanded="false" aria-controls="pbMore"><span class="pb-glyph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/></svg></span><span class="pb-cap" aria-hidden="true">More</span></button>
+        <button id="fullscreen" type="button" class="pb-capped pb-icon" title="Full screen (F)" aria-label="Full screen" aria-pressed="false"><span class="pb-glyph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></span><span class="pb-cap" aria-hidden="true">Full screen</span></button>
       </div>
     </div>
 
@@ -177,10 +177,10 @@
       </div>
       <div class="pb-more-row">
         <span class="pb-more-label">Step</span>
-        <button id="prevEvent" type="button" title="Previous event (Shift+←)" aria-label="Previous event">⏮</button>
-        <button id="framePrev" type="button" title="One frame back (,)" aria-label="One frame back">◁|</button>
-        <button id="frameNext" type="button" title="One frame on (.)" aria-label="One frame on">|▷</button>
-        <button id="nextEvent" type="button" title="Next event (Shift+→)" aria-label="Next event">⏭</button>
+        <button class="pb-capped" id="prevEvent" type="button" title="Previous event (Shift+←)" aria-label="Previous event"><span class="pb-glyph">⏮</span><span class="pb-cap" aria-hidden="true">Prev event</span></button>
+        <button class="pb-capped" id="framePrev" type="button" title="One frame back (,)" aria-label="One frame back"><span class="pb-glyph">◁|</span><span class="pb-cap" aria-hidden="true">Frame back</span></button>
+        <button class="pb-capped" id="frameNext" type="button" title="One frame on (.)" aria-label="One frame on"><span class="pb-glyph">|▷</span><span class="pb-cap" aria-hidden="true">Frame on</span></button>
+        <button class="pb-capped" id="nextEvent" type="button" title="Next event (Shift+→)" aria-label="Next event"><span class="pb-glyph">⏭</span><span class="pb-cap" aria-hidden="true">Next event</span></button>
       </div>
       <div class="pb-more-row">
         <button id="searchToggle" type="button" title="Find movement inside an area you draw" aria-pressed="false">Motion search</button>

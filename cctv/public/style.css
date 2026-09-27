@@ -174,8 +174,8 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
    only way to reach those pages. It scrolls sideways instead, and each tab keeps its full label
    rather than being squeezed to an unreadable stub. */
 .tabs { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
-.tabs a { flex: 0 0 auto; }
 .tabs a {
+  flex: 0 0 auto;
   color: var(--muted);
   text-decoration: none;
   padding: 4px 10px;
@@ -1220,8 +1220,7 @@ body.is-fullscreen .alert-banner { display: none; }
 .al-when small { display: block; color: var(--text-muted); font-size: 12px; }
 /* the rest of a row reads as ordinary text: only the urgency cell and the edge bar are coloured */
 .al-table td:not(:first-child) { color: var(--text); }
-.al-actions { display: flex; flex-wrap: wrap; gap: 4px; }
-.al-actions { justify-content: flex-end; }
+.al-actions { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
 .al-actions button, .al-actions a {
   background: none; color: var(--text-muted); border: 1px solid transparent; border-radius: var(--r-sm);
   font-size: 12px; padding: 4px 8px; cursor: pointer; text-decoration: none;
@@ -1503,10 +1502,10 @@ body.playback-page.is-fullscreen .pb-timeline { height: 48px; }
 
 /* ---- Playback: the simple bar ---- */
 .pb-simple { justify-content: space-between; align-items: center; }
-.pb-simple .pb-transport { gap: 8px; }
+.pb-simple .pb-transport { gap: 8px; grid-column: 2; justify-content: center; }
 .pb-simple .pb-play { width: 44px; height: 44px; border-radius: 50%; font-size: 18px; background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .pb-speed-cycle { min-width: 46px; font-variant-numeric: tabular-nums; font-weight: 600; }
-.pb-simple .pb-tools { flex: 0 0 auto; gap: 4px; }
+.pb-simple .pb-tools { flex: 0 0 auto; gap: 4px; grid-column: 3; justify-self: end; }
 .pb-icon { width: 38px; height: 38px; padding: 0; display: inline-grid; place-items: center; border-radius: 10px; }
 .pb-icon .icon { width: 20px; height: 20px; }
 .pb-icon[aria-pressed="true"], .pb-icon[aria-expanded="true"] { color: var(--accent-strong); border-color: var(--accent); }
@@ -1546,7 +1545,7 @@ body.playback-page.is-fullscreen .pb-timeline { height: 48px; }
 .hp-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ok); flex: none; }
 .hp-dot.warn { background: var(--warn); }
 .hp-dot.bad { background: var(--bad); }
-#nvrs { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-items: start; }
+#nvrs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 12px; align-items: start; }
 .nvr-tile { padding: 0 !important; }
 .nvr-tile[open] { grid-column: 1 / -1; }
 .nvr-tile > :not(summary) { margin-left: 16px; margin-right: 16px; }
@@ -1567,8 +1566,6 @@ body.playback-page.is-fullscreen .pb-timeline { height: 48px; }
 body.health-page .alert-banner { display: none; }
 /* the transport sits in the middle of the bar, the icons on the right */
 .pb-row.pb-simple { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
-.pb-simple .pb-transport { grid-column: 2; justify-content: center; }
-.pb-simple .pb-tools { grid-column: 3; justify-self: end; }
 @media (max-width: 640px) {
   .pb-row.pb-simple { grid-template-columns: 1fr; justify-items: center; gap: 8px; }
   .pb-simple .pb-transport, .pb-simple .pb-tools { grid-column: 1; justify-self: center; }
@@ -1598,12 +1595,10 @@ body.has-shell .app-main > header .wall-pager[hidden] { display: none; }
   padding: 12px 14px; border-radius: 12px; background: var(--surface-1); border: 1px solid var(--border); box-shadow: 0 8px 30px rgba(0,0,0,.35); font-size: 13px; }
 .live-tip button { flex: none; }
 /* a phone's tapped camera covers the whole screen, with or without the browser's full screen */
-body.phone-full #grid { position: fixed; inset: 0; z-index: 90; background: #000; padding: 0; }
-body.phone-full #grid > .tile.single-overlay { inset: 0; border-radius: 0; }
+body.phone-full #grid { position: fixed; inset: 0; z-index: 90; background: #000; padding: 0; overflow: hidden; }
 body.phone-full .shell-bar, body.phone-full .shell-sheet, body.phone-full .alert-banner, body.phone-full .live-tip { display: none !important; }
 body.phone-full .tile.single-overlay canvas { object-fit: contain; }
-body.phone-full #grid { overflow: hidden; }
-body.phone-full #grid > .tile.single-overlay { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; aspect-ratio: auto; max-height: none; z-index: 91; }
+body.phone-full #grid > .tile.single-overlay { position: fixed; inset: 0; border-radius: 0; width: 100vw; height: 100vh; height: 100dvh; aspect-ratio: auto; max-height: none; z-index: 91; }
 
 /* ---- Phones: a slim glass top bar, and only what matters under it ---- */
 .shell-top { display: none; }
@@ -1754,3 +1749,10 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .a-hooks { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
 .a-hook { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; gap: 6px; }
 @media (max-width: 600px) { .a-hook { grid-template-columns: 1fr; } }
+
+/* playback: every control says what it is under its symbol (the owner: "hard to know what is what") */
+.pb-capped { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 56px; padding-top: 4px; padding-bottom: 4px; line-height: 1; }
+.pb-capped .pb-glyph { display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
+.pb-capped .pb-cap { font-size: 10.5px; font-weight: 500; color: var(--text-muted, var(--muted)); white-space: nowrap; letter-spacing: 0.01em; }
+.pb-capped[aria-pressed="true"] .pb-cap { color: inherit; }
+@media (max-width: 420px) { .pb-capped { min-width: 44px; } .pb-capped .pb-cap { font-size: 9.5px; } }

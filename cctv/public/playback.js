@@ -504,7 +504,7 @@ function renderSpeeds() {
     speedsEl.dataset.kind = state.mode
   }
   for (const b of speedsEl.children) b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === state.speed))
-  speedCycleBtn.textContent = speedLabel(state.speed)
+  speedCycleBtn.querySelector('.pb-glyph').textContent = speedLabel(state.speed)
 }
 
 // The one speed button on the bar: each click goes to the next faster forward speed, and from the
@@ -810,7 +810,8 @@ function togglePause() {
 }
 
 function updatePlayButton() {
-  playBtn.textContent = state.paused ? '▶' : '⏸'
+  playBtn.querySelector('.pb-glyph').textContent = state.paused ? '▶' : '⏸'
+  playBtn.querySelector('.pb-cap').textContent = state.paused ? 'Play' : 'Pause'
   playBtn.setAttribute('aria-label', state.paused ? 'Play' : 'Pause')
 }
 
