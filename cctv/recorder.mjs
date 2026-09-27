@@ -18,7 +18,7 @@
 // live viewers) only hands the frame to the camera's SegmentWriter queue. A disk too slow for
 // it (over 8 MB or 10 s behind) makes the writer drop frames: reported as a recgap
 // "disk too slow", recording resumes at a keyframe once the queue has caught up.
-import { MAIN, SUB, afterRefusal, afterVideo, chooseStream, degradedNote } from './stream-choice.mjs'
+import { MAIN, REFUSALS_BEFORE_SUB, SUB, afterRefusal, afterVideo, chooseStream, degradedNote } from './stream-choice.mjs'
 import { SegmentWriter, rollOffsetFor } from './segment-writer.mjs'
 // The event modes' decision lives apart so it can be tested without a worker, an NVR or a disk.
 import { shouldWrite } from './rec-modes.mjs'
@@ -59,6 +59,15 @@ const STARTUP_REASON = 'recording starting after a restart'
 // the SDK this recently (flowing), or none for this long (frozen)
 const FLOW_RECENT_MS = 10_000
 const FROZEN_MS = 45_000
+// A main stream the NVR "serves" but only trickles -- a few frames, then several seconds of nothing,
+// over and over -- looked like a working stream: every brief burst of frames made afterVideo() mark
+// the camera recovered, so it recorded a full-resolution stream full of holes instead of falling back
+// to the sub-stream the NVR can actually serve within its budget (nvr-2 cameras 23/30/31/32, near the
+// NVR's serving ceiling, 2026-09-27). This many "no video from the NVR" gaps within the window, while
+// on the main stream, counts as the NVR failing to serve it, and drops the camera to the sub-stream.
+const STUTTER_WINDOW_MS = 90_000
+const STUTTER_COUNT = 3
+const STUTTER_REASON = 'the main stream only trickled video (repeated short gaps)'
 
 export class Recorder {
   /**
@@ -185,7 +194,7 @@ export class Recorder {
       let cam = this.cams.get(ch)
       if (!cam) {
         const now = this.now()
-        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0, pick: { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }, wantType: MAIN, createdAt: now, frameAt: 0 }
+        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0, pick: { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }, wantType: MAIN, createdAt: now, frameAt: 0, stutterAt: [] }
         cam.tap = this.#tapFor(cam)
         this.cams.set(ch, cam)
         // recording before the restart (on in the first settings), back now: not recorded from the
@@ -371,6 +380,29 @@ export class Recorder {
     if (!cam.gap) cam.gap = { fromMs: cam.lastTs || cam.lastAt || this.now(), reason }
   }
 
+  /**
+   * A "no video from the NVR" gap just opened on this camera's MAIN stream. When they keep coming,
+   * the NVR is serving the stream in a broken trickle rather than refusing it cleanly -- and
+   * afterVideo() would otherwise mark the camera recovered on every brief burst, so it never falls
+   * back. After STUTTER_COUNT within STUTTER_WINDOW_MS, drop to the sub-stream exactly as a clean
+   * refusal would (so the retry backoff and the 30-minute main retry in stream-choice.mjs both apply).
+   * @returns {boolean} whether it dropped to the sub-stream
+   */
+  #noteStutter(cam, now) {
+    if (cam.wantType !== MAIN || cam.pick?.onSub || !this.allowSubFallback()) return false
+    cam.stutterAt.push(now)
+    const cutoff = now - STUTTER_WINDOW_MS
+    while (cam.stutterAt.length && cam.stutterAt[0] < cutoff) cam.stutterAt.shift()
+    if (cam.stutterAt.length < STUTTER_COUNT) return false
+    cam.stutterAt = []
+    cam.pick = { ...cam.pick, refusals: REFUSALS_BEFORE_SUB, lastRefusedAt: now }
+    cam.lastError = { at: now, loc: cam.loc?.id ?? null, reason: STUTTER_REASON }
+    const next = chooseStream(cam.pick, now, { allowSub: true })
+    console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${STUTTER_REASON}; ${next.why}`)
+    this.#detach(cam) // the next tick attaches the sub-stream
+    return true
+  }
+
   #endGap(cam, toMs) {
     if (!cam.gap) return
     const g = cam.gap
@@ -427,7 +459,10 @@ export class Recorder {
     }
     cam.eventIdle = null
     // (a re-anchor moves the timeline, it loses nothing: no gap row for that jump)
-    if (cam.lastTs && ts - cam.lastTs >= SILENCE_GAP_MS && !cam.gap && !reanchored) cam.gap = { fromMs: cam.lastTs, reason: 'no video from the NVR' }
+    if (cam.lastTs && ts - cam.lastTs >= SILENCE_GAP_MS && !cam.gap && !reanchored) {
+      cam.gap = { fromMs: cam.lastTs, reason: 'no video from the NVR' }
+      if (this.#noteStutter(cam, now)) return // dropped to the sub-stream: stop recording this trickle
+    }
     // frames were lost (a stall inside the SDK: LiveStream did not restart, so nothing asked for
     // a keyframe): deltas that follow reference pictures the file does not have. Wait for a key.
     if (lost) cam.waitKey = true
@@ -463,7 +498,11 @@ export class Recorder {
       // back up on the main stream stops being marked degraded here, and nowhere else.
       const was = cam.pick?.onSub
       cam.pick = afterVideo(cam.pick, now, cam.wantType ?? MAIN)
-      if (was && !cam.pick.onSub) console.log(`[rec ${this.nvrId}/${cam.ch + 1}] back on the main stream`)
+      // recovered to the main stream: forget the earlier trickle so a stale count can't drop it again
+      if (was && !cam.pick.onSub) {
+        cam.stutterAt = []
+        console.log(`[rec ${this.nvrId}/${cam.ch + 1}] back on the main stream`)
+      }
       this.#endGap(cam, ts)
       cam.lastAt = now
       cam.lastTs = ts

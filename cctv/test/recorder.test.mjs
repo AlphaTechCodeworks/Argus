@@ -404,6 +404,32 @@ const wire = (isKey, codec, payload, ts = 0) => {
   }
 }
 
+// ---- a main stream the NVR only trickles (a "no video" gap every few seconds) drops to the sub
+{
+  const streams = new Map()
+  const asked = [] // the stream type getStream was asked for, in order (0 main, 1 sub)
+  let now = Date.UTC(2026, 8, 24, 12, 0, 0)
+  const rec = new Recorder({ nvrId: 'nt', getStream: (ch, type) => { asked.push(type); const k = `${ch}:${type}`; return streams.get(k) ?? streams.set(k, fakeStream()).get(k) }, online: () => true, channels: () => [0], send: () => {}, now: () => now, writerOpts: { rollOffsetMs: 0 } })
+  rec.apply({ recording: recording({ 'nt/0': { mode: 'continuous' } }), locations: [location('LT')] })
+  const main = streams.get('0:0')
+  const tap = [...main.clients][0]
+  const key = () => wire(true, 1, Buffer.from([0, 0, 0, 1, 0x26, 0]), now)
+  check('stutter: it starts on the main stream', asked[0] === 0 && main.clients.size === 1)
+  tap.send(key()); await rec.idle() // a clean keyframe first
+  // then keyframes 5 s apart: each opens a "no video from the NVR" gap on the main stream
+  for (let i = 0; i < 3; i++) { now += 5000; tap.send(key()); await rec.idle() }
+  check('stutter: three short gaps in a row drop it off the main stream', main.clients.size === 0)
+  rec.tick() // the worker's 250 ms tick re-attaches: now the sub-stream
+  const sub = streams.get('0:1')
+  check('stutter: the camera falls back to the sub-stream', asked.includes(1) && sub?.clients.size === 1)
+  // and the sub-stream is not itself treated as a stutter (only the main is)
+  const stap = [...sub.clients][0]
+  stap.send(key()); await rec.idle()
+  now += 5000; stap.send(key()); await rec.idle()
+  check('stutter: a gap on the sub-stream is not counted (it stays on the sub)', streams.get('0:0')?.clients.size !== 1 || asked.filter((t) => t === 0).length === 1)
+  await rec.stop()
+}
+
 // ---- the worker: recording shares the live pull; settings messages start and stop it
 {
   const L = location('LW')
