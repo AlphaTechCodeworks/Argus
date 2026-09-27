@@ -42,7 +42,14 @@ export const SUB = 1
  * @param {boolean} [o.allowSub] false keeps the old behaviour: main stream or nothing
  * @returns {{ type: 0|1, changed: boolean, why: string }}
  */
-export function chooseStream({ refusals = 0, onSub = false, subSince = 0, lastRefusedAt = 0 } = {}, nowMs, { allowSub = true, refusalsBeforeSub = REFUSALS_BEFORE_SUB, retryMainMs = RETRY_MAIN_MS } = {}) {
+export function chooseStream({ refusals = 0, onSub = false, subSince = 0, lastRefusedAt = 0 } = {}, nowMs, { allowSub = true, prefer = 'auto', refusalsBeforeSub = REFUSALS_BEFORE_SUB, retryMainMs = RETRY_MAIN_MS } = {}) {
+  // A deliberate per-camera or per-NVR choice (settings recording.stream): record this stream and never
+  // switch. `sub` is how a constrained NVR is recorded continuously -- nvr-2 has 32 cameras and, near
+  // its serving budget, would not relay channels 18-32 as a smooth main stream, so their server-side
+  // recording gapped constantly while the NVR's own disk had them in full. A sub-stream is a fraction
+  // of the bandwidth, so the NVR can serve every camera. This is a choice, not a fallback: not degraded.
+  if (prefer === 'sub') return { type: SUB, changed: !onSub, why: 'recording the sub-stream (set for this camera)' }
+  if (prefer === 'main') return { type: MAIN, changed: onSub, why: 'recording the main stream (set for this camera)' }
   if (!allowSub) return { type: MAIN, changed: onSub, why: 'sub-stream fallback is switched off' }
 
   if (onSub) {

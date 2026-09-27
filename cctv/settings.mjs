@@ -22,14 +22,20 @@ export const SETTINGS_FILE = join(DATA_DIR, 'settings.json')
 
 export const MODES = ['off', 'continuous', 'motion', 'ai', 'ai-or-motion']
 export const AFTER = ['timelapse', 'keep', 'delete']
+// which stream the server records: auto (main, and the sub-stream when the NVR will not serve the
+// main one -- stream-choice.mjs), or a fixed main / sub for the whole camera or NVR
+export const STREAMS = ['auto', 'main', 'sub']
 export const RECENT_MINUTES = [0, 1, 2, 5, 10, 15, 20]
 export const THUMBNAILS = ['off', '1m', '5m']
 export const MAX_RETENTION_DAYS = 366
 
 export const DEFAULTS = Object.freeze({
   recording: {
-    defaults: { mode: 'off', fullDays: 30, after: 'timelapse', timelapseS: 10, retentionDays: 183, preS: 10, postS: 20 },
-    cameras: {}
+    defaults: { mode: 'off', fullDays: 30, after: 'timelapse', timelapseS: 10, retentionDays: 183, preS: 10, postS: 20, stream: 'auto' },
+    cameras: {},
+    // per-NVR overrides, e.g. { "nvr-2": { stream: "sub" } } to record a constrained NVR on its
+    // sub-streams so it can serve every camera within its bandwidth budget (recorder.mjs #streamPref)
+    nvrs: {}
   },
   memory: { recentMinutes: 2 },
   thumbnails: 'off',
@@ -89,7 +95,8 @@ const REC_FIELDS = {
   timelapseS: int('Time-lapse interval (s)', 1, 3600),
   retentionDays: int('Total retention days', 1, MAX_RETENTION_DAYS),
   preS: int('Pre-event seconds', 0, 300),
-  postS: int('Post-event seconds', 0, 600)
+  postS: int('Post-event seconds', 0, 600),
+  stream: oneOf('stream', STREAMS)
 }
 const CAMERA_FIELDS = {
   ...REC_FIELDS,
@@ -138,6 +145,12 @@ function validate(s) {
     for (const [k, v] of Object.entries(o)) CAMERA_FIELDS[k](v)
     days({ ...d, ...o }, `Camera ${key}`)
   }
+  for (const [id, o] of Object.entries(s.recording.nvrs ?? {})) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new HttpError(400, `bad NVR id ${id}`)
+    needObject(o, `nvr ${id}`)
+    knownKeys(o, ['stream'], `nvrs.${id}.`)
+    if ('stream' in o) oneOf('stream', STREAMS)(o.stream)
+  }
   oneOf('memory.recentMinutes', RECENT_MINUTES)(s.memory.recentMinutes)
   oneOf('thumbnails', THUMBNAILS)(s.thumbnails)
   int('Low-space threshold (% free)', 1, 50)(s.storage.lowFreePct)
@@ -173,6 +186,12 @@ function fromFile(j) {
       } catch (e) {
         console.warn(`[settings] camera ${key} ignored: ${e.message}`)
       }
+    }
+  }
+  if (isPlainObject(r.nvrs)) {
+    for (const [id, o] of Object.entries(r.nvrs)) {
+      if (isPlainObject(o) && (!('stream' in o) || STREAMS.includes(o.stream))) s.recording.nvrs[id] = 'stream' in o ? { stream: o.stream } : {}
+      else console.warn(`[settings] nvr ${id} recording override ignored`)
     }
   }
   const tryPart = (fn) => {
@@ -288,7 +307,7 @@ export function saveSettings(patch, user, { internal = false } = {}) {
   const next = getSettings()
   if ('recording' in patch) {
     const r = needObject(patch.recording, 'recording')
-    knownKeys(r, ['defaults', 'cameras'], 'recording.')
+    knownKeys(r, ['defaults', 'cameras', 'nvrs'], 'recording.')
     if ('defaults' in r) {
       const d = needObject(r.defaults, 'recording.defaults')
       knownKeys(d, Object.keys(REC_FIELDS), 'recording.defaults.')
@@ -309,6 +328,24 @@ export function saveSettings(patch, user, { internal = false } = {}) {
         if (merged.locationId === null) delete merged.locationId
         if (Object.keys(merged).length) next.recording.cameras[key] = merged
         else delete next.recording.cameras[key]
+      }
+    }
+    // per-NVR overrides (only `stream` for now): null removes an NVR's entry, or one field of it
+    if ('nvrs' in r) {
+      next.recording.nvrs ??= {}
+      for (const [id, o] of Object.entries(needObject(r.nvrs, 'recording.nvrs'))) {
+        if (o === null) {
+          delete next.recording.nvrs[id]
+          continue
+        }
+        needObject(o, `nvr ${id}`)
+        const merged = { ...(next.recording.nvrs[id] ?? {}) }
+        for (const [k, v] of Object.entries(o)) {
+          if (v === null) delete merged[k]
+          else merged[k] = v
+        }
+        if (Object.keys(merged).length) next.recording.nvrs[id] = merged
+        else delete next.recording.nvrs[id]
       }
     }
   }

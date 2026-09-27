@@ -430,6 +430,28 @@ const wire = (isKey, codec, payload, ts = 0) => {
   await rec.stop()
 }
 
+// ---- an NVR set to record on its sub-streams (settings recording.nvrs[id].stream = 'sub')
+{
+  const streams = new Map()
+  const asked = []
+  let now = Date.UTC(2026, 8, 24, 13, 0, 0)
+  const rec = new Recorder({ nvrId: 'nsub', getStream: (ch, type) => { asked.push(type); const k = `${ch}:${type}`; return streams.get(k) ?? streams.set(k, fakeStream()).get(k) }, online: () => true, channels: () => [0, 1], send: () => {}, now: () => now, writerOpts: { rollOffsetMs: 0 } })
+  const cfg = recording({ 'nsub/0': { mode: 'continuous' }, 'nsub/1': { mode: 'continuous', stream: 'main' } })
+  cfg.nvrs = { nsub: { stream: 'sub' } }
+  rec.apply({ recording: cfg, locations: [location('LSB')] })
+  check("nvr set to 'sub': its camera taps the sub-stream from the start, never the main", streams.get('0:1')?.clients.size === 1 && !streams.has('0:0'))
+  check("... and a camera set to 'main' on that NVR keeps the main (camera beats NVR)", streams.get('1:0')?.clients.size === 1 && !streams.has('1:1'))
+  const tap = [...streams.get('0:1').clients][0]
+  const key = () => wire(true, 1, Buffer.from([0, 0, 0, 1, 0x26, 0]), now)
+  tap.send(key()); await rec.idle()
+  // gaps on a chosen sub-stream never count as a stutter, and it is not reported as degraded
+  for (let i = 0; i < 4; i++) { now += 5000; tap.send(key()); await rec.idle() }
+  rec.tick()
+  check("... gaps on it do not move it (a choice, not a fallback)", streams.get('0:1')?.clients.size === 1 && !streams.has('0:0'))
+  check("... and it is not listed as degraded", rec.degraded().length === 0, JSON.stringify(rec.degraded()))
+  await rec.stop()
+}
+
 // ---- the worker: recording shares the live pull; settings messages start and stop it
 {
   const L = location('LW')

@@ -136,7 +136,8 @@ export class Recorder {
     const now = this.now()
     const out = []
     for (const [ch, cam] of this.cams) {
-      const note = degradedNote(cam.pick, now)
+      // only "auto" cameras can be degraded (a fallback); one set to record the sub-stream is not
+      const note = this.#streamPref(ch) === 'auto' ? degradedNote(cam.pick, now) : null
       if (note) out.push({ nvr: this.nvrId, ch, note, since: cam.pick.subSince })
     }
     return out
@@ -238,7 +239,7 @@ export class Recorder {
       // main stream for ever, and the old behaviour was to keep asking every few minutes and
       // record nothing in between -- which is how eleven of nvr-2's cameras came to be online,
       // green on every page, and writing no footage at all.
-      const next = chooseStream(cam.pick, now, { allowSub: this.allowSubFallback() })
+      const next = chooseStream(cam.pick, now, { allowSub: this.allowSubFallback(), prefer: this.#streamPref(cam.ch) })
       const dropping = next.type === SUB && !cam.pick.onSub
       const reason = `refused by the NVR (${f.reason || 'no reason given'})`
       cam.lastError = { at: now, loc: cam.loc?.id ?? null, reason }
@@ -259,7 +260,7 @@ export class Recorder {
     if (now < cam.refusedUntil) return
     if (!cam.stream) {
       cam.attachedAt = now
-      const pick = chooseStream(cam.pick, now, { allowSub: this.allowSubFallback() })
+      const pick = chooseStream(cam.pick, now, { allowSub: this.allowSubFallback(), prefer: this.#streamPref(cam.ch) })
       cam.wantType = pick.type
       cam.stream = this.getStream(cam.ch, pick.type)
       cam.stream.add(cam.tap)
@@ -373,6 +374,12 @@ export class Recorder {
     cam.switchPending = true // done by the next #onFrame
   }
 
+  /** Which stream this camera is set to record: 'auto' (main, sub on refusal), 'main' or 'sub'. */
+  #streamPref(ch) {
+    const r = this.recording
+    return r?.cameras?.[`${this.nvrId}/${ch}`]?.stream ?? r?.nvrs?.[this.nvrId]?.stream ?? r?.defaults?.stream ?? 'auto'
+  }
+
   #gapFrom(cam, reason) {
     // a reason of its own during the ramp-up after a restart (refused, camera offline, no storage):
     // the ramp-up part ends here and this one starts, so each stretch carries the reason it had
@@ -389,7 +396,7 @@ export class Recorder {
    * @returns {boolean} whether it dropped to the sub-stream
    */
   #noteStutter(cam, now) {
-    if (cam.wantType !== MAIN || cam.pick?.onSub || !this.allowSubFallback()) return false
+    if (cam.wantType !== MAIN || cam.pick?.onSub || !this.allowSubFallback() || this.#streamPref(cam.ch) !== 'auto') return false
     cam.stutterAt.push(now)
     const cutoff = now - STUTTER_WINDOW_MS
     while (cam.stutterAt.length && cam.stutterAt[0] < cutoff) cam.stutterAt.shift()
@@ -496,12 +503,17 @@ export class Recorder {
       cam.refusedLogged = false
       // Video is flowing, so whatever stream we settled on is the one working. A camera that came
       // back up on the main stream stops being marked degraded here, and nowhere else.
-      const was = cam.pick?.onSub
-      cam.pick = afterVideo(cam.pick, now, cam.wantType ?? MAIN)
-      // recovered to the main stream: forget the earlier trickle so a stale count can't drop it again
-      if (was && !cam.pick.onSub) {
-        cam.stutterAt = []
-        console.log(`[rec ${this.nvrId}/${cam.ch + 1}] back on the main stream`)
+      if (this.#streamPref(cam.ch) === 'auto') {
+        const was = cam.pick?.onSub
+        cam.pick = afterVideo(cam.pick, now, cam.wantType ?? MAIN)
+        // recovered to the main stream: forget the earlier trickle so a stale count can't drop it again
+        if (was && !cam.pick.onSub) {
+          cam.stutterAt = []
+          console.log(`[rec ${this.nvrId}/${cam.ch + 1}] back on the main stream`)
+        }
+      } else {
+        // recording the stream this camera is set to: a choice, never a fallback, so no degraded state
+        cam.pick = { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }
       }
       this.#endGap(cam, ts)
       cam.lastAt = now

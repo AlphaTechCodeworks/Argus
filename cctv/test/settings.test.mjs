@@ -115,5 +115,17 @@ check('other paths: not handled (null)', (await handleSettings('GET', '/api/admi
 const [p4, pb4] = await handleSettings('POST', '/api/admin/settings', json({ storage: { locations: [{ path: '/' }] } }), 'boss')
 check('locations are not settable through /settings', p4 === 400, pb4.error)
 
+// which stream the server records: per camera, per NVR, or the default (recorder.mjs #streamPref)
+check("the default recorded stream is 'auto'", getSettings().recording.defaults.stream === 'auto')
+saveSettings({ recording: { nvrs: { 'nvr-2': { stream: 'sub' } } } }, 'boss')
+check("an NVR can be set to record its sub-streams", getSettings().recording.nvrs['nvr-2']?.stream === 'sub')
+saveSettings({ recording: { cameras: { 'nvr-2/5': { stream: 'main' } } } }, 'boss')
+check('a camera can be set to a stream of its own', getSettings().recording.cameras['nvr-2/5']?.stream === 'main')
+check('a stream that does not exist is refused', refused({ recording: { nvrs: { 'nvr-2': { stream: 'hd' } } } }))
+check('an unknown NVR field is refused', refused({ recording: { nvrs: { 'nvr-2': { bitrate: 3 } } } }))
+check('a bad NVR id is refused', refused({ recording: { nvrs: { 'nvr 2/x': { stream: 'sub' } } } }))
+saveSettings({ recording: { nvrs: { 'nvr-2': null } } }, 'boss')
+check('null removes an NVR override', !('nvr-2' in getSettings().recording.nvrs))
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

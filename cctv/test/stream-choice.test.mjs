@@ -91,5 +91,22 @@ const MIN = 60_000
   check('counting from nothing still counts', afterRefusal(undefined, T0).refusals === 1)
 }
 
+// ---- a fixed choice per camera or NVR (settings recording.stream) ---------------------------------
+// nvr-2 on 2026-09-27: its own disk held channels 23 and 30 in full (114.8 of 115 min), while the
+// server-side recording of their main streams gapped every ~5 s -- the NVR, near its serving budget,
+// would not relay them smoothly, and even one camera moved to the sub-stream kept gapping while the
+// other 24 main streams still loaded the NVR. Recording the whole NVR on sub-streams is the fix.
+{
+  const fresh = { refusals: 0, onSub: false, subSince: 0 }
+  check("prefer 'sub': records the sub-stream from the start", chooseStream(fresh, T0, { prefer: 'sub' }).type === SUB)
+  const refusedMain = { refusals: 5, onSub: false, subSince: 0 }
+  check("prefer 'sub': whatever the refusal count", chooseStream(refusedMain, T0, { prefer: 'sub' }).type === SUB)
+  const onSubLong = { refusals: 0, onSub: true, subSince: T0 - 60 * MIN }
+  check("prefer 'sub': never retries the main stream (no 30-min probe)", chooseStream(onSubLong, T0, { prefer: 'sub' }).type === SUB)
+  check("prefer 'main': the main stream even after refusals", chooseStream(refusedMain, T0, { prefer: 'main' }).type === MAIN)
+  check("prefer 'main': overrides the sub fallback", chooseStream({ refusals: 2, onSub: false }, T0, { prefer: 'main', allowSub: true }).type === MAIN)
+  check("prefer 'auto' (the default): unchanged behaviour", chooseStream(refusedMain, T0, { prefer: 'auto' }).type === SUB && chooseStream(fresh, T0).type === MAIN)
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
