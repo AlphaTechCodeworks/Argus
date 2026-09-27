@@ -106,17 +106,51 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   check('a suspended tile is not reconnected by the watchdog', !w2.closed)
   t2.close()
 }
-// a socket still connecting (never opened) is left to the browser's own timeout
+// a socket still connecting: given a few seconds, then dropped and tried again (the browser's own
+// timeout never came: a full-size view waited 10+ minutes for its main stream, 2026-09-27)
 {
   const t3 = new LiveTile(tileEl, { nvr: 'n1', ch: 4 }, 1, 0, { now: () => now })
   clearInterval(t3.statusTimer)
   clearTimeout(t3.retry)
   t3.connect()
   const w3 = sockets.at(-1)
-  now += 6000
+  now += 3000
   t3.updateStatus()
-  check('socket still connecting: badge stays "connecting…"', /connecting/.test(parts['.status'].textContent) && !w3.closed, parts['.status'].textContent)
+  check('socket still connecting after 3 s: badge stays "connecting…"', /connecting/.test(parts['.status'].textContent) && !w3.closed, parts['.status'].textContent)
+  now += 5500
+  t3.updateStatus()
+  check('... never opened after 8 s, nothing else opening: dropped, and a retry is scheduled', w3.closed && Boolean(t3.retry) && /reconnecting/.test(parts['.status'].textContent), `${w3.closed} ${parts['.status'].textContent}`)
   t3.close()
+}
+// a big grid: the browser opens its sockets one at a time, so a socket waiting its turn is queued,
+// not stuck. Dropping those sent them to the back of the queue again and an 8x8 never loaded.
+{
+  const mk = (ch) => {
+    const x = new LiveTile(tileEl, { nvr: 'n1', ch }, 1, 0, { now: () => now })
+    clearInterval(x.statusTimer)
+    clearTimeout(x.retry)
+    x.connect()
+    return [x, sockets.at(-1)]
+  }
+  const [a, wa] = mk(10)
+  now += 100
+  const [b, wb] = mk(11)
+  now += 100
+  const [c, wc] = mk(12)
+  // the queue moves: one opens 9 s later
+  now += 9000
+  wa.readyState = 1
+  wa.onopen()
+  b.updateStatus()
+  c.updateStatus()
+  check('sockets waiting while others keep opening are left in the queue', !wb.closed && !wc.closed)
+  // then nothing opens for 8 s: only the oldest waiting one (the one holding the queue) is dropped
+  now += 8500
+  c.updateStatus()
+  check('... a younger waiting socket is not the stuck one', !wc.closed)
+  b.updateStatus()
+  check('... the oldest waiting one is, once nothing has opened for 8 s', wb.closed)
+  for (const x of [a, b, c]) x.close()
 }
 // back from the full-size view: the stream kept since its last keyframe is shown at once, on the
 // same socket (a reconnect through the internet link was 1.7-4.5 s, 2026-09-26)

@@ -21,6 +21,13 @@ export const STALL_RECONNECT_MS = 8000
 // reconnect back-off: 1, 2, 4, 8 s then every 8 s (with jitter). It was up to 30 s: a camera that
 // dropped for a moment stayed black half a minute after it was back.
 export const RECONNECT_MAX_MS = 8000
+// A connection still not open after this long, while no other one has opened either, is dropped and
+// tried again (see #stuckConnecting). Browsers open WebSockets to one server ONE AT A TIME (RFC 6455
+// 4.1): through the public link 24 at once opened over 6.5 s, one every ~250 ms (2026-09-27), so an
+// 8x8 grid's last tile waits ~16 s for its turn. Dropping every socket older than a few seconds sent
+// those to the back of the queue again and the grid, and the full-size view behind it, never loaded.
+export const CONNECT_TIMEOUT_MS = 8000
+let lastOpenAt = 0 // when any tile's socket last opened: the browser's queue is moving
 // A tile under the full-size view keeps its connection and, without decoding, the stream from its
 // last keyframe (at most this much): back on the grid it shows that at once and carries on. It used
 // to reconnect, and through the internet link that was 1.7 s before the first tile moved again and
@@ -218,7 +225,18 @@ export class LiveTile {
     const ws = this.ws
     const open = (this.source ? true : ws && ws.readyState === 1) && !this.suspended && !this.closed
     const since = open ? this.now() - (this.lastDataAt || this.now()) : 0
-    if (open && since >= STALL_RECONNECT_MS && this.source) {
+    if (!this.source && !this.closed && ws?.readyState === 0 && this.#stuckConnecting()) {
+      // a connection that never opens (its handshake stuck in Cloudflare or behind a frozen NVR)
+      // waited for ever, and held up every other one behind it: the full-size view sat on the
+      // sub-stream for 10+ minutes and a first click sometimes showed nothing (2026-09-27). Give up
+      // on it and try again with the back-off.
+      const onclose = ws.onclose
+      ws.onclose = null
+      ws.onmessage = null
+      ws.onopen = null
+      ws.close()
+      onclose?.()
+    } else if (open && since >= STALL_RECONNECT_MS && this.source) {
       // the borrowed stream stopped: a connection of our own
       this.#unborrow()
       this.connect()
@@ -256,13 +274,30 @@ export class LiveTile {
     this.drawOverlay()
   }
 
+  /**
+   * This socket's handshake is stuck, not queued: past the limit, nothing has opened meanwhile, and
+   * it is the oldest one waiting (the one the browser is actually trying; the rest wait behind it).
+   */
+  #stuckConnecting() {
+    const now = this.now()
+    if (now - this.connectAt < CONNECT_TIMEOUT_MS || now - lastOpenAt < CONNECT_TIMEOUT_MS) return false
+    for (const t of liveTiles) {
+      if (t !== this && !t.closed && t.ws?.readyState === 0 && t.connectAt < this.connectAt) return false
+    }
+    return true
+  }
+
   connect() {
     this.setStatus('connecting…')
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     this.ws = new WebSocket(`${proto}://${location.host}/live?nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${this.streamType}${this.maxFps === 15 ? '&fps=15' : ''}${deviceH265 === null ? '' : `&h265=${deviceH265 ? 1 : 0}`}`)
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
-    this.ws.onopen = () => (this.lastDataAt = this.now())
+    this.connectAt = this.now()
+    this.ws.onopen = () => {
+      this.lastDataAt = this.now()
+      lastOpenAt = this.lastDataAt
+    }
     this.ws.onmessage = (e) => {
       this.attempts = 0
       this.lastDataAt = this.now()
