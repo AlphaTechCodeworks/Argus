@@ -123,6 +123,47 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   check('stop: the segment is closed and reported', seg?.bytes > 0 && seg.path.startsWith(loc), JSON.stringify(seg))
 }
 
+// ---- an NVR that plays only so many sub-streams at once (value4u: 15; sub-cap.mjs): the worker
+// learns the limit from two "cannot connect" refusals, stops asking for the refused ones, holds
+// warm-ups back below it, and lets a held viewer take a warm-up's place
+{
+  const { existsSync, readFileSync } = await import('node:fs')
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const capData = mkdtempSync(join(tmpdir(), 'cctv-subcap-')) // its own sub-cap-w1.json, not the other tests'
+  writeFileSync(join(capData, 'nvrs.json'), JSON.stringify({ nvrs: [{ id: 'w1', site: 'T', name: 'W1', host: 'w1.invalid', port: 6036, user: 'u', password: 'p' }] }))
+  const child = fork(new URL('../nvr-worker.mjs', import.meta.url), [], { serialization: 'advanced', stdio: ['ignore', 'pipe', 'inherit', 'ipc'], env: { ...process.env, DATA_DIR: capData, CCTV_WORKER_NVR: 'w1', CCTV_FAKE_LOG_CALLS: '1', CCTV_FAKE_MAX_SUBS: '5' } })
+  let wout = ''
+  child.stdout.on('data', (d) => (wout += d))
+  const got = []
+  child.on('message', (m) => got.push(m))
+  const plays = (key) => (wout.match(new RegExp(`^\\[fake-sdk\\] LivePlay ${key}$`, 'gm')) ?? []).length
+  const framesOf = (key, from = 0) => got.slice(from).some((m) => m.t === 'frame' && m.key === key)
+  const stats = () => got.filter((m) => m.t === 'stats').at(-1)
+  check('sub limit: worker ready and logged in', (await until(() => got.some((m) => m.t === 'ready'))) && (await until(() => wout.includes('logged in'))))
+  for (let ch = 0; ch < 5; ch++) child.send({ t: 'want', ch, type: 1 })
+  check('sub limit: five viewers\' sub-streams play', await until(() => [0, 1, 2, 3, 4].every((ch) => framesOf(`${ch}:1`)), 8000))
+  child.send({ t: 'want', ch: 5, type: 1 })
+  child.send({ t: 'want', ch: 6, type: 1 })
+  check('sub limit: two refusals at 5 playing set the limit (stats say 5, the log says so)', await until(() => stats()?.subCap?.limit === 5 && wout.includes('plays at most 5 sub-streams at once'), 8000), JSON.stringify(stats()?.subCap))
+  check('sub limit: the refused viewers\' sub-streams are held (in the stats at once)', await until(() => JSON.stringify(stats()?.subCap?.held) === '[5,6]', 3000), JSON.stringify(stats()?.subCap))
+  const p5 = plays('5:1')
+  const p6 = plays('6:1')
+  await sleep(7000) // past the 5 s retry of a refused start
+  check('sub limit: a held sub-stream is not asked for again and again', plays('5:1') === p5 && plays('6:1') === p6, `5:1 ${p5} -> ${plays('5:1')}, 6:1 ${p6} -> ${plays('6:1')}`)
+  child.send({ t: 'want', ch: 7, type: 1, background: true }) // a warm-up
+  await sleep(1500)
+  check('sub limit: a warm-up is held back below the limit (no LivePlay)', plays('7:1') === 0 && !(stats()?.subCap?.held ?? []).includes(7), `${plays('7:1')} LivePlay`)
+  check('sub limit: the limit is saved for the next start', existsSync(join(capData, 'sub-cap-w1.json')) && JSON.parse(readFileSync(join(capData, 'sub-cap-w1.json'), 'utf8')).limit === 5)
+  // viewer 0 leaves its tile, the stream lingers (background): a held viewer takes its place
+  const from = got.length
+  child.send({ t: 'want', ch: 0, type: 1, background: true })
+  check('sub limit: a held viewer takes the place of a stream nobody watches (it stops)', await until(() => wout.includes('stream w1/1:sub stopped'), 6000))
+  check('sub limit: ... and one held viewer\'s sub-stream plays', await until(() => framesOf('5:1', from) || framesOf('6:1', from), 6000))
+  check('sub limit: ... the other is still held, and the warm-up is not started', await until(() => (stats()?.subCap?.held ?? []).length === 1, 3000) && plays('7:1') === 0 && plays('0:1') === 1, JSON.stringify(stats()?.subCap))
+  child.send({ t: 'stop' })
+  await until(() => child.exitCode !== null || child.signalCode !== null, 6000)
+}
+
 // ---- the SDK's "Net Disconnected" lines in a worker's output: one LINKRESET a second at most
 {
   const { linkResetWatch } = await import('../worker-supervisor.mjs')

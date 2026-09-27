@@ -100,6 +100,21 @@ check('frames for an unwanted stream are ignored', !hub.streams.has('18:0') && a
   s6.add(viewer)
   s6.remove(viewer)
   check('the last viewer leaves a warm-up stream: the worker is told it is background again', msgs.at(-1).ch === 6 && msgs.at(-1).t === MSG.WANT && msgs.at(-1).background === true && s6.fg === false, JSON.stringify(msgs.at(-1)))
+  // the last viewer leaves a sub-stream: its linger is background (a viewer's may take its place at
+  // an NVR's sub-stream limit, nvr-worker.mjs); a viewer back within it makes it foreground again
+  const s5 = h.getStream(5, 1)
+  const only = fakeWs()
+  s5.add(only)
+  s5.remove(only)
+  check('a sub-stream nobody watches any more: background for its linger', msgs.at(-1).ch === 5 && msgs.at(-1).type === 1 && msgs.at(-1).background === true && s5.fg === false && s5.wanted === true, JSON.stringify(msgs.at(-1)))
+  s5.add(fakeWs())
+  check('... a viewer back within the linger: foreground again', msgs.at(-1).ch === 5 && msgs.at(-1).background === false && s5.fg === true)
+  const m7 = h.getStream(7, 0)
+  const full = fakeWs()
+  m7.add(full)
+  const before = msgs.length
+  m7.remove(full)
+  check('... a main stream\'s linger is left as it was (foreground)', msgs.length === before && m7.fg === true)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

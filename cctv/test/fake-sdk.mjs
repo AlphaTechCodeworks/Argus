@@ -15,14 +15,28 @@ const GOP = 25
 // (an NVR stream that stalls inside the SDK); streams started later are not affected
 const STALL_AFTER = Number(process.env.CCTV_FAKE_STALL_AFTER_FRAMES || 0)
 let stallUsed = false
+// tests: an NVR that plays at most this many sub-streams at once, like value4u (15): a sub-stream
+// LivePlay beyond it fails at once and GetLastError says 8, "cannot connect" (sub-cap.mjs)
+const MAX_SUBS = Number(process.env.CCTV_FAKE_MAX_SUBS || 0)
+const subHandles = new Set()
+let lastErr = 0
 
 const answers = {
   Login: (host) => (/\.invalid$/.test(String(host)) ? nextUser++ : -1),
   LoginEx: () => -1,
-  GetLastError: () => 0,
-  LivePlay: () => nextHandle++,
+  GetLastError: () => lastErr,
+  LivePlay: (_user, info) => {
+    if (MAX_SUBS && info?.streamType === 1 && subHandles.size >= MAX_SUBS) {
+      lastErr = 8
+      return -1
+    }
+    const h = nextHandle++
+    if (info?.streamType === 1) subHandles.add(h)
+    return h
+  },
   StopLivePlay: (h) => {
     stopFeed(h)
+    subHandles.delete(h)
     return true
   }
 }

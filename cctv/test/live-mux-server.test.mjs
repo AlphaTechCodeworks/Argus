@@ -17,7 +17,7 @@ import { REPLAY_MAX_BYTES } from '../gop-replay.mjs'
 import { bridgeSub } from '../sub-bridge.mjs'
 import { AdaptiveLive, PRESSURE_BYTES, SETTLE_MS } from '../adaptive-live.mjs'
 import { TranscodePool } from '../transcode.mjs'
-import { liveAttacher } from '../live-attach.mjs'
+import { PHONE_SPARE, liveAttacher } from '../live-attach.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -704,6 +704,51 @@ const fanOut = (c, buf, isKey, type, now) => {
   const m = setup({ attach: (channel, s) => attachLive(channel, req(), { nvr: off, who, ch: s.ch, streamType: s.stream, clientH265: s.h265, phone15: s.fps === 15 }) })
   m.ws.msg(sub(5))
   check('... on a channel, NVR offline is "end" 1013 for that id, the socket stays', JSON.stringify(m.ws.texts()) === '[{"op":"end","id":5,"code":1013,"reason":"NVR offline"}]' && m.ws.readyState === 1)
+}
+
+// ---- live-attach.mjs: a sub-stream held at the NVR's sub-stream limit (value4u: 15, sub-cap.mjs) ----
+// the tile gets the main stream meanwhile; a phone that cannot play the H.265 it is gets it converted
+{
+  const mkStream = (gop) => ({ gop, viewers: new Set(), add(w) { this.viewers.add(w) }, remove(w) { this.viewers.delete(w) } })
+  const mkNvr = ({ held = true, mainCodec = 'h265', mainPlaying = true } = {}) => ({
+    id: 'v4', liveOnline: true, streams: new Map(),
+    codecSeen: new Map([['3:0', { codec: mainCodec }]]),
+    subHeld: (ch) => held && ch === 3,
+    mainPlaying: (ch) => mainPlaying && ch === 3,
+    getStream(ch, type) {
+      const k = `${ch}/${type}`
+      if (!this.streams.has(k)) this.streams.set(k, mkStream(type === 1 ? [] : [frame(true)]))
+      return this.streams.get(k)
+    }
+  })
+  const fakeWs = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, closedWith: null, handlers: {}, sent: [], send(d) { this.sent.push(d) }, on(e, f) { (this.handlers[e] ??= []).push(f); return this }, close(code, reason) { this.closedWith = { code, reason } } })
+  const phoneReq = { socket: { remoteAddress: '192.168.1.30' }, headers: { 'user-agent': 'Mozilla/5.0 (iPhone)', cookie: 'c=1' } }
+  const deskReq = { socket: { remoteAddress: '192.168.1.20' }, headers: { 'user-agent': 'Desktop', cookie: 'c=1' } }
+  const mkPhone = (free = 16) => ({ free, calls: [], detached: [], attach(key, stream, type, ws) { this.calls.push({ key, stream, type, ws }); return true }, detach(key, ws) { this.detached.push({ key, ws }) }, room() { return this.free } })
+  const run = ({ nvr = mkNvr(), phone = mkPhone(), r = phoneReq, clientH265 = false } = {}) => {
+    const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive: phone })
+    const w = fakeWs()
+    attach(w, r, { nvr, who: { user: 'ann' }, ch: 3, streamType: 1, clientH265, phone15: true })
+    return { w, nvr, phone, sub: nvr.getStream(3, 1), main: nvr.getStream(3, 0) }
+  }
+  let x = run()
+  const conv = x.phone.calls.find((c) => c.key === 'v4/3/0')
+  check('held sub, phone, H.265 main that plays: the stand-in is the main converted for phones (shared key v4/3/0)', conv && conv.stream === x.main && conv.type === 0 && conv.ws.background === true && x.main.viewers.size === 0, JSON.stringify(x.phone.calls.map((c) => c.key)))
+  check('... the held sub-stream itself is not thinned (nothing to thin; no conversion place held for it)', !x.phone.calls.some((c) => c.key === 'v4/3/1') && x.sub.viewers.has(x.w))
+  x.w.send(frame(true)) // the sub-stream's first frame (there is room now): the stand-in ends
+  check('... its first frame ends the stand-in, and the converted stream is let go', x.phone.detached.length === 1 && x.phone.detached[0].key === 'v4/3/0' && x.phone.detached[0].ws === conv.ws)
+  x = run({ phone: mkPhone(PHONE_SPARE - 1) })
+  check(`... fewer than ${PHONE_SPARE} conversions free: the main as it is (as before)`, x.phone.calls.length === 0 && [...x.main.viewers].some((v) => v.background === true))
+  x = run({ clientH265: true })
+  check('... a phone that plays H.265: the main as it is', !x.phone.calls.some((c) => c.key === 'v4/3/0') && x.main.viewers.size === 1)
+  x = run({ nvr: mkNvr({ mainCodec: 'h264' }) })
+  check('... an H.264 main: as it is', !x.phone.calls.some((c) => c.key === 'v4/3/0') && x.main.viewers.size === 1)
+  x = run({ nvr: mkNvr({ mainPlaying: false }) })
+  check('... a main that does not play: no conversion started for it (never makes the NVR start one)', !x.phone.calls.some((c) => c.key === 'v4/3/0'))
+  x = run({ nvr: mkNvr({ held: false }) })
+  check('... a sub-stream that is only cold (not held): converted stand-in too, and the sub thinned as before', x.phone.calls.some((c) => c.key === 'v4/3/0') && x.phone.calls.some((c) => c.key === 'v4/3/1' && c.ws === x.w))
+  x = run({ r: deskReq })
+  check('... a desktop: the main as it is, the viewer on its held sub-stream', x.phone.calls.length === 0 && x.main.viewers.size === 1 && x.sub.viewers.has(x.w))
 }
 
 // ---- server.mjs wiring (source shape: importing server.mjs starts the NVRs) ----

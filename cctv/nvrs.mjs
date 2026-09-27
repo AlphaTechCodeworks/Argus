@@ -377,6 +377,11 @@ export class Nvr {
     this.streams = new Map()
     this.scans = new Set() // abort functions of running motion searches
     this.codecSeen = new Map() // "ch:stream" -> { codec: 'h264' | 'h265', width, height, at }
+    // from the live worker's stats (workerStats): viewers' sub-streams held at the NVR's sub-stream
+    // limit, that limit (null: none known), and the cameras whose main stream plays
+    this.subsHeld = new Set()
+    this.subLimit = null
+    this.mainsPlaying = new Set()
     this.health = { channelFailures: 0, liveFailures: 0 }
     this.stopped = false
     this.relogging = false
@@ -589,6 +594,7 @@ export class Nvr {
    * a relogin needs the NVR itself to stop answering.
    */
   async liveFailed(stream) {
+    this.onLiveFailed?.(stream) // the NVR worker learns the NVR's sub-stream limit from these (sub-cap.mjs)
     const others = [...this.streams.values()].some((s) => s !== stream && s.state === 'playing')
     if (others) return
     if (++this.health.liveFailures < MAX_LIVE_FAILURES) return
@@ -653,6 +659,16 @@ export class Nvr {
       this.streams.set(key, stream)
     }
     return stream
+  }
+
+  /** A viewer's sub-stream of this camera waits for room at the NVR's sub-stream limit (live worker only). */
+  subHeld(ch) {
+    return Boolean(this.worker) && this.subsHeld.has(ch)
+  }
+
+  /** This camera's main stream plays (in the live worker, as of its last stats): a stand-in joins it without starting it. */
+  mainPlaying(ch) {
+    return Boolean(this.worker) && this.mainsPlaying.has(ch)
   }
 
   /** Restarts one live stream in place (viewers stay connected), in this process or in the NVR's worker. */
@@ -742,6 +758,16 @@ export class Nvr {
   /** Worker stats (every 5 s): the codecs its streams saw, for info() and the sub-stream page. */
   workerStats(stats) {
     for (const [k, v] of Object.entries(stats?.codecSeen ?? {})) this.codecSeen.set(k, v)
+    // viewers' sub-streams the worker holds at the NVR's sub-stream limit (nvr-worker.mjs, sub-cap.mjs),
+    // and the cameras whose main stream plays: a held tile is shown that main meanwhile (live-attach.mjs)
+    const held = new Set((Array.isArray(stats?.subCap?.held) ? stats.subCap.held : []).filter(Number.isInteger))
+    for (const ch of held) {
+      // newly held: the picture it kept is old now, and a stale picture would keep the stand-in away
+      if (!this.subsHeld.has(ch)) this.worker?.hub?.streams.get(`${ch}:1`)?.reset()
+    }
+    this.subsHeld = held
+    this.subLimit = Number.isInteger(stats?.subCap?.limit) ? stats.subCap.limit : null
+    if (Array.isArray(stats?.mainPlaying)) this.mainsPlaying = new Set(stats.mainPlaying.filter(Number.isInteger))
     // the worker's camera list (it polls; this process then does not, see #refresh)
     const list = stats?.channels
     if (Array.isArray(list) && list.length > 0 && list.every((c) => c && Number.isInteger(c.ch))) {

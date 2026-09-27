@@ -204,4 +204,14 @@ export class PhoneLive {
     ws.on?.('close', () => s.remove(ws))
     return true
   }
+
+  /** Takes a socket off a thinned stream before it closes (sub-bridge.mjs: a stand-in that has ended). */
+  detach(key, ws) {
+    this.streams.get(key)?.remove(ws)
+  }
+
+  /** How many more conversions may start (the cap, less those running). */
+  room() {
+    return this.pool.max - this.pool.active
+  }
 }

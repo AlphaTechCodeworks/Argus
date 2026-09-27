@@ -467,11 +467,12 @@ const ERRORS = {
   95: 'NVR busy',
   97: 'NVR not ready'
 }
+/** An SDK error code as text. */
+export const errorText = (code) => ERRORS[code] ?? `error ${code}`
+/** Last SDK error code (-1 when it cannot be read). A hint only, as lastError. */
+export const lastErrorCode = () => sdkCall(NET_SDK.GetLastError).catch(() => -1)
 /** Last SDK error as text. A hint only: the SDK may keep it per thread and calls run on pool threads. */
-export const lastError = async () => {
-  const code = await sdkCall(NET_SDK.GetLastError).catch(() => -1)
-  return ERRORS[code] ?? `error ${code}`
-}
+export const lastError = async () => errorText(await lastErrorCode())
 
 let initialised = null
 /** Initialises the SDK once (idempotent). */

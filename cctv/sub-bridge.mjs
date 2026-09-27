@@ -4,8 +4,13 @@
 //
 // Measured through the public link, 2026-09-27: starting a cold sub-stream took 1.9 s (nvr-2) and
 // 2.0 s (value4u) at the median, up to 5.8 s, while the main stream showed in 0.75-1.07 s; and value4u
-// refuses the sub-streams of cameras 19-29 outright, so those tiles never showed anything. Their main
-// streams run at 3-6 fps and 0.2-0.3 Mbit/s: about what a sub-stream costs.
+// refuses the sub-streams of cameras 19-29 outright, so those tiles never showed anything.
+//
+// value4u plays only 15 sub-streams at once (sub-cap.mjs). Beyond that its NVR worker holds a
+// viewer's sub-stream back until there is room (nvr-worker.mjs), and the tile gets the main stream
+// here the same way meanwhile -- for as long as it waits. Those mains are heavier (1-5 Mbit/s, most
+// of them H.265): a phone that cannot play H.265 is given the main as converted for phones, shared
+// with full-size views (live-attach.mjs, phone-live.mjs), rather than nothing.
 //
 // Everything after the hand-over is the normal path, untouched: the viewer's socket still waits for
 // the sub-stream's keyframe (ws.waitForKey), and the tile's decoder sets itself up again for the
@@ -37,13 +42,13 @@ export function bridgeSub(ws, { sub, main, clientH265, cap = CAP_BYTES[0], log =
     overSince: null,
     terminate: () => ws.terminate?.()
   }
-  const end = () => {
+  const end = (why) => {
     if (!on) return
     on = false
     // (ws.send is left wrapped, passing straight through from now on: other layers wrap it after
     // us -- adaptive-live.mjs counts the bytes it sends -- and putting ours back would drop theirs)
     main.remove(tap)
-    if (sent) log(`${sent} frames of the main stream shown until the sub-stream came`)
+    if (sent) log(`${sent} frames of the main stream shown ${why === 'sub' ? 'until the sub-stream came' : 'until the tile closed'}`)
   }
   const tap = {
     OPEN: 1,
@@ -53,7 +58,7 @@ export function bridgeSub(ws, { sub, main, clientH265, cap = CAP_BYTES[0], log =
     send: (buf) => {
       if (!on || !(buf?.length > 16)) return
       // a browser that cannot play H.265 gets nothing from here (it waits for its own stream)
-      if (buf[1] === CODEC_H265 && !clientH265) return end()
+      if (buf[1] === CODEC_H265 && !clientH265) return end('h265')
       if (gateSend(gate, (buf[0] & 1) === 1, { cap })) {
         sent++
         realSend(buf)
@@ -62,10 +67,10 @@ export function bridgeSub(ws, { sub, main, clientH265, cap = CAP_BYTES[0], log =
   }
   // the first frame of the viewer's own stream (a keyframe: it waits for one) ends the stand-in
   ws.send = (...args) => {
-    end()
+    end('sub')
     return realSend(...args)
   }
-  ws.on?.('close', end)
+  ws.on?.('close', () => end('closed'))
   main.add(tap) // replays the main stream's current GOP into the tap, keyframe first
   return { end, active: () => on }
 }

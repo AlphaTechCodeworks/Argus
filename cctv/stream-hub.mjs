@@ -49,8 +49,10 @@ export class HubStream {
 
   remove(ws) {
     this.clients.delete(ws)
-    // only warm-ups left: the worker may start it behind real viewers again
-    if (this.fg && this.clients.size > 0 && ![...this.clients].some((c) => c.background !== true)) {
+    // only warm-ups left: the worker may start it behind real viewers again. A sub-stream nobody
+    // watches any more (its linger) is background too: at an NVR's sub-stream limit a viewer's
+    // stream takes its place (nvr-worker.mjs); a viewer back within the linger makes it foreground
+    if (this.fg && (this.clients.size > 0 || this.type === 1) && ![...this.clients].some((c) => c.background !== true)) {
       this.fg = false
       this.hub.send(want(this.ch, this.type, true))
     }

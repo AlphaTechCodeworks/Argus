@@ -15,7 +15,7 @@ import { replayGop } from './gop-replay.mjs'
 import { idleStopQueue } from './idle-stops.mjs'
 import { PRIORITY, RANK, connectLane } from './lanes.mjs'
 import { PACE, livePacer } from './live-pacer.mjs'
-import { CODEC_H264, FRAME_TYPE_VIDEO, FRAME_TYPE_VIDEO_FORMAT, NET_SDK, codecOf, encodeFrame, lastError, lastLateReturnAt, lateCalls, liveCallsInFlight, liveFrames, nvrCooling, onCallSettled, sdkCallT } from './sdk.mjs'
+import { CODEC_H264, FRAME_TYPE_VIDEO, FRAME_TYPE_VIDEO_FORMAT, NET_SDK, codecOf, encodeFrame, errorText, lastErrorCode, lastLateReturnAt, lateCalls, liveCallsInFlight, liveFrames, nvrCooling, onCallSettled, sdkCallT } from './sdk.mjs'
 
 const MAX_GOP_FRAMES = 400 // frames kept since the last keyframe, so new viewers start instantly
 // slow sockets: nothing is sent over the cap (1 MB sub, 4 MB main), see backpressure.mjs
@@ -252,9 +252,11 @@ export class LiveStream {
     if (handle <= 0) {
       const ms = callStart ? Date.now() - callStart : 0
       const fast = Boolean(callStart) && !callError && !notTried && ms < FAST_REFUSAL_MS
-      // the SDK's last error, as a hint only (it may be per thread)
-      const why = callError ? callError.message : await lastError().catch(() => 'no error code')
-      this.lastFailure = { at: Date.now(), ms, fast, reason: `${fast ? `refused in ${ms} ms` : `failed after ${ms} ms`}: ${why}` }
+      // the SDK's last error, as a hint only (it may be per thread); its code too, for a start that
+      // reached the NVR (8, "cannot connect": value4u at its sub-stream limit, sub-cap.mjs)
+      const code = callError || notTried ? null : await lastErrorCode()
+      const why = callError ? callError.message : errorText(code)
+      this.lastFailure = { at: Date.now(), ms, fast, code, reason: `${fast ? `refused in ${ms} ms` : `failed after ${ms} ms`}: ${why}` }
       if (this.stopped) return
       console.log(`stream ${this.label} failed to start (${this.lastFailure.reason})`)
       nvr.liveFailed(this).catch((e) => console.warn(`[${nvr.id}] live failure check: ${e.message}`))
