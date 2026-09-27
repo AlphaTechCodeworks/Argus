@@ -70,8 +70,10 @@ await nvr.stop()
 
 // wiring
 const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')
-check('worker STATS carry the camera list', /channels: nvr\.channels/.test(src('nvr-worker.mjs').split('sendStats')[1] ?? ''))
-check('server /live uses liveOnline', /!nvr\.liveOnline/.test(src('server.mjs')))
+// (the definition, not the first call of it, which comes earlier in the file)
+check('worker STATS carry the camera list', /channels: nvr\.channels/.test(src('nvr-worker.mjs').split('const sendStats')[1] ?? ''))
+// (the /live attach steps are in live-attach.mjs since /live-mux shares them)
+check('server /live uses liveOnline', /!nvr\.liveOnline/.test(src('live-attach.mjs')) && /liveAttacher\(/.test(src('server.mjs')))
 
 print(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
