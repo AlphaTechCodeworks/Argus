@@ -2,8 +2,9 @@
 // through the Cloudflare tunnel).
 
 // A Content-Security-Policy as a backstop against any script injection, and HSTS so a browser never
-// falls back to plain HTTP. The policy is REPORT-ONLY until every page has been checked against it
-// (violations show in the browser console); CCTV_CSP=enforce makes it binding. Map tiles come from
+// falls back to plain HTTP. Enforced since 2026-09-27, after every page was loaded under it in report-only
+// mode: the only violations were Cloudflare's injected analytics beacon (blocked now, which is
+// fine) and framing (refused, as meant). CCTV_CSP=report-only goes back to reporting. Map tiles come from
 // OpenStreetMap and ArcGIS. No includeSubDomains on HSTS: other *.jfl.gripe hosts are not ours to
 // force onto HTTPS.
 export const CSP = [
@@ -28,7 +29,7 @@ export function securityHeaders(env = process.env) {
     'x-frame-options': 'DENY',
     'referrer-policy': 'no-referrer',
     'strict-transport-security': 'max-age=15552000',
-    [env.CCTV_CSP === 'enforce' ? 'content-security-policy' : 'content-security-policy-report-only']: CSP
+    [env.CCTV_CSP === 'report-only' ? 'content-security-policy-report-only' : 'content-security-policy']: CSP
   }
 }
 

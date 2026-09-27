@@ -14,8 +14,8 @@ check('no header: the socket address', clientIpOf('::ffff:127.0.0.1', undefined)
 
 // headers
 const h = securityHeaders({})
-check('report-only by default (pages are checked against it first)', 'content-security-policy-report-only' in h && !('content-security-policy' in h))
-check('CCTV_CSP=enforce makes it binding', 'content-security-policy' in securityHeaders({ CCTV_CSP: 'enforce' }))
+check('enforced by default (every page was checked against it)', 'content-security-policy' in h && !('content-security-policy-report-only' in h))
+check('CCTV_CSP=report-only goes back to reporting', 'content-security-policy-report-only' in securityHeaders({ CCTV_CSP: 'report-only' }))
 check('HSTS, without includeSubDomains', /^max-age=\d+$/.test(h['strict-transport-security']))
 check('the old headers stay', h['x-frame-options'] === 'DENY' && h['x-content-type-options'] === 'nosniff' && h['referrer-policy'] === 'no-referrer')
 check('no inline or eval scripts allowed', /script-src 'self'(;|$)/.test(CSP) && !/unsafe-eval/.test(CSP))
