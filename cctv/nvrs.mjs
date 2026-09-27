@@ -18,7 +18,7 @@ import { DATA_DIR } from './auth.mjs'
 import { Lane, PRIORITY, connectLane } from './lanes.mjs'
 import { LiveStream } from './live.mjs'
 import { createPlayback } from './playback.mjs'
-import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastError, lateCalls, nvrCooling, sdkCallT } from './sdk.mjs'
+import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastError, lateCalls, nvrCooling, sdkCallT, sdkStuck } from './sdk.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
 import { xmlSettled } from './nvr-xml.mjs'
 import { startWorker } from './worker-supervisor.mjs'
@@ -26,6 +26,7 @@ import { openRecIndex } from './rec-index.mjs'
 import { createWarmer } from './rec-cache.mjs'
 import { downtimeGaps, recoverOrphans } from './rec-recover.mjs'
 import { cameraRecording, getSettings, onSettingsChange } from './settings.mjs'
+import { spareWhile } from './watchdog.mjs'
 import { checkHealth, listLocations, onChange as onStorageChange, startHealthChecks } from './storage.mjs'
 import { SPOOL_ID, drainSpool, spoolLocation, trimSpool } from './ram-spool.mjs'
 
@@ -353,6 +354,10 @@ class SessionPool {
 // ---- one NVR --------------------------------------------------------------
 
 const LANE_CONCURRENCY = 2 // SDK operations at once per NVR (the SDK serialises internally anyway)
+// In an NVR's worker, where recording shares this login with the viewers, the lane holds new work
+// (stops excepted) once ONE call of the NVR is late, not two: at 03:51:54 a second LivePlay went in
+// next to a late one on nvr1, and the worker was killed with every recording on that NVR
+const LANE_HOLD_AT = process.env.CCTV_WORKER_NVR ? 1 : LANE_CONCURRENCY
 const MASS_STALL_SHARE = 0.5 // this share of an NVR's streams stalling at once = an NVR problem
 const RESTART_SPACING_MS = 250
 const PROBE_BACKOFF_MS = 30_000 // after a probe the NVR didn't answer, wait this long before the next
@@ -383,9 +388,10 @@ export class Nvr {
     this.probeFailedAt = 0
     this.relogins = [] // times of recent relogins, for back-off
     this.gen = 0 // session generation: results from an older session are ignored
-    this.lane = new Lane(cfg.id, LANE_CONCURRENCY)
+    this.lane = new Lane(cfg.id, LANE_CONCURRENCY, { holdAt: LANE_HOLD_AT })
     this.sessions = new SessionPool(this)
     this.playback = createPlayback(this)
+    this.loggedInAt = 0 // when the current session logged in (playback.mjs asks for no recording dates just after)
     this.lastOwnPoll = 0 // when this process last read the camera list itself
     this.workerListAt = 0 // when the live worker last sent its camera list (STATS)
     this.refreshTimer = null
@@ -434,9 +440,14 @@ export class Nvr {
     return this.status === 'online'
   }
 
-  /** Recovering, or SDK calls to this NVR are stuck: don't start optional work (playback logins, tests). */
+  /**
+   * Recovering, or SDK calls to this NVR are stuck, or the SDK itself is (sdk.mjs sdkStuck: a call
+   * to any NVR overdue with nothing back since): don't start optional work (playback, settings,
+   * event searches, tests). The SDK runs one call at a time for every NVR, so work for this NVR
+   * would only queue behind another NVR's stuck call.
+   */
   get degraded() {
-    return !this.online || this.relogging || this.probing || lateCalls(this.id) > 0
+    return !this.online || this.relogging || this.probing || lateCalls(this.id) > 0 || sdkStuck()
   }
 
   info() {
@@ -485,6 +496,7 @@ export class Nvr {
         if (userId >= 0) {
           this.gen++
           this.userId = userId
+          this.loggedInAt = Date.now()
           this.model = String(info.deviceProduct ?? '').replace(/\0.*$/, '')
           this.serial = String(info.szSN ?? '').replace(/\0.*$/, '').trim()
           this.health = { channelFailures: 0, liveFailures: 0 }
@@ -544,8 +556,9 @@ export class Nvr {
   }
 
   async #refresh() {
-    // one at a time, and not while this NVR cools down after a late call (it would only add another and renew the cool-down)
-    if (this.userId < 0 || this.relogging || this.connecting || this.refreshing || nvrCooling(this.id)) return
+    // one at a time, and not while this NVR cools down after a late call (it would only add another and renew the cool-down),
+    // nor while the SDK is stuck on any NVR's call (it would only queue behind it)
+    if (this.userId < 0 || this.relogging || this.connecting || this.refreshing || nvrCooling(this.id) || sdkStuck()) return
     // the worker polls and sends the list: only a slow keepalive here (keeps this control login
     // checked for picture settings, playback and motion search)
     if (this.#workerPolls && Date.now() - this.lastOwnPoll < CONTROL_KEEPALIVE_MS) return
@@ -663,19 +676,20 @@ export class Nvr {
     const playing = [...this.streams.values()].filter((s) => s.state === 'playing')
     const stalled = playing.filter((s) => s.stalled)
     // calls to this NVR are stuck in the SDK or just came back late (sdk.mjs nvrCooling): restarts
-    // would only pile on. Its stalled streams are handled once it has cooled down.
-    if (nvrCooling(this.id)) {
-      if (stalled.length && !this.stallsHeld) {
-        this.stallsHeld = true
-        console.warn(`[${this.id}] ${stalled.length} stalled stream${stalled.length === 1 ? '' : 's'} left alone while this NVR answers slowly; restarting once it has cooled down`)
-      }
-      return
+    // would only pile on. Its stalled streams are handled once it has cooled down -- except the
+    // recorder's, as soon as none of those calls is still inside the SDK (#stallHeld)
+    const held = stalled.filter((s) => this.#stallHeld(s))
+    if (!nvrCooling(this.id)) this.stallsHeld = false
+    else if (held.length && !this.stallsHeld) {
+      this.stallsHeld = true
+      console.warn(`[${this.id}] ${held.length} stalled stream${held.length === 1 ? '' : 's'} left alone while this NVR answers slowly; restarting once it has cooled down`)
     }
-    this.stallsHeld = false
-    if (stalled.length === 0) return
+    const due = stalled.filter((s) => !held.includes(s))
+    if (due.length === 0) return
     this.checking = true
     const gen = this.gen
     try {
+      // (the held ones count here too: many stalled at once is the NVR's problem, whoever's they are)
       if (stalled.length >= 3 && stalled.length >= playing.length * MASS_STALL_SHARE) {
         if (Date.now() - this.probeFailedAt < PROBE_BACKOFF_MS) return
         this.probing = true
@@ -694,14 +708,25 @@ export class Nvr {
           return
         }
       }
-      for (const s of stalled) {
-        if (gen !== this.gen || !s.stalled) continue
+      for (const s of due) {
+        // (the NVR may have started cooling meanwhile: a restart came back late)
+        if (gen !== this.gen || !s.stalled || this.#stallHeld(s)) continue
         await s.restart('stalled')
         await sleep(RESTART_SPACING_MS)
       }
     } finally {
       this.checking = false
     }
+  }
+
+  /**
+   * Whether the NVR's cool-down holds back this stalled stream's restart. The recorder's stream is
+   * held only while one of the NVR's calls is still inside the SDK late, as its starts are (live.mjs
+   * #coolingHolds): a viewer's LivePlay back late (03:14:14, 03:50:51, 04:10:26) otherwise left a
+   * recorded camera that stalled in that minute unrecorded until the cool-down was over.
+   */
+  #stallHeld(s) {
+    return nvrCooling(this.id) && (!s.recorded || lateCalls(this.id) > 0)
   }
 
   async stop() {
@@ -854,10 +879,35 @@ const recordingChannels = (nvrId, idx) => {
       return Boolean(mode) && mode !== 'off'
     })
 }
+const REC_FLOWING_MS = 10_000 // a camera whose recorder had a frame this recently is recording
+/**
+ * Whether the workers are recording now: cameras whose recorder had a frame in the last 10 s, from
+ * each worker's STATS (sent every 5 s; a worker that stops sending them soon counts as not
+ * recording). The watchdog asks before it kills this process (spareWhile in startRecording): the
+ * kill would take every worker, and all recording, with it.
+ * @returns {string} e.g. '64 cameras on 4 NVRs', or '' when none is recording
+ */
+export const recordingActive = (now = Date.now()) => {
+  let cams = 0
+  let on = 0
+  for (const n of nvrs.values()) {
+    const rec = n.worker?.stats()?.rec
+    if (!rec || typeof rec !== 'object') continue
+    const k = Object.values(rec).filter((c) => Number.isFinite(c?.lastFrameAt) && now - c.lastFrameAt < REC_FLOWING_MS).length
+    if (k) {
+      cams += k
+      on++
+    }
+  }
+  return cams ? `${cams} camera${cams === 1 ? '' : 's'} on ${on} NVR${on === 1 ? '' : 's'}` : ''
+}
+
 let recordingStarted = false
 function startRecording() {
   if (recordingStarted) return
   recordingStarted = true
+  // a stuck SDK in this process is not worth every camera's recording (watchdog.mjs spareWhile)
+  spareWhile(recordingActive)
   try {
     index = openRecIndex(REC_DB)
   } catch (e) {
@@ -889,7 +939,7 @@ const makeNvr = (cfg) => {
 /** @type {Map<string, Nvr>} */
 export const nvrs = new Map()
 
-const STOP_WAIT_MS = 8500 // the workers get 8 s to close their segments and log out (worker-supervisor.mjs)
+const STOP_WAIT_MS = 8500 // the workers get 6 s to close their segments (worker-supervisor.mjs), then this process's own logout
 const bounded = (p) => Promise.race([p, sleep(STOP_WAIT_MS)])
 
 let syncing = Promise.resolve()
@@ -975,7 +1025,9 @@ async function startEvents() {
     recordings: (nvr, ch, date) => nvr.playback.recordings(ch, date),
     clock: (nvr) => nvr.playback.clock(),
     onEvent: (event) => void notifier.handle(event).catch((e) => console.warn(`[alarms] ${e.message}`)),
-    log: console.warn
+    log: console.warn,
+    // any overdue call, for any NVR: the SDK runs one call at a time for all of them
+    sdkBusy: () => lateCalls() > 0
   })
 
   const every = (ms, fn) => {

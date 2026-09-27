@@ -58,6 +58,9 @@
 // arrives two minutes late is still useful — so the poller:
 //   - asks one camera at a time, never a burst, and rests between cameras
 //   - skips an NVR that is offline, degraded, refusing streams, or already busy with a search
+//   - runs one pass at a time, and asks nobody while any SDK call in this process is overdue: the
+//     SDK runs one call at a time for every NVR, so a question to another NVR only queues behind
+//     the stuck call (on 09-27 six such questions turned one stuck FindRecDate into a restart)
 //   - backs off exponentially on every failure and does not come back for a while
 //   - runs at the lane's LOW priority through the playback search the timeline already uses, so it
 //     queues behind live video rather than in front of it
@@ -304,9 +307,11 @@ export const backoffFor = (fails) => BACKOFF_MS[Math.min(Math.max(0, fails - 1),
  * intake is quiet rather than looking broken.
  * @returns {{ ok: boolean, why: string }}
  */
-export function pollable(nvr, nowMs, { nextAt = 0, fails = 0 } = {}) {
+export function pollable(nvr, nowMs, { nextAt = 0, fails = 0, sdkBusy = false } = {}) {
   if (!nvr) return { ok: false, why: 'unknown NVR' }
   if (!nvr.online) return { ok: false, why: `${nvr.name ?? nvr.id} is offline` }
+  // process-wide: whichever NVR the overdue call belongs to, a search here would queue behind it
+  if (sdkBusy) return { ok: false, why: 'waiting: an NVR call is overdue, and any question now would only queue behind it' }
   if (nvr.degraded) return { ok: false, why: `${nvr.name ?? nvr.id} is busy or recovering` }
   if (nvr.stopped) return { ok: false, why: 'the NVR has been stopped' }
   // A box refusing streams is a box with nothing to spare; a search would only make it worse.
@@ -349,11 +354,17 @@ export function daysToAsk(fromMs, toMs, tzOffsetMs = 0, maxDays = 2) {
  * @param {(event: object) => void} [deps.onEvent] called for each newly stored event (the rules run here)
  * @param {() => number} [deps.now]
  * @param {(line: string) => void} [deps.log]
+ * @param {() => boolean} [deps.sdkBusy] true while any SDK call in this process is overdue
+ *   (sdk.mjs lateCalls() > 0): then no NVR is asked at all
  */
-export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null, onEvent = () => {}, now = Date.now, log = console.log, store = { addEvent, lastEventMs } }) {
+export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null, onEvent = () => {}, now = Date.now, log = console.log, store = { addEvent, lastEventMs }, sdkBusy = () => false }) {
   /** nvr id -> { nextAt, fails, queue: [ch], lastWhy } */
   const state = new Map()
   let offline = new Map() // camera key -> online, for the offline/online comparison
+  // A pass still waiting (its clock read or search queued behind a slow call) when the next 5 s
+  // tick comes: that tick does nothing. Without this each tick asked another NVR's clock, and
+  // every one of those queued behind the same stuck call.
+  let ticking = false
 
   const stateOf = (id) => {
     let s = state.get(id)
@@ -382,48 +393,64 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
     return { stored, why: '' }
   }
 
+  /** One pass: the first NVR that may be asked gets one camera asked. */
+  async function pass() {
+    const nowMs = now()
+    let busy = false
+    try {
+      busy = Boolean(sdkBusy())
+    } catch {}
+    for (const nvr of listNvrs()) {
+      const s = stateOf(nvr.id)
+      const can = pollable(nvr, nowMs, { nextAt: s.nextAt, fails: s.fails, sdkBusy: busy })
+      if (!can.ok) {
+        // A backoff reason must not paper over the failure that caused it: status() shows the
+        // failure while one is outstanding, because 'asked recently' explains nothing.
+        s.lastWhy = can.why
+        continue
+      }
+      if (!s.queue.length) s.queue = camerasOf(nvr).map((c) => (typeof c === 'number' ? c : c.ch)).filter((c) => Number.isInteger(c))
+      const ch = s.queue.shift()
+      if (ch === undefined) {
+        s.lastWhy = 'this NVR reports no cameras'
+        s.nextAt = nowMs + MIN_POLL_MS
+        continue
+      }
+      try {
+        const r = await pollCamera(nvr, ch)
+        s.fails = 0
+        s.lastWhy = ''
+        s.lastError = null
+        // The rest is per camera; the whole-NVR minimum only applies once the list is exhausted.
+        s.nextAt = nowMs + (s.queue.length ? CAMERA_REST_MS : MIN_POLL_MS)
+        return { nvr: nvr.id, ch, stored: r.stored }
+      } catch (e) {
+        s.fails++
+        s.lastWhy = `could not be asked: ${String(e?.message ?? e).slice(0, 80)}`
+        s.lastError = s.lastWhy
+        s.nextAt = nowMs + backoffFor(s.fails)
+        s.queue = [] // start the list again next time rather than skipping the rest of the cameras
+        log(`[events] ${nvr.id}/${ch + 1}: ${s.lastWhy}; next try in ${Math.round(backoffFor(s.fails) / 60_000)} min`)
+        return { nvr: nvr.id, ch, stored: 0, error: s.lastWhy }
+      }
+    }
+    return null
+  }
+
   return {
     /**
      * One pass: at most one camera on one NVR. Returns what it did, so a caller (and the tests) can
-     * see that a quiet intake is quiet for a reason rather than broken.
+     * see that a quiet intake is quiet for a reason rather than broken. null: nothing was asked
+     * (also while the previous pass is still waiting).
      */
     async tick() {
-      const nowMs = now()
-      for (const nvr of listNvrs()) {
-        const s = stateOf(nvr.id)
-        const can = pollable(nvr, nowMs, s)
-        if (!can.ok) {
-          // A backoff reason must not paper over the failure that caused it: status() shows the
-          // failure while one is outstanding, because 'asked recently' explains nothing.
-          s.lastWhy = can.why
-          continue
-        }
-        if (!s.queue.length) s.queue = camerasOf(nvr).map((c) => (typeof c === 'number' ? c : c.ch)).filter((c) => Number.isInteger(c))
-        const ch = s.queue.shift()
-        if (ch === undefined) {
-          s.lastWhy = 'this NVR reports no cameras'
-          s.nextAt = nowMs + MIN_POLL_MS
-          continue
-        }
-        try {
-          const r = await pollCamera(nvr, ch)
-          s.fails = 0
-          s.lastWhy = ''
-          s.lastError = null
-          // The rest is per camera; the whole-NVR minimum only applies once the list is exhausted.
-          s.nextAt = nowMs + (s.queue.length ? CAMERA_REST_MS : MIN_POLL_MS)
-          return { nvr: nvr.id, ch, stored: r.stored }
-        } catch (e) {
-          s.fails++
-          s.lastWhy = `could not be asked: ${String(e?.message ?? e).slice(0, 80)}`
-          s.lastError = s.lastWhy
-          s.nextAt = nowMs + backoffFor(s.fails)
-          s.queue = [] // start the list again next time rather than skipping the rest of the cameras
-          log(`[events] ${nvr.id}/${ch + 1}: ${s.lastWhy}; next try in ${Math.round(backoffFor(s.fails) / 60_000)} min`)
-          return { nvr: nvr.id, ch, stored: 0, error: s.lastWhy }
-        }
+      if (ticking) return null
+      ticking = true
+      try {
+        return await pass()
+      } finally {
+        ticking = false
       }
-      return null
     },
 
     /** Compares camera online state with the last pass and files anything that changed. */

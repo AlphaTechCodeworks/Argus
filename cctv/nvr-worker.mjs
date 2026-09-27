@@ -9,9 +9,10 @@ import { MSG, frameMsg, streamKey } from './worker-ipc.mjs'
 
 if (process.env.CCTV_WORKER_FAKE_SDK === '1') await import('./test/fake-sdk.mjs') // tests: replaces NET_SDK
 const { Nvr, readConfig } = await import('./nvrs.mjs')
-const { sdkStats } = await import('./sdk.mjs')
-const { startWatchdog } = await import('./watchdog.mjs')
+const { refuseNewCalls, sdkStats } = await import('./sdk.mjs')
+const { spareWhile, startWatchdog } = await import('./watchdog.mjs')
 const { Recorder } = await import('./recorder.mjs')
+const { linkReset } = await import('./live.mjs')
 
 const id = process.env.CCTV_WORKER_NVR
 const cfg = readConfig().nvrs.find((n) => n?.id === id)
@@ -23,6 +24,7 @@ if (!cfg) {
 startWatchdog() // kills this worker only; the supervisor starts a new one
 const nvr = new Nvr(cfg) // logs in by itself (the constructor connects)
 const taps = new Map() // key -> { tap, stream, ch, type }
+let stopping = false // shutdown() has begun
 // server recording (settings from the parent; off until a camera's mode is not 'off'): its taps
 // sit on the same main-stream LiveStream as the live tap, so both share one pull from the NVR
 const recorder = new Recorder({
@@ -34,6 +36,9 @@ const recorder = new Recorder({
   channels: () => nvr.channels.map((c) => ({ ch: c.ch, online: c.online !== false })), // offline slots are not recorded
   send: (m) => process.connected && process.send(m)
 })
+// this worker's watchdog judges a stuck call by the recording: longer while its video flows, less
+// once it has frozen (watchdog.mjs)
+spareWhile(() => recorder.flow())
 // bytes not yet handed to the parent count as the tap's bufferedAmount. Over TAP_CAP the tap gets
 // nothing (keyframes included) until it is below TAP_RESUME, then resumes on a keyframe
 // (backpressure.mjs gateSend). A tap is never closed for being slow: stuckMs 0.
@@ -44,7 +49,7 @@ const TAP_RESUME = 1024 * 1024
 const tapFor = (key, background = false) => {
   let pending = 0
   return {
-    // only warm-ups asked for it: a real viewer's stream starts ahead of it (live.mjs urgent())
+    // only warm-ups (or the sub-bridge) asked for it: a real viewer's stream starts ahead of it (live.mjs rank())
     background,
     OPEN: 1,
     readyState: 1,
@@ -63,17 +68,37 @@ const tapFor = (key, background = false) => {
   }
 }
 
+// A background WANT for a MAIN stream comes only from the sub-bridge (sub-bridge.mjs: a cold sub
+// tile shows the camera's main meanwhile; warm-ups ask for subs only). It must never make this
+// worker start a main stream: for a camera recorded on its sub that was a LivePlay, and a
+// StopLivePlay 10 s later, per tile, on the NVRs that refuse those mains anyway (they started 8 of
+// the 21 cool-downs on 09-27). So such a tap only joins a main stream that is already playing --
+// the recorder's own pull, no SDK call -- and is parked until then; the 250 ms loop below attaches
+// it once that stream plays. A parked tap never creates a LiveStream.
+const bridgeOnly = (t) => t.type === 0 && t.tap.background === true
+const parked = (t) => bridgeOnly(t) && nvr.streams.get(streamKey(t.ch, t.type))?.state !== 'playing'
+
 const attach = (key) => {
   const t = taps.get(key)
-  if (!t || t.stream) return
+  if (!t || t.stream || parked(t)) return
   t.stream = nvr.getStream(t.ch, t.type)
   t.stream.add(t.tap)
+}
+
+/** The tap lets go of its stream; with nobody else on it, the stream stops (idle-stops.mjs pacing). */
+const detach = (t) => {
+  const s = t.stream
+  t.stream = null
+  if (!s) return
+  s.remove(t.tap)
+  // the parent already waited out the linger: stop now rather than linger twice
+  if (s.clients.size === 0) s.stopWhenIdle()
 }
 
 // streams are started only while the NVR is logged in (a LivePlay before that only fails and
 // backs off); after a relogin (LiveStream.fail dropped the taps) they are started again
 let lastSentStatus = ''
-setInterval(() => {
+const loop = setInterval(() => {
   // the main process learns of a login (or a drop) at once, not at the next 5 s stats
   if (nvr.status !== lastSentStatus) {
     lastSentStatus = nvr.status
@@ -82,10 +107,14 @@ setInterval(() => {
   if (nvr.userId < 0 || !nvr.online) return
   for (const [key, t] of taps) {
     if (t.stream && (t.stream.stopped || !t.stream.clients.has(t.tap))) t.stream = null
+    // nor does the bridge's tap keep a main stream going by itself once it stops playing (the
+    // recorder let go of a refused main, which would go on restarting for the bridge alone)
+    if (t.stream && bridgeOnly(t) && t.stream.state !== 'playing' && t.stream.clients.size === 1) detach(t)
     if (!t.stream) attach(key)
   }
   recorder.sync() // also picks up cameras found after login when the default mode records
-}, 250).unref()
+}, 250)
+loop.unref()
 
 // streams that stop delivering video while the NVR session stays up are restarted here, like
 // startNvrs() does in the main process (Nvr.checkStalled skips only the parent's worker proxy).
@@ -98,11 +127,15 @@ const stallTimer = setInterval(() => {
 stallTimer.unref()
 
 process.on('message', (m) => {
+  // stopping: nothing is started, stopped, re-created or restarted any more (see shutdown)
+  if (stopping) return
   if (m?.t === MSG.WANT) {
     const key = streamKey(m.ch, m.type)
     const had = taps.get(key)
     if (had) {
       had.tap.background = m.background === true // a viewer wants it now, or only warm-ups again
+      // a viewer now wants a main the bridge's tap was parked on: it starts at once
+      if (!had.stream && nvr.userId >= 0 && nvr.online) attach(key)
       return
     }
     taps.set(key, { tap: tapFor(key, m.background === true), stream: null, ch: m.ch, type: m.type })
@@ -111,11 +144,7 @@ process.on('message', (m) => {
     const key = streamKey(m.ch, m.type)
     const t = taps.get(key)
     taps.delete(key)
-    if (t?.stream) {
-      t.stream.remove(t.tap)
-      // the parent already waited out the linger: stop now rather than linger twice
-      if (t.stream.clients.size === 0) t.stream.stop()
-    }
+    if (t) detach(t)
   } else if (m?.t === MSG.SETTINGS) {
     recorder.apply(m)
   } else if (m?.t === MSG.EVENTS) {
@@ -124,27 +153,41 @@ process.on('message', (m) => {
     recorder.applyEvents(m)
   } else if (m?.t === MSG.RESTART) {
     nvr.streams.get(streamKey(m.ch, m.type))?.restart(String(m.why || 'restart asked'))
+  } else if (m?.t === MSG.LINKRESET) {
+    // the SDK printed that the NVR dropped this worker's links (worker-supervisor.mjs): viewers' new
+    // streams wait while it reconnects them (live-pacer.mjs); the recorder's do not
+    linkReset(id)
   } else if (m?.t === MSG.STOP) shutdown()
 })
 process.on('disconnect', shutdown)
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
 
-let stopping = false
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+/**
+ * Stops the worker: the recording's segments are closed and reported, then SIGKILL, with no
+ * StopLivePlay and no Logout. The 250 ms loop used to re-create every camera the recorder had
+ * just stopped (04:39:04: 'recording off', then 'recording on' for all 25 and new mains starting
+ * in the old worker), and the stops and logout of the old way aborted inside the SDK at 03:35:48,
+ * 04:03:58 and 04:39:09. The kernel closes the NVR's sockets at the kill, as at every watchdog kill.
+ */
 async function shutdown() {
   if (stopping) return
   stopping = true
-  clearInterval(stallTimer) // no restarts while the streams are being stopped
+  clearInterval(loop) // no re-attached taps, no re-created cameras
+  clearInterval(stallTimer) // no stall restarts
+  refuseNewCalls('the worker is stopping') // nothing new enters the SDK (timers of streams included)
+  nvr.lane.clear('the worker is stopping')
   // tests only (with the fake SDK): a worker that overstays its stop
   const slow = process.env.CCTV_WORKER_FAKE_SDK === '1' ? Number(process.env.CCTV_WORKER_TEST_SLOW_STOP_MS || 0) : 0
-  if (slow) await new Promise((r) => setTimeout(r, slow))
+  if (slow) await sleep(slow)
   // closes (fsyncs) the open segments; their messages go out before the exit. A disk that does
   // not finish within 4 s: those files are picked up by the recovery scan at the next start
   allowAllCloses()
-  await Promise.race([recorder.stop(), new Promise((r) => setTimeout(r, 4000))])
-  await new Promise((r) => setImmediate(r))
-  // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
-  await Promise.race([nvr.stop().catch(() => {}), new Promise((r) => setTimeout(r, 3000))])
+  await Promise.race([recorder.stop(), sleep(4000)])
+  // messages go to the parent in order: once a last one has been handed over, so have the
+  // segments' (a kill straight after recorder.stop() could lose them)
+  await Promise.race([new Promise((r) => sendStats(r) || r()), sleep(1000)])
   process.kill(process.pid, 'SIGKILL')
 }
 
@@ -152,5 +195,14 @@ process.send?.({ t: MSG.READY })
 // (channels: the worker polls the camera list; the main process uses this one, nvrs.mjs workerStats)
 // refusals: the streams live in THIS process, so the main process cannot count them itself; without
 // this number the Health page's "refused" column and the nvr-refusing alert are both dead letters.
-const sendStats = () => process.connected && process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, streams: nvr.streams.size, refusals: recentRefusals(nvr.streams.values(), Date.now()), channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), sdk: sdkStats(), rec: recorder.status() })
+// (sent: called once the message has been handed over; returns false when nothing was sent)
+const sendStats = (sent) => {
+  if (!process.connected) return false
+  try {
+    process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, streams: nvr.streams.size, refusals: recentRefusals(nvr.streams.values(), Date.now()), channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), sdk: sdkStats(), rec: recorder.status() }, typeof sent === 'function' ? () => sent() : undefined)
+    return true
+  } catch {
+    return false
+  }
+}
 setInterval(sendStats, 5000).unref()

@@ -6,11 +6,16 @@
 // process-wide connect lane instead. A stream that stops delivering video is
 // restarted in place: viewers stay connected (they wait for the next keyframe),
 // and repeated restarts back off. While the NVR is cooling down after late calls
-// (sdk.mjs nvrCooling), starts wait instead of adding calls to a slow NVR.
+// (sdk.mjs nvrCooling), starts wait instead of adding calls to a slow NVR -- except
+// the recorder's, once none of that NVR's calls is still inside the SDK late.
+// Inside an NVR's worker, viewers' starts are paced (live-pacer.mjs); a stream nobody
+// wants any more is stopped through the NVR's idle-stop queue (idle-stops.mjs).
 import { CAP_BYTES, gateSend } from './backpressure.mjs'
 import { replayGop } from './gop-replay.mjs'
-import { PRIORITY, connectLane } from './lanes.mjs'
-import { CODEC_H264, FRAME_TYPE_VIDEO, FRAME_TYPE_VIDEO_FORMAT, NET_SDK, codecOf, encodeFrame, lastError, liveFrames, nvrCooling, sdkCallT } from './sdk.mjs'
+import { idleStopQueue } from './idle-stops.mjs'
+import { PRIORITY, RANK, connectLane } from './lanes.mjs'
+import { PACE, livePacer } from './live-pacer.mjs'
+import { CODEC_H264, FRAME_TYPE_VIDEO, FRAME_TYPE_VIDEO_FORMAT, NET_SDK, codecOf, encodeFrame, lastError, lastLateReturnAt, lateCalls, liveCallsInFlight, liveFrames, nvrCooling, onCallSettled, sdkCallT } from './sdk.mjs'
 
 const MAX_GOP_FRAMES = 400 // frames kept since the last keyframe, so new viewers start instantly
 // slow sockets: nothing is sent over the cap (1 MB sub, 4 MB main), see backpressure.mjs
@@ -45,6 +50,51 @@ const FAST_REFUSAL_MS = 1000
 // a valid handle that sends no video this long after the start: the NVR refused it silently
 // (nvr-2 does this at its stream limit); treated as a fast refusal
 export const FIRST_FRAME_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1' && Number(process.env.CCTV_TEST_FIRST_FRAME_MS)) || 8000
+
+// Viewers' starts are paced in the NVR workers, where recording shares the NVR's login with them.
+// The main process without workers (CCTV_LIVE_WORKER off) starts them as it always has.
+const PACED = Boolean(process.env.CCTV_WORKER_NVR)
+const pacers = new Map() // NVR id -> livePacer
+const idleStops = new Map() // NVR id -> idleStopQueue
+const pacerFor = (id) => {
+  let p = pacers.get(id)
+  if (!p) pacers.set(id, (p = livePacer({ liveInFlight: () => liveCallsInFlight(id), lateNow: () => lateCalls(id), lateAt: () => lastLateReturnAt(id) })))
+  return p
+}
+const idleStopsFor = (id) => {
+  let q = idleStops.get(id)
+  if (!q) idleStops.set(id, (q = idleStopQueue({ busy: () => liveCallsInFlight(id) > 0 })))
+  return q
+}
+// a call that returns may be what a paced start or an idle stop is waiting for. The pacers look a
+// moment later (setImmediate): a start whose LivePlay just returned first tells its pacer how long it
+// took and lets go of its turn (#start, in the microtasks after this), so the next start does not go
+// by the old reading
+let pacerKick = null
+onCallSettled(() => {
+  for (const q of idleStops.values()) q.kick()
+  if (pacerKick !== null || pacers.size === 0) return
+  pacerKick = setImmediate(() => {
+    pacerKick = null
+    for (const p of pacers.values()) p.kick()
+  })
+})
+
+const resetLoggedAt = new Map() // NVR id -> when the hold was last logged
+/**
+ * The NVR dropped its links (the worker's SDK printed so; worker-supervisor.mjs, MSG.LINKRESET):
+ * viewers' and warm-ups' new starts on it wait PACE.RESET_HOLD_MS while the SDK reconnects its
+ * links (live-pacer.mjs); the recorder's go on. Outside an NVR's worker nothing is paced: nothing to hold.
+ */
+export const linkReset = (nvrId, at = Date.now()) => {
+  if (!PACED) return
+  const logged = resetLoggedAt.get(nvrId) ?? -Infinity
+  if (at - logged >= PACE.RESET_HOLD_MS) {
+    resetLoggedAt.set(nvrId, at)
+    console.warn(`[${nvrId}] the NVR dropped its links: viewers' new streams on it wait ${PACE.RESET_HOLD_MS / 1000} s`)
+  }
+  pacerFor(nvrId).linkReset(at)
+}
 
 export class LiveStream {
   /**
@@ -91,6 +141,33 @@ export class LiveStream {
     return this.state === 'playing' && Date.now() - this.lastFrameAt > STALL_MS
   }
 
+  /** The recorder writes this stream (its tap, recorder.mjs, is one of the clients). */
+  get recorded() {
+    for (const c of this.clients) if (c.recorder === true) return true
+    return false
+  }
+
+  /** Its place in the lanes (lanes.mjs RANK): the recorder's first, then a viewer's, then background work. */
+  rank() {
+    let r = RANK.BACKGROUND
+    for (const c of this.clients) {
+      if (c.recorder === true) return RANK.RECORDER
+      if (!c.background) r = RANK.VIEWER
+    }
+    return r
+  }
+
+  /**
+   * Whether the NVR's cool-down holds this start back (calls to it are stuck in the SDK or just came
+   * back late). The recorder's stream is held only while one of those calls is still inside the SDK:
+   * a viewer's LivePlay that came back late (03:14:14, 03:50:51, 04:10:26 ...) held every recording
+   * restart on that NVR for a minute.
+   */
+  #coolingHolds() {
+    if (!nvrCooling(this.nvr.id)) return false
+    return !this.recorded || lateCalls(this.nvr.id) > 0
+  }
+
   async #start() {
     this.state = 'starting'
     const nvr = this.nvr
@@ -107,7 +184,7 @@ export class LiveStream {
       }
       // checked when its turn comes (first starts and restarts, main and sub): calls to this NVR
       // are stuck in the SDK or just came back late, so don't add one; retried below
-      if (nvrCooling(nvr.id)) {
+      if (this.#coolingHolds()) {
         cooling = true
         this.nativeStarting = false
         return Promise.resolve(-1)
@@ -139,19 +216,33 @@ export class LiveStream {
     }
     let callStart = 0
     let callError = null
-    // someone is waiting to see this camera (not only the recorder or a warm-up): start it first
-    const urgent = () => [...this.clients].some((c) => !c.background)
+    // the recorder's stream first, then one someone is waiting to see, then warm-ups (lanes.mjs RANK)
+    const rank = () => this.rank()
     const timed = () => {
       callStart = Date.now()
       return call()
     }
+    // a viewer's or a warm-up's start waits its turn on this NVR first (live-pacer.mjs); the
+    // recorder's never does, nor one the cool-down holds anyway (it is only put off below)
+    let paced = null
+    if (PACED && rank() !== RANK.RECORDER && !this.#coolingHolds()) {
+      paced = await pacerFor(nvr.id).wait({ rank, cancelled: () => this.stopped, bypass: () => rank() === RANK.RECORDER })
+    }
     const handle = await (this.streamType === 0
-      ? connectLane.run(timed, { urgent }) // opens a new NVR connection: one at a time, process-wide
-      : nvr.lane.run(timed, { priority: PRIORITY.NORMAL, urgent })
-    ).catch((e) => {
-      callError = e
-      return -1
-    })
+      ? connectLane.run(timed, { rank }) // opens a new NVR connection: one at a time, process-wide
+      : nvr.lane.run(timed, { priority: PRIORITY.NORMAL, rank })
+    )
+      .catch((e) => {
+        callError = e
+        return -1
+      })
+      .finally(() => {
+        // how quickly this NVR answers a LivePlay now (anyone's): the pacer's gap and its "slow",
+        // learnt before this start lets go of its turn. The other way round, the next start went by
+        // the old reading: a LivePlay back after 8 s let another go next to one still in flight
+        if (PACED && callStart && !cooling && !notTried) pacerFor(nvr.id).played(Date.now() - callStart)
+        paced?.()
+      })
     if (this.stopped) {
       if (handle > 0) await this.#stopHandle(handle, 'stopped while starting')
       return
@@ -240,7 +331,10 @@ export class LiveStream {
   add(ws) {
     clearTimeout(this.stopTimer)
     this.stopTimer = null
+    idleStops.get(this.nvr.id)?.cancel(this) // wanted again: it plays on, no stop
     this.clients.add(ws)
+    // the recorder's tap: a start of this stream waiting in the pacer goes now; a viewer's: ahead of warm-ups
+    if (this.state === 'starting') pacers.get(this.nvr.id)?.kick()
     // replay the current GOP so the picture appears without waiting for the next keyframe
     if (this.gop.length > 0) replayGop(this.gop, ws)
     else {
@@ -253,8 +347,20 @@ export class LiveStream {
     this.clients.delete(ws)
     if (this.clients.size === 0 && !this.stopped) {
       clearTimeout(this.stopTimer)
-      this.stopTimer = setTimeout(() => this.stop(), STOP_DELAY_MS[this.streamType] ?? 10_000)
+      this.stopTimer = setTimeout(() => this.stopWhenIdle(), STOP_DELAY_MS[this.streamType] ?? 10_000)
     }
+  }
+
+  /**
+   * Nobody wants this stream: it is stopped through its NVR's idle-stop queue (idle-stops.mjs), at
+   * most one such stop a second and none next to another live call of that NVR. Wanted again before
+   * its turn (add), it plays on.
+   */
+  stopWhenIdle() {
+    clearTimeout(this.stopTimer)
+    this.stopTimer = null
+    if (this.stopped || this.clients.size > 0) return
+    idleStopsFor(this.nvr.id).add(this)
   }
 
   /** Stops and starts the stream again (viewers stay connected); repeated restarts back off. */
@@ -279,8 +385,9 @@ export class LiveStream {
     clearTimeout(this.retryTimer)
     this.retryTimer = setTimeout(() => {
       if (this.stopped) return
-      // don't add calls while this NVR has calls stuck in the SDK or just back late, or our last start still runs there
-      if (this.nativeStarting || nvrCooling(this.nvr.id) || this.nvr.userId < 0) return this.#scheduleRestart(BUSY_RETRY_MS)
+      // don't add calls while this NVR has calls stuck in the SDK or just back late (the recorder's
+      // stream: only while stuck), or our last start still runs there
+      if (this.nativeStarting || this.#coolingHolds() || this.nvr.userId < 0) return this.#scheduleRestart(BUSY_RETRY_MS)
       this.op = this.#start()
     }, delay)
   }
@@ -323,6 +430,8 @@ export class LiveStream {
     clearTimeout(this.retryTimer)
     clearTimeout(this.keyTimer)
     clearTimeout(this.firstFrameTimer)
+    idleStops.get(this.nvr.id)?.cancel(this)
+    pacers.get(this.nvr.id)?.kick() // a start of ours waiting there leaves the queue at once
     this.nvr.streamStopped(this)
     // wait for a start or stop already in progress, then stop whatever handle it left
     this.op = this.op

@@ -8,13 +8,19 @@
 // process-wide lane.
 //
 // A call that times out frees its lane slot, but the native call may still be
-// stuck inside the SDK. So while an NVR has that many overdue calls, its lane
+// stuck inside the SDK. So while an NVR has that many overdue calls (holdAt), its lane
 // holds back new work (stops excepted) until they really return, instead of
 // piling more calls into a stuck SDK. The process-wide lane does the same for
 // overdue calls of ANY NVR: the SDK makes other NVRs' calls queue behind them.
+//
+// Within a priority, jobs go by rank, then first come first served: the recorder's streams first,
+// then the ones a viewer is waiting for, then background work (warm-ups, the sub-bridge's stand-in).
+// Recording used to be "background", so after a restart every viewer's stream went ahead of it.
 import { lateCalls, onCallSettled } from './sdk.mjs'
 
 export const PRIORITY = { HIGH: 0, NORMAL: 1, LOW: 2 }
+/** Order within a priority: a stream the recorder writes, one a viewer waits for, background work. */
+export const RANK = { RECORDER: 0, VIEWER: 1, BACKGROUND: 2 }
 
 const lanes = new Set()
 onCallSettled(() => {
@@ -25,12 +31,14 @@ export class Lane {
   /**
    * @param {string} name for NVR lanes, the NVR id (used to find its overdue calls)
    * @param {number} concurrency
-   * @param {{ anyNvr?: boolean }} [opts] anyNvr: hold back for overdue calls of every NVR, not just this lane's
+   * @param {{ anyNvr?: boolean, holdAt?: number }} [opts] anyNvr: hold back for overdue calls of every
+   *   NVR, not just this lane's; holdAt: hold back from this many overdue calls (default: concurrency)
    */
-  constructor(name, concurrency, { anyNvr = false } = {}) {
+  constructor(name, concurrency, { anyNvr = false, holdAt = concurrency } = {}) {
     this.name = name
     this.concurrency = concurrency
     this.anyNvr = anyNvr
+    this.holdAt = holdAt
     this.running = 0
     this.queue = [] // { task, priority, seq, resolve, reject, queuedAt }
     this.seq = 0
@@ -39,39 +47,36 @@ export class Lane {
   }
 
   /**
-   * Runs task() when a slot is free. Higher priority (lower number) goes first, FIFO within a priority.
+   * Runs task() when a slot is free. Higher priority (lower number) goes first, then lower rank,
+   * then FIFO.
    * @template T
    * @param {() => Promise<T>} task
-   * @param {{ priority?: number }} [opts]
+   * @param {{ priority?: number, rank?: () => number }} [opts] rank (RANK): asked again each time a
+   *   job is picked, so a start queued as background work moves up once a viewer (or the recorder)
+   *   has come for that stream. Jobs without one rank as background work.
    * @returns {Promise<T>}
    */
-  /**
-   * @param {{ priority?: number, urgent?: () => boolean }} opts urgent: asked again each time a job
-   *   is picked -- true moves the job ahead of the others of its priority (a stream someone is
-   *   waiting to watch, ahead of the recorder's after a restart), even if it was queued first as
-   *   background work and a viewer arrived later
-   */
-  run(task, { priority = PRIORITY.NORMAL, urgent = null } = {}) {
+  run(task, { priority = PRIORITY.NORMAL, rank = null } = {}) {
     return new Promise((resolve, reject) => {
-      this.queue.push({ task, priority, urgent, seq: this.seq++, resolve, reject, queuedAt: Date.now() })
+      this.queue.push({ task, priority, rank, seq: this.seq++, resolve, reject, queuedAt: Date.now() })
       this.#order()
       this.kick()
     })
   }
 
   #order() {
-    const u = (j) => (j.urgent?.() ? 0 : 1)
-    this.queue.sort((a, b) => a.priority - b.priority || u(a) - u(b) || a.seq - b.seq)
+    const r = (j) => j.rank?.() ?? RANK.BACKGROUND
+    this.queue.sort((a, b) => a.priority - b.priority || r(a) - r(b) || a.seq - b.seq)
   }
 
   /** Starts queued jobs while slots are free (called on new jobs, finished jobs and settled native calls). */
   kick() {
-    // a viewer may have arrived for a queued background start since it was queued
-    if (this.queue.length > 1 && this.queue.some((j) => j.urgent)) this.#order()
+    // a viewer or the recorder may have come for a queued start since it was queued
+    if (this.queue.length > 1 && this.queue.some((j) => j.rank)) this.#order()
     while (this.running < this.concurrency && this.queue.length) {
       // with overdue calls stuck in the SDK for this NVR (any NVR: anyNvr), only stops may go ahead;
       // a native call returning kicks every lane (onCallSettled above), which ends the hold
-      if (this.queue[0].priority !== PRIORITY.HIGH && lateCalls(this.anyNvr ? undefined : this.name) >= this.concurrency) return
+      if (this.queue[0].priority !== PRIORITY.HIGH && lateCalls(this.anyNvr ? undefined : this.name) >= this.holdAt) return
       const job = this.queue.shift()
       this.running++
       Promise.resolve()

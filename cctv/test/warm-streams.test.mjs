@@ -1,6 +1,11 @@
 // Tests picking the cameras to keep streaming ahead of Live (warm-streams.mjs).
 //   node cctv/test/warm-streams.test.mjs
-import { pickWarm, startWarmStreams } from '../warm-streams.mjs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'warm-')) // (the default warm-out.json lands here, never in data/)
+const { FIRST_RUN_MS, OUT_FILE, OUT_SAVE_STEP_MS, RELEASE_PER_RUN, pickWarm, startWarmStreams } = await import('../warm-streams.mjs')
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -25,7 +30,7 @@ check('a camera no longer there is not kept', !pickWarm({ cameras: cams, orders:
     return streams.get(k)
   }
   let list = cams
-  const w = startWarmStreams({ cameras: () => list, orders: () => ({}), streamOf, log: () => {}, everyMs: 1e9 })
+  const w = startWarmStreams({ cameras: () => list, orders: () => ({}), streamOf, log: () => {}, everyMs: 1e9, firstRunMs: 0, outFile: null })
   w.run()
   check('the first screen has a viewer each', [...streams.values()].filter((s) => s.viewers.size === 1).length === 9)
   list = cams.map((c) => (c.nvr === 'a' && c.ch === 0 ? { ...c, online: false } : c))
@@ -52,12 +57,14 @@ check('a camera no longer there is not kept', !pickWarm({ cameras: cams, orders:
   let refusing = false
   const cams = Array.from({ length: 30 }, (_, i) => ({ nvr: 'v', ch: i, online: true }))
   const fake = () => ({ clients: new Set(), add(w) { this.clients.add(w) }, remove(w) { this.clients.delete(w) } })
-  const w = startWarmStreams({ cameras: () => cams, orders: () => ({}), streamOf: fake, roomy: () => !refusing, log: () => {}, everyMs: 1e9, now: () => t })
+  const w = startWarmStreams({ cameras: () => cams, orders: () => ({}), streamOf: fake, roomy: () => !refusing, log: () => {}, everyMs: 1e9, now: () => t, firstRunMs: 0, outFile: null })
   w.run()
   check('calm: 16 kept ready', w.held.size === 16, String(w.held.size))
   refusing = true
   w.run()
-  check('refusing: back to the first screen (9)', w.held.size === 9, String(w.held.size))
+  check('refusing: the extra ones are let go, 2 per pass', w.held.size === 14, String(w.held.size))
+  for (let i = 0; i < 3; i++) w.run()
+  check('... back to the first screen (9) after 4 passes', w.held.size === 9, String(w.held.size))
   refusing = false
   t += 60 * 60_000
   w.run()
@@ -65,6 +72,87 @@ check('a camera no longer there is not kept', !pickWarm({ cameras: cams, orders:
   t += 6 * 60 * 60_000
   w.run()
   check('six hours on: warmed again', w.held.size === 16, String(w.held.size))
+}
+const fake = () => ({ clients: new Set(), add(v) { this.clients.add(v) }, remove(v) { this.clients.delete(v) } })
+{
+  // nothing is warmed in the first 5 minutes after a start (which NVRs refuse is not known yet)
+  let t = 1_000_000
+  const cams = Array.from({ length: 20 }, (_, i) => ({ nvr: 'v', ch: i, online: true }))
+  const w = startWarmStreams({ cameras: () => cams, orders: () => ({}), streamOf: fake, roomy: () => true, log: () => {}, everyMs: 1e9, now: () => t, outFile: null })
+  check('first run: 5 minutes after start by default', FIRST_RUN_MS === 5 * 60_000)
+  w.run()
+  t += FIRST_RUN_MS - 1000
+  w.run()
+  check('nothing is added before 5 min', w.held.size === 0, String(w.held.size))
+  t += 1000
+  w.run()
+  check('... and the first screen plus the extra ones at 5 min', w.held.size === 16, String(w.held.size))
+}
+{
+  // an NVR kept out is still kept out after a restart (warm-out.json)
+  const file = join(mkdtempSync(join(tmpdir(), 'warm-out-')), 'warm-out.json')
+  let t = 5_000_000
+  const cams = Array.from({ length: 30 }, (_, i) => ({ nvr: i < 20 ? 'v' : 'calm', ch: i, online: true }))
+  let refusing = true
+  const opts = { cameras: () => cams, orders: () => ({}), streamOf: fake, roomy: (id) => !(refusing && id === 'v'), log: () => {}, everyMs: 1e9, now: () => t, firstRunMs: 0, outFile: file }
+  const a = startWarmStreams(opts)
+  a.run()
+  let saved = null
+  try { saved = JSON.parse(readFileSync(file, 'utf8')) } catch {}
+  check('an NVR put out is written to the file with its end', saved?.v === t + 6 * 60 * 60_000 && saved.calm === undefined, JSON.stringify(saved))
+  refusing = false // quiet now: a new instance must still keep it out
+  t += 30 * 60_000
+  const b = startWarmStreams(opts)
+  check('outUntil is read back by a new instance', b.outUntil.get('v') === saved?.v, JSON.stringify([...b.outUntil]))
+  b.run()
+  const vHeld = [...b.held.keys()].filter((k) => k.startsWith('v/')).length
+  check('... and that NVR stays at the first-screen rule', vHeld === 9, String(vHeld))
+  t += 6 * 60 * 60_000
+  const c = startWarmStreams(opts)
+  check('an entry that has run out is not read back', !c.outUntil.has('v'))
+  check('the default file is warm-out.json in the data folder', OUT_FILE === join(process.env.DATA_DIR, 'warm-out.json'))
+  check('(these tests wrote nothing into the default data folder)', !existsSync(OUT_FILE))
+}
+{
+  // an NVR that goes on refusing: the saved end moves on with it, so a restart 7 h after the first
+  // refusal (a deploy) still keeps it out
+  const file = join(mkdtempSync(join(tmpdir(), 'warm-out-')), 'warm-out.json')
+  let t = 9_000_000
+  const cams = Array.from({ length: 30 }, (_, i) => ({ nvr: i < 20 ? 'v' : 'calm', ch: i, online: true }))
+  let refusing = true
+  const opts = { cameras: () => cams, orders: () => ({}), streamOf: fake, roomy: (id) => !(refusing && id === 'v'), log: () => {}, everyMs: 1e9, now: () => t, firstRunMs: 0, outFile: file }
+  const read = () => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return null } }
+  const a = startWarmStreams(opts)
+  a.run()
+  const first = read()?.v
+  t += 60_000
+  a.run() // one pass later: moved on 1 min in memory, not written yet
+  check('refusing on: the file is not rewritten at every pass', read()?.v === first && a.outUntil.get('v') === t + 6 * 60 * 60_000, `${(a.outUntil.get('v') - read()?.v) / 1000} s behind`)
+  for (let i = 0; i < 7 * 60; i++) { t += 60_000; a.run() } // 7 h of passes, refusing all along
+  const lag = a.outUntil.get('v') - read()?.v
+  check(`refusing on for 7 h: the saved end follows (at most ${OUT_SAVE_STEP_MS / 60_000} min behind)`, lag >= 0 && lag < OUT_SAVE_STEP_MS, `${lag / 1000} s behind`)
+  refusing = false
+  t += 5 * 60_000 // a restart
+  const b = startWarmStreams(opts)
+  check('... a restart then keeps it out', b.outUntil.get('v') > t, `${(b.outUntil.get('v') - t) / 60_000} min left`)
+  b.run()
+  const vHeld = [...b.held.keys()].filter((k) => k.startsWith('v/')).length
+  check('... at the first-screen rule', vHeld === 9, String(vHeld))
+}
+{
+  // many warm streams no longer wanted at once are let go 2 per NVR per pass, not together
+  let t = 0
+  let cams = Array.from({ length: 16 }, (_, i) => ({ nvr: 'n', ch: i, online: true }))
+  const w = startWarmStreams({ cameras: () => cams, orders: () => ({}), streamOf: fake, roomy: () => true, log: () => {}, everyMs: 1e9, now: () => t, firstRunMs: 0, outFile: null })
+  w.run()
+  check('16 held', w.held.size === 16, String(w.held.size))
+  cams = cams.map((c) => ({ ...c, online: false })) // all 16 drop off the list
+  const sizes = []
+  for (let i = 0; i < 9; i++) {
+    w.run()
+    sizes.push(w.held.size)
+  }
+  check(`dropping 16 keys releases ${RELEASE_PER_RUN} per run`, RELEASE_PER_RUN === 2 && sizes.join() === '14,12,10,8,6,4,2,0,0', sizes.join())
 }
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

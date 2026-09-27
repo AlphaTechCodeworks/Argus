@@ -130,6 +130,15 @@ const trace = (line) => {
 // queued call with that key has really returned (see sdkCallT's `exclusive`).
 const exclusiveTails = new Map()
 
+// A worker that is shutting down (nvr-worker.mjs) lets nothing new into the SDK: it is SIGKILLed a
+// moment later and the kernel closes the NVR's sockets, as at every watchdog kill. The service stops
+// that aborted (03:35:48, 04:03:58, 04:39:09) were in the StopLivePlay burst and Logout of that stop.
+let refusing = null // why new calls are refused, or null
+/** From now on every call is refused before it reaches the SDK (calls already inside it run on). */
+export const refuseNewCalls = (why = 'the process is stopping') => {
+  refusing = why
+}
+
 /**
  * Runs an SDK function on a worker thread with a time limit.
  * @param {{ timeoutMs?: number, tag?: string, nvr?: string, exclusive?: string|string[], mayBlock?: boolean, onLate?: (result: any, err?: Error) => void }} opts
@@ -146,7 +155,8 @@ const exclusiveTails = new Map()
  *   stop the new stream. The time limit starts when the call does, not while it waits here.
  */
 export function sdkCallT(opts, fn, ...args) {
-  const name = names.get(fn) ?? 'sdk call'
+  // (cName: a test's stand-in for a bound function, test/fake-sdk.mjs, named like the real one)
+  const name = names.get(fn) ?? fn?.cName ?? 'sdk call'
   const budget = opts.timeoutMs ?? BUDGETS[name] ?? DEFAULT_BUDGET
   return new Promise((resolve, reject) => {
     let settled = false
@@ -154,6 +164,15 @@ export function sdkCallT(opts, fn, ...args) {
     let returned = () => {} // for `exclusive`: the next call with the key may start
     const queuedAt = Date.now()
     const start = () => {
+      if (refusing) {
+        returned()
+        if (!settled) {
+          settled = true
+          reject(new Error(`${name}${opts.tag ? ` (${opts.tag})` : ''} not started: ${refusing}`))
+        }
+        waiting.shift()?.start() // (started from release(): the slot it would have taken is free)
+        return
+      }
       running++
       const id = ++seq
       // mayBlock: this call is known to sit inside the SDK for minutes when the far end does not
@@ -181,7 +200,10 @@ export function sdkCallT(opts, fn, ...args) {
           inFlight.delete(id)
           lastReturnAt = Date.now()
           if (entry.nvr) returnAtByNvr.set(entry.nvr, lastReturnAt)
-          if (entry.late && entry.nvr && !entry.queuedBehind) noteLateReturn(entry, budget)
+          // a late login (mayBlock) does not cool its NVR: a login is known to sit in the SDK for a
+          // while, logoutLate tidies up one we gave up on, and a new session is exactly when the
+          // recorder wants to start its streams (02:30:11: a login 1 s late held 23 cameras for 60 s)
+          if (entry.late && entry.nvr && !entry.queuedBehind && !entry.mayBlock) noteLateReturn(entry, budget)
           release()
           try {
             const ms = Date.now() - entry.startedAt
@@ -267,8 +289,15 @@ export const sdkCall = (fn, ...args) => sdkCallT({}, fn, ...args)
 /** Snapshot for the watchdog and /healthz. */
 export const sdkStats = () => {
   const now = Date.now()
-  const list = [...inFlight.values()].map((e) => ({ ...e, ms: now - e.startedAt }))
+  const list = [...inFlight].map(([id, e]) => ({ ...e, id, ms: now - e.startedAt }))
   const oldest = list.reduce((a, b) => (b.ms > (a?.ms ?? -1) ? b : a), null)
+  // A victim started while an older call was (and still is) inside the SDK. The SDK serialises
+  // work across NVRs, so a victim that is late is most likely only queued behind that older call:
+  // at 04:12:13 one stuck FindRecDate plus six event-poller calls queued behind it read as
+  // "7 SDK calls overdue". Only the oldest call in flight can be a root (ties go by start order), so
+  // lateRoots is 0 or 1: the watchdog counts it only where the late rule is to leave such a queue
+  // to the single-stuck-call rule (the main process that runs the recording workers).
+  for (const e of list) e.victim = list.some((o) => o.startedAt < e.startedAt || (o.startedAt === e.startedAt && o.id < e.id))
   return {
     inFlight: list.length,
     running,
@@ -285,9 +314,33 @@ export const sdkStats = () => {
     lastReturnAgoByNvr: Object.fromEntries([...returnAtByNvr].map(([id, at]) => [id, now - at])),
     // late calls that are not `mayBlock` (logins): only these are evidence of a hung SDK
     lateBlocking: list.filter((e) => e.late && !e.mayBlock).length,
+    // ... and of those, the ones that started a jam rather than queued behind one (see victim)
+    lateRoots: list.filter((e) => e.late && !e.mayBlock && !e.victim).length,
     calls: list.sort((a, b) => b.ms - a.ms).slice(0, 50)
   }
 }
+
+/**
+ * Whether the SDK looks stuck from here: a call is past its time limit and no native call (for
+ * any NVR) has come back since it started. The main process then refuses new SDK work at once
+ * (degraded NVRs, playback busy, XML calls refused, refreshes skipped) instead of queuing it
+ * behind the stuck call: queued calls only fill the SDK queue and the libuv pool, and read to the
+ * watchdog as more evidence of a hang. It clears as soon as any native call returns.
+ * Any late call counts, not only the oldest: a login stuck for minutes on an NVR that does not
+ * answer (while others kept returning) must not hide a newer call that has since stopped
+ * everything. A late login (mayBlock) alone does not count, for the reason the watchdog ignores
+ * it: logins are known to sit in the SDK for minutes while other NVRs' calls go on working, and
+ * refusing everything would also stop the calls that could show it. If it does hold everything
+ * up, the next call asked behind it goes late too, and that one counts.
+ */
+export const sdkStuck = () => {
+  // (<=: release() starts a queued call in the same millisecond the previous one returned)
+  for (const e of inFlight.values()) if (e.late && !e.mayBlock && lastReturnAt <= e.startedAt) return true
+  return false
+}
+
+/** Whether the call with this id (sdkStats().calls[].id) is still inside the SDK: the watchdog's hold belongs to one call. */
+export const callInFlight = (id) => inFlight.has(id)
 
 /** Number of late (overdue, still running) calls attributed to one NVR, or to any NVR when no id is given. */
 export const lateCalls = (nvrId) => {
@@ -295,6 +348,22 @@ export const lateCalls = (nvrId) => {
   for (const e of inFlight.values()) if (e.late && (nvrId === undefined || e.nvr === nvrId)) n++
   return n
 }
+
+const LIVE_CALLS = new Set(['NET_SDK_LivePlay', 'NET_SDK_StopLivePlay'])
+/**
+ * LivePlay and StopLivePlay calls of one NVR inside the SDK now (late ones included). The live
+ * pacer (live-pacer.mjs) and the idle-stop queue (idle-stops.mjs) start a viewer's stream or an
+ * unwanted stream's stop only below their limit, so viewers' churn does not pile onto the calls the
+ * NVR's recording depends on.
+ */
+export const liveCallsInFlight = (nvrId) => {
+  let n = 0
+  for (const e of inFlight.values()) if (e.nvr === nvrId && LIVE_CALLS.has(e.name)) n++
+  return n
+}
+
+/** When a call of this NVR last came back after its time limit (0: never), as counted for its cool-down. */
+export const lastLateReturnAt = (nvrId) => lateReturnAt.get(nvrId) ?? 0
 
 /**
  * How much longer an NVR cools down (0: not cooling). It cools while one of its calls is late

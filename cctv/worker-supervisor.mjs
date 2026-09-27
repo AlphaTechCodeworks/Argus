@@ -6,11 +6,19 @@ import { MSG, want } from './worker-ipc.mjs'
 
 const BACKOFF_MS = [2000, 5000, 15_000, 60_000]
 const HEALTHY_MS = 5 * 60_000 // ready this long: the back-off starts again from the first step
-const STOP_WAIT_MS = 8000 // the worker's own shutdown takes up to 7 s (close segments 4 s, log out 3 s): it was killed at 5
+// the worker's own shutdown takes up to about 5 s (close segments 4 s, hand over its last messages
+// 1 s; no stops, no logout since the aborts in those): it was killed at 5 once, when it logged out
+const STOP_WAIT_MS = 6000
 const KILL_WAIT_MS = 10_000 // after SIGKILL: the exit event normally follows at once
+// The TVT SDK prints this line for each link it loses when the NVR drops its connections ("Net
+// Disconnected...... m_deviceID = 29", 02:25:03 and 03:13-03:14 on 09-27), and then reconnects them
+// by itself. The worker is told (MSG.LINKRESET): viewers' new streams on that NVR wait a while
+// (live-pacer.mjs) rather than add LivePlays while the SDK is reconnecting the recording's.
+const LINK_RESET_RE = /Net Disconnected/
+const LINK_RESET_EVERY_MS = 1000 // one reset prints a line per link: at most one message a second
 
-/** Copies a child's output to `out`, each line prefixed. */
-function prefixLines(from, out, prefix) {
+/** Copies a child's output to `out`, each line prefixed; onLine (optional) is shown each line too. */
+function prefixLines(from, out, prefix, onLine = null) {
   if (!from) return
   let rest = ''
   from.setEncoding('utf8')
@@ -18,11 +26,30 @@ function prefixLines(from, out, prefix) {
     const lines = (rest + d).split('\n')
     rest = lines.pop()
     if (lines.length) out.write(lines.map((l) => `${prefix}${l}\n`).join(''))
+    if (onLine) for (const l of lines) onLine(l)
   })
   from.on('end', () => {
     if (rest) out.write(`${prefix}${rest}\n`)
+    if (rest && onLine) onLine(rest)
     rest = ''
   })
+}
+
+/**
+ * Watches a worker's output for the SDK's lines about links the NVR dropped: send(at) at the first
+ * one, then at most once every LINK_RESET_EVERY_MS while they go on.
+ * @param {(at: number) => void} send
+ * @returns {(line: string) => void}
+ */
+export function linkResetWatch(send, now = Date.now) {
+  let last = -Infinity
+  return (line) => {
+    if (!LINK_RESET_RE.test(line)) return
+    const t = now()
+    if (t - last < LINK_RESET_EVERY_MS) return
+    last = t
+    send(t)
+  }
 }
 
 /**
@@ -54,8 +81,14 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
     c.spawnedAt = Date.now()
     child = c
     if (!stdio) {
-      prefixLines(c.stdout, process.stdout, `[worker ${nvrId}] `)
-      prefixLines(c.stderr, process.stderr, `[worker ${nvrId}] `)
+      // (the SDK prints from inside the worker: only its output shows that the NVR dropped the links)
+      const onLine = linkResetWatch((at) => {
+        try {
+          if (c === child && c.connected) c.send({ t: MSG.LINKRESET, at })
+        } catch {} // (the worker is going: nothing to hold)
+      })
+      prefixLines(c.stdout, process.stdout, `[worker ${nvrId}] `, onLine)
+      prefixLines(c.stderr, process.stderr, `[worker ${nvrId}] `, onLine)
     }
     c.on('error', (e) => console.warn(`[worker ${nvrId}] ${e.message}`))
     c.on('message', (m) => {

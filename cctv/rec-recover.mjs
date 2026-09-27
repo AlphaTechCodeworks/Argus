@@ -88,13 +88,17 @@ const DOWNTIME_MIN_MS = 3000 // playback's gapMs: shorter holes are not reported
  * At startup (or a worker restart), after recoverOrphans: a gap row for each recording camera from the
  * end of its newest segment (or gap row, when later) to atMs, so the index explains the time the
  * service or worker was down. Cameras without footage, and holes under 3 s, get none.
+ * Only rows that started before atMs count: the new worker's own rows are none of the downtime. Its
+ * 'recording starting after a restart' row (recorder.mjs) often lands first -- the recovery scan
+ * before this walks every hour folder of the NVR -- and, counted, left the downtime itself (the
+ * service or worker down) in no row at all after every deploy.
  * @param {{ index: {lastEnds, addGap}, nvrId: string, channels: number[], atMs: number, reason: string }} opts
  * @returns {object[]} the rows added
  */
 export function downtimeGaps({ index, nvrId, channels, atMs, reason }) {
   const added = []
   for (const ch of channels) {
-    const { segEnd, gapEnd } = index.lastEnds(nvrId, ch)
+    const { segEnd, gapEnd } = index.lastEnds(nvrId, ch, atMs)
     if (segEnd == null) continue
     const fromMs = Math.max(segEnd, gapEnd ?? -Infinity)
     if (!(atMs - fromMs >= DOWNTIME_MIN_MS)) continue

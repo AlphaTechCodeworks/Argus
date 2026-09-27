@@ -31,9 +31,14 @@ for (const name of Object.keys(NET_SDK)) {
   const answer = answers[name] ?? (() => true)
   NET_SDK[name] = {
     fake: true,
+    cName: `NET_SDK_${name}`, // (sdk.mjs names the call like the real one: time limits, live calls in flight)
     async(...args) {
       const cb = args.at(-1)
-      if (process.env.CCTV_FAKE_LOG_CALLS === '1' && /LivePlay/.test(name)) console.log('[fake-sdk] ' + name)
+      // (CCTV_FAKE_LOG_CALLS=1: a worker's live calls and logouts, for tests that read its output)
+      if (process.env.CCTV_FAKE_LOG_CALLS === '1' && /LivePlay|Logout/.test(name)) console.log(`[fake-sdk] ${name}${name === 'LivePlay' ? ` ${args[1]?.lChannel}:${args[1]?.streamType}` : ''}`)
+      // (CCTV_FAKE_NET_DOWN_CH=n: a LivePlay of channel n makes the SDK say the NVR dropped a link, as
+      // the real one prints it; the supervisor watches for it, worker-supervisor.mjs)
+      if (name === 'LivePlay' && process.env.CCTV_FAKE_NET_DOWN_CH !== undefined && String(args[1]?.lChannel) === process.env.CCTV_FAKE_NET_DOWN_CH) console.log('Net Disconnected...... m_deviceID = 1')
       log.push({ fn: name, args: args.slice(0, -1).map((a) => (typeof a === 'object' ? null : a)), at: Date.now() })
       setTimeout(() => cb(null, answer(...args.slice(0, -1))), 5)
     }

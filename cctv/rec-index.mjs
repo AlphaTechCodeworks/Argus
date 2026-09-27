@@ -169,7 +169,11 @@ export function openRecIndex(file) {
     recent: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? ORDER BY start_ms DESC LIMIT ?`),
     window: db.prepare('SELECT path, start_ms AS s, end_ms AS e FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? AND end_ms >= ? ORDER BY start_ms'),
     lastEnd: db.prepare('SELECT MAX(end_ms) AS e FROM segments WHERE nvr = ? AND ch = ?'),
-    lastGapEnd: db.prepare('SELECT MAX(to_ms) AS e FROM gaps WHERE nvr = ? AND ch = ?')
+    lastGapEnd: db.prepare('SELECT MAX(to_ms) AS e FROM gaps WHERE nvr = ? AND ch = ?'),
+    // ... of the rows that started before a time (served by segments_cam / gaps_cam): what the
+    // service or a worker left before it went down, not what the new one has written since
+    lastEndBefore: db.prepare('SELECT MAX(end_ms) AS e FROM segments WHERE nvr = ? AND ch = ? AND start_ms < ?'),
+    lastGapEndBefore: db.prepare('SELECT MAX(to_ms) AS e FROM gaps WHERE nvr = ? AND ch = ? AND from_ms < ?')
   }
   /** camera key -> the file its writer has open: { nvr, ch, path, startMs, loc } (memory only) */
   const opens = new Map()
@@ -245,8 +249,14 @@ export function openRecIndex(file) {
     cameras: () => q.cameras.all().map(plain),
     /** One camera's newest `limit` segments, newest first (rec-cache.mjs: its bytes per minute). */
     recentOf: (nvr, ch, limit) => q.recent.all(String(nvr), Number(ch), Math.max(0, Math.floor(Number(limit) || 0))).map(plain),
-    /** The end of one camera's newest recording and of its newest gap row: { segEnd, gapEnd } (null when none). */
-    lastEnds: (nvr, ch) => ({ segEnd: q.lastEnd.get(String(nvr), Number(ch))?.e ?? null, gapEnd: q.lastGapEnd.get(String(nvr), Number(ch))?.e ?? null }),
+    /**
+     * The end of one camera's newest recording and of its newest gap row: { segEnd, gapEnd } (null
+     * when none). beforeMs: only rows that started before it count.
+     */
+    lastEnds: (nvr, ch, beforeMs = null) =>
+      Number.isFinite(beforeMs)
+        ? { segEnd: q.lastEndBefore.get(String(nvr), Number(ch), beforeMs)?.e ?? null, gapEnd: q.lastGapEndBefore.get(String(nvr), Number(ch), beforeMs)?.e ?? null }
+        : { segEnd: q.lastEnd.get(String(nvr), Number(ch))?.e ?? null, gapEnd: q.lastGapEnd.get(String(nvr), Number(ch))?.e ?? null },
     forgetGapsBefore(ms) {
       q.oldGaps.run(ms)
     },

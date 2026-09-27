@@ -117,6 +117,21 @@ check('housekeeping leaves the fresh file (not indexed, newer)', existsSync(fres
   check('downtime: only cameras that record now; none under 3 s; none without footage', g(3).length === 0 && g(4).length === 0 && g(5).length === 0 && added.length === 2, JSON.stringify(added))
   downtimeGaps({ index: ix, nvrId: 'd1', channels: [1, 2], atMs: at + 1000, reason: 'service down' })
   check('downtime: a second start soon after adds nothing (the rows already reach it)', g(1).length === 1 && g(2).length === 2)
+  // a worker restart: the new worker's first rows reach the index before the recovery scan is done
+  // (its 'recording starting after a restart' row, even a first segment); they are none of the downtime
+  {
+    const U = T + 3_600_000
+    seg(6, U, U + 60_000)
+    seg(7, U, U + 60_000)
+    const spawned = U + 110_000
+    ix.addGap({ nvr: 'd1', ch: 6, fromMs: spawned + 400, toMs: spawned + 9000, reason: 'recording starting after a restart' })
+    seg(6, spawned + 9000, spawned + 60_000)
+    const got = downtimeGaps({ index: ix, nvrId: 'd1', channels: [6, 7], atMs: spawned, reason: 'recording worker restarted' })
+    const down = (ch) => g(ch).filter((r) => r.reason === 'recording worker restarted')
+    check('downtime: rows the new worker wrote first do not hide the downtime row', down(6).length === 1 && down(6)[0].fromMs === U + 60_000 && down(6)[0].toMs === spawned, JSON.stringify(g(6)))
+    check('downtime: ... the same row as for a camera the new worker has not written yet', down(7).length === 1 && down(7)[0].fromMs === U + 60_000 && got.length === 2, JSON.stringify(got))
+    check('index: lastEnds without a bound still gives the newest rows', ix.lastEnds('d1', 6).segEnd === spawned + 60_000 && ix.lastEnds('d1', 6).gapEnd === spawned + 9000)
+  }
   ix.close()
 }
 index.close()

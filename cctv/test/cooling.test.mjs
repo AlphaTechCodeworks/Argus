@@ -1,8 +1,9 @@
 // Tests for the cool-down after late SDK calls (sdk.mjs nvrCooling) in live view: while an NVR's
 // call is stuck in the SDK or just came back late, no new LivePlay goes to that NVR (first starts,
 // restarts, main and sub streams) and its stalled streams are left alone; other NVRs carry on,
-// and everything starts again once it has cooled down. The connect lane (main streams, logins)
-// waits while ANY NVR has a call stuck.
+// and everything starts again once it has cooled down. The recorder's streams (starts, restarts
+// and stall restarts) are held only while a call of the NVR is still stuck. The connect lane (main
+// streams, logins) waits while ANY NVR has a call stuck.
 // Uses real Nvr and LiveStream objects over fake SDK functions and made-up hosts: nothing here
 // reaches an NVR.
 // Run inside the container:  node cctv/test/cooling.test.mjs
@@ -141,6 +142,73 @@ check('a restart due while the NVR cools does not enter the SDK', calls('LivePla
 check('... and does not escalate the back-off', aSub.restarts === 1, `restarts ${aSub.restarts}`)
 check('the healthy NVR’s restart went ahead meanwhile', calls('LivePlay', 'b', 0, 1).length === 2 && bSub.state === 'playing')
 check('... the held restart runs once the NVR has cooled down', (await until(() => calls('LivePlay', 'a', 0, 1).length === livePlaysA + 1, 7000)) && aSub.state === 'playing', `${aSub.state}`)
+
+// ---- the recorder's streams: a cool-down holds them only while a call of that NVR is still late
+// (a viewer's LivePlay that came back late held every recording restart on its NVR for a minute)
+await sleep(COOL_MS + 200)
+const tap = (recorder) => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, send() {}, close() {}, ...(recorder ? { recorder: true, background: true } : {}) })
+const plays = (ch) => calls('LivePlay', 'a', ch, 1).length
+{
+  await lateReturn('a') // A cools down; nothing of A is inside the SDK any more
+  const rec = A.getStream(20, 1)
+  rec.add(tap(true))
+  const view = A.getStream(21, 1)
+  view.add(tap(false))
+  await sleep(300)
+  check('cooling, nothing still late: the recorder’s start goes ahead', plays(20) === 1 && rec.state === 'playing', `${plays(20)} LivePlay, ${rec.state}`)
+  check('... while a viewer’s start waits', plays(21) === 0 && view.state === 'restarting', `${plays(21)} LivePlay, ${view.state}`)
+  slowCall('a', 900) // late, still inside the SDK
+  await sleep(150)
+  const rec2 = A.getStream(22, 1)
+  rec2.add(tap(true))
+  await sleep(300)
+  check('a call of A still late: the recorder’s start waits too', plays(22) === 0, `${plays(22)} LivePlay`)
+  check('... and goes once that call is back', await until(() => plays(22) === 1, 7000))
+}
+{
+  await sleep(COOL_MS + 200)
+  const recR = A.getStream(23, 1)
+  recR.add(tap(true))
+  const viewR = A.getStream(24, 1)
+  viewR.add(tap(false))
+  await until(() => recR.state === 'playing' && viewR.state === 'playing', 3000)
+  const [r0, v0] = [plays(23), plays(24)]
+  const t0 = Date.now()
+  recR.restart('test') // both back off 5 s
+  viewR.restart('test')
+  await sleep(3500 - (Date.now() - t0))
+  await lateReturn('a') // A cools again 3.5 s into the back-off; nothing still late
+  await sleep(t0 + 5600 - Date.now())
+  check('a restart due while the NVR cools: the recorder’s goes ahead', plays(23) === r0 + 1 && recR.state === 'playing', `${plays(23) - r0} LivePlay, ${recR.state}`)
+  check('... a viewer’s waits', plays(24) === v0 && viewR.state === 'restarting', `${plays(24) - v0} LivePlay, ${viewR.state}`)
+}
+{
+  // a stream that stalls during a cool-down: the stall check restarts the recorder's once nothing of
+  // the NVR is still late (a viewer's LivePlay back late held it for the whole minute); a viewer's
+  // stalled stream waits for the end of the cool-down, as before
+  await sleep(COOL_MS + 200)
+  const recS = A.getStream(25, 1)
+  recS.add(tap(true))
+  const viewS = A.getStream(26, 1)
+  viewS.add(tap(false))
+  await until(() => recS.state === 'playing' && viewS.state === 'playing', 3000)
+  const stops = (ch) => calls('StopLivePlay', 'a', ch, 1).length
+  const lateAt = Date.now()
+  slowCall('a', 900) // late after 50 ms, back at 900
+  await sleep(150)
+  for (const s of A.streams.values()) s.lastFrameAt = Date.now()
+  recS.lastFrameAt = Date.now() - STALL_MS - 1000
+  viewS.lastFrameAt = Date.now() - STALL_MS - 1000
+  await A.checkStalled()
+  check('stall in a cool-down, a call of A still late: the recorder’s stalled stream is left alone too', stops(25) === 0 && recS.state === 'playing', `${stops(25)} stops, ${recS.state}`)
+  await sleep(lateAt + 1000 - Date.now()) // that call is back: A cools, nothing of it still late
+  await A.checkStalled()
+  check('... nothing still late: the stall check restarts the recorder’s', stops(25) === 1 && recS.state === 'restarting', `${stops(25)} stops, ${recS.state}`)
+  check('... and leaves the viewer’s alone', stops(26) === 0 && viewS.state === 'playing', `${stops(26)} stops, ${viewS.state}`)
+  await sleep(lateAt + 900 + COOL_MS + 150 - Date.now())
+  await A.checkStalled()
+  check('... which is restarted once the NVR has cooled down', stops(26) === 1 && viewS.state === 'restarting', `${stops(26)} stops, ${viewS.state}`)
+}
 
 if (failures) print(`\napp log:\n${out.join('\n')}`)
 print(failures ? `\n${failures} FAILED` : '\nALL PASSED')

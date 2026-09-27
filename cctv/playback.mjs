@@ -18,16 +18,32 @@
 //        client -> server: {"speed": 1|2|4|8} {"pause": true|false}
 //        server -> client: {"type":"started"} {"type":"end"} {"type":"error","message":...}
 //                          {"type":"stream","stream":0} (switched to HD: this camera records no SD)
-// While the NVR is busy (recovering, or its calls are stuck or just came back late) the three GET
-// routes answer 503 { error, retryAfterS } at once and new playbacks fail with the same message,
-// instead of queuing more SDK work for it. Playbacks already running are left alone.
+// While the NVR is busy (recovering, or its calls are stuck or just came back late, or the SDK is
+// stuck on any NVR's call) the three GET routes answer 503 { error, retryAfterS } at once and new
+// playbacks fail with the same message, instead of queuing more SDK work for it. Playbacks already
+// running are left alone.
+//
+// Recording days (/dates, NET_SDK_FindRecDate) are asked as rarely as possible: that search has
+// wedged the whole SDK on nvr1 (every main-process call for every NVR queued behind it, and the
+// watchdog restarted the service, stopping all recording), and it was asked again 2 s after the
+// restart. The answer is kept on disk (rec-dates.json) and reused for an hour; a search that runs
+// past its time limit opens a breaker for that NVR for 2 hours (also when the watchdog's last dump
+// names that search), and none is asked in the first 2 minutes after a login. Meanwhile the answer
+// comes from the cache, however old, or, with nothing cached, an empty list. The page only uses
+// these days for the date picker's lower limit (public/playback.js), so an old answer is harmless
+// and an empty one costs only that limit. Not a 503: the page reads any 503 with a Retry-After on
+// /dates as "the NVR is busy", and would then load neither the day's recordings from the NVR (NVR
+// mode) nor its clock, events and NVR-only stretches (server mode) until it cleared, up to 2 hours
+// on the first run, before rec-dates.json exists. /dates is still 503 while the NVR itself is busy
+// (checkBusy) and nothing is cached, as before: /now is then 503 as well.
 import koffi from 'koffi'
 import { PRIORITY } from './lanes.mjs'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, Transcoder, clientCanDecodeH265, lightPool, pool as transcodePool } from './transcode.mjs'
-import { bind, codecOf, coolingLeftMs, encodeFrame, playFrames, sdkCallT, sniffCodec } from './sdk.mjs'
+import { bind, codecOf, coolingLeftMs, encodeFrame, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
+import { lastHang } from './watchdog.mjs'
 
 // FindNext* result codes continue the SDK error enum: NET_SDK_FILE_SUCCESS is 85
 const FILE_SUCCESS = 85
@@ -53,6 +69,11 @@ const MAX_QUEUE_FRAMES = 5000 // pacing buffer backstop (~2.5 min at 30 fps) if 
 const CONTINUOUS_TYPES = 0x1 | 0x2
 const BUSY_RETRY_S = 10 // "try again" hint while an NVR recovers (relogin, probe): how long is unknown
 const SKEW_MIN_MS = 2000 // NVR clock differences under this read as 0 (DD_TIME has whole seconds)
+// recording days (see the top)
+const DATES_FILE = join(DATA_DIR, 'rec-dates.json')
+const DATES_FRESH_MS = 60 * 60_000 // an answer this recent is reused without asking
+const DATES_BREAKER_MS = 2 * 3_600_000 // no search after one ran past its time limit
+const DATES_AFTER_LOGIN_MS = 2 * 60_000 // none this soon after a login (04:13:16: 2 s after it)
 
 const pad = (n) => String(n).padStart(2, '0')
 
@@ -102,6 +123,20 @@ const PlayBackByTimeEx = fn(
 const SetPlayDataCallBack = fn('bool NET_SDK_SetPlayDataCallBack(int64 handle, CctvFrameCallback *cb, void *user)')
 const PlayBackControl = fn('bool NET_SDK_PlayBackControl(int64 handle, uint32 code, uint32 value, _Out_ uint32 *out)')
 const StopPlayBack = fn('bool NET_SDK_StopPlayBack(int64 handle)')
+// the recording-date search; the tests replace these (and may shorten the time limit, which is
+// otherwise each function's own budget in sdk.mjs)
+const REAL_DATE_CALLS = { FindRecDate, FindNextRecDate, FindRecDateClose, timeoutMs: undefined }
+let dateCalls = REAL_DATE_CALLS
+
+/** Every NVR's saved recording days and breaker: { [id]: { at, dates, openUntil, why } }. */
+const readDatesFile = () => {
+  try {
+    const all = JSON.parse(readFileSync(DATES_FILE, 'utf8'))
+    return all && typeof all === 'object' && !Array.isArray(all) ? all : {}
+  } catch {
+    return {}
+  }
+}
 
 /** UTC epoch ms -> DD_TIME with UTC fields (the time base of recordings; see the top). */
 export const toDD = (ms) => {
@@ -126,9 +161,10 @@ export const PB = { PlayBackByTimeEx, SetPlayDataCallBack, PlayBackControl, Stop
 
 /**
  * Recording search and playback for one NVR.
- * @param {{ id: string, userId: number }} nvr
+ * @param {{ id: string, userId: number, loggedInAt?: number }} nvr
+ * @param {{ now?: () => number }} [opts] now: the clock of the recording-days cache (tests)
  */
-export function createPlayback(nvr) {
+export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
   const userId = () => nvr.userId
   // all SDK work for this NVR goes through its lane, with time limits (lanes.mjs, sdk.mjs)
   const op = (task, priority = PRIORITY.NORMAL) => nvr.lane.run(task, { priority })
@@ -138,17 +174,19 @@ export function createPlayback(nvr) {
   /**
    * Walks a search handle with next() and closes it afterwards. If a call times out, the
    * native call is still using the handle, so it is closed only once that call returns.
+   * timeoutMs: for every call of the walk (default: each function's own budget).
    */
-  const walk = async (h, next, close, onItem) => {
+  const walk = async (h, next, close, onItem, timeoutMs = undefined) => {
     let late = false
-    const closeLater = () => call(close, h).catch(() => {})
+    const t = (onLate, f, ...args) => sdkCallT({ nvr: nvr.id, tag: 'playback', timeoutMs, onLate }, f, ...args)
+    const closeLater = () => t(undefined, close, h).catch(() => {})
     try {
-      for (let item = {}; (await callLate(closeLater, next, h, item)) === FILE_SUCCESS; item = {}) onItem(item)
+      for (let item = {}; (await t(closeLater, next, h, item)) === FILE_SUCCESS; item = {}) onItem(item)
     } catch (e) {
       if (e?.name === 'SdkTimeout') late = true
       throw e
     } finally {
-      if (!late) await call(close, h).catch(() => {})
+      if (!late) await t(undefined, close, h).catch(() => {})
     }
   }
   // a search handle that arrives after its timeout is closed straight away
@@ -162,6 +200,8 @@ export function createPlayback(nvr) {
     const coolMs = coolingLeftMs(nvr.id)
     if (coolMs > 0) throw new NvrBusy(Math.ceil(coolMs / 1000))
     if (nvr.degraded) throw new NvrBusy(BUSY_RETRY_S)
+    // the SDK is stuck on another NVR's call (sdk.mjs sdkStuck): this would only queue behind it
+    if (sdkStuck()) throw new NvrBusy(BUSY_RETRY_S)
   }
 
   // searches share one SDK session; run them one at a time
@@ -204,18 +244,86 @@ export function createPlayback(nvr) {
   const lastClock = () => (lastClockRead ? { ...lastClockRead } : null)
   const nvrNow = async (inLane = false) => (await clock(inLane)).now
 
-  let datesCache = { at: 0, dates: [] }
-  const recordDates = async () => {
-    checkBusy()
-    return serial(() => op(async () => {
-      if (Date.now() - datesCache.at < 5 * 60_000) return datesCache.dates
+  // ---- recording days (see the top): cache on disk, breaker, not just after a login
+  const saved = readDatesFile()[nvr.id] ?? {}
+  let datesCache = {
+    at: Number(saved.at) || 0,
+    dates: Array.isArray(saved.dates) ? saved.dates.filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) : []
+  }
+  let breaker = { until: Number(saved.openUntil) || 0, why: String(saved.why ?? '') }
+  {
+    // the previous run was killed by the watchdog with this NVR's date search as the oldest call:
+    // asking again at once is how 04:13:16 followed 04:12:13
+    const hang = lastHang()
+    const until = Date.parse(hang?.at ?? '') + DATES_BREAKER_MS
+    if (/^NET_SDK_Find(Next)?RecDate$/.test(hang?.oldest?.name ?? '') && hang.oldest.nvr === nvr.id && until > breaker.until) {
+      breaker = { until, why: `the watchdog restarted the service at ${hang.at} with a recording-date search to this NVR stuck` }
+    }
+  }
+  const saveDates = () => {
+    try {
+      const all = readDatesFile()
+      all[nvr.id] = { at: datesCache.at, dates: datesCache.dates, openUntil: breaker.until, why: breaker.why }
+      writeFileSync(DATES_FILE, `${JSON.stringify(all)}\n`, { mode: 0o600 })
+    } catch (e) {
+      console.warn(`[${nvr.id}] could not save the recording days: ${e.message}`)
+    }
+  }
+  /**
+   * Why the NVR is not to be asked for its recording days now, or null: 'held' while the search
+   * itself is held back (the breaker is open, or it logged in less than 2 minutes ago), or the
+   * NvrBusy while the NVR is busy (checkBusy, which refuses /now just the same).
+   */
+  const whyNotAskDates = () => {
+    const t = datesNow()
+    if (breaker.until > t) return 'held'
+    if (nvr.loggedInAt && t - nvr.loggedInAt < DATES_AFTER_LOGIN_MS) return 'held'
+    try {
       checkBusy()
-      const h = await callLate(closeIfLate(FindRecDateClose), FindRecDate, userId())
-      if (h <= 0) throw new Error('FindRecDate failed')
-      const dates = []
-      await walk(h, FindNextRecDate, FindRecDateClose, (d) => dates.push(`${d.year}-${pad(d.month)}-${pad(d.mday)}`))
-      datesCache = { at: Date.now(), dates: dates.sort() }
-      return datesCache.dates
+    } catch (e) {
+      return e
+    }
+    return null
+  }
+  const datesFresh = () => datesCache.at > 0 && datesNow() - datesCache.at < DATES_FRESH_MS
+  /**
+   * When the NVR is not to be asked: the cached days however old (they only set the date picker's
+   * lower limit). With nothing cached, no days while the search is held back (see the top: a 503
+   * there would stall the whole page for hours), and the refusal while the NVR is busy.
+   */
+  const cachedOr = (why) => {
+    if (datesCache.at) return datesCache.dates
+    if (why instanceof Error) throw why
+    return []
+  }
+  const recordDates = async () => {
+    // a recent answer: no lane, no SDK
+    if (datesFresh()) return datesCache.dates
+    const no = whyNotAskDates()
+    if (no) return cachedOr(no)
+    return serial(() => op(async () => {
+      // (checked again when its turn comes: another request may have asked meanwhile, or the NVR got busy)
+      if (datesFresh()) return datesCache.dates
+      const noNow = whyNotAskDates()
+      if (noNow) return cachedOr(noNow)
+      const { FindRecDate: find, FindNextRecDate: next, FindRecDateClose: close, timeoutMs } = dateCalls
+      try {
+        const h = await sdkCallT({ nvr: nvr.id, tag: 'playback', timeoutMs, onLate: closeIfLate(close) }, find, userId())
+        if (h <= 0) throw new Error('FindRecDate failed')
+        const dates = []
+        await walk(h, next, close, (d) => dates.push(`${d.year}-${pad(d.month)}-${pad(d.mday)}`), timeoutMs)
+        datesCache = { at: datesNow(), dates: dates.sort() }
+        saveDates()
+        return datesCache.dates
+      } catch (e) {
+        if (e?.name === 'SdkTimeout') {
+          // on nvr1 this search once held every main-process SDK call for a minute: not again for a while
+          breaker = { until: datesNow() + DATES_BREAKER_MS, why: `the recording-date search ran past its time limit (${e.message})` }
+          saveDates()
+          console.warn(`[${nvr.id}] ${breaker.why}: not asking this NVR for its recording days for ${DATES_BREAKER_MS / 3_600_000} h`)
+        }
+        throw e
+      }
     }))
   }
 
@@ -668,5 +776,13 @@ export async function playbackApi(nvr, pathname, params) {
   } catch (e) {
     if (e instanceof NvrBusy) return [503, { error: e.message, retryAfterS: e.retryAfterS }, { 'retry-after': String(e.retryAfterS) }]
     return [502, { error: `NVR: ${e.message}` }]
+  }
+}
+
+// for the tests: replace the recording-date search, e.g. with calls that never come back and a short
+// timeoutMs (null puts the real one back)
+export const _test = {
+  setDateCalls(calls) {
+    dateCalls = calls ? { ...REAL_DATE_CALLS, ...calls } : REAL_DATE_CALLS
   }
 }

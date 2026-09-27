@@ -289,6 +289,70 @@ const S = 1000
   check('and it is left alone while it backs off', (await intake.tick()) === null)
   check('status explains the silence', /not answering/.test(intake.status()[0].why))
 }
+{
+  // One pass at a time. On 09-27 a FindRecDate stuck in the SDK had each 5 s tick ask yet another
+  // NVR's clock, and every one of those queued behind it: six overdue calls and a restart.
+  const quiet = { addEvent: () => ({ event: null, isNew: false }), lastEventMs: () => null }
+  const nvrs = [{ id: 'a', name: 'A', online: true }, { id: 'b', name: 'B', online: true }]
+  const asked = []
+  const never = new Promise(() => {})
+  const intake = makeEventIntake({
+    listNvrs: () => nvrs,
+    camerasOf: () => [{ ch: 0 }, { ch: 1 }],
+    clock: (nvr) => { asked.push(`clock ${nvr.id}`); return never },
+    recordings: (nvr) => { asked.push(`recordings ${nvr.id}`); return never },
+    now: () => T0,
+    log: () => {},
+    store: quiet
+  })
+  void intake.tick() // its clock read never comes back
+  await new Promise((r) => setImmediate(r))
+  // (raced against a timer: a tick that joins the stuck pass would never answer at all)
+  const within = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r('still waiting'), 300))])
+  const second = await within(intake.tick())
+  check('a tick while the previous pass is still waiting on its clock read returns null', second === null)
+  check('... and asks nothing, of that NVR or any other', asked.join() === 'clock a', asked.join())
+
+  // the same when the clock answers and the search is the call that hangs
+  const asked2 = []
+  const intake2 = makeEventIntake({
+    listNvrs: () => nvrs,
+    camerasOf: () => [{ ch: 0 }],
+    clock: async (nvr) => { asked2.push(`clock ${nvr.id}`); return { tzOffsetMs: 0 } },
+    recordings: (nvr) => { asked2.push(`recordings ${nvr.id}`); return never },
+    now: () => T0,
+    log: () => {},
+    store: quiet
+  })
+  void intake2.tick()
+  await new Promise((r) => setImmediate(r))
+  const again = await Promise.all([within(intake2.tick()), within(intake2.tick())])
+  check('a tick while the previous pass waits on its search returns null and asks nothing', again.every((r) => r === null) && asked2.join() === 'clock a,recordings a', asked2.join())
+}
+{
+  // Any overdue SDK call in this process (sdk.mjs lateCalls() > 0): nobody is asked, because the
+  // SDK runs one call at a time for every NVR and a question now would only queue behind it.
+  let busy = true
+  const asked = []
+  const intake = makeEventIntake({
+    listNvrs: () => [{ id: 'a', name: 'A', online: true }, { id: 'b', name: 'B', online: true }, { id: 'c', name: 'C', online: false }],
+    camerasOf: () => [{ ch: 0 }],
+    clock: async (nvr) => { asked.push(`clock ${nvr.id}`); return { tzOffsetMs: 0 } },
+    recordings: async (nvr, ch) => { asked.push(`recordings ${nvr.id}/${ch}`); return { events: [] } },
+    sdkBusy: () => busy,
+    now: () => T0,
+    log: () => {},
+    store: { addEvent: () => ({ event: null, isNew: false }), lastEventMs: () => null }
+  })
+  check('with an SDK call overdue, a tick asks no NVR at all', (await intake.tick()) === null && asked.length === 0, asked.join())
+  const st = intake.status()
+  check('... and status says why for each NVR that is online', st.filter((s) => s.nvr !== 'c').every((s) => /overdue/.test(s.why)), JSON.stringify(st.map((s) => s.why)))
+  check('... while an offline NVR still says it is offline', /offline/.test(st.find((s) => s.nvr === 'c').why))
+  busy = false
+  const r = await intake.tick()
+  check('once nothing is overdue, intake carries on', r?.nvr === 'a' && asked.join() === 'clock a,recordings a/0', asked.join())
+  check('pollable: sdkBusy is a no, with a sentence', !pollable({ id: 'n', online: true }, T0, { sdkBusy: true }).ok && /overdue/.test(pollable({ id: 'n', online: true }, T0, { sdkBusy: true }).why))
+}
 
 // --- the read-only command probe ------------------------------------------------------------------------
 //

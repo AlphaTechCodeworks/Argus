@@ -7,6 +7,10 @@
 // sub-streams are small, but nvr-2 refuses streams once its bandwidth budget is spent, so this is
 // kept to what makes a difference: the screen people open first. Re-read every minute; a camera
 // that drops off the list is let go (and lingers the usual 3 minutes, stream-hub.mjs).
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { DATA_DIR } from './auth.mjs'
+
 export const FIRST_SCREEN = 9
 export const CAP = 16
 // ...and, beyond that, up to PER_NVR online cameras of each NVR that is not refusing streams
@@ -19,6 +23,19 @@ export const ALL_CAP = 200
 export const PER_NVR = 16
 export const STAY_OUT_MS = 6 * 60 * 60_000
 const EVERY_MS = 60_000
+// Nothing is warmed until this long after start. Warming every NVR at each restart put up to 16
+// extra sub-streams on each of them in the very minute recording was starting again (03:39:52,
+// 04:04:13, 04:18:34), before it was known which NVRs refuse streams (nvr-2 said so at 03:41:36).
+export const FIRST_RUN_MS = 5 * 60_000
+// At most this many held streams of one NVR are let go per pass: nvr-2's 16 let go together (16
+// stops at 03:44:36-38) were followed by 6 of its cameras stalling.
+export const RELEASE_PER_RUN = 2
+// which NVRs are kept out and until when, so that nvr-2 and value4u stay out across restarts
+export const OUT_FILE = join(DATA_DIR, 'warm-out.json')
+// An NVR that goes on refusing has its "kept out until" moved on at every pass; the file follows
+// once it has moved this far (not at every pass). Only the first one saved, a restart 6 h after the
+// first refusal let an NVR back in that had refused all along.
+export const OUT_SAVE_STEP_MS = 10 * 60_000
 
 /**
  * Which cameras to keep ready: each user's first screen in their own order (the default order for
@@ -63,32 +80,71 @@ function pickFirst({ cameras, orders, perUser, cap }) {
 /** The stream's quiet viewer: takes the frames, sends them nowhere. */
 const quietViewer = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, send() {}, on() {} })
 
+/** The saved "kept out until" times (NVR id -> ms), only those still running at t. */
+function readOut(file, t) {
+  try {
+    const saved = JSON.parse(readFileSync(file, 'utf8'))
+    return new Map(Object.entries(saved ?? {}).filter(([, until]) => Number.isFinite(until) && until > t))
+  } catch {
+    return new Map()
+  }
+}
+
 /**
  * Keeps the picked sub-streams running.
- * @param {{ cameras: () => object[], orders: () => object, streamOf: (nvrId: string, ch: number) => {add: Function, remove: Function}|null, log?: Function }} o
+ * @param {{ cameras: () => object[], orders: () => object, streamOf: (nvrId: string, ch: number) => {add: Function, remove: Function}|null,
+ *   log?: Function, everyMs?: number, now?: () => number, firstRunMs?: number, outFile?: string|null }} o
+ *   outFile: where the kept-out NVRs are saved (null: memory only)
  */
-export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log = console.log, everyMs = EVERY_MS, now = Date.now }) {
+export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log = console.log, everyMs = EVERY_MS, now = Date.now, firstRunMs = FIRST_RUN_MS, outFile = OUT_FILE }) {
+  const startedAt = now()
   const held = new Map() // key -> { stream, viewer }
-  // an NVR that refused is kept out of the extra warm-up for STAY_OUT_MS, not just while it refuses
-  const outUntil = new Map()
+  // an NVR that refused is kept out of the extra warm-up for STAY_OUT_MS, not just while it refuses,
+  // and a restart does not let it back in (outFile)
+  const outUntil = outFile ? readOut(outFile, startedAt) : new Map()
+  const saved = new Map(outUntil) // what the file holds
+  const saveOut = () => {
+    if (!outFile) return
+    // (counted as saved even when the write fails: tried again a step later, not at every camera)
+    saved.clear()
+    for (const [k, v] of outUntil) saved.set(k, v)
+    try {
+      mkdirSync(dirname(outFile), { recursive: true })
+      const tmp = `${outFile}.tmp`
+      writeFileSync(tmp, `${JSON.stringify(Object.fromEntries(outUntil))}\n`)
+      renameSync(tmp, outFile)
+    } catch (e) {
+      log(`[warm] ${outFile} not written: ${e.message}`)
+    }
+  }
   const calm = roomy && ((id) => {
     const t = now()
     if (!roomy(id)) {
-      if (!outUntil.has(id) || outUntil.get(id) <= t) log(`[warm] ${id} is refusing streams: only its first-screen cameras are kept ready for the next ${STAY_OUT_MS / 3_600_000} h`)
+      const fresh = !outUntil.has(id) || outUntil.get(id) <= t
+      if (fresh) log(`[warm] ${id} is refusing streams: only its first-screen cameras are kept ready for the next ${STAY_OUT_MS / 3_600_000} h`)
       outUntil.set(id, t + STAY_OUT_MS)
+      // when it is put out, and again each time its end has moved on OUT_SAVE_STEP_MS (not at every
+      // pass it goes on refusing)
+      if (fresh || t + STAY_OUT_MS - (saved.get(id) ?? 0) >= OUT_SAVE_STEP_MS) saveOut()
       return false
     }
     return (outUntil.get(id) ?? 0) <= t
   })
   const run = () => {
+    if (now() - startedAt < firstRunMs) return
     let want
     try {
       want = new Set(pickWarm({ cameras: cameras(), orders: orders(), roomy: calm }))
     } catch (e) {
       return log(`[warm] ${e.message}`)
     }
+    const released = new Map() // NVR id -> streams let go in this pass
     for (const [k, h] of held) {
       if (want.has(k)) continue
+      const nvrId = k.slice(0, k.lastIndexOf('/'))
+      const n = released.get(nvrId) ?? 0
+      if (n >= RELEASE_PER_RUN) continue // the rest in the next passes
+      released.set(nvrId, n + 1)
       h.stream.remove(h.viewer)
       held.delete(k)
     }
@@ -108,6 +164,6 @@ export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log 
   }
   const t = setInterval(run, everyMs)
   t.unref?.()
-  setTimeout(run, 10_000).unref?.() // after the video logins (~4.5 s); viewers still go first
-  return { run, held }
+  setTimeout(run, firstRunMs).unref?.() // viewers still go first
+  return { run, held, outUntil }
 }

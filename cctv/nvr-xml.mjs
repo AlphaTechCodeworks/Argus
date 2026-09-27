@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { PRIORITY } from './lanes.mjs'
-import { NET_SDK, lastError, lateCalls, sdkCallT } from './sdk.mjs'
+import { NET_SDK, lastError, lateCalls, sdkCallT, sdkStuck } from './sdk.mjs'
 import { kid, parseXml } from './xml.mjs'
 // The parser itself lives in xml.mjs, which imports nothing: modules that only read an NVR's
 // answer can use it without loading the native SDK. Re-exported here so nothing else had to change.
@@ -96,48 +96,150 @@ export function errorAnswer(e) {
 const xmlTails = new WeakMap() // nvr -> promise that settles when its last queued XML call has returned from the SDK
 const XML_CAP_MS = 90_000 // never block the queue for ever: the watchdog handles calls stuck longer
 
+// ---- and one at a time in the whole process, paced, with a short queue -------------------
+//
+// The SDK runs one call at a time for every NVR, so a burst of XML calls (the page that reads
+// every camera's picture settings: 87 reads, still running at 04:11 next to the call that got the
+// service restarted) only queues inside it, where every other NVR's control calls wait behind it.
+// So: one XML call in flight in this process, and the next starts only once the previous one has
+// returned and at least XML_GAP_MS after it started (slow calls run back to back, a burst of fast
+// ones goes out at 4 a second; the NVR disk reads, 3 per NVR, still fit their 8 s). At most
+// XML_MAX_WAITING calls wait; a read beyond that is answered "busy" at once. Reads (query...,
+// get..., search...) to an NVR that has let two of them in a row run past their time limit are
+// refused for XML_READ_BREAKER_MS (other failures are answers, e.g. a probe of a command the
+// firmware lacks, and do not count). Changes (edit...) are never turned away by the queue length
+// or the breaker: an admin is waiting on each one, and the change lock allows one per NVR.
+// Nothing is queued at all while the SDK is stuck (sdk.mjs sdkStuck).
+// A call takes its process-wide turn only once its NVR's lane runs it, right before the native call
+// (takeTurn). Taken earlier, a call waiting for its lane would keep every NVR's XML calls waiting:
+// an NVR with two late calls holds its lane, e.g. for a disk read from nvr-disks (which checks only
+// that the NVR is online), until those calls return or XML_CAP_MS passes, and every other NVR's
+// settings pages would queue and then be turned away behind it. The price is that a call waiting for
+// its turn keeps its lane slot meanwhile, as it used to while its native call queued inside the SDK
+// behind the same calls; only one XML call per NVR gets that far (the per-NVR queue above), so the
+// turns ahead of it are at most one call per other NVR.
+const XML_GAP_MS = 250
+const XML_MAX_WAITING = 10
+const XML_READ_FAILS = 2 // timeouts in a row ...
+const XML_READ_BREAKER_MS = 60_000 // ... and that NVR's reads are refused this long
+const BUSY_RETRY_S = 5 // "try again" hint for a full queue
+const STUCK_RETRY_S = 30 // ... and while the SDK is stuck
+
+let gapMs = XML_GAP_MS // (tests that shorten every other timing shorten this too: _test.setGap)
+let xmlGate = Promise.resolve() // settles once the last call to take its turn has returned and XML_GAP_MS has passed since it started
+let xmlPending = 0 // admitted and not yet returned: the one in flight plus those waiting
+
+/**
+ * Waits for the process-wide turn: every call that took its turn earlier has returned, and the
+ * last one to go out started at least gapMs ago. Resolves to done(sentAt), which passes the turn on
+ * (sentAt: when this call's native call started, 0 if nothing was sent: then no gap is kept).
+ */
+async function takeTurn() {
+  const before = xmlGate
+  let done
+  const finished = new Promise((r) => (done = r))
+  xmlGate = before.then(() => finished).then((at) => (at ? sleep(Math.max(0, at + gapMs - Date.now())) : undefined))
+  await before
+  return done
+}
+const readFails = new Map() // nvr id -> { fails, openUntil }
+let now = Date.now // (the tests' clock)
+/** Whether a command only reads (NVMS-9000 web command names). */
+export const isReadCommand = (url) => /^(query|get|search)/i.test(String(url))
+
+/** Refuses (503, nothing sent) while the SDK is stuck, or reads while this NVR's read breaker is open. */
+function refuseNow(nvr, read) {
+  if (sdkStuck()) throw new HttpError(503, `The connection to the NVRs is stuck on an earlier call; nothing was sent. Try again in a minute`, { retryAfterS: STUCK_RETRY_S })
+  const b = readFails.get(nvr.id)
+  if (read && b?.openUntil > now()) {
+    const s = Math.ceil((b.openUntil - now()) / 1000)
+    throw new HttpError(503, `${nvr.name} did not answer ${XML_READ_FAILS} settings reads in time; not asking it again for ${s} s`, { retryAfterS: s })
+  }
+}
+
+/** A read came back (ok) or ran past its time limit (timeout): counts towards this NVR's breaker. */
+function noteRead(nvr, timedOut) {
+  if (!timedOut) return void readFails.delete(nvr.id)
+  const b = readFails.get(nvr.id) ?? { fails: 0, openUntil: 0 }
+  if (b.openUntil && b.openUntil <= now()) b.fails = 0 // (a closed breaker starts counting again)
+  b.fails++
+  if (b.fails >= XML_READ_FAILS) {
+    b.openUntil = now() + XML_READ_BREAKER_MS
+    console.warn(`[${nvr.id}] ${b.fails} settings reads in a row ran past their time limit: no reads to this NVR for ${XML_READ_BREAKER_MS / 1000} s`)
+    b.fails = 0
+  }
+  readFails.set(nvr.id, b)
+}
+
 // replaced by the offline tests: (opts, userId, xml, url, out, outSize, len) => Promise<bool>
 let call = (opts, ...args) => sdkCallT(opts, NET_SDK.TransparentConfig, ...args)
 
 /**
  * Sends one command and returns the answer. Refuses (nothing sent) if the session changed
- * while the call waited its turn: `gen` is the session the caller's data came from.
+ * while the call waited its turn: `gen` is the session the caller's data came from. Refuses with
+ * 503 while the SDK is stuck, while the process-wide queue is full (reads) and while this NVR's
+ * read breaker is open (reads): see above.
  */
 export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes = 256 * 1024 } = {}) {
   if (!nvr.online || nvr.userId < 0) throw new Error(`${nvr.name} is offline`)
+  const read = isReadCommand(url)
+  refuseNow(nvr, read)
+  if (read && xmlPending > XML_MAX_WAITING) {
+    throw new HttpError(503, `Too many NVR settings requests at once (${xmlPending - 1} waiting); nothing was sent. Try again shortly`, { retryAfterS: BUSY_RETRY_S })
+  }
   const out = Buffer.alloc(outBytes)
   const len = Buffer.alloc(4)
   const prev = xmlTails.get(nvr) ?? Promise.resolve()
   let returned
-  const mine = new Promise((r) => (returned = r))
+  const mine = new Promise((r) => (returned = r)) // resolves once the native call has returned, nothing was sent, or the cap
   const tail = prev.then(() => mine)
   xmlTails.set(nvr, tail)
   tail.then(() => {
     if (xmlTails.get(nvr) === tail) xmlTails.delete(nvr)
   })
+  xmlPending++
+  mine.then(() => xmlPending--)
   await prev
-  const cap = setTimeout(() => returned(), XML_CAP_MS)
+  let sentAt = 0
+  let passTurn = null // set while this call holds the process-wide turn (takeTurn)
+  let cap = null
   const release = () => {
     clearTimeout(cap)
     returned()
+    passTurn?.(sentAt)
+    passTurn = null
   }
+  // never block the queues for ever (the watchdog handles calls stuck longer): from here while it
+  // waits for its lane, and again from its process-wide turn
+  cap = setTimeout(release, XML_CAP_MS)
   let ok
   try {
+    // things may have changed while it waited: the SDK stuck, the breaker opened
+    refuseNow(nvr, read)
     ok = await nvr.lane.run(
-      () => {
+      async () => {
+        // the process-wide turn, only now that the lane runs this call (see takeTurn)
+        passTurn = await takeTurn()
+        clearTimeout(cap)
+        cap = setTimeout(release, XML_CAP_MS)
+        // and once more after that wait: the SDK stuck, the breaker opened
+        refuseNow(nvr, read)
         // the session as it is when the call really starts (a relogin may have happened while queued)
         const userId = nvr.userId
         if (userId < 0 || nvr.gen !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
+        sentAt = Date.now()
         return call({ nvr: nvr.id, tag, onLate: release }, userId, xml, url, out, out.length, len)
       },
       { priority: PRIORITY.NORMAL }
     )
   } catch (e) {
-    // after a timeout the native call is still running: onLate releases the queue when it returns
+    if (read && sentAt) noteRead(nvr, e?.name === 'SdkTimeout')
+    // after a timeout the native call is still running: onLate releases the queues when it returns
     if (e?.name !== 'SdkTimeout') release()
     throw e
   }
   release()
+  if (read) noteRead(nvr, false)
   if (!ok) throw new Error(`the NVR did not accept the request (${await lastError()})`)
   // some answers end with stray NUL bytes
   return out.toString('utf8', 0, Math.min(len.readUInt32LE(0), out.length)).replace(/\0+$/, '')
@@ -323,5 +425,17 @@ export const isPlainObject = (v) => v !== null && typeof v === 'object' && !Arra
 export const _test = {
   setCall(fn) {
     call = fn ?? ((opts, ...args) => sdkCallT(opts, NET_SDK.TransparentConfig, ...args))
+  },
+  /** The read breaker's clock (null: the real one). */
+  setNow(fn) {
+    now = fn ?? Date.now
+  },
+  /** Forgets every NVR's read breaker. */
+  resetBreakers() {
+    readFails.clear()
+  },
+  /** The gap between XML calls (null: 250 ms), for tests that shorten the flows' own timings. */
+  setGap(ms) {
+    gapMs = ms ?? XML_GAP_MS
   }
 }

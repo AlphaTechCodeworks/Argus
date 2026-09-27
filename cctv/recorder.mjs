@@ -49,6 +49,16 @@ const REFUSED_BACKOFF_MS = [5 * 60_000, 10 * 60_000]
 // every restart), and a 5-10 min wait there was a 'not recording' alert after each deploy
 const STARTUP_GRACE_MS = 3 * 60_000
 const STARTUP_BACKOFF_MS = [30_000, 60_000]
+// A camera already set to record when the recorder started (a worker restart: crash, watchdog kill,
+// deploy), and taken on within STARTUP_GRACE_MS, has a gap from the recorder's start until its first
+// written frame. The parent's downtime row ends when the worker was spawned, so the login, a
+// cool-down and the stream starts after it were in no row at all: about 1,982 camera-seconds after
+// the 02:29:47 crash had neither footage nor a gap row.
+const STARTUP_REASON = 'recording starting after a restart'
+// The worker's watchdog judges it by the recording (flow(), watchdog.mjs): a camera had a frame from
+// the SDK this recently (flowing), or none for this long (frozen)
+const FLOW_RECENT_MS = 10_000
+const FROZEN_MS = 45_000
 
 export class Recorder {
   /**
@@ -67,8 +77,10 @@ export class Recorder {
     this.writerOpts = writerOpts
     this.writers = new Set() // every writer with work outstanding (also ones being closed)
     this.recording = null
+    this.firstRecording = null // the first settings received: which cameras were recording before a restart
     this.locations = []
     this.cams = new Map() // ch -> cam
+    this.takenOn = new Set() // every channel this recorder has had a camera for (a restart's ramp-up is only the first)
     this.failed = new Map() // location id -> { at, reason }
     this.noted = new Set()
     // Event-driven recording (phase 7): the parent sends the stretches each event-mode camera
@@ -124,6 +136,7 @@ export class Recorder {
   /** New settings from the parent. */
   apply({ recording, locations } = {}) {
     this.recording = recording ?? null
+    if (!this.firstRecording && this.recording?.defaults) this.firstRecording = this.recording
     this.locations = Array.isArray(locations) ? locations.filter((l) => l && typeof l.path === 'string') : []
     // a location the parent (re)confirms as healthy gets another chance
     for (const id of this.failed.keys()) if (!this.locations.some((l) => l.id === id)) this.failed.delete(id)
@@ -171,9 +184,16 @@ export class Recorder {
     for (const [ch, w] of want) {
       let cam = this.cams.get(ch)
       if (!cam) {
-        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0, pick: { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }, wantType: MAIN }
+        const now = this.now()
+        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0, pick: { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }, wantType: MAIN, createdAt: now, frameAt: 0 }
         cam.tap = this.#tapFor(cam)
         this.cams.set(ch, cam)
+        // recording before the restart (on in the first settings), back now: not recorded from the
+        // recorder's start until its first frame is written (a ramp-up under SILENCE_GAP_MS leaves no row).
+        // Only the first time: a camera turned off and on again soon after has recorded since the start,
+        // and was off by choice meanwhile
+        if (now - this.startedAt < STARTUP_GRACE_MS && !this.takenOn.has(ch) && this.#onAtStart(ch)) cam.gap = { fromMs: this.startedAt, reason: STARTUP_REASON, startup: true }
+        this.takenOn.add(ch)
         console.log(`[rec ${this.nvrId}/${ch + 1}] recording on`)
       }
       cam.locationId = w.locationId
@@ -247,6 +267,34 @@ export class Recorder {
     for (const cam of this.cams.values()) this.attach(cam)
   }
 
+  /** Whether channel ch was set to record in the first settings this recorder was given. */
+  #onAtStart(ch) {
+    const r = this.firstRecording
+    const mode = r?.cameras?.[`${this.nvrId}/${ch}`]?.mode ?? r?.defaults?.mode
+    return Boolean(mode) && mode !== 'off'
+  }
+
+  /**
+   * How the recording's video is flowing from the SDK, for this worker's watchdog (watchdog.mjs
+   * spareWhile): of the cameras that should be delivering now (recording, camera online, not left
+   * alone after a refusal), how many had a frame in the last FLOW_RECENT_MS (flowing) and how many
+   * have had none for FROZEN_MS (frozen; counted from when the camera was taken on or attached, if
+   * it never had one). null when no camera should be delivering.
+   */
+  flow(now = this.now()) {
+    let cameras = 0
+    let flowing = 0
+    const frozenChs = []
+    for (const cam of this.cams.values()) {
+      if (!cam.camOnline || now < cam.refusedUntil) continue
+      cameras++
+      if (cam.frameAt && now - cam.frameAt < FLOW_RECENT_MS) flowing++
+      else if (now - Math.max(cam.frameAt, cam.attachedAt, cam.createdAt) >= FROZEN_MS) frozenChs.push(cam.ch)
+    }
+    if (!cameras) return null
+    return { at: now, cameras, flowing, frozen: frozenChs.length, recentMs: FLOW_RECENT_MS, frozenMs: FROZEN_MS, frozenChs: frozenChs.slice(0, 64) }
+  }
+
   status() {
     return Object.fromEntries(
       [...this.cams.values()].map((c) => {
@@ -317,19 +365,28 @@ export class Recorder {
   }
 
   #gapFrom(cam, reason) {
+    // a reason of its own during the ramp-up after a restart (refused, camera offline, no storage):
+    // the ramp-up part ends here and this one starts, so each stretch carries the reason it had
+    if (cam.gap?.startup && reason !== cam.gap.reason) this.#endGap(cam, this.now())
     if (!cam.gap) cam.gap = { fromMs: cam.lastTs || cam.lastAt || this.now(), reason }
   }
 
   #endGap(cam, toMs) {
     if (!cam.gap) return
-    this.send({ t: 'recgap', nvr: this.nvrId, ch: cam.ch, fromMs: cam.gap.fromMs, toMs, reason: cam.gap.reason })
+    const g = cam.gap
     cam.gap = null
+    // a camera that was recording again within SILENCE_GAP_MS of the restart lost nothing worth a row
+    if (g.startup && toMs - g.fromMs < SILENCE_GAP_MS) return
+    this.send({ t: 'recgap', nvr: this.nvrId, ch: cam.ch, fromMs: g.fromMs, toMs, reason: g.reason })
   }
 
   #tapFor(cam) {
     const rec = this
     return {
-      background: true, // nobody is watching: a viewer's stream starts ahead of this one (lanes.mjs)
+      // the recorder's stream starts first in the NVR's lanes (lanes.mjs RANK), is never held by
+      // the live pacer, and may start while the NVR cools down once nothing of it is stuck (live.mjs)
+      recorder: true,
+      background: true, // nobody is watching it
       OPEN: 1,
       readyState: 1,
       bufferedAmount: 0, // the writer has its own queue limits (segment-writer.mjs)
@@ -344,6 +401,7 @@ export class Recorder {
   #onFrame(cam, buf) {
     if (this.cams.get(cam.ch) !== cam || buf.length <= HEADER_SIZE) return
     const now = this.now()
+    cam.frameAt = now // video from the SDK, whether or not it is written (flow())
     const isKey = buf[0] === 1
     const { ts, lost, reanchored } = this.#stamp(cam, Number(buf.readBigInt64LE(8)) / 1000, now)
     // Event-driven modes: outside an event window this camera is meant not to be writing. That is a
@@ -353,6 +411,9 @@ export class Recorder {
     // first frame after a quiet spell is not mistaken for a jump.
     const gate = this.#gate(cam, ts, now)
     if (!gate.write) {
+      // the video is back and this camera is doing what it should (not writing between events):
+      // the restart's ramp-up ends here, not at the next event
+      if (cam.gap?.startup) this.#endGap(cam, ts)
       cam.lastTs = ts
       cam.lastAt = now
       cam.waitKey = true // the next written frame must be a keyframe: deltas need their reference
@@ -447,10 +508,7 @@ export class Recorder {
     cam.stream = null
     this.#retire(cam.writer)
     cam.writer = null
-    if (cam.gap) {
-      this.send({ t: 'recgap', nvr: this.nvrId, ch, fromMs: cam.gap.fromMs, toMs: this.now(), reason: cam.gap.reason })
-      cam.gap = null
-    }
+    this.#endGap(cam, this.now())
     console.log(`[rec ${this.nvrId}/${ch + 1}] recording off`)
   }
 }

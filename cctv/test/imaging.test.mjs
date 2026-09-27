@@ -282,6 +282,9 @@ check('rebootParam: unknown names are reported raw', dec('fooBar').groups.length
 TIMING.verifyMs = [5, 10, 20]
 TIMING.pollEveryMs = 5
 TIMING.pollMaxMs = 60
+// the process-wide spacing of XML calls (250 ms; nvr-xml.test.mjs) shortened with the rest: a 60 ms
+// restart poll would otherwise have room for one read
+xmlMod._test.setGap(0)
 
 const escT = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;')
 const escA = (v) => escT(v).replace(/"/g, '&quot;')

@@ -306,6 +306,104 @@ const wire = (isKey, codec, payload, ts = 0) => {
   check('a lasting 8 s lag: times never go backwards', rows.every((r, j) => j === 0 || r.tsMs >= rows[j - 1].tsMs))
 }
 
+// ---- after a restart: a camera that was recording has a gap row from the recorder's start until its
+// first written frame (the parent's downtime row ends when the worker was spawned)
+{
+  const REASON = 'recording starting after a restart'
+  const mk = (nvrId, chans, t) => {
+    const streams = new Map()
+    const sent = []
+    const clock = { now: t }
+    const rec = new Recorder({ nvrId, getStream: (ch) => streams.get(ch) ?? streams.set(ch, fakeStream()).get(ch), online: () => true, channels: () => chans.map((ch) => ({ ch, online: true })), send: (m) => sent.push(m), now: () => clock.now })
+    const tapOf = (ch) => [...(streams.get(ch)?.clients ?? [])][0]
+    const frame = (ch) => tapOf(ch).send(wire(true, 0, Buffer.from([0, 0, 0, 1, 0x65])))
+    return { rec, sent, clock, streams, frame, gaps: (ch) => sent.filter((m) => m.t === 'recgap' && m.ch === ch) }
+  }
+  const t0 = Date.UTC(2026, 8, 27, 2, 29, 50)
+  {
+    const chans = [0]
+    const { rec, clock, frame, gaps } = mk('n7', chans, t0)
+    rec.apply({ recording: recording({}, { mode: 'continuous' }), locations: [location('LR')] })
+    clock.now = t0 + 40_000 // login, a cool-down, the stream's start ...
+    frame(0)
+    await rec.idle()
+    const g = gaps(0)
+    check('restart: created at t0, first frame at t0+40 s: one recgap row with that reason', g.length === 1 && g[0].reason === REASON && g[0].fromMs === t0 && g[0].toMs === t0 + 40_000, J(g))
+    clock.now += 1000
+    frame(0)
+    await rec.idle()
+    check('... and no other row once it records', gaps(0).length === 1)
+    chans.push(1) // a camera that turns up 4 minutes after the start (it came online)
+    clock.now = t0 + 4 * 60_000
+    rec.sync()
+    clock.now += 5000
+    frame(1)
+    frame(0)
+    await rec.idle()
+    check('restart: a camera created later (past the start-up grace): none', gaps(1).length === 0, J(gaps(1)))
+    const f = rec.flow(clock.now)
+    check('flow: both cameras had a frame in the last 10 s', f?.cameras === 2 && f.flowing === 2 && f.frozen === 0, J(f))
+    clock.now += 50_000
+    frame(1)
+    const f2 = rec.flow(clock.now)
+    check('flow: one without a frame for 45 s is frozen, the other flowing', f2.cameras === 2 && f2.flowing === 1 && f2.frozen === 1 && J(f2.frozenChs) === '[0]', J(f2))
+    await rec.stop()
+  }
+  {
+    const { rec, clock, frame, gaps } = mk('n8', [0], t0)
+    rec.apply({ recording: recording({}, { mode: 'continuous' }), locations: [location('LR2')] })
+    clock.now = t0 + 1500
+    frame(0)
+    await rec.idle()
+    check('restart: recording again within 3 s: no row (nothing worth one lost)', gaps(0).length === 0, J(gaps(0)))
+    await rec.stop()
+  }
+  {
+    const { rec, clock, frame, gaps } = mk('n9', [0], t0)
+    rec.apply({ recording: recording(), locations: [location('LR3')] }) // recording off at the start
+    clock.now = t0 + 30_000
+    rec.apply({ recording: recording({}, { mode: 'continuous' }), locations: [location('LR3b')] }) // turned on 30 s in
+    clock.now = t0 + 70_000
+    frame(0)
+    await rec.idle()
+    check('restart: a camera turned on after the start (not recording before it): none', gaps(0).length === 0, J(gaps(0)))
+    await rec.stop()
+  }
+  {
+    const { rec, clock, streams, gaps } = mk('n10', [0], t0)
+    rec.apply({ recording: recording({}, { mode: 'continuous' }), locations: [location('LR4')] })
+    check('flow: a camera taken on just now is neither flowing nor frozen', J(rec.flow(t0)) === J({ at: t0, cameras: 1, flowing: 0, frozen: 0, recentMs: 10_000, frozenMs: 45_000, frozenChs: [] }), J(rec.flow(t0)))
+    clock.now = t0 + 20_000
+    streams.get(0).lastFailure = { at: clock.now, fast: true, reason: 'refused in 30 ms: error 31' }
+    rec.sync()
+    const g = gaps(0)
+    check('restart: refused during the ramp-up: the ramp-up row ends there, the refusal has a row of its own', g.length === 1 && g[0].reason === REASON && g[0].toMs === t0 + 20_000 && rec.cams.get(0).gap?.reason?.startsWith('refused'), J({ g, open: rec.cams.get(0).gap }))
+    clock.now = t0 + 45_000 // (the first refusal just after a start backs off 30-60 s)
+    const f = rec.flow(clock.now)
+    check('flow: a camera left alone after a refusal does not count (none left: null)', rec.cams.get(0).refusedUntil > clock.now && f === null, J({ f, until: rec.cams.get(0).refusedUntil - clock.now }))
+    await rec.stop()
+  }
+  {
+    // recording from t0+6 s; turned off at t0+60 s and on again at t0+100 s (inside the start-up grace)
+    const { rec, clock, frame, gaps } = mk('n11', [0], t0)
+    rec.apply({ recording: recording({}, { mode: 'continuous' }), locations: [location('LR5')] })
+    clock.now = t0 + 6000
+    frame(0)
+    await rec.idle()
+    const first = gaps(0).length
+    clock.now = t0 + 60_000
+    rec.apply({ recording: recording({ 'n11/0': { mode: 'off' } }, { mode: 'continuous' }), locations: [location('LR5')] })
+    clock.now = t0 + 100_000
+    rec.apply({ recording: recording({}, { mode: 'continuous' }), locations: [location('LR5')] })
+    clock.now = t0 + 104_000
+    frame(0)
+    await rec.idle()
+    const g = gaps(0).slice(first)
+    check('restart: a camera turned off and on again within the grace: no ramp-up row over what it recorded', first === 1 && g.length === 0 && !rec.cams.get(0).gap, J({ first: gaps(0), open: rec.cams.get(0).gap }))
+    await rec.stop()
+  }
+}
+
 // ---- the worker: recording shares the live pull; settings messages start and stop it
 {
   const L = location('LW')

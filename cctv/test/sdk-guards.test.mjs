@@ -14,6 +14,7 @@ const { Lane, PRIORITY, connectLane } = await import('../lanes.mjs')
 const sdk = await import('../sdk.mjs')
 const { SdkTimeout, discountPause, exclusiveSettled, lateCalls, liveFrames, sdkCallT, sdkStats } = sdk
 const nvrCooling = sdk.nvrCooling ?? (() => undefined) // (so the checks below fail, not crash, without it)
+const sdkStuck = sdk.sdkStuck ?? (() => undefined)
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -219,6 +220,91 @@ const fake = (ms, result = 1, err = null) => ({
   console.warn = warn
 }
 
+// ---- a late login (mayBlock) does not cool its NVR; an ordinary late call still does ------
+// (02:30:11: a relogin 1 s late held the recording restarts of 23 cameras for 60 s)
+{
+  const lines = []
+  const warn = console.warn
+  console.warn = (...a) => lines.push(a.join(' '))
+  await sdkCallT({ nvr: 'cool-login', tag: 'login', mayBlock: true, timeoutMs: 50 }, fake(200)).catch(() => {})
+  await sleep(250) // it has come back now, 150 ms after its time limit
+  check('a login (mayBlock) that came back late leaves its NVR not cooling', nvrCooling('cool-login') === false && lateCalls('cool-login') === 0)
+  check('... and nothing is logged about holding new streams', !lines.some((l) => l.includes('[cool-login]')), lines.join(' | '))
+  await sdkCallT({ nvr: 'cool-plain', tag: 'channels', timeoutMs: 50 }, fake(200)).catch(() => {})
+  await sleep(250)
+  check('an ordinary call that came back late still cools its NVR', nvrCooling('cool-plain') === true)
+  console.warn = warn
+  await sleep(COOL_MS + 50)
+}
+
+// ---- victims and roots (the watchdog's late rule counts roots only) -----------------------
+{
+  const warn = console.warn
+  console.warn = () => {}
+  const root = sdkCallT({ nvr: 'jam-0', tag: 'root', timeoutMs: 50 }, fake(700)).catch(() => {})
+  await sleep(5)
+  // three calls to three NVRs asked while the root is inside the SDK (the event poller at 04:12).
+  // (Three, not six: this process may run with the default native-call cap of 4.)
+  const victims = Array.from({ length: 3 }, (_, i) => sdkCallT({ nvr: `jam-${i % 3}`, tag: `victim ${i}`, timeoutMs: 50 }, fake(700)).catch(() => {}))
+  await sleep(150)
+  const s = sdkStats()
+  const jam = s.calls.filter((c) => c.nvr.startsWith('jam-'))
+  check('sdkStats: the oldest call in flight is the only one not marked a victim', jam.length === 4 && jam.filter((c) => !c.victim).map((c) => c.tag).join() === 'root', jam.map((c) => `${c.tag}:${c.victim}`).join(', '))
+  check('sdkStats: lateRoots counts the root only, lateBlocking all four', s.lateRoots === 1 && s.lateBlocking === 4, `roots ${s.lateRoots}, blocking ${s.lateBlocking}`)
+  await Promise.all([root, ...victims])
+  await sleep(700)
+  check('sdkStats: none left once they returned', sdkStats().lateRoots === 0 && sdkStats().inFlight === 0)
+  console.warn = warn
+}
+
+// ---- sdkStuck: a call past its time limit with nothing back since it started --------------
+{
+  const warn = console.warn
+  console.warn = () => {}
+  /** A fake call that returns only when told to. */
+  const held = () => {
+    const f = { finish: () => {} }
+    f.fn = { async: (...a) => (f.finish = () => a.at(-1)(null, 1)) }
+    return f
+  }
+  check('sdkStuck: false with nothing in flight', sdkStuck() === false)
+  const a = held()
+  const pa = sdkCallT({ nvr: 'stk-a', tag: 'stuck', timeoutMs: 80 }, a.fn).catch(() => {})
+  await sleep(30)
+  check('sdkStuck: false while the call is still within its time limit', sdkStuck() === false)
+  await sleep(100)
+  check('sdkStuck: true once it is past its limit and nothing has come back since it started', sdkStuck() === true)
+  await sdkCallT({ nvr: 'stk-b', timeoutMs: 500 }, fake(5))
+  check('sdkStuck: false as soon as any native call comes back', sdkStuck() === false && lateCalls('stk-a') === 1)
+  // a newer call that stops everything is not hidden by the older one (e.g. a login stuck for
+  // minutes on an NVR that does not answer while the others kept returning)
+  const b = held()
+  const pb = sdkCallT({ nvr: 'stk-c', tag: 'wedge', timeoutMs: 80 }, b.fn).catch(() => {})
+  await sleep(130)
+  check('sdkStuck: true for a newer call past its limit with nothing back since, whatever older call is in flight', sdkStuck() === true)
+  a.finish()
+  b.finish()
+  await Promise.all([pa, pb])
+  await sleep(10)
+  check('sdkStuck: false once they returned', sdkStuck() === false && lateCalls() === 0)
+  // a login (mayBlock) past its limit on its own is not the SDK stuck; a call asked behind it that
+  // goes late with nothing back is
+  const login = held()
+  const pl = sdkCallT({ nvr: 'stk-l', tag: 'login', mayBlock: true, timeoutMs: 80 }, login.fn).catch(() => {})
+  await sleep(130)
+  check('sdkStuck: a late login alone does not count', sdkStuck() === false && lateCalls('stk-l') === 1)
+  const behind = held()
+  const pbh = sdkCallT({ nvr: 'stk-m', tag: 'behind the login', timeoutMs: 80 }, behind.fn).catch(() => {})
+  await sleep(130)
+  check('sdkStuck: ... a call asked behind it that goes late with nothing back does', sdkStuck() === true)
+  login.finish()
+  behind.finish()
+  await Promise.all([pl, pbh])
+  await sleep(10)
+  console.warn = warn
+  await sleep(COOL_MS + 50)
+}
+
 // ---- a call only queued behind another NVR's slow call does not cool its NVR --
 {
   const warn = console.warn
@@ -323,9 +409,13 @@ const fake = (ms, result = 1, err = null) => ({
 const watchdogChild = async (body, env) => {
   const dir = mkdtempSync(join(tmpdir(), 'wd-'))
   const code = `
-    import { startWatchdog } from '${new URL('../watchdog.mjs', import.meta.url).href}'
+    import * as wd from '${new URL('../watchdog.mjs', import.meta.url).href}'
+    const { startWatchdog } = wd
+    const spareWhile = wd.spareWhile ?? (() => {}) // (so the checks fail, not crash, without it)
     import { sdkCallT } from '${new URL('../sdk.mjs', import.meta.url).href}'
     const stuck = (tag, nvr) => sdkCallT({ timeoutMs: 100, tag, nvr }, { async() {} }).catch(() => {})
+    const returnsAfter = (ms, tag, nvr) => sdkCallT({ timeoutMs: 100, tag, nvr }, { async(...a) { setTimeout(() => a.at(-1)(null, 1), ms) } }).catch(() => {})
+    const exitAt = (ms) => setTimeout(() => { process.stderr.write('still running\\n'); process.exit(0) }, ms)
     const quick = { async(...a) { setTimeout(() => a.at(-1)(null, 1), 10) } }
     const keepReturning = () => setInterval(() => sdkCallT({ timeoutMs: 500, nvr: 'nvr-ok', tag: 'quick' }, quick).catch(() => {}), 150)
     startWatchdog()
@@ -341,17 +431,115 @@ const watchdogChild = async (body, env) => {
   let stderr = ''
   child.stderr.on('data', (d) => (stderr += d))
   const [exitCode, signal] = await new Promise((resolve) => child.on('exit', (c, sig) => resolve([c, sig])))
-  let dump = null
-  try {
-    dump = JSON.parse(readFileSync(join(dir, 'last-hang.json'), 'utf8'))
-  } catch {}
-  return { exitCode, signal, took: Date.now() - t0, stderr, dump }
+  const suffix = env?.CCTV_WORKER_NVR ? `-${env.CCTV_WORKER_NVR}` : ''
+  const json = (name) => {
+    try {
+      return JSON.parse(readFileSync(join(dir, `${name}${suffix}.json`), 'utf8'))
+    } catch {
+      return null
+    }
+  }
+  return { exitCode, signal, took: Date.now() - t0, stderr, dump: json('last-hang'), hold: json('last-hold') }
 }
 const SIX_STUCK = `for (let i = 0; i < 6; i++) stuck('stuck ' + i, 'nvr-' + (i % 3))`
+const LATE_RULE = { WATCHDOG_MAX_CALL_MS: '20000', WATCHDOG_LATE_HOLD_MS: '1500', WATCHDOG_PROGRESS_MS: '800' }
 {
-  const r = await watchdogChild(SIX_STUCK, { WATCHDOG_MAX_CALL_MS: '20000', WATCHDOG_LATE_HOLD_MS: '1500', WATCHDOG_PROGRESS_MS: '800' })
-  check('watchdog trips on 6 late calls with none returning, once the oldest is past the hold', r.signal === 'SIGKILL' && r.took >= 1500 && r.took < 6000 && /6 SDK calls overdue/.test(r.dump?.reason ?? ''), `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
+  // a recording worker's watchdog is not changed: there six late calls still trip the late rule
+  const r = await watchdogChild(SIX_STUCK, { ...LATE_RULE, CCTV_WORKER_NVR: 'wd-w1' })
+  check('worker: watchdog trips on 6 late calls with none returning, once the oldest is past the hold', r.signal === 'SIGKILL' && r.took >= 1500 && r.took < 6000 && /6 SDK calls overdue/.test(r.dump?.reason ?? ''), `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
   check('the hang dump says how long ago a native call last returned', r.dump?.lastReturnAgoMs >= 800 && r.dump?.stats?.lastReturnAgoMs >= 800, String(r.dump?.lastReturnAgoMs))
+}
+{
+  // the main process that runs the recording workers: one stuck call and six asked behind it
+  // (04:12:13) are one jam, not seven (the single stuck call rule judges the root)
+  const r = await watchdogChild(`stuck('root', 'nvr-0'); setTimeout(() => { ${SIX_STUCK} }, 20); exitAt(3500)`, { ...LATE_RULE, CCTV_LIVE_WORKER: 'on' })
+  check('main with recording workers: a stuck root plus 6 victims does not trip the late rule', r.signal === null && r.exitCode === 0 && r.stderr.includes('still running'), `${r.signal ?? r.exitCode} after ${r.took} ms: ${r.dump?.reason ?? ''}`)
+}
+{
+  // ... but a main process without recording workers (CCTV_LIVE_WORKER off, e.g. Docker: it runs
+  // every live stream itself) keeps the late rule as it was: the same jam still ends at LATE_HOLD_MS
+  const r = await watchdogChild(`stuck('root', 'nvr-0'); setTimeout(() => { ${SIX_STUCK} }, 20)`, { ...LATE_RULE, CCTV_LIVE_WORKER: '' })
+  check('main without recording workers: a stuck root plus 6 victims still trips the late rule', r.signal === 'SIGKILL' && r.took >= 1500 && r.took < 6000 && /7 SDK calls overdue/.test(r.dump?.reason ?? '') && r.dump?.limits?.lateCounts === 'lateBlocking', `${r.signal} after ${r.took} ms: ${r.dump?.reason}; ${r.dump?.limits?.lateCounts}`)
+}
+// main process: while the workers record (spareWhile), a stuck-SDK verdict is held, up to a limit
+{
+  const r = await watchdogChild(`spareWhile(() => '3 cameras on 1 NVR'); stuck('stuck search', 'nvr-1'); exitAt(3000)`, { WATCHDOG_MAX_CALL_MS: '1000' })
+  check('main: spareWhile(() => true) with one stuck call: still running after 3 s', r.signal === null && r.exitCode === 0 && r.stderr.includes('still running'), `${r.signal ?? r.exitCode} after ${r.took} ms`)
+  check('... and it logs that it is holding, and why', /\[watchdog\] SDK call stuck .*holding.*3 cameras on 1 NVR/.test(r.stderr), r.stderr.split('\n').find((l) => l.includes('[watchdog]')) ?? '')
+  check('... and writes last-hold.json (no hang dump)', r.hold?.outcome === 'holding' && r.hold.recording === '3 cameras on 1 NVR' && r.hold.stats?.calls?.[0]?.tag === 'stuck search' && r.hold.limitS === 300 && r.dump === null, JSON.stringify(r.hold)?.slice(0, 300))
+}
+{
+  const r = await watchdogChild(`spareWhile(() => false); stuck('stuck search', 'nvr-1')`, { WATCHDOG_MAX_CALL_MS: '1000' })
+  check('main: spareWhile(() => false): killed as before', r.signal === 'SIGKILL' && r.took < 4000 && /^SDK call stuck/.test(r.dump?.reason ?? '') && !/held/.test(r.dump?.reason ?? '') && r.hold === null, `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
+}
+{
+  const r = await watchdogChild(`spareWhile(() => { throw new Error('probe broke') }); stuck('stuck search', 'nvr-1')`, { WATCHDOG_MAX_CALL_MS: '1000' })
+  check('main: a probe that throws spares nothing', r.signal === 'SIGKILL' && r.took < 4000, `${r.signal} after ${r.took} ms`)
+}
+{
+  const r = await watchdogChild(`spareWhile(() => true); stuck('stuck search', 'nvr-1')`, { WATCHDOG_MAX_CALL_MS: '1000', WATCHDOG_HOLD_MAX_MS: '1500' })
+  check('main: the hold reaches its limit: killed', r.signal === 'SIGKILL' && r.took >= 2400 && r.took < 6000 && /held \d+ s while the workers recorded, the limit/.test(r.dump?.reason ?? ''), `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
+  check('... last-hold.json says so', r.hold?.outcome === 'killed' && r.hold.heldS >= 1, JSON.stringify(r.hold)?.slice(0, 200))
+}
+{
+  const r = await watchdogChild(`let on = true; spareWhile(() => on); stuck('stuck search', 'nvr-1'); setTimeout(() => (on = false), 2000)`, { WATCHDOG_MAX_CALL_MS: '1000' })
+  check('main: a hold ends in the kill once the workers stop recording', r.signal === 'SIGKILL' && r.took >= 1900 && r.took < 5000 && /until the workers stopped recording/.test(r.dump?.reason ?? ''), `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
+}
+{
+  const r = await watchdogChild(`spareWhile(() => true); returnsAfter(2500, 'slow search', 'nvr-1'); exitAt(3800)`, { WATCHDOG_MAX_CALL_MS: '1000' })
+  check('main: a held stall that clears by itself: no restart', r.signal === null && r.exitCode === 0 && /\(slow search\) on nvr-1 returned after \d+ s held; no restart/.test(r.stderr), `${r.signal ?? r.exitCode}: ${r.stderr.split('\n').filter((l) => l.includes('[watchdog]')).join(' | ')}`)
+  check('... last-hold.json says it recovered', r.hold?.outcome === 'recovered' && r.hold.first?.oldest?.includes('slow search') && r.hold.first?.call?.includes('slow search'), JSON.stringify(r.hold)?.slice(0, 300))
+}
+{
+  // The hold belongs to the stuck call, not to a run of verdicts: another NVR's call that comes back
+  // now and then (every 1.5 s, more than PROGRESS_MS apart) clears the verdict for a moment each
+  // time, and must neither start the limit over nor count as the stall having cleared. (With the
+  // limit starting over after each return the process was never killed, and last-hold.json said
+  // 'recovered' while the call was still stuck.)
+  const body = `spareWhile(() => true); stuck('stuck search', 'nvr-1')
+    setInterval(() => sdkCallT({ timeoutMs: 500, nvr: 'nvr-ok', tag: 'now and then' }, quick).catch(() => {}), 1500)
+    exitAt(9000)`
+  const r = await watchdogChild(body, { WATCHDOG_MAX_CALL_MS: '1000', WATCHDOG_PROGRESS_MS: '800', WATCHDOG_HOLD_MAX_MS: '1500' })
+  check('main: a call stuck for good is killed at the hold limit although other NVRs return now and then', r.signal === 'SIGKILL' && r.took >= 2400 && r.took < 7000 && /held \d+ s while the workers recorded, the limit/.test(r.dump?.reason ?? ''), `${r.signal ?? r.exitCode} after ${r.took} ms: ${r.dump?.reason ?? ''}`)
+  check('... and the hold never reported that it had cleared', !/returned after|no restart/.test(r.stderr) && r.hold?.outcome === 'killed' && r.hold.first?.call?.includes('stuck search'), `${r.stderr.split('\n').filter((l) => l.includes('[watchdog]')).join(' | ')}; ${r.hold?.outcome}`)
+}
+{
+  // a stuck call that returned ends its hold; a later stuck call gets a limit of its own
+  const body = `spareWhile(() => true); returnsAfter(2000, 'first', 'nvr-1'); setTimeout(() => stuck('second', 'nvr-2'), 2100)`
+  const r = await watchdogChild(body, { WATCHDOG_MAX_CALL_MS: '1000', WATCHDOG_PROGRESS_MS: '800', WATCHDOG_HOLD_MAX_MS: '1500' })
+  check('main: after a held call returned, the next stuck call is held for the full limit again', r.signal === 'SIGKILL' && r.took >= 4500 && r.took < 9000 && /\(first\) on nvr-1 returned after/.test(r.stderr) && /the limit/.test(r.dump?.reason ?? '') && r.hold?.first?.call?.includes('second'), `${r.signal} after ${r.took} ms: ${r.dump?.reason}; ${r.stderr.split('\n').filter((l) => l.includes('[watchdog]')).join(' | ')}`)
+}
+{
+  const r = await watchdogChild(`spareWhile(() => true); stuck('stuck stop', 'nvr-1')`, { WATCHDOG_MAX_CALL_MS: '1000', CCTV_WORKER_NVR: 'wd-w2' })
+  check('worker: a probe that gives no flow snapshot leaves the single-call limit as it was (no hold either)', r.signal === 'SIGKILL' && r.took < 4000 && r.hold === null, `${r.signal} after ${r.took} ms`)
+}
+// an NVR worker judged by its recording's flow (recorder.mjs flow() through spareWhile)
+{
+  const flowing = `{ at: Date.now(), cameras: 10, flowing: 8, frozen: 0, recentMs: 10000, frozenMs: 45000, frozenChs: [] }`
+  const r = await watchdogChild(`spareWhile(() => (${flowing})); stuck('viewer LivePlay', 'nvr-1'); exitAt(3000)`, { WATCHDOG_MAX_CALL_MS: '1000', WATCHDOG_FLOW_MAX_CALL_MS: '20000', CCTV_WORKER_NVR: 'wd-w3' })
+  check('worker: recording flowing: no kill at MAX_CALL (still running after 3 s)', r.signal === null && r.exitCode === 0 && r.stderr.includes('still running'), `${r.signal ?? r.exitCode} after ${r.took} ms: ${r.dump?.reason ?? ''}`)
+  check('... and it says why, once', (r.stderr.match(/\[watchdog\] SDK call stuck .*viewer LivePlay.*recording still flowing \(8 of 10 cameras.*not restarting before 20 s/g) ?? []).length === 1, r.stderr.split('\n').filter((l) => l.includes('[watchdog]')).join(' | '))
+}
+{
+  const flowing = `{ at: Date.now(), cameras: 10, flowing: 5, frozen: 0 }`
+  const r = await watchdogChild(`spareWhile(() => (${flowing})); stuck('viewer LivePlay', 'nvr-1')`, { WATCHDOG_MAX_CALL_MS: '800', WATCHDOG_FLOW_MAX_CALL_MS: '2000', CCTV_WORKER_NVR: 'wd-w4' })
+  check('worker: recording flowing (half the cameras): killed at the longer limit', r.signal === 'SIGKILL' && r.took >= 2000 && r.took < 5000 && /recording still flowing/.test(r.dump?.reason ?? ''), `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
+  check('... the dump includes the flow snapshot and the limits', r.dump?.flow?.cameras === 10 && r.dump.flow.flowing === 5 && r.dump.limits?.flowMaxCallMs === 2000 && r.dump.limits?.frozenCallMs === 60_000, JSON.stringify({ flow: r.dump?.flow, limits: r.dump?.limits }))
+}
+{
+  const frozen = `{ at: Date.now(), cameras: 10, flowing: 0, frozen: 9, recentMs: 10000, frozenMs: 45000, frozenChs: [0, 1, 2, 3, 4, 5, 6, 7, 8] }`
+  const r = await watchdogChild(`spareWhile(() => (${frozen})); stuck('viewer LivePlay', 'nvr-1')`, { WATCHDOG_MAX_CALL_MS: '5000', WATCHDOG_FROZEN_CALL_MS: '800', CCTV_WORKER_NVR: 'wd-w5' })
+  check('worker: recording frozen: killed at the frozen limit, before MAX_CALL', r.signal === 'SIGKILL' && r.took >= 800 && r.took < 3000 && /recording frozen \(9 of 10 cameras/.test(r.dump?.reason ?? ''), `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
+  check('... the dump includes the flow snapshot', r.dump?.flow?.frozen === 9 && r.dump.flow.frozenChs?.length === 9, JSON.stringify(r.dump?.flow))
+}
+{
+  const neither = `{ at: Date.now(), cameras: 10, flowing: 3, frozen: 2 }`
+  const r = await watchdogChild(`spareWhile(() => (${neither})); stuck('viewer LivePlay', 'nvr-1')`, { WATCHDOG_MAX_CALL_MS: '1000', WATCHDOG_FROZEN_CALL_MS: '400', WATCHDOG_FLOW_MAX_CALL_MS: '20000', CCTV_WORKER_NVR: 'wd-w6' })
+  check('worker: neither flowing nor frozen: MAX_CALL as before', r.signal === 'SIGKILL' && r.took >= 1000 && r.took < 4000 && !/recording/.test(r.dump?.reason ?? ''), `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
+}
+{
+  const r = await watchdogChild(`spareWhile(() => { throw new Error('probe broke') }); stuck('viewer LivePlay', 'nvr-1')`, { WATCHDOG_MAX_CALL_MS: '1000', WATCHDOG_FLOW_MAX_CALL_MS: '20000', CCTV_WORKER_NVR: 'wd-w7' })
+  check('worker: a flow probe that throws: MAX_CALL as before', r.signal === 'SIGKILL' && r.took < 4000 && r.dump?.flow === null, `${r.signal} after ${r.took} ms`)
 }
 {
   const r = await watchdogChild(`${SIX_STUCK}; keepReturning(); setTimeout(() => { process.stderr.write('still running\\n'); process.exit(0) }, 3500)`, {
@@ -360,11 +548,15 @@ const SIX_STUCK = `for (let i = 0; i < 6; i++) stuck('stuck ' + i, 'nvr-' + (i %
   check('watchdog leaves 6 late calls alone while other calls keep returning', r.signal === null && r.exitCode === 0 && r.stderr.includes('still running'), `${r.signal ?? r.exitCode} after ${r.took} ms ${r.stderr.split('\n').find((l) => l.includes('[watchdog]')) ?? ''}`)
 }
 {
-  // defaults for the late rule (only the single-call limit is shortened here)
-  const r = await watchdogChild(`stuck('stuck stop', 'nvr-1'); keepReturning()`, { WATCHDOG_MAX_CALL_MS: '1500' })
-  check('watchdog still trips on one call stuck past MAX_CALL_MS, even while others return', r.signal === 'SIGKILL' && r.took < 6000 && r.dump?.reason?.includes('stuck'), `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
+  // defaults for the late rule (only the single-call limit is shortened here). (This used to keep
+  // calls to another NVR returning meanwhile and expect a kill; since 633f325 other NVRs' returns
+  // spare a stuck call, so the child never died and the test hung. Both halves are checked now.)
+  const r = await watchdogChild(`stuck('stuck stop', 'nvr-1')`, { WATCHDOG_MAX_CALL_MS: '1500' })
+  check('watchdog trips on one call stuck past MAX_CALL_MS without waiting for the late rule', r.signal === 'SIGKILL' && r.took < 6000 && r.dump?.reason?.includes('stuck'), `${r.signal} after ${r.took} ms: ${r.dump?.reason}`)
   const l = r.dump?.limits ?? {}
   check('late rule defaults: oldest past 45 s and nothing back for 20 s (in the dump)', l.lateHoldMs === 45_000 && l.progressMs === 20_000 && l.maxLate === 6 && l.maxCallMs === 1500, JSON.stringify(l))
+  const kept = await watchdogChild(`stuck('stuck stop', 'nvr-1'); keepReturning(); exitAt(3500)`, { WATCHDOG_MAX_CALL_MS: '1500' })
+  check('... but not while calls to another NVR keep returning', kept.signal === null && kept.exitCode === 0, `${kept.signal ?? kept.exitCode} after ${kept.took} ms: ${kept.dump?.reason ?? ''}`)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED')

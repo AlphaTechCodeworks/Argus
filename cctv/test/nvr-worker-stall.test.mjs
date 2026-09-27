@@ -33,7 +33,7 @@ check('frames arrive', await until(() => frames.length >= 20))
 await until(() => frames.length >= 30)
 const stalledAt = Date.now()
 check('stalled stream is restarted by the worker', await until(() => /stalled, restarting/.test(out), 6000), out.split('\n').filter(Boolean).slice(-4).join(' | '))
-const callsNow = () => out.split('\n').filter((l) => l.startsWith('[fake-sdk] ')).map((l) => l.slice(11))
+const callsNow = () => out.split('\n').filter((l) => l.startsWith('[fake-sdk] ')).map((l) => l.slice(11).split(' ')[0]) // (LivePlay lines also name the stream)
 await until(() => callsNow().filter((c) => c === 'LivePlay').length >= 2, 10_000) // after the restart back-off
 const calls = callsNow()
 const stopIdx = calls.indexOf('StopLivePlay')

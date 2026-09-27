@@ -75,6 +75,70 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   check('worker exits on stop', await until(() => child.exitCode !== null || child.signalCode !== null))
 }
 
+// ---- the sub-bridge's background WANT for a main never makes the worker start one; a stopping
+// worker makes no SDK call (no StopLivePlay, no Logout) and re-creates no camera
+{
+  const { readdirSync } = await import('node:fs')
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]))
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const loc = mkdtempSync(join(tmpdir(), 'rec-bridge-'))
+  writeFileSync(join(loc, '.cctv-recordings'), '{}')
+  const DEFAULTS = { mode: 'off', fullDays: 30, after: 'timelapse', timelapseS: 10, retentionDays: 183, preS: 10, postS: 20 }
+  const settings = (cameras) => ({ t: 'settings', recording: { defaults: DEFAULTS, cameras }, locations: [{ id: 'LB', path: loc, role: 'main' }] })
+  const child = fork(new URL('../nvr-worker.mjs', import.meta.url), [], { serialization: 'advanced', stdio: ['ignore', 'pipe', 'inherit', 'ipc'], env: { ...process.env, CCTV_WORKER_NVR: 'w1', CCTV_FAKE_LOG_CALLS: '1' } })
+  let wout = ''
+  child.stdout.on('data', (d) => (wout += d))
+  const got = []
+  child.on('message', (m) => got.push(m))
+  const plays = (key) => (wout.match(new RegExp(`^\\[fake-sdk\\] LivePlay ${key}$`, 'gm')) ?? []).length
+  const framesOf = (key) => got.some((m) => m.t === 'frame' && m.key === key)
+  check('bridge: worker ready and logged in', (await until(() => got.some((m) => m.t === 'ready'))) && (await until(() => wout.includes('logged in'))))
+  child.send(settings({}))
+  child.send({ t: 'want', ch: 4, type: 0, background: true }) // what the sub-bridge sends for a cold sub tile
+  await sleep(2000)
+  check('bridge: a background main WANT, camera not recorded on its main: no LivePlay after 2 s', plays('4:0') === 0 && !framesOf('4:0'), `${plays('4:0')} LivePlay`)
+  child.send(settings({ 'w1/5': { mode: 'continuous' } }))
+  check("bridge: the recorder's own main starts", await until(() => wout.includes('stream w1/6:main started'), 5000))
+  child.send({ t: 'want', ch: 5, type: 0, background: true })
+  check("bridge: with the camera recorded on its main, the tap joins the recorder's pull (frames arrive)", await until(() => framesOf('5:0'), 3000))
+  await sleep(500)
+  check('bridge: ... with no extra LivePlay', plays('5:0') === 1, `${plays('5:0')} LivePlay`)
+  child.send({ t: 'want', ch: 4, type: 0, background: false }) // a viewer opens that camera full size
+  check('bridge: a foreground main WANT still starts it', await until(() => plays('4:0') === 1 && framesOf('4:0'), 3000), `${plays('4:0')} LivePlay`)
+
+  child.send({ t: 'want', ch: 7, type: 1 }) // a viewer's sub
+  check('stop: a wanted sub plays', await until(() => framesOf('7:1'), 3000))
+  check('stop: the recorder writes', await until(() => walk(loc).some((f) => f.endsWith('.h264')), 5000))
+  await sleep(300)
+  const mark = wout.length
+  const at = got.length
+  const t0 = Date.now()
+  child.send({ t: 'stop' })
+  check('stop: the process exits within 6 s', await until(() => child.exitCode !== null || child.signalCode !== null, 6000), `${Date.now() - t0} ms, ${child.signalCode ?? child.exitCode}`)
+  const after = wout.slice(mark)
+  check('stop: no StopLivePlay and no Logout', !/^\[fake-sdk\] (StopLivePlay|Logout)/m.test(after), after.split('\n').filter((l) => l.startsWith('[fake-sdk]')).join(' | '))
+  const off = after.indexOf('recording off')
+  check("stop: no 'recording on' after 'recording off'", off >= 0 && !after.slice(off).includes('recording on'), after.split('\n').filter((l) => l.includes('recording o')).join(' | '))
+  const seg = got.slice(at).find((m) => m.t === 'segment' && m.ch === 5)
+  check('stop: the segment is closed and reported', seg?.bytes > 0 && seg.path.startsWith(loc), JSON.stringify(seg))
+}
+
+// ---- the SDK's "Net Disconnected" lines in a worker's output: one LINKRESET a second at most
+{
+  const { linkResetWatch } = await import('../worker-supervisor.mjs')
+  let t = 1000
+  const sent = []
+  const onLine = linkResetWatch((at) => sent.push(at), () => t)
+  onLine('stream w1/3:sub started')
+  onLine('Net Disconnected...... m_deviceID = 29')
+  onLine('Net Disconnected...... m_deviceID = 30') // the same reset: a line per link
+  t += 400
+  onLine('Net Disconnected...... m_deviceID = 1')
+  t += 700
+  onLine('Net Disconnected...... m_deviceID = 2')
+  check('link reset: at most one message a second, none for other lines', sent.join() === '1000,2100', sent.join())
+}
+
 // ---- Task 4: supervisor
 {
   const { startWorker } = await import('../worker-supervisor.mjs')
@@ -116,6 +180,14 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
     return /^(PASS|FAIL|\n)/.test(String(chunk)) ? realWrite(chunk, ...rest) : true
   }
   process.env.CCTV_WORKER_TEST_SLOW_STOP_MS = '7000' // the first worker overstays its stop (for I3)
+  process.env.CCTV_FAKE_NET_DOWN_CH = '11' // a LivePlay of channel 11: the worker's SDK says the NVR dropped a link
+  process.env.CCTV_FAKE_LOG_CALLS = '1'
+  let appErr = ''
+  const realErr = process.stderr.write.bind(process.stderr)
+  process.stderr.write = (chunk, ...rest) => {
+    appErr += chunk
+    return realErr(chunk, ...rest)
+  }
   startNvrs()
   check('app: NVR w1 created', await until(() => nvrs.has('w1')))
   const nvr = nvrs.get('w1')
@@ -133,6 +205,16 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   nvr.restartStream(2, 1, 'sub-stream codec changed')
   check('app: restartStream restarts the stream in the worker', await until(() => appOut.includes('[worker w1] stream w1/3:sub sub-stream codec changed, restarting'), 3000))
   check('app: worker log lines are prefixed', /^\[worker w1\] /m.test(appOut) && !/^stream w1\//m.test(appOut))
+  // the SDK in the worker says the NVR dropped its links: the supervisor tells the worker (LINKRESET),
+  // which holds viewers' new streams on that NVR (live-pacer.mjs)
+  const quiet = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, send() {} })
+  nvr.getStream(11, 1).add(quiet())
+  check('app: the SDK’s "Net Disconnected" reaches the worker as a link reset', await until(() => appErr.includes('[worker w1] [w1] the NVR dropped its links'), 3000), appErr.split('\n').filter((l) => l.includes('dropped')).join(' | '))
+  nvr.getStream(12, 1).add(quiet())
+  await new Promise((r) => setTimeout(r, 1500))
+  check('app: ... a viewer’s new stream on that NVR then waits', appOut.includes('[worker w1] [fake-sdk] LivePlay 11:1') && !appOut.includes('[worker w1] [fake-sdk] LivePlay 12:1'))
+  process.stderr.write = realErr
+  delete process.env.CCTV_FAKE_NET_DOWN_CH
   // I3: a config change replaces the NVR; the new worker is forked only after the old one has exited
   const oldChild = nvr.worker._child()
   let oldExitAt = 0
