@@ -19,6 +19,8 @@
 //   GET  /api/admin/nvrs/:id/disks[?discover=1] -> what the NVR says about its own disks and how
 //                                 many days it holds; discover=1 sends every candidate query and
 //                                 returns the raw answers (read only), see nvr-disks.mjs
+//   GET  /api/admin/nvrs/:id/netstatus -> the NVR's receive and send bandwidth, in use and left, and
+//                                 its ports' addresses (read only), see nvr-netstatus.mjs
 //   /api/admin/nvrs/:id/channels/:ch/image -> a camera's picture settings (admins), see imaging.mjs
 //     .../image/profiles, .../image/schedule -> Day/Night set-up and schedule, see imaging.mjs
 //     .../lens -> focus settings and "Focus now", see lens.mjs
@@ -50,6 +52,7 @@
 //   bytes 16-   Annex B bitstream
 import { clientIpOf, securityHeaders } from './security.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
+import { handleNetStatus } from './nvr-netstatus.mjs'
 import { handleRelays } from './relays.mjs'
 import { transparent } from './nvr-xml.mjs'
 import { readAlerts } from './alert-log.mjs'
@@ -589,6 +592,9 @@ const handleRequest = async (req, res) => {
   // an NVR's own event log, read only (nvr-log.mjs)
   const nvrLog = await handleNvrLog(req.method, pathname, url.search, { nvrs, admin: who.admin, query: transparent })
   if (nvrLog) return sendJson(res, ...nvrLog)
+  // an NVR's network status: how much of its send budget, shared by every client, is left (nvr-netstatus.mjs)
+  const netStatus = await handleNetStatus(req.method, pathname, { nvrs, admin: who.admin, query: transparent })
+  if (netStatus) return sendJson(res, ...netStatus)
   if (al) return sendJson(res, ...al)
   const store = await handleStorage(req.method, pathname, () => readJsonObject(req, 4096), who)  // accepts the { user, admin } shape
   if (store) return sendJson(res, ...store)
