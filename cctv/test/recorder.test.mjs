@@ -452,6 +452,317 @@ const wire = (isKey, codec, payload, ts = 0) => {
   await rec.stop()
 }
 
+// ---- the stream setting changed while the cameras record: each moves to the new stream, one per NVR
+// every 3 s (setting nvr-2 to 'sub' used to move only the cameras that happened to reattach)
+{
+  const streams = new Map()
+  const asked = [] // `${ch}:${type}` getStream was asked for, in order (type 0 main, 1 sub)
+  const sent = []
+  let now = Date.UTC(2026, 8, 24, 14, 0, 5)
+  const rec = new Recorder({ nvrId: 'nmg', getStream: (ch, type) => { const k = `${ch}:${type}`; asked.push(k); return streams.get(k) ?? streams.set(k, fakeStream()).get(k) }, online: () => true, channels: () => [0, 1], send: (m) => sent.push(m), now: () => now, writerOpts: { rollOffsetMs: 0 } })
+  const cfg = (stream, cameras = {}) => ({ ...recording(cameras, { mode: 'continuous' }), ...(stream ? { nvrs: { nmg: { stream } } } : {}) })
+  const L = location('LMG')
+  const on = (ch, type) => streams.get(`${ch}:${type}`)?.clients.size === 1
+  const key = () => wire(true, 1, Buffer.from([0, 0, 0, 1, 0x26, 0]), now)
+  // a keyframe on every stream the recorder taps (a detached stream no longer reaches it)
+  const frames = async () => { for (const s of streams.values()) for (const t of s.clients) t.send(key()); await rec.idle() }
+  // the worker's 250 ms tick for ms, with video every second
+  const run = async (ms) => { for (let t = 0; t < ms; t += 250) { now += 250; rec.tick(); if (now % 1000 === 0) await frames() } }
+  const gaps = (ch) => sent.filter((m) => m.t === 'recgap' && m.ch === ch)
+  const TO_SUB = 'switching to the sub-stream (recording setting changed)'
+  const TO_MAIN = 'switching to the main stream (recording setting changed)'
+  rec.apply({ recording: cfg(), locations: [L] })
+  await frames()
+  await run(2000)
+  check("switch: two cameras recording their main streams under 'auto'", on(0, 0) && on(1, 0) && J(asked) === J(['0:0', '1:0']), J(asked))
+  rec.apply({ recording: cfg('sub'), locations: [L] })
+  rec.tick()
+  check("switch: nvr set to 'sub': the first camera moves to its sub-stream within a tick", on(0, 1) && !on(0, 0), J(asked))
+  check('... with an open gap naming the switch', rec.cams.get(0).gap?.reason === TO_SUB, J(rec.cams.get(0).gap))
+  check('... the second stays on its main for now (one camera per NVR every 3 s)', on(1, 0) && !streams.has('1:1'), J(asked))
+  await run(2750)
+  check('... still on its main 2.75 s later', on(1, 0) && !streams.has('1:1'), J(asked))
+  await run(250)
+  check('... and on its sub-stream once 3 s have passed', on(1, 1) && !on(1, 0), J(asked))
+  await run(3000)
+  const g0 = gaps(0)
+  const g1 = gaps(1)
+  check('switch: one gap row per camera, naming the switch, from its last main frame to its first sub frame (1 s)', g0.length === 1 && g1.length === 1 && [...g0, ...g1].every((g) => g.reason === TO_SUB && g.toMs - g.fromMs === 1000), J([...g0, ...g1]))
+  const seg0 = sent.filter((m) => m.t === 'segment' && m.ch === 0)
+  check("... the main stream's file ends at the switch (the sub-stream starts a file of its own)", seg0.length === 1 && seg0[0].endMs === g0[0]?.fromMs, J(seg0))
+  check('... recording the sub-stream it is set to is not degraded', rec.degraded().length === 0, J(rec.degraded()))
+  // back to 'auto': both were on the sub-stream only because of the setting, so both go back to the main
+  rec.apply({ recording: cfg(), locations: [L] })
+  rec.tick()
+  check("switch: back to 'auto': the first camera returns to its main stream within a tick", on(0, 0) && !on(0, 1), J(asked))
+  check('... the second not yet', on(1, 1) && !on(1, 0), J(asked))
+  await run(2000)
+  // its sub-stream frames under 'auto' while it waits its turn must not make it a fallback: that
+  // would list it degraded, and leave it on the sub-stream for good
+  check('... recording its sub-stream while it waits: not taken for a fallback (not degraded)', on(1, 1) && rec.cams.get(1).pick.onSub === false && rec.degraded().length === 0, J({ pick: rec.cams.get(1).pick, degraded: rec.degraded() }))
+  await run(1000)
+  check('... and 3 s later the second too', on(1, 0) && !on(1, 1), J(asked))
+  await run(2000)
+  check('... getStream asked for exactly: main, main, sub, sub, main, main', J(asked) === J(['0:0', '1:0', '0:1', '1:1', '0:0', '1:0']), J(asked))
+  check('... each return has its gap row', gaps(0).length === 2 && gaps(1).length === 2 && gaps(0)[1].reason === TO_MAIN && gaps(1)[1].reason === TO_MAIN, J([...gaps(0), ...gaps(1)]))
+  // a camera that falls back to its sub-stream by itself under 'auto' is not taken back to the main:
+  // camera 0's main only trickles (keyframes 5 s apart: three short gaps drop it to the sub)
+  const m0 = [...streams.get('0:0').clients][0]
+  for (let i = 0; i < 3; i++) { now += 5000; m0.send(key()); await rec.idle() }
+  rec.tick()
+  check('fallback: a main that only trickles drops camera 0 to its sub-stream', on(0, 1) && !on(0, 0), J(asked))
+  for (let i = 0; i < 20; i++) { now += 250; rec.tick() }
+  check("... not moved back before its first frame there (onSub not set yet: 'auto' chose that stream, not a setting)",on(0, 1) && !on(0, 0) && rec.cams.get(0).pick.onSub === false, J(rec.cams.get(0).pick))
+  ;[...streams.get('0:1').clients][0].send(key())
+  await rec.idle()
+  for (let i = 0; i < 20; i++) { now += 250; rec.tick() }
+  check('... nor once it records there (onSub): it stays on the sub-stream, listed as degraded', on(0, 1) && !on(0, 0) && rec.cams.get(0).pick.onSub === true && J(rec.degraded().map((d) => d.ch)) === '[0]', J({ pick: rec.cams.get(0).pick, degraded: rec.degraded() }))
+  // ...until the camera is set to 'main': a setting moves even a fallback
+  rec.apply({ recording: cfg(null, { 'nmg/0': { stream: 'main' } }), locations: [L] })
+  check("switch: camera set to 'main' while on a fallback sub-stream: moved to the main", on(0, 0) && !on(0, 1) && rec.cams.get(0).gap?.reason === TO_MAIN, J({ asked, gap: rec.cams.get(0).gap }))
+  await rec.stop()
+}
+
+// ---- a camera recording on events: a switch made while it waits for one leaves no gap row, and one made
+// while it writes is ended by the new stream's first frame, not left open until the next event
+{
+  const streams = new Map()
+  const sent = []
+  let now = Date.UTC(2026, 8, 24, 15, 30, 0)
+  const rec = new Recorder({ nvrId: 'nev', getStream: (ch, type) => { const k = `${ch}:${type}`; return streams.get(k) ?? streams.set(k, fakeStream()).get(k) }, online: () => true, channels: () => [0], send: (m) => sent.push(m), now: () => now, writerOpts: { rollOffsetMs: 0 } })
+  const cfg = (stream) => ({ ...recording({}, { mode: 'motion' }), ...(stream ? { nvrs: { nev: { stream } } } : {}) })
+  const L = location('LEV')
+  const on = (type) => streams.get(`0:${type}`)?.clients.size === 1
+  // a keyframe on the tapped stream, then a second passes
+  const frame = async () => { for (const s of streams.values()) for (const t of s.clients) t.send(wire(true, 1, Buffer.from([0, 0, 0, 1, 0x26, 0]), now)); await rec.idle(); now += 1000 }
+  const rows = () => sent.filter((m) => m.t === 'recgap')
+  const t0 = now
+  rec.apply({ recording: cfg(), locations: [L] })
+  rec.applyEvents({ windows: { 0: [[t0, t0 + 1500]] }, at: t0 })
+  await frame(); await frame(); await frame() // written, written, then past the window: waiting for an event
+  rec.apply({ recording: cfg('sub'), locations: [L] })
+  await frame(); await frame()
+  check('events: switched while waiting for an event: on the sub-stream, and no gap (nothing was being written)', on(1) && !on(0) && rows().length === 0 && !rec.cams.get(0).gap, J({ rows: rows(), gap: rec.cams.get(0).gap }))
+  rec.applyEvents({ windows: { 0: [[now, now + 500]] }, at: now })
+  await frame() // written (t0+5 s), inside the new window
+  rec.apply({ recording: cfg(), locations: [L] }) // t0+6 s: back to the main while writing
+  await frame() // the main's first frame, past the window: not written
+  const r = rows()
+  check('events: switched while writing: the gap row ends at the new stream\'s first frame, even one not written', on(0) && r.length === 1 && r[0].reason === 'switching to the main stream (recording setting changed)' && r[0].fromMs === t0 + 5000 && r[0].toMs === t0 + 6000 && !rec.cams.get(0).gap, J({ r, gap: rec.cams.get(0).gap }))
+  await rec.stop()
+}
+
+// ---- what follows a switch keeps its own reason (a switch's row took in a 5-10 min refusal, an hour
+// offline, an NVR outage, a stall already under way), and a camera waiting out a refusal still follows
+// its setting. Long past the start (startedAt -Infinity): a refusal backs off the full 5-10 min.
+{
+  const { gapKind } = await import('../reports.mjs')
+  const TO_SUB = 'switching to the sub-stream (recording setting changed)'
+  const TO_MAIN = 'switching to the main stream (recording setting changed)'
+  const rig = (nvrId, chs = [0]) => {
+    const streams = new Map()
+    const sent = []
+    const chans = chs.map((ch) => ({ ch, online: true }))
+    const r = { now: Date.UTC(2026, 8, 24, 16, 0, 0), nvrOnline: true, streams, chans }
+    r.rec = new Recorder({ nvrId, getStream: (ch, type) => { const k = `${ch}:${type}`; return streams.get(k) ?? streams.set(k, fakeStream()).get(k) }, online: () => r.nvrOnline, channels: () => chans.map((c) => ({ ...c })), send: (m) => sent.push(m), now: () => r.now, writerOpts: { rollOffsetMs: 0 } })
+    r.rec.startedAt = -Infinity
+    const L = location(`LX${nvrId}`)
+    r.set = (stream) => r.rec.apply({ recording: { ...recording({}, { mode: 'continuous' }), ...(stream ? { nvrs: { [nvrId]: { stream } } } : {}) }, locations: [L] })
+    r.on = (ch, type) => streams.get(`${ch}:${type}`)?.clients.size === 1
+    // a keyframe on whichever stream camera ch is tapping now
+    r.key = async (ch) => { for (const [k, s] of streams) if (k.startsWith(`${ch}:`)) for (const t of s.clients) t.send(wire(true, 1, Buffer.from([0, 0, 0, 1, 0x26, 0]), r.now)); await r.rec.idle() }
+    r.refuse = (ch, type) => { streams.get(`${ch}:${type}`).lastFailure = { at: r.now, fast: true, reason: 'refused in 30 ms: error 31' } }
+    r.gaps = (ch) => sent.filter((m) => m.t === 'recgap' && m.ch === ch).map(({ fromMs, toMs, reason }) => ({ fromMs, toMs, reason }))
+    r.cam = (ch) => r.rec.cams.get(ch)
+    r.ticks = (n) => { for (let i = 0; i < n; i++) { r.now += 250; r.rec.tick() } }
+    return r
+  }
+  {
+    // on the sub by a setting; the NVR set to 'main', and the NVR refuses that main
+    const r = rig('xa')
+    r.set('sub')
+    await r.key(0)
+    r.now += 1000
+    await r.key(0)
+    const last = r.now
+    r.now += 500
+    r.set('main')
+    r.now += 1000
+    r.refuse(0, 0)
+    r.rec.tick()
+    const tRef = r.now
+    const wait = r.cam(0).refusedUntil - tRef
+    check("switch, then the new stream refused: the switch's row ends at the refusal", J(r.gaps(0)) === J([{ fromMs: last, toMs: tRef, reason: TO_MAIN }]) && r.cam(0).gap?.fromMs === tRef && /^refused by the NVR/.test(r.cam(0).gap?.reason), J({ rows: r.gaps(0), open: r.cam(0).gap }))
+    check("... it waits out the refusal (5-10 min under 'main')", !r.on(0, 0) && wait >= 5 * 60_000 && wait <= 10 * 60_000, `${wait} ms`)
+    r.now = r.cam(0).refusedUntil + 1
+    r.rec.tick()
+    await r.key(0)
+    const g = r.gaps(0)
+    check('... and the wait is a row of its own, which reports file as refused by the NVR', g.length === 2 && g[1].fromMs === tRef && g[1].toMs === r.now && gapKind(g[1].reason) === 'refused by the NVR', J(g))
+    await r.rec.stop()
+  }
+  {
+    // the camera goes offline 2 s into a switch, for an hour
+    const r = rig('xb')
+    r.set()
+    await r.key(0)
+    r.now += 1000
+    await r.key(0)
+    const last = r.now
+    r.now += 500
+    r.set('sub')
+    r.now += 2000
+    r.chans[0].online = false
+    r.rec.sync()
+    const tOff = r.now
+    r.now += 3_600_000
+    r.chans[0].online = true
+    r.rec.sync()
+    await r.key(0)
+    const g = r.gaps(0)
+    check("switch, then the camera offline for an hour: the switch's row ends when it went, the hour is 'camera offline'", r.on(0, 1) && J(g) === J([{ fromMs: last, toMs: tOff, reason: TO_SUB }, { fromMs: tOff, toMs: r.now, reason: 'camera offline' }]), J(g))
+    await r.rec.stop()
+  }
+  {
+    // the NVR drops off just after a switch and is back an hour on: the worker does not drive the
+    // recorder while it is logged out, and the relogin dropped the taps (LiveStream.fail)
+    const r = rig('xc')
+    r.set()
+    await r.key(0)
+    r.now += 1000
+    await r.key(0)
+    const last = r.now
+    r.now += 500
+    r.set('sub')
+    const tSw = r.now
+    r.nvrOnline = false
+    r.now += 3_600_000
+    r.nvrOnline = true
+    for (const s of r.streams.values()) s.clients.clear()
+    r.rec.tick()
+    await r.key(0)
+    const g = r.gaps(0)
+    check("switch, then an NVR outage: the switch's row runs 30 s at most, the rest is 'no video from the NVR'", r.on(0, 1) && J(g) === J([{ fromMs: last, toMs: tSw + 30_000, reason: TO_SUB }, { fromMs: tSw + 30_000, toMs: r.now, reason: 'no video from the NVR' }]), J(g))
+    await r.rec.stop()
+  }
+  {
+    // the main has been silent for 20 s when the NVR is set to 'sub'
+    const r = rig('xd')
+    r.set()
+    await r.key(0)
+    r.now += 1000
+    await r.key(0)
+    const last = r.now
+    r.ticks(80)
+    r.set('sub')
+    const tSw = r.now
+    r.now += 1000
+    await r.key(0)
+    const g = r.gaps(0)
+    check("a stall under way when the switch comes: 'no video from the NVR' up to the switch, the switch from there", J(g) === J([{ fromMs: last, toMs: tSw, reason: 'no video from the NVR' }, { fromMs: tSw, toMs: tSw + 1000, reason: TO_SUB }]), J(g))
+    await r.rec.stop()
+  }
+  {
+    // 'auto': camera 0's main refused once (a 5-10 min wait), then the NVR is set to 'sub'
+    const r = rig('xe', [0, 1])
+    r.set()
+    await r.key(0)
+    await r.key(1)
+    r.now += 1000
+    r.refuse(0, 0)
+    r.rec.tick()
+    const tRef = r.now
+    const wait = r.cam(0).refusedUntil - r.now
+    check("'auto', a main refused once: the camera waits 5-10 min with no stream", !r.on(0, 0) && !r.on(0, 1) && wait >= 5 * 60_000, `${wait} ms`)
+    r.now += 1000
+    r.set('sub')
+    check("... the NVR set to 'sub': it takes its sub-stream at once, not when the wait ends", r.on(0, 1) && r.cam(0).refusedUntil === 0, J({ until: r.cam(0).refusedUntil - r.now }))
+    check('... in its turn: camera 1 still on its main (one camera per NVR every 3 s)', r.on(1, 0) && !r.on(1, 1))
+    r.ticks(12)
+    check('... and camera 1 on its sub-stream 3 s later', r.on(1, 1) && !r.on(1, 0))
+    await r.key(0)
+    const g = r.gaps(0)
+    check('... the time camera 0 recorded nothing is one row, refused by the NVR', g.length === 1 && g[0].fromMs <= tRef && g[0].toMs === r.now && gapKind(g[0].reason) === 'refused by the NVR', J(g))
+    await r.rec.stop()
+  }
+  {
+    // 'sub': the sub-stream refused
+    const r = rig('xf')
+    r.set('sub')
+    await r.key(0)
+    r.now += 1000
+    r.refuse(0, 1)
+    r.rec.tick()
+    const wait = r.cam(0).refusedUntil - r.now
+    check("'sub', the sub-stream refused: it waits 5-10 min, not asked for again at the next tick", !r.on(0, 1) && wait >= 5 * 60_000 && wait <= 10 * 60_000, `${wait} ms`)
+    r.ticks(8)
+    check('... still not asked for 2 s on', !r.on(0, 1))
+    r.set('main')
+    check("... then set to 'main': the main at once", r.on(0, 0) && r.cam(0).refusedUntil === 0, J({ until: r.cam(0).refusedUntil - r.now }))
+    await r.rec.stop()
+  }
+  {
+    const r = rig('xf2')
+    r.set('sub')
+    await r.key(0)
+    r.now += 1000
+    r.refuse(0, 1)
+    r.rec.tick()
+    r.now += 1000
+    r.set()
+    check("'sub' refused, then back to 'auto': the main at once, one refusal short of the sub", r.on(0, 0) && r.cam(0).refusedUntil === 0 && r.cam(0).pick.refusals === 1, J({ until: r.cam(0).refusedUntil - r.now, pick: r.cam(0).pick }))
+    await r.rec.stop()
+  }
+  {
+    // 'auto': the main refused twice drops to the sub; that sub refused before its first frame
+    const r = rig('xg')
+    r.set()
+    await r.key(0)
+    r.now += 1000
+    r.refuse(0, 0)
+    r.rec.tick()
+    r.now = r.cam(0).refusedUntil + 1
+    r.rec.tick()
+    r.refuse(0, 0)
+    r.now += 250
+    r.rec.tick()
+    check("'auto', the main refused twice: dropped to the sub-stream at once", r.cam(0).refusedUntil === 0)
+    r.ticks(1)
+    check('... the sub-stream attached', r.on(0, 1))
+    r.refuse(0, 1)
+    r.now += 250
+    r.rec.tick()
+    const wait = r.cam(0).refusedUntil - r.now
+    check('... that sub-stream refused before its first frame: it waits 5-10 min, not asked for again at once', !r.on(0, 1) && wait >= 5 * 60_000, `${wait} ms`)
+    await r.rec.stop()
+  }
+  {
+    // on the sub by a setting; back to 'auto', and the NVR refuses the main it goes back to
+    const r = rig('xh')
+    r.set('sub')
+    await r.key(0)
+    r.now += 1000
+    await r.key(0)
+    const last = r.now
+    r.now += 500
+    r.set()
+    check("back to 'auto': the camera moved to its main", r.on(0, 0) && !r.on(0, 1))
+    r.now += 1000
+    r.refuse(0, 0)
+    r.rec.tick()
+    const tRef = r.now
+    check('... the NVR refuses that main: straight back to the sub-stream, not 5-10 min of nothing', r.cam(0).refusedUntil === 0, J({ until: r.cam(0).refusedUntil - r.now, pick: r.cam(0).pick }))
+    r.ticks(1)
+    await r.key(0)
+    const g = r.gaps(0)
+    check('... recording its sub-stream a tick later, as a fallback now (listed degraded)', r.on(0, 1) && J(r.rec.degraded().map((d) => d.ch)) === '[0]', J(r.rec.degraded()))
+    check('... rows: the switch up to the refusal, then refused until the sub records', g.length === 2 && J(g[0]) === J({ fromMs: last, toMs: tRef, reason: TO_MAIN }) && g[1].fromMs === tRef && g[1].toMs === r.now && gapKind(g[1].reason) === 'refused by the NVR', J(g))
+    r.ticks(40)
+    check('... and it stays there (the setting does not move a fallback)', r.on(0, 1) && !r.on(0, 0))
+    await r.rec.stop()
+  }
+}
+
 // ---- the worker: recording shares the live pull; settings messages start and stop it
 {
   const L = location('LW')

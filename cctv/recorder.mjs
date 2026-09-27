@@ -28,6 +28,7 @@ const FAILED_LOCATION_MS = 60_000 // a location a write failed on is skipped thi
 // a hole this long in the recorded timeline is reported as a gap (playback's gapMs: 3 s). Stalls
 // of 3-10 s used to leave no gap row, so the index could not explain them
 const SILENCE_GAP_MS = 3000
+const NO_VIDEO_REASON = 'no video from the NVR'
 // frame times: the SDK header's capture time (us, the NVR's clock) mapped onto our clock by the
 // smallest (arrival - capture) seen, i.e. the least-delayed frame. A catch-up burst after a stall
 // then keeps its real spacing instead of being squeezed into a few ms. The offset may creep up
@@ -68,6 +69,19 @@ const FROZEN_MS = 45_000
 const STUTTER_WINDOW_MS = 90_000
 const STUTTER_COUNT = 3
 const STUTTER_REASON = 'the main stream only trickled video (repeated short gaps)'
+// A camera already recording when its stream setting (recording.stream) changes is moved to the stream
+// the setting now calls for, at most one camera per NVR this often. Setting nvr-2 to 'sub' in one go
+// would otherwise stop and start ~25 streams at once on an NVR that is already struggling to serve
+// them -- the reason it was set to 'sub' -- and nothing else paces it: the worker's idle-stops and
+// live pacer pace the viewers' streams, and the recorder's starts are exempt from both.
+const MIGRATE_EVERY_MS = 3000
+// ...and the switch is over within this long: the new stream's LivePlay and first keyframe, with
+// LiveStream's own limits past that (no video within 8 s is a silent refusal, which files a row of
+// its own; a start that fails is tried again after 5 s). A switch's gap row never runs past it: the
+// rest is filed as the NVR sending no video, as the same stretch would be without a switch. The
+// worker does not drive the recorder while the NVR is logged out, so an outage that followed a
+// switch only reached it when the video came back, and was one 'switching' row an hour long.
+const SWITCH_MAX_MS = 30_000
 
 export class Recorder {
   /**
@@ -98,6 +112,7 @@ export class Recorder {
     // an event-mode camera records continuously — see rec-modes.mjs for why.
     this.windows = new Map() // ch -> [[startMs, endMs]]
     this.windowsAt = null // when the parent last sent them
+    this.migratedAt = -Infinity // when a camera last moved to another stream for its setting (#migrate)
   }
 
   /**
@@ -195,7 +210,7 @@ export class Recorder {
       let cam = this.cams.get(ch)
       if (!cam) {
         const now = this.now()
-        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0, pick: { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }, wantType: MAIN, createdAt: now, frameAt: 0, stutterAt: [] }
+        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0, pick: { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }, wantType: MAIN, bySetting: false, createdAt: now, frameAt: 0, stutterAt: [] }
         cam.tap = this.#tapFor(cam)
         this.cams.set(ch, cam)
         // recording before the restart (on in the first settings), back now: not recorded from the
@@ -240,7 +255,12 @@ export class Recorder {
       // record nothing in between -- which is how eleven of nvr-2's cameras came to be online,
       // green on every page, and writing no footage at all.
       const next = chooseStream(cam.pick, now, { allowSub: this.allowSubFallback(), prefer: this.#streamPref(cam.ch) })
-      const dropping = next.type === SUB && !cam.pick.onSub
+      // Dropping is the step from the main stream down to the sub. A refusal of the sub-stream it
+      // asked for is not one: nothing cheaper is left, so it waits out the backoff like any refusal.
+      // (Told by pick.onSub, every refusal under 'sub' was a drop -- a written frame there resets
+      // onSub -- so the refused sub was asked for again at the next tick, and LiveStream restarted it
+      // about once a minute for as long as the NVR said no, with a warning each time.)
+      const dropping = next.type === SUB && cam.wantType !== SUB
       const reason = `refused by the NVR (${f.reason || 'no reason given'})`
       cam.lastError = { at: now, loc: cam.loc?.id ?? null, reason }
       this.#gapFrom(cam, reason)
@@ -257,11 +277,34 @@ export class Recorder {
       }
       return
     }
-    if (now < cam.refusedUntil) return
+    if (now < cam.refusedUntil) {
+      // A refusal is of one stream and says nothing about the other. A camera waiting one out whose
+      // setting now calls for the other stream tries that at once, in its turn among the cameras
+      // being moved (MIGRATE_EVERY_MS), not when the backoff ends: 'sub' set on an NVR that refuses
+      // main streams is the remedy for exactly this, and the cameras it was meant for recorded
+      // nothing for up to 10 more minutes. wantType is the stream refused (only attaching sets it).
+      // Back to 'auto' from a sub-stream a setting chose, it is the main, as #migrate moves an
+      // attached one (the refusals counted there were of the sub); otherwise chooseStream on the pick
+      // as it stands ('auto' after the main was refused twice under 'main' takes the sub).
+      const prefer = this.#streamPref(cam.ch)
+      const back = prefer === 'auto' && cam.bySetting && cam.wantType === SUB
+      const type = back ? MAIN : chooseStream(cam.pick, now, { allowSub: this.allowSubFallback(), prefer }).type
+      if (type === cam.wantType || now - this.migratedAt < MIGRATE_EVERY_MS) return
+      this.migratedAt = now
+      cam.refusedUntil = 0
+      cam.refusedLogged = false // a refusal of the new stream is news
+      if (back) cam.pick = this.#movedPick(cam, MAIN)
+      console.log(`[rec ${this.nvrId}/${cam.ch + 1}] recording setting changed: trying the ${type === SUB ? 'sub-stream' : 'main stream'} now, not after the refusal of the other`)
+    }
+    // recording a stream its setting no longer calls for: detached here (one camera per NVR every
+    // MIGRATE_EVERY_MS), and the no-stream path below attaches the one it does
+    if (cam.stream) this.#migrate(cam, now)
     if (!cam.stream) {
       cam.attachedAt = now
-      const pick = chooseStream(cam.pick, now, { allowSub: this.allowSubFallback(), prefer: this.#streamPref(cam.ch) })
+      const prefer = this.#streamPref(cam.ch)
+      const pick = chooseStream(cam.pick, now, { allowSub: this.allowSubFallback(), prefer })
       cam.wantType = pick.type
+      cam.bySetting = prefer === 'sub' || prefer === 'main' // a setting chose this stream, not 'auto' (#prefTarget)
       cam.stream = this.getStream(cam.ch, pick.type)
       cam.stream.add(cam.tap)
     }
@@ -270,6 +313,72 @@ export class Recorder {
   #detach(cam) {
     cam.stream?.remove(cam.tap)
     cam.stream = null
+  }
+
+  /**
+   * The stream an attached camera's setting now calls for when it is recording the other one (SUB or
+   * MAIN), else null. 'sub' and 'main' are what they say. 'auto' only takes a camera back to the main
+   * stream when a setting is what put it on the sub (bySetting: set when its stream was attached). One
+   * that fell back there under 'auto' (refused, or the main only trickled) stays, and stream-choice.mjs
+   * decides when it tries the main again. pick.onSub alone cannot tell the two apart: a fallback has
+   * not set it until its first written frame, so a camera would be taken back to the main stream the
+   * moment it fell back from it.
+   */
+  #prefTarget(cam) {
+    const prefer = this.#streamPref(cam.ch)
+    if (prefer === 'sub') return cam.wantType === SUB ? null : SUB
+    if (prefer === 'main') return cam.wantType === MAIN ? null : MAIN
+    return cam.wantType === SUB && cam.bySetting && !cam.pick?.onSub ? MAIN : null
+  }
+
+  /**
+   * Moves a camera that is recording to the stream its setting now calls for (#prefTarget), one camera
+   * per NVR every MIGRATE_EVERY_MS. sync() starts and stops cameras by mode, and attach() only chose a
+   * stream for a camera without one, so setting nvr-2 to 'sub' moved just the 8 of its ~25 cameras
+   * that happened to reattach; the rest went on recording the main stream the NVR only trickled.
+   * Detaches the camera and opens a gap row saying why; the caller's no-stream path attaches the
+   * new stream, and its first written frame ends the gap.
+   */
+  #migrate(cam, now) {
+    const type = this.#prefTarget(cam)
+    if (type === null || now - this.migratedAt < MIGRATE_EVERY_MS) return
+    this.migratedAt = now
+    const reason = `switching to the ${type === SUB ? 'sub-stream' : 'main stream'} (recording setting changed)`
+    this.#detach(cam)
+    // (a camera between events is not writing anyway: nothing is lost, so no row)
+    if (!cam.eventIdle) {
+      if (!cam.gap && cam.lastAt > 0 && now - cam.lastAt >= SILENCE_GAP_MS) {
+        // A stall already under way is filed as what it is, up to now, and the switch starts here.
+        // Its 'no video' row would only have opened with the stream's next frame, which this stream
+        // will not send now, so the switch's row began at the last frame and took the stall in: a
+        // camera moved partway through one of nvr-2's ~5 s holes had it filed as 'switching'.
+        cam.gap = { fromMs: cam.lastTs || cam.lastAt, reason: NO_VIDEO_REASON }
+        this.#endGap(cam, now)
+        cam.gap = { fromMs: now, reason }
+      } else this.#gapFrom(cam, reason)
+      // (switchEnd: its row runs no further, SWITCH_MAX_MS)
+      if (cam.gap?.reason === reason) Object.assign(cam.gap, { switching: true, switchEnd: now + SWITCH_MAX_MS })
+    }
+    // one stream per file: the old stream's file ends at its last frame, and the new stream's first
+    // keyframe opens one of its own (a sub-stream in the same codec would not roll the file by itself)
+    if (cam.writer?.open) cam.writer.close()
+    cam.pick = this.#movedPick(cam, type)
+    cam.stutterAt = []
+    console.log(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}`)
+  }
+
+  /**
+   * The pick for a camera a setting moves to stream `type`. What 'auto' counted on the old stream
+   * (refusals, short gaps, a fallback) says nothing about the new one, and a refusal count left over
+   * would have chooseStream pick the sub-stream again. Back to the main under 'auto' it starts one
+   * refusal short of the sub: the camera was recording its sub-stream a moment ago, and a main the NVR
+   * refuses drops it straight back there rather than leaving it with nothing for the 5-10 min backoff
+   * of a first refusal. nvr-2 refused channels 18-32 on 09-25: one click back to 'auto' would have
+   * left most of them recording nothing at the same time.
+   */
+  #movedPick(cam, type) {
+    const back = type === MAIN && this.#streamPref(cam.ch) === 'auto'
+    return { refusals: back ? REFUSALS_BEFORE_SUB - 1 : 0, onSub: false, subSince: 0, lastRefusedAt: 0 }
   }
 
   /** Called every 250 ms by the worker: reattach after a relogin, report long silences. */
@@ -381,9 +490,19 @@ export class Recorder {
   }
 
   #gapFrom(cam, reason) {
-    // a reason of its own during the ramp-up after a restart (refused, camera offline, no storage):
-    // the ramp-up part ends here and this one starts, so each stretch carries the reason it had
-    if (cam.gap?.startup && reason !== cam.gap.reason) this.#endGap(cam, this.now())
+    // a reason of its own during the ramp-up after a restart (refused, camera offline, no storage),
+    // or during a switch of stream for a setting (the new stream refused, the camera offline, the disk
+    // too slow, a write failed): the ramp-up or the switch ends here and this one starts, so each
+    // stretch carries the reason it had. A switch's row used to keep its own: a 5-10 min refusal or
+    // an hour offline went into one 'switching' row, reports counted it as 'other', and a failed
+    // write's 'not writable' never reached the parent's health check.
+    const g = cam.gap
+    if ((g?.startup || g?.switching) && reason !== g.reason) {
+      const at = this.now()
+      this.#endGap(cam, at)
+      cam.gap = { fromMs: at, reason } // (from the old row's end: not again from the last frame)
+      return
+    }
     if (!cam.gap) cam.gap = { fromMs: cam.lastTs || cam.lastAt || this.now(), reason }
   }
 
@@ -416,6 +535,12 @@ export class Recorder {
     cam.gap = null
     // a camera that was recording again within SILENCE_GAP_MS of the restart lost nothing worth a row
     if (g.startup && toMs - g.fromMs < SILENCE_GAP_MS) return
+    // a switch is over by switchEnd (SWITCH_MAX_MS); the rest of a longer one is the NVR sending nothing
+    if (g.switching && toMs - g.switchEnd >= SILENCE_GAP_MS) {
+      this.send({ t: 'recgap', nvr: this.nvrId, ch: cam.ch, fromMs: g.fromMs, toMs: g.switchEnd, reason: g.reason })
+      this.send({ t: 'recgap', nvr: this.nvrId, ch: cam.ch, fromMs: g.switchEnd, toMs, reason: NO_VIDEO_REASON })
+      return
+    }
     this.send({ t: 'recgap', nvr: this.nvrId, ch: cam.ch, fromMs: g.fromMs, toMs, reason: g.reason })
   }
 
@@ -451,8 +576,8 @@ export class Recorder {
     const gate = this.#gate(cam, ts, now)
     if (!gate.write) {
       // the video is back and this camera is doing what it should (not writing between events):
-      // the restart's ramp-up ends here, not at the next event
-      if (cam.gap?.startup) this.#endGap(cam, ts)
+      // the restart's ramp-up ends here, not at the next event, and so does a switch of stream
+      if (cam.gap?.startup || cam.gap?.switching) this.#endGap(cam, ts)
       cam.lastTs = ts
       cam.lastAt = now
       cam.waitKey = true // the next written frame must be a keyframe: deltas need their reference
@@ -467,7 +592,7 @@ export class Recorder {
     cam.eventIdle = null
     // (a re-anchor moves the timeline, it loses nothing: no gap row for that jump)
     if (cam.lastTs && ts - cam.lastTs >= SILENCE_GAP_MS && !cam.gap && !reanchored) {
-      cam.gap = { fromMs: cam.lastTs, reason: 'no video from the NVR' }
+      cam.gap = { fromMs: cam.lastTs, reason: NO_VIDEO_REASON }
       if (this.#noteStutter(cam, now)) return // dropped to the sub-stream: stop recording this trickle
     }
     // frames were lost (a stall inside the SDK: LiveStream did not restart, so nothing asked for
@@ -503,7 +628,10 @@ export class Recorder {
       cam.refusedLogged = false
       // Video is flowing, so whatever stream we settled on is the one working. A camera that came
       // back up on the main stream stops being marked degraded here, and nowhere else.
-      if (this.#streamPref(cam.ch) === 'auto') {
+      // (a stream a setting chose, recorded after the setting went back to 'auto' while the camera
+      // waits its turn in #migrate, is still that choice: were it marked a fallback here, the camera
+      // would be listed degraded and #prefTarget would leave it on the sub-stream for good)
+      if (this.#streamPref(cam.ch) === 'auto' && !cam.bySetting) {
         const was = cam.pick?.onSub
         cam.pick = afterVideo(cam.pick, now, cam.wantType ?? MAIN)
         // recovered to the main stream: forget the earlier trickle so a stale count can't drop it again
