@@ -48,6 +48,7 @@
 //   bytes 6-7   reserved
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
+import { clientIpOf, securityHeaders } from './security.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleRelays } from './relays.mjs'
 import { transparent } from './nvr-xml.mjs'
@@ -394,11 +395,7 @@ const MIME = {
 }
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
 const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
-const SECURITY_HEADERS = {
-  'x-content-type-options': 'nosniff',
-  'x-frame-options': 'DENY',
-  'referrer-policy': 'no-referrer'
-}
+const SECURITY_HEADERS = securityHeaders()
 
 // CCTV_AUTH=off is for local development only: never publish such an instance beyond 127.0.0.1
 const AUTH_OFF = process.env.CCTV_AUTH === 'off'
@@ -418,7 +415,8 @@ const RELEASE = read('RELEASE', 'dev')
 const BUILD = { version: `v${VERSION}`, release: RELEASE }
 if (AUTH_OFF) console.warn('WARNING: CCTV_AUTH=off, sign-in is disabled. Development use only.')
 
-const clientIp = (req) => req.socket.remoteAddress ?? ''
+// the visitor behind the Cloudflare tunnel, not cloudflared (security.mjs)
+const clientIp = (req) => clientIpOf(req.socket.remoteAddress, req.headers['cf-connecting-ip'])
 const currentUser = (req) =>
   AUTH_OFF ? 'dev' : auth.verifySession(auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME])
 
@@ -576,6 +574,15 @@ const handleRequest = async (req, res) => {
   const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null, canSee })
   if (ev) return sendJson(res, ...ev)
   const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: who.admin, cameras: allCameras, canSee })
+  // every camera's own address and web port, as its NVR connects to it (admins): for the settings an
+  // NVR cannot pass on, such as day/night on some models, made on the camera's own page
+  if (pathname === '/api/admin/camera-addresses') {
+    if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    return sendJson(res, 200, [...nvrs.values()].flatMap((n) => n.channels.filter((c) => c.configured !== false).map((c) => ({
+      nvr: n.id, site: n.site, ch: c.ch, name: c.name, online: c.online, ip: c.ip || null, httpPort: c.httpPort ?? null, model: c.model || null, maker: c.maker || null
+    }))))
+  }
   // NVR alarm outputs, read only (relays.mjs)
   const relays = await handleRelays(req.method, pathname, { nvrs, admin: who.admin, query: transparent })
   if (relays) return sendJson(res, ...relays)
@@ -861,10 +868,11 @@ const onRequest = (req, res) =>
     if (!res.headersSent) res.writeHead(500).end()
   })
 
-const wss = new WebSocketServer({ noServer: true })
+// Browsers send /live, /playback and /motion only small JSON commands; ws's own default would take
+// 100 MiB messages from any signed-in client (security audit 2026-09-27)
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
 // /live-mux on a server of its own: a page sends it nothing over MAX_MESSAGE_BYTES, and ws refuses a
-// bigger message (1009) from its header, before reading it. The default maxPayload (100 MiB, kept
-// for the other paths) let a signed-in client make the server buffer 100 MiB per message.
+// bigger message (1009) from its header, before reading it.
 const muxWss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES })
 // ping every 15 s; a socket that misses a pong is terminated (backpressure.mjs)
 keepAlive(wss)
@@ -944,9 +952,19 @@ const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on co
 // one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs)
 const attachLive = liveAttacher({ can, currentUser, adaptiveLive, phoneLive })
 
+// This listener is synchronous and nothing above it catches: anything that throws here takes the
+// whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27
+// (auth.mjs parseCookies). So the whole of it is guarded: whatever goes wrong refuses the socket.
 const onUpgrade = (req, socket, head) => {
-  // this listener is synchronous: anything that throws here would take the whole process
-  // down, so unparseable URLs and Origins (e.g. "Origin: null") are refused, not thrown.
+  try {
+    upgrade(req, socket, head)
+  } catch (e) {
+    console.error('websocket upgrade refused:', e?.message ?? e)
+    try { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n') } catch {}
+  }
+}
+const upgrade = (req, socket, head) => {
+  // unparseable URLs and Origins (e.g. "Origin: null") are refused, not thrown.
   // Node drops its own error listener from upgrade sockets: a client resetting the
   // connection while we refuse it must not become an uncaught exception either.
   socket.on('error', () => {})
