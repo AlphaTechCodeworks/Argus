@@ -440,7 +440,13 @@ export class BackfillJob {
    *   tickMs?: number, stateFile?: string, log?: Function }} deps
    */
   constructor(deps = {}) {
-    this.index = deps.index ?? null
+    // deps.index may be the recordings index itself or, from server.mjs at start-up (before it is
+    // open), a getter for it. The same shape-tolerance storage-report.mjs has -- and the reason it
+    // has it: handing the getter straight through and storing it as `this.index` made every tick
+    // throw "this.index.cameras is not a function", so backfill never filled a single gap (it was
+    // wired with the getter on 2026-09-25 and silently did nothing until 2026-09-27). Resolved on
+    // every use through the `index` getter below, so a tick always sees the currently-open index.
+    this.getIndex = typeof deps.index === 'function' ? deps.index : () => deps.index ?? null
     this.nvrs = deps.nvrs ?? new Map()
     this.locations = deps.locations ?? (() => [])
     this.settings = deps.settings ?? (() => ({}))
@@ -581,10 +587,20 @@ export class BackfillJob {
    * does at most one pull per tick, so between any two pulls the whole set of conditions (window,
    * exports, refusals, live recording) is checked again from scratch.
    */
+  /** The recordings index, resolved now (null before it is open). See the constructor. */
+  get index() {
+    return this.getIndex()
+  }
+
   async tick() {
     if (this.working) return
     this.working = true
     try {
+      // the recordings index is not open yet (start-up): nothing to scan, look again next tick
+      if (!this.index) {
+        this.#arm(this.tickMs)
+        return
+      }
       const now = this.now()
       const cfg = this.cfg()
       const allowed = mayRun({ now, cfg, running: this.running, exportsBusy: this.exportsBusy(), recordingBusy: this.recordingBusy() })

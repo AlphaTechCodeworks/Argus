@@ -479,6 +479,19 @@ index.addGap({ ...CAM, fromMs: HOLE_FROM, toMs: HOLE_TO, reason: 'refused by the
 check('the module needs no settings import: it carries its own defaults', bf.DEFAULT_BACKFILL.windowStart === '01:00' && bf.DEFAULT_BACKFILL.windowEnd === '05:00' && bf.DEFAULT_BACKFILL.enabled === false)
 check('a job given no settings at all still has sane values', new BackfillJob({ index, stateFile: join(DATA, 'noset.json'), log: () => {} }).cfg().nvrRetentionDays === 30)
 
+// the index dependency may be a getter, as server.mjs passes it at start-up (before the index is
+// open). It must be resolved on use, not stored raw -- storing the getter made every tick throw
+// "this.index.cameras is not a function" and backfill filled nothing (2026-09-25 to 09-27).
+{
+  const viaGetter = new BackfillJob({ index: () => index, stateFile: join(DATA, 'getter.json'), log: () => {} })
+  check('a job given the index as a getter resolves it', viaGetter.index === index && typeof viaGetter.index.cameras === 'function')
+  const notOpen = new BackfillJob({ index: () => null, settings: () => ({ backfill: { enabled: true, windowStart: '00:00', windowEnd: '23:59' } }), now: () => Date.now(), stateFile: join(DATA, 'notopen.json'), log: () => {} })
+  let threw = false
+  try { await notOpen.tick() } catch { threw = true }
+  notOpen.stop()
+  check('a tick before the index is open no-ops instead of throwing', !threw)
+}
+
 index.close()
 console.log(`\n${checks - failures} of ${checks} passed`)
 if (failures) console.log(`${failures} failed`)
