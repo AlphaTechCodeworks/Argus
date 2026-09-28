@@ -5,6 +5,7 @@ import { diffCameras, shownCameras, visibleCameras } from './grid-diff.js'
 import { enableGridDrag } from './grid-drag.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
 import { ImagePanel } from './image-panel.js'
+import { LinesPanel } from './lines-panel.js'
 import { muxState, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
@@ -82,6 +83,31 @@ const imagePanel = new ImagePanel({
     for (const b of grid.querySelectorAll('button.pic-toggle')) b.setAttribute('aria-expanded', 'false')
   }
 })
+
+// line crossing (admins): lines drawn on the camera shown full-size, for the camera's own detection
+// (lines-panel.js). One panel at a time with Picture: both sit over the right of the picture.
+let linesPanel = null // the open Lines panel, or null
+const linesSupport = new Map() // camKey -> Promise<true | false | null>: asked once per camera while this page is open
+/**
+ * Whether the camera has line-crossing detection of its own (GET .../lines: the NVR's own answer).
+ * null when it could not be asked (camera offline, NVR busy): asked again the next time the view opens.
+ */
+function linesSupported(cam) {
+  const k = camKey(cam)
+  if (!linesSupport.has(k)) {
+    const ask = fetch(`/api/admin/nvrs/${encodeURIComponent(cam.nvr)}/channels/${cam.ch}/lines`, { cache: 'no-store' })
+      .then(async (res) => (res.ok ? (await res.json())?.lines?.supported === true : null))
+      .catch(() => null)
+      .then((ok) => {
+        if (ok === null) linesSupport.delete(k)
+        return ok
+      })
+    linesSupport.set(k, ask)
+  }
+  return linesSupport.get(k)
+}
+/** The Lines panel may go (it asks first when lines are drawn but not saved). */
+const linesDiscard = () => !linesPanel || linesPanel.confirmDiscard()
 
 if (!('VideoDecoder' in window)) {
   notice.hidden = false
@@ -170,7 +196,7 @@ function render({ keepSingle = false } = {}) {
   }
   grid.classList.toggle('show-stats', showStats)
   // the kept view and its panel stay in place (moving them would close an open dialog)
-  const kept = keep ? [overlay, imagePanel.el].filter((n) => n.parentNode === grid) : []
+  const kept = keep ? [overlay, imagePanel.el, linesPanel?.el].filter((n) => n?.parentNode === grid) : []
   for (const n of [...grid.children]) if (!kept.includes(n)) n.remove()
   const before = kept[0] ?? null
 
@@ -594,24 +620,61 @@ function openSingle(cam, { fromTap = false } = {}) {
         imagePanel.requestClose()
         return
       }
+      // one panel at a time: the Lines panel goes first (asking when lines are unsaved)
+      if (linesPanel && !linesPanel.requestClose()) return
       imagePanel.open(cam, { opener: pic })
       pic.setAttribute('aria-expanded', 'true')
       grid.append(imagePanel.el)
     })
     links.append(pic)
+    // Lines: only for a camera whose NVR says it has line crossing of its own (hidden until then)
+    const lines = document.createElement('button')
+    lines.type = 'button'
+    lines.className = 'pb-link lines-toggle'
+    lines.textContent = 'Lines'
+    lines.title = 'Line crossing: draw lines for the camera\'s own detection'
+    lines.hidden = true
+    lines.setAttribute('aria-expanded', String(linesPanel?.key === single))
+    lines.addEventListener('click', (e) => {
+      e.stopPropagation()
+      if (linesPanel?.key === single) {
+        linesPanel.requestClose()
+        return
+      }
+      // one panel at a time: the Picture panel goes first (asking when changes are unsent)
+      if (!imagePanel.confirmDiscard()) return
+      imagePanel.close()
+      overlayZoom?.reset() // the lines are drawn on the whole picture
+      linesPanel = new LinesPanel(grid, cam, {
+        liveEl: () => shownPlayer()?.player?.canvas ?? null,
+        opener: lines,
+        onClose: () => {
+          linesPanel = null
+          for (const b of grid.querySelectorAll('button.lines-toggle')) b.setAttribute('aria-expanded', 'false')
+        }
+      })
+      linesPanel.open()
+      lines.setAttribute('aria-expanded', 'true')
+    })
+    links.append(lines)
+    linesSupported(cam).then((ok) => {
+      if (ok) lines.hidden = false
+    })
   }
   overlay.querySelector('.name').after(links)
   if (isPhone()) overlay.append(nativeFullButton(overlay))
   overlay.append(...stepArrows()) // ‹ › on every screen (keys: ← →)
   // closing the view discards the panel's unsent changes: ask first
   overlay.addEventListener('click', () => {
-    if (imagePanel.confirmDiscard()) closeSingle()
+    if (imagePanel.confirmDiscard() && linesDiscard()) closeSingle()
   })
   // zoom: the wheel, a pinch, drag to pan, double-click / double-tap back (pinch-zoom.js). Only the
   // pictures move (style.css .single-overlay canvas); the name, the badge and the buttons stay put.
   // While zoomed a tap does not close the view and a flick does not change camera.
   const view = overlay
   overlayZoom = attachZoom(view, {
+    // paused while the Lines panel is open: a drag there draws a line, and lines need the whole picture
+    busy: () => Boolean(linesPanel),
     apply: (z, x, y) => {
       view.style.setProperty('--zs', String(z))
       view.style.setProperty('--zx', `${x}px`)
@@ -634,6 +697,9 @@ function openSingle(cam, { fromTap = false } = {}) {
   // open for this camera: keep it (and its unsent changes) across a rebuild of the view
   if (imagePanel.key === single) grid.append(imagePanel.el)
   else imagePanel.close()
+  // the Lines panel likewise; its drawing follows the camera's picture into the rebuilt view
+  if (linesPanel?.key === single) grid.append(linesPanel.el)
+  else linesPanel?.close()
   const opts = tileOptions(cam)
   const sub = new LiveTile(overlay, cam, SUB_STREAM, 0, { ...opts, borrowFrom: lenderFor(cam) })
   singleTiles.push(sub)
@@ -655,6 +721,7 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   stopAhead()
   leavePhoneFull()
   imagePanel.close()
+  linesPanel?.close()
   single = null
   singleCam = null
   // A phone rebuilds its grid instead: under the full-size view the list's tiles were scrolled out,
@@ -778,7 +845,7 @@ function relayout() {
   const perPage = cells.length
   const v = visibleCameras(cameras, gridView(perPage))
   if (gridSlots.length !== perPage || v.page !== page) return render({ keepSingle: true })
-  const before = [overlay, imagePanel.el].find((n) => n?.parentNode === grid) ?? null
+  const before = [overlay, imagePanel.el, linesPanel?.el].find((n) => n?.parentNode === grid) ?? null
   const keys = cells.map((_, i) => (v.visible[i] ? camKey(v.visible[i]) : null))
   const { from, unused } = reuseSlots(gridSlots.map((s) => (s.cam ? camKey(s.cam) : null)), keys)
   const leaving = unused.map((i) => gridSlots[i])
@@ -922,6 +989,11 @@ siteSelect.addEventListener('change', () => {
 prevBtn.addEventListener('click', () => { page--; render() })
 nextBtn.addEventListener('click', () => { page++; render() })
 document.addEventListener('keydown', (e) => {
+  // Escape closes the Lines panel first (it lies over the picture), then the full-size view
+  if (e.key === 'Escape' && linesPanel) {
+    linesPanel.requestClose()
+    return
+  }
   if (e.key === 'Escape' && single !== null && !document.fullscreenElement && imagePanel.confirmDiscard()) closeSingle()
   // the full-size view: ← → go through the cameras, the same as ‹ › and a flick
   if (single !== null && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && !e.target.closest?.('input, select, textarea')) {
@@ -1085,7 +1157,7 @@ function stepCamera(dir) {
   if (list.length < 2 || single === null) return
   const i = list.findIndex((c) => camKey(c) === single)
   const next = list[(i + dir + list.length) % list.length]
-  if (imagePanel.confirmDiscard()) openSingle(next)
+  if (imagePanel.confirmDiscard() && linesDiscard()) openSingle(next)
 }
 
 /** The ‹ › on a phone's full-size camera: they say a flick works, and a tap on one works too. */
@@ -1115,6 +1187,7 @@ function stepArrows() {
   const rotated = () => false // the picture is no longer turned sideways on an upright phone
   document.addEventListener('touchstart', (e) => {
     if (!document.body.classList.contains('phone-full') || e.touches.length !== 1) return (t0 = null)
+    if (linesPanel) return (t0 = null) // drawing lines: a flick draws, it does not change camera
     if (overlayZoom && overlayZoom.zoom > 1) return (t0 = null) // zoomed: one finger moves the picture
     t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }
   }, { passive: true })
