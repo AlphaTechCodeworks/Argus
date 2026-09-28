@@ -73,6 +73,12 @@ export const SCAN_MARGIN_MS = 2 * DAY
 // much shorter ladder.
 export const REFUSED_BACKOFF_MS = [30 * MINUTE, 6 * 3_600_000]
 export const ERROR_BACKOFF_MS = [5 * MINUTE, 2 * 3_600_000]
+/**
+ * A pull counts as progress only when it made the row's missing time at least this much shorter.
+ * Counting any written file as progress cleared the retry wait on pulls that only wrote footage from
+ * outside the hole, and the same row was pulled again on the next tick (playback report 9).
+ */
+export const MIN_PROGRESS_MS = 1000
 
 /**
  * The backfill settings, repeated here so that this module never has to import settings.mjs.
@@ -534,8 +540,9 @@ export class BackfillJob {
     }
     // A separate pass over the whole ledger, because a hole falls off the end of the NVR's own
     // retention while it is sitting in the ledger waiting its turn, not while it is being found.
-    // This is where the deadline actually bites, and where roadmap point 5's list comes from.
-    for (const row of this.index.backfillList({ state: 'pending', limit: 10_000 })) {
+    // This is where the deadline actually bites, and where roadmap point 5's list comes from. Oldest
+    // first, as the pick: those are the rows that age out, and a newest-first list cuts them off.
+    for (const row of this.index.backfillPending({ limit: 10_000 })) {
       if (now - row.toMs > retention) {
         this.index.backfillSet(row.id, { state: 'permanent', note: PERMANENT.aged })
         out.permanent++
@@ -610,7 +617,9 @@ export class BackfillJob {
         return
       }
       this.scan()
-      const rows = this.index.backfillList({ limit: 5000 }).map((r) => ({ ...r, nextTryMs: this.nextTry.get(r.id) ?? 0 }))
+      // Pending rows only, oldest hole first: the newest 5,000 rows of every state left the oldest
+      // pending rows (785 of 5,785 on the server), the ones nearest their deadline, out of the pick.
+      const rows = this.index.backfillPending({ limit: 10_000 }).map((r) => ({ ...r, nextTryMs: this.nextTry.get(r.id) ?? 0 }))
       const pick = chooseGap(rows, { now, nvrs: this.nvrView(), retentionMsOf: () => this.retentionMs(), busyNvrs: this.busyNvrs })
       if (!pick.row) {
         this.last.what = pick.why
@@ -650,6 +659,7 @@ export class BackfillJob {
       this.last = { ...this.last, at: now, what: `${row.nvr}/${row.ch + 1}: nothing left to fill` }
       return 0
     }
+    const missingMs = totalMs(holes.map((h) => [h.fromMs, h.toMs]))
 
     // 2. What does the NVR say it has? A failure to ask is not an answer (rule 2 at the top).
     let cov
@@ -713,15 +723,25 @@ export class BackfillJob {
     }
     if (!result.segments.length) return fail(result.message ?? 'the NVR sent no usable video')
 
-    // 5. Index what landed, marked as backfilled so an export can say where it came from.
+    // 5. Index what landed, marked as backfilled so an export can say where it came from. Also when
+    //    it turns out not to be progress (below): the files are on disk, and a file the index does not
+    //    know is one housekeeping never deletes.
     const filledAt = this.now()
     for (const s of result.segments) {
       this.index.addSegment({ nvr: row.nvr, ch: row.ch, path: s.path, startMs: s.startMs, endMs: s.endMs, bytes: s.bytes, keyframes: s.keyframes, loc: loc.id, source: `backfill:${row.nvr}`, filledMs: filledAt })
     }
     const left = this.holesOf(row.nvr, row.ch, row.fromMs, row.toMs)
+    const ms = result.segments.reduce((n, s) => n + (s.endMs - s.startMs), 0)
+    // Progress is a hole that got shorter, not a file written: a pull whose footage all lies outside
+    // the hole is a failed try, with the back-off that comes with one. Counting it as progress cleared
+    // the retry wait, and the same row was pulled again on the next tick.
+    if (left.length && missingMs - totalMs(left.map((h) => [h.fromMs, h.toMs])) < MIN_PROGRESS_MS) {
+      const wait = fail(`pulled ${Math.round(ms / 1000)} s from the NVR, but the hole got less than a second shorter`)
+      this.log(`${row.nvr}/${row.ch + 1}: ${this.last.what}; next try in ${Math.round(wait / 60_000)} min`)
+      return wait
+    }
     this.index.backfillSet(row.id, left.length ? { attempts: row.attempts ?? 0, lastTryMs: now, lastError: null, note: `partly filled, ${left.length} piece(s) left` } : { state: 'filled', filledMs: filledAt, lastError: null, note: null })
     this.nextTry.delete(row.id)
-    const ms = result.segments.reduce((n, s) => n + (s.endMs - s.startMs), 0)
     this.last = { at: filledAt, what: `${row.nvr}/${row.ch + 1}: filled ${Math.round(ms / 1000)} s (${result.bytes} bytes)`, filledMs: this.last.filledMs + ms, bytes: this.last.bytes + result.bytes, errors: this.last.errors }
     this.log(this.last.what)
     return restAfterMs(result.bytes, elapsed, Number(cfg.perNvrMbps ?? 8), Number(cfg.restSeconds ?? 30))
@@ -740,7 +760,10 @@ export class BackfillJob {
     let leg = null
     let done
     try {
-      leg = this.leg({ nvr, ch: row.ch, fromMs, toMs, skewMs, real: sink, gen: null, at: fromMs })
+      // floorMs: the NVR starts a playback at the file holding fromMs, often minutes before the hole,
+      // and without a floor the leg kept those frames: copies of footage already on disk (108 of 293
+      // backfilled segments), written again on every pull of the row
+      leg = this.leg({ nvr, ch: row.ch, fromMs, toMs, skewMs, real: sink, gen: null, at: fromMs, floorMs: fromMs - 1 })
       this.current = { row: row.id, abort: () => leg.close() }
       // A leg is bounded: the stretch itself plus generous slack. A session that stops sending is
       // closed rather than left holding an NVR login all night.

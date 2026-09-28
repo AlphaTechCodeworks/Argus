@@ -210,6 +210,21 @@ const index = openRecIndex(join(DATA, 'recordings.db'))
   check('ledger: a row can be removed', index.backfillList({}).length === 0)
 }
 {
+  // The job's pick list: pending rows only, oldest hole first (playback report 9). It read the newest
+  // 5,000 rows of every state, so the oldest pending rows -- the ones nearest the NVR's deadline --
+  // were never tried at all.
+  const note = (days, state = null) => {
+    const r = index.backfillNote({ nvr: 'q', ch: 0, fromMs: NOW - days * DAY, toMs: NOW - days * DAY + MIN, reason: null, kind: 'unknown' }, NOW)
+    if (state) index.backfillSet(r.id, { state })
+    return r
+  }
+  const rows = [note(3), note(5), note(9, 'permanent'), note(7, 'filled'), note(6)]
+  const pending = typeof index.backfillPending === 'function' ? index.backfillPending({ limit: 2 }) : []
+  check('ledger: backfillPending lists pending rows oldest first, up to the limit', J(pending.map((r) => r.id)) === J([rows[4].id, rows[1].id]), J(pending.map((r) => r.fromMs - NOW)))
+  check('ledger: ... and never a filled or permanent row', typeof index.backfillPending === 'function' && index.backfillPending({ limit: 100 }).every((r) => r.state === 'pending') && index.backfillPending({ limit: 100 }).length === 3)
+  for (const r of rows) index.backfillRemove(r.id)
+}
+{
   index.addSegment({ nvr: 'n', ch: 0, path: '/x/a.h264', startMs: 1, endMs: 2, bytes: 10, keyframes: 1, loc: 'L', source: 'backfill:n', filledMs: NOW })
   index.addSegment({ nvr: 'n', ch: 0, path: '/x/b.h264', startMs: 3, endMs: 4, bytes: 10, keyframes: 1, loc: 'L' })
   check('segments: a backfilled row states its source and when it was pulled', index.byPath('/x/a.h264')?.source === 'backfill:n' && index.byPath('/x/a.h264')?.filledMs === NOW)
@@ -237,12 +252,14 @@ function frame(tsMs, isKey, size = 400, codec = 0) {
  */
 function fakeLeg(behaviour = {}) {
   const calls = []
-  const fn = ({ ch, fromMs, toMs, real, skewMs }) => {
-    calls.push({ ch, fromMs, toMs, skewMs })
+  const fn = ({ ch, fromMs, toMs, real, skewMs, floorMs }) => {
+    calls.push({ ch, fromMs, toMs, skewMs, floorMs })
     const done = (async () => {
       if (behaviour.refuse) return { reason: 'error', message: 'refused: resource limit reached', frames: 0 }
       if (behaviour.silent) return { reason: 'end', frames: 0 }
-      for (let t = fromMs; t < toMs; t += 1000) real.send(frame(t, true))
+      // span: the frames it sends whatever it was asked for (a leg that ignores floorMs)
+      const [a, b] = behaviour.span ? behaviour.span(fromMs, toMs) : [fromMs, toMs]
+      for (let t = a; t < b; t += behaviour.stepMs ?? 1000) real.send(frame(t, true))
       return { reason: 'reached', frames: Math.ceil((toMs - fromMs) / 1000) }
     })()
     return { done, close() {}, command() {}, fromMs, toMs }
@@ -391,6 +408,112 @@ index.addGap({ ...CAM, fromMs: HOLE_FROM, toMs: HOLE_TO, reason: 'refused by the
   check('chunking: the row stays pending with what is left noted', after.state === 'pending' && /left/.test(after.note ?? ''), J(after))
   await job.fill(index.backfillRow(row.id))
   check('chunking: the next turn carries on where the footage now ends', leg.calls.length === 2 && leg.calls[1].fromMs >= leg.calls[0].toMs - 2000 && leg.calls[1].fromMs > leg.calls[0].fromMs, J(leg.calls))
+}
+
+// ---- the same NVR footage pulled over and over (playback report 9) -------------------------------
+//
+// nvr1/18, ledger row 2658, hole 17:48:03-17:56:11: every pull wrote 17:44:48-17:47:11. The NVR starts
+// a playback at the file that holds the asked-for time, minutes before the hole; the leg kept those
+// frames (no floorMs), the job counted the written file as progress and cleared the retry wait, and
+// chooseGap picked the same row again on the next tick. 108 of 293 backfilled segments were copies.
+
+/**
+ * An NVR as rec-fallback's startLeg meets it: a playback asked to start at `start` begins at the start
+ * of the file holding that time (fileBeforeMs earlier) and plays one keyframe a second up to
+ * hasTo(start), then ends.
+ */
+function playingNvr({ fileBeforeMs = 3 * MIN, hasTo }) {
+  const starts = []
+  return {
+    id: 'nvr-1',
+    online: true,
+    starts,
+    playback: {
+      connect(ws, url) {
+        const start = Number(url.searchParams.get('start'))
+        starts.push(start)
+        setImmediate(() => {
+          ws.send(JSON.stringify({ type: 'started' }))
+          for (let t = start - fileBeforeMs; t < hasTo(start); t += 1000) ws.send(frame(t, true))
+          ws.send(JSON.stringify({ type: 'end' }))
+        })
+      }
+    }
+  }
+}
+/** A camera with footage either side of a 3-minute hole two days ago; its pending ledger row. */
+function holeOn(ch) {
+  index.addSegment({ nvr: 'nvr-1', ch, path: join(root, `h${ch}a.h264`), startMs: HOLE_FROM - 10 * MIN, endMs: HOLE_FROM, bytes: 1000, keyframes: 10, loc: 'L1' })
+  index.addSegment({ nvr: 'nvr-1', ch, path: join(root, `h${ch}b.h264`), startMs: HOLE_TO, endMs: HOLE_TO + 10 * MIN, bytes: 1000, keyframes: 10, loc: 'L1' })
+  return index.backfillNote({ nvr: 'nvr-1', ch, fromMs: HOLE_FROM, toMs: HOLE_TO, reason: null, kind: 'unknown' }, NOW)
+}
+const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO + 20 * MIN).filter((x) => x.source)
+{
+  const { startLeg } = await import('../rec-fallback.mjs')
+  // the NVR has footage through the hole: only the hole's part of it is written
+  const nvr = playingNvr({ hasTo: (start) => start + 5 * MIN })
+  const job = makeJob({ leg: startLeg, extra: { nvrs: new Map([['nvr-1', nvr]]) } })
+  const row = holeOn(10)
+  await job.fill(row)
+  const segs = pulled(10)
+  check('floor: the NVR is asked from the start of the hole (and plays from its file start)', nvr.starts.length === 1 && nvr.starts[0] === HOLE_FROM, J(nvr.starts))
+  check('floor: nothing from before the hole is written again', segs.length > 0 && segs.every((x) => x.startMs >= HOLE_FROM - 1), J(segs.map((x) => (x.startMs - HOLE_FROM) / 1000)))
+  check('floor: the hole is filled', index.backfillRow(row.id).state === 'filled' && job.holesOf('nvr-1', 10, HOLE_FROM - MIN, HOLE_TO + MIN).length === 0, J(index.backfillRow(row.id)))
+
+  // row 2658: the NVR has nothing inside the hole, only the minutes before it
+  const empty = playingNvr({ hasTo: (start) => start - MIN })
+  const job2 = makeJob({ leg: startLeg, extra: { nvrs: new Map([['nvr-1', empty]]) } })
+  const row2 = holeOn(11)
+  const wait = await job2.fill(row2)
+  const after = index.backfillRow(row2.id)
+  check('floor: footage from before the hole is not written at all', pulled(11).length === 0, J(pulled(11).map((x) => (x.startMs - HOLE_FROM) / 1000)))
+  check('floor: ... so that pull is a failure: attempt counted, row pending, backed off', after.state === 'pending' && after.attempts === 1 && job2.nextTry.get(row2.id) > NOW && wait === bf.ERROR_BACKOFF_MS[0], J({ after, wait }))
+  check('floor: ... and the next pick does not take the same row straight away', chooseGap([{ ...after, nextTryMs: job2.nextTry.get(row2.id) }], { now: NOW, nvrs: job2.nvrView(), retentionMsOf: () => 30 * DAY }).row === null)
+  index.backfillSet(row2.id, { state: 'permanent', note: 'test tidy-up' })
+}
+{
+  // Written files are not progress: only a hole that got shorter is. A leg that writes footage outside
+  // the hole (the frames before it, as every pull of row 2658 did) is a failed try with a back-off.
+  const leg = fakeLeg({ span: (from) => [from - 3 * MIN, from - MIN] })
+  const job = makeJob({ leg })
+  const row = holeOn(12)
+  const wait = await job.fill(row)
+  const after = index.backfillRow(row.id)
+  check('floor: the job gives the leg floorMs 1 ms before the piece it pulls', leg.calls[0]?.floorMs === leg.calls[0]?.fromMs - 1, J(leg.calls))
+  check('progress: the leg did write files (outside the hole)', pulled(12).length > 0)
+  check('progress: a pull that did not shorten the hole is a failure, not progress', after.state === 'pending' && after.attempts === 1 && /hole/.test(after.lastError ?? ''), J(after))
+  check('progress: ... it backs off rather than resting for the rate limit', wait === bf.ERROR_BACKOFF_MS[0] && job.nextTry.get(row.id) === NOW + bf.ERROR_BACKOFF_MS[0], `${wait}`)
+  check('progress: ... and says so in the job state', /hole/.test(job.last.what) && job.last.errors === 1, J(job.last))
+  // a second failed try doubles the wait, as any other failure does
+  const wait2 = await job.fill(index.backfillRow(row.id))
+  check('progress: the next failed try waits longer', wait2 === bf.backoffMs(2, bf.ERROR_BACKOFF_MS) && index.backfillRow(row.id).attempts === 2, `${wait2}`)
+  index.backfillSet(row.id, { state: 'permanent', note: 'test tidy-up' })
+
+  // under a second of the hole is not progress either
+  const tiny = fakeLeg({ span: (from) => [from, from + 500], stepMs: 400 })
+  const job2 = makeJob({ leg: tiny })
+  const row2 = holeOn(13)
+  const wait3 = await job2.fill(row2)
+  check('progress: shortening the hole by under a second is a failure too', index.backfillRow(row2.id).attempts === 1 && wait3 === bf.ERROR_BACKOFF_MS[0], J({ row: index.backfillRow(row2.id), wait3 }))
+  index.backfillSet(row2.id, { state: 'permanent', note: 'test tidy-up' })
+}
+{
+  // The oldest pending hole is tried first even with thousands of newer rows in the ledger (5,785 on
+  // the server; the newest 5,000 were read, so the oldest 785 -- nearest their deadline -- never were).
+  const leg = fakeLeg()
+  const job = makeJob({ leg })
+  const OLD_FROM = NOW - 29 * DAY
+  index.addSegment({ nvr: 'nvr-1', ch: 41, path: join(root, 'o41a.h264'), startMs: OLD_FROM - 10 * MIN, endMs: OLD_FROM, bytes: 1000, keyframes: 10, loc: 'L1' })
+  index.addSegment({ nvr: 'nvr-1', ch: 41, path: join(root, 'o41b.h264'), startMs: OLD_FROM + 3 * MIN, endMs: OLD_FROM + 13 * MIN, bytes: 1000, keyframes: 10, loc: 'L1' })
+  const oldest = index.backfillNote({ nvr: 'nvr-1', ch: 41, fromMs: OLD_FROM, toMs: OLD_FROM + 3 * MIN, reason: null, kind: 'unknown' }, NOW)
+  const filler = []
+  for (let i = 0; i < 5100; i++) filler.push(index.backfillNote({ nvr: 'nvr-1', ch: 40, fromMs: NOW - 20 * DAY + i * MIN, toMs: NOW - 20 * DAY + i * MIN + 30_000, reason: null, kind: 'unknown' }, NOW).id)
+  job.running = true
+  await job.tick()
+  job.stop('test')
+  check('oldest first: with 5,100 newer rows in the ledger the oldest pending hole is the one pulled', leg.calls.length === 1 && leg.calls[0].fromMs === OLD_FROM, J({ calls: leg.calls.map((c) => (c.fromMs - NOW) / DAY), what: job.last.what }))
+  check('oldest first: ... and it is filled', index.backfillRow(oldest.id).state === 'filled', J(index.backfillRow(oldest.id)))
+  for (const id of filler) index.backfillRemove(id)
 }
 {
   // the run flag is on disk, so a restart picks the job back up (roadmap 2b point 3)

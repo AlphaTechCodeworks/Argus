@@ -142,6 +142,8 @@ export function openRecIndex(file) {
     bfById: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps WHERE id = ?`),
     bfAll: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps ORDER BY from_ms DESC LIMIT ?`),
     bfState: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps WHERE state = ? ORDER BY from_ms DESC LIMIT ?`),
+    // the job's pick list: oldest hole first (served by backfill_state (state, from_ms))
+    bfPending: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps WHERE state = 'pending' ORDER BY from_ms LIMIT ?`),
     bfForget: db.prepare('DELETE FROM backfill_gaps WHERE to_ms < ?'),
     bfDrop: db.prepare('DELETE FROM backfill_gaps WHERE id = ?'),
     gap: db.prepare('INSERT INTO gaps (nvr, ch, from_ms, to_ms, reason) VALUES (?, ?, ?, ?, ?)'),
@@ -198,6 +200,12 @@ export function openRecIndex(file) {
     backfillRow: (id) => one(q.bfById.get(Number(id))),
     /** Ledger rows, newest hole first; `state` filters to one state. */
     backfillList: ({ state = null, limit = 1000 } = {}) => (state ? q.bfState.all(String(state), Number(limit)) : q.bfAll.all(Number(limit))).map(plain),
+    /**
+     * Pending ledger rows, oldest hole first: what the job picks from. Oldest first because those are
+     * the rows nearest the NVR's deadline; with backfillList (newest first, every state) a long ledger
+     * cut its oldest pending rows off, and they were never tried.
+     */
+    backfillPending: ({ limit = 10_000 } = {}) => q.bfPending.all(Number(limit)).map(plain),
     /** Changes a ledger row (only the fields in BF_SET; unknown fields are ignored). */
     backfillSet(id, fields) {
       const cols = []
