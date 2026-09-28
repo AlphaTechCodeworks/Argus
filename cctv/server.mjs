@@ -116,7 +116,8 @@ import { probeTarget, tcpReachable } from './probe.mjs'
 import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
-import { can, handleRights } from './rights.mjs'
+import { can, handleRights, sitesFor } from './rights.mjs'
+import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
 import { audit, handleAudit, pruneAudit } from './audit.mjs'
@@ -574,6 +575,10 @@ const handleRequest = async (req, res) => {
   // session and nowhere else: a user named in a request body says whose settings are being
   // changed, never who is doing the changing.
   const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
+  // What this user may see of a camera at all: watching it live or playing it back (rights.mjs). The
+  // routes that tell about cameras rather than show them (events, alarms, bookmarks, health, maps,
+  // links, overlays) keep every other camera out of their answers with it.
+  const canSee = (nvr, ch) => who.admin || ['live', 'playback-server', 'playback-nvr'].some((a) => can(who, a, { nvr, ch }))
 
   if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
@@ -587,10 +592,9 @@ const handleRequest = async (req, res) => {
   // routes; who may see it is decided inside (a playback right for that camera)
   const snapRoute = /^\/api\/events\/(\d{1,15})\/snapshot$/.exec(pathname)
   if (snapRoute) return handleSnapshot(req, res, snapRoute[1], who)
-  // alarms and events of cameras this user may not see stay out of their lists (rights.mjs): watching
-  // live or playing back that camera is what lets them see what happened on it
-  const canSee = (nvr, ch) => who.admin || ['live', 'playback-server', 'playback-nvr'].some((a) => can(who, a, { nvr, ch }))
-  const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null, canSee })
+  // alarms and events of cameras this user may not see stay out of their lists (canSee above):
+  // watching live or playing back that camera is what lets them see what happened on it
+  const ev =await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null, canSee })
   if (ev) return sendJson(res, ...ev)
   const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: who.admin, cameras: allCameras, canSee })
   // every camera's own address and web port, as its NVR connects to it (admins): for the settings an
@@ -821,13 +825,14 @@ const handleRequest = async (req, res) => {
     const [status, body] = await handleAdmin(req.method, pathname, readJson)
     return sendJson(res, status, body)
   }
-  // The Health page: everything anyone signed in may see about how the server is doing. It
-  // carries no secret, so it is not admin-only (see alert-checks.mjs health()).
+  // The Health page: how the server is doing, for anyone signed in (see alert-checks.mjs health()).
+  // An admin gets all of it; anyone else only the cameras they may see and those cameras' NVRs, by
+  // name and state (health-view.mjs): no other camera, and no address, model or serial.
   if (pathname === '/api/health') {
     // plus remote viewing: what goes out over the internet, the levels remote viewers are on, and
     // what the video conversions cost (Health: "Remote viewing")
     const remote = adaptiveLive.summary()
-    return sendJson(res, 200, {
+    return sendJson(res, 200, healthFor({
       ...alerts.health(),
       viewing: {
         traffic: trafficSummary(),
@@ -839,9 +844,11 @@ const handleRequest = async (req, res) => {
           cpu: ffmpegCpuPercent()
         }
       }
-    })
+    }, { admin: who.admin, canSee }))
   }
-  if (pathname === '/api/sites') return sendJson(res, 200, [...nvrs.values()].map((n) => n.info()))
+  // an admin sees every NVR in full; anyone else only the sites they hold a grant on, by site, name
+  // and status (rights.mjs sitesFor): never an NVR's address, P2P serial, model or serial number
+  if (pathname === '/api/sites') return sendJson(res, 200, sitesFor(who, [...nvrs.values()].map((n) => n.info())))
   // only the cameras this user may watch live (rights.mjs; an admin sees all)
   if (pathname === '/api/cameras') return sendJson(res, 200, who.admin ? allCameras({ live: true }) : allCameras({ live: true }).filter((c) => can(who, 'live', { nvr: c.nvr, ch: c.ch })))
   if (handleMapsRead(pathname, res, sendJson, SECURITY_HEADERS)) return

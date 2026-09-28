@@ -347,5 +347,30 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   check('forgetRights ignores junk names', R.forgetRights(null) === false && R.forgetRights('') === false && R.forgetRights('__proto__') === false)
 }
 
+// ---- /api/sites (sitesFor): a viewer is told only about sites they hold a grant on, and never where an NVR is
+{
+  const SITES = [
+    { id: 'nvr1', site: 'Main site', name: 'NVR 1', host: '10.0.0.5', sn: '', status: 'online', error: '', model: 'X', serial: 'S1', cameras: 9 },
+    { id: 'rigginglot', site: 'Rigginglot', name: 'Rigginglot', host: 'c2020.autonat.com', sn: 'ABC123456', status: 'offline', error: 'cannot be reached at 10.8.0.9:6036', model: 'Y', serial: 'S2', cameras: 4 }
+  ]
+  R.saveRights('jo', { grants: { live: ['nvr1/2'] } })
+  R.saveRights('sam', {}) // explicit: with no row, migrateRights would hand a viewer live '*'
+  const jo = R.sitesFor({ user: 'jo', admin: false }, SITES)
+  check('sitesFor: a viewer sees only the NVR they hold a camera on', jo.length === 1 && jo[0].id === 'nvr1', JSON.stringify(jo))
+  check('sitesFor: no address, P2P serial, serial, model or error for a viewer', ['host', 'sn', 'serial', 'model', 'error', 'cameras'].every((k) => !(k in (jo[0] ?? {}))))
+  check('sitesFor: ...but the site, name and status the site filter needs', jo[0]?.site === 'Main site' && jo[0]?.name === 'NVR 1' && jo[0]?.status === 'online')
+  R.saveRights('jo', { grants: { export: ['rigginglot'] }, formats: ['pack'] })
+  check('sitesFor: a grant in any action counts', R.sitesFor({ user: 'jo', admin: false }, SITES).map((s) => s.id).join() === 'rigginglot')
+  R.saveRights('jo', { grants: { 'playback-nvr': ['*'] } })
+  check('sitesFor: a "*" grant is every site', R.sitesFor({ user: 'jo', admin: false }, SITES).length === 2)
+  R.saveRights('jo', { grants: { live: ['nvr10/1', 'nvr'] } })
+  check('sitesFor: another NVR whose id starts the same is not this one', R.sitesFor({ user: 'jo', admin: false }, SITES).length === 0)
+  check('sitesFor: a zero-grant viewer is told about no site', R.sitesFor({ user: 'sam', admin: false }, SITES).length === 0)
+  check('sitesFor: no session, no sites', R.sitesFor(null, SITES).length === 0)
+  check('sitesFor: an admin sees every NVR in full', R.sitesFor({ user: 'boss', admin: true }, SITES)[1].sn === 'ABC123456')
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  check("server.mjs answers /api/sites through sitesFor", /pathname === '\/api\/sites'\)[^\n]*sitesFor\(/.test(server))
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

@@ -168,7 +168,8 @@ export function startAlerts(deps) {
     testSend: (method) => deps.sender.test(method),
     /**
      * Everything the Health page shows. Carries no secret: no ntfy topic and no mail password,
-     * because the page is served to every signed-in user, not only admins.
+     * because the page is served to every signed-in user, not only admins. For anyone but an admin
+     * server.mjs cuts it down further to the cameras they may see (health-view.mjs).
      */
     health() {
       // Health updates live (every 2 s): the state is rebuilt when it is over 2 s old -- it only

@@ -1075,9 +1075,10 @@ async function loadCameras(pre = null) {
 
   const down = sites.filter((s) => s.status !== 'online')
   notice.hidden = down.length === 0 && cameras.length > 0
+  // (a viewer is told only the site, name and state of an NVR: /api/sites, rights.mjs sitesFor)
   notice.textContent = cameras.length === 0 && down.length === 0
-    ? 'No cameras yet. Add an NVR with: docker exec -it tvt-cctv node cctv/nvr.mjs add'
-    : down.map((s) => `${s.site} · ${s.name} (${s.sn ? `serial ${s.sn}` : s.host}) is ${s.status}${s.error ? `: ${s.error}` : ''}`).join(' — ')
+    ? (isAdmin ? 'No cameras yet. Add an NVR with: docker exec -it tvt-cctv node cctv/nvr.mjs add' : 'No cameras have been shared with you yet. Ask an admin for access.')
+    : down.map((s) => `${s.site} · ${s.name}${s.sn ? ` (serial ${s.sn})` : s.host ? ` (${s.host})` : ''} is ${s.status}${s.error ? `: ${s.error}` : ''}`).join(' — ')
   // another camera coming or going must not rebuild the full-size view (a running measurement or
   // change in its Picture panel would be lost)
   if (!changed) return

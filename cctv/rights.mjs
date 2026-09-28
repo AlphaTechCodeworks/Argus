@@ -339,6 +339,24 @@ export function canAny(who, action) {
   return action !== 'export' || rights.formats.length > 0
 }
 
+/**
+ * GET /api/sites for one user. An admin gets every NVR as nvrs.mjs info() gives it. Anyone else
+ * gets only the NVRs they hold some grant on ('*', the NVR, or one of its cameras, in any action),
+ * and of those only the site, name and status the viewer's site filter and "is offline" notice
+ * need: the address, P2P serial, model, serial number, camera counts and error text (which names
+ * host:port) are admin-only. A zero-grant viewer is told about no site at all.
+ */
+export function sitesFor(who, list) {
+  if (can(who, 'admin')) return list
+  const user = isString(who) ? who : isString(who?.user) ? who.user : null
+  if (!user) return []
+  const { grants } = rightsOf(user)
+  const onNvr = (t, id) => t === '*' || t === id || t.startsWith(`${id}/`)
+  return list
+    .filter((s) => GRANTABLE.some((a) => (grants[a] ?? []).some((t) => onNvr(t, s.id))))
+    .map(({ id, site, name, status }) => ({ id, site, name, status }))
+}
+
 /** Convenience for the old canPlayServer(who, nvrId, ch) call shape. */
 export const canPlayServer = (who, nvrId, ch) =>
   can(who, 'playback-server', { nvr: isString(nvrId) && nvrId ? nvrId : null, ch: Number.isInteger(ch) && ch >= 0 ? ch : null })
