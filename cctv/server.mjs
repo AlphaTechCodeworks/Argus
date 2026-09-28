@@ -609,7 +609,7 @@ const handleRequest = async (req, res) => {
   if (snapRoute) return handleSnapshot(req, res, snapRoute[1], who)
   // alarms and events of cameras this user may not see stay out of their lists (canSee above):
   // watching live or playing back that camera is what lets them see what happened on it
-  const ev =await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null, canSee })
+  const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null, canSee })
   if (ev) return sendJson(res, ...ev)
   const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: who.admin, cameras: allCameras, canSee })
   // every camera's own address and web port, as its NVR connects to it (admins): for the settings an
