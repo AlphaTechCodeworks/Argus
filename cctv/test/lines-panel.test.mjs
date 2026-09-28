@@ -149,6 +149,10 @@ check('undoText: when and by whom', /^Undo puts back the line settings from befo
   const rule = { id: 4, name: 'Line crossing', enabled: true, notify: true, cameras: ['nvr-2/2'], types: ['line-crossing'] }
   check('alertOn: the camera in the "Line crossing" rule', alertOn([{ name: 'Other', enabled: true, notify: true, cameras: ['nvr-2/2'] }, rule], 'nvr-2/2') && !alertOn([rule], 'nvr-2/3'))
   check('  not when the rule is switched off, does not notify, or is missing', !alertOn([{ ...rule, enabled: false }], 'nvr-2/2') && !alertOn([{ ...rule, notify: false }], 'nvr-2/2') && !alertOn([], 'nvr-2/2') && !alertOn(undefined, 'nvr-2/2'))
+  // F7: the same rule as the server's (line-actions.mjs isLineRule): named "Line crossing" AND for line crossings alone
+  const theirs = { id: 9, name: 'Line crossing', enabled: true, notify: true, cameras: ['nvr-2/2'], types: ['motion'] }
+  check('  a person\'s own rule of the same name for other kinds is not ours', !alertOn([theirs], 'nvr-2/2') && !alertOn([{ ...theirs, types: ['line-crossing', 'motion'] }], 'nvr-2/2') && !alertOn([{ ...theirs, types: [] }], 'nvr-2/2'))
+  check('  listed before ours, it does not hide ours', alertOn([{ ...theirs, cameras: [] }, rule], 'nvr-2/2') && !alertOn([theirs, { ...rule, cameras: ['nvr-2/5'] }], 'nvr-2/2'))
   const on = { ...ch3, enabled: true }
   check('autoAlert: on by default after a Save that switched line crossing on', autoAlert(ch3, on, { on: false, touched: false }))
   check('  not when the admin touched the switch, the camera is already in, or it is not known', !autoAlert(ch3, on, { on: false, touched: true }) && !autoAlert(ch3, on, { on: true, touched: false }) && !autoAlert(ch3, on, { on: null, touched: false }) && !autoAlert(ch3, on, { on: undefined, touched: false }))

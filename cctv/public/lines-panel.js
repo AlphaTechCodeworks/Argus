@@ -242,9 +242,16 @@ export function resultView(result, schedules = []) {
   return { status, headline: HEADLINES[status], fields, sideEffects, acked }
 }
 
-/** Is this camera in the "Line crossing" alarm rule, switched on and notifying? rules: GET /api/alarms/rules. */
+/** The event kind the rule is for (line-actions.mjs LINE_TYPE). */
+const LINE_TYPE = 'line-crossing'
+
+/**
+ * Is this camera in the "Line crossing" alarm rule, switched on and notifying? rules: GET /api/alarms/rules.
+ * The rule is found as the server finds it (line-actions.mjs isLineRule): named "Line crossing" and for
+ * line crossings alone. A person's own rule of that name for other kinds is not it, and does not hide it.
+ */
 export function alertOn(rules, key) {
-  const rule = (rules ?? []).find((r) => r?.name === LINE_RULE_NAME)
+  const rule = (rules ?? []).find((r) => r?.name === LINE_RULE_NAME && Array.isArray(r.types) && r.types.length === 1 && r.types[0] === LINE_TYPE)
   return Boolean(rule && rule.enabled && rule.notify && Array.isArray(rule.cameras) && rule.cameras.includes(key))
 }
 
