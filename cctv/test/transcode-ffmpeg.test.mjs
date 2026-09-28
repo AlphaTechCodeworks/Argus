@@ -7,6 +7,8 @@
 //   - one keyframe from ffmpeg's own test pattern (H.265 at 1080p and 4K, H.264 at 1080p), pushed and
 //     ended: exactly one H.264 picture comes back, with the keyframe's time, and it decodes;
 //   - two scrubs in a row on one converter (a reset between them, as every scrub does);
+//   - playback's limits (PLAYBACK_LIMITS): noisy 4K comes out 1920x1080, within the rate cap, and no
+//     picture bigger than the 1 s buffer;
 //   - the whole path: a recorded .h265 file, ServerPlayback with &h265=0, {scrub}: one converted
 //     frame on the socket after {type:'scrub'}, for each of two scrubs.
 // ffmpeg runs behind ionice and nice here exactly as in the service. Nothing reaches an NVR.
@@ -18,7 +20,7 @@ import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-xcode-ffmpeg-test-'))
-const { CODEC_H264, CODEC_H265, TranscodePool, Transcoder } = await import('../transcode.mjs')
+const { CODEC_H264, CODEC_H265, PLAYBACK_LIMITS, TranscodePool, Transcoder } = await import('../transcode.mjs')
 const { CODEC, splitUnits } = await import('../rec-reader.mjs')
 const { SegmentWriter } = await import('../segment-writer.mjs')
 const { openRecIndex } = await import('../rec-index.mjs')
@@ -46,12 +48,14 @@ if (!execFileSync('ffmpeg', ['-hide_banner', '-encoders']).toString().includes('
  * Raw Annex B from ffmpeg's test pattern: 10 fps, a keyframe every `gop` frames exactly, no B-frames
  * (the cameras use none: a picture is decoded and shown in the order it arrives).
  */
-function testVideo({ size, codec = 'h265', frames = 1, gop = 10 }) {
+function testVideo({ size, codec = 'h265', frames = 1, gop = 10, rate = 10, noise = false }) {
   const enc = codec === 'h265'
     ? ['-c:v', 'libx265', '-preset', 'ultrafast', '-x265-params', `log-level=error:keyint=${gop}:min-keyint=${gop}:scenecut=0:open-gop=0:bframes=0`]
     : ['-c:v', 'libx264', '-preset', 'ultrafast', '-g', String(gop), '-keyint_min', String(gop), '-sc_threshold', '0', '-bf', '0']
   return execFileSync('ffmpeg', [
-    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `testsrc=size=${size}:rate=10`,
+    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `testsrc=size=${size}:rate=${rate}`,
+    // noise: fresh grain in every picture, so every picture is expensive (a rate cap has work to do)
+    ...(noise ? ['-vf', 'noise=alls=40:allf=t'] : []),
     '-frames:v', String(frames), ...enc, '-pix_fmt', 'yuv420p',
     '-f', codec === 'h265' ? 'hevc' : 'h264', 'pipe:1'
   ], { maxBuffer: 256 * 1024 * 1024 })
@@ -67,13 +71,14 @@ function probe(buf) {
 }
 
 /** A real Transcoder (real ffmpeg, niced) whose pictures are collected with their arrival time. */
-function converter(inCodec) {
+function converter(inCodec, opts = {}) {
   const frames = []
   const fails = []
   const logs = []
   const t = new Transcoder({
     inCodec,
     encoder: 'libx264',
+    ...opts,
     onFrame: (ts, isKey, buf) => frames.push({ ts, isKey, buf, at: performance.now() }),
     onFail: (e) => fails.push(e),
     log: (l) => logs.push(l)
@@ -147,6 +152,36 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
   await sleep(QUIET_MS)
   check('two scrubs on one converter: one picture for each, in the order asked', keys.length === 2 && J(frames.map((f) => f.ts - T0)) === J([500, 0]) && frames.every((f) => f.isKey) && fails.length === 0, J(frames.map((f) => f.ts - T0)))
   t.close()
+}
+
+// ---- playback's limits (PLAYBACK_LIMITS): 4K comes out 1920 wide, and no picture bursts past the buffer ----
+// Converted at full size a 4K recording ran slower than real time and came out at ~9 Mbit/s with
+// 1.5 MB keyframes (smoothness report, cause 2b).
+{
+  const FPS = 20
+  const clip = testVideo({ size: '3840x2160', frames: 20, gop: 10, rate: FPS, noise: true })
+  const units = splitUnits(clip, CODEC.h265).units
+  const run = async (opts) => {
+    const { t, frames, fails } = converter(CODEC_H265, opts)
+    units.forEach((u, i) => t.push(T0 + i * 50, u.isKey, clip.subarray(u.start, u.end)))
+    t.endPicture()
+    await until(() => frames.length >= units.length, 60_000)
+    await sleep(QUIET_MS)
+    t.close()
+    return { frames, fails, bytes: frames.reduce((s, f) => s + f.buf.length, 0), max: Math.max(0, ...frames.map((f) => f.buf.length)) }
+  }
+  const capped = await run({ ...PLAYBACK_LIMITS })
+  const full = await run({})
+  const bufBytes = (PLAYBACK_LIMITS.maxKbps * 1000 * PLAYBACK_LIMITS.bufSeconds) / 8
+  // what the cap allows over the clip: the rate for its length plus one full buffer (10% for x264's rounding)
+  const allowed = 1.1 * ((PLAYBACK_LIMITS.maxKbps * 1000 * units.length) / FPS / 8 + bufBytes)
+  info(`a noisy 4K H.265 clip of ${units.length} pictures: ${Math.round(full.bytes / 1024)} KB converted at full size (largest picture ${Math.round(full.max / 1024)} KB), ${Math.round(capped.bytes / 1024)} KB within PLAYBACK_LIMITS (largest ${Math.round(capped.max / 1024)} KB)`)
+  const p = capped.frames.length ? probe(Buffer.concat(capped.frames.map((f) => f.buf))) : {}
+  check('PLAYBACK_LIMITS: every picture of a 4K clip comes out, each with its own time', units.length === 20 && capped.frames.length === 20 && capped.frames.every((f, i) => f.ts === T0 + i * 50) && capped.fails.length === 0, `${capped.frames.length} out`)
+  check('  scaled to 1920x1080', p.codec_name === 'h264' && p.width === '1920' && p.height === '1080' && p.nb_read_frames === '20', J(p))
+  check('  no picture larger than the 1 s buffer at the cap (a keyframe cannot burst past it)', capped.max <= 1.1 * bufBytes, `largest ${capped.max} B, buffer ${bufBytes} B`)
+  check('  and the whole clip within the cap', capped.bytes <= allowed, `${capped.bytes} B, allowed ${Math.round(allowed)} B`)
+  check('  (the same clip at full size is far bigger: the cap is what held it down)', full.frames.length === 20 && full.bytes > 3 * allowed, `${full.bytes} B`)
 }
 
 // ---- the whole path: a recorded .h265 file, ServerPlayback, {scrub} --------------------------------------

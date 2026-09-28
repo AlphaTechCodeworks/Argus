@@ -65,8 +65,9 @@
 //    again below resumeBelow; at most readAheadMs x |speed| of footage and maxQueueBytes are queued.
 //  - H.265 for a browser that cannot decode it (&h265=0 on the URL, transcode.mjs): the frames go
 //    through ffmpeg and H.264 goes out instead, in this same wire format and with the same times, so
-//    the page needs no new decoding path. Only that parameter switches it on, so a browser that can
-//    decode H.265 always gets the recording itself. At most CCTV_TRANSCODE_MAX (2) of these run at
+//    the page needs no new decoding path, at most 1920 wide and 2.5 Mbit/s (PLAYBACK_LIMITS). Only
+//    that parameter switches it on, so a browser that can decode H.265 always gets the recording
+//    itself. At most CCTV_TRANSCODE_MAX (2) of these run at
 //    once; over that the viewer is told plainly and the socket closes, rather than joining a queue.
 //    The ffmpeg is killed on close, on error and on every seek: recording always wins. NVR legs are
 //    told the same (h265), so the NVR's own playback is converted for this browser too.
@@ -78,7 +79,7 @@ import { audit } from './audit.mjs'
 import { DATA_DIR } from './auth.mjs'
 import { nvrLegs } from './rec-fallback.mjs'
 import { SegmentReader, keyAtOrAfter, keyAtOrBefore } from './rec-reader.mjs'
-import { CODEC_H264, Transcoder, clientCanDecodeH265, pool as transcodePool, wantsTranscode } from './transcode.mjs'
+import { CODEC_H264, PLAYBACK_LIMITS, Transcoder, clientCanDecodeH265, pool as transcodePool, wantsTranscode } from './transcode.mjs'
 
 // ---- read-ahead: the next file of a playback, read once in the background ----
 // When playback opens a file, the one after it is read through (1 MB at a time into one reused
@@ -564,6 +565,9 @@ export class ServerPlayback {
         return false
       }
       this.xcode = this.makeTranscoder({
+        // at most 1920 wide and 2.5 Mbit/s: a 4K conversion at full size ran slower than real time
+        // and came out bigger than a tunnel carries (the measurements are at PLAYBACK_LIMITS)
+        ...PLAYBACK_LIMITS,
         onFrame: (ts, isKey, buf) => this.#sendConverted(ts, isKey, buf),
         onFail: (e) => this.#fail(new Error(`could not convert this H.265 recording (${e.message})`)),
         log: this.log

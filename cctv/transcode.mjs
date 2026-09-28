@@ -10,13 +10,13 @@
 // through ffmpeg and the browser is sent H.264 in the very same wire format, with the very same
 // timestamps: the player needs no new code path at all.
 //
-// The quality trade, plainly: this is evidence, not a master copy. The picture is re-encoded at the
-// recorded resolution (so a number plate that was readable stays readable) but with crf 26 /
-// veryfast, which throws away detail in the noisy, moving parts of the picture that a second encode
-// cannot afford. It is visibly softer than the original on a big screen and it is generated fresh
+// The quality trade, plainly: this is evidence, not a master copy. The picture is re-encoded with
+// crf 26 / veryfast, which throws away detail in the noisy, moving parts of the picture that a second
+// encode cannot afford, and playback converts at most 1920 wide (PLAYBACK_LIMITS): a 4K camera is
+// watched at 1080p. It is visibly softer than the original on a big screen and it is generated fresh
 // every time; the original H.265 file on disk is never touched, and an export still gets the real
-// footage. Speed matters more than the last few percent of quality here, because the conversion has
-// to keep ahead of playback on a box whose first job is recording.
+// footage at full size. Speed matters more than the last few percent of quality here, because the
+// conversion has to keep ahead of playback on a box whose first job is recording.
 //
 // What protects recording: a hard cap on how many conversions run at once (CCTV_TRANSCODE_MAX,
 // 2 by default), nice/ionice so ffmpeg loses every contest against the recorder and exports, and a
@@ -40,6 +40,19 @@ export const FLUSH_IDLE_MS = 150
 export const RENDER_NODE = '/dev/dri/renderD128'
 /** Every conversion runs at this much lower CPU and at idle disk priority: recording always wins. */
 export const NICE = 10
+/**
+ * The size and rate a playback conversion (rec-playback.mjs) is held to. Measured on this server with
+ * two 4K H.265 recordings (20 fps, 2.9 and 3.6 Mbit/s): converted at full size, ffmpeg made 16.9-18.8
+ * pictures a second (0.85-0.94x real time: fed at 1x, the lag grew to 4 s in 30 s) and made 9.3-10
+ * Mbit/s with 1.5 MB keyframes, more than one tunnel connection carries (3.5-6.5 Mbit/s). At most 1920
+ * wide and 2500 kbit/s: 23-25 a second (1.16-1.26x), 2.2-2.5 Mbit/s, the lag at 1x under 0.5 s.
+ * The buffer is 1 s at the cap, not the 4 s phones get, because the keyframe burst is what stalls a
+ * viewer on a thin link: keyframes came out at 100-150 KB (a quarter of a second through the tunnel)
+ * against 430-550 KB with 4 s. The price is sharpness, since the keyframe is what a still scene's
+ * other pictures are built on: SSIM against the recording scaled to 1080p was 0.984 with 1 s, 0.987
+ * with 2 s and 0.990 with 4 s, at the same 2.1-2.2 Mbit/s.
+ */
+export const PLAYBACK_LIMITS = Object.freeze({ maxWidth: 1920, maxKbps: 2500, bufSeconds: 1 })
 
 /** The cap, from the environment; a bad or missing value means the default. */
 export function maxTranscodes(env = process.env) {
@@ -109,16 +122,18 @@ export const lightPool = new TranscodePool((() => { const n = Number(process.env
  * No container either way, so nothing has to be demuxed or muxed and there is no latency but the
  * encoder's own. -bf 0 keeps the output in input order (see Transcoder for why that matters), and
  * -g 50 puts a keyframe in often enough that a decoder joining late recovers quickly.
- * keepEvery / maxWidth (phones, phone-live.mjs): keep one frame in every keepEvery, and scale down to at
- * most maxWidth wide. Software only: the GPU path would need its own filters, and phones do not
- * need it.
+ * keepEvery / maxWidth (phones, phone-live.mjs; maxWidth for playback too, PLAYBACK_LIMITS): keep one
+ * frame in every keepEvery, and scale down to at most maxWidth wide. Software only: the GPU path would
+ * need its own filters, and this server has no GPU encoder (its GPU is the VM's virtual one).
  * Never -fflags nobuffer: with it the packet ffmpeg reads while it probes the stream is thrown away
  * instead of decoded, and that packet is the first keyframe. A scrub's lone keyframe then never came
  * out at all, and every run began with the rest of a GOP decoded against a missing picture, each
  * picture handed the time of the one before it. -probesize 32 already stops the probe at that packet.
- * @param {{ encoder?: 'libx264'|'h264_vaapi', inCodec?: number, keepEvery?: number, maxWidth?: number }} o
+ * maxKbps / bufSeconds: cap the rate, with an encoder buffer of bufSeconds at the cap (below).
+ * @param {{ encoder?: 'libx264'|'h264_vaapi', inCodec?: number, keepEvery?: number, maxWidth?: number,
+ *   crf?: number, maxKbps?: number, bufSeconds?: number }} o
  */
-export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0 } = {}) {
+export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0, bufSeconds = 4 } = {}) {
   const head = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-flags', 'low_delay', '-probesize', '32', '-analyzeduration', '0']
   const input = ['-f', inCodec === CODEC_H265 ? 'hevc' : 'h264', '-i', 'pipe:0', '-an']
   const tail = ['-fps_mode', 'passthrough', '-flush_packets', '1', '-f', 'h264', 'pipe:1']
@@ -144,9 +159,10 @@ export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEver
     ...input,
     ...(filters.length ? ['-vf', filters.join(',')] : []),
     '-c:v', 'libx264', '-preset', PRESET, '-crf', String(crf), '-tune', 'zerolatency', '-bf', '0', '-g', '50', '-pix_fmt', 'yuv420p',
-    // a buffer of 4 s at the cap: the keyframe (many times a normal frame) can be sent whole and
-    // sharp, instead of being squeezed to the cap and arriving as blocks
-    ...(maxKbps > 0 ? ['-maxrate', `${maxKbps}k`, '-bufsize', `${maxKbps * 4}k`] : []),
+    // Phones: a buffer of 4 s at the cap, so the keyframe (many times a normal frame) can be sent
+    // whole and sharp, instead of being squeezed to the cap and arriving as blocks. Playback asks for
+    // 1 s (PLAYBACK_LIMITS): there the burst itself is what stalls a viewer on a thin link.
+    ...(maxKbps > 0 ? ['-maxrate', `${maxKbps}k`, '-bufsize', `${Math.round(maxKbps * bufSeconds)}k`] : []),
     ...tail
   ]
 }
@@ -323,6 +339,7 @@ export class Transcoder {
     maxWidth = 0,
     crf = CRF,
     maxKbps = 0,
+    bufSeconds = 4,
     encoder = keepEvery > 1 || maxWidth > 0 ? 'libx264' : encoderNow(),
     onFrame,
     onFail = () => {},
@@ -337,7 +354,7 @@ export class Transcoder {
     clearTimer = clearTimeout,
     flushIdleMs = FLUSH_IDLE_MS
   } = {}) {
-    Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
+    Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, bufSeconds, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
     this.proc = null
     this.closed = false
     this.times = [] // the times of the frames pushed in and not yet handed back, smallest first
@@ -352,7 +369,7 @@ export class Transcoder {
   }
 
   #start() {
-    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth, crf: this.crf, maxKbps: this.maxKbps })
+    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth, crf: this.crf, maxKbps: this.maxKbps, bufSeconds: this.bufSeconds })
     const { bin, args: full } = niceWrap('ffmpeg', args, { platform: this.platform, hasNice: this.hasNice, hasIonice: this.hasIonice })
     const proc = this.spawn(bin, full, { stdio: ['pipe', 'pipe', 'pipe'] })
     this.proc = proc

@@ -12,6 +12,7 @@ import {
   CODEC_H265,
   DEFAULT_MAX,
   NICE,
+  PLAYBACK_LIMITS,
   RENDER_NODE,
   TranscodePool,
   Transcoder,
@@ -78,6 +79,16 @@ const check = (name, ok, extra = '') => {
   check('  never -fflags nobuffer: the first keyframe is decoded, not dropped by the probe', !/nobuffer/.test(s) && !/nobuffer/.test(ffmpegArgs({ encoder: 'h264_vaapi' }).join(' ')) && !/nobuffer/.test(ffmpegArgs({ keepEvery: 2, maxWidth: 1280 }).join(' ')), s)
   check('  no audio is ever produced', s.includes('-an'))
   check('  an H.264 recording would be fed in as h264 (never reached, but not wrong)', ffmpegArgs({ inCodec: CODEC_H264 }).join(' ').includes('-f h264 -i pipe:0'))
+
+  // Playback's size and rate cap (smoothness report, cause 2b): a 4K H.265 recording converted at full
+  // size ran at 0.79-0.99x real time and came out at ~9 Mbit/s, more than the tunnel carries.
+  check('PLAYBACK_LIMITS: playback converts at most 1920 wide, at most 2.5 Mbit/s, with a 1 s buffer', PLAYBACK_LIMITS.maxWidth === 1920 && PLAYBACK_LIMITS.maxKbps === 2500 && PLAYBACK_LIMITS.bufSeconds === 1 && Object.isFrozen(PLAYBACK_LIMITS), JSON.stringify(PLAYBACK_LIMITS))
+  const capped = ffmpegArgs({ encoder: 'libx264', ...PLAYBACK_LIMITS }).join(' ')
+  check('  scaled down to 1920 wide (never up), the height kept in proportion', capped.includes('-vf scale=min(1920\\,iw):-2'), capped)
+  check('  the rate capped at 2500k with a buffer of 1 s at the cap: a keyframe cannot burst past what a tunnel carries', capped.includes('-maxrate 2500k -bufsize 2500k'), capped)
+  const phone = ffmpegArgs({ encoder: 'libx264', maxKbps: 500 }).join(' ')
+  check('  a cap without bufSeconds keeps the 4 s buffer (phones, phone-live.mjs: unchanged)', phone.includes('-maxrate 500k -bufsize 2000k'), phone)
+  check('  no cap: no rate options at all (unchanged)', !/-maxrate|-bufsize/.test(s))
 
   const hw = ffmpegArgs({ encoder: 'h264_vaapi' }).join(' ')
   check('  hardware: h264_vaapi on the render node, decode and encode both on the GPU', /-c:v h264_vaapi/.test(hw) && hw.includes(RENDER_NODE) && /-hwaccel vaapi/.test(hw) && /-hwaccel_output_format vaapi/.test(hw), hw)
@@ -208,6 +219,12 @@ function harness(opts = {}) {
   h2.procs[0].stdout.emit('data', Buffer.concat([IDR, P, P]))
   h2.fireIdle()
   check('  times are handed back in time order, so reordering cannot shuffle the picture', h2.frames.map((f) => f.ts).join() === '5000,5040,5080', h2.frames.map((f) => f.ts).join())
+
+  const h3 = harness({ ...PLAYBACK_LIMITS })
+  h3.t.push(1000, true, IDR)
+  const a = h3.procs[0]?.args.join(' ') ?? ''
+  check('  the limits it is given reach ffmpeg (size, rate and buffer)', a.includes('scale=min(1920\\,iw):-2') && a.includes('-maxrate 2500k -bufsize 2500k'), a)
+  h3.t.close()
 }
 
 // ---- ending a picture: a scrub's single keyframe ------------------------------------------------

@@ -974,6 +974,7 @@ for (const speed of [2, 4]) {
   /** A Transcoder stand-in: records what it was given and hands each frame straight back as H.264. */
   const fakeXcode = (rec) => (o) => {
     const x = {
+      opts: o, // what the session asked of the conversion
       pushed: [],
       calls: [], // 'push' and 'end' in the order they came
       resets: 0,
@@ -1000,6 +1001,10 @@ for (const speed of [2, 4]) {
     check('a browser that cannot decode H.265 is sent H.264', ws.bins.length >= 2 && ws.bins.every((b) => b.codec === 0), `${ws.bins.length} frames, codecs ${[...new Set(ws.bins.map((b) => b.codec))].join()}`)
     check('  every frame keeps the time it was recorded at', ws.bins.every((b, i) => Math.abs(b.tsMs - xs[0].pushed[i]) < 0.001), )
     check('  exactly one conversion was started, holding one slot under the cap', xs.length === 1 && released.length === 0)
+    // smoothness report, cause 2b: at full size a 4K conversion ran slower than real time and made
+    // ~9 Mbit/s; capped, it keeps ahead and fits a tunnel
+    const o = xs[0].opts
+    check('  it converts at most 1920 wide and 2.5 Mbit/s, with a 1 s buffer (transcode.mjs PLAYBACK_LIMITS)', o.maxWidth === 1920 && o.maxKbps === 2500 && o.bufSeconds === 1, J({ maxWidth: o.maxWidth, maxKbps: o.maxKbps, bufSeconds: o.bufSeconds }))
     const n = xs[0].resets
     session.close()
     await sleep(20)
