@@ -16,20 +16,36 @@ const KILL_WAIT_MS = 10_000 // after SIGKILL: the exit event normally follows at
 // (live-pacer.mjs) rather than add LivePlays while the SDK is reconnecting the recording's.
 const LINK_RESET_RE = /Net Disconnected/
 const LINK_RESET_EVERY_MS = 1000 // one reset prints a line per link: at most one message a second
+// The SDK prints this line, then a blank line, over and over (" %s, %s,%d  m_bLoginSuccess == false ":
+// file, function, line). The pair was about half of the journal on a normal day and says nothing a
+// person acts on, so it is not written there; onLine still gets it, like every line, because that
+// is where the SDK's output is watched.
+const LOGIN_STATE_NOISE_RE = /ProcChannelState.*m_bLoginSuccess == false/
 
-/** Copies a child's output to `out`, each line prefixed; onLine (optional) is shown each line too. */
-function prefixLines(from, out, prefix, onLine = null) {
+/**
+ * Copies a child's output to `out`, each line prefixed, except the SDK's login-state noise (above)
+ * and the blank line after it; onLine (optional) is shown every line, those included.
+ */
+export function prefixLines(from, out, prefix, onLine = null) {
   if (!from) return
   let rest = ''
+  let afterNoise = false // the last line was the SDK's noise: a blank line now is its second half
+  const keep = (l) => {
+    const noise = LOGIN_STATE_NOISE_RE.test(l)
+    const drop = noise || (afterNoise && l.trim() === '')
+    afterNoise = noise
+    return !drop
+  }
   from.setEncoding('utf8')
   from.on('data', (d) => {
     const lines = (rest + d).split('\n')
     rest = lines.pop()
-    if (lines.length) out.write(lines.map((l) => `${prefix}${l}\n`).join(''))
+    const kept = lines.filter(keep)
+    if (kept.length) out.write(kept.map((l) => `${prefix}${l}\n`).join(''))
     if (onLine) for (const l of lines) onLine(l)
   })
   from.on('end', () => {
-    if (rest) out.write(`${prefix}${rest}\n`)
+    if (rest && keep(rest)) out.write(`${prefix}${rest}\n`)
     if (rest && onLine) onLine(rest)
     rest = ''
   })
