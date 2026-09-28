@@ -132,18 +132,38 @@ export function pickMode({ timeline, h265, quality }) {
   return { mode: 'server', transcode: false, why: 'Server recordings.' }
 }
 
+/** How long a scrub waits for its reply before the next position is sent all the same (ScrubThrottle). */
+export const SCRUB_TIMEOUT_MS = 300
+/**
+ * The same when the server converts H.265 for this browser (transcode.mjs): every scrub starts an
+ * ffmpeg and converts one whole keyframe, about 600-830 ms for a 4K picture, and the next scrub kills
+ * that ffmpeg. Sent every 300 ms, not one converted scrub would ever get its picture out.
+ */
+export const CONVERTED_SCRUB_TIMEOUT_MS = 1500
+
+/**
+ * The scrub timeout for this browser: 1500 ms when it cannot decode H.265 (its H.265 scrubs are
+ * converted), else 300 ms. Keyed on the browser, not on the day's codec (the newest file's): a
+ * camera switched away from H.265 during the day still has converted footage before the switch. An
+ * H.264 scrub is answered by its frame within milliseconds whatever this is, so it stays fast.
+ */
+export function scrubTimeoutMs(h265) {
+  return h265 === false ? CONVERTED_SCRUB_TIMEOUT_MS : SCRUB_TIMEOUT_MS
+}
+
 /**
  * One scrub in flight: while dragging the playhead, a position is sent only when the reply to the
  * previous one ({type:'scrub', gen}) has come (ack), so the server never works on a backlog; the
- * newest position wins. A reply that never comes frees the slot after timeoutMs.
+ * newest position wins. A reply that never comes frees the slot after timeoutMs: a number, or a
+ * function asked at each send (the page learns what it can decode after the throttle is made).
  * send(t) sends {scrub: t, gen} and returns gen, or null when it could not send (the position is
  * kept for the next push).
  */
 export class ScrubThrottle {
-  constructor(send, { timeoutMs = 300, now = () => Date.now(), setTimer = (fn, ms) => setTimeout(fn, ms) } = {}) {
+  constructor(send, { timeoutMs = SCRUB_TIMEOUT_MS, now = () => Date.now(), setTimer = (fn, ms) => setTimeout(fn, ms) } = {}) {
     Object.assign(this, { send, timeoutMs, now, setTimer })
     this.pending = null // the newest position not sent yet
-    this.inflight = null // { gen, at } of the scrub sent and not answered
+    this.inflight = null // { gen, at, ms } of the scrub sent and not answered (ms: its timeout)
   }
 
   push(t) {
@@ -166,18 +186,19 @@ export class ScrubThrottle {
 
   #pump() {
     if (this.pending === null) return
-    if (this.inflight && this.now() - this.inflight.at < this.timeoutMs) return
+    if (this.inflight && this.now() - this.inflight.at < this.inflight.ms) return
     this.inflight = null
     const gen = this.send(this.pending)
     if (gen === null || gen === undefined) return
     this.pending = null
-    const rec = { gen, at: this.now() }
+    const ms = typeof this.timeoutMs === 'function' ? this.timeoutMs() : this.timeoutMs
+    const rec = { gen, at: this.now(), ms }
     this.inflight = rec
     this.setTimer(() => {
       if (this.inflight !== rec) return
       this.inflight = null
       this.#pump()
-    }, this.timeoutMs)
+    }, ms)
   }
 }
 

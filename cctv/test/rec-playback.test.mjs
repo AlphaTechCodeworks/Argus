@@ -886,12 +886,15 @@ for (const speed of [2, 4]) {
   const fakeXcode = (rec) => (o) => {
     const x = {
       pushed: [],
+      calls: [], // 'push' and 'end' in the order they came
       resets: 0,
       closes: 0,
       push: (ts, isKey, buf) => {
         x.pushed.push(ts)
+        x.calls.push('push')
         o.onFrame(ts, isKey, Buffer.concat([Buffer.from([0xaa]), buf.subarray(0, 4)]))
       },
+      endPicture: () => x.calls.push('end'),
       reset: () => x.resets++,
       close: () => x.closes++
     }
@@ -923,6 +926,23 @@ for (const speed of [2, 4]) {
     check('kill on seek: the conversion is reset, so no ffmpeg keeps chewing on the old position', xs[0].resets === 1)
     await until(() => ws.texts.some((t) => t.type === 'started' && t.gen === 1), 2000)
     check('  and playback carries on converted after the seek', ws.bins.every((b) => b.codec === 0))
+    session.close()
+  }
+  {
+    // A scrub sends one keyframe and then nothing: ffmpeg's parser would hold that picture until the
+    // next one starts, so the picture is ended at once (Transcoder.endPicture). Playing frames are
+    // never ended one by one: the next frame ends each of them anyway.
+    const xs = []
+    const pool = { active: 0, acquire: () => ({ release: () => {} }) }
+    const { ws, session } = open(9, T9 + 500, { extra: '&h265=0', opts: { pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.length >= 2, 2000)
+    check('playing converted: no picture is ended by hand', xs[0].calls.length >= 2 && !xs[0].calls.includes('end'), xs[0].calls.join())
+    const before = xs[0].calls.length
+    ws.handlers.message(JSON.stringify({ scrub: T9 + 2500, gen: 1 }), false)
+    await until(() => ws.texts.some((t) => t.type === 'scrub' && t.gen === 1) && xs[0].calls.length > before, 2000)
+    await sleep(50)
+    const sc = ws.texts.find((t) => t.type === 'scrub' && t.gen === 1)
+    check('a converted scrub: its keyframe is pushed, then the picture is ended, once', J(xs[0].calls.slice(before)) === J(['push', 'end']) && xs[0].pushed.at(-1) === sc?.at, `${xs[0].calls.slice(before).join()} at ${sc?.at}`)
     session.close()
   }
   {

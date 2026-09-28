@@ -33,6 +33,7 @@ import {
   pickMode,
   prerollUntil,
   recordedFrom as stretchFrom,
+  scrubTimeoutMs,
   shift,
   speedFor
 } from './pb-sources.js'
@@ -797,7 +798,9 @@ const throttle = new ScrubThrottle(
     sock.send(JSON.stringify({ scrub: Math.round(t), gen }))
     return gen
   },
-  { now: () => performance.now() }
+  // longer when the server converts this browser's H.265 scrubs: each picture takes 600-830 ms, and
+  // a scrub sent before it is out kills its ffmpeg (asked at each send: state.h265 is known later)
+  { now: () => performance.now(), timeoutMs: () => scrubTimeoutMs(state.h265) }
 )
 
 function togglePause() {

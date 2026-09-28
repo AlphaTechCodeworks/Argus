@@ -1,10 +1,11 @@
 // Offline tests for the H.265 -> H.264 playback fallback's logic (cctv/transcode.mjs): when a
 // recording may be converted at all, the ffmpeg arguments, nice/ionice, the concurrency cap, the
-// Annex B framing, encoder detection with its fallback, and -- the part that matters most -- that
-// the ffmpeg process is really killed on close, on error and on seek.
+// Annex B framing, ending a scrub's picture (endPicture), encoder detection with its fallback, and
+// -- the part that matters most -- that the ffmpeg process is really killed on close, on error and on seek.
 //
 // Nothing here spawns ffmpeg or touches the SDK, so it runs on Windows with plain node:
 //   node cctv/test/transcode.test.mjs
+// What only the real ffmpeg can show (that the pictures come out at all) is in transcode-ffmpeg.test.mjs.
 import { EventEmitter } from 'node:events'
 import {
   CODEC_H264,
@@ -72,7 +73,9 @@ const check = (name, ok, extra = '') => {
   check('ffmpegArgs: hevc in on stdin, raw H.264 out on stdout', /-f hevc -i pipe:0/.test(s) && /-f h264 pipe:1/.test(s), s)
   check('  libx264 at veryfast/crf 26, the measured trade', /-c:v libx264/.test(s) && /-preset veryfast/.test(s) && /-crf 26/.test(s))
   check('  no B-frames and no reordering, so a frame comes out for each one put in, in order', /-bf 0/.test(s) && /-fps_mode passthrough/.test(s))
-  check('  flushed per packet and no input buffering, so playback is not held up', /-flush_packets 1/.test(s) && /-fflags nobuffer/.test(s))
+  check('  flushed per packet, and the probe stops at the first packet, so playback is not held up', /-flush_packets 1/.test(s) && /-probesize 32/.test(s))
+  // nobuffer throws away the packet read while probing -- the first keyframe (transcode-ffmpeg.test.mjs)
+  check('  never -fflags nobuffer: the first keyframe is decoded, not dropped by the probe', !/nobuffer/.test(s) && !/nobuffer/.test(ffmpegArgs({ encoder: 'h264_vaapi' }).join(' ')) && !/nobuffer/.test(ffmpegArgs({ keepEvery: 2, maxWidth: 1280 }).join(' ')), s)
   check('  no audio is ever produced', s.includes('-an'))
   check('  an H.264 recording would be fed in as h264 (never reached, but not wrong)', ffmpegArgs({ inCodec: CODEC_H264 }).join(' ').includes('-f h264 -i pipe:0'))
 
@@ -205,6 +208,37 @@ function harness(opts = {}) {
   h2.procs[0].stdout.emit('data', Buffer.concat([IDR, P, P]))
   h2.fireIdle()
   check('  times are handed back in time order, so reordering cannot shuffle the picture', h2.frames.map((f) => f.ts).join() === '5000,5040,5080', h2.frames.map((f) => f.ts).join())
+}
+
+// ---- ending a picture: a scrub's single keyframe ------------------------------------------------
+// ffmpeg's raw H.265/H.264 parser holds a picture until the next one starts, and after a scrub
+// nothing else is written: without an end marker the keyframe never came out (the real ffmpeg proves
+// it in transcode-ffmpeg.test.mjs). endPicture() writes an access unit delimiter, which starts the
+// next unit, so the parser lets the keyframe go.
+{
+  const AUD_265 = Buffer.from([0, 0, 0, 1, 0x46, 0x01, 0x50])
+  const AUD_264 = Buffer.from([0, 0, 0, 1, 0x09, 0xf0])
+  const { t, procs } = harness()
+  t.endPicture()
+  check('endPicture: nothing running (no keyframe yet): nothing written, no ffmpeg started', procs.length === 0 && t.running === false)
+  t.push(7000, true, IDR)
+  t.endPicture()
+  const w = procs[0].written
+  check('  H.265 in: an access unit delimiter (00 00 00 01 46 01 50) straight after the keyframe', w.length === 2 && w[0] === IDR && Buffer.from(w[1]).equals(AUD_265), w.map((b) => Buffer.from(b).toString('hex')).join(' | '))
+  check('  it is not a frame: no time is waiting for it', t.times.length === 1 && t.times[0] === 7000, t.times.join())
+  t.reset()
+  t.endPicture()
+  check('  after a reset (the ffmpeg killed) it writes nothing and starts nothing', procs.length === 1 && w.length === 2)
+  t.push(8000, true, IDR)
+  t.close()
+  t.endPicture()
+  check('  after close it writes nothing', procs[1].written.length === 1)
+
+  const h4 = harness({ inCodec: CODEC_H264 })
+  h4.t.push(9000, true, IDR)
+  h4.t.endPicture()
+  const w4 = h4.procs[0].written
+  check('  H.264 in: the H.264 delimiter (00 00 00 01 09 f0)', w4.length === 2 && Buffer.from(w4[1]).equals(AUD_264), w4.map((b) => Buffer.from(b).toString('hex')).join(' | '))
 }
 
 // ---- killing it: close, error, seek -------------------------------------------------------------

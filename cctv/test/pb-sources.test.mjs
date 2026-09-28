@@ -4,8 +4,10 @@
 // the clock-skew hint and the conversions between the two time bases.
 //   node cctv/test/pb-sources.test.mjs
 import {
+  CONVERTED_SCRUB_TIMEOUT_MS,
   LIVE_MARGIN_MS,
   NVR_SPEEDS,
+  SCRUB_TIMEOUT_MS,
   SERVER_SPEEDS,
   ScrubThrottle,
   convertTime,
@@ -17,6 +19,7 @@ import {
   pickMode,
   prerollUntil,
   recordedFrom,
+  scrubTimeoutMs,
   shift,
   speedFor,
   stretchAt
@@ -190,6 +193,31 @@ function fakeTimers() {
   check('  the newest position goes once it can', sent.join() === '3')
   th.ack(11)
   check('  (an ack with nothing waiting sends nothing)', sent.join() === '3')
+}
+{
+  // A browser without HEVC: the server converts each H.265 scrub (a fresh ffmpeg and one whole
+  // keyframe, ~600-830 ms at 4K) and the next scrub kills it, so at 300 ms none would ever show.
+  check('scrubTimeoutMs: 300 ms for a browser that decodes H.265', scrubTimeoutMs(true) === 300 && SCRUB_TIMEOUT_MS === 300)
+  check('  1500 ms for one that cannot (its H.265 scrubs are converted)', scrubTimeoutMs(false) === 1500 && CONVERTED_SCRUB_TIMEOUT_MS === 1500)
+  const ft = fakeTimers()
+  const sent = []
+  let gen = 0
+  let h265 = false
+  const th = new ScrubThrottle((t) => (sent.push(t), ++gen), { now: () => ft.now, setTimer: ft.setTimer, timeoutMs: () => scrubTimeoutMs(h265) })
+  th.push(1)
+  th.push(2)
+  ft.advance(1499)
+  check('ScrubThrottle, timeoutMs asked at each send: converted, still waiting at 1499 ms', sent.join() === '1', sent.join())
+  ft.advance(1)
+  check('  the waiting position goes at 1500 ms', sent.join() === '1,2', sent.join())
+  h265 = true // (the page found out it can decode H.265)
+  th.ack(2)
+  th.push(3)
+  th.push(4)
+  ft.advance(300)
+  check('  the next send takes the new answer: 300 ms', sent.join() === '1,2,3,4', sent.join())
+  const plain = new ScrubThrottle(() => 1, { now: () => ft.now, setTimer: ft.setTimer })
+  check('  the default is still 300 ms', plain.timeoutMs === SCRUB_TIMEOUT_MS)
 }
 
 // ---- clock-skew hint, time bases, speeds ------------------------------------------------------------------

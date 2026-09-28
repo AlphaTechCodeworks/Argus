@@ -112,10 +112,14 @@ export const lightPool = new TranscodePool((() => { const n = Number(process.env
  * keepEvery / maxWidth (phones, phone-live.mjs): keep one frame in every keepEvery, and scale down to at
  * most maxWidth wide. Software only: the GPU path would need its own filters, and phones do not
  * need it.
+ * Never -fflags nobuffer: with it the packet ffmpeg reads while it probes the stream is thrown away
+ * instead of decoded, and that packet is the first keyframe. A scrub's lone keyframe then never came
+ * out at all, and every run began with the rest of a GOP decoded against a missing picture, each
+ * picture handed the time of the one before it. -probesize 32 already stops the probe at that packet.
  * @param {{ encoder?: 'libx264'|'h264_vaapi', inCodec?: number, keepEvery?: number, maxWidth?: number }} o
  */
 export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0 } = {}) {
-  const head = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-fflags', 'nobuffer', '-flags', 'low_delay', '-probesize', '32', '-analyzeduration', '0']
+  const head = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-flags', 'low_delay', '-probesize', '32', '-analyzeduration', '0']
   const input = ['-f', inCodec === CODEC_H265 ? 'hevc' : 'h264', '-i', 'pipe:0', '-an']
   const tail = ['-fps_mode', 'passthrough', '-flush_packets', '1', '-f', 'h264', 'pipe:1']
   if (encoder === 'h264_vaapi') {
@@ -289,6 +293,11 @@ function runOnce(bin, args) {
 
 // ---- the conversion itself --------------------------------------------------------------------
 
+// Access unit delimiters (Transcoder.endPicture): H.265 NAL type 35 with pic_type 2 (any slice type),
+// H.264 NAL type 9 with primary_pic_type 7 (any); each followed by its stop bit.
+const AUD_H265 = Buffer.from([0, 0, 0, 1, 0x46, 0x01, 0x50])
+const AUD_H264 = Buffer.from([0, 0, 0, 1, 0x09, 0xf0])
+
 /**
  * One ffmpeg turning one viewer's H.265 frames into H.264, with the timestamps kept.
  *
@@ -387,6 +396,21 @@ export class Transcoder {
     let i = t.length
     while (i > 0 && t[i - 1] > tsMs) i--
     t.splice(i, 0, tsMs)
+  }
+
+  /**
+   * Ends the picture just pushed, for when nothing will follow it (a scrub: one keyframe, then
+   * paused). ffmpeg's raw H.265/H.264 parser only knows a picture is complete when the next one
+   * starts, so a lone keyframe was never decoded and the viewer saw no picture for the whole drag.
+   * An access unit delimiter is the smallest thing that starts a new unit: the parser lets the
+   * picture go, and the delimiter itself decodes to nothing. The bytes after the NAL header matter:
+   * the H.265 parser reads one byte past its 2-byte header before it decides.
+   */
+  endPicture() {
+    if (this.closed || !this.proc) return
+    try {
+      this.proc.stdin.write(this.inCodec === CODEC_H265 ? AUD_H265 : AUD_H264)
+    } catch {}
   }
 
   #onData(proc, chunk) {

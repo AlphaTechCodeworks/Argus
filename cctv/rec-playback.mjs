@@ -789,6 +789,9 @@ export class ServerPlayback {
     }
     this.#send({ type: 'scrub', gen: c.gen, at: kf.ts })
     this.#deliver({ buf: kf.buf, isKey: true, codec: r.codec, ts: kf.ts })
+    // Converted: nothing follows this keyframe, and ffmpeg would hold it until a next picture began,
+    // so the drag showed no picture at all. (No conversion running: nothing happens.)
+    this.xcode?.endPicture()
     this.cur = { phase: 'scrubbed', t: kf.ts }
     return false
   }
