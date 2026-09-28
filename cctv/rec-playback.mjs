@@ -1,11 +1,14 @@
 // Playback from the server's own recordings over the /playback WebSocket (phase 3).
 //
 // connectPlayback() decides per socket where playback comes from:
-//  - without src=auto: today's NVR playback, unchanged (playback.mjs PlaybackSession, NVR clock);
+//  - without src=auto: today's NVR playback, unchanged (playback.mjs PlaybackSession, NVR clock),
+//    for a viewer who may play the NVR's recordings back (rights.mjs playback-nvr; anyone else is
+//    closed 1008 "not allowed": playback-server alone never reaches the NVR);
 //  - with src=auto: the server's recordings (a ServerPlayback), when CCTV_LIVE_WORKER=on (an index),
-//    the viewer may (rec-access.mjs) and the camera has recordings. Otherwise the socket gets
-//    {type:'error'} and is closed (1011): never a silent NVR session in another time base (R15).
-//    Server playback does not need the NVR: it runs while the NVR is offline (R14).
+//    the viewer may (rights.mjs playback-server) and the camera has recordings. Otherwise the socket
+//    gets {type:'error'} and is closed (1011): never a silent NVR session in another time base (R15).
+//    Server playback does not need the NVR: it runs while the NVR is offline (R14). Its gaps are
+//    filled from the NVR (legs, below) only for a viewer who may also play the NVR back.
 //
 // ServerPlayback reads the segment files directly (rec-reader.mjs; read-only, one read in flight,
 // at most 4 MB per read call) and sends the frames exactly as stored, in the /live wire format
@@ -73,7 +76,7 @@
 //  - Parsed files are kept per session (an LRU of 64 open readers, closed after 60 s unused), so
 //    scrubbing and seeking back and forth do not read an .idx twice.
 import * as fsp from 'node:fs/promises'
-import { canPlayServer } from './rights.mjs'
+import { canPlayNvr, canPlayServer } from './rights.mjs'
 import { audit } from './audit.mjs'
 import { DATA_DIR } from './auth.mjs'
 import { nvrLegs } from './rec-fallback.mjs'
@@ -178,14 +181,33 @@ const note = (who, nvr, ch, source, start) => {
 /**
  * Handles a /playback WebSocket: server recordings (src=auto) or the NVR, see the top.
  * @param {{ nvr: object, ws: object, url: URL, who: {user?: string, admin?: boolean}|null,
- *           index: object|null, allowed?: Function, legs?: object|null, opts?: object }} args
- *   index: rec-index.mjs (null: CCTV_LIVE_WORKER off); allowed: the access hook (rights.mjs);
- *   opts: ServerPlayback options (tests)
+ *           index: object|null, allowed?: Function, allowedNvr?: Function, legs?: object|null, opts?: object }} args
+ *   index: rec-index.mjs (null: CCTV_LIVE_WORKER off); allowed: the access hook for the server's
+ *   recordings, allowedNvr for the NVR's (rights.mjs); opts: ServerPlayback options (tests)
  * @returns {ServerPlayback|null}
  */
-export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlayServer, legs = defaultLegs, opts = {} }) {
+export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlayServer, allowedNvr = canPlayNvr, legs = defaultLegs, opts = {} }) {
   const p = url.searchParams
+  // The NVR's own recordings are playback-nvr's. server.mjs lets either playback right open the
+  // socket, which can serve either source, so each source asks for its own right here: playback-server
+  // alone never reaches the NVR, which may still hold days the server has already let go.
+  const nvrAllowed = (c) => {
+    try {
+      return Boolean(allowedNvr(who, nvr.id, c))
+    } catch {
+      return false // a check that throws is a no
+    }
+  }
   if (p.get('src') !== 'auto') {
+    const rawCh = p.get('ch') ?? ''
+    if (!/^\d{1,3}$/.test(rawCh)) {
+      ws.close(1008, 'bad parameters')
+      return null
+    }
+    if (!nvrAllowed(Number(rawCh))) {
+      ws.close(1008, 'not allowed')
+      return null
+    }
     // today's NVR playback, exactly as before
     if (!nvr.online) ws.close(1013, 'NVR offline')
     else {
@@ -220,7 +242,9 @@ export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlaySer
   // The page tells us what it can decode (&h265=0 when canDecodeH265() said no). Nothing else may
   // switch the conversion on, so H.264 can never reach a client that did not ask for it.
   const clientH265 = clientCanDecodeH265(p)
-  return new ServerPlayback({ ws, nvr, ch, start, stream, index, legs, clientH265, ...opts })
+  // gaps are filled from the NVR's recordings only for someone who may play those back; anyone else
+  // has them jumped with a notice (#legsAllowed with no legs)
+  return new ServerPlayback({ ws, nvr, ch, start, stream, index, legs: nvrAllowed(ch) ? legs : null, clientH265, ...opts })
 }
 
 /** HH:MM:SS of a server time, in the NVR's time zone when known (else the server's). */

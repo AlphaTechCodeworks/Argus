@@ -7,13 +7,21 @@
 //                    (its row looked up by path once closed), unreadable files, flow control, close
 // Temp dirs, a temp index, fake NVR objects and a fake WebSocket only: nothing reaches an NVR.
 // Run:  node cctv/test/rec-playback.test.mjs
-import { mkdtempSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, unlinkSync, writeFileSync } from 'node:fs'
 import * as fsp from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'rec-pb-'))
+// real rights for the source checks (rights.mjs reads DATA_DIR when first imported): srv may play
+// n1/0 back from the server only, nv from the NVR only, both from either
+writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ srv: { hash: 'x', role: 'viewer' }, nv: { hash: 'x', role: 'viewer' }, both: { hash: 'x', role: 'viewer' } }))
+writeFileSync(join(process.env.DATA_DIR, 'rights.json'), JSON.stringify({ version: 1, users: {
+  srv: { grants: { 'playback-server': ['n1/0'] } },
+  nv: { grants: { 'playback-nvr': ['n1/0'] } },
+  both: { grants: { 'playback-server': ['n1/0'], 'playback-nvr': ['n1/0'] } }
+} }))
 
 let failures = 0
 const check = (n, ok, e = '') => {
@@ -234,12 +242,13 @@ const ADMIN = { user: 'admin', admin: true }
 const logs = []
 const N = fakeNvr()
 /** Opens a /playback socket through connectPlayback. */
-function open(ch, start, { nvr = N, index = IDX, who = ADMIN, src = 'auto', stream = 0, legs = null, allowed, opts = {}, chParam, extra = '' } = {}) {
+function open(ch, start, { nvr = N, index = IDX, who = ADMIN, src = 'auto', stream = 0, legs = null, allowed, allowedNvr, opts = {}, chParam, extra = '' } = {}) {
   const ws = fakeWs()
   const url = new URL(`ws://x/playback?nvr=${nvr.id}&ch=${chParam ?? ch}&stream=${stream}&start=${start}${src ? `&src=${src}` : ''}${extra}`)
   ws.t0 = performance.now()
   const args = { nvr, ws, url, who, index, legs, opts: { log: (l) => logs.push(l), ...opts } }
   if (allowed) args.allowed = allowed
+  if (allowedNvr) args.allowedNvr = allowedNvr
   const session = rp.connectPlayback(args)
   return { ws, url, session }
 }
@@ -293,13 +302,51 @@ check('footage: cameras 1, 3 and 4 have 3 files each', cam1.segs.length === 3 &&
   const cases = [
     ['an admin, an index, recordings', IDX, ADMIN],
     ['no index (flag off)', null, ADMIN],
-    ['a non-admin', IDX, { user: 'v', admin: false }]
+    ['a viewer allowed NVR playback of the camera', IDX, { user: 'nv', admin: false }]
   ]
   for (const [label, index, who] of cases) {
     const nvr = fakeNvr()
     const { ws, url } = open(0, T0 + 1000, { nvr, index, who, src: null })
     await sleep(30)
     check(`no src=auto (${label}): the NVR session gets the same ws and url; nothing else is sent`, nvr.connects.length === 1 && nvr.connects[0].ws === ws && nvr.connects[0].url === url && ws.texts.length === 0 && ws.bins.length === 0 && ws.closedWith === 0)
+  }
+  // the NVR's own recordings are playback-nvr: server playback alone, or nothing, never reaches the NVR
+  const refusedNvr = [
+    ['a non-admin with no rights', { who: { user: 'v', admin: false } }],
+    ['a viewer allowed server playback only', { who: { user: 'srv', admin: false } }],
+    ['a viewer allowed NVR playback of another camera', { who: { user: 'nv', admin: false }, ch: 1 }],
+    ['refused by the NVR access hook', { allowedNvr: () => false }]
+  ]
+  for (const [label, o] of refusedNvr) {
+    const nvr = fakeNvr()
+    const { ws } = open(o.ch ?? 0, T0 + 1000, { nvr, src: null, ...o })
+    await sleep(10)
+    check(`no src=auto, ${label}: closed 1008 "not allowed", no NVR session`, ws.closedWith === 1008 && ws.closeReason === 'not allowed' && nvr.connects.length === 0, `${ws.closedWith} ${ws.closeReason} ${nvr.connects.length}`)
+  }
+  {
+    // a channel that is no number names no camera, so no right can cover it
+    const nvr = fakeNvr()
+    const { ws } = open(0, T0 + 1000, { nvr, src: null, chParam: 'x' })
+    check('no src=auto, a channel that is not a number: closed 1008, no NVR session', ws.closedWith === 1008 && nvr.connects.length === 0, `${ws.closedWith} ${ws.closeReason}`)
+  }
+  {
+    // server playback: its gaps are filled from the NVR's own recordings (legs) only for a user who
+    // may play the NVR back; anyone else has them jumped with a notice
+    const spy = { cov: 0, starts: 0, coverage() { this.cov++; return { ranges: [] } }, start() { this.starts++; throw new Error('not in this test') } }
+    const asSrv = open(0, T0 + 1000, { who: { user: 'srv', admin: false }, legs: spy })
+    check('src=auto as a viewer allowed server playback only: it plays, with no NVR legs', asSrv.session !== null && asSrv.session.legs === null, String(asSrv.session?.legs))
+    asSrv.ws.close(1000)
+    const asBoth = open(0, T0 + 1000, { who: { user: 'both', admin: false }, legs: spy })
+    check('src=auto as a viewer allowed both: the NVR legs are there', asBoth.session !== null && asBoth.session.legs === spy)
+    asBoth.ws.close(1000)
+    const hooked = open(0, T0 - 120_000, { legs: spy, allowed: () => true, allowedNvr: () => false })
+    await until(() => started(hooked.ws), 2000)
+    check('src=auto refused by the NVR hook: the NVR is never asked, the gap gets a notice', spy.cov === 0 && spy.starts === 0 && hooked.ws.texts[0]?.type === 'notice' && started(hooked.ws)?.src === 'server', `${spy.cov} ${J(hooked.ws.texts.slice(0, 2))}`)
+    hooked.ws.close(1000)
+    const control = open(0, T0 - 120_000, { legs: spy, allowed: () => true, allowedNvr: () => true })
+    await until(() => spy.cov > 0, 2000)
+    check('...and allowed, the NVR is asked for that gap (the control)', spy.cov > 0)
+    control.ws.close(1000)
   }
   const off = fakeNvr()
   off.online = false

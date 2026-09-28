@@ -249,6 +249,7 @@ async function api(path) {
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
     const e = new Error(body.error ?? `HTTP ${res.status}`)
+    e.status = res.status
     if (body.retryAfterS > 0) e.retryAfterS = body.retryAfterS // the NVR is busy for a moment
     throw e
   }
@@ -466,6 +467,9 @@ async function loadNvrSide(token) {
     scheduleDraw()
   } catch (e) {
     if (stale()) return
+    // 403: this user may play the server's copy but not the NVR's (rights.mjs), so there is no NVR
+    // side to show; asking again would only be refused again
+    if (e.status === 403) return
     const { delayMs, refusalMs } = nvrRetryDelay(e, nvrRefusalMs)
     nvrRefusalMs = refusalMs
     nvrSideTimer = setTimeout(() => {

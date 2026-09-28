@@ -372,5 +372,38 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   check("server.mjs answers /api/sites through sitesFor", /pathname === '\/api\/sites'\)[^\n]*sitesFor\(/.test(server))
 }
 
+// ---- canPlayAnyOn: the gate for /api/playback/now and /dates (a whole NVR's clock and recording days)
+{
+  R.saveRights('sam', { grants: {} })
+  check("canPlayAnyOn: a zero-grant viewer may not read an NVR's clock or recording days", R.canPlayAnyOn(SAM, 'rigginglot', [0, 1, 2]) === false)
+  R.saveRights('sam', { grants: { live: ['rigginglot'] } })
+  check('... watching live is not playing back', R.canPlayAnyOn(SAM, 'rigginglot', [0, 1, 2]) === false)
+  R.saveRights('jo', { grants: { 'playback-server': ['rigginglot/2'] } })
+  check('... one camera there that may be played back is enough', R.canPlayAnyOn(VIEWER, 'rigginglot', [0, 1, 2]) === true)
+  check('... but it opens no other NVR', R.canPlayAnyOn(VIEWER, 'nvr1', [0, 1, 2]) === false)
+  R.saveRights('jo', { grants: { 'playback-nvr': ['nvr1'] } })
+  check('... an NVR-wide grant counts with no cameras listed', R.canPlayAnyOn(VIEWER, 'nvr1', []) === true)
+  check('... an admin may; no NVR named is refused', R.canPlayAnyOn(ADMIN, 'nvr1', []) === true && R.canPlayAnyOn(ADMIN, '', [0]) === false)
+  const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  const branch = src.slice(src.indexOf("pathname.startsWith('/api/playback/')"))
+  check('server.mjs: every /api/playback/* path passes canPlayAnyOn or the per-camera check before playbackApi', branch.indexOf('canPlayAnyOn(') > 0 && branch.indexOf('canPlayAnyOn(') < branch.indexOf('playbackApi('))
+}
+
+// ---- canPlayNvr: the NVR's own recordings are playback-nvr, never playback-server -----------------
+{
+  R.saveRights('jo', { grants: { 'playback-server': ['n1/3'] } })
+  check('canPlayNvr: a server-playback grant is not NVR playback', R.canPlayNvr(VIEWER, 'n1', 3) === false && R.canPlayServer(VIEWER, 'n1', 3) === true)
+  R.saveRights('jo', { grants: { 'playback-nvr': ['n1/3'] } })
+  check('canPlayNvr: an NVR-playback grant for that camera', R.canPlayNvr(VIEWER, 'n1', 3) === true && R.canPlayServer(VIEWER, 'n1', 3) === false)
+  check('canPlayNvr refuses the camera next door', R.canPlayNvr(VIEWER, 'n1', 4) === false)
+  check('canPlayNvr refuses null, undefined and junk channels', R.canPlayNvr(null, 'n1', 3) === false && R.canPlayNvr(undefined, 'n1', 3) === false && R.canPlayNvr(VIEWER, 'n1', -1) === false && R.canPlayNvr(VIEWER, 'n1', Number.NaN) === false)
+  check('canPlayNvr allows a session admin', R.canPlayNvr(ADMIN, 'n1', 0) === true)
+  const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  const recordings = src.slice(src.indexOf("pathname === '/api/playback/recordings'"))
+  check("server.mjs: /api/playback/recordings (an NVR search) asks playback-nvr only", /^[^\n]*\n[\s\S]{0,300}if \(!can\(who, 'playback-nvr', target\)\) return sendJson\(res, 403/.test(recordings) && !/playback-server/.test(recordings.slice(0, 400)))
+  const motion = src.slice(src.indexOf("url.pathname === '/motion'"))
+  check("server.mjs: /motion (reads the NVR's recordings) asks playback-nvr only", /if \(!can\(who, 'playback-nvr', target\)\) return ws\.close\(1008/.test(motion.slice(0, 400)) && !/playback-server/.test(motion.slice(0, 400)))
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

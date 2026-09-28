@@ -361,6 +361,25 @@ export function sitesFor(who, list) {
 export const canPlayServer = (who, nvrId, ch) =>
   can(who, 'playback-server', { nvr: isString(nvrId) && nvrId ? nvrId : null, ch: Number.isInteger(ch) && ch >= 0 ? ch : null })
 
+/**
+ * The same for the NVR's own recordings: an NVR playback session, and what fills a server playback's
+ * gaps (rec-fallback.mjs). playback-server alone never reaches the NVR, which may still hold days
+ * the server has already let go.
+ */
+export const canPlayNvr = (who, nvrId, ch) =>
+  can(who, 'playback-nvr', { nvr: isString(nvrId) && nvrId ? nvrId : null, ch: Number.isInteger(ch) && ch >= 0 ? ch : null })
+
+/**
+ * May this person play back anything at all on this NVR? /api/playback/now and /dates answer for the
+ * whole NVR (its clock and time zone, the days it holds recordings) and each ask costs an SDK call
+ * to it, so they are for someone who may play back at least one of its cameras, not for everyone
+ * signed in. ch null is asked too, so an NVR-wide or '*' grant counts before any camera is listed.
+ */
+export function canPlayAnyOn(who, nvrId, chs = []) {
+  if (!isString(nvrId) || !nvrId) return false
+  return [null, ...chs].some((ch) => can(who, 'playback-nvr', { nvr: nvrId, ch }) || can(who, 'playback-server', { nvr: nvrId, ch }))
+}
+
 // ------------------------------------------------------------------------------------- the route
 
 const ROUTES = { '/api/admin/rights': ['GET', 'POST'], '/api/rights/me': ['GET'] }

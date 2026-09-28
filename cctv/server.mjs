@@ -116,7 +116,7 @@ import { probeTarget, tcpReachable } from './probe.mjs'
 import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
-import { can, handleRights, sitesFor } from './rights.mjs'
+import { can, canPlayAnyOn, handleRights, sitesFor } from './rights.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
@@ -894,11 +894,16 @@ const handleRequest = async (req, res) => {
     return sendJson(res, status, body)
   }
   if (pathname.startsWith('/api/playback/')) {
-    // a camera's recordings on the NVR: only for a user who may play it back (rights.mjs)
+    const id = url.searchParams.get('nvr') ?? ''
     if (pathname === '/api/playback/recordings') {
-      const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
-      const target = { nvr: url.searchParams.get('nvr') ?? '', ch: Number(url.searchParams.get('ch')) }
-      if (!can(who, 'playback-nvr', target) && !can(who, 'playback-server', target)) return sendJson(res, 403, { error: 'You may not play back this camera' })
+      // a camera's recordings on the NVR (an NVR search): only for a user who may play it back from
+      // the NVR; server playback alone never reaches the NVR (rights.mjs)
+      const target = { nvr: id, ch: Number(url.searchParams.get('ch')) }
+      if (!can(who, 'playback-nvr', target)) return sendJson(res, 403, { error: 'You may not play back this camera from the NVR' })
+    } else if (!canPlayAnyOn(who, id, nvrs.get(id)?.channels.map((c) => c.ch) ?? [])) {
+      // /now and /dates: the NVR's clock and recording days, and an SDK call to it, for someone who
+      // may play back at least one of its cameras (rights.mjs canPlayAnyOn)
+      return sendJson(res, 403, { error: 'You may not play back from this NVR' })
     }
     // (503 with retryAfterS while the NVR is busy, see playback.mjs)
     const [status, body, headers] = await playbackApi(nvrs.get(url.searchParams.get('nvr') ?? ''), pathname, url.searchParams)
@@ -954,14 +959,16 @@ const onConnection = (ws, req) => {
   const target = { nvr: nvr.id, ch: Number(url.searchParams.get('ch')) }
   if (url.pathname === '/playback') {
     // server recordings (src=auto) or the NVR as before; the "NVR offline" refusal is for NVR
-    // sessions only (server playback runs without the NVR), see rec-playback.mjs
+    // sessions only (server playback runs without the NVR), see rec-playback.mjs. Either playback
+    // right opens the socket; connectPlayback asks the right of the source it serves.
     if (!can(who, 'playback-server', target) && !can(who, 'playback-nvr', target)) return ws.close(1008, 'not allowed')
     connectPlayback({ nvr, ws, url, who, index: recIndex() })
     return
   }
   if (url.pathname === '/motion') {
-    // motion search reads a camera's recordings: the same right as playing them back
-    if (!can(who, 'playback-nvr', target) && !can(who, 'playback-server', target)) return ws.close(1008, 'not allowed')
+    // motion search reads a camera's recordings on the NVR (its search and its playback): the same
+    // right as playing them back from the NVR
+    if (!can(who, 'playback-nvr', target)) return ws.close(1008, 'not allowed')
     if (!nvr.online) return ws.close(1013, 'NVR offline')
     motionScan(nvr, ws, url)
     return
