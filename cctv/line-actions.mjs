@@ -47,9 +47,17 @@ const snapped = new Set()
 
 // ---- the alarm rule ------------------------------------------------------------------------------
 
-/** The "Line crossing" rule, or null. Found by name: it is an ordinary rule an admin can also see. */
+/**
+ * Ours: named "Line crossing" and filed for line crossings alone. A person is free to name their
+ * own rule "Line crossing" too (nothing stops them, and nothing should have to) — that one is
+ * matched by its types instead, so a rule of theirs with other or no types is never adopted,
+ * touched or listed as ours. If it isn't, setLineAlert makes a second rule of the same name that is.
+ */
+const isLineRule = (r) => r.name === LINE_RULE_NAME && Array.isArray(r.types) && r.types.length === 1 && r.types[0] === LINE_TYPE
+
+/** The "Line crossing" rule, or null. Found by name and type: see isLineRule. */
 function lineRule() {
-  return listRules().find((r) => r.name === LINE_RULE_NAME) ?? null
+  return listRules().find(isLineRule) ?? null
 }
 
 /**

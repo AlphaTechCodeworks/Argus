@@ -20,21 +20,50 @@ const settings = (o = {}) => ({
 })
 const alert = (o = {}) => ({ key: 'nvr-offline/nvr-2', kind: 'nvr-offline', title: 'nvr-2 is offline', detail: 'NVR 2: the server cannot reach it.', since: T0, severity: 'high', ...o })
 
-// --- ntfy --------------------------------------------------------------------------------------
+// --- ntfy ----------------------------------------------------------------------------------------
+// Published as JSON to the base url (never as headers: a header can only be Latin-1, and a title
+// or detail built from a camera or rule name is free text — an em dash or curly quote in it would
+// throw building the request and take the whole push down with it).
 {
   const calls = []
   const s = makeSender({ settings: settings(), fetchImpl: async (url, opt) => { calls.push({ url, opt }); return { ok: true, status: 200 } }, mailImpl: async () => {}, now: () => T0 })
   await s.deliver([alert()], 'opened')
-  check('ntfy is posted to the topic url', calls[0]?.url === 'https://ntfy.sh/cctv-secret-topic', calls[0]?.url)
-  check('the body carries the title and detail', calls[0].opt.body.includes('nvr-2 is offline') && calls[0].opt.body.includes('cannot reach it'))
-  check('an opened alert is high priority', calls[0].opt.headers.Priority === 'high', JSON.stringify(calls[0].opt.headers))
+  check('ntfy is posted to the base url, not a per-topic path', calls[0]?.url === 'https://ntfy.sh', calls[0]?.url)
+  check('as JSON', calls[0].opt.headers['content-type'] === 'application/json', JSON.stringify(calls[0].opt.headers))
+  const body = JSON.parse(calls[0].opt.body)
+  check('the topic travels in the body, not the url or headers', body.topic === 'cctv-secret-topic')
+  check('the body carries the title and detail', body.message.includes('nvr-2 is offline') && body.message.includes('cannot reach it'), body.message)
+  check('an opened alert is high priority (4) with the alert tag', body.priority === 4 && body.tags?.join() === 'rotating_light', JSON.stringify(body))
 }
 {
   const calls = []
   const s = makeSender({ settings: settings(), fetchImpl: async (url, opt) => { calls.push({ url, opt }); return { ok: true, status: 200 } }, mailImpl: async () => {}, now: () => T0 })
   await s.deliver([alert()], 'cleared')
-  check('a cleared alert is default priority', calls[0].opt.headers.Priority === 'default')
-  check('a cleared alert says OK again', calls[0].opt.body.toLowerCase().includes('ok again'), calls[0].opt.body)
+  const body = JSON.parse(calls[0].opt.body)
+  check('a cleared alert is default priority (3) with the all-clear tag', body.priority === 3 && body.tags?.join() === 'white_check_mark', JSON.stringify(body))
+  check('a cleared alert says OK again', body.message.toLowerCase().includes('ok again'), body.message)
+}
+{
+  const calls = []
+  const s = makeSender({ settings: settings(), fetchImpl: async (url, opt) => { calls.push({ url, opt }); return { ok: true, status: 200 } }, mailImpl: async () => {}, now: () => T0 })
+  await s.deliver([alert()], 'report')
+  const body = JSON.parse(calls[0].opt.body)
+  check('a daily report is low priority (2) with the report tag', body.priority === 2 && body.tags?.join() === 'bar_chart', JSON.stringify(body))
+}
+{
+  // Regression: a title or detail with an em dash or a curly quote (a camera or rule name, a line
+  // crossing's "—") used to be sent as an HTTP header, which node's fetch only accepts as Latin-1
+  // and throws building the request for — this constructs the exact Request ntfy() would hand to
+  // fetch and checks it does not throw, so a header regression here fails loudly, not silently.
+  const calls = []
+  const s = makeSender({ settings: settings(), fetchImpl: async (url, opt) => { calls.push({ url, opt }); return { ok: true, status: 200 } }, mailImpl: async () => {}, now: () => T0 })
+  const tricky = alert({ title: 'Line crossing (tripwire) — Gate’s Camera', detail: 'crossed A→B — driver’s side' })
+  await s.deliver([tricky], 'opened')
+  let threw = null
+  try { new Request(calls[0].url, calls[0].opt) } catch (e) { threw = e }
+  check('a title with an em dash and a curly quote builds a real Request without throwing', threw === null, threw?.message)
+  const body = JSON.parse(calls[0].opt.body)
+  check('  and the text reaches the JSON body untouched', body.title.includes('—') && body.title.includes('’'), body.title)
 }
 
 // --- email with no sender ----------------------------------------------------------------------

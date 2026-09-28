@@ -16,7 +16,7 @@ const {
   AUTO_USER, BOOKMARK_POST_S, BOOKMARK_PRE_S, LINE_RULE_NAME, LINE_TYPE, RULE_MIN_GAP_S, RULE_PRIORITY,
   autoBookmark, ensureNtfyTopic, eventLink, handleLineAlert, lineRuleCameras, newTopic, onLineCrossing, setLineAlert
 } = await import('../line-actions.mjs')
-const { addEvent, closeEvents, listRules, updateRule } = await import('../events-db.mjs')
+const { addEvent, closeEvents, createRule, deleteRule, listRules, updateRule } = await import('../events-db.mjs')
 const { applyRules } = await import('../event-rules.mjs')
 const { SETTINGS_FILE, getSettings, saveSettings } = await import('../settings.mjs')
 const { CLIP_POST_S, CLIP_PRE_S, makeAlarmNotifier } = await import('../alarms.mjs')
@@ -61,6 +61,24 @@ const listen = async (fn) => {
 const filesWith = (text) => readdirSync(DATA)
   .filter((f) => f !== 'settings.json' && !f.startsWith('settings.json.tmp') && statSync(join(DATA, f)).isFile())
   .filter((f) => readFileSync(join(DATA, f)).includes(text))
+
+// ---- a user's own rule of the same name -----------------------------------------------------------
+// Nothing stops someone naming their own rule "Line crossing" too; it must never be adopted, changed
+// or counted as ours, because it was not made by a camera switch and its cameras are not ours to move.
+{
+  const foreign = createRule({ name: LINE_RULE_NAME, enabled: true, cameras: ['nvr-9/1'], types: ['motion'], schedule: [], priority: 'high', notify: true, minGapS: 30 }, 'alice', T)
+  check('(a user rule named "Line crossing", for motion — not ours)', foreign.ok, foreign.error)
+  check('lineRuleCameras ignores a same-named rule of another type', lineRuleCameras().length === 0)
+  const made = setLineAlert('nvr-2/2', true, 'alice', { now: T })
+  check('setLineAlert makes its own rule alongside it rather than adopting it', made.id !== foreign.rule.id && made.types.join() === LINE_TYPE, JSON.stringify(made))
+  const stillForeign = listRules().find((r) => r.id === foreign.rule.id)
+  check('  the foreign rule is left exactly as it was', stillForeign?.cameras.join() === 'nvr-9/1' && stillForeign?.types.join() === 'motion')
+  check('  both are named "Line crossing" now, but only the real one alerts a phone', rulesNamed().length === 2 && lineRuleCameras().join() === 'nvr-2/2')
+  // clean slate for the rest of the suite, which assumes no rule exists yet
+  deleteRule(made.id)
+  deleteRule(foreign.rule.id)
+  check('(clean slate restored)', lineRuleCameras().length === 0 && rulesNamed().length === 0)
+}
 
 // ---- the alarm rule ------------------------------------------------------------------------------
 {

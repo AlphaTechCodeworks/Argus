@@ -3,8 +3,8 @@
 // so the Health page can say "email failing".
 //
 // Secrets (the email password, the ntfy topic) never appear in a log line or in pending():
-// the topic is part of a URL that would let anyone send to the owner's phone, so a log line
-// names the method only, never the URL it posted to.
+// the topic would let anyone send to the owner's phone, so a log line names the method only,
+// never the url, body or topic it posted.
 //
 // Email is not built yet (see the scope change in the health-alerts plan): the settings and this
 // code path stay so nothing has to be rewired later, but mailImpl defaults to a stub that fails.
@@ -63,17 +63,22 @@ export function makeSender({ settings, fetchImpl = fetch, mailImpl = noMailer, n
   async function ntfy(alerts, kind) {
     const n = cfg().ntfy
     const base = (n.url || 'https://ntfy.sh').replace(/\/+$/, '')
-    const url = `${base}/${n.topic}`
-    const res = await fetchImpl(url, {
+    // Published as JSON, posted to the base url (the topic is a body field, not a path segment):
+    // a header can only be Latin-1 (node's fetch throws on anything past U+00FF), and a title or
+    // detail taken from a camera name or rule name is free text — an em dash or a curly quote in
+    // it would take every push down with it, leaving only the ASCII health alerts delivered.
+    const res = await fetchImpl(base, {
       method: 'POST',
-      headers: {
-        Title: subject(alerts),
-        Priority: kind === 'report' ? 'low' : kind === 'cleared' ? 'default' : 'high',
-        Tags: kind === 'report' ? 'bar_chart' : kind === 'cleared' ? 'white_check_mark' : 'rotating_light'
-      },
-      body: text(alerts, kind)
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        topic: n.topic,
+        title: subject(alerts),
+        message: text(alerts, kind),
+        priority: kind === 'report' ? 2 : kind === 'cleared' ? 3 : 4,
+        tags: [kind === 'report' ? 'bar_chart' : kind === 'cleared' ? 'white_check_mark' : 'rotating_light']
+      })
     })
-    // The status only — never the url, which carries the topic.
+    // The status only — never the body, which carries the topic.
     if (!res?.ok) throw new Error(`the ntfy server answered ${res?.status ?? 'nothing'}`)
   }
 
