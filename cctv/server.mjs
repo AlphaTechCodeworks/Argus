@@ -25,6 +25,7 @@
 //     .../image/profiles, .../image/schedule -> Day/Night set-up and schedule, see imaging.mjs
 //     .../lens -> focus settings and "Focus now", see lens.mjs
 //     .../stream, .../stream/estimate -> main (recording) stream, see streams.mjs
+//     .../lines -> line-crossing lines the camera detects on, see tripwire.mjs
 //     .../notes, .../figures -> app notes and measurements for Auto adjust, see camera-notes.mjs
 //   /api/admin/sites/:site/notes -> a site's mains frequency (app data), see camera-notes.mjs
 //   /api/admin/settings, /api/admin/storage, /api/admin/disks[/prepare] -> Settings tab
@@ -71,6 +72,7 @@ import { handleDiscovery } from './discovery.mjs'
 import { handleImaging } from './imaging.mjs'
 import { handleLens } from './lens.mjs'
 import { handleStreams } from './streams.mjs'
+import { handleLines } from './tripwire.mjs'
 import { ADMIN_OSD_PATH, OSD_PATH, handleCameraNotes, handleOsd as handleCameraOsd, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
@@ -454,9 +456,10 @@ const CAMERA_METHODS = {
   stream: ['GET', 'POST'], // read / apply, undo
   'stream/estimate': ['POST'], // read only, but takes a body
   notes: ['GET', 'POST'],
-  figures: ['GET', 'POST']
+  figures: ['GET', 'POST'],
+  lines: ['GET', 'POST'] // read / change, undo
 }
-const CAMERA_ROUTE = /^\/api\/admin\/nvrs\/([^/]+)\/channels\/(\d{1,3})\/(image|image\/profiles|image\/schedule|lens|stream|stream\/estimate|notes|figures)$/
+const CAMERA_ROUTE = /^\/api\/admin\/nvrs\/([^/]+)\/channels\/(\d{1,3})\/(image|image\/profiles|image\/schedule|lens|stream|stream\/estimate|notes|figures|lines)$/
 
 const sendJson = (res, status, data, headers = {}) => {
   res.writeHead(status, { 'content-type': 'application/json', ...SECURITY_HEADERS, ...headers })
@@ -751,7 +754,9 @@ const handleRequest = async (req, res) => {
           ? await handleLens(req.method, id, ch, readJson, user)
           : what.startsWith('stream')
             ? await handleStreams(what === 'stream' ? 'stream' : 'estimate', req.method, id, ch, url.searchParams, readJson, user)
-            : await handleCameraNotes(what, req.method, id, ch, readJson, user)
+            : what === 'lines'
+              ? await handleLines(req.method, id, ch, url.searchParams, readJson, user)
+              : await handleCameraNotes(what, req.method, id, ch, readJson, user)
       return sendJson(res, status, body)
     }
     const siteNotes = /^\/api\/admin\/sites\/([^/]+)\/notes$/.exec(pathname)
