@@ -309,11 +309,8 @@ function watcher({ nvrList, lines, answer, ...more }) {
   check('nothing stored: nothing handled or grown', onCrossing(report) === null && handled.length === 2 && grown.length === 2)
 
   // Fix round 1: a row events-db has never stored before (isNew: true) must always be handled, even
-  // when the watcher's own `again` says it has seen this alarm before. `again` is the watcher's
-  // memory of having reported an alarm (alarm-watch.mjs watchOne marks it "seen" as soon as it is
-  // reported, whether or not filing it succeeds), so a first attempt whose addEvent call threw (a
-  // locked database, say) can come back on a later tick as `again: true` even though nothing was
-  // ever actually stored. isNew is the source of truth, not again.
+  // when the watcher's own `again` says it has seen this alarm before. `again` is only the watcher's
+  // memory of having filed an alarm, not what events-db holds. isNew is the source of truth, not again.
   answer = (row) => ({ event: { id: 42, ...row }, isNew: true })
   check('a fresh row (isNew) reported "again" by the watcher is still handled, not just grown',
     onCrossing({ ...report, nvr: 'nvr-9', again: true })?.id === 42 && handled.some((h) => h.id === 42) && !grown.some((g) => g.id === 42))
@@ -321,11 +318,9 @@ function watcher({ nvrList, lines, answer, ...more }) {
 
 {
   // Fix round 1 reproduction: addEvent throws on the alarm's first sighting (e.g. the events-db is
-  // briefly locked). The watcher still marks the alarm "seen" as soon as it reports it (watchOne),
-  // whether or not the report is filed successfully, so the next tick reports the same alarm as
-  // `again: true`. Storing then succeeds and comes back isNew: true (nothing was ever actually
-  // inserted before) — the alert must still reach the notifier exactly once, not be silently grown
-  // forever.
+  // briefly locked). The next tick files it (the watcher remembers an alarm only once it has been
+  // filed, so it comes back as new) and storing comes back isNew: true: the alert must reach the
+  // notifier exactly once, not be silently grown forever.
   let fail = true
   const stored = []
   const store = {
@@ -358,6 +353,49 @@ function watcher({ nvrList, lines, answer, ...more }) {
   t += WATCH_EVERY_MS
   await w.tick()
   check('... and the alarm still listed on the next tick only grows it', handled.length === 1 && grown.length === 1 && grown[0] === 9, JSON.stringify({ handled, grown }))
+  w.stop()
+}
+
+{
+  // The fold branch: a crossing 20 s after the camera's previous one, which events-db folds into that
+  // one (isNew false, the row's start is the earlier crossing's). Its first filing throws. The watcher
+  // remembers an alarm only once it has been filed, so the next tick reports it as new (again: false)
+  // and crossingHandler hands it to the rules; reported `again: true` it would only have been grown.
+  let fail = true
+  const PREV = START - 20_000
+  const handled = []
+  const grown = []
+  const reported = []
+  const onCrossing = crossingHandler({
+    addEvent: (row) => {
+      if (fail) throw new Error('database is locked')
+      return { event: { id: 5, ...row, startMs: PREV }, isNew: false }
+    },
+    handle: (ev) => handled.push(ev.id),
+    grew: (ev) => grown.push(ev.id)
+  })
+  const w = startAlarmWatch({
+    nvrs: () => [{ id: 'nvr-2', online: true }],
+    linesOn: () => new Set(['nvr-2/2']),
+    query: async () => withAi(TRIP),
+    onCrossing: (e) => {
+      reported.push(e.again)
+      return onCrossing(e)
+    },
+    everyMs: 3_600_000,
+    log: () => {},
+    now
+  })
+  await w.tick()
+  check('(the first filing of a crossing that folds fails)', handled.length === 0 && grown.length === 0 && reported.join() === 'false')
+  fail = false
+  t += WATCH_EVERY_MS
+  await w.tick()
+  check('filed on the next tick, it is reported as new and handled (the rules see the fold), not only grown',
+    reported.join() === 'false,false' && handled.join() === '5' && grown.length === 0, JSON.stringify({ reported, handled, grown }))
+  t += WATCH_EVERY_MS
+  await w.tick()
+  check('... after which it is the same alarm (again), only grown', reported.at(-1) === true && handled.length === 1 && grown.join() === '5', JSON.stringify({ reported, handled, grown }))
   w.stop()
 }
 

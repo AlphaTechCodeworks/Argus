@@ -74,9 +74,10 @@ function camerasByNvr(keys) {
  * once, never while that NVR's previous query is still out, and reports each tripwire alarm on a
  * camera with lines on:
  *   onCrossing({ nvr, ch, type: 'line-crossing', subtype: 'tripwire', startMs, endMs, source: 'alarm-status', again })
- * again is false the first time an alarm (camera + start) is seen and true on each later tick while
- * the NVR still lists it; endMs is then startMs plus how long we have seen it, measured on this
- * server's clock so an NVR clock that is off cannot give an end before the start. A failed query is
+ * again is false until an alarm (camera + start) has been filed (onCrossing returned without throwing)
+ * and true on each later tick while the NVR still lists it; endMs is then startMs plus how long we
+ * have seen it, measured on this server's clock so an NVR clock that is off cannot give an end before
+ * the start. A failed query is
  * logged at most once per NVR per FAIL_LOG_MS and skipped; what was seen before it is kept, so an
  * alarm that outlasts a failure is not reported as new afterwards.
  *
@@ -127,12 +128,13 @@ export function startAlarmWatch({ nvrs, linesOn, query, onCrossing, everyMs = WA
       s.told = false
       const nowMs = now()
       const seen = new Map()
+      const tried = new Set()
       for (const it of items) {
         if (it.kind !== 'tripwire' || !cams.has(it.ch)) continue
         const key = `${it.ch}/${it.startMs}`
-        if (seen.has(key)) continue // listed twice in one answer: still one alarm
+        if (tried.has(key)) continue // listed twice in one answer: still one alarm
+        tried.add(key)
         const first = s.seen.get(key)
-        seen.set(key, first ?? nowMs)
         try {
           onCrossing({
             nvr: nvr.id,
@@ -144,7 +146,12 @@ export function startAlarmWatch({ nvrs, linesOn, query, onCrossing, everyMs = WA
             source: SOURCE_ALARM_STATUS,
             again: first !== undefined
           })
+          // remembered only once filed: an alarm whose first filing threw comes back as new (again:
+          // false) on the next tick, so crossingHandler still hands a folded crossing to the rules
+          seen.set(key, first ?? nowMs)
         } catch (e) {
+          // filed before: still that alarm, its first sighting kept for its end
+          if (first !== undefined) seen.set(key, first)
           log(`[alarm-watch] ${nvr.id}/${it.ch}: a crossing could not be filed: ${e?.message ?? e}`)
         }
       }
@@ -210,11 +217,10 @@ export function startAlarmWatch({ nvrs, linesOn, query, onCrossing, everyMs = WA
  * What the server does with one report from the watcher (nvrs.mjs passes the result as onCrossing):
  * store it with events-db addEvent, then call handle(event) only for a crossing not handled before.
  *   - a new row (isNew: true): always handled, whatever the watcher's own `again` says. `again` is
- *     only the watcher's memory of having reported this alarm before: watchOne (above) marks an
- *     alarm "seen" as soon as it is reported, whether or not filing it succeeds, so a first attempt
- *     whose addEvent call threw (the events-db briefly locked, say) can come back `again: true` on a
- *     later, successful attempt even though nothing was ever actually stored. events-db's own isNew
- *     is the only source of truth for whether the notifier has seen this row; again is not.
+ *     only the watcher's memory of having filed this alarm before (watchOne remembers an alarm once
+ *     onCrossing has returned, so a first attempt whose addEvent threw comes back as new), not what
+ *     events-db holds: events-db's own isNew is the only source of truth for whether the notifier has
+ *     seen this row.
  *   - not new, and the row returned starts at another time: events-db merged this crossing into the
  *     camera's previous line-crossing event (within 30 s) and extended it: handled again, so the
  *     rules see it and its bookmark grows (the notifier itself never sends one event twice).
