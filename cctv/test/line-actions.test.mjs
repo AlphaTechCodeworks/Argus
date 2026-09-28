@@ -14,7 +14,7 @@ writeFileSync(join(DATA, 'users.json'), JSON.stringify({ alice: { hash: 'x', rol
 
 const {
   AUTO_USER, BOOKMARK_POST_S, BOOKMARK_PRE_S, LINE_RULE_NAME, LINE_TYPE, RULE_MIN_GAP_S, RULE_PRIORITY,
-  autoBookmark, ensureNtfyTopic, eventLink, handleLineAlert, lineRuleCameras, newTopic, onLineCrossing, setLineAlert
+  autoBookmark, ensureNtfyTopic, eventLink, handleLineAlert, lineRuleCameras, newTopic, onLineCrossing, onServerClock, setLineAlert
 } = await import('../line-actions.mjs')
 const { addEvent, closeEvents, createRule, deleteRule, listRules, updateRule } = await import('../events-db.mjs')
 const { applyRules } = await import('../event-rules.mjs')
@@ -304,6 +304,38 @@ const filesWith = (text) => readdirSync(DATA)
   await onLineCrossing({ id: 505, ...crossing('nvr-2', 20, near) }, { log: () => {} })
   const made = bookmarks.listBookmarks({ camera: 'nvr-2/20' })
   check('by default a crossing makes the real automatic bookmark', made.length === 1 && made[0].user === AUTO_USER && made[0].startMs === near - 30 * S, JSON.stringify(made))
+}
+
+// ---- an NVR whose clock is off ----------------------------------------------------------------------
+// An event's times are the NVR's (alarmTime, the recorded-file list); the server's recordings and
+// bookmarks are on this server's clock. nvr1 runs about 220 s fast: a crossing at 14:00:00 server time
+// arrives as 14:03:40. nvrs.mjs hands onLineCrossing the event moved by the NVR's skewMs (playback.mjs
+// clock(): its clock - this server's), so the picture and the footage kept are of the crossing itself.
+{
+  const SKEW = 220 * S
+  const row = { id: 601, ...crossing('nvr-1', 5, T + SKEW, { endMs: T + SKEW + 10 * S }), seenMs: T + 5 * S }
+  check('onServerClock is exported', typeof onServerClock === 'function')
+  const moved = typeof onServerClock === 'function' ? onServerClock(row, SKEW) : row
+  check('onServerClock: start and end on this server’s clock (NVR time - skewMs)', moved.startMs === T && moved.endMs === T + 10 * S, `${moved.startMs - T} ${moved.endMs - T}`)
+  check('  everything else as it was (id, camera, seenMs already server time)', moved.id === 601 && moved.nvr === 'nvr-1' && moved.ch === 5 && moved.type === LINE_TYPE && moved.seenMs === T + 5 * S)
+  check('  the stored row itself is left on the NVR’s time (the fold and the unique key use it)', row.startMs === T + SKEW && row.endMs === T + SKEW + 10 * S)
+  check('  no end stays no end; a skew of 0 (or none read yet) changes nothing', typeof onServerClock === 'function' && onServerClock({ ...row, endMs: null }, SKEW).endMs === null && onServerClock(row, 0) === row && onServerClock(row, undefined) === row)
+
+  const shots = []
+  const r = await onLineCrossing(moved, {
+    bookmark: (e, o) => autoBookmark(e, { ...o, store: bookmarks, now: T + MIN }),
+    snapshot: async (e) => {
+      shots.push(e)
+      return null
+    },
+    nameOf: (key) => key,
+    log: () => {}
+  })
+  await r.snapshot
+  check('an nvr1 crossing’s picture is asked for at the crossing on this server’s clock (not 220 s later)', shots.length === 1 && shots[0].id === 601 && shots[0].startMs === T, shots.map((e) => e.startMs - T).join())
+  check('  and the footage kept is 30 s before to 60 s after it on this server’s clock',
+    r.bookmark?.ok === true && r.bookmark.bookmark.startMs === T - 30 * S && r.bookmark.bookmark.endMs === T + 10 * S + 60 * S && bookmarks.protectedRanges(T - MIN, T + 2 * MIN).some(([a, b]) => a <= T - 30 * S && b >= T + 70 * S),
+    JSON.stringify(r.bookmark?.bookmark && [r.bookmark.bookmark.startMs - T, r.bookmark.bookmark.endMs - T]))
 }
 
 // ---- the alert, end to end through the rule -------------------------------------------------------

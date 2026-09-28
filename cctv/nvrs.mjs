@@ -1047,6 +1047,14 @@ let eventIntake = null
 /** What event intake is doing, per NVR, for the Alarms and Health pages ([] when it is not running). */
 export const eventStatus = () => eventIntake?.status() ?? []
 
+/**
+ * An NVR's clock minus this server's, from its last clock read (playback.mjs lastClock), for
+ * line-actions.mjs onServerClock: a crossing's snapshot and bookmark are taken on this server's clock,
+ * its recordings' time base. The intake reads each NVR's clock on every poll; before the first read
+ * after a start, and under 2 s, it is 0 and the event's own times are used.
+ */
+const skewOf = (nvrId) => nvrs.get(nvrId)?.playback?.lastClock?.()?.skewMs ?? 0
+
 async function startEvents() {
   const [{ makeEventIntake }, { buildWindowMessage }, { eventsOfCamera }, { makeAlarmNotifier }, { makeSender }] = await Promise.all([
     import('./events.mjs'), import('./rec-modes.mjs'), import('./events-db.mjs'), import('./alarms.mjs'), import('./alert-send.mjs')
@@ -1072,7 +1080,7 @@ async function startEvents() {
   // non-fatally, the same way as startLineWatch below: a failed import logs one warning and the intake
   // carries on, only without a bookmark or a picture for these.
   const lineCrossing = await Promise.all([import('./line-actions.mjs'), import('./event-snapshot.mjs')]).then(
-    ([{ onLineCrossing }, { takeSnapshot }]) => ({ onLineCrossing, takeSnapshot }),
+    ([{ onLineCrossing, onServerClock }, { takeSnapshot }]) => ({ onLineCrossing, onServerClock, takeSnapshot }),
     (e) => {
       console.warn(`[lines] recorded crossings get no automatic bookmark or snapshot: ${e.message}`)
       return null
@@ -1092,7 +1100,8 @@ async function startEvents() {
     clock: (nvr) => nvr.playback.clock(),
     onEvent: (event) => {
       void notifier.handle(event).catch((e) => console.warn(`[alarms] ${e.message}`))
-      if (lineCrossing) void lineCrossing.onLineCrossing(event, { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
+      // the stored row stays on the NVR's time; its snapshot and bookmark are on this server's clock
+      if (lineCrossing) void lineCrossing.onLineCrossing(lineCrossing.onServerClock(event, skewOf(event.nvr)), { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
     },
     log: console.warn,
     // any overdue call, for any NVR: the SDK runs one call at a time for all of them
@@ -1139,7 +1148,7 @@ async function startEvents() {
 // any other event, goes through the same rules and notifier as the recorded-file intake's new events
 // (onEvent above), and then gets its automatic bookmark and snapshot (line-actions.mjs).
 async function startLineWatch(notifier) {
-  const [{ crossingHandler, startAlarmWatch }, { linesOn }, { onLineCrossing }, { takeSnapshot }, { addEvent }] = await Promise.all([
+  const [{ crossingHandler, startAlarmWatch }, { linesOn }, { onLineCrossing, onServerClock }, { takeSnapshot }, { addEvent }] = await Promise.all([
     import('./alarm-watch.mjs'), import('./tripwire.mjs'), import('./line-actions.mjs'), import('./event-snapshot.mjs'), import('./events-db.mjs')
   ])
   // readerFor is left to event-snapshot.mjs: its default opens the reader (SegmentReader.open()), which
@@ -1155,13 +1164,14 @@ async function startLineWatch(notifier) {
     linesOn,
     // a read with nothing to say: the XML queue, the read breaker and the busy refusals all apply to it
     query: (nvr) => transparent(nvr, 'queryAlarmStatus', `${XML_HEADER}</request>`, 'alarm watch'),
+    // the stored row stays on the NVR's time (alarmTime); its snapshot and bookmark are on this server's clock
     onCrossing: crossingHandler({
       addEvent,
       handle: (event) => {
         void notifier.handle(event).catch((e) => console.warn(`[alarms] ${e.message}`))
-        void onLineCrossing(event, { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
+        void onLineCrossing(onServerClock(event, skewOf(event.nvr)), { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
       },
-      grew: (event) => void onLineCrossing(event, { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
+      grew: (event) => void onLineCrossing(onServerClock(event, skewOf(event.nvr)), { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
     }),
     log: console.warn,
     // any overdue call, for any NVR: a question now would only queue behind it (as for the intake)

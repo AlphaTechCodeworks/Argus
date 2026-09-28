@@ -208,6 +208,24 @@ export async function autoBookmark(event, { store = null, nameOf = null, now = D
 // ---- one crossing --------------------------------------------------------------------------------
 
 /**
+ * An event with its times on this server's clock, which the server's recordings, bookmarks and
+ * thinning use: NVR time - skewMs (playback.mjs clock(): the NVR's clock - this server's). An event's
+ * times are the NVR's own (alarmTime, its recorded-file list), and nvr1 runs about 220 s fast: without
+ * this its snapshot looked for footage 220 s after the crossing and its bookmark kept the wrong stretch.
+ * A copy; the stored row stays on the NVR's time (the fold and the unique key compare it with the
+ * NVR's other times). seenMs is already this server's. skewMs 0 (under 2 s, or not read yet): the
+ * same event.
+ * @param {object} event  an events-db row
+ * @param {number} skewMs
+ */
+export function onServerClock(event, skewMs) {
+  const skew = Number(skewMs)
+  if (!event || !Number.isFinite(skew) || skew === 0) return event
+  const shift = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? v : Number(v) - skew)
+  return { ...event, startMs: shift(event.startMs), endMs: shift(event.endMs) }
+}
+
+/**
  * Everything a line-crossing event sets off after it is stored: the bookmark now, the snapshot in
  * the background (it waits up to 3 minutes for the recording). Called for a new event and again
  * each time the same event grows; the bookmark merge and the per-event snapshot memory make the

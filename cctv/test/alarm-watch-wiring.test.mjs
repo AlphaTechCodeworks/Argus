@@ -32,15 +32,25 @@ check('... never bookmarks.mjs or rec-reader.mjs (Task 5\'s bookmark stays its d
 check('the snapshot helper passes only { index }: readerFor is left to event-snapshot.mjs\'s default, which opens the reader',
   /const snapshot = \(event\) => \{[\s\S]*?takeSnapshot\(event, \{ index \}\)[\s\S]*?\}/.test(watchBody))
 
-check('onLineCrossing is called with { snapshot, nameOf } (bookmark left to its default autoBookmark), from both the watch and the intake',
-  (src.match(/onLineCrossing\(event, \{ snapshot, nameOf \}\)/g) ?? []).length === 3)
+// The event's times are the NVR's; the snapshot and the bookmark are on this server's clock (F1 of the
+// final review: nvr1 runs about 220 s fast). Each of the three calls hands onLineCrossing the event
+// moved by that NVR's skew, from its last clock read; the stored row itself stays on the NVR's time.
+check('onLineCrossing is called with the event on this server\'s clock and { snapshot, nameOf } (bookmark left to its default autoBookmark), from both the watch and the intake',
+  (src.match(/onLineCrossing\((?:lineCrossing\.)?onServerClock\(event, skewOf\(event\.nvr\)\), \{ snapshot, nameOf \}\)/g) ?? []).length === 3 &&
+  !/onLineCrossing\(event,/.test(src))
+
+check('skewOf is the NVR\'s last clock read (playback.mjs lastClock: its clock - this server\'s), 0 before the first',
+  /const skewOf = \(nvrId\) => nvrs\.get\(nvrId\)\?\.playback\?\.lastClock\?\.\(\)\?\.skewMs \?\? 0/.test(src))
+
+check('startLineWatch takes onServerClock from line-actions.mjs',
+  /const \[\{ crossingHandler, startAlarmWatch \}, \{ linesOn \}, \{ onLineCrossing, onServerClock \}, \{ takeSnapshot \}, \{ addEvent \}\] = await Promise\.all/.test(watchBody))
 
 check('crossingHandler is given a grew callback so a long alarm\'s bookmark can follow its end',
-  /crossingHandler\(\{\s*addEvent,\s*handle: \(event\) => \{[\s\S]*?\},\s*grew: \(event\) => void onLineCrossing\(event, \{ snapshot, nameOf \}\)/.test(watchBody))
+  /crossingHandler\(\{\s*addEvent,\s*handle: \(event\) => \{[\s\S]*?\},\s*grew: \(event\) => void onLineCrossing\(onServerClock\(event, skewOf\(event\.nvr\)\), \{ snapshot, nameOf \}\)/.test(watchBody))
 
 check('the recorded-file intake\'s onEvent also calls onLineCrossing for line-crossing events, loaded non-fatally',
-  /const lineCrossing = await Promise\.all\(\[import\('\.\/line-actions\.mjs'\), import\('\.\/event-snapshot\.mjs'\)\]\)\.then\(\s*\(\[\{ onLineCrossing \}, \{ takeSnapshot \}\]\) => \(\{ onLineCrossing, takeSnapshot \}\),/.test(src) &&
-  /if \(lineCrossing\) void lineCrossing\.onLineCrossing\(event, \{ snapshot, nameOf \}\)\.catch/.test(src))
+  /const lineCrossing = await Promise\.all\(\[import\('\.\/line-actions\.mjs'\), import\('\.\/event-snapshot\.mjs'\)\]\)\.then\(\s*\(\[\{ onLineCrossing, onServerClock \}, \{ takeSnapshot \}\]\) => \(\{ onLineCrossing, onServerClock, takeSnapshot \}\),/.test(src) &&
+  /if \(lineCrossing\) void lineCrossing\.onLineCrossing\(lineCrossing\.onServerClock\(event, skewOf\(event\.nvr\)\), \{ snapshot, nameOf \}\)\.catch/.test(src))
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exitCode = failures ? 1 : 0
