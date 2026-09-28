@@ -1811,3 +1811,55 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .pb-capped .pb-cap { font-size: 10.5px; font-weight: 500; color: var(--text-muted, var(--muted)); white-space: nowrap; letter-spacing: 0.01em; }
 .pb-capped[aria-pressed="true"] .pb-cap { color: inherit; }
 @media (max-width: 420px) { .pb-capped { min-width: 44px; } .pb-capped .pb-cap { font-size: 9.5px; } }
+
+/* ---- Users & access: the access editor (audit.js draws it, access-model.js decides) ---- */
+.ac-dialog { width: min(780px, calc(100vw - 32px)); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); }
+.ac-dialog .ac-admin { flex-direction: row; align-items: center; gap: 8px; font-size: var(--fs-body); color: var(--text); }
+.ac-dialog .ac-admin small, .ac-tree small { color: var(--text-muted); font-size: var(--fs-meta); font-weight: 400; }
+.ac-dialog .ac-admin small { margin-left: 6px; }
+.ac-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ac-body[hidden] { display: none; }
+.ac-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.ac-dialog .ac-copy { margin-left: auto; flex-direction: row; align-items: center; gap: 8px; }
+/* the tree scrolls inside the dialog, its column heads staying in view */
+.ac-tree-wrap { max-height: min(52vh, 520px); overflow: auto; border: 1px solid var(--border); border-radius: var(--r-md); }
+.ac-tree { width: 100%; border-collapse: collapse; font-size: var(--fs-dense); }
+.ac-tree thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); color: var(--text-muted); font-weight: 500; padding: 6px 8px; text-align: center; white-space: nowrap; }
+.ac-tree thead th:first-child { text-align: left; }
+/* the tick columns keep room for a note such as "NVR recordings only" on one line */
+.ac-tree thead th:not(:first-child) { width: 116px; }
+.ac-tree tbody th, .ac-tree td { padding: 6px 8px; border-top: 1px solid var(--border); vertical-align: middle; }
+.ac-tree tbody th { text-align: left; font-weight: 400; }
+.ac-tree td { text-align: center; }
+.ac-tree .ac-name { overflow-wrap: anywhere; }
+.ac-tree small { display: block; }
+.ac-all th, .ac-all td { background: var(--surface-2); }
+.ac-all .ac-name, .ac-site .ac-name { font-weight: 600; }
+.ac-site .ac-head { display: grid; grid-template-columns: 24px 1fr; column-gap: 4px; align-items: center; }
+.ac-site .ac-head small { grid-column: 2; }
+.ac-cam th { padding-left: 36px; }
+.ac-cam[hidden] { display: none; }
+.ac-fold { width: 24px; height: 24px; padding: 0; border: 0; background: none; color: var(--text-muted); font-size: 12px; line-height: 1; transition: transform var(--t-fast); }
+.ac-fold[aria-expanded="true"] { transform: rotate(90deg); }
+.ac-fold:disabled { visibility: hidden; }
+.ac-tree input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+/* what a tick alone would hide ("NVR recordings only"), right under the box */
+.ac-note { display: block; max-width: 13em; margin: 2px auto 0; color: var(--warn); font-size: 11px; line-height: 1.25; }
+.ac-note:empty { display: none; }
+.ac-formats { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-md); }
+.ac-formats legend { padding: 0 4px; color: var(--text-muted); font-size: var(--fs-dense); }
+.ac-format-list { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.ac-kept h3 { margin: 0 0 4px; font-size: var(--fs-body); }
+.ac-kept ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ac-kept li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-radius: var(--r-sm); background: var(--warn-soft); font-size: var(--fs-dense); }
+.ac-warn { display: flex; flex-direction: column; gap: 6px; }
+.ac-warn:empty { display: none; }
+.ac-dirty { margin-right: auto; align-self: center; }
+.ac-user-actions { white-space: nowrap; text-align: right; }
+@media (max-width: 560px) {
+  .ac-dialog { padding: 14px; }
+  .ac-tree thead th:not(:first-child) { width: 76px; }
+  .ac-tree td { padding: 6px 4px; }
+  .ac-cam th { padding-left: 20px; }
+  .ac-dialog .ac-copy { margin-left: 0; }
+}

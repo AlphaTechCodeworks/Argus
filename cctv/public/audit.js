@@ -7,6 +7,12 @@
 // One deliberate choice about filtering: the filters are sent to the server and applied there,
 // not applied in the browser. The browser never receives rows the signed-in admin is not entitled
 // to see, so a filter cannot be "removed" with the developer tools to reveal more.
+//
+// The access editor (Edit access, on Users & access) is drawn here too, but every rule about what a
+// tick means lives in access-model.js, tested without a browser; this file only paints its view
+// and posts its row. The server decides again on save (rights.mjs), so nothing here is trusted.
+
+import { COLUMNS, COLUMN_LABELS, FORMATS, FORMAT_LABELS, buildTree, click, copyFrom, copySources, dropKept, fromRow, sameRow, setAdmin, setAll, setFormat, toRow, view } from './access-model.js'
 
 const PAD = (n) => String(n).padStart(2, '0')
 
@@ -196,13 +202,18 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     return j
   }
   const uSay = (t, bad = false) => { const m = document.getElementById('u-msg'); m.textContent = t; m.classList.toggle('st-error-text', bad) }
+  // the names on the list, so adding a viewer can tell a new account from a changed one
+  let knownUsers = new Set()
   const loadUsers = async () => {
     const box = document.getElementById('usersSection')
     let users
     try { users = (await usersApi('GET')).users } catch { return } // not an admin: the section stays hidden
     box.hidden = false
+    knownUsers = new Set(users.map((u) => u.name))
     document.getElementById('userRows').replaceChildren(...users.map((u) => {
       const tr = document.createElement('tr')
+      const edit = el('button', { type: 'button', className: 'btn-ghost', textContent: 'Edit access' })
+      edit.addEventListener('click', () => openAccess(u.name))
       const rm = document.createElement('button')
       rm.type = 'button'
       rm.className = 'btn-ghost'
@@ -213,7 +224,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       })
       const name = document.createElement('td'); name.textContent = u.name
       const role = document.createElement('td'); role.textContent = u.role === 'admin' ? 'Admin' : 'Viewer'
-      const act = document.createElement('td'); act.append(rm)
+      const act = document.createElement('td'); act.className = 'ac-user-actions'; act.append(edit, rm)
       tr.append(name, role, act)
       return tr
     }))
@@ -223,15 +234,225 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     const name = document.getElementById('u-name').value.trim()
     const password = document.getElementById('u-pass').value
     const role = document.getElementById('u-role').value
+    const isNew = !knownUsers.has(name)
     try {
       await usersApi('POST', '', { name, role, ...(password ? { password } : {}) })
       document.getElementById('u-pass').value = ''
       uSay(`Saved ${name} (${role})`)
-      loadUsers()
+      await loadUsers()
       loadRights()
+      // A new viewer can see nothing yet (users-api.mjs starts them with no rights), so the next
+      // thing the admin needs is to say what they may see.
+      if (isNew && role === 'viewer') openAccess(name)
     } catch (err) { uSay(err.message, true) }
   })
   loadUsers()
+
+  // ---- the access editor ----
+  // ac is the one open editing session: whose access, the tree it was opened against, the row as it
+  // was loaded (for "unsaved changes"), the state being edited, and the boxes drawn for it.
+  let ac = null
+  let opening = null // the latest openAccess call: an older one answering late is ignored
+  let meName = null
+  const acDlg = id('accessDlg')
+  const acSay = (text) => { id('ac-error').textContent = text; id('ac-error').hidden = !text }
+  const getJson = async (path) => {
+    const r = await fetch(path)
+    const j = await r.json().catch(() => null)
+    if (!r.ok || !j || j.error) throw new Error(j?.error ?? `the server answered ${r.status}`)
+    return j
+  }
+  // fetch() throws a TypeError when it never reached the server: say that, not "Failed to fetch"
+  const words = (e) => (e instanceof TypeError ? 'the server could not be reached' : e?.message || 'something went wrong')
+
+  /** Paints the open session's current state: every box, the old grants, formats, warnings. */
+  const paintAccess = () => {
+    if (!ac) return
+    const v = view(ac.state, ac.tree)
+    id('ac-admin').checked = v.admin
+    id('ac-adminNote').textContent = v.adminNote
+    id('ac-adminNote').hidden = !v.admin
+    id('ac-body').hidden = v.admin
+    // parent: the site's cell, whose note a camera does not repeat (every camera of a site stored
+    // as NVR playback only would otherwise say so twenty times over)
+    const set = (col, target, cell, parent = null) => {
+      const box = ac.boxes.get(`${col} ${target}`)
+      if (!box) return
+      box.cb.checked = cell.state === 'on'
+      box.cb.indeterminate = cell.state === 'some'
+      box.note.textContent = parent && parent.note === cell.note ? '' : cell.note
+      box.cb.title = cell.note
+    }
+    for (const col of COLUMNS) {
+      set(col, '*', v.all[col])
+      for (const s of v.sites) {
+        set(col, s.nvr, s.cells[col])
+        for (const c of s.cameras) set(col, c.key, c.cells[col], s.cells[col])
+      }
+    }
+    for (const f of v.formats) ac.formatBoxes.get(f.id).checked = f.on
+    id('ac-kept').hidden = v.kept.length === 0
+    id('ac-keptList').replaceChildren(...v.kept.map((k) => {
+      const rm = el('button', { type: 'button', className: 'btn-ghost', textContent: 'Remove' })
+      rm.setAttribute('aria-label', `Remove ${k.text}`)
+      rm.addEventListener('click', () => { ac.state = dropKept(ac.state, k.target); paintAccess() })
+      const text = el('span')
+      text.append(el('b', { textContent: k.text }), ` · ${k.columns.join(', ')} · ${k.reason}`)
+      const li = el('li')
+      li.append(text, rm)
+      return li
+    }))
+    const notes = [...v.warnings.map((w) => ['st-notice', w])]
+    if (v.nothing) notes.push(['st-help', 'Nothing is ticked: they can sign in, but see no site and no camera.'])
+    id('ac-warn').replaceChildren(...notes.map(([className, textContent]) => el('p', { className, textContent })))
+    id('ac-dirty').textContent = sameRow(toRow(ac.state), ac.saved) ? '' : 'Unsaved changes'
+  }
+
+  /** The tree's rows, drawn once per opening; paintAccess only changes the boxes, so focus stays put. */
+  const drawTree = () => {
+    const v = view(ac.state, ac.tree)
+    ac.boxes = new Map()
+    const cellTd = (col, target, what) => {
+      const cb = el('input', { type: 'checkbox' })
+      cb.setAttribute('aria-label', `${COLUMN_LABELS[col]}: ${what}`)
+      cb.addEventListener('change', () => { ac.state = click(ac.state, ac.tree, col, target); paintAccess() })
+      const note = el('span', { className: 'ac-note' })
+      const td = el('td')
+      td.append(cb, note)
+      ac.boxes.set(`${col} ${target}`, { cb, note })
+      return td
+    }
+    const rowHead = (text, sub) => {
+      const head = el('div', { className: 'ac-head' })
+      head.append(el('span', { className: 'ac-name', textContent: text }), el('small', { textContent: sub }))
+      const th = el('th', { scope: 'row' })
+      th.append(head)
+      return th
+    }
+    const all = el('tr', { className: 'ac-all' })
+    all.append(rowHead('All sites', 'everything, sites added later included'), ...COLUMNS.map((c) => cellTd(c, '*', 'all sites')))
+    const rows = [all]
+    for (const s of v.sites) {
+      const tr = el('tr', { className: 'ac-site' })
+      const count = s.cameras.length ? `${s.cameras.length} camera${s.cameras.length === 1 ? '' : 's'}` : 'no cameras listed yet'
+      const th = rowHead(s.site, `${s.name !== s.site ? `${s.name} · ` : ''}${count}`)
+      const fold = el('button', { type: 'button', className: 'ac-fold', textContent: '▸' })
+      fold.setAttribute('aria-label', `Cameras of ${s.site}`)
+      fold.disabled = s.cameras.length === 0
+      th.firstChild.prepend(fold)
+      tr.append(th, ...COLUMNS.map((c) => cellTd(c, s.nvr, s.site)))
+      rows.push(tr)
+      const camRows = s.cameras.map((c) => {
+        const cr = el('tr', { className: 'ac-cam' })
+        cr.append(rowHead(c.name, `camera ${c.ch + 1}`), ...COLUMNS.map((col) => cellTd(col, c.key, `${c.name}, ${s.site}`)))
+        return cr
+      })
+      // A site opens by itself when some of its cameras are ticked and some not: that is the
+      // state an admin most needs to see. The rest stay folded, so five sites fit on a screen.
+      const showCams = (open) => {
+        fold.setAttribute('aria-expanded', String(open))
+        for (const cr of camRows) cr.hidden = !open
+      }
+      showCams(COLUMNS.some((col) => s.cells[col].state === 'some' && s.cameras.some((c) => c.cells[col].state === 'on')))
+      fold.addEventListener('click', () => showCams(fold.getAttribute('aria-expanded') !== 'true'))
+      rows.push(...camRows)
+    }
+    id('ac-rows').replaceChildren(...rows)
+
+    ac.formatBoxes = new Map()
+    id('ac-formats').replaceChildren(...FORMATS.map((f) => {
+      const cb = el('input', { type: 'checkbox' })
+      cb.addEventListener('change', () => { ac.state = setFormat(ac.state, f, cb.checked); paintAccess() })
+      ac.formatBoxes.set(f, cb)
+      const label = el('label', { className: 'st-check' })
+      label.append(cb, ` ${FORMAT_LABELS[f]}`)
+      return label
+    }))
+
+    const copy = id('ac-copy')
+    copy.replaceChildren(el('option', { value: '', textContent: 'choose someone' }), ...copySources(ac.users, ac.user).map((u) => el('option', { value: u, textContent: u })))
+    copy.disabled = copy.options.length === 1
+  }
+
+  /** Opens the editor for one account, with the rights and the camera list as they are right now. */
+  async function openAccess(user) {
+    const mineCall = {}
+    opening = mineCall
+    ac = null
+    id('ac-user').textContent = user
+    id('ac-body').hidden = true
+    id('ac-adminNote').hidden = true
+    id('ac-dirty').textContent = ''
+    id('ac-save').disabled = true
+    id('ac-rows').replaceChildren()
+    acSay('')
+    id('ac-loading').hidden = false
+    if (!acDlg.open) acDlg.showModal()
+    try {
+      // Admins are sent every NVR and every camera by these two, so the tree is the whole server.
+      const [rights, sites, cameras] = await Promise.all([getJson('/api/admin/rights'), getJson('/api/sites'), getJson('/api/cameras')])
+      if (opening !== mineCall) return
+      const users = Array.isArray(rights.users) ? rights.users : []
+      const mine = users.find((u) => u.user === user)
+      if (!mine) throw new Error(`there is no account called ${user} any more`)
+      const tree = buildTree(sites, cameras)
+      const state = fromRow(mine, tree)
+      ac = { user, tree, state, saved: toRow(state), users }
+      drawTree()
+      paintAccess()
+      id('ac-save').disabled = false
+    } catch (e) {
+      if (opening !== mineCall) return
+      acSay(`Could not open ${user}'s access: ${words(e)}. Close this and try again.`)
+    } finally {
+      if (opening === mineCall) id('ac-loading').hidden = true
+    }
+  }
+
+  const acDirty = () => ac !== null && !sameRow(toRow(ac.state), ac.saved)
+  const acLeave = () => !acDirty() || confirm(`Close without saving the changes to ${ac.user}'s access?`)
+  id('ac-admin').addEventListener('change', (e) => { if (!ac) return; ac.state = setAdmin(ac.state, e.target.checked); paintAccess() })
+  id('ac-everything').addEventListener('click', () => { if (!ac) return; ac.state = setAll(ac.state, true); paintAccess() })
+  id('ac-nothing').addEventListener('click', () => { if (!ac) return; ac.state = setAll(ac.state, false); paintAccess() })
+  id('ac-copy').addEventListener('change', (e) => {
+    const from = ac?.users.find((u) => u.user === e.target.value)
+    e.target.value = ''
+    if (!from) return
+    ac.state = copyFrom(ac.state, from, ac.tree)
+    paintAccess()
+    id('ac-dirty').textContent = `Copied from ${from.user}. Save to keep it.`
+  })
+  id('ac-cancel').addEventListener('click', () => { if (acLeave()) acDlg.close() })
+  // Escape closes a <dialog> by itself: ask first when something would be lost
+  acDlg.addEventListener('cancel', (e) => { if (!acLeave()) e.preventDefault() })
+  id('acForm').addEventListener('submit', async (e) => {
+    e.preventDefault()
+    if (!ac) return
+    const { user } = ac
+    const rights = toRow(ac.state)
+    const selfDemote = user === meName && ac.saved.admin && !rights.admin
+    if (selfDemote && !confirm('You are switching off your own admin. As soon as this is saved you lose this page and every setting. Go ahead?')) return
+    const save = id('ac-save')
+    save.disabled = true
+    save.setAttribute('aria-busy', 'true')
+    acSay('')
+    try {
+      const r = await fetch('/api/admin/rights', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user, rights }) })
+      const j = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(j.error ?? `the server answered ${r.status}`)
+      ac = null
+      acDlg.close()
+      if (selfDemote) { location.reload(); return }
+      uSay(`Saved ${user}'s access`)
+      loadUsers()
+      loadRights()
+    } catch (err) {
+      acSay(`Not saved: ${words(err)}.`)
+    } finally {
+      save.disabled = false
+      save.removeAttribute('aria-busy')
+    }
+  })
 
   const loadRights = () =>
     fetch('/api/admin/rights')
@@ -250,6 +471,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error('signed out'))))
     .then((me) => {
       id('whoami').textContent = me.user
+      meName = me.user
       if (me.admin) { const st = id('sitesTab'); if (st) st.hidden = false; const se = id('settingsTab'); if (se) se.hidden = false }
       loadAudit()
       loadRights()

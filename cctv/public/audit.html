@@ -35,10 +35,10 @@
   <main class="st-main">
     <section class="se-section" data-tab="access" data-tab-label="Users &amp; access" data-tab-help="Who can sign in, and what each of them may watch, play back and export, per site or per camera." aria-labelledby="users-title" id="usersSection" hidden>
       <h2 id="users-title">Accounts</h2>
-      <p class="st-help">Who can sign in. A <b>viewer</b> watches and plays back what the Rights below allow; an <b>admin</b> can change everything. Type the new person's password yourself and give it to them in person.</p>
+      <p class="st-help">Who can sign in. A <b>viewer</b> watches, plays back and exports only what <b>Edit access</b> allows, per site or per camera; an <b>admin</b> can do and change everything. A new viewer sees nothing until you tick something: the access editor opens as soon as they are added. Type the new person's password yourself and give it to them in person.</p>
       <table class="hp-table"><thead><tr><th>Name</th><th>Role</th><th></th></tr></thead><tbody id="userRows"></tbody></table>
       <form id="addUser" class="se-grid" autocomplete="off">
-        <label>Name <input id="u-name" required maxlength="64" pattern="[w.@-]{1,64}" autocapitalize="off" spellcheck="false" /></label>
+        <label>Name <input id="u-name" required maxlength="64" pattern="[\w.@\-]{1,64}" title="Letters, digits and . _ @ -" autocapitalize="off" spellcheck="false" /></label>
         <label>Password (8 or more) <input id="u-pass" type="password" minlength="8" autocomplete="new-password" /></label>
         <label>Role <select id="u-role"><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label>
         <div class="se-actions"><button type="submit" class="st-primary">Add or update</button><span id="u-msg" class="st-meta"></span></div>
@@ -47,7 +47,7 @@
 
     <section class="se-section" data-tab="access" aria-labelledby="rights-title">
       <h2 id="rights-title">Rights</h2>
-      <p class="st-help">What each account may do, per site or per camera. Anything not listed here is refused.</p>
+      <p class="st-help">What each account may do, per site or per camera. Anything not listed here is refused. Change it with <b>Edit access</b> above.</p>
       <p id="rightsNote" class="hp-note"></p>
       <table class="hp-table">
         <thead id="rightsHead"></thead>
@@ -81,6 +81,48 @@
     </section>
 
   </main>
+
+  <!-- The access editor (audit.js draws it; access-model.js decides what every tick means). -->
+  <dialog id="accessDlg" class="st-dialog ac-dialog" aria-labelledby="ac-title">
+    <form id="acForm" method="dialog" autocomplete="off">
+      <h2 id="ac-title">Access for <span id="ac-user"></span></h2>
+      <label class="st-check ac-admin"><input type="checkbox" id="ac-admin" /> <span><b>Admin</b> <small>everything, everywhere, and every setting</small></span></label>
+      <p id="ac-adminNote" class="st-notice" hidden></p>
+      <p id="ac-loading" class="st-meta" role="status" hidden>Reading the sites and cameras…</p>
+      <div id="ac-body" class="ac-body" hidden>
+        <div class="ac-tools">
+          <button type="button" id="ac-everything">Everything</button>
+          <button type="button" id="ac-nothing" title="Takes every right away, the old ones listed below included">Nothing</button>
+          <label class="ac-copy">Copy access from
+            <select id="ac-copy"><option value="">choose someone</option></select>
+          </label>
+        </div>
+        <p class="st-help">A ticked site includes cameras added to it later; untick one camera and the rest stay ticked. <b>Playback</b> is the server's recordings and the NVR's own.</p>
+        <div class="ac-tree-wrap">
+          <table class="ac-tree">
+            <thead><tr><th scope="col">Site / camera</th><th scope="col">Live</th><th scope="col">Playback</th><th scope="col">Export</th></tr></thead>
+            <tbody id="ac-rows"></tbody>
+          </table>
+        </div>
+        <fieldset class="ac-formats">
+          <legend>Export formats</legend>
+          <div id="ac-formats" class="ac-format-list"></div>
+        </fieldset>
+        <div id="ac-kept" class="ac-kept" hidden>
+          <h3>Kept from before</h3>
+          <p class="st-help">Granted to something this server does not list now. Saved as it is until you remove it.</p>
+          <ul id="ac-keptList"></ul>
+        </div>
+        <div id="ac-warn" class="ac-warn"></div>
+      </div>
+      <p id="ac-error" class="st-error" role="alert" hidden></p>
+      <div class="st-actions">
+        <span id="ac-dirty" class="st-meta ac-dirty" role="status"></span>
+        <button type="button" id="ac-cancel">Cancel</button>
+        <button type="submit" id="ac-save" class="st-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
 
   <script type="module" src="shell.js"></script>
   <script type="module" src="audit.js"></script>
