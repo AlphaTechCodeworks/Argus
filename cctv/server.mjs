@@ -2,7 +2,8 @@
 // native SDK and relays encoded video frames (H.264/H.265) to browsers over WebSocket.
 //
 // Served on HTTP (HTTP_PORT, for localhost) and HTTPS (HTTPS_PORT, for the LAN).
-// Everything except the login page and /healthz requires a viewer session.
+// Everything except the login page and /healthz requires a viewer session; /healthz answers
+// anyone but this machine itself and a signed-in admin with { ok } only.
 //
 //   GET  /                     -> viewer page (cctv/public)
 //   POST /api/login            -> { user, password } sets the session cookie
@@ -35,7 +36,8 @@
 //   POST /api/admin/alerts/test { method: 'ntfy'|'email' } -> sends a test message (admins)
 //   POST /api/admin/lines/alert { nvr, ch, on } -> a camera's line-crossing phone alert on or off
 //                                 (admins): the "Line crossing" alarm rule, see line-actions.mjs
-//   GET  /healthz              -> used by the Docker healthcheck
+//   GET  /healthz              -> used by the Docker healthcheck and the watchers on this machine;
+//                                 { ok } only for anyone else who is not an admin (security.mjs localProbe)
 //   WS   /live?nvr=ID&ch=N&stream=S -> binary frames, S: 0 = main, 1 = sub
 //   WS   /live-mux             -> every live tile of a page on one socket, see live-mux.mjs
 //   /api/playback/*?nvr=ID, WS /playback?nvr=ID -> recorded video, see playback.mjs
@@ -56,7 +58,7 @@
 //   bytes 6-7   reserved
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
-import { clientIpOf, securityHeaders } from './security.mjs'
+import { clientIpOf, localProbe, securityHeaders } from './security.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleNetStatus } from './nvr-netstatus.mjs'
 import { handleRelays } from './relays.mjs'
@@ -553,7 +555,12 @@ const handleRequest = async (req, res) => {
           })
       )
     }
-    return sendJson(res, ok ? 200 : 503, body)
+    // The whole body (NVR ids, share paths, SDK load) is for the watchers on this machine and for a
+    // signed-in admin. Anyone else, through the tunnel or on the LAN, learns only whether it is up:
+    // the status code and { ok } are all the Docker healthcheck and server-restart.js read.
+    const u = currentUser(req)
+    const full = localProbe(req.socket.remoteAddress, req.headers['cf-connecting-ip']) || Boolean(u && (AUTH_OFF || auth.isAdmin(u)))
+    return sendJson(res, ok ? 200 : 503, full ? body : { ok })
   }
   if (pathname === '/api/login' && req.method === 'POST') return handleLogin(req, res)
   if (pathname === '/api/logout' && req.method === 'POST') {

@@ -42,3 +42,9 @@ const LOOPBACK = /^(?:::ffff:)?127\.0\.0\.1$|^::1$/
 const IP_TEXT = /^[0-9A-Fa-f:.]{2,45}$/
 export const clientIpOf = (peer, cfHeader) =>
   LOOPBACK.test(peer ?? '') && typeof cfHeader === 'string' && IP_TEXT.test(cfHeader) ? cfHeader : (peer ?? '')
+
+// /healthz tells the watchers on this machine (cctv-healthwatch.mjs, cctv-watch.ps1, the Docker
+// healthcheck) which share is stuck and how each NVR's worker is doing. It needs no sign-in, and the
+// same port is reachable through the tunnel, whose cloudflared also connects from 127.0.0.1 but always
+// adds CF-Connecting-IP: only a loopback call with no such header at all is the machine asking itself.
+export const localProbe = (peer, cfHeader) => LOOPBACK.test(peer ?? '') && cfHeader === undefined
