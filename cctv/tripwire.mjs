@@ -349,7 +349,7 @@ async function apply(ctx, cfg, change, { action, undoes, body, schedules, tokenP
   const kept = fields.filter((f) => f.status !== 'as asked').map((f) => f.key)
   let message =
     status === 'done' ? (action === 'undo' ? 'Undone' : 'Applied')
-      : status === 'unknown' ? 'Sent, but the camera\'s line settings could not be read back; reopen this panel.'
+      : status === 'unknown' ? 'Sent, but the camera\'s line settings could not be read back afterwards: what it has now is not known.'
         : status === 'partial' ? `Partly applied; the camera kept: ${kept.join(', ')}`
           : a.status === 'success' ? 'The NVR accepted it, but the camera kept its line settings'
             : timedOut ? 'Not changed: the NVR did not answer in time'
