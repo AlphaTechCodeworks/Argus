@@ -23,10 +23,15 @@
 //   'nvr1'     every camera on that one NVR
 //   'nvr1/3'   channel 3 of that NVR, and nothing else
 //
-//   GET  /api/admin/rights            -> { users, actions, formats, failures }
-//   POST /api/admin/rights            { user, rights } -> { user, rights }
+//   GET  /api/admin/rights            -> { users, actions, formats, failures }; each user's row
+//                                         carries `seen`, a token of it right now
+//   POST /api/admin/rights            { user, rights, seen } -> { user, rights }
+//                                         or 409 { error, stale: true } when `seen` is missing or does
+//                                         not match: a stale editor screen must not silently put back
+//                                         access someone else already took away while it sat open
 //   GET  /api/rights/me               -> { user, admin, rights }   (anyone signed in: their own)
 
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DATA_DIR, loadUsers, saveUsers } from './auth.mjs'
@@ -150,6 +155,16 @@ export function rightsOf(name) {
   return row
 }
 
+/**
+ * A short fingerprint of one user's rights row (the admin flag included, which mirrors the account's
+ * role). Two reads a moment apart get the same token only when nothing changed in between: the
+ * access editor's compare-and-swap (handleRights below) sends this back as `seen`, so a stale editor
+ * screen cannot silently restore access someone else already took away while it sat open.
+ */
+export function rightsToken(row) {
+  return createHash('sha256').update(JSON.stringify(row)).digest('hex').slice(0, 16)
+}
+
 // ------------------------------------------------------------------------------- the migration
 
 /**
@@ -263,11 +278,15 @@ export function adminList() {
     .sort()
 }
 
-/** Every account with its rights, for the rights screen. */
+/** Every account with its rights, for the rights screen; each row carries `seen` (rightsToken), the
+ * compare-and-swap token the access editor must send back with any change to that row. */
 export function listRights() {
   return Object.keys(loadUsers())
     .sort()
-    .map((user) => ({ user, ...rightsOf(user) }))
+    .map((user) => {
+      const rights = rightsOf(user)
+      return { user, ...rights, seen: rightsToken(rights) }
+    })
 }
 
 // --------------------------------------------------------------------------------- the decision
@@ -428,15 +447,29 @@ export async function handleRights(method, pathname, readJson, who) {
     // The name comes from the body because an admin is editing somebody else. The *authority* to
     // do so came from the session above, which is the part that must never be client-supplied.
     const user = String(body?.user ?? '')
+    // Compare-and-swap (STALE EDITOR): the access editor's GET handed out this row's `seen` token.
+    // If it does not match the row as it is right now, somebody else changed this person's access
+    // while the editor sat open, and saving the whole row it opened with would silently put that
+    // change back. A missing token fails the same `!==` compare, so an old client that never learned
+    // about `seen` is refused too, rather than allowed to overwrite blindly. Only checked for an
+    // account that exists: for one that does not, saveRights below gives the clearer "no account" 400.
+    const before = rightsOf(user)
+    if (Object.hasOwn(loadUsers(), user) && body?.seen !== rightsToken(before)) {
+      return [409, { error: 'Someone changed this person\'s access since you opened it; reopen to see it', stale: true }]
+    }
     const rights = saveRights(user, body?.rights)
     // "Who gave them permission" is the first question after "who did it", so a rights change is
     // itself an audited event. The stored row is recorded, not what was posted: they differ
     // whenever cleanRights() has thrown something out.
+    // The role is the one flag the grant summary below cannot show truthfully by itself: an unchanged
+    // "admin" would read the same for someone who was always an admin and someone just now demoted
+    // (rights.admin is false either way once they are out), so a demotion has to say so explicitly.
+    const roleNote = before.admin === rights.admin ? (rights.admin ? 'admin; ' : '') : rights.admin ? 'made admin; ' : 'admin removed; '
     audit(DATA_DIR, {
       user: name ?? 'dev',
       action: 'rights-change',
       target: user,
-      detail: `${rights.admin ? 'admin; ' : ''}${GRANTABLE.map((a) => `${a}=${rights.grants[a].join('|') || 'none'}`).join(' ')} formats=${rights.formats.join('|') || 'none'}`
+      detail: `${roleNote}${GRANTABLE.map((a) => `${a}=${rights.grants[a].join('|') || 'none'}`).join(' ')} formats=${rights.formats.join('|') || 'none'}`
     })
     return [200, { user, rights }]
   } catch (e) {

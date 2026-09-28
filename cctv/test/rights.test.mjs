@@ -25,7 +25,7 @@ writeFileSync(
 )
 
 const R = await import('../rights.mjs')
-const { renderRights, grantText } = await import('../public/audit.js')
+const { renderRights, grantText, saveRightsFailure } = await import('../public/audit.js')
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -247,7 +247,8 @@ const SAM = { user: 'sam', admin: false }
   const [s5] = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { admin: true } }), null)
   check('no session at all: 403', s5 === 403)
 
-  const [s6, b6] = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { grants: { live: ['n1'] }, formats: ['pack'] } }), ADMIN)
+  const joSeen = b1.users.find((u) => u.user === 'jo').seen
+  const [s6, b6] = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { grants: { live: ['n1'] }, formats: ['pack'] }, seen: joSeen }), ADMIN)
   check('POST as admin: 200 and the stored row comes back', s6 === 200 && b6.rights.grants.live.join() === 'n1')
   const [s7, b7] = await R.handleRights('POST', '/api/admin/rights', json({ user: 'ghost', rights: {} }), ADMIN)
   check('POST for an unknown account: 400', s7 === 400 && /no account/.test(b7.error), b7?.error)
@@ -261,6 +262,72 @@ const SAM = { user: 'sam', admin: false }
   check('...and it is their OWN row, not a way to read anyone else', b9.rights.grants.live.join() === 'n1')
   const [s10] = await R.handleRights('GET', '/api/rights/me', json({}), null)
   check('/api/rights/me with no session: 401', s10 === 401)
+}
+
+// ---- STALE EDITOR: POST /api/admin/rights is a compare-and-swap on the `seen` GET hands out ----
+// audit.js Save used to post the whole row it opened with, no compare: a screen left open while
+// somebody else tightened this person's access would silently put it back on the next save.
+{
+  const json = (o) => async () => o
+  const [, before] = await R.handleRights('GET', '/api/admin/rights', json({}), ADMIN)
+  const joRow = before.users.find((u) => u.user === 'jo')
+  check('GET /api/admin/rights: each row carries a seen token', typeof joRow.seen === 'string' && joRow.seen.length > 0, JSON.stringify(joRow))
+  check('rightsToken is exported and agrees with what GET sent', R.rightsToken(R.rightsOf('jo')) === joRow.seen)
+
+  const wrong = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { grants: { live: ['n9'] } }, seen: 'not-the-real-token' }), ADMIN)
+  check('POST with the wrong seen token: 409 stale', wrong[0] === 409 && wrong[1].stale === true && /reopen/i.test(wrong[1].error), JSON.stringify(wrong[1]))
+  check('...and the stored row is not touched', R.rightsOf('jo').grants.live.join() === 'n1')
+
+  const missing = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { grants: { live: ['n9'] } } }), ADMIN) // no seen at all
+  check('POST with no seen token at all: refused the same way (an old client cannot overwrite blindly)', missing[0] === 409 && missing[1].stale === true)
+  check('...and the stored row is still not touched', R.rightsOf('jo').grants.live.join() === 'n1')
+
+  // an account that does not exist: saveRights' own "no account" 400 still wins over a stale refusal
+  const unknown = await R.handleRights('POST', '/api/admin/rights', json({ user: 'ghost', rights: {} }), ADMIN)
+  check('an unknown account: 400, not 409 (there is no row to be stale about)', unknown[0] === 400)
+
+  const fresh = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { grants: { live: ['n1', 'n9'] }, formats: ['pack'] }, seen: joRow.seen }), ADMIN)
+  check('POST with the token GET just handed out: saved', fresh[0] === 200 && fresh[1].rights.grants.live.join() === 'n1,n9', JSON.stringify(fresh[1]))
+  check('...and the token moves on once the row changes', R.rightsToken(R.rightsOf('jo')) !== joRow.seen)
+  // put jo back exactly as later checks in this file expect
+  R.saveRights('jo', { grants: { live: ['n1'] }, formats: ['pack'] })
+}
+
+// ---- audit.js pure part: what Save shows for a failed POST -------------------------------------
+{
+  check('an ordinary error: shown plainly, not offered a reopen', JSON.stringify(saveRightsFailure(400, { error: 'bad request' })) === JSON.stringify({ stale: false, message: 'bad request' }))
+  check('a stale refusal: told apart so Save can offer to reopen instead of retry', JSON.stringify(saveRightsFailure(409, { error: 'stale, reopen it', stale: true })) === JSON.stringify({ stale: true, message: 'stale, reopen it' }))
+  check('a 409 that is not the stale shape: an ordinary error, not a reopen offer', saveRightsFailure(409, { error: 'x' }).stale === false)
+  check('a body with no error text at all: falls back to the status', saveRightsFailure(500, {}).message === 'the server answered 500')
+}
+
+// ---- AUDIT ADMIN CHANGES: a role change is stated explicitly, not folded into "admin; " --------
+// the audit detail used to say "admin; " only while the account IS an admin, so a demotion (which
+// ends with rights.admin === false, same as somebody who was never an admin) was never recorded.
+{
+  const json = (o) => async () => o
+  const auditRows = () => readFileSync(join(DATA, 'audit.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const lastFor = (user) => auditRows().filter((r) => r.action === 'rights-change' && r.target === user).at(-1)
+
+  const seenOf = (user) => R.rightsToken(R.rightsOf(user))
+  const promote = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: { admin: true }, seen: seenOf('sam') }), ADMIN)
+  check('sam is promoted', promote[0] === 200 && promote[1].rights.admin === true)
+  check('the audit row says "made admin", not just "admin;"', /made admin;/.test(lastFor('sam').detail), lastFor('sam').detail)
+
+  // no role change (still admin): the plain "admin; " summary is kept, exactly as before this fix
+  const same = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: { admin: true, grants: { live: ['nvr1'] } }, seen: seenOf('sam') }), ADMIN)
+  check('sam stays admin', same[0] === 200 && same[1].rights.admin === true)
+  check('the audit row keeps the plain "admin; " summary, no "made admin" (nothing changed)', /^admin; /.test(lastFor('sam').detail) && !/made admin/.test(lastFor('sam').detail), lastFor('sam').detail)
+
+  const demote = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: { admin: false }, seen: seenOf('sam') }), ADMIN)
+  check('sam is demoted', demote[0] === 200 && demote[1].rights.admin === false)
+  check('the audit row says "admin removed", where it used to say nothing at all', /admin removed;/.test(lastFor('sam').detail), lastFor('sam').detail)
+  check('...and it is not confused with "made admin"', !/made admin/.test(lastFor('sam').detail))
+
+  // never an admin, never touched: no role wording either way, only the grant summary
+  const untouched = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: { grants: { live: ['nvr2'] } }, seen: seenOf('sam') }), ADMIN)
+  check('a viewer whose admin flag never changes: no "admin;"/"made admin"/"admin removed" wording at all', untouched[0] === 200 && !/admin/.test(lastFor('sam').detail), lastFor('sam').detail)
+  R.saveRights('sam', {}) // back to a clean viewer with no grants, as later sections expect
 }
 
 // ---- the rights screen's render ------------------------------------------------------------

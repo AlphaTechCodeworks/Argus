@@ -129,6 +129,21 @@ export function renderRights(d) {
   }
 }
 
+/**
+ * What the access editor's Save should do with a failed POST /api/admin/rights: the message to show,
+ * and whether this is the stale-editor refusal (rights.mjs's compare-and-swap, `seen`) rather than an
+ * ordinary error. A stale save means the row on screen is no longer the truth — retrying would just
+ * resend the same wrong row — so it is offered a reopen instead of a plain "not saved".
+ * @param {number} status
+ * @param {{ error?: string, stale?: boolean }} body the parsed JSON of a non-2xx response (or {})
+ */
+export function saveRightsFailure(status, body) {
+  return {
+    stale: status === 409 && body?.stale === true,
+    message: body?.error || `the server answered ${status}`
+  }
+}
+
 // ---- the page itself (skipped when a test imports this module: there is no document) ------------
 if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
   const el = (tag, props = {}) => Object.assign(document.createElement(tag), props)
@@ -397,7 +412,10 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       if (!mine) throw new Error(`there is no account called ${user} any more`)
       const tree = buildTree(sites, cameras)
       const state = fromRow(mine, tree)
-      ac = { user, tree, state, saved: toRow(state), users }
+      // `seen`: the row's compare-and-swap token, sent back unchanged with Save (rights.mjs). Kept on
+      // the session, not re-read at save time, because the whole point is to catch a change that
+      // happened while this editor sat open.
+      ac = { user, tree, state, saved: toRow(state), users, seen: mine.seen }
       drawTree()
       paintAccess()
       id('ac-save').disabled = false
@@ -437,9 +455,15 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     save.setAttribute('aria-busy', 'true')
     acSay('')
     try {
-      const r = await fetch('/api/admin/rights', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user, rights }) })
+      const r = await fetch('/api/admin/rights', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user, rights, seen: ac.seen }) })
       const j = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(j.error ?? `the server answered ${r.status}`)
+      if (!r.ok) {
+        const f = saveRightsFailure(r.status, j)
+        // A stale save (rights.mjs's compare-and-swap) means the row on screen is already wrong:
+        // retrying would only resend it, so this is offered as a reopen, not a plain error to dismiss.
+        if (f.stale) { if (confirm(`${f.message} Reopen ${user}'s access now?`)) await openAccess(user); else acSay(f.message) } else acSay(`Not saved: ${f.message}.`)
+        return
+      }
       ac = null
       acDlg.close()
       if (selfDemote) { location.reload(); return }
