@@ -282,6 +282,7 @@ function watcher({ nvrList, lines, answer, ...more }) {
 {
   const stored = []
   const handled = []
+  const grown = []
   let answer = null
   const store = {
     addEvent: (row, nowMs) => {
@@ -289,23 +290,75 @@ function watcher({ nvrList, lines, answer, ...more }) {
       return answer(row)
     }
   }
-  const onCrossing = crossingHandler({ ...store, handle: (ev) => handled.push(ev), now: () => 1234 })
+  const onCrossing = crossingHandler({ ...store, handle: (ev) => handled.push(ev), grew: (ev) => grown.push(ev), now: () => 1234 })
   const report = { nvr: 'nvr-2', ch: 2, type: 'line-crossing', subtype: 'tripwire', startMs: START, endMs: START, source: SOURCE_ALARM_STATUS, again: false }
 
   answer = (row) => ({ event: { id: 7, ...row }, isNew: true })
-  check('a new crossing is stored and handled', onCrossing(report)?.id === 7 && handled.length === 1 && handled[0].id === 7)
+  check('a new crossing is stored and handled', onCrossing(report)?.id === 7 && handled.length === 1 && handled[0].id === 7 && grown.length === 0)
   check('... stored without the watcher’s again flag, with a detail, at the given time',
     !('again' in stored[0].row) && /line-crossing alarm/.test(stored[0].row.detail) && stored[0].nowMs === 1234 && stored[0].row.endMs === START)
 
   answer = (row) => ({ event: { id: 7, ...row, startMs: START - 20_000 }, isNew: false })
-  check('merged into the camera’s previous crossing (a row with another start): handled again', onCrossing({ ...report, startMs: START + 20_000, endMs: START + 20_000 })?.id === 7 && handled.length === 2)
+  check('merged into the camera’s previous crossing (a row with another start): handled again, not grown', onCrossing({ ...report, startMs: START + 20_000, endMs: START + 20_000 })?.id === 7 && handled.length === 2 && grown.length === 0)
 
   answer = (row) => ({ event: { id: 7, ...row }, isNew: false })
-  check('the same alarm on a later tick: stored (its end moves on) and not handled', onCrossing({ ...report, endMs: START + 5000, again: true }) === null && handled.length === 2 && stored.at(-1).row.endMs === START + 5000)
-  check('a row already there with this very start (a restart while it was listed): not handled', onCrossing(report) === null && handled.length === 2)
+  check('the same alarm on a later tick: stored (its end moves on), grown, not handled', onCrossing({ ...report, endMs: START + 5000, again: true }) === null && handled.length === 2 && grown.length === 1 && grown[0].id === 7 && stored.at(-1).row.endMs === START + 5000)
+  check('a row already there with this very start (a restart while it was listed): grown, not handled', onCrossing(report) === null && handled.length === 2 && grown.length === 2)
 
   answer = () => ({ event: null, isNew: false })
-  check('nothing stored: nothing handled', onCrossing(report) === null && handled.length === 2)
+  check('nothing stored: nothing handled or grown', onCrossing(report) === null && handled.length === 2 && grown.length === 2)
+
+  // Fix round 1: a row events-db has never stored before (isNew: true) must always be handled, even
+  // when the watcher's own `again` says it has seen this alarm before. `again` is the watcher's
+  // memory of having reported an alarm (alarm-watch.mjs watchOne marks it "seen" as soon as it is
+  // reported, whether or not filing it succeeds), so a first attempt whose addEvent call threw (a
+  // locked database, say) can come back on a later tick as `again: true` even though nothing was
+  // ever actually stored. isNew is the source of truth, not again.
+  answer = (row) => ({ event: { id: 42, ...row }, isNew: true })
+  check('a fresh row (isNew) reported "again" by the watcher is still handled, not just grown',
+    onCrossing({ ...report, nvr: 'nvr-9', again: true })?.id === 42 && handled.some((h) => h.id === 42) && !grown.some((g) => g.id === 42))
+}
+
+{
+  // Fix round 1 reproduction: addEvent throws on the alarm's first sighting (e.g. the events-db is
+  // briefly locked). The watcher still marks the alarm "seen" as soon as it reports it (watchOne),
+  // whether or not the report is filed successfully, so the next tick reports the same alarm as
+  // `again: true`. Storing then succeeds and comes back isNew: true (nothing was ever actually
+  // inserted before) — the alert must still reach the notifier exactly once, not be silently grown
+  // forever.
+  let fail = true
+  const stored = []
+  const store = {
+    addEvent: (row) => {
+      if (fail) throw new Error('database is locked')
+      stored.push(row)
+      return { event: { id: 9, ...row }, isNew: stored.length === 1 }
+    }
+  }
+  const handled = []
+  const grown = []
+  const logs = []
+  const onCrossing = crossingHandler({ ...store, handle: (ev) => handled.push(ev.id), grew: (ev) => grown.push(ev.id) })
+  const w = startAlarmWatch({
+    nvrs: () => [{ id: 'nvr-2', online: true }],
+    linesOn: () => new Set(['nvr-2/2']),
+    query: async () => withAi(TRIP),
+    onCrossing,
+    everyMs: 3_600_000,
+    log: (l) => logs.push(l),
+    now
+  })
+  await w.tick()
+  check('a failed filing is logged; nothing handled or grown yet', handled.length === 0 && grown.length === 0 && logs.some((l) => l.includes('database is locked')), JSON.stringify(logs))
+  fail = false
+  t += WATCH_EVERY_MS
+  await w.tick()
+  check('once storing succeeds (a fresh row, isNew): the alert reaches the notifier exactly once, not just grown',
+    handled.length === 1 && handled[0] === 9 && grown.length === 0, JSON.stringify({ handled, grown }))
+  t += WATCH_EVERY_MS
+  await w.tick()
+  check('... and the alarm still listed on the next tick only grows it', handled.length === 1 && grown.length === 1 && grown[0] === 9, JSON.stringify({ handled, grown }))
+  w.stop()
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

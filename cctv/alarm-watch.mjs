@@ -209,13 +209,18 @@ export function startAlarmWatch({ nvrs, linesOn, query, onCrossing, everyMs = WA
 /**
  * What the server does with one report from the watcher (nvrs.mjs passes the result as onCrossing):
  * store it with events-db addEvent, then call handle(event) only for a crossing not handled before.
- *   - a new row: handled.
+ *   - a new row (isNew: true): always handled, whatever the watcher's own `again` says. `again` is
+ *     only the watcher's memory of having reported this alarm before: watchOne (above) marks an
+ *     alarm "seen" as soon as it is reported, whether or not filing it succeeds, so a first attempt
+ *     whose addEvent call threw (the events-db briefly locked, say) can come back `again: true` on a
+ *     later, successful attempt even though nothing was ever actually stored. events-db's own isNew
+ *     is the only source of truth for whether the notifier has seen this row; again is not.
  *   - not new, and the row returned starts at another time: events-db merged this crossing into the
  *     camera's previous line-crossing event (within 30 s) and extended it: handled again, so the
  *     rules see it and its bookmark grows (the notifier itself never sends one event twice).
- *   - the same alarm seen on a later tick (again), or a row already there with this very start (the
- *     server restarted while the alarm was still listed): addEvent has moved its end on; grew is
- *     called (a long alarm's bookmark can follow its end) but the rules and the notifier are not.
+ *   - not new, and the same alarm seen on a later tick (again), or a row already there with this very
+ *     start (the server restarted while the alarm was still listed): addEvent has moved its end on;
+ *     grew is called (a long alarm's bookmark can follow its end) but the rules and the notifier are not.
  * @param {{ addEvent: Function, handle: (event: object) => void, grew?: ((event: object) => void)|null, now?: () => number }} deps
  * @param {(event: object) => void} [deps.grew]  called with the stored row when a known alarm is seen
  *   again; not for the rules or the notifier
@@ -226,8 +231,9 @@ export function crossingHandler({ addEvent, handle, grew = null, now = Date.now 
     const { again, ...row } = e
     const { event, isNew } = addEvent({ ...row, detail: CROSSING_DETAIL }, now())
     if (!event) return null
-    // the same alarm still listed (or already stored): its end has moved on, so its bookmark may grow
-    if (again || (!isNew && event.startMs === row.startMs)) {
+    // a row events-db had not stored before is always handled: isNew is what the notifier has
+    // actually seen, and it is not to be second-guessed by the watcher's own again bookkeeping
+    if (!isNew && (again || event.startMs === row.startMs)) {
       grew?.(event)
       return null
     }
