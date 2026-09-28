@@ -10,6 +10,7 @@
 import {
   DAY_MS,
   MAX_BOXES,
+  boxSeekMs,
   fmtClock,
   follow,
   laneBoxes,
@@ -282,6 +283,44 @@ const valid = (v) =>
   check('  every hole is drawn, the last of the day included', gaps.every(([s, e]) => inside(drawnHoles, s, e)), `${gaps.filter(([s, e]) => !inside(drawnHoles, s, e)).length} missing`)
   check('  every recorded range is inside a recorded box', stretches.every(({ s, e }) => inside(recorded, s, e)))
   check('  and only the two kinds that went in come out', shown.every((b) => b.kind === 'server' || b.kind === 'gap') && shown.reduce((n, b) => n + b.n, 0) === lane.length)
+}
+
+// ---- boxSeekMs: a click on a folded motion box plays the event under the pointer ------------------------
+// Sixty ten-second motion events, one a minute from 10:00 to 11:00. At the day view each is widened
+// to 86 s, so laneBoxes folds the hour into one box whose from is 10:00: a click near 10:58 that
+// played the box's from would start an hour early.
+{
+  const dayView = makeView({ spanMs: DAY_MS, startMs: dayStart, ...day })
+  const at = (h, m = 0, s = 0) => dayStart + ((h * 60 + m) * 60 + s) * S
+  const hour = Array.from({ length: 60 }, (_, i) => ({ s: at(10, i), e: at(10, i, 10), kind: 'event' }))
+  // what the page hands laneBoxes for the motion lane: that hour, and one lone event earlier on
+  const events = [{ s: at(8), e: at(8, 0, 10), kind: 'event' }, ...hour]
+  const boxes = laneBoxes(dayView, events)
+  const chain = boxes.find((b) => b.n > 1)
+  check('boxSeekMs: an hour of motion a minute apart is one box at the day view', boxes.length === 2 && chain?.n === 60 && chain.from === at(10), boxes.map((b) => `${fmtClock(b.from, { tzOffsetMs: TZ })}:${b.n}`).join(' '))
+  const seekAt = (t, list = events, box = chain) => boxSeekMs(box, t, list)
+  const said = (ms) => fmtClock(ms, { tzOffsetMs: TZ })
+  check('  a click near its end plays the event there, not the box\'s first', seekAt(at(10, 58, 30)) === at(10, 58), said(seekAt(at(10, 58, 30))))
+  check('  a click on an event\'s own start plays that event', seekAt(at(10, 17)) === at(10, 17), said(seekAt(at(10, 17))))
+  check('  between two events, the one before the pointer (the one drawn on top there)', seekAt(at(10, 30, 40)) === at(10, 30), said(seekAt(at(10, 30, 40))))
+  check('  on the widened tail past the last event, the last event', seekAt(at(11, 0, 50)) === at(10, 59), said(seekAt(at(11, 0, 50))))
+  check('  left of the first (a box pulled in at the right edge), the box\'s first, not an event in another box', seekAt(at(9, 59)) === at(10), said(seekAt(at(9, 59))))
+  const lone = boxes.find((b) => b.n === 1)
+  check('  a box for one event plays from its start wherever on it the click lands', seekAt(at(8, 1), events, lone) === at(8), said(seekAt(at(8, 1), events, lone)))
+
+  // the search's hits are drawn over the events from a list of their own; one handed in with the
+  // events is not an event, however close to the pointer it starts
+  const hits = [{ s: at(10, 58, 40), e: at(10, 58, 50), kind: 'hit' }]
+  check('  only ranges of the box\'s own kind count', seekAt(at(10, 58, 45), [...events, ...hits]) === at(10, 58), said(seekAt(at(10, 58, 45), [...events, ...hits])))
+  const hitBox = laneBoxes(dayView, hits)[0]
+  check('  and a hit box plays its hit', boxSeekMs(hitBox, at(10, 59), [...events, ...hits]) === at(10, 58, 40), said(boxSeekMs(hitBox, at(10, 59), [...events, ...hits])))
+  check('  a list out of time order gives the same answer', seekAt(at(10, 58, 30), [...events].reverse()) === at(10, 58))
+
+  // an event already running when the view starts is clipped to the view's left edge, and so is its seek
+  const v = makeView({ spanMs: 3600 * S, startMs: at(10, 30, 5), ...day })
+  const clipped = laneBoxes(v, hour)[0]
+  check('  an event clipped at the left edge plays from the edge, as its box says', clipped.from === v.startMs && boxSeekMs(clipped, at(10, 30, 7), hour) === v.startMs, said(boxSeekMs(clipped, at(10, 30, 7), hour)))
+  check('  no ranges, or rubbish in the list, plays the box\'s first', boxSeekMs(chain, at(10, 58, 30)) === at(10) && boxSeekMs(chain, at(10, 58, 30), [null, { s: NaN, e: at(10, 58, 50), kind: 'event' }, { s: at(10, 58), e: at(10, 58), kind: 'event' }]) === at(10))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

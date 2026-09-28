@@ -36,6 +36,8 @@ const TOUCH_PCT = 1e-9
 
 const num = (x, fallback) => (Number.isFinite(x) ? Number(x) : fallback)
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x)
+/** A range's kind, as laneBoxes reads it: pb-sources stretches say src, the page's own lists kind. */
+const kindOf = (r) => r?.kind ?? r?.src ?? null
 
 /**
  * A valid window on the day: the span within its limits and never longer than the day itself, and the
@@ -145,7 +147,8 @@ export function fmtClock(ms, { ms: showMillis = false, tzOffsetMs = 0 } = {}) {
  * recalculation. Ranges may be given as { from, to, kind } or as pb-sources stretches { s, e, src }.
  * `from`/`to` are the clipped times, which is what a click on the box should seek to — note that a box
  * widened to MIN_BOX_PCT is wider than the time it stands for, so seeking must use these and never the
- * box's own edges.
+ * box's own edges. A folded box (below) stands for many ranges, so a click on one goes through
+ * boxSeekMs, which picks the range under the pointer rather than playing the first.
  *
  * A box that touches or overlaps the last box of its own kind on screen (after the widening) is
  * folded into it: `from`/`to` then run from the first one's start to the last one's end, and `n` says
@@ -169,7 +172,7 @@ export function laneBoxes(view, ranges) {
     const widthPct = Math.max(((b - a) / v.spanMs) * 100, MIN_BOX_PCT)
     // A widened sliver near the right edge would otherwise hang over the end of the track.
     const leftPct = Math.min(((a - v.startMs) / v.spanMs) * 100, 100 - widthPct)
-    const kind = r?.kind ?? r?.src ?? null
+    const kind = kindOf(r)
     const prev = lastOf.get(kind)
     if (prev && leftPct <= prev.leftPct + prev.widthPct + TOUCH_PCT && leftPct + widthPct >= prev.leftPct - TOUCH_PCT) {
       // min/max rather than "extend to the right": a list out of time order merges the same way
@@ -186,6 +189,42 @@ export function laneBoxes(view, ranges) {
     lastOf.set(kind, box)
   }
   return out
+}
+
+/**
+ * Where a click on a lane box plays from: the start of the latest of its ranges that started by the
+ * time under the pointer. A folded box's `from` is only its first range's start, and at the day view
+ * motion a minute apart folds into one box an hour long, so playing `from` would start a click near
+ * its end an hour early. Before the fold each range had its own box, each drawn over the one before,
+ * so the box on top under the pointer was this same range: a click still lands on the event it is
+ * on, from its beginning, rather than somewhere in the minute after it ended.
+ *
+ * `ranges` is the list the box was made from. Only ranges of the box's own kind starting inside it
+ * count, so an event in another box, or a hit handed in with the events, is never picked; a click
+ * left of them all (a box pulled in at the right edge) plays the box's first. Starts are clipped to
+ * the box as laneBoxes clipped them, so an event already running when the view starts plays from
+ * the view's edge, as its box says.
+ * @param {{ from: number, to: number, kind?: string|null }} box one of laneBoxes' boxes
+ * @param {number} atMs the time under the pointer
+ * @param {Array<{from?: number, to?: number, s?: number, e?: number, kind?: string, src?: string}>} ranges
+ * @returns {number}
+ */
+export function boxSeekMs(box, atMs, ranges) {
+  const from = num(box?.from, null)
+  const to = num(box?.to, from)
+  if (from === null) return num(atMs, null)
+  const t = num(atMs, from)
+  const kind = box.kind ?? null
+  let best = from
+  for (const r of ranges ?? []) {
+    if (kindOf(r) !== kind) continue
+    const s = num(r?.from ?? r?.s, null)
+    const e = num(r?.to ?? r?.e, null)
+    // the same ranges laneBoxes would have drawn: no reversed or zero-length ones
+    if (s === null || e === null || e <= s) continue
+    if (s > best && s <= t && s <= to) best = s
+  }
+  return best
 }
 
 /** A span as something to put on a button: "1 h", "48 min", "30 s". */

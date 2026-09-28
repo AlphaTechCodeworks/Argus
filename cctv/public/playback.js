@@ -41,7 +41,7 @@ import {
   speedFor,
   watchesStart
 } from './pb-sources.js'
-import { MAX_BOXES, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
+import { MAX_BOXES, boxSeekMs, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
 import { allowedSpeeds, clampSpeed, frameStep, ignoredRepeat, shuttleLabel, shuttleRate } from './pb-transport.js'
 import { DEFAULT_OSD, drawOsd, osdFont, osdIsOff, osdLayout } from './osd-overlay.js'
@@ -175,7 +175,11 @@ let seekAt = null // performance.now() of the last seek, until its first picture
 let startMs = null // seek to first picture, ms
 let lastEndSkip = -Infinity // the last stretch jumped to at an end (never the same one twice)
 let hoverX = null // where the pointer is over the timeline, in px from its left edge
-let drag = null // { x, startMs, moved } while the timeline is being panned
+let drag = null // { x, startMs, moved, box } while the timeline is being panned
+// What a click on a motion box plays from, by the box's element: set as the lane is drawn, read on
+// pointerup. A map rather than a data attribute because the answer depends on where on the box the
+// click lands (boxSeekMs): one box can stand for an hour of events.
+const boxSeek = new WeakMap()
 
 const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   clock: { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 1000 },
@@ -1021,8 +1025,9 @@ function drawTimeline() {
   const hits = state.hits.map((h) => ({ s: h.start, e: h.end + 2000, kind: 'hit' }))
   fillLane(laneMotion, [...laneBoxes(v, events), ...laneBoxes(v, hits)], (d, b) => {
     d.title = `${b.kind === 'hit' ? 'Movement in your box' : 'Motion'} at ${fmtTime(b.from)}${more(b, b.kind === 'hit' ? 'hits' : 'events')}`
-    // the seek happens in the timeline's own pointerup, so a click does not both jump and pan
-    d.dataset.ms = String(Math.round(b.from))
+    // the seek happens in the timeline's own pointerup, so a click does not both jump and pan: the
+    // event (or hit) under the pointer from its start, which in a folded box is not the box's first
+    boxSeek.set(d, (t) => boxSeekMs(b, t, b.kind === 'hit' ? hits : events))
   })
 
   playheadEl.hidden = state.position === null || !inView(state.position)
@@ -1156,7 +1161,9 @@ timeline.addEventListener('pointerdown', (e) => {
   }
   if (pointers.size > 2) return
   if (onPlayhead(e.clientX)) return startScrub(e)
-  drag = { x: e.clientX, startMs: state.view.startMs, moved: false }
+  // the box pressed on is noted here: the timeline now has the pointer captured, and captured events
+  // (pointerup included) are aimed at the timeline itself, never at the box under the pointer
+  drag = { x: e.clientX, startMs: state.view.startMs, moved: false, box: e.target }
 })
 
 timeline.addEventListener('pointermove', (e) => {
@@ -1187,9 +1194,11 @@ timeline.addEventListener('pointerup', (e) => {
   if (pointers.size < 2) pinch = null
   if (scrub) return endScrub()
   if (drag && !drag.moved) {
-    // a motion block under the pointer says where it starts; elsewhere the time under the pointer
-    const ms = Number(e.target?.dataset?.ms)
-    seek(Number.isFinite(ms) ? ms : timeAt(e.clientX))
+    // a motion block pressed on plays the event under the pointer from its start; elsewhere the
+    // time under the pointer
+    const t = timeAt(e.clientX)
+    const onBox = boxSeek.get(drag.box)
+    seek(onBox ? onBox(t) : t)
   }
   drag = null
 })
