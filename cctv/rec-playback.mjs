@@ -599,6 +599,12 @@ export class ServerPlayback {
         // at most 1920 wide and 2.5 Mbit/s: a 4K conversion at full size ran slower than real time
         // and came out bigger than a tunnel carries (the measurements are at PLAYBACK_LIMITS)
         ...PLAYBACK_LIMITS,
+        // Asked each time an ffmpeg starts. Playing forward, low_delay is dropped: it made the H.265
+        // decoder single-threaded, and 4K converted at 1.2x real time with it, 2.2-2.3x without
+        // (smoothness report, cause 2a). One picture at a time keeps it, because the decoder's frame
+        // threads hold a picture back until the next arrives: a scrub's keyframe would never come
+        // out, and each keyframe would wait for the next one (a second at 2x).
+        lowDelay: () => this.#oneAtATime(),
         onFrame: (ts, isKey, buf) => this.#sendConverted(ts, isKey, buf),
         onFail: (e) => this.#fail(new Error(`could not convert this H.265 recording (${e.message})`)),
         log: this.log

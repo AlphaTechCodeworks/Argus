@@ -10,6 +10,7 @@ import { EventEmitter } from 'node:events'
 import {
   CODEC_H264,
   CODEC_H265,
+  DECODE_THREADS,
   DEFAULT_MAX,
   NICE,
   PLAYBACK_LIMITS,
@@ -30,6 +31,7 @@ import {
 } from '../transcode.mjs'
 
 let failures = 0
+const J = (v) => JSON.stringify(v)
 const check = (name, ok, extra = '') => {
   if (!ok) failures++
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? `  (${extra})` : ''}`)
@@ -89,6 +91,14 @@ const check = (name, ok, extra = '') => {
   const phone = ffmpegArgs({ encoder: 'libx264', maxKbps: 500 }).join(' ')
   check('  a cap without bufSeconds keeps the 4 s buffer (phones, phone-live.mjs: unchanged)', phone.includes('-maxrate 500k -bufsize 2000k'), phone)
   check('  no cap: no rate options at all (unchanged)', !/-maxrate|-bufsize/.test(s))
+
+  // -flags low_delay turns the H.265 decoder's frame threads off: one thread, 0.8-0.99x real time at
+  // 4K (smoothness report, cause 2a). Playing forward it is dropped; one picture at a time (a scrub,
+  // keyframes only) keeps it, since frame threads hold pictures back until more arrive.
+  check('  low_delay by default (scrubs, keyframes, phones and NVR playback unchanged), no thread count', /-nostdin -flags low_delay -probesize 32/.test(s) && !/-threads/.test(s), s)
+  const played = ffmpegArgs({ encoder: 'libx264', lowDelay: false }).join(' ')
+  check(`  lowDelay false: no low_delay, and ${DECODE_THREADS} decoder threads (an input option: before -i)`, !/low_delay/.test(played) && played.includes(`-nostdin -threads ${DECODE_THREADS} -probesize 32 -analyzeduration 0 -f hevc -i pipe:0`), played)
+  check('  two decoder threads: each holds back one picture at most', DECODE_THREADS === 2)
 
   const hw = ffmpegArgs({ encoder: 'h264_vaapi' }).join(' ')
   check('  hardware: h264_vaapi on the render node, decode and encode both on the GPU', /-c:v h264_vaapi/.test(hw) && hw.includes(RENDER_NODE) && /-hwaccel vaapi/.test(hw) && /-hwaccel_output_format vaapi/.test(hw), hw)
@@ -225,6 +235,22 @@ function harness(opts = {}) {
   const a = h3.procs[0]?.args.join(' ') ?? ''
   check('  the limits it is given reach ffmpeg (size, rate and buffer)', a.includes('scale=min(1920\\,iw):-2') && a.includes('-maxrate 2500k -bufsize 2500k'), a)
   h3.t.close()
+
+  // lowDelay may be a function: asked each time an ffmpeg starts (a run starts at a keyframe after
+  // every reset), because one session plays forward, scrubs and plays keyframes in turn
+  let still = false
+  const h4 = harness({ lowDelay: () => still })
+  h4.t.push(1000, true, IDR)
+  h4.t.reset()
+  still = true
+  h4.t.push(2000, true, IDR)
+  const runs = h4.procs.map((p) => /low_delay/.test(p.args.join(' ')))
+  check('  lowDelay as a function: asked at each start (a run playing forward, then a scrub)', J(runs) === J([false, true]), J(runs))
+  h4.t.close()
+  const h5 = harness()
+  h5.t.push(1000, true, IDR)
+  check('  lowDelay not given: low_delay, as before', /low_delay/.test(h5.procs[0].args.join(' ')))
+  h5.t.close()
 }
 
 // ---- ending a picture: a scrub's single keyframe ------------------------------------------------

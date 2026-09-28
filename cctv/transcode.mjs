@@ -53,6 +53,17 @@ export const NICE = 10
  * with 2 s and 0.990 with 4 s, at the same 2.1-2.2 Mbit/s.
  */
 export const PLAYBACK_LIMITS = Object.freeze({ maxWidth: 1920, maxKbps: 2500, bufSeconds: 1 })
+/**
+ * Decoder threads for a conversion that plays forward (lowDelay false, ffmpegArgs). Frame threads
+ * decode the next picture while ffmpeg scales and encodes this one; each thread past the first holds
+ * one picture back until more arrive. Measured on two 4K recordings (20 fps) within PLAYBACK_LIMITS:
+ * one thread (low_delay) 23.7-24.6 pictures a second (1.19-1.23x real time), two 43.0-46.4 (2.15-2.32x),
+ * ffmpeg's own choice (nine threads on this server) 47.9-50.3. Two gets almost all of it, holds back
+ * one picture instead of eight, and leaves the cores to the recorder. (None of the 45 H.265 cameras
+ * here uses wavefronts. A stream that did would decode on many threads even with low_delay, and two
+ * would be slower for it.)
+ */
+export const DECODE_THREADS = 2
 
 /** The cap, from the environment; a bad or missing value means the default. */
 export function maxTranscodes(env = process.env) {
@@ -130,11 +141,19 @@ export const lightPool = new TranscodePool((() => { const n = Number(process.env
  * out at all, and every run began with the rest of a GOP decoded against a missing picture, each
  * picture handed the time of the one before it. -probesize 32 already stops the probe at that packet.
  * maxKbps / bufSeconds: cap the rate, with an encoder buffer of bufSeconds at the cap (below).
+ * lowDelay (the default): -flags low_delay, which turns the decoder's frame threads off, so every
+ * picture pushed in comes out without waiting for the next ones: what a scrub (one keyframe, then
+ * nothing) and keyframes only (one every half second or more) need. It also makes the H.265 decoder
+ * single-threaded: 4K converted below real time at full size, and at 1.2x within PLAYBACK_LIMITS
+ * (smoothness report, cause 2a). So playback going forward passes false: DECODE_THREADS frame threads,
+ * 2.2-2.3x, holding back one picture.
  * @param {{ encoder?: 'libx264'|'h264_vaapi', inCodec?: number, keepEvery?: number, maxWidth?: number,
- *   crf?: number, maxKbps?: number, bufSeconds?: number }} o
+ *   crf?: number, maxKbps?: number, bufSeconds?: number, lowDelay?: boolean }} o
  */
-export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0, bufSeconds = 4 } = {}) {
-  const head = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-flags', 'low_delay', '-probesize', '32', '-analyzeduration', '0']
+export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0, bufSeconds = 4, lowDelay = true } = {}) {
+  // (-threads here is an input option: it is the decoder's; libx264 picks its own)
+  const decode = lowDelay ? ['-flags', 'low_delay'] : ['-threads', String(DECODE_THREADS)]
+  const head = ['-hide_banner', '-loglevel', 'error', '-nostdin', ...decode, '-probesize', '32', '-analyzeduration', '0']
   const input = ['-f', inCodec === CODEC_H265 ? 'hevc' : 'h264', '-i', 'pipe:0', '-an']
   const tail = ['-fps_mode', 'passthrough', '-flush_packets', '1', '-f', 'h264', 'pipe:1']
   if (encoder === 'h264_vaapi') {
@@ -331,7 +350,8 @@ export class Transcoder {
    *   onFail?: (err: Error) => void, onHardwareFailed?: () => void, log?: (line: string) => void,
    *   spawn?: Function, platform?: string, hasNice?: boolean, hasIonice?: boolean,
    *   setPriority?: Function, now?: () => number, setTimer?: Function, clearTimer?: Function,
-   *   flushIdleMs?: number }} o
+   *   flushIdleMs?: number, lowDelay?: boolean|(() => boolean) }} o
+   *   lowDelay: see ffmpegArgs; a function is asked each time an ffmpeg starts
    */
   constructor({
     inCodec = CODEC_H265,
@@ -340,6 +360,7 @@ export class Transcoder {
     crf = CRF,
     maxKbps = 0,
     bufSeconds = 4,
+    lowDelay = true,
     encoder = keepEvery > 1 || maxWidth > 0 ? 'libx264' : encoderNow(),
     onFrame,
     onFail = () => {},
@@ -354,7 +375,7 @@ export class Transcoder {
     clearTimer = clearTimeout,
     flushIdleMs = FLUSH_IDLE_MS
   } = {}) {
-    Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, bufSeconds, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
+    Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, bufSeconds, lowDelay, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
     this.proc = null
     this.closed = false
     this.times = [] // the times of the frames pushed in and not yet handed back, smallest first
@@ -369,7 +390,10 @@ export class Transcoder {
   }
 
   #start() {
-    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth, crf: this.crf, maxKbps: this.maxKbps, bufSeconds: this.bufSeconds })
+    // asked afresh for every run (each starts at a keyframe after a reset): one session plays forward,
+    // scrubs and plays keyframes only in turn, and only playing forward goes without low_delay
+    const lowDelay = typeof this.lowDelay === 'function' ? Boolean(this.lowDelay()) : this.lowDelay !== false
+    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth, crf: this.crf, maxKbps: this.maxKbps, bufSeconds: this.bufSeconds, lowDelay })
     const { bin, args: full } = niceWrap('ffmpeg', args, { platform: this.platform, hasNice: this.hasNice, hasIonice: this.hasIonice })
     const proc = this.spawn(bin, full, { stdio: ['pipe', 'pipe', 'pipe'] })
     this.proc = proc

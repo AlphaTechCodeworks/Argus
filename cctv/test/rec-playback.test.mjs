@@ -985,9 +985,11 @@ for (const speed of [2, 4]) {
       calls: [], // 'push' and 'end' in the order they came
       resets: 0,
       closes: 0,
+      low: [], // lowDelay as the session answers it at each push (the real one asks when ffmpeg starts)
       push: (ts, isKey, buf) => {
         x.pushed.push(ts)
         x.calls.push('push')
+        x.low.push(typeof o.lowDelay === 'function' ? o.lowDelay() : o.lowDelay)
         o.onFrame(ts, isKey, Buffer.concat([Buffer.from([0xaa]), buf.subarray(0, 4)]))
       },
       endPicture: () => x.calls.push('end'),
@@ -1043,6 +1045,9 @@ for (const speed of [2, 4]) {
     await sleep(50)
     const sc = ws.texts.find((t) => t.type === 'scrub' && t.gen === 1)
     check('a converted scrub: its keyframe is pushed, then the picture is ended, once', J(xs[0].calls.slice(before)) === J(['push', 'end']) && xs[0].pushed.at(-1) === sc?.at, `${xs[0].calls.slice(before).join()} at ${sc?.at}`)
+    // smoothness report, cause 2a: low_delay turns the decoder's frame threads off (one thread,
+    // slower than real time at 4K); frame threads hold pictures back until more arrive, which a scrub never sends
+    check('  low_delay: not while playing forward at 1x, but for the scrub', xs[0].low.length >= 3 && xs[0].low.slice(0, -1).every((v) => v === false) && xs[0].low.at(-1) === true, J(xs[0].low))
     session.close()
   }
   {
@@ -1112,6 +1117,7 @@ for (const speed of [2, 4]) {
     const gap = medianGap(bins)
     check('  at their media time (a keyframe a second at 2x: one every ~500 ms), not in a burst', gap > 350 && gap < 700, `${Math.round(gap)} ms`)
     check('  each keyframe is pushed and then ended at once', xs.length === 1 && J(xs[0].calls.slice(0, 6)) === J(['push', 'end', 'push', 'end', 'push', 'end']), xs[0]?.calls.join())
+    check('  with low_delay (frame threads would hold keyframes back until more arrive)', xs[0].low.length >= 4 && xs[0].low.every((v) => v === true), J(xs[0].low))
     session.close()
   }
   {

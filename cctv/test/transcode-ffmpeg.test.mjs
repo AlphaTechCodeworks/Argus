@@ -7,20 +7,24 @@
 //   - one keyframe from ffmpeg's own test pattern (H.265 at 1080p and 4K, H.264 at 1080p), pushed and
 //     ended: exactly one H.264 picture comes back, with the keyframe's time, and it decodes;
 //   - two scrubs in a row on one converter (a reset between them, as every scrub does);
+//   - playing forward without low_delay (frame threads): every picture out, in order, at most one
+//     held back until the next arrives; the speed with and without it, for the record;
 //   - playback's limits (PLAYBACK_LIMITS): noisy 4K comes out 1920x1080, within the rate cap, and no
 //     picture bigger than the 1 s buffer;
 //   - the whole path: a recorded .h265 file, ServerPlayback with &h265=0, {scrub}: one converted
-//     frame on the socket after {type:'scrub'}, for each of two scrubs.
+//     frame on the socket after {type:'scrub'}, for each of two scrubs, each ffmpeg with low_delay;
+//     played at 1x (no low_delay, every picture) and at 2x (keyframes only, with low_delay, each out
+//     without waiting for the next).
 // ffmpeg runs behind ionice and nice here exactly as in the service. Nothing reaches an NVR.
 //   node cctv/test/transcode-ffmpeg.test.mjs        (on the server copy)
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-xcode-ffmpeg-test-'))
-const { CODEC_H264, CODEC_H265, PLAYBACK_LIMITS, TranscodePool, Transcoder } = await import('../transcode.mjs')
+const { CODEC_H264, CODEC_H265, DECODE_THREADS, PLAYBACK_LIMITS, TranscodePool, Transcoder } = await import('../transcode.mjs')
 const { CODEC, splitUnits } = await import('../rec-reader.mjs')
 const { SegmentWriter } = await import('../segment-writer.mjs')
 const { openRecIndex } = await import('../rec-index.mjs')
@@ -46,11 +50,13 @@ if (!execFileSync('ffmpeg', ['-hide_banner', '-encoders']).toString().includes('
 
 /**
  * Raw Annex B from ffmpeg's test pattern: 10 fps, a keyframe every `gop` frames exactly, no B-frames
- * (the cameras use none: a picture is decoded and shown in the order it arrives).
+ * (the cameras use none: a picture is decoded and shown in the order it arrives), and H.265 without
+ * wavefronts (none of the 45 H.265 cameras here uses them; with them low_delay would still decode on
+ * several threads, and the decoder's speed would not look like the cameras').
  */
 function testVideo({ size, codec = 'h265', frames = 1, gop = 10, rate = 10, noise = false }) {
   const enc = codec === 'h265'
-    ? ['-c:v', 'libx265', '-preset', 'ultrafast', '-x265-params', `log-level=error:keyint=${gop}:min-keyint=${gop}:scenecut=0:open-gop=0:bframes=0`]
+    ? ['-c:v', 'libx265', '-preset', 'ultrafast', '-x265-params', `log-level=error:keyint=${gop}:min-keyint=${gop}:scenecut=0:open-gop=0:bframes=0:wpp=0`]
     : ['-c:v', 'libx264', '-preset', 'ultrafast', '-g', String(gop), '-keyint_min', String(gop), '-sc_threshold', '0', '-bf', '0']
   return execFileSync('ffmpeg', [
     '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `testsrc=size=${size}:rate=${rate}`,
@@ -135,6 +141,53 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
   await sleep(QUIET_MS)
   check(`${label}: ${units.length} pictures pushed (keyframes at 0 and 10), ${units.length} out, each with its own time`, units.length === 20 && frames.length === 20 && frames.every((f, i) => f.ts === T0 + i * 100) && frames[0].isKey && fails.length === 0, `${frames.length} out`)
   t.close()
+}
+
+// ---- playing forward without low_delay (smoothness report, cause 2a) -----------------------------------------
+// low_delay turns the H.265 decoder's frame threads off: one thread, slower than real time at 4K. Without
+// it the decoder runs DECODE_THREADS frame threads, and each thread past the first holds one picture
+// back until more arrive: the pictures still all come out, in order, each with its own time.
+{
+  const clip = testVideo({ size: '640x360', frames: 30, gop: 10 })
+  const units = splitUnits(clip, CODEC.h265).units
+  const { t, frames, fails } = converter(CODEC_H265, { lowDelay: false })
+  units.slice(0, 20).forEach((u, i) => t.push(T0 + i * 100, u.isKey, clip.subarray(u.start, u.end)))
+  t.endPicture()
+  await until(() => frames.length >= 20, 10_000)
+  await sleep(QUIET_MS)
+  const held = 20 - frames.length
+  check(`without low_delay: 20 pictures pushed and ended, at most ${DECODE_THREADS - 1} held back by the decoder's threads`, held >= 0 && held <= DECODE_THREADS - 1 && fails.length === 0, `${frames.length} out`)
+  units.slice(20).forEach((u, i) => t.push(T0 + (20 + i) * 100, u.isKey, clip.subarray(u.start, u.end)))
+  t.endPicture()
+  await until(() => frames.length >= 30 - held, 10_000)
+  await sleep(QUIET_MS)
+  check('  the next pictures release them: every picture out, in order, each with its own time', frames.length >= 30 - held && frames.every((f, i) => f.ts === T0 + i * 100) && frames[0].isKey, `${frames.length} out`)
+  const p = probe(Buffer.concat(frames.map((f) => f.buf)))
+  check('  and they decode', p.codec_name === 'h264' && Number(p.nb_read_frames) === frames.length, J(p))
+  t.close()
+  check('  close kills ffmpeg', t.running === false)
+}
+{
+  // The speed. Grain in every picture makes the decoder the slow part, as it is with the cameras'
+  // 4K; one thread against two should come out near 2x (on real recordings: 23.7 against 43.3 a second).
+  const FPS = 20
+  const clip = testVideo({ size: '3840x2160', frames: 20, gop: 10, rate: FPS, noise: true })
+  const units = splitUnits(clip, CODEC.h265).units
+  const rate = async (lowDelay) => {
+    const { t, frames } = converter(CODEC_H265, { ...PLAYBACK_LIMITS, lowDelay })
+    const t0 = performance.now()
+    units.forEach((u, i) => t.push(T0 + i * 50, u.isKey, clip.subarray(u.start, u.end)))
+    t.endPicture()
+    const want = units.length - (lowDelay ? 0 : DECODE_THREADS - 1)
+    await until(() => frames.length >= want, 60_000)
+    const s = (frames.at(-1).at - t0) / 1000
+    t.close()
+    return { n: frames.length, fps: frames.length / s }
+  }
+  const slow = await rate(true)
+  const fast = await rate(false)
+  info(`noisy 4K H.265 within PLAYBACK_LIMITS: ${slow.fps.toFixed(1)} pictures/s with low_delay, ${fast.fps.toFixed(1)} without (${(fast.fps / slow.fps).toFixed(2)}x)`)
+  check('without low_delay the conversion is clearly faster (at least 1.3x; the margin is for a busy server)', fast.fps >= 1.3 * slow.fps, `${slow.fps.toFixed(1)} -> ${fast.fps.toFixed(1)}`)
 }
 
 // ---- two scrubs in a row: each reset kills ffmpeg, and each keyframe still comes out ----------------------
@@ -227,9 +280,11 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
   const url = new URL(`ws://x/playback?nvr=n1&ch=${CH}&stream=0&start=${T0}&src=auto&h265=0`)
   let xc = null
   const logs = []
+  const spawned = [] // every ffmpeg's arguments, to see which ran with low_delay
+  const spy = (o) => new Transcoder({ ...o, encoder: 'libx264', spawn: (bin, args, opt) => (spawned.push(args.join(' ')), spawn(bin, args, opt)) })
   const session = rp.connectPlayback({
     nvr, ws, url, who: { user: 'admin', admin: true }, index: IDX, legs: null,
-    opts: { pool: new TranscodePool(2), makeTranscoder: (o) => (xc = new Transcoder({ ...o, encoder: 'libx264' })), log: (l) => logs.push(l) }
+    opts: { pool: new TranscodePool(2), makeTranscoder: (o) => (xc = spy(o)), log: (l) => logs.push(l) }
   })
   // straight away, as a drag does: the start is dropped before it has read anything
   const t1 = performance.now()
@@ -251,8 +306,62 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
   const s2 = ws.texts.find((m) => m.type === 'scrub' && m.gen === 2)
   const f2 = after(2) ?? []
   check('a second scrub (the drag goes on): exactly one converted keyframe for gen 2, at its time', Boolean(s2) && f2.length === 1 && f2[0].bin.codec === 0 && f2[0].bin.key && Math.abs(f2[0].bin.tsMs - s2.at) < 0.001, `${J(s2)}, ${f2.length} frames`)
+  check('  each scrub ran its own ffmpeg, with low_delay (frame threads would hold its keyframe back)', spawned.length === 2 && spawned.every((a) => a.includes('-flags low_delay') && !a.includes('-threads')), spawned.join(' | '))
   session.close()
   check('close: the conversion is closed and its ffmpeg killed', session.xcode === null && xc?.running === false)
+
+  /** A playback of the recording from T0, converted (&h265=0), at `speed`: its binary frames with their arrival time. */
+  const play = (speed) => {
+    const sock = { OPEN: 1, readyState: 1, bufferedAmount: 0, bins: [], handlers: {} }
+    sock.send = (m) => {
+      if (typeof m !== 'string') sock.bins.push({ at: performance.now(), key: (m[0] & 1) === 1, codec: m[1], tsMs: Number(m.readBigInt64LE(8)) / 1000, buf: Buffer.from(m.subarray(16)) })
+    }
+    sock.on = (event, fn) => (sock.handlers[event] = fn)
+    sock.close = () => {
+      if (sock.readyState !== 1) return
+      sock.readyState = 3
+      sock.handlers.close?.()
+    }
+    sock.t0 = performance.now()
+    const s = rp.connectPlayback({
+      nvr, ws: sock, url, who: { user: 'admin', admin: true }, index: IDX, legs: null,
+      opts: { pool: new TranscodePool(2), makeTranscoder: spy, log: () => {} }
+    })
+    if (speed !== 1) sock.handlers.message(Buffer.from(J({ speed })), false) // as the page does when the socket opens
+    return { sock, s }
+  }
+  {
+    // 1x: forward, without low_delay; every picture but the last one or two, which wait in ffmpeg for
+    // a next picture that never comes (the footage ends): one in the parser, one in the second thread
+    spawned.length = 0
+    const { sock, s } = play(1)
+    await until(() => sock.bins.length >= units.length - DECODE_THREADS, 15_000)
+    await sleep(QUIET_MS)
+    const bins = sock.bins
+    check('playing converted footage at 1x: every picture but the last one or two, converted, each at its own time, in order', bins.length >= units.length - DECODE_THREADS && bins.every((b, i) => b.codec === 0 && Math.abs(b.tsMs - (T0 + i * 100)) < 1) && bins[0].key, `${bins.length} of ${units.length}: ${bins.slice(0, 3).map((b) => b.tsMs - T0).join()}`)
+    check(`  its ffmpeg ran without low_delay, on ${DECODE_THREADS} decoder threads`, spawned.length === 1 && !spawned[0].includes('low_delay') && spawned[0].includes(`-threads ${DECODE_THREADS} `), spawned.join(' | '))
+    const p = bins.length ? probe(Buffer.concat(bins.map((b) => b.buf))) : {}
+    check('  and it decodes: 1280x720 H.264, every picture sent', p.codec_name === 'h264' && p.width === '1280' && p.height === '720' && Number(p.nb_read_frames) === bins.length, J(p))
+    s.close()
+  }
+  {
+    // 2x (keyframes only while converting, one a second of footage: every 500 ms): with low_delay,
+    // each keyframe ended at once, so none waits for the next one
+    spawned.length = 0
+    const { sock, s } = play(2)
+    await until(() => sock.bins.length >= 3, 10_000)
+    await sleep(QUIET_MS)
+    const keys = sock.bins.slice(0, 3)
+    // (one ffmpeg converts them all, so after the first the encoder codes each as a change from the
+    // one before, as it does for 8x-32x and reverse: the first is the only H.264 keyframe)
+    check('playing converted footage at 2x: the recording\'s keyframes only, converted, each at its own time', keys.length === 3 && keys[0].key && keys.every((b, i) => b.codec === 0 && Math.abs(b.tsMs - (T0 + i * 1000)) < 1), keys.map((b) => `${b.key}@${b.tsMs - T0}`).join())
+    const first = keys[0] ? keys[0].at - sock.t0 : Infinity
+    info(`at 2x the first converted keyframe was out ${Math.round(first)} ms after the start, then every ${keys.slice(1).map((b, i) => Math.round(b.at - keys[i].at)).join(', ')} ms`)
+    // held until the next keyframe it would have come 500 ms later: after a fresh ffmpeg's ~300 ms, about 800 ms
+    check('  not held for the next keyframe: the first one out within 650 ms of the start', first < 650, `${Math.round(first)} ms`)
+    check('  its ffmpeg ran with low_delay', spawned.length >= 1 && spawned[0].includes('-flags low_delay'), spawned.join(' | '))
+    s.close()
+  }
   IDX.close()
 }
 
