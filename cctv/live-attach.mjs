@@ -4,7 +4,8 @@
 // frame rate a remote viewer's link can carry (adaptive-live.mjs), the shared thinned stream for a
 // phone asking for 15 fps (phone-live.mjs), or else the camera's stream itself. A refusal closes it
 // with the code a /live socket has always had; on a channel that is an "end" message, and the page's
-// other tiles carry on.
+// other tiles carry on. One that is let in is tracked (access-watch.mjs) for as long as it is open, so
+// losing the live right to that camera, the account or the session ends it too.
 //
 // Out of server.mjs so the tests can drive every refusal and path (importing server.mjs starts the
 // NVRs); server.mjs hands in what it owns.
@@ -38,12 +39,13 @@ function standIn(nvr, ch, main, { phone, held, clientH265, phoneLive }) {
 
 /**
  * @param {{ can: Function, currentUser: (req: object) => string|null,
- *   adaptiveLive: { attach: Function }, phoneLive: { attach: Function } }} o
- *   can: rights.mjs can; currentUser: the request's signed-in user
+ *   adaptiveLive: { attach: Function }, phoneLive: { attach: Function }, track?: Function }} o
+ *   can: rights.mjs can; currentUser: the request's signed-in user; track: access-watch.mjs's, which
+ *   asks the live right again while the socket or channel is open
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
  *   clientH265: boolean, phone15: boolean }) => void} attachLive
  */
-export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive }) {
+export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track = () => {} }) {
   return function attachLive(ws, req, { nvr, who, ch, streamType, clientH265, phone15 }) {
     if (!can(who, 'live', { nvr: nvr.id, ch })) return ws.close(1008, 'not allowed')
     // live video: with a live worker, the worker's own login decides (it polls the camera list)
@@ -55,6 +57,10 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive }) {
       ws.close(1008, 'bad channel or stream')
       return
     }
+    // let in: the same question again for as long as it is open, from the session as it is then.
+    // Every path below (sub-bridge, adaptive, phone, the stream itself) ends with this socket or
+    // channel closing, which is how it leaves the watch.
+    track(ws, req, { actions: ['live'], nvr: nvr.id, ch })
     const stream = nvr.getStream(ch, streamType)
     const remote = isRemoteAddress(req.socket.remoteAddress)
     const phone = !remote && phone15 && isPhoneRequest(req.headers)

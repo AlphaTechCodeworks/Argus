@@ -27,6 +27,7 @@ import {
   prerollUntil,
   qualityForCam,
   recordedFrom,
+  refusedMessage,
   scrubTimeoutMs,
   serverFailed,
   shift,
@@ -283,6 +284,13 @@ check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any
   check('serverFailed: a failed server playback (1011 "playback failed", rec-playback.mjs #fail)', serverFailed(1011, 'playback failed'))
   check('  not the NVR being busy, nor a viewer or the page closing it', !serverFailed(1013, 'NVR offline') && !serverFailed(1000, '') && !serverFailed(1001, '') && !serverFailed(1005, ''))
   check('  nor the refusals the viewer can do nothing about by switching (a converter full, no recordings)', !serverFailed(1011, 'transcode busy') && !serverFailed(1011, 'server recordings not available'))
+  // a playback closed 1008 by the server (access-watch.mjs: the camera taken away or the session
+  // signed out while it played, or refused at the start) says so, instead of stopping without a word
+  check('refusedMessage: "not allowed" says the camera may not be played back', /not allowed to play back this camera/.test(refusedMessage(1008, 'not allowed') ?? ''))
+  check('  "signed out" says so', /signed out/.test(refusedMessage(1008, 'signed out') ?? ''))
+  check('  nothing for any other close', refusedMessage(1011, 'playback failed') === null && refusedMessage(1013, 'NVR offline') === null && refusedMessage(1000, '') === null && refusedMessage(1008, 'bad parameters') === null)
+  const pageSrc = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8')
+  check('  playback.js shows it for NVR and server playback sockets alike', (pageSrc.match(/const refused = refusedMessage\(e\.code, e\.reason\)\n\s*if \(e\.code === 1013\)[^\n]*\n\s*else if \(refused\) showMessage\(refused\)/g) ?? []).length === 2)
   const list = [{ s: 0, e: 100, src: 'server' }, { s: 100, e: 200, src: 'nvr' }, { s: 200, e: 300, src: 'server' }]
   check('watchesStart: a start in the server\'s own footage is watched (its files are read)', watchesStart(list, 50) && watchesStart(list, 250))
   check('  one in a stretch only the NVR has is not: that is the NVR\'s own start, sometimes 10 s slow', !watchesStart(list, 150))

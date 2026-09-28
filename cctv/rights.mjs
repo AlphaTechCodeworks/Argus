@@ -180,12 +180,28 @@ export function migrateRights() {
   return store
 }
 
+// Told after every write of rights.json. server.mjs hands in access-watch.mjs's sweep: a camera taken
+// away must also end the sockets already showing it, not only refuse the next one.
+const savedHooks = new Set()
+/** @returns {() => void} unsubscribes */
+export function onRightsSaved(fn) {
+  savedHooks.add(fn)
+  return () => savedHooks.delete(fn)
+}
+
 function writeStore(store) {
   mkdirSync(dirname(RIGHTS_FILE), { recursive: true })
   const tmp = `${RIGHTS_FILE}.tmp-${process.pid}`
   writeFileSync(tmp, `${JSON.stringify(store, null, 1)}\n`, { mode: 0o600 })
   renameSync(tmp, RIGHTS_FILE)
   rightsCache.forget()
+  for (const fn of savedHooks) {
+    try {
+      fn()
+    } catch (e) {
+      console.error(`[rights] a listener for saved rights failed: ${e.message}`)
+    }
+  }
 }
 
 /** The stored rows of accounts that exist, in a fresh null-prototype object (never the cached one). */

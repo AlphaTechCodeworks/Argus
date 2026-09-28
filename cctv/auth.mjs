@@ -1,8 +1,9 @@
 // Viewer accounts and sessions.
 // Users live in data/users.json as scrypt hashes (manage with cctv/adduser.mjs).
-// Sessions are stateless signed cookies: base64url(user).expiry.hmac
+// Sessions are stateless signed cookies: base64url(user).expiry.hmac. A signed-out one is remembered
+// (revokeSession) until it would have run out anyway, so the token is refused wherever it still is.
 import { createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileCache } from './file-cache.mjs'
@@ -50,10 +51,30 @@ export const isAdmin = (user) => {
   return Object.hasOwn(users, user) && users[user]?.role === 'admin'
 }
 
+// Told after users.json is saved and after a session is signed out. server.mjs hands in
+// access-watch.mjs's sweep: a removed account, a changed role or a signed-out session must also end
+// the video sockets already open with it, not only refuse the next request.
+const changedHooks = new Set()
+/** @returns {() => void} unsubscribes */
+export const onUsersChanged = (fn) => {
+  changedHooks.add(fn)
+  return () => changedHooks.delete(fn)
+}
+const usersChanged = () => {
+  for (const fn of changedHooks) {
+    try {
+      fn()
+    } catch (e) {
+      console.error(`[auth] a listener for changed accounts failed: ${e.message}`)
+    }
+  }
+}
+
 export const saveUsers = (users) => {
   ensureDir(USERS_FILE)
   writeFileSync(USERS_FILE, `${JSON.stringify(users, null, 2)}\n`, { mode: 0o600 })
   usersCache.forget()
+  usersChanged()
 }
 
 export const hashPassword = async (password) => {
@@ -96,6 +117,7 @@ export const verifySession = (token) => {
   const expected = Buffer.from(sign(payload))
   if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) return null
   if (Number(parts[1]) < Date.now()) return null
+  if (revokedSessions().has(parts[2])) return null // signed out (revokeSession)
   const user = Buffer.from(parts[0], 'base64url').toString()
   const users = loadUsers()
   // hasOwn, not `in`: `'constructor' in {}` is true, and a name that resolves through
@@ -108,6 +130,50 @@ export const verifySession = (token) => {
   const since = users[user]?.since
   if (Number.isFinite(since) && Number(parts[1]) - SESSION_TTL_MS < since) return null
   return user
+}
+
+// Signed-out sessions. A session is a signed cookie the server keeps no record of, so signing out
+// only cleared the cookie in that one browser: the token itself stayed good until it ran out (7
+// days), and a page still open with it kept its video sockets and could open more. Its signature is
+// kept here with the time it would have run out anyway, and verifySession refuses it. Written 0600
+// by temp-file-and-rename, read once: only this process signs sessions out.
+const REVOKED_FILE = join(DATA_DIR, 'revoked-sessions.json')
+let revoked = null // signature -> expiry (ms)
+const revokedSessions = () => {
+  if (revoked) return revoked
+  revoked = new Map()
+  if (!existsSync(REVOKED_FILE)) return revoked
+  try {
+    const raw = JSON.parse(readFileSync(REVOKED_FILE, 'utf8'))
+    for (const [sig, exp] of Object.entries(raw && typeof raw === 'object' ? raw : {})) if (Number.isFinite(exp) && exp >= Date.now()) revoked.set(sig, exp)
+  } catch (e) {
+    console.error(`[auth] ${REVOKED_FILE} is unreadable (${e.message}); sessions signed out before now are good again until they run out`)
+  }
+  return revoked
+}
+
+/**
+ * Signs one session out for good: verifySession refuses its token from now on, wherever it is (a
+ * page still open with it, a copy of the cookie), not only in the browser whose cookie is cleared.
+ * @returns {boolean} whether there was a session to sign out (junk never reaches the file)
+ */
+export const revokeSession = (token) => {
+  if (verifySession(token) === null) return false
+  const [, expiry, sig] = token.split('.')
+  const list = revokedSessions()
+  const now = Date.now()
+  for (const [s, exp] of list) if (exp < now) list.delete(s) // run out anyway: refused without the list
+  list.set(sig, Number(expiry))
+  try {
+    ensureDir(REVOKED_FILE)
+    const tmp = `${REVOKED_FILE}.tmp-${process.pid}`
+    writeFileSync(tmp, `${JSON.stringify(Object.fromEntries(list))}\n`, { mode: 0o600 })
+    renameSync(tmp, REVOKED_FILE)
+  } catch (e) {
+    console.error(`[auth] could not write ${REVOKED_FILE} (${e.message}); that session is signed out until the server restarts`)
+  }
+  usersChanged()
+  return true
 }
 
 // A cookie value that is not valid percent-encoding ("cctv_session=%") made decodeURIComponent

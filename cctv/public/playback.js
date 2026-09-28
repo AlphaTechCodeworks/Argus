@@ -37,6 +37,7 @@ import {
   prerollUntil,
   qualityForCam,
   recordedFrom as stretchFrom,
+  refusedMessage,
   scrubTimeoutMs,
   serverFailed,
   shift,
@@ -629,7 +630,10 @@ function open(start) {
   sock.onclose = (e) => {
     if (ws !== sock) return
     ws = null
+    // the camera taken away or the session signed out while it played (access-watch.mjs)
+    const refused = refusedMessage(e.code, e.reason)
     if (e.code === 1013) showMessage('The NVR is busy with other playbacks. Try again in a moment.')
+    else if (refused) showMessage(refused)
   }
   ws = sock
 }
@@ -800,7 +804,10 @@ function openServer(start) {
     if (ws !== sock) return
     settleStart(sock)
     ws = null
+    // the camera taken away or the session signed out while it played (access-watch.mjs)
+    const refused = refusedMessage(e.code, e.reason)
     if (e.code === 1013) showMessage('The NVR is busy with other playbacks. Try again in a moment.')
+    else if (refused) showMessage(refused)
     // a failed server playback (the share down, say): the NVR's copy, once per camera, with the
     // server's own message ({type:'error'}, just before this) as the notice's reason
     else if (serverFailed(e.code, e.reason)) fallBackToNvr(sock, (sock.error ?? 'Server playback failed').replace(/[.\s]+$/, ''))

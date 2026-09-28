@@ -179,6 +179,18 @@ export function serverFailed(code, reason) {
 }
 
 /**
+ * What to tell the viewer when the server closes a playback socket 1008: the camera was taken away
+ * from them or their session was signed out while it played (access-watch.mjs), or it was refused at
+ * the start. Neither is helped by the NVR's copy or by trying again. null for any other close.
+ */
+export function refusedMessage(code, reason) {
+  if (code !== 1008) return null
+  if (reason === 'signed out') return 'You have been signed out. Sign in again to carry on.'
+  if (reason === 'not allowed') return 'You are not allowed to play back this camera. An admin can give you access.'
+  return null
+}
+
+/**
  * Whether a start or seek at t is watched for SERVER_START_TIMEOUT_MS: yes when it reads the server's
  * files. A stretch only the NVR has (src 'nvr') is played by the NVR's own session, whose start can
  * take 10 s on a good day and has its own failure path (rec-playback.mjs #legDone); it is not the share.

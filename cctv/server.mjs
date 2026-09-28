@@ -47,6 +47,8 @@
 //                                 person their own while their export right covers it, an admin
 //                                 every one); see export-api.mjs and export-job.mjs
 //   WS   /motion?nvr=ID&...    -> motion search inside a box, see motion.mjs
+//   (every video socket and /live-mux channel is asked its rights again while it is open, and
+//    closed 1008 once refused or signed out: see access-watch.mjs)
 //   GET  /api/events/:id/snapshot -> an event's picture (JPEG), for users who may play that
 //                                 camera back, see event-snapshot.mjs
 //
@@ -110,6 +112,7 @@ import { timelineApi } from './rec-api.mjs'
 import { downloadExport, handleExports } from './export-api.mjs'
 import { listExports } from './export-job.mjs'
 import { connectPlayback } from './rec-playback.mjs'
+import { accessWatch } from './access-watch.mjs'
 import { vpnView } from './vpn.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
 import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
@@ -118,7 +121,7 @@ import { probeTarget, tcpReachable } from './probe.mjs'
 import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
-import { can, canPlayAnyOn, handleRights, sitesFor } from './rights.mjs'
+import { can, canPlayAnyOn, handleRights, onRightsSaved, sitesFor } from './rights.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
@@ -567,6 +570,10 @@ const handleRequest = async (req, res) => {
     // Read before the cookie is cleared, or there is nobody to name in the entry.
     const leaving = currentUser(req)
     if (leaving) audit(auth.DATA_DIR, { user: leaving, action: 'logout', ip: clientIp(req) })
+    // Clearing the cookie signs out this browser only: the token would stay good for its 7 days, and a
+    // page still open with it would keep its video and could open more. Revoked, it is refused from
+    // now on, and the sockets it opened are closed (auth.mjs revokeSession, access-watch.mjs).
+    auth.revokeSession(auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME])
     return sendJson(res, 200, { ok: true }, { 'set-cookie': auth.clearCookie() })
   }
   if (PUBLIC_PATHS.has(pathname)) return serveFile(res, pathname, req)
@@ -934,6 +941,12 @@ const muxWss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYT
 // ping every 15 s; a socket that misses a pong is terminated (backpressure.mjs)
 keepAlive(wss)
 keepAlive(muxWss)
+// Every open video socket and mux channel is asked again while it is open (access-watch.mjs): soon
+// after rights or accounts are saved or a session is signed out, and every SWEEP_MS. A camera taken
+// away, an account removed or a sign-out ends what is already showing, not only the next one.
+const watch = accessWatch({ currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), can })
+onRightsSaved(watch.sweepSoon)
+auth.onUsersChanged(watch.sweepSoon)
 const onConnection = (ws, req) => {
   // A frame ws cannot parse (a text frame with invalid UTF-8, a bad opcode) is an 'error' event on
   // the socket, which then closes; with no listener Node treats it as unhandled and exits: one
@@ -949,7 +962,8 @@ const onConnection = (ws, req) => {
       attach: (channel, sub, user) => {
         const nvr = nvrs.get(sub.nvr)
         if (!nvr) return channel.close(1013, 'unknown NVR')
-        // the rights as they are now, on every "sub": a changed role counts from the next tile
+        // the rights as they are now, on every "sub"; a channel let in is watched while it is open
+        // (attachLive tracks it), so a change also ends the tiles already playing
         const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
         attachLive(channel, req, { nvr, who, ch: sub.ch, streamType: sub.stream, clientH265: sub.h265, phone15: sub.fps === 15 })
       }
@@ -969,7 +983,12 @@ const onConnection = (ws, req) => {
     // sessions only (server playback runs without the NVR), see rec-playback.mjs. Either playback
     // right opens the socket; connectPlayback asks the right of the source it serves.
     if (!can(who, 'playback-server', target) && !can(who, 'playback-nvr', target)) return ws.close(1008, 'not allowed')
-    connectPlayback({ nvr, ws, url, who, index: recIndex() })
+    const session = connectPlayback({ nvr, ws, url, who, index: recIndex() })
+    // ...and for as long as it is open, the rights of what it plays (access-watch.mjs): the NVR's
+    // recordings, or the server's and, when its gaps are filled from the NVR, the NVR's as well. A
+    // socket connectPlayback refused is closing already and is not tracked.
+    const auto = url.searchParams.get('src') === 'auto'
+    watch.track(ws, req, { actions: !auto ? ['playback-nvr'] : session?.legs ? ['playback-server', 'playback-nvr'] : ['playback-server'], nvr: nvr.id, ch: target.ch })
     return
   }
   if (url.pathname === '/motion') {
@@ -977,6 +996,8 @@ const onConnection = (ws, req) => {
     // right as playing them back from the NVR
     if (!can(who, 'playback-nvr', target)) return ws.close(1008, 'not allowed')
     if (!nvr.online) return ws.close(1013, 'NVR offline')
+    // ...and while the search runs (access-watch.mjs)
+    watch.track(ws, req, { actions: ['playback-nvr'], nvr: nvr.id, ch: target.ch })
     motionScan(nvr, ws, url)
     return
   }
@@ -1009,7 +1030,7 @@ startWarmStreams({
 })
 const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on conversions for phones and remote viewers together
 // one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs)
-const attachLive = liveAttacher({ can, currentUser, adaptiveLive, phoneLive })
+const attachLive = liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track: watch.track })
 
 // This listener is synchronous and nothing above it catches: anything that throws here takes the
 // whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27

@@ -704,6 +704,19 @@ const fanOut = (c, buf, isKey, type, now) => {
   const m = setup({ attach: (channel, s) => attachLive(channel, req(), { nvr: off, who, ch: s.ch, streamType: s.stream, clientH265: s.h265, phone15: s.fps === 15 }) })
   m.ws.msg(sub(5))
   check('... on a channel, NVR offline is "end" 1013 for that id, the socket stays', JSON.stringify(m.ws.texts()) === '[{"op":"end","id":5,"code":1013,"reason":"NVR offline"}]' && m.ws.readyState === 1)
+  // the watch (access-watch.mjs): one let in is tracked for the live right on its camera, with its own
+  // request (the session asked again later); a refused one never is
+  const tracked = []
+  const watched = liveAttacher({ can: () => allowed, currentUser: () => 'ann', adaptiveLive: adaptive, phoneLive: phone, track: (w, r, what) => tracked.push({ w, r, what }) })
+  allowed = false
+  watched(fakeWs(), req(), { ...base, nvr: mkNvr() })
+  allowed = true
+  watched(fakeWs(), req(), { ...base, nvr: mkNvr({ online: false }) })
+  watched(fakeWs(), req(), { ...base, nvr: mkNvr(), ch: -1 })
+  const inWs = fakeWs()
+  const inReq = req()
+  watched(inWs, inReq, { ...base, nvr: mkNvr() })
+  check('... let in: tracked with the live right on its camera and its own request; refused (rights, offline, bad channel): not', tracked.length === 1 && tracked[0].w === inWs && tracked[0].r === inReq && JSON.stringify(tracked[0].what) === '{"actions":["live"],"nvr":"n1","ch":3}', JSON.stringify(tracked.map((t) => t.what)))
 }
 
 // ---- live-attach.mjs: a sub-stream held at the NVR's sub-stream limit (value4u: 15, sub-cap.mjs) ----
@@ -779,7 +792,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('... pinged like the others, with the same connection handler', /keepAlive\(muxWss\)/.test(src) && /wss\.on\('connection', onConnection\)/.test(src) && /muxWss\.on\('connection', onConnection\)/.test(src))
   const conn = src.slice(src.indexOf('const onConnection'))
   check('/live-mux is served right after meterSocket, before the NVR lookup', /meterSocket\(ws, [^)]*\)\n[\s\S]*?if \(url\.pathname === '\/live-mux'\) \{\n\s*serveMux\(ws,/.test(conn) && conn.indexOf("'/live-mux'") < conn.indexOf('nvrs.get('))
-  check('/live and every mux channel go through the same attachLive (live-attach.mjs)', (src.match(/attachLive\((ws|channel), req,/g) ?? []).length === 2 && /const attachLive = liveAttacher\(\{ can, currentUser, adaptiveLive, phoneLive \}\)/.test(src) && !/function attachLive/.test(src))
+  check('/live and every mux channel go through the same attachLive (live-attach.mjs)', (src.match(/attachLive\((ws|channel), req,/g) ?? []).length === 2 && /const attachLive = liveAttacher\(\{ can, currentUser, adaptiveLive, phoneLive, track: watch\.track \}\)/.test(src) && !/function attachLive/.test(src))
   check('the session is checked again for each sub', /session: \(\) => currentUser\(req\)/.test(src))
 }
 
