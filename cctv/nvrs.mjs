@@ -20,7 +20,7 @@ import { LiveStream } from './live.mjs'
 import { createPlayback } from './playback.mjs'
 import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastError, lateCalls, nvrCooling, sdkCallT, sdkStuck } from './sdk.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
-import { xmlSettled } from './nvr-xml.mjs'
+import { XML_HEADER, transparent, xmlSettled } from './nvr-xml.mjs'
 import { startWorker } from './worker-supervisor.mjs'
 import { openRecIndex } from './rec-index.mjs'
 import { createWarmer } from './rec-cache.mjs'
@@ -1066,16 +1066,39 @@ async function startEvents() {
     linkOf: (row) => eventLink(row.id)
   })
 
+  // A line crossing the recorded-file intake finds itself (record bits 0x80/0x400) gets the same
+  // automatic bookmark and snapshot as one the alarm watch saw first (line-actions.mjs onLineCrossing
+  // ignores every other event type, so it is safe to call for every event this intake reports). Loaded
+  // non-fatally, like eventLink above: without it the intake still stores and alerts the crossing,
+  // only without a bookmark or a picture.
+  const onLineCrossing = await import('./line-actions.mjs').then((m) => m.onLineCrossing, (e) => {
+    console.warn(`[lines] recorded crossings get no automatic bookmark or snapshot: ${e.message}`)
+    return null
+  })
+  const nameOf = (key) => allCameras().find((c) => `${c.nvr}/${c.ch}` === key)?.name ?? key
+  const snapshot = (event) => {
+    const index = recIndex()
+    // no recordings index here (no live worker, or it could not be opened): nothing to take a picture from
+    return index ? import('./event-snapshot.mjs').then(({ takeSnapshot }) => takeSnapshot(event, { index }), () => null) : Promise.resolve(null)
+  }
+
   eventIntake = makeEventIntake({
     listNvrs: () => [...nvrs.values()],
     camerasOf: (nvr) => nvr.channels.filter((c) => c.configured !== false),
     recordings: (nvr, ch, date) => nvr.playback.recordings(ch, date),
     clock: (nvr) => nvr.playback.clock(),
-    onEvent: (event) => void notifier.handle(event).catch((e) => console.warn(`[alarms] ${e.message}`)),
+    onEvent: (event) => {
+      void notifier.handle(event).catch((e) => console.warn(`[alarms] ${e.message}`))
+      if (onLineCrossing) void onLineCrossing(event, { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
+    },
     log: console.warn,
     // any overdue call, for any NVR: the SDK runs one call at a time for all of them
     sdkBusy: () => lateCalls() > 0
   })
+
+  // Line crossings within seconds. Started on its own and never fatal: if the watcher or a module it
+  // needs cannot load, the recorded-file intake above still finds the crossings, only later.
+  startLineWatch(notifier).catch((e) => console.warn(`[alarm-watch] not started: ${e.message}`))
 
   const every = (ms, fn) => {
     const t = setInterval(() => {
@@ -1103,6 +1126,43 @@ async function startEvents() {
         nowMs: Date.now()
       }))
     }
+  })
+}
+
+// ---- line crossings (alarm-watch.mjs) --------------------------------------------------------------
+//
+// The cameras' own line-crossing alarms, read from each NVR's live alarm list every 5 s, and only on
+// NVRs where an admin has switched lines on (tripwire.mjs lines-on.json). A new crossing is stored like
+// any other event, goes through the same rules and notifier as the recorded-file intake's new events
+// (onEvent above), and then gets its automatic bookmark and snapshot (line-actions.mjs).
+async function startLineWatch(notifier) {
+  const [{ crossingHandler, startAlarmWatch }, { linesOn }, { onLineCrossing }, { takeSnapshot }, { addEvent }] = await Promise.all([
+    import('./alarm-watch.mjs'), import('./tripwire.mjs'), import('./line-actions.mjs'), import('./event-snapshot.mjs'), import('./events-db.mjs')
+  ])
+  // readerFor is left to event-snapshot.mjs: its default opens the reader (SegmentReader.open()), which
+  // reads the .idx; an unopened reader has no keyframe times and no picture would ever be taken
+  const snapshot = (event) => {
+    const index = recIndex()
+    // no recordings index here (no live worker, or it could not be opened): nothing to take a picture from
+    return index ? takeSnapshot(event, { index }) : Promise.resolve(null)
+  }
+  const nameOf = (key) => allCameras().find((c) => `${c.nvr}/${c.ch}` === key)?.name ?? key
+  startAlarmWatch({
+    nvrs: () => nvrs.values(),
+    linesOn,
+    // a read with nothing to say: the XML queue, the read breaker and the busy refusals all apply to it
+    query: (nvr) => transparent(nvr, 'queryAlarmStatus', `${XML_HEADER}</request>`, 'alarm watch'),
+    onCrossing: crossingHandler({
+      addEvent,
+      handle: (event) => {
+        void notifier.handle(event).catch((e) => console.warn(`[alarms] ${e.message}`))
+        void onLineCrossing(event, { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
+      },
+      grew: (event) => void onLineCrossing(event, { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
+    }),
+    log: console.warn,
+    // any overdue call, for any NVR: a question now would only queue behind it (as for the intake)
+    sdkBusy: () => lateCalls() > 0
   })
 }
 
