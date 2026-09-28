@@ -20,6 +20,12 @@ const GRACE_MS = 3 * 60_000
 const HISTORY_DAYS = 30
 const HISTORY_SHOWN_DAYS = 7
 const PRUNE_MS = 6 * 60 * 60_000
+// health() shows the newest snapshot, whoever built it (the check above or an earlier poll), while it
+// is younger than this. Building one reads every camera's last recording from the index on the main
+// thread, which also paces every playback; the banner on every page polls every 30 s and the Health
+// page every 2 s, and a snapshot per poll was the main-thread time that froze playback. The Health
+// page still moves within seconds.
+const SNAPSHOT_REUSE_MS = 5000
 
 /** Errors that mean the NVR rejected who we are, rather than that we could not reach it. */
 const LOGIN_ERROR = /password|user ?name|locked|denied|credential/i
@@ -102,7 +108,7 @@ export function startAlerts(deps) {
   })
 
   let last = { open: [], snapshot: null }
-  const fresh = { snap: null, snapAt: 0, history: null, historyAt: 0 } // health(): what the page is shown between alert checks
+  const fresh = { snap: null, snapAt: 0, history: null, historyAt: 0 } // health(): the newest snapshot (the check's or a poll's) and history
   let timer = null
   let pruneTimer = null
 
@@ -127,6 +133,9 @@ export function startAlerts(deps) {
       log(`[alerts] could not read the state: ${e.message}`)
       return
     }
+    // the Health page and the banners are shown this one until it is SNAPSHOT_REUSE_MS old
+    fresh.snap = snap
+    fresh.snapAt = t
     try {
       const { opened, cleared, open } = engine.step(snap, t)
       last = { open, snapshot: snap }
@@ -171,10 +180,10 @@ export function startAlerts(deps) {
      * because the page is served to every signed-in user, not only admins.
      */
     health() {
-      // Health updates live (every 2 s): the state is rebuilt when it is over 2 s old -- it only
-      // reads what is in memory -- rather than waiting for the next alert check. The history file is
-      // re-read at most every 30 s.
-      if (!fresh.snap || now() - fresh.snapAt > 2000) {
+      // Health updates live (every 2 s), but the state is only rebuilt once the newest snapshot (the
+      // alert check's or an earlier poll's) is SNAPSHOT_REUSE_MS old, rather than waiting for the next
+      // alert check or rebuilding for every poll. The history file is re-read at most every 30 s.
+      if (!fresh.snap || now() - fresh.snapAt >= SNAPSHOT_REUSE_MS) {
         fresh.snap = buildSnapshot(deps, now())
         fresh.snapAt = now()
       }
