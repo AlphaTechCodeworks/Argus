@@ -192,13 +192,16 @@ const RULE = /^\/api\/alarms\/rules\/(\d+)$/
  * @param {string} method
  * @param {string} pathname   with or without its query string
  * @param {() => Promise<object>} readJson
- * @param {{user?: string, admin?: boolean, cameras?: Function, now?: number}} deps
+ * @param {{user?: string, admin?: boolean, cameras?: Function, now?: number, canSee?: Function}} deps
+ *   canSee: which cameras this person may watch or play back (rights.mjs, via server.mjs); left out
+ *   (not passed at all, as opposed to admin, which is its own explicit flag): nothing is seen, never
+ *   everything — a caller that forgot the hook must not hand a viewer every camera's alarms (FAIL CLOSED)
  * @returns {Promise<[number, object, object?] | null>}
  */
 export async function handleAlarms(method, pathname, readJson, deps = {}) {
   const [path, search = ''] = String(pathname ?? '').split('?')
   if (!path.startsWith('/api/alarms')) return null
-  const { user = null, admin = false, cameras = () => [], now = Date.now(), canSee = () => true } = deps
+  const { user = null, admin = false, cameras = () => [], now = Date.now(), canSee = () => false } = deps
   // an alarm on a camera this user may not see does not exist for them (rights.mjs, via server.mjs)
   const visible = (row) => Boolean(row) && canSee(row.nvr, row.ch)
   // A rule names cameras. One about cameras this user may not see is not theirs to read: it says

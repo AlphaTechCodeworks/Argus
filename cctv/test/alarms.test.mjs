@@ -6,7 +6,7 @@
 // Temp data folder only; no NVR, no SDK, no network, and the notifier is given a fake sender so
 // nothing is delivered anywhere.
 //   node cctv/test/alarms.test.mjs
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -284,7 +284,9 @@ const json = (o) => async () => o
 
 // --- the routes --------------------------------------------------------------------------------------
 {
-  const who = { user: 'alice', admin: true, cameras: () => [{ nvr: 'nvr1', ch: 0, name: 'Gate' }], now: T0 + 200 * MIN }
+  // canSee is explicit here too, as server.mjs's real one always is (and, for an admin, always
+  // true): the fail-closed default below must never be what stands in for "an admin sees everything".
+  const who = { user: 'alice', admin: true, cameras: () => [{ nvr: 'nvr1', ch: 0, name: 'Gate' }], now: T0 + 200 * MIN, canSee: () => true }
   check('a path that is not ours is not ours', (await handleAlarms('GET', '/api/health', json({}), who)) === null)
   const anon = await handleAlarms('GET', '/api/alarms', json({}), { user: null })
   check('signed out is a 401', anon[0] === 401)
@@ -355,6 +357,29 @@ const json = (o) => async () => o
   check('no camera key the viewer may not see appears anywhere', !JSON.stringify(seen).includes('rigginglot'))
   check('an admin still sees the whole rule', (await handleAlarms('GET', `/api/alarms/rules/${mixed[1].rule.id}`, json({}), who))[1].rule.cameras.length === 2)
   for (const r of [hidden, mixed, anyCam]) await handleAlarms('DELETE', `/api/alarms/rules/${r[1].rule.id}`, json({}), who)
+
+  // FAIL CLOSED: a caller that forgets the canSee hook entirely (left out of deps, not passed as
+  // () => true) must get nothing for a non-admin, never every camera's alarms and rules.
+  const forgot = { user: 'carol', admin: false, cameras: () => [] } // no canSee at all
+  const noneDefault = await handleAlarms('GET', '/api/alarms?from=0', json({}), forgot)
+  check('a forgotten canSee hook: a non-admin sees no alarms, not all of them', noneDefault[0] === 200 && noneDefault[1].alarms.length === 0, `${noneDefault[1].alarms?.length}`)
+  check('...nor acknowledged, opened as a clip or bookmarked by id (404, as if absent)', (await handleAlarms('POST', `/api/alarms/${someId}/ack`, json({ note: 'x' }), forgot))[0] === 404 && (await handleAlarms('GET', `/api/alarms/${someId}/clip`, json({}), forgot))[0] === 404)
+  const onCam = await handleAlarms('POST', '/api/alarms/rules', json({ name: 'Gate rule', cameras: ['nvr1/0'], types: ['motion'] }), who)
+  const anyCam2 = await handleAlarms('POST', '/api/alarms/rules', json({ name: 'Any camera rule', types: ['motion'] }), who)
+  const rulesForgot = (await handleAlarms('GET', '/api/alarms/rules', json({}), forgot))[1].rules
+  check('a forgotten canSee hook: a rule naming a camera is hidden, not shown as if any camera', !rulesForgot.some((r) => r.id === onCam[1].rule.id))
+  check('...a rule naming no camera at all is still listed (it names none to hide)', rulesForgot.some((r) => r.id === anyCam2[1].rule.id))
+  for (const r of [onCam, anyCam2]) await handleAlarms('DELETE', `/api/alarms/rules/${r[1].rule.id}`, json({}), who)
+}
+
+// source-shape: server.mjs always hands handleAlarms a canSee (the same one events, bookmarks and
+// maps get), rather than leaving it out and falling on the fail-closed default
+{
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  check(
+    'server.mjs passes handleAlarms a canSee hook',
+    /handleAlarms\(req\.method, pathname \+ url\.search, \(\) => readJsonObject\(req, 8192\), \{ user, admin: who\.admin, cameras: allCameras, canSee \}\)/.test(server)
+  )
 }
 
 // --- the page's pure view code --------------------------------------------------------------------------

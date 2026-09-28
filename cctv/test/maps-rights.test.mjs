@@ -2,7 +2,7 @@
 // camera is and what it covers, so its blind spots too: a viewer limited to one site used to get
 // every site's placements and every floor plan. Pure: a temp data folder, no NVR, no SDK.
 //   node cctv/test/maps-rights.test.mjs
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -75,6 +75,25 @@ const viewer = { canSee: (nvr) => nvr === 'solus', siteVisible: (s) => s === 'IT
   check('...and no plan', get(`/api/maps/plan/${PLAN_A}`, none).status === 404 && get(`/api/maps/plan/${PLAN_B}`, none).status === 404)
 }
 check('an unknown plan is still 404 for an admin', get('/api/maps/plan/cccccccccccccccc.jpg', null).status === 404)
+
+// FAIL CLOSED: a caller that forgets the view hook entirely (the 5th argument left out, not an
+// explicit null) must get nothing, never every site as an admin would. Admin is only ever the
+// explicit null server.mjs passes for who.admin.
+{
+  const forgot = get('/api/maps') // view left undefined, as a caller who forgot the hook would
+  check('a forgotten view hook: no sites, not every site', JSON.stringify(forgot.body) === '{"sites":{}}', JSON.stringify(forgot.body))
+  check('...and no plan either', get(`/api/maps/plan/${PLAN_A}`).status === 404 && get(`/api/maps/plan/${PLAN_B}`).status === 404)
+}
+
+// source-shape: server.mjs always hands handleMapsRead an explicit view (null for who.admin, the
+// rights hook otherwise) rather than leaving the argument out and falling on the fail-closed default
+{
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  check(
+    'server.mjs passes handleMapsRead an explicit view (who.admin ? null : { canSee, siteVisible })',
+    /handleMapsRead\(pathname, res, sendJson, SECURITY_HEADERS, who\.admin \? null : \{ canSee, siteVisible \}\)/.test(server)
+  )
+}
 
 rmSync(DATA, { recursive: true, force: true })
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

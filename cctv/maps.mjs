@@ -174,12 +174,19 @@ export const mapsFor = (maps, view) => {
   return { sites }
 }
 
+// The default when a caller forgets to pass a view at all (a missing 5th argument, not an explicit
+// null): deny every site and placement, never "treat them as an admin". An admin is only ever the
+// explicit `null` server.mjs passes for who.admin — never what you get by omission (FAIL CLOSED).
+const DENY_ALL_VIEW = { canSee: () => false, siteVisible: () => false }
+
 /**
  * Serves GET /api/maps and GET /api/maps/plan/<file>. Returns false if the path is not a maps path.
  * @param {(res, status, data) => void} sendJson
  * @param {Parameters<typeof mapsFor>[1]} [view] what this user may see (mapsFor); null for an admin
+ *   (an explicit choice server.mjs makes from who.admin); a caller that leaves this out entirely
+ *   gets DENY_ALL_VIEW, not an admin's view
  */
-export function handleMapsRead(pathname, res, sendJson, headers, view = null) {
+export function handleMapsRead(pathname, res, sendJson, headers, view = DENY_ALL_VIEW) {
   if (pathname === '/api/maps') {
     try {
       sendJson(res, 200, mapsFor(readMaps(), view))
