@@ -393,6 +393,24 @@ const S = 1000
   const rows = eventsOfCamera('lc1', 2, at - MIN, at + MIN)
   check('... the camera still has one row', rows.length === 1, JSON.stringify(rows.map((x) => `${x.type}/${x.subtype}@${x.startMs - at}`)))
   check('... with the alarm’s start and the recording’s end', rows[0]?.startMs === at && rows[0]?.endMs === at + 40 * S, JSON.stringify(rows[0]))
+
+  // The NVR's file was already open for motion 3 minutes before the alarm: it still is the same crossing
+  const at2 = at + 20 * MIN
+  addEvent({ nvr: 'lc1', ch: 4, type: 'line-crossing', subtype: 'tripwire', startMs: at2, source: 'alarm-status' }, at2)
+  const seen2 = []
+  const intake2 = makeEventIntake({
+    listNvrs: () => [{ id: 'lc1', name: 'LC', online: true }],
+    camerasOf: () => [{ ch: 4 }],
+    recordings: async () => ({ events: [[at2 - 3 * MIN, at2 + MIN, 0x4 | 0x400]] }),
+    onEvent: (e) => seen2.push(e),
+    now: () => at2 + 4 * MIN,
+    log: () => {}
+  })
+  const r2 = await intake2.tick()
+  check('a file that started 3 min before the alarm: its motion is new, its crossing is not (no second alert)',
+    r2?.stored === 1 && seen2.length === 1 && seen2[0].type === 'motion', JSON.stringify({ r2, seen: seen2.map((e) => e.type) }))
+  const rows2 = eventsOfCamera('lc1', 4, at2 - 5 * MIN, at2 + 5 * MIN).filter((x) => x.type === 'line-crossing')
+  check('... the camera still has one crossing, the alarm’s, to the file’s end', rows2.length === 1 && rows2[0].startMs === at2 && rows2[0].endMs === at2 + MIN, JSON.stringify(rows2))
   closeEvents()
 }
 

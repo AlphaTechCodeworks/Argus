@@ -27,8 +27,11 @@ export const MAX_RESULTS = 1000
  * few seconds earlier because of the NVR's pre-record and often carrying both line bits (0x80 and
  * 0x400). Somebody walking along a line also crosses it several times in a few seconds. Folding
  * these keeps one row, one phone alert and one snapshot per crossing instead of three or four.
+ * A recorded file also folds into a crossing whose time it overlaps or touches (foldCrossing).
  */
 export const MERGE_MS = 30_000
+/** Two files of one recording can leave a second or so between them (playback.mjs joins such files into one range too): they still touch. */
+const TOUCH_MS = 2000
 /** The only kind that is folded; every other kind keeps one row per thing the NVR reported. */
 const MERGED_TYPE = 'line-crossing'
 /**
@@ -66,6 +69,10 @@ function open(file = EVENTS_DB) {
     // Served by events_cam (nvr, ch, start_ms).
     nearest: db.prepare(`SELECT ${EV_COLS} FROM events WHERE nvr = ? AND ch = ? AND type = ? AND start_ms >= ? AND start_ms <= ?
       ORDER BY ABS(start_ms - ?), start_ms, id LIMIT 1`),
+    // The camera's newest event of one kind that started before a given time (a recorded file looking
+    // back for a crossing whose time reaches it). Walks events_cam back from that time and stops at the
+    // first, so it stays cheap however many other events the camera has.
+    newestBefore: db.prepare(`SELECT ${EV_COLS} FROM events WHERE nvr = ? AND ch = ? AND type = ? AND start_ms < ? ORDER BY start_ms DESC LIMIT 1`),
     byId: db.prepare(`SELECT ${EV_COLS} FROM events WHERE id = ?`),
     // The window query is the only filter with an index behind it; the rest are applied in JS by
     // event-rules.filterAlarms, which the page uses on the same data.
@@ -148,22 +155,39 @@ function toRule(row) {
 
 // ---- events ------------------------------------------------------------------------------------
 
+/** The last moment an event covers: its end, or its start while it has none. */
+const heldOf = (ev) => Math.max(ev.startMs, Number.isFinite(ev.endMs) ? ev.endMs : ev.startMs)
+
 /**
  * Folds a line crossing into the line-crossing event of the same camera whose start is nearest its
- * own, if that is within MERGE_MS either side. Returns what addEvent returns, or null when there is
- * none and the crossing is stored as a row of its own.
+ * own, if that is within MERGE_MS either side. A file from the recording list (SOURCE_RECORDINGS)
+ * also folds into a crossing whose time it overlaps or touches: a file already open for motion starts
+ * long before the alarm (minutes, not the few seconds of pre-record), and a recording split into two
+ * files carries the line bit in both; without this each of them was a second event, a second phone
+ * alert and a snapshot of the wrong moment. The alarm watcher's rows keep start-to-start only: each is
+ * an alarm the camera raised afresh, and a long file's end must never swallow a later crossing's alert.
+ * Returns what addEvent returns, or null when there is none and the crossing is stored as a row of
+ * its own.
  *
  * An acknowledged event takes its later sightings too. The usual case is the recording list finding,
  * minutes later, a crossing somebody has already looked at; storing that as a fresh alarm would ring
  * the phone again for something already dealt with.
  */
 function foldCrossing(s, e, start) {
-  const near = plain(s.nearest.get(String(e.nvr), Number(e.ch), MERGED_TYPE, start - MERGE_MS, start + MERGE_MS, start))
-  if (!near) return null
   // null and undefined mean "no end yet": Number(null) is 0, which is 1970 rather than an end
   const endIn = e.endMs === null || e.endMs === undefined ? NaN : Number(e.endMs)
   const reach = Math.round(Math.max(start, Number.isFinite(endIn) ? endIn : start))
-  const held = Math.max(near.startMs, Number.isFinite(near.endMs) ? near.endMs : near.startMs)
+  const recorded = String(e.source ?? '') === SOURCE_RECORDINGS
+  // a file reaches every crossing that starts while it is being written, and just after it ends
+  const hi = recorded ? Math.max(start + MERGE_MS, reach + TOUCH_MS) : start + MERGE_MS
+  let near = plain(s.nearest.get(String(e.nvr), Number(e.ch), MERGED_TYPE, start - MERGE_MS, hi, start))
+  if (!near && recorded) {
+    // a crossing that started earlier still takes the file if its time reaches the file's start
+    const before = plain(s.newestBefore.get(String(e.nvr), Number(e.ch), MERGED_TYPE, start - MERGE_MS))
+    if (before && heldOf(before) >= start - TOUCH_MS) near = before
+  }
+  if (!near) return null
+  const held = heldOf(near)
   // Only the end moves. The start is the row's identity (the unique key) and the moment the snapshot
   // and the bookmark are taken around; it is usually the alarm's own time, which is nearer the
   // crossing than the recording's pre-record start.
@@ -173,8 +197,9 @@ function foldCrossing(s, e, start) {
 
 /**
  * Records one event, or returns the row already there.
- * A line crossing within MERGE_MS of another on the same camera is folded into that one instead (its
- * end moved out, isNew false), so every caller treats it like an event it already had.
+ * A line crossing within MERGE_MS of another on the same camera, or a recorded one whose time overlaps
+ * or touches another's (foldCrossing), is folded into that one instead (its end moved out, isNew
+ * false), so every caller treats it like an event it already had.
  * @param {{nvr, ch, type, subtype?, startMs, endMs?, source?, detail?, priority?, ruleId?, ruleName?}} e
  * @returns {{ event: object, isNew: boolean }}
  */
