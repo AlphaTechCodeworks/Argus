@@ -50,7 +50,7 @@ const HEADLINES = {
   done: 'Saved: the camera reports every change as asked.',
   partial: 'Partly saved: the camera kept some of it (below).',
   failed: 'Not saved: the camera kept its settings.',
-  unknown: 'Sent, but the camera could not be read back: reopen this panel to see what it has.'
+  unknown: 'Sent, but the camera could not be read back afterwards.'
 }
 // Each slot's own colour, on the picture and beside its row: bright on any video, told apart at a glance.
 const SLOT_COLOURS = ['#ffd23f', '#3fd0ff', '#ff6bd6', '#7dff6b']
@@ -150,6 +150,15 @@ export function changeLines(cfg, draft, schedules = []) {
 
 /** "Save", "Save 1 change", "Save 3 changes". */
 export const saveLabel = (n) => (n ? `Save ${plural(n, 'change')}` : 'Save')
+
+/**
+ * After a Save that could not be read back, the camera is read again: whether it still has every
+ * setting the panel changes as it was before the Save (so the change was not applied, and the
+ * admin's drawing is kept to send again). false when it could not be read (cfg null).
+ */
+export function unchangedSince(before, cfg) {
+  return Boolean(before && cfg) && changeLines(before, draftOf(cfg)).length === 0
+}
 
 /**
  * The schedule choices: the NVR's list, with the camera's own first-hand value added when the
@@ -517,20 +526,33 @@ export class LinesPanel {
 
   // ---- reading -------------------------------------------------------------------------------------
 
-  async load({ first = false } = {}) {
+  /**
+   * Reads the camera and shows it. keep: { before, draft } after a Save that could not be read back:
+   * a camera that still has `before` did not take it, and the drawing is kept to send again.
+   * @returns {Promise<boolean>} whether it was read and shown
+   */
+  async load({ first = false, keep = null } = {}) {
     const seq = ++this.loadSeq
     this.busy = true
     this.update()
     this.status('Reading the camera\'s line settings…')
     try {
       const r = await api('GET', this.url())
-      if (seq !== this.loadSeq) return
+      if (seq !== this.loadSeq) return false
       if (!r.ok) throw errorOf(r)
       this.show(r.data.lines)
-      this.status('')
+      if (keep && unchangedSince(keep.before, this.view?.supported ? this.view.cfg : null)) {
+        this.draft = keep.draft
+        this.draw()
+        this.status('Read again: the camera still has its settings from before, so your changes are kept here. Save sends them again.')
+      } else {
+        this.status(keep ? 'Read again: the lines and settings shown are what the camera has now.' : '')
+      }
       if (first) this.$('.ip-head h2').focus()
+      return true
     } catch (e) {
-      if (seq === this.loadSeq) this.status(e.message, { error: true })
+      if (seq === this.loadSeq) this.status(keep ? `The camera could not be read again (${e.message}); reopen this panel to see what it has.` : e.message, { error: true })
+      return false
     } finally {
       if (seq === this.loadSeq) {
         this.busy = false
@@ -1069,6 +1091,14 @@ export class LinesPanel {
       }
       this.update()
       this.status(data.error || `HTTP ${r.status}`, { error: true })
+      return
+    }
+    if (!data.lines) {
+      // not read back: what the camera has now is not known, and the settings from before the Save are
+      // not it, so they are never shown as saved. The camera is read again instead.
+      this.showResult(data.result)
+      const read = await this.load({ keep: { before, draft: this.draft } })
+      if (read && session === this.session && autoAlert(before, this.view?.cfg, this.alert)) await this.setAlert(true, { auto: true })
       return
     }
     this.show(data.lines)

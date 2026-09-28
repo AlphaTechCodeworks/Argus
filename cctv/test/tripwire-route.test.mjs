@@ -400,7 +400,29 @@ const enableAcross = async () => {
   const cam = addCam(n2, 'tripwire-ch3.xml')
   cam.onEdit = () => ({ ignore: true, then: (c) => (c.offline = true) }) // gone right after the edit
   const [st, b] = await enableAcross()
-  check('no read-back at all: unknown, said so, nothing to undo', st === 200 && b.result.status === 'unknown' && /could not be read back/.test(b.result.message) && b.lines.undo === null && logLines().at(-1).result === 'unknown', JSON.stringify(b.result))
+  check('no read-back at all: unknown, said so', st === 200 && b.result.status === 'unknown' && /could not be read back/.test(b.result.message) && logLines().at(-1).result === 'unknown', JSON.stringify(b.result))
+  // F10: the settings read before the change are not what the camera has now (it may have taken it):
+  // they must not come back as the camera's lines, for the panel to show as saved
+  check('... and no settings are answered as the camera\'s (lines: null), not the ones from before the change', b.lines === null, JSON.stringify(b.lines)?.slice(0, 200))
+  // F4: the camera may well have switched on; lines-on keeps it until a read says otherwise (a wrong
+  // "on" costs one alarm-list read every 5 s, a wrong "off" loses the alert that should come in seconds)
+  check('... and lines-on keeps a camera the change switched on, while it cannot be read', linesOn().has('t2/2') && savedOn()['t2/2'] === true, JSON.stringify(savedOn()))
+}
+{
+  // F4: lines-on is written before the edit goes out, so a stop between the edit and its read-back
+  // cannot leave a switched-on camera unwatched
+  const cam = addCam(n2, 'tripwire-ch3.xml')
+  noteLinesOn('t2', 2, false)
+  let atEdit = null
+  cam.onEdit = () => {
+    atEdit = savedOn()['t2/2'] ?? false
+    return {}
+  }
+  const [st, b] = await enableAcross()
+  check('a switch-on: lines-on already had the camera when the edit went out', st === 200 && b.result.status === 'done' && atEdit === true, `${atEdit} ${JSON.stringify(b.result ?? b)}`)
+  const [, g] = await get(n2, 2)
+  const [st2, b2] = await post(n2, 2, { device: DEV, seen: g.lines.seen, change: { enabled: false }, confirm: true })
+  check('... and a switch-off read back as off takes it out', st2 === 200 && b2.result.status === 'done' && !linesOn().has('t2/2'), JSON.stringify(b2.result ?? b2))
 }
 
 // ---- answers that must not be acted on ----------------------------------------------------------------

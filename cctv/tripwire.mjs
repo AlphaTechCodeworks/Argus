@@ -36,6 +36,7 @@
 //        { device, seen, change, ack?, ackToken?, confirm: true }
 //        { device, undo: true, seq, ack?, ackToken?, confirm: true }
 //     -> { lines, result: { seq, status, message, answer, fields, sideEffects, warningsAcked } }
+//        lines: null when the camera could not be read back afterwards (status 'unknown')
 //        409 { error, stale: true }: the camera changed since `seen`; nothing was sent
 //        409 { error, needsAck: [{ key, text }], ackToken }: acknowledge these, then send again
 //
@@ -305,6 +306,11 @@ async function apply(ctx, cfg, change, { action, undoes, body, schedules, tokenP
     kind: 'change', seq, at: new Date().toISOString(), user, nvr: nvr.id, device, nvrName: nvr.name, chl: chlId, ch: ctx.ch + 1, name: ctx.name,
     action, undoes, change, undo: changeFrom(cfg, Object.keys(change)), to, ack: acked, ackToken: token, before: cfg
   })
+  // lines-on, pessimistically and before the edit goes out: a camera this change may switch on is
+  // watched from now, and the read-back below corrects it. If that read fails, or the process stops
+  // first, it stays cfg.enabled (noted at the read) || next.enabled: a wrong "on" costs one alarm-list
+  // read every 5 s, a wrong "off" loses the alert that should come within seconds.
+  if (next.enabled) noteLinesOn(nvr.id, ctx.ch, true)
   const changed = Object.keys(to).filter((k) => to[k] !== from[k])
   console.log(`[tripwire] ${nvr.id} ch${ctx.ch + 1} "${ctx.name}": ${changed.map((k) => `${k} ${from[k] ?? '(none)'} -> ${to[k]}`).join(', ')} (${action}, by ${user})`)
 
@@ -332,7 +338,7 @@ async function apply(ctx, cfg, change, { action, undoes, body, schedules, tokenP
   const { fields, sideEffects } = after ? compareReadBack(cfg, next, after) : { fields: [], sideEffects: [] }
   const good = fields.filter((f) => f.status === 'as asked').length
   const status = !after ? 'unknown' : good === fields.length ? 'done' : good > 0 ? 'partial' : 'failed'
-  if (after) noteLinesOn(nvr.id, ctx.ch, after.enabled)
+  if (after) noteLinesOn(nvr.id, ctx.ch, after.enabled) // (not read back: what was noted before the edit stays)
   try {
     writeLog({ kind: 'result', seq, at: new Date().toISOString(), result: status, answer: a.status, errorCode: a.errorCode || undefined, after: after ? flatten(after) : null, fields, sideEffects })
     rotateLog(LINES_LOG, { keyOf: logKey })
@@ -428,9 +434,12 @@ export async function handleLines(method, nvrId, ch, params, readJson, user, dep
       const cfg = await readCfg(ctx)
       noteLinesOn(nvr.id, ch, cfg.enabled)
       const r = body.undo === true ? await undo(ctx, cfg, body) : await changeFromBody(ctx, cfg, body)
+      // not read back (status 'unknown'): what the camera has now is not known, and the settings read
+      // before the change are not it; answered as lines: null so the panel never shows them as saved
+      if (!r.after) return [200, { lines: null, result: r.result }]
       // the change is made and logged by now: a failed list of schedules must not hide its result
       const schedules = await readSchedules(ctx).catch(() => [])
-      return [200, { lines: view(ctx, true, r.after ?? cfg, schedules), result: r.result }]
+      return [200, { lines: view(ctx, true, r.after, schedules), result: r.result }]
     })
   } catch (e) {
     return errorAnswer(e)

@@ -22,6 +22,7 @@ import {
   scheduleChoices,
   slotText,
   undoText,
+  unchangedSince,
   valueText
 } from '../public/lines-panel.js'
 import { applyChange, checkChange, compareReadBack, parseSchedules, parseTripwire } from '../tripwire-xml.mjs'
@@ -125,6 +126,10 @@ check('undoText: when and by whom', /^Undo puts back the line settings from befo
   const all = resultView(compareReadBack(before, asked, asked), schedules)
   check('  all as asked: saved', all.status === 'done' && all.sideEffects.length === 0 && /^Saved/.test(all.headline))
   check('  not read back: unknown', resultView({ fields: [], sideEffects: [] }).status === 'unknown' && resultView(undefined).status === 'unknown')
+  // F10: after a Save that could not be read back the panel reads the camera again; a camera that
+  // still has the settings from before did not take the change, and the admin's drawing is kept
+  check('unchangedSince: the camera read again still has the settings from before the Save', typeof unchangedSince === 'function' && unchangedSince(before, structuredClone(before)) === true)
+  check('  not when it has changed (the Save may have been applied) or could not be read', typeof unchangedSince === 'function' && unchangedSince(before, asked) === false && unchangedSince(before, null) === false)
   check('  nothing applied: not saved', resultView(compareReadBack(before, asked, before)).status === 'failed')
   check('fieldLabel: lines, classes, the NVR\'s actions, detections that cannot run together', fieldLabel('line.3.direction') === 'Line 4 direction' && fieldLabel('filter.motor.on') === 'Motorbike' && fieldLabel('filter.person.max') === 'Person largest size' && fieldLabel('trigger.sysSnap') === 'NVR action: NVR snapshot' && fieldLabel('mutex.perimeter.2') === 'intrusion zones (cannot run beside line crossing)' && fieldLabel('something.new') === 'something.new')
   check('valueText: on/off, directions, seconds, schedule names, none', valueText('enabled', 'true') === 'on' && valueText('line.0.direction', 'leftorbotton') === 'B → A' && valueText('holdTime', '10') === '10 s' && valueText('schedule', S24x5, schedules) === '24x5' && valueText('x', null) === '(none)')
@@ -162,6 +167,10 @@ check('undoText: when and by whom', /^Undo puts back the line settings from befo
   check('  post only from send, send only from Save and Undo', callers(/this\.post\(/) === 'send' && callers(/this\.send\(/) === 'save,undo', `${callers(/this\.post\(/)} / ${callers(/this\.send\(/)}`)
   check('  Save and Undo are started by a click', /addEventListener\('click', \(\) => this\.save\(\)\)/.test(src) && /addEventListener\('click', \(\) => this\.undo\(\)\)/.test(src))
   check('  the alert: from its switch, and the default after a Save', callers(/this\.setAlert\(/) === 'build,send' && /addEventListener\('change', \(e\) => \{\s*this\.alert\.touched = true\s*this\.setAlert\(e\.target\.checked\)/.test(src))
+  const sendBody = src.slice(src.indexOf('  async send('), src.indexOf('  showResult('))
+  check('  a Save not read back (lines: null) never shows the settings from before it as saved: the camera is read again, the drawing kept if it did not change',
+    /if \(!data\.lines\) \{[\s\S]*?this\.load\(\{ keep: \{ before, draft: this\.draft \} \}\)[\s\S]*?return\s*\}\s*this\.show\(data\.lines\)/.test(sendBody) &&
+    /unchangedSince\(keep\.before,/.test(src.slice(src.indexOf('  async load('), src.indexOf('  /** Whether the camera is in the'))))
   const drawing = src.slice(src.indexOf('  onPointerDown('), src.indexOf('  /** The lines as they will be saved'))
   check('  drawing only changes what is shown (no request from a pointer)', drawing.length > 0 && !/api\(|this\.post\(|this\.send\(|this\.setAlert\(/.test(drawing))
   check('  the camera\'s sound and white light are never among what the panel sends', !/triggerAudio|triggerWhiteLight/.test(src.slice(src.indexOf('export function changeOf'), src.indexOf('/** A schedule\'s name'))))
