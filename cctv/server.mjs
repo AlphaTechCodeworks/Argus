@@ -851,7 +851,10 @@ const handleRequest = async (req, res) => {
   if (pathname === '/api/sites') return sendJson(res, 200, sitesFor(who, [...nvrs.values()].map((n) => n.info())))
   // only the cameras this user may watch live (rights.mjs; an admin sees all)
   if (pathname === '/api/cameras') return sendJson(res, 200, who.admin ? allCameras({ live: true }) : allCameras({ live: true }).filter((c) => can(who, 'live', { nvr: c.nvr, ch: c.ch })))
-  if (handleMapsRead(pathname, res, sendJson, SECURITY_HEADERS)) return
+  // a map shows where cameras are and what they cover: only the sites and cameras this user may see
+  // (maps.mjs mapsFor; a site is visible when one of its NVRs' cameras is)
+  const siteVisible = (site) => [...nvrs.values()].some((n) => n.site === site && n.channels.some((c) => canSee(n.id, c.ch)))
+  if (handleMapsRead(pathname, res, sendJson, SECURITY_HEADERS, who.admin ? null : { canSee, siteVisible })) return
   if (pathname.startsWith('/api/exports')) {
     const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
     // Same cross-site guard as the admin routes: a change only from our own pages, as JSON.

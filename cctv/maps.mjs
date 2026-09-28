@@ -1,8 +1,10 @@
 // Site maps: where each camera is and what it covers, on a site plan image or a
 // street/satellite map. Stored in data/maps.json; plan images in data/maps/.
 //
-//   GET  /api/maps                         -> { sites: { [site]: SiteMap } }   (everyone signed in)
-//   GET  /api/maps/plan/<file>             -> the plan image
+//   GET  /api/maps                         -> { sites: { [site]: SiteMap } }   (everyone signed in: an
+//                                             admin every site; anyone else only the sites and camera
+//                                             placements they may see, mapsFor)
+//   GET  /api/maps/plan/<file>             -> the plan image (of a site the user is shown)
 //   PUT  /api/admin/maps/<site>            { mode, plan: { cams }, geo: { lat, lng, zoom, layer, cams } }
 //   POST /api/admin/maps/<site>/plan       { data: "data:image/jpeg;base64,...", w, h }  -> new plan image
 //
@@ -152,13 +154,35 @@ const savePlan = (name, body) => {
 }
 
 /**
+ * What one user may see of the maps: a site only when they may see a camera at it, and in it only
+ * their own cameras' placements (on the plan and on the street map alike). A placement is where a
+ * camera is and what it covers, and so where it does not. null = an admin, who sees everything.
+ * @param {{ sites: object }} maps
+ * @param {{ canSee: (nvr: string, ch: number) => boolean, siteVisible: (site: string) => boolean } | null} view
+ */
+export const mapsFor = (maps, view) => {
+  if (!view) return maps
+  const keep = (cams) => Object.fromEntries(Object.entries(cams ?? {}).filter(([k]) => {
+    const slash = k.lastIndexOf('/')
+    return slash > 0 && view.canSee(k.slice(0, slash), Number(k.slice(slash + 1)))
+  }))
+  const sites = {}
+  for (const [name, s] of Object.entries(maps.sites)) {
+    if (!s || !view.siteVisible(name)) continue
+    sites[name] = { ...s, ...(s.plan && { plan: { ...s.plan, cams: keep(s.plan.cams) } }), ...(s.geo && { geo: { ...s.geo, cams: keep(s.geo.cams) } }) }
+  }
+  return { sites }
+}
+
+/**
  * Serves GET /api/maps and GET /api/maps/plan/<file>. Returns false if the path is not a maps path.
  * @param {(res, status, data) => void} sendJson
+ * @param {Parameters<typeof mapsFor>[1]} [view] what this user may see (mapsFor); null for an admin
  */
-export function handleMapsRead(pathname, res, sendJson, headers) {
+export function handleMapsRead(pathname, res, sendJson, headers, view = null) {
   if (pathname === '/api/maps') {
     try {
-      sendJson(res, 200, readMaps())
+      sendJson(res, 200, mapsFor(readMaps(), view))
     } catch (e) {
       sendJson(res, 500, { error: `Cannot read maps: ${e.message}` })
     }
@@ -167,7 +191,14 @@ export function handleMapsRead(pathname, res, sendJson, headers) {
   if (pathname.startsWith('/api/maps/plan/')) {
     const file = pathname.slice('/api/maps/plan/'.length)
     const path = join(PLANS_DIR, file)
-    if (!PLAN_FILE_RE.test(file) || !existsSync(path)) {
+    // another site's plan is 404 as well, so a guessed name does not even confirm the file exists
+    let mine = true
+    try {
+      mine = !view || Object.values(mapsFor(readMaps(), view).sites).some((s) => s?.plan?.file === file)
+    } catch {
+      mine = false
+    }
+    if (!PLAN_FILE_RE.test(file) || !mine || !existsSync(path)) {
       res.writeHead(404, headers).end('Not found')
       return true
     }
