@@ -362,7 +362,8 @@ export function daysToAsk(fromMs, toMs, tzOffsetMs = 0, maxDays = 2) {
  * It holds no timer of its own beyond the interval it is started with, and every pass does at most
  * one camera on at most one NVR. That is deliberately slow: at one camera every few seconds a site
  * of forty cameras comes round every couple of minutes, which is fast enough for an alarm list and
- * slow enough that nobody watching live video notices.
+ * slow enough that nobody watching live video notices. The NVRs take turns (each pass starts after
+ * the NVR asked last), so a small remote NVR is not left waiting behind the big local ones.
  *
  * @param {object} deps
  * @param {() => object[]} deps.listNvrs
@@ -384,6 +385,11 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
   // tick comes: that tick does nothing. Without this each tick asked another NVR's clock, and
   // every one of those queued behind the same stuck call.
   let ticking = false
+  // The NVR the last pass asked: the next pass starts with the one after it, so the NVRs take turns.
+  // Starting at the top of the list every time gave nearly every tick to nvr1 and nvr-2 (an NVR with
+  // cameras still to do may be asked again after CAMERA_REST_MS, sooner than the next tick comes), and
+  // value4u's and rigginglot's motion reached the Alarms page 20 min to hours late.
+  let lastAsked = null
 
   const stateOf = (id) => {
     let s = state.get(id)
@@ -414,14 +420,18 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
     return { stored, why: '' }
   }
 
-  /** One pass: the first NVR that may be asked gets one camera asked. */
+  /** One pass: the next NVR in turn that may be asked gets one camera asked. */
   async function pass() {
     const nowMs = now()
     let busy = false
     try {
       busy = Boolean(sdkBusy())
     } catch {}
-    for (const nvr of listNvrs()) {
+    const list = listNvrs()
+    // after the NVR asked last; from the top when that one is gone from the list (findIndex -1)
+    const from = list.findIndex((n) => n.id === lastAsked) + 1
+    for (let i = 0; i < list.length; i++) {
+      const nvr = list[(from + i) % list.length]
       const s = stateOf(nvr.id)
       const can = pollable(nvr, nowMs, { nextAt: s.nextAt, fails: s.fails, sdkBusy: busy })
       if (!can.ok) {
@@ -437,6 +447,8 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
         s.nextAt = nowMs + MIN_POLL_MS
         continue
       }
+      // its turn, whether the search answers or fails
+      lastAsked = nvr.id
       try {
         const r = await pollCamera(nvr, ch)
         s.fails = 0

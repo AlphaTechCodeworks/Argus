@@ -401,6 +401,101 @@ const S = 1000
   const again = await intake.tick()
   check('... and the failing camera is asked again on the next round', again?.ch === 1 && asked.join() === '0,1,2,0,1', asked.join())
 }
+{
+  // NVRs take turns (playback report 6). Each 5 s tick went to the first NVR in list order that could
+  // be asked, and an NVR with cameras still to do may be asked again 3 s later: nvr1 and nvr-2 took
+  // nearly every tick, and value4u's and rigginglot's motion reached the Alarms page 20 min to hours
+  // late. Four NVRs of different sizes, the sizes of the site, ticked as nvrs.mjs ticks them.
+  const TICK = 5000 // nvrs.mjs EVENT_TICK_MS
+  const sizes = { nvr1: 32, 'nvr-2': 32, value4u: 8, rigginglot: 4 }
+  const nvrs = Object.keys(sizes).map((id) => ({ id, name: id, online: true }))
+  let now = T0
+  let tickNo = 0
+  const asked = []
+  const intake = makeEventIntake({
+    listNvrs: () => nvrs,
+    camerasOf: (nvr) => Array.from({ length: sizes[nvr.id] }, (_, ch) => ({ ch })),
+    recordings: async (nvr, ch) => {
+      asked.push({ tick: tickNo, nvr: nvr.id, ch, at: now })
+      return { events: [] }
+    },
+    now: () => now,
+    log: () => {},
+    store: { addEvent: () => ({ event: null, isNew: false }), intakeCursorMs: () => null }
+  })
+  let most = 0
+  for (tickNo = 0; tickNo < 200; tickNo++) {
+    const before = asked.length
+    await intake.tick()
+    most = Math.max(most, asked.length - before)
+    now += TICK
+  }
+  check('round-robin: still one camera per tick', most === 1, `${most}`)
+  const first4 = asked.filter((a) => a.tick < 4).map((a) => a.nvr)
+  check('round-robin: the first four ticks ask the four NVRs, one each', new Set(first4).size === 4, first4.join())
+  const cams = new Set(asked.filter((a) => a.tick < 4 * 32).map((a) => `${a.nvr}/${a.ch}`))
+  check('round-robin: within 4 x 32 ticks every camera of every NVR has been asked', cams.size === 76, `${cams.size} of 76`)
+  // between two turns of one NVR: at most one turn of each other NVR, unless its list was done and it
+  // rested the whole-NVR minimum
+  const restTicks = Math.ceil(MIN_POLL_MS / TICK)
+  const late = []
+  for (const id of Object.keys(sizes)) {
+    const mine = asked.filter((a) => a.nvr === id)
+    for (let i = 1; i < mine.length; i++) {
+      const allowed = mine[i - 1].ch === sizes[id] - 1 ? restTicks + 4 : 4
+      if (mine[i].tick - mine[i - 1].tick > allowed) late.push(`${id} waited ${mine[i].tick - mine[i - 1].tick} ticks after ch ${mine[i - 1].ch}`)
+    }
+  }
+  check('round-robin: no NVR waits more than one turn of each other NVR while it has cameras to do', late.length === 0, late.slice(0, 3).join('; '))
+  check('round-robin: the small remote NVRs are asked as often as their lists allow', asked.filter((a) => a.nvr === 'rigginglot').length >= 20, `${asked.filter((a) => a.nvr === 'rigginglot').length}`)
+}
+{
+  // ... and the per-NVR rests still hold when the ticks come faster than the rest
+  const REST = events.CAMERA_REST_MS
+  let now = T0
+  const asked = []
+  const intake = makeEventIntake({
+    listNvrs: () => [{ id: 'a', name: 'A', online: true }, { id: 'b', name: 'B', online: true }],
+    camerasOf: () => [{ ch: 0 }, { ch: 1 }, { ch: 2 }, { ch: 3 }],
+    recordings: async (nvr, ch) => {
+      asked.push({ nvr: nvr.id, ch, at: now })
+      return { events: [] }
+    },
+    now: () => now,
+    log: () => {},
+    store: { addEvent: () => ({ event: null, isNew: false }), intakeCursorMs: () => null }
+  })
+  for (let i = 0; i < 12; i++) {
+    await intake.tick()
+    now += 1000
+  }
+  const tooSoon = ['a', 'b'].flatMap((id) => {
+    const mine = asked.filter((x) => x.nvr === id)
+    return mine.slice(1).filter((x, i) => x.at - mine[i].at < REST).map((x) => `${id}/${x.ch}`)
+  })
+  check('round-robin: no NVR is asked again inside its camera rest', asked.length > 0 && tooSoon.length === 0, tooSoon.join())
+  check('round-robin: with both NVRs ready they alternate', asked.slice(0, 4).map((x) => x.nvr).join() === 'a,b,a,b', asked.map((x) => x.nvr).join())
+  // a failed search is a turn too: the next pass goes on to the other NVR, not back to the same one
+  let now2 = T0
+  const asked2 = []
+  const intake2 = makeEventIntake({
+    listNvrs: () => [{ id: 'a', name: 'A', online: true }, { id: 'b', name: 'B', online: true }],
+    camerasOf: () => [{ ch: 0 }, { ch: 1 }],
+    recordings: async (nvr) => {
+      asked2.push(nvr.id)
+      if (nvr.id === 'b') throw new Error('the NVR could not search its recordings')
+      return { events: [] }
+    },
+    now: () => now2,
+    log: () => {},
+    store: { addEvent: () => ({ event: null, isNew: false }), intakeCursorMs: () => null }
+  })
+  for (let i = 0; i < 3; i++) {
+    await intake2.tick()
+    now2 += 5000
+  }
+  check('round-robin: after a failed turn the next NVR in line is asked', asked2.join() === 'a,b,a', asked2.join())
+}
 
 // --- the intake's clock: the last read while it is fresh -------------------------------------------------
 //
