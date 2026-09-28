@@ -167,49 +167,89 @@ const readJson = (body) => async () => body
 }
 
 // ---- the routes ------------------------------------------------------------------------------------
+// The rights check server.mjs hands in (canSee): which cameras this person may watch or play back.
+const seeOnly = (keys) => ({ canSee: (nvr, ch) => keys.includes(`${nvr}/${ch}`) })
+const SEE = seeOnly(['nvr1/0', 'nvr2/1']) // every camera the bookmarks above are on
 {
   check('another path is not ours', (await handleBookmarks('GET', '/api/cameras', readJson({}), 'bob')) === null)
   check('signed out is 401', (await handleBookmarks('GET', '/api/bookmarks', readJson({}), null))[0] === 401)
 
-  const [listStatus, listBody] = await handleBookmarks('GET', '/api/bookmarks', readJson({}), 'bob')
+  const [listStatus, listBody] = await handleBookmarks('GET', '/api/bookmarks', readJson({}), 'bob', SEE)
   check('GET /api/bookmarks lists them', listStatus === 200 && Array.isArray(listBody.bookmarks))
   check('  and says who is asking and whether they are an admin', listBody.user === 'bob' && listBody.admin === false)
   const [, adminBody] = await handleBookmarks('GET', '/api/bookmarks', readJson({}), 'alice')
   check('  an admin is told so', adminBody.admin === true)
 
-  const [, filtered] = await handleBookmarks('GET', '/api/bookmarks?text=till&camera=nvr2/1', readJson({}), 'bob')
+  const [, filtered] = await handleBookmarks('GET', '/api/bookmarks?text=till&camera=nvr2/1', readJson({}), 'bob', SEE)
   check('the query string filters', filtered.bookmarks.length === 1 && filtered.bookmarks[0].title === 'Till drawer opened')
-  const [, byDate] = await handleBookmarks('GET', `/api/bookmarks?from=${T}&to=${T + 1000}`, readJson({}), 'bob')
+  const [, byDate] = await handleBookmarks('GET', `/api/bookmarks?from=${T}&to=${T + 1000}`, readJson({}), 'bob', SEE)
   check('  by time as well', byDate.bookmarks.length === 1)
-  const [, nonsense] = await handleBookmarks('GET', '/api/bookmarks?from=yesterday', readJson({}), 'bob')
+  const [, nonsense] = await handleBookmarks('GET', '/api/bookmarks?from=yesterday', readJson({}), 'bob', SEE)
   check('a time that makes no sense is ignored, not passed on', nonsense.bookmarks.length === 2)
 
-  const [postStatus, posted] = await handleBookmarks('POST', '/api/bookmarks', readJson(good({ title: 'Through the route' })), 'bob')
+  const [postStatus, posted] = await handleBookmarks('POST', '/api/bookmarks', readJson(good({ title: 'Through the route' })), 'bob', SEE)
   check('POST makes one, answering 201', postStatus === 201 && posted.bookmark.id > 0)
   const newId = posted.bookmark.id
-  const [badStatus, badBody] = await handleBookmarks('POST', '/api/bookmarks', readJson(good({ title: '' })), 'bob')
+  const [badStatus, badBody] = await handleBookmarks('POST', '/api/bookmarks', readJson(good({ title: '' })), 'bob', SEE)
   check('  a bad one is 400 with the reason', badStatus === 400 && /needs a title/.test(badBody.error))
 
-  const [patchStatus, patched] = await handleBookmarks('PATCH', `/api/bookmarks/${newId}`, readJson({ title: 'Through the gate' }), 'bob')
+  const [patchStatus, patched] = await handleBookmarks('PATCH', `/api/bookmarks/${newId}`, readJson({ title: 'Through the gate' }), 'bob', SEE)
   check('PATCH changes it', patchStatus === 200 && patched.bookmark.title === 'Through the gate')
-  const [forbidden] = await handleBookmarks('PATCH', `/api/bookmarks/${newId}`, readJson({ title: 'x' }), 'carol')
+  const [forbidden] = await handleBookmarks('PATCH', `/api/bookmarks/${newId}`, readJson({ title: 'x' }), 'carol', SEE)
   check('  someone else is refused', forbidden === 403)
   const [missing] = await handleBookmarks('PATCH', '/api/bookmarks/424242', readJson({ title: 'x' }), 'alice')
   check('  an unknown id is 404', missing === 404)
 
-  const [wrongMethod, , headers] = await handleBookmarks('PUT', '/api/bookmarks', readJson({}), 'bob')
+  const [wrongMethod, , headers] = await handleBookmarks('PUT', '/api/bookmarks', readJson({}), 'bob', SEE)
   check('PUT is not allowed, and says what is', wrongMethod === 405 && headers.allow === 'GET, POST')
 
-  const [delStatus, deleted] = await handleBookmarks('DELETE', `/api/bookmarks/${newId}`, readJson({}), 'bob')
+  const [delStatus, deleted] = await handleBookmarks('DELETE', `/api/bookmarks/${newId}`, readJson({}), 'bob', SEE)
   check('DELETE removes it', delStatus === 200 && deleted.deleted === true)
   check('  and it is gone', getBookmark(newId) === null)
   const [goneStatus] = await handleBookmarks('DELETE', `/api/bookmarks/${newId}`, readJson({}), 'alice')
   check('  deleting it again is 404', goneStatus === 404)
 
-  const [jsonStatus, jsonBody] = await handleBookmarks('POST', '/api/bookmarks', async () => { throw new SyntaxError('bad') }, 'bob')
+  const [jsonStatus, jsonBody] = await handleBookmarks('POST', '/api/bookmarks', async () => { throw new SyntaxError('bad') }, 'bob', SEE)
   check('a broken body is 400 Bad JSON, not a 500', jsonStatus === 400 && jsonBody.error === 'Bad JSON')
 
-  check('bookmarks are never cached', (await handleBookmarks('GET', '/api/bookmarks', readJson({}), 'bob'))[2]['cache-control'] === 'no-store')
+  check('bookmarks are never cached', (await handleBookmarks('GET', '/api/bookmarks', readJson({}), 'bob', SEE))[2]['cache-control'] === 'no-store')
+}
+
+// ---- rights: a viewer sees only bookmarks on cameras they may watch or play back -----------------
+// Every bookmark on every camera (titles, incident descriptions, times, who made them) used to be
+// readable by anyone signed in, and ?camera= aimed the list at any camera.
+{
+  const bob = { user: 'bob', admin: false }
+  const alice = { user: 'alice', admin: true }
+  const [, mine] = await handleBookmarks('POST', '/api/bookmarks', readJson(good({ cameras: ['rigginglot/3', 'nvr1/0'], title: 'Shared' })), alice)
+  const [, secret] = await handleBookmarks('POST', '/api/bookmarks', readJson(good({ cameras: ['rigginglot/3'], title: 'Van reverses into the gate', description: 'secret' })), alice)
+  const [, list] = await handleBookmarks('GET', '/api/bookmarks', readJson({}), bob, seeOnly(['nvr1/0']))
+  check('a viewer does not list a bookmark on a camera they cannot see', !list.bookmarks.some((b) => b.id === secret.bookmark.id))
+  const shared = list.bookmarks.find((b) => b.id === mine.bookmark.id)
+  check('  a shared one is listed without the hidden camera', shared && shared.cameras.join() === 'nvr1/0', JSON.stringify(shared?.cameras))
+  check('  no camera they cannot see is named anywhere in the list', !JSON.stringify(list).includes('rigginglot'))
+  check('  ?camera= cannot reach it either', (await handleBookmarks('GET', '/api/bookmarks?camera=rigginglot/3', readJson({}), bob, seeOnly(['nvr1/0'])))[1].bookmarks.length === 0)
+  check('  nor can its id (404)', (await handleBookmarks('GET', `/api/bookmarks/${secret.bookmark.id}`, readJson({}), bob, seeOnly(['nvr1/0'])))[0] === 404)
+  check('  the shared one by id shows only their camera', (await handleBookmarks('GET', `/api/bookmarks/${mine.bookmark.id}`, readJson({}), bob, seeOnly(['nvr1/0'])))[1].bookmark?.cameras.join() === 'nvr1/0')
+  check('  PATCH or DELETE of one they cannot see is 404, not 403', (await handleBookmarks('PATCH', `/api/bookmarks/${secret.bookmark.id}`, readJson({ title: 'x' }), bob, seeOnly(['nvr1/0'])))[0] === 404 && (await handleBookmarks('DELETE', `/api/bookmarks/${secret.bookmark.id}`, readJson({}), bob, seeOnly(['nvr1/0'])))[0] === 404)
+  check('  and it is still there', getBookmark(secret.bookmark.id)?.title === 'Van reverses into the gate')
+  check('  POST on a camera they cannot see is 403', (await handleBookmarks('POST', '/api/bookmarks', readJson(good({ cameras: ['value4u/1'] })), bob, seeOnly(['nvr1/0'])))[0] === 403)
+  check('  ...even beside one they can', (await handleBookmarks('POST', '/api/bookmarks', readJson(good({ cameras: ['nvr1/0', 'value4u/1'] })), bob, seeOnly(['nvr1/0'])))[0] === 403)
+  check('  with no rights check handed in, a viewer sees nothing', (await handleBookmarks('GET', '/api/bookmarks', readJson({}), bob))[1].bookmarks.length === 0)
+  check('  an admin still sees everything', (await handleBookmarks('GET', '/api/bookmarks', readJson({}), alice))[1].bookmarks.some((b) => b.id === secret.bookmark.id))
+
+  // The owner of a bookmark who lost a camera saves the list as the dialog shows it (without that
+  // camera): the camera stays on the bookmark, and with it the footage housekeeping must keep.
+  const [, own] = await handleBookmarks('POST', '/api/bookmarks', readJson(good({ cameras: ['nvr1/0', 'nvr2/1'], title: 'Two cameras' })), bob, SEE)
+  const [st, patched] = await handleBookmarks('PATCH', `/api/bookmarks/${own.bookmark.id}`, readJson({ cameras: ['nvr1/0'], title: 'Two cameras, renamed' }), bob, seeOnly(['nvr1/0']))
+  check('the owner can still change their bookmark after losing a camera', st === 200 && patched.bookmark.title === 'Two cameras, renamed' && patched.bookmark.cameras.join() === 'nvr1/0', JSON.stringify(patched))
+  check('  the camera they can no longer see stays on it', getBookmark(own.bookmark.id).cameras.join() === 'nvr1/0,nvr2/1', getBookmark(own.bookmark.id).cameras.join())
+  check('  PATCH naming a camera they cannot see is 403', (await handleBookmarks('PATCH', `/api/bookmarks/${own.bookmark.id}`, readJson({ cameras: ['nvr1/0', 'value4u/1'] }), bob, seeOnly(['nvr1/0'])))[0] === 403)
+
+  // the cap of 500 is applied to what the viewer may see, not before: a viewer's bookmarks are not
+  // pushed out of their list by newer ones on cameras they cannot see
+  for (let i = 0; i < 3; i++) createBookmark(good({ cameras: ['rigginglot/3'], startMs: T + 7200_000 + i, endMs: T + 7200_000 + i + 1000, title: `hidden ${i}` }), 'alice', { now: NOW })
+  check('listBookmarks filters before it caps', listBookmarks({ limit: 2, keep: (b) => b.cameras.includes('nvr1/0') }).every((b) => b.cameras.includes('nvr1/0')) && listBookmarks({ limit: 2, keep: (b) => b.cameras.includes('nvr1/0') }).length === 2)
 }
 
 // ---- the migration is additive -------------------------------------------------------------------

@@ -53,9 +53,10 @@ function open() {
   q = {
     add: db.prepare('INSERT INTO bookmarks (cameras, start_ms, end_ms, title, description, user, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?)'),
     get: db.prepare(`SELECT ${COLS} FROM bookmarks WHERE id = ?`),
-    all: db.prepare(`SELECT ${COLS} FROM bookmarks ORDER BY start_ms DESC LIMIT ?`),
+    // read row by row (iterate) and stopped at the cap by listBookmarks, which filters first
+    all: db.prepare(`SELECT ${COLS} FROM bookmarks ORDER BY start_ms DESC`),
     // overlapping, not contained: a search for an hour must still find the bookmark that straddles it
-    inWindow: db.prepare(`SELECT ${COLS} FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC LIMIT ?`),
+    inWindow: db.prepare(`SELECT ${COLS} FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC`),
     protect: db.prepare('SELECT start_ms AS startMs, end_ms AS endMs FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms'),
     update: db.prepare('UPDATE bookmarks SET cameras = ?, start_ms = ?, end_ms = ?, title = ?, description = ? WHERE id = ?'),
     remove: db.prepare('DELETE FROM bookmarks WHERE id = ?')
@@ -150,25 +151,32 @@ export function getBookmark(id) {
  * The time window is done in SQL (it is the one filter with an index behind it); the text and
  * camera filters are applied to those rows here, because `cameras` is JSON and a LIKE against it
  * would match a camera key that happens to be a prefix of another.
- * @param {{ text?: string, fromMs?: number|null, toMs?: number|null, camera?: string|null, limit?: number }} f
+ * The cap counts the bookmarks that pass every filter, `keep` among them (the caller's rights
+ * check): rows are read newest first and reading stops at the cap, so a viewer's own bookmarks are
+ * never pushed out of their list by newer ones on cameras they may not see.
+ * @param {{ text?: string, fromMs?: number|null, toMs?: number|null, camera?: string|null, limit?: number,
+ *   keep?: ((bookmark: object) => boolean) | null }} f
  */
-export function listBookmarks({ text = '', fromMs = null, toMs = null, camera = null, limit = MAX_RESULTS } = {}) {
+export function listBookmarks({ text = '', fromMs = null, toMs = null, camera = null, limit = MAX_RESULTS, keep = null } = {}) {
   const s = open()
   const cap = Math.min(Math.max(1, Math.floor(Number(limit) || MAX_RESULTS)), MAX_RESULTS)
   const from = Number.isFinite(fromMs) ? Math.round(fromMs) : null
   const to = Number.isFinite(toMs) ? Math.round(toMs) : null
   const rows = from !== null || to !== null
-    ? s.inWindow.all(from ?? -8.64e15, to ?? 8.64e15, cap)
-    : s.all.all(cap)
+    ? s.inWindow.iterate(from ?? -8.64e15, to ?? 8.64e15)
+    : s.all.iterate()
   const needle = String(text ?? '').trim().toLowerCase()
   const cam = camera ? String(camera) : null
-  return rows
-    .map(toBookmark)
-    .filter((b) => {
-      if (cam && !b.cameras.includes(cam)) return false
-      if (needle && !`${b.title}\n${b.description}\n${b.user}`.toLowerCase().includes(needle)) return false
-      return true
-    })
+  const out = []
+  for (const row of rows) {
+    const b = toBookmark(row)
+    if (cam && !b.cameras.includes(cam)) continue
+    if (needle && !`${b.title}\n${b.description}\n${b.user}`.toLowerCase().includes(needle)) continue
+    if (keep && !keep(b)) continue
+    out.push(b)
+    if (out.length >= cap) break // (leaving the loop ends the statement)
+  }
+  return out
 }
 
 /**
@@ -263,25 +271,49 @@ const ID_PATH = /^\/api\/bookmarks\/([^/]+)$/
  * @param {string} pathname                 '/api/bookmarks', with or without its query string
  * @param {() => Promise<object>} readJson   the request's JSON object body (POST and PATCH only)
  * @param {string | { user: string, admin?: boolean }} user  the signed-in person
+ * @param {{ canSee?: ((nvr: string, ch: number) => boolean) | null }} [rights] which cameras this
+ *   person may watch or play back (server.mjs canSee, from rights.mjs). Missing: none, for anyone
+ *   but an admin.
  * @returns {Promise<[number, any, object?] | null>} null when the path is not one of these routes
  */
-export async function handleBookmarks(method, pathname, readJson, user) {
+export async function handleBookmarks(method, pathname, readJson, user, { canSee = null } = {}) {
   const [path, search = ''] = String(pathname ?? '').split('?')
   const who = whoOf(user)
   const idMatch = ID_PATH.exec(path)
   if (path !== '/api/bookmarks' && !idMatch) return null
   if (!who.user) return [401, { error: 'Not signed in' }, NO_STORE]
 
+  // A bookmark names cameras and says what happened on them. Anyone but an admin is shown only the
+  // bookmarks on a camera they may see, and in those only the cameras they may see; one on none of
+  // their cameras does not exist for them (404, so its id is not even confirmed). They may bookmark
+  // only cameras they may see.
+  const seeKey = (k) => {
+    const slash = typeof k === 'string' ? k.lastIndexOf('/') : -1
+    return slash > 0 && typeof canSee === 'function' && Boolean(canSee(k.slice(0, slash), Number(k.slice(slash + 1))))
+  }
+  const visible = (b) => who.admin || b.cameras.some(seeKey)
+  const shown = (b) => (who.admin ? b : { ...b, cameras: b.cameras.filter(seeKey) })
+  const namesHidden = (list) => !who.admin && Array.isArray(list) && list.some((k) => typeof k === 'string' && !seeKey(k))
+  const NOT_YOURS = [403, { error: 'You cannot bookmark a camera you have no access to' }, NO_STORE]
+
   try {
     if (idMatch) {
       const id = decodeURIComponent(idMatch[1])
+      const current = getBookmark(id)
+      if (current && !visible(current) && ['GET', 'PATCH', 'DELETE'].includes(method)) return [404, { error: 'No such bookmark' }, NO_STORE]
       if (method === 'GET') {
-        const bookmark = getBookmark(id)
-        return bookmark ? [200, { bookmark }, NO_STORE] : [404, { error: 'No such bookmark' }, NO_STORE]
+        return current ? [200, { bookmark: shown(current) }, NO_STORE] : [404, { error: 'No such bookmark' }, NO_STORE]
       }
       if (method === 'PATCH') {
-        const res = updateBookmark(id, await readJson(), who)
-        return res.ok ? [200, { bookmark: res.bookmark }, NO_STORE] : [res.status, { error: res.error }, NO_STORE]
+        let patch = await readJson()
+        if (!who.admin && patch && typeof patch === 'object' && 'cameras' in patch) {
+          if (namesHidden(patch.cameras)) return NOT_YOURS
+          // The dialog shows the list without the cameras this person may not see; saving it must
+          // not drop them from the bookmark (and so from what housekeeping keeps).
+          if (current && Array.isArray(patch.cameras)) patch = { ...patch, cameras: [...patch.cameras, ...current.cameras.filter((k) => !seeKey(k))] }
+        }
+        const res = updateBookmark(id, patch, who)
+        return res.ok ? [200, { bookmark: shown(res.bookmark) }, NO_STORE] : [res.status, { error: res.error }, NO_STORE]
       }
       if (method === 'DELETE') {
         const res = deleteBookmark(id, who)
@@ -292,16 +324,23 @@ export async function handleBookmarks(method, pathname, readJson, user) {
 
     if (method === 'GET') {
       const params = new URLSearchParams(search)
+      const camera = params.get('camera')
+      // aimed at a camera this person may not see: nothing, rather than the shared bookmarks that
+      // would say it is on them
+      if (camera && !who.admin && !seeKey(camera)) return [200, { bookmarks: [], user: who.user, admin: who.admin }, NO_STORE]
       const bookmarks = listBookmarks({
         text: params.get('text') ?? '',
         fromMs: msFrom(params.get('from')),
         toMs: msFrom(params.get('to')),
-        camera: params.get('camera')
-      })
+        camera,
+        keep: who.admin ? null : visible
+      }).map(shown)
       return [200, { bookmarks, user: who.user, admin: who.admin }, NO_STORE]
     }
     if (method === 'POST') {
-      const res = createBookmark(await readJson(), who.user)
+      const body = await readJson()
+      if (namesHidden(body?.cameras)) return NOT_YOURS
+      const res = createBookmark(body, who.user)
       return res.ok ? [201, { bookmark: res.bookmark }, NO_STORE] : [400, { error: res.error }, NO_STORE]
     }
     return [405, { error: 'Method not allowed' }, { allow: 'GET, POST' }]

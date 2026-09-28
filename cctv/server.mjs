@@ -583,8 +583,9 @@ const handleRequest = async (req, res) => {
   if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
 
-  // Signed in is enough for these; what each user may actually see is settled inside them.
-  const marks = await handleBookmarks(req.method, pathname + url.search, () => readJsonObject(req, 8192), who)
+  // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
+  // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own.
+  const marks = await handleBookmarks(req.method, pathname + url.search, () => readJsonObject(req, 8192), who, { canSee })
   if (marks) return sendJson(res, ...marks)
   const views = await handleViews(req.method, pathname, () => readJsonObject(req, 32768), user)
   if (views) return sendJson(res, ...views)
