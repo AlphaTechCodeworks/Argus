@@ -24,6 +24,15 @@ const TICK_LADDER = Object.freeze([1, 5, 10, 30, 60, 300, 600, 900, 1800, 3600, 
 const MAX_TICKS = 8
 /** A box narrower than this is still drawn this wide: a one-second gap has to stay clickable. */
 const MIN_BOX_PCT = 0.1
+/**
+ * The most boxes the page draws in one lane (playback.js fillLane): every box is an element, so a
+ * day of one-second motion events would otherwise be tens of thousands of them. laneBoxes merges
+ * boxes that meet on screen, so this is only reached by thousands of stretches genuinely apart; at
+ * 400 a busy camera's lane stopped hours before the end of its day, and none of its holes were drawn.
+ */
+export const MAX_BOXES = 3000
+/** Boxes this close (in % of the track) count as touching: float rounding, not a real space between them. */
+const TOUCH_PCT = 1e-9
 
 const num = (x, fallback) => (Number.isFinite(x) ? Number(x) : fallback)
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x)
@@ -137,10 +146,19 @@ export function fmtClock(ms, { ms: showMillis = false, tzOffsetMs = 0 } = {}) {
  * `from`/`to` are the clipped times, which is what a click on the box should seek to — note that a box
  * widened to MIN_BOX_PCT is wider than the time it stands for, so seeking must use these and never the
  * box's own edges.
+ *
+ * A box that touches or overlaps the last box of its own kind on screen (after the widening) is
+ * folded into it: `from`/`to` then run from the first one's start to the last one's end, and `n` says
+ * how many ranges it stands for. The picture is the same — they were painted over each other anyway —
+ * but a day of 2,000 three-second holes is a few hundred boxes instead of 2,000, which is what keeps a
+ * busy lane under MAX_BOXES all the way to midnight. The merge is keyed by kind, so the NVR-only
+ * slivers the page draws between server boxes do not keep those server boxes apart, and a kind is
+ * never folded into another: a gap stays a gap however closely it is hemmed in by recordings.
  */
 export function laneBoxes(view, ranges) {
   const v = makeView(view)
   const out = []
+  const lastOf = new Map() // kind -> the newest box of that kind, the one a touching box joins
   for (const r of ranges ?? []) {
     const from = num(r?.from ?? r?.s, null)
     const to = num(r?.to ?? r?.e, null)
@@ -148,16 +166,24 @@ export function laneBoxes(view, ranges) {
     const a = Math.max(from, v.startMs)
     const b = Math.min(to, v.endMs)
     if (b <= a) continue
-    const leftPct = ((a - v.startMs) / v.spanMs) * 100
     const widthPct = Math.max(((b - a) / v.spanMs) * 100, MIN_BOX_PCT)
-    out.push({
-      // A widened sliver near the right edge would otherwise hang over the end of the track.
-      leftPct: Math.min(leftPct, 100 - widthPct),
-      widthPct,
-      kind: r?.kind ?? r?.src ?? null,
-      from: a,
-      to: b
-    })
+    // A widened sliver near the right edge would otherwise hang over the end of the track.
+    const leftPct = Math.min(((a - v.startMs) / v.spanMs) * 100, 100 - widthPct)
+    const kind = r?.kind ?? r?.src ?? null
+    const prev = lastOf.get(kind)
+    if (prev && leftPct <= prev.leftPct + prev.widthPct + TOUCH_PCT && leftPct + widthPct >= prev.leftPct - TOUCH_PCT) {
+      // min/max rather than "extend to the right": a list out of time order merges the same way
+      const right = Math.max(prev.leftPct + prev.widthPct, leftPct + widthPct)
+      prev.leftPct = Math.min(prev.leftPct, leftPct)
+      prev.widthPct = right - prev.leftPct
+      prev.from = Math.min(prev.from, a)
+      prev.to = Math.max(prev.to, b)
+      prev.n++
+      continue
+    }
+    const box = { leftPct, widthPct, kind, from: a, to: b, n: 1 }
+    out.push(box)
+    lastOf.set(kind, box)
   }
   return out
 }

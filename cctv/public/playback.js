@@ -37,7 +37,7 @@ import {
   shift,
   speedFor
 } from './pb-sources.js'
-import { follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
+import { MAX_BOXES, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
 import { allowedSpeeds, clampSpeed, frameStep, shuttleLabel, shuttleRate } from './pb-transport.js'
 import { DEFAULT_OSD, drawOsd, osdFont, osdIsOff, osdLayout } from './osd-overlay.js'
@@ -57,10 +57,10 @@ const H265_HELP =
 const HEADER_SIZE = 16
 const DAY = 86_400_000
 // The timeline is drawn from ordinary elements rather than a canvas, so every box can carry its own
-// title and click. That only stays cheap because nothing outside the view is drawn (laneBoxes clips)
-// and each lane is capped: a day of one-second motion events would otherwise be tens of thousands.
+// title and click. That only stays cheap because nothing outside the view is drawn (laneBoxes clips
+// it, and folds boxes of a kind that meet on screen into one) and each lane is capped (MAX_BOXES,
+// pb-view.js): a day of one-second motion events would otherwise be tens of thousands.
 const MIN_SPAN = 10_000
-const MAX_BOXES = 400
 const SEEK_STEP = 30_000
 const START_BACK_MS = 5 * 60_000
 // server recordings: the file being written is readable, so playback starts closer to now
@@ -920,9 +920,10 @@ function recRanges() {
 }
 
 /**
- * Fill a lane with positioned divs. Only boxes laneBoxes kept (those inside the view) are made, and
- * at most MAX_BOXES of them: a busy day of motion events would otherwise be tens of thousands of
- * elements, which is the price of leaving the canvas behind.
+ * Fill a lane with positioned divs. Only boxes laneBoxes kept (those inside the view, the ones that
+ * meet on screen already folded together) are made, and at most MAX_BOXES of them: a busy day of
+ * motion events would otherwise be tens of thousands of elements, which is the price of leaving the
+ * canvas behind.
  */
 function fillLane(el, boxes, decorate) {
   const nodes = boxes.slice(0, MAX_BOXES).map((b) => {
@@ -941,8 +942,11 @@ function drawTimeline() {
   const pct = (t) => ((t - v.startMs) / v.spanMs) * 100
   const inView = (t) => Number.isFinite(t) && t >= v.startMs && t <= v.endMs
 
+  // a box standing for several (laneBoxes folds those that meet on screen) says so; the reason
+  // shown is the first one's
+  const more = (b, what) => (b.n > 1 ? ` (${b.n} ${what} here: zoom in to see them apart)` : '')
   fillLane(laneRec, laneBoxes(v, recRanges()), (d, b) => {
-    if (b.kind === 'gap') d.title = `Not recorded: ${gapAt(state.gaps, b.from) ?? 'no reason given'}`
+    if (b.kind === 'gap') d.title = `Not recorded: ${gapAt(state.gaps, b.from) ?? 'no reason given'}${more(b, 'holes')}`
     else d.title = `${fmtTime(b.from)} – ${fmtTime(b.to)}${b.kind === 'nvr' ? ' · from the NVR' : ''}`
   })
 
@@ -950,7 +954,7 @@ function drawTimeline() {
   const events = state.events.map(([s, e]) => ({ s, e, kind: 'event' }))
   const hits = state.hits.map((h) => ({ s: h.start, e: h.end + 2000, kind: 'hit' }))
   fillLane(laneMotion, [...laneBoxes(v, events), ...laneBoxes(v, hits)], (d, b) => {
-    d.title = `${b.kind === 'hit' ? 'Movement in your box' : 'Motion'} at ${fmtTime(b.from)}`
+    d.title = `${b.kind === 'hit' ? 'Movement in your box' : 'Motion'} at ${fmtTime(b.from)}${more(b, b.kind === 'hit' ? 'hits' : 'events')}`
     // the seek happens in the timeline's own pointerup, so a click does not both jump and pan
     d.dataset.ms = String(Math.round(b.from))
   })

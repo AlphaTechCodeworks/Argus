@@ -164,6 +164,15 @@ check('an empty wall is not warned about', loadWarning(0).level === 'ok')
   eq('one lane per camera, named', rows.map((r) => r.name), ['Front Gate', 'Yard'])
   eq('the first lane covers the first half of the window', Math.round(rows[0].boxes[0].widthPct), 50)
   eq('a camera with nothing has an empty lane, not a missing one', rows[1].boxes.length, 0)
+
+  // a whole day of a camera that drops a few seconds every half minute (nvr-2 on a bad day): its
+  // holes meet on screen and are drawn as one box, the recording under them as another
+  const day = makeView({ dayStartMs: T, dayEndMs: T + 86_400_000, spanMs: 86_400_000 })
+  const stretches = []
+  for (let t = T; t < T + 3_600_000; t += 30_000) stretches.push({ s: t, e: t + 27_000, src: 'server' }, { s: t + 27_000, e: t + 30_000, kind: 'gap', reason: 'no video from the NVR' })
+  const [busy] = laneRows(day, [{ key: 'nvr-2/0', name: 'Busy', stretches }])
+  eq('a busy hour on the wall: 120 holes are one gap box and the recording one box', busy.boxes.map((b) => `${b.kind}:${b.n}`), ['server:120', 'gap:120'])
+  check('  the gap box starts where the first hole does (its reason is looked up there)', busy.boxes[1].from === T + 27_000 && busy.boxes[1].to === T + 3_600_000)
 }
 
 // ---- the saved choice -----------------------------------------------------------------------

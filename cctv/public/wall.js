@@ -731,7 +731,8 @@ function drawLanes() {
         box.style.left = `${b.leftPct}%`
         box.style.width = `${b.widthPct}%`
         box.dataset.kind = b.kind ?? 'server'
-        if (b.kind === 'gap') box.title = tile?.gaps?.find((g) => g.s <= b.from && b.from <= g.e)?.reason ?? 'not recorded'
+        // holes that meet on screen are one box (pb-view.js laneBoxes): the first one's reason, and how many
+        if (b.kind === 'gap') box.title = `${tile?.gaps?.find((g) => g.s <= b.from && b.from <= g.e)?.reason ?? 'not recorded'}${b.n > 1 ? ` (${b.n} holes here)` : ''}`
         lane.append(box)
       }
       return lane

@@ -9,6 +9,7 @@
 // timezone, and the two offsets below (UTC and +05:30) prove the offset is really being used.
 import {
   DAY_MS,
+  MAX_BOXES,
   fmtClock,
   follow,
   laneBoxes,
@@ -202,6 +203,85 @@ const valid = (v) =>
   check('  order is kept and everything is in view', laneBoxes(v, [{ from: at(30_100), to: at(30_200) }, { from: at(33_000), to: at(33_500) }]).every((x, i, a) => x.leftPct >= 0 && x.leftPct + x.widthPct <= 100 + 1e-9 && (i === 0 || x.leftPct >= a[i - 1].leftPct)))
   check('  pb-sources stretches ({ s, e, src }) are understood as they are', laneBoxes(v, [{ s: at(30_900), e: at(31_800), src: 'nvr' }])[0]?.kind === 'nvr')
   check('  no ranges, or rubbish in the list, gives no boxes rather than an error', laneBoxes(v, []).length === 0 && laneBoxes(v).length === 0 && laneBoxes(v, [null, { from: NaN, to: at(31_000) }]).length === 0)
+}
+
+// ---- laneBoxes: boxes of a kind that meet on screen are drawn as one ------------------------------------
+{
+  const v = makeView({ spanMs: 3600 * S, startMs: dayStart + 30_000 * S, ...day })
+  const at = (secs) => dayStart + secs * S
+  const two = laneBoxes(v, [{ from: at(30_900), to: at(31_000), kind: 'server' }, { from: at(31_000), to: at(31_500), kind: 'server' }])
+  check('laneBoxes: two boxes of a kind that touch become one, spanning both', two.length === 1 && two[0].from === at(30_900) && two[0].to === at(31_500) && near(two[0].widthPct, (600 / 3600) * 100) && two[0].n === 2, JSON.stringify(two))
+  const apart = laneBoxes(v, [{ from: at(30_900), to: at(31_000), kind: 'server' }, { from: at(31_100), to: at(31_500), kind: 'server' }])
+  check('  apart on screen they stay two', apart.length === 2 && apart.every((b) => b.n === 1))
+  // 1 s holes 2 s apart: each is drawn 3.6 s wide (MIN_BOX_PCT of an hour), so on screen they overlap
+  const holes = Array.from({ length: 5 }, (_, i) => ({ from: at(31_000 + 2 * i), to: at(31_001 + 2 * i), kind: 'gap' }))
+  const one = laneBoxes(v, holes)
+  check('  slivers widened into each other are one box, from the first one\'s start to the last one\'s end', one.length === 1 && one[0].from === at(31_000) && one[0].to === at(31_009) && one[0].n === 5, JSON.stringify(one))
+  check('  as wide as they were drawn together, never less than the minimum', near(one[0].leftPct, ((at(31_000) - v.startMs) / v.spanMs) * 100) && near(one[0].leftPct + one[0].widthPct, ((at(31_008) - v.startMs) / v.spanMs) * 100 + 0.1), JSON.stringify(one[0]))
+
+  // kinds never merge into each other, and a box of another kind between two of a kind does not
+  // keep them apart: the NVR-only slivers between server boxes must not stop those boxes merging
+  const mixed = laneBoxes(v, [
+    { s: at(31_000), e: at(31_001), src: 'server' },
+    { s: at(31_001), e: at(31_002), src: 'nvr' },
+    { s: at(31_002), e: at(31_003), src: 'server' },
+    { s: at(31_003), e: at(31_004), src: 'nvr' },
+    { from: at(31_000), to: at(31_001), kind: 'gap' }
+  ])
+  const kinds = mixed.map((b) => `${b.kind}:${b.n}`).join(' ')
+  check('laneBoxes: kinds never merge across, whatever lies between', kinds === 'server:2 nvr:2 gap:1', kinds)
+  check('  each merged box keeps its own kind\'s times', mixed[0].from === at(31_000) && mixed[0].to === at(31_003) && mixed[1].from === at(31_001) && mixed[1].to === at(31_004))
+  const edge = laneBoxes(v, [{ from: at(30_000), to: at(30_010), kind: 'server' }, { from: at(30_010), to: at(30_020), kind: 'gap' }, { from: at(30_020), to: at(30_030), kind: 'server' }])
+  check('  a gap between two recorded stretches stays a gap between two boxes, though it touches both', edge.map((b) => `${b.kind}:${b.n}`).join(' ') === 'server:1 gap:1 server:1', edge.map((b) => `${b.kind}:${b.n}`).join(' '))
+  const late = laneBoxes(v, [{ from: v.endMs - 500, to: v.endMs - 400, kind: 'gap' }, { from: v.endMs - 300, to: v.endMs - 200, kind: 'gap' }])
+  check('  merged slivers at the right edge still end inside the track', late.length === 1 && late[0].leftPct >= 0 && late[0].leftPct + late[0].widthPct <= 100 + 1e-9, JSON.stringify(late))
+  const unsorted = laneBoxes(v, [{ from: at(31_100), to: at(31_200), kind: 'server' }, { from: at(31_000), to: at(31_100), kind: 'server' }])
+  check('  a list out of time order merges the same way', unsorted.length === 1 && unsorted[0].from === at(31_000) && unsorted[0].to === at(31_200), JSON.stringify(unsorted))
+}
+
+// ---- laneBoxes on a busy day: nvr-2 camera 23 on 09-27 ---------------------------------------------------
+// 22.8 h recorded as 911 ranges with 2,295 holes of about 3 s between them. Drawn one box each, the
+// 3,206 boxes ran over the lane's cap: the recorded lane stopped at 08:13 and not one hole was drawn.
+{
+  const dayView = makeView({ spanMs: DAY_MS, startMs: dayStart, ...day })
+  const RANGES = 911
+  const HOLES = 2295
+  const lens = [] // [kind, ms] in time order
+  let holesLeft = HOLES
+  for (let i = 0; i < RANGES; i++) {
+    // every fifth a few minutes of steady recording, the others a trickle of a few seconds
+    lens.push(['server', i % 5 === 0 ? (200 + ((i * 37) % 390)) * S : (2 + (i % 9)) * S])
+    if (i === RANGES - 1) break
+    // 2 or 3 holes back to back after each range, spread evenly so there are exactly HOLES of them
+    const n = Math.floor(((i + 1) * HOLES) / (RANGES - 1)) - Math.floor((i * HOLES) / (RANGES - 1))
+    for (let j = 0; j < n; j++) lens.push(['gap', 3000 + ((i * 7 + j * 131) % 400)])
+    holesLeft -= n
+  }
+  const total = lens.reduce((sum, [, ms]) => sum + ms, 0)
+  // it ends at midnight, as a camera recording through the night does
+  let t = dayEnd - total
+  const stretches = []
+  const gaps = []
+  for (const [kind, ms] of lens) {
+    if (kind === 'server') stretches.push({ s: t, e: t + ms, src: 'server' })
+    else gaps.push([t, t + ms])
+    t += ms
+  }
+  // what the page draws in its top lane (playback.js recRanges): the stretches, then the holes
+  const lane = [...stretches, ...gaps.map(([s, e]) => ({ s, e, kind: 'gap' }))]
+  check('busy day: the day as measured, over the cap one box each', holesLeft === 0 && stretches.length === RANGES && gaps.length === HOLES && total < DAY_MS && lane.length > MAX_BOXES, `${stretches.length} ranges, ${gaps.length} holes, ${(total / 3_600_000).toFixed(1)} h, cap ${MAX_BOXES}`)
+
+  const boxes = laneBoxes(dayView, lane)
+  const shown = boxes.slice(0, MAX_BOXES) // what fillLane keeps
+  check('busy day: 2,295 small holes collapse to fit under the cap', boxes.length <= MAX_BOXES && boxes.length < lane.length / 4, `${boxes.length} boxes for ${lane.length} ranges`)
+  const recorded = shown.filter((b) => b.kind === 'server')
+  const rightmost = Math.max(...recorded.map((b) => b.leftPct + b.widthPct))
+  check('  the recorded lane reaches the end of the day', near(rightmost, 100) && Math.max(...recorded.map((b) => b.to)) === dayEnd, `ends at ${rightmost.toFixed(3)} %`)
+  const inside = (list, s, e) => list.some((b) => b.from <= s && e <= b.to)
+  const drawnHoles = shown.filter((b) => b.kind === 'gap')
+  check('  every hole is drawn, the last of the day included', gaps.every(([s, e]) => inside(drawnHoles, s, e)), `${gaps.filter(([s, e]) => !inside(drawnHoles, s, e)).length} missing`)
+  check('  every recorded range is inside a recorded box', stretches.every(({ s, e }) => inside(recorded, s, e)))
+  check('  and only the two kinds that went in come out', shown.every((b) => b.kind === 'server' || b.kind === 'gap') && shown.reduce((n, b) => n + b.n, 0) === lane.length)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
