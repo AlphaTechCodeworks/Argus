@@ -65,7 +65,8 @@
 //    the page needs no new decoding path. Only that parameter switches it on, so a browser that can
 //    decode H.265 always gets the recording itself. At most CCTV_TRANSCODE_MAX (2) of these run at
 //    once; over that the viewer is told plainly and the socket closes, rather than joining a queue.
-//    The ffmpeg is killed on close, on error and on every seek: recording always wins.
+//    The ffmpeg is killed on close, on error and on every seek: recording always wins. NVR legs are
+//    told the same (h265), so the NVR's own playback is converted for this browser too.
 //  - Parsed files are kept per session (an LRU of 64 open readers, closed after 60 s unused), so
 //    scrubbing and seeking back and forth do not read an .idx twice.
 import * as fsp from 'node:fs/promises'
@@ -1074,7 +1075,8 @@ export class ServerPlayback {
     }
     const rec = { handle: null, gen, fromMs, toMs, keyMode: this.#keyMode() }
     try {
-      rec.handle = this.legs.start({ nvr: this.nvr, ch: this.ch, fromMs, toMs, stream: 0, speed: Math.min(this.speed, LEG_MAX_SPEED), paused: this.paused, skewMs: skew, real: this.ws, gen, at: fromMs, floorMs })
+      // h265: the NVR's frames go straight to this browser, so they must be converted when ours are
+      rec.handle = this.legs.start({ nvr: this.nvr, ch: this.ch, fromMs, toMs, stream: 0, speed: Math.min(this.speed, LEG_MAX_SPEED), paused: this.paused, skewMs: skew, real: this.ws, gen, at: fromMs, floorMs, h265: this.clientH265 })
     } catch (e) {
       rec.handle = failedLeg(e)
     }

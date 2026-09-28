@@ -5,7 +5,7 @@
 //   startLeg        an NVR session through a proxy ws: the clock conversion (in a copy), toMs and
 //                   floorMs, the messages (started -> started or source, stream, end, error), commands
 //                   (speed capped at 8, no reverse, pause), close (the session's close handler; nothing
-//                   is forwarded afterwards), the start timeout
+//                   is forwarded afterwards), the start timeout, the browser's h265 on the session's URL
 //   ServerPlayback  with legs: a start in NVR-only time and the switch back to disk at the server's
 //                   footage; commands during a leg; failures (the leg fails, the NVR is offline or busy)
 //                   fall back to disk with a notice; gaps (10 s jumped without asking the NVR, 90 s
@@ -270,9 +270,9 @@ function fakeNvr({ cover = [], mode = 'ok', clockKnown = true, stepMs = 200, eve
 const ADMIN = { user: 'admin', admin: true }
 const logs = []
 /** Opens a /playback?src=auto socket through connectPlayback (legs: rec-fallback's unless given). */
-function open(ch, start, { nvr, legs = fb.nvrLegs, defaultLegs = false, opts = {} } = {}) {
+function open(ch, start, { nvr, legs = fb.nvrLegs, defaultLegs = false, opts = {}, extra = '' } = {}) {
   const ws = fakeWs()
-  const url = new URL(`ws://x/playback?nvr=${NVR_ID}&ch=${ch}&stream=0&start=${start}&src=auto`)
+  const url = new URL(`ws://x/playback?nvr=${NVR_ID}&ch=${ch}&stream=0&start=${start}&src=auto${extra}`)
   ws.t0 = performance.now()
   const args = { nvr, ws, url, who: ADMIN, index: IDX, opts: { log: (l) => logs.push(l), ...opts } }
   if (!defaultLegs) args.legs = legs
@@ -406,6 +406,8 @@ const nvrAt = (ms) => ms + SKEW // server time -> the NVR's clock
   const p = nvr.url
   check("startLeg: the NVR session gets /playback with nvr, ch, stream and start in the NVR's clock", p?.pathname === '/playback' && p.searchParams.get('nvr') === NVR_ID && p.searchParams.get('ch') === '3' && p.searchParams.get('stream') === '0' && Number(p.searchParams.get('start')) === F + SKEW, String(p))
   check('startLeg: the speed (16x, capped at 8x) and the pause chosen before go to the session', J(nvr.commands) === J([{ speed: 8 }, { pause: true }]), J(nvr.commands))
+  // not told otherwise (backfill, a browser that decodes H.265): the recording itself, never converted
+  check('startLeg: h265=1 on the URL unless told the browser cannot decode H.265', p?.searchParams.get('h265') === '1', String(p))
   real.bufferedAmount = 12345
   check("proxy: bufferedAmount is the browser socket's; readyState OPEN", nvr.ws.bufferedAmount === 12345 && nvr.ws.readyState === nvr.ws.OPEN)
   nvr.ws.send(J({ type: 'stream', stream: 0 }))
@@ -449,6 +451,16 @@ const nvrAt = (ms) => ms + SKEW // server time -> the NVR's clock
   nvr.ws.send(J({ type: 'end' }))
   const r = await leg.done
   check('leg: {type:"end"} from the session ends it (not forwarded), the session closed', r.reason === 'end' && !real.texts.some((m) => m.type === 'end') && nvr.closed === 1, J(r))
+}
+{
+  // a browser that cannot decode H.265: the NVR session must convert as the server does, or the leg's
+  // raw H.265 reaches a player with no decoder for it and playback dies with "install HEVC"
+  const nvr = scriptedNvr()
+  const real = fakeWs()
+  const leg = fb.startLeg({ nvr, ch: 0, fromMs: F, toMs: F + 60_000, skewMs: SKEW, real, gen: null, h265: false })
+  check('startLeg h265: false: h265=0 on the URL (the NVR session converts H.265 to H.264)', nvr.url?.searchParams.get('h265') === '0', String(nvr.url))
+  leg.close()
+  await leg.done
 }
 {
   const nvr = scriptedNvr()
@@ -524,6 +536,24 @@ const nvrAt = (ms) => ms + SKEW // server time -> the NVR's clock
   await sleep(100)
   check('close: timers cleared (the session, the leg, the NVR session)', timers() === before, `${before} before, ${timers()} after`)
   check('one log line for the leg', logs.some((l) => /NVR leg .* reached/.test(l)), logs.filter((l) => /NVR leg/.test(l)).join(' | '))
+  check('a page that did not say what it decodes: the leg asks for h265=1 (the recording itself)', c?.url.searchParams.get('h265') === '1', String(c?.url))
+}
+{
+  // A browser that cannot decode H.265 (&h265=0): the NVR's own playback in a leg must be converted
+  // too, at a start in NVR-only time and at a hole the NVR fills. Before, the leg's URL had no h265,
+  // playback.mjs took that as "can decode", and raw H.265 went to a player with no decoder for it.
+  const nvr = fakeNvr({ cover: [[S0 - 3_600_000, S0 + 3_600_000]] })
+  const { ws } = open(0, S0 - 60_000, { nvr, extra: '&h265=0' })
+  await until(() => nvr.connects.length > 0, 3000)
+  check('h265=0, a start in NVR-only time: the leg asks the NVR session for h265=0', nvr.connects[0]?.url.searchParams.get('h265') === '0', String(nvr.connects[0]?.url))
+  ws.close(1000)
+  const gap = fakeNvr({ cover: [[S2 - 3_600_000, S2 + 3_600_000]] })
+  const g = open(2, exp2[0].ts, { nvr: gap, extra: '&h265=0' })
+  g.ws.command({ speed: 4 })
+  await until(() => gap.connects.length > 0, 8000)
+  check('h265=0, a 90 s hole the NVR fills: the leg asks the NVR session for h265=0', gap.connects[0]?.url.searchParams.get('h265') === '0', String(gap.connects[0]?.url))
+  g.ws.close(1000)
+  await sleep(50)
 }
 {
   // commands during a leg

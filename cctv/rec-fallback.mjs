@@ -26,6 +26,8 @@
 //   playback and frees its login; nothing from the leg is forwarded after that. Ending for any
 //   reason does the same, and `done` resolves once: { reason: 'reached'|'end'|'error'|'closed',
 //   message?, frames, lastTs, announced }.
+//   h265 (default true) is the browser's answer to "can you decode H.265", passed on as &h265=0|1:
+//   with false the session converts the NVR's H.265 to H.264 (transcode.mjs), taking a slot of its own.
 //
 // This module does not import playback.mjs or sdk.mjs (koffi): NvrBusy is recognised by its name.
 
@@ -116,14 +118,15 @@ function dayRanges(nvr, cache, ch, date, ttl, t) {
  * Starts an NVR playback of [fromMs, toMs] (server time) for the browser socket `real` (see the top).
  * @param {{ nvr: object, ch: number, fromMs: number, toMs: number, stream?: number, speed?: number,
  *   paused?: boolean, skewMs?: number, real: object, gen?: number|null, at?: number,
- *   floorMs?: number|null, startTimeoutMs?: number }} opts
+ *   floorMs?: number|null, startTimeoutMs?: number, h265?: boolean }} opts
  *   gen: the generation of a start or seek (announced with {type:'started'}); null: a hole between two
  *   server files ({type:'source'}); at: the time the browser shows first (default fromMs);
- *   floorMs: the last frame the browser already has; startTimeoutMs: the session must have started by then
+ *   floorMs: the last frame the browser already has; startTimeoutMs: the session must have started by then;
+ *   h265: the browser can decode H.265 (false: the NVR session converts it to H.264, as the server does)
  * @returns {{ command: (obj: object) => void, close: () => void, done: Promise<object>,
  *   announced: boolean, frames: number, lastTs: number|null, fromMs: number, toMs: number }}
  */
-export function startLeg({ nvr, ch, fromMs, toMs, stream = 0, speed = 1, paused = false, skewMs = 0, real, gen = null, at = fromMs, floorMs = null, startTimeoutMs = 20_000 }) {
+export function startLeg({ nvr, ch, fromMs, toMs, stream = 0, speed = 1, paused = false, skewMs = 0, real, gen = null, at = fromMs, floorMs = null, startTimeoutMs = 20_000, h265 = true }) {
   const skew = Number.isFinite(skewMs) ? skewMs : 0
   const skewUs = BigInt(Math.round(skew * 1000))
   const handlers = {}
@@ -239,7 +242,10 @@ export function startLeg({ nvr, ch, fromMs, toMs, stream = 0, speed = 1, paused 
       if (!state.announced) finish({ reason: 'error', message: 'the NVR did not start playing in time' })
     }, startTimeoutMs)
   }
-  const url = new URL(`ws://x/playback?nvr=${encodeURIComponent(nvr.id)}&ch=${Number(ch)}&stream=${Number(stream)}&start=${Math.round(fromMs + skew)}`)
+  // h265 always said, as the page says it: playback.mjs takes a missing one as "can decode", and a leg's
+  // raw H.265 sent to a browser without a decoder kills the player ("install HEVC") mid-playback.
+  // Only an explicit false converts, so backfill (which stores the NVR's own bytes) never gets H.264.
+  const url = new URL(`ws://x/playback?nvr=${encodeURIComponent(nvr.id)}&ch=${Number(ch)}&stream=${Number(stream)}&start=${Math.round(fromMs + skew)}&h265=${h265 === false ? 0 : 1}`)
   try {
     nvr.playback.connect(proxy, url)
   } catch (e) {
