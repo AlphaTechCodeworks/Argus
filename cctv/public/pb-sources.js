@@ -133,6 +133,34 @@ export function pickMode({ timeline, h265, quality }) {
   return { mode: 'server', transcode: false, why: 'Server recordings.' }
 }
 
+// ---- the NVR refusing a search: backing off --------------------------------------------------------
+// dc9e296: loadNvrSide's background recordings() throws on a refused FindFile or a broken file walk,
+// and the route answers 502 with no retryAfterS. That is not "busy for a moment" (503, retryAfterS):
+// it will not clear itself soon, and a page left open on a camera the NVR always refuses (an offline
+// channel with older server recordings, say) used to run a foreground FindFile on it every 30 s.
+
+/** First backoff after a search refusal (no retryAfterS): 5 minutes. */
+export const NVR_REFUSAL_RETRY_MS = 5 * 60_000
+/** The backoff never grows past this: 30 minutes. */
+export const NVR_REFUSAL_MAX_MS = 30 * 60_000
+
+/**
+ * loadNvrSide's retry after error `e`: `{ delayMs, refusalMs }`. An answer WITH retryAfterS (busy, try
+ * again shortly) is retried after that, at least 5 s, exactly as before, and leaves the refusal backoff
+ * (prevRefusalMs) alone, so a busy answer between two refusals does not reset it. One with no
+ * retryAfterS is a refusal: retried after refusalMs, NVR_REFUSAL_RETRY_MS the first time and doubling
+ * (capped at NVR_REFUSAL_MAX_MS) each further one. Feed the refusalMs this returns back in as
+ * prevRefusalMs next time; start over (null) on a new camera or day, or once a search succeeds.
+ * @param {{ retryAfterS?: number }|null|undefined} e
+ * @param {number|null} prevRefusalMs
+ * @returns {{ delayMs: number, refusalMs: number|null }}
+ */
+export function nvrRetryDelay(e, prevRefusalMs) {
+  if (e?.retryAfterS > 0) return { delayMs: Math.max(5, e.retryAfterS) * 1000, refusalMs: prevRefusalMs }
+  const refusalMs = prevRefusalMs ? Math.min(prevRefusalMs * 2, NVR_REFUSAL_MAX_MS) : NVR_REFUSAL_RETRY_MS
+  return { delayMs: refusalMs, refusalMs }
+}
+
 // ---- the share failing: the NVR's copy instead ----------------------------------------------------
 // The server's recordings live on one NAS share, mounted soft: when it is down a read fails after a
 // few minutes (EIO) or hangs until then. The server ends the session as a failed playback
@@ -175,6 +203,25 @@ export class NvrFallback {
     this.used.add(cam)
     return true
   }
+
+  /** cam no longer plays from the NVR by default: the viewer chose a quality for it themselves. */
+  clear(cam) {
+    this.used.delete(cam)
+  }
+}
+
+/**
+ * 9fb29b8: fallBackToNvr used to set the viewer's quality choice itself to 'sd-nvr', page-wide, so
+ * every camera opened afterwards played from the NVR too, and stayed there once the NAS was back. The
+ * fix keeps the override per camera: 'sd-nvr' for a camera in `fellBack` (an NvrFallback's `used`, or
+ * any Set of camKey()s), the viewer's own choice for every other one.
+ * @param {string} cam camKey() of the camera being shown
+ * @param {'server'|'sd-nvr'|undefined} quality the viewer's own choice (state.quality)
+ * @param {Set<string>|null|undefined} fellBack
+ * @returns {'server'|'sd-nvr'|undefined}
+ */
+export function qualityForCam(cam, quality, fellBack) {
+  return fellBack?.has(cam) ? 'sd-nvr' : quality
 }
 
 /** How long a scrub waits for its reply before the next position is sent all the same (ScrubThrottle). */

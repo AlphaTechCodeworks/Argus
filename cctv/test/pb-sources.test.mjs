@@ -8,6 +8,8 @@ import { readFileSync } from 'node:fs'
 import {
   CONVERTED_SCRUB_TIMEOUT_MS,
   LIVE_MARGIN_MS,
+  NVR_REFUSAL_MAX_MS,
+  NVR_REFUSAL_RETRY_MS,
   NVR_SPEEDS,
   NvrFallback,
   SCRUB_TIMEOUT_MS,
@@ -20,8 +22,10 @@ import {
   liveEdge,
   mergeSources,
   nextStretch,
+  nvrRetryDelay,
   pickMode,
   prerollUntil,
+  qualityForCam,
   recordedFrom,
   scrubTimeoutMs,
   serverFailed,
@@ -131,6 +135,42 @@ const text = (list) => list.map((x) => `${x.src} ${x.s}-${x.e}`).join(', ')
   check('  H.265 on a browser with H.265 -> server, no conversion', m(tl({ codec: 'h265' }), { h265: true }).mode === 'server' && m(tl({ codec: 'h265' }), { h265: true }).transcode === false)
   check('  quality sd-nvr -> nvr', m(tl(), { quality: 'sd-nvr' }).mode === 'nvr')
   check('  otherwise -> server', m(tl()).mode === 'server' && m(tl(), { quality: undefined }).mode === 'server')
+}
+
+// ---- the NVR refusing a search: backing off (dc9e296) ---------------------------------------------------
+// loadNvrSide used to retry any error, refusal or not, every 30 s: a camera the NVR always refuses
+// (an offline channel with older server recordings, say) ran a foreground FindFile that often for as
+// long as the page stayed open.
+{
+  check('nvrRetryDelay: an answer WITH retryAfterS is retried after it, at least 5 s, as before', nvrRetryDelay({ retryAfterS: 12 }, null).delayMs === 12_000 && nvrRetryDelay({ retryAfterS: 1 }, null).delayMs === 5000)
+  check('  it leaves the refusal backoff already reached alone', nvrRetryDelay({ retryAfterS: 12 }, 600_000).refusalMs === 600_000)
+
+  const first = nvrRetryDelay(new Error('refused'), null)
+  check('a refusal (no retryAfterS): 5 min the first time, not the 30 s flat retry it used to be', first.delayMs === NVR_REFUSAL_RETRY_MS && first.refusalMs === NVR_REFUSAL_RETRY_MS && NVR_REFUSAL_RETRY_MS === 5 * 60_000, JSON.stringify(first))
+  const second = nvrRetryDelay(new Error('refused'), first.refusalMs)
+  check('  doubles on the next refusal', second.delayMs === NVR_REFUSAL_RETRY_MS * 2, second.delayMs)
+  const third = nvrRetryDelay(new Error('refused'), second.refusalMs)
+  const fourth = nvrRetryDelay(new Error('refused'), third.refusalMs)
+  check('  and again, capped at 30 min', third.delayMs === NVR_REFUSAL_RETRY_MS * 4 && fourth.delayMs === NVR_REFUSAL_MAX_MS && NVR_REFUSAL_MAX_MS === 30 * 60_000, `${third.delayMs} ${fourth.delayMs}`)
+  const fifth = nvrRetryDelay(new Error('refused'), fourth.refusalMs)
+  check('  stays capped after that', fifth.delayMs === NVR_REFUSAL_MAX_MS)
+  check('  no error object at all still backs off (never the bare 30 s default)', nvrRetryDelay(null, null).delayMs === NVR_REFUSAL_RETRY_MS && nvrRetryDelay(undefined, first.refusalMs).delayMs === second.delayMs)
+}
+
+// ---- per-camera NVR fallback quality (9fb29b8 was page-wide) --------------------------------------------
+// fallBackToNvr used to set the viewer's quality choice itself, page-wide: every camera opened
+// afterwards played from the NVR too, and stayed there once the NAS was back.
+{
+  check('qualityForCam: the viewer\'s own choice, unchanged, when this camera has not fallen back', qualityForCam('nvr1/4', 'server', new Set()) === 'server' && qualityForCam('nvr1/4', undefined, new Set()) === undefined)
+  const fell = new Set(['nvr1/4'])
+  check('  \'sd-nvr\' for a camera that fell back, whatever the viewer chose', qualityForCam('nvr1/4', 'server', fell) === 'sd-nvr' && qualityForCam('nvr1/4', undefined, fell) === 'sd-nvr')
+  check('  every other camera keeps the viewer\'s own choice', qualityForCam('solus/5', 'server', fell) === 'server')
+  check('  a missing fallen-back set changes nothing (no camera has fallen back)', qualityForCam('nvr1/4', 'server', null) === 'server' && qualityForCam('nvr1/4', 'server', undefined) === 'server')
+
+  const fb = new NvrFallback()
+  fb.take('nvr1/4')
+  check('NvrFallback.clear: undoes take, so a manual quality choice gets its one fallback again', fb.take('nvr1/4') === false && (fb.clear('nvr1/4'), fb.take('nvr1/4') === true))
+  check('  another camera\'s fallback is untouched', fb.take('solus/5') === true && (fb.clear('nvr1/4'), fb.take('solus/5') === false))
 }
 
 // ---- scrub throttle ------------------------------------------------------------------------------------
@@ -261,7 +301,19 @@ check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any
   check('  a start is watched when the socket opens, and a seek on the open socket too', /watchStart\(sock, 0, /.test(fn('openServer')) && /watchStart\(sock, cmd\.gen, /.test(fn('serverSeek')))
   check('  the watch waits SERVER_START_TIMEOUT_MS, only where watchesStart says so, and stands down once that generation is answered', /SERVER_START_TIMEOUT_MS/.test(fn('watchStart')) && /watchesStart\(state\.stretches, /.test(fn('watchStart')) && /okGen >= gen/.test(fn('watchStart')))
   check('  "started" and "end" end the watch; closing the socket does too', /case 'started': \{[^}]*settleStart\(sock\)/.test(page) && /case 'end':\s*settleStart\(sock\)/.test(page) && /settleStart\(ws\)/.test(fn('closeSocket')))
-  check('  going over plays the NVR at the same moment (SD (NVR), the position kept) and says so', /state\.quality = 'sd-nvr'/.test(fn('fallBackToNvr')) && /reloadKeepingPosition\(\)/.test(fn('fallBackToNvr')) && /showNotice\(/.test(fn('fallBackToNvr')))
+  check('  going over plays the NVR at the same moment (position kept) and says so', /reloadKeepingPosition\(\)/.test(fn('fallBackToNvr')) && /showNotice\(/.test(fn('fallBackToNvr')))
+  check('  ... without touching the page-wide quality (9fb29b8: that dragged every other camera onto the NVR too)', !/state\.quality/.test(fn('fallBackToNvr')))
+  check('  every source choice for a camera goes through qualityForCam, not state.quality bare', (page.match(/qualityForCam\(camKey\(\), state\.quality, nvrFallback\.used\)/g) ?? []).length === 3)
+  check('  a manual quality pick clears that camera\'s fallback override', /nvrFallback\.clear\(camKey\(\)\)/.test(page))
+}
+
+// ---- loadNvrSide backing off on a refusal (dc9e296) ------------------------------------------------------
+{
+  const page = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const fn = (name) => page.slice(page.indexOf(`function ${name}(`), page.indexOf('\n}\n', page.indexOf(`function ${name}(`)))
+  const loadNvrSide = fn('loadNvrSide')
+  check('page: loadNvrSide asks nvrRetryDelay for its retry, not a flat 30 s', /nvrRetryDelay\(e, nvrRefusalMs\)/.test(loadNvrSide))
+  check('  the backoff resets on a new camera/day (the token) and once the search succeeds', /nvrRefusalMs = null/.test(loadNvrSide) && (loadNvrSide.match(/nvrRefusalMs = null/g) ?? []).length === 2)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

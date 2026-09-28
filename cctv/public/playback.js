@@ -32,8 +32,10 @@ import {
   liveEdge,
   mergeSources,
   nextStretch,
+  nvrRetryDelay,
   pickMode,
   prerollUntil,
+  qualityForCam,
   recordedFrom as stretchFrom,
   scrubTimeoutMs,
   serverFailed,
@@ -318,7 +320,7 @@ async function loadDay(after, tzRetried = false) {
     state.tz = tl.tzOffsetMs
     return loadDay(after, true)
   }
-  const pick = pickMode({ timeline: tl, h265: state.h265, quality: state.quality })
+  const pick = pickMode({ timeline: tl, h265: state.h265, quality: qualityForCam(camKey(), state.quality, nvrFallback.used) })
   lastPick = pick
   if (pick.mode === 'server') {
     // Said once per day loaded: the picture is a conversion, not the recording itself, and a viewer
@@ -422,14 +424,23 @@ const edgeNow = () => liveEdge(state.nvrNow, state.tlAt, performance.now())
 
 let nvrSideTimer = null
 let nvrInfo = null // { nvr, dates } the NVR's recording days (server mode)
+let nvrRetryToken = null // the loadNvrSide token the refusal backoff below belongs to
+let nvrRefusalMs = null // pb-sources.js nvrRetryDelay's backoff so far; null before a refusal
 
 /**
  * Server mode, in the background: the NVR's clock (skew, time zone) and recording days, then its
  * recordings of the day (events, NVR-only stretches). Never waited for; a busy or offline NVR is
- * retried quietly (no message over the video).
+ * retried quietly (no message over the video). A refused search (dc9e296: a channel the NVR always
+ * declines, or a broken file walk) is not "busy for a moment": it backs off instead of asking again
+ * every 30 s (pb-sources.js nvrRetryDelay), starting over on a new camera or day, or once a search
+ * succeeds.
  */
 async function loadNvrSide(token) {
   clearTimeout(nvrSideTimer)
+  if (token !== nvrRetryToken) {
+    nvrRetryToken = token
+    nvrRefusalMs = null // a different camera or day: an earlier refusal's backoff does not carry over
+  }
   const stale = () => token !== dayToken || state.mode !== 'server'
   const nvr = state.nvr
   try {
@@ -449,14 +460,17 @@ async function loadNvrSide(token) {
     }
     const { ranges, events } = await api(`/api/playback/recordings?${nvrQ()}&ch=${state.ch}&date=${state.date}`)
     if (stale()) return
+    nvrRefusalMs = null // the search succeeded: forget any earlier refusal's backoff
     state.nvrRaw = { ranges, events }
     rebuildStretches()
     scheduleDraw()
   } catch (e) {
     if (stale()) return
+    const { delayMs, refusalMs } = nvrRetryDelay(e, nvrRefusalMs)
+    nvrRefusalMs = refusalMs
     nvrSideTimer = setTimeout(() => {
       if (!stale()) loadNvrSide(token)
-    }, Math.max(5, e?.retryAfterS ?? 30) * 1000)
+    }, delayMs)
   }
 }
 
@@ -538,7 +552,9 @@ function updateModeUi() {
   const server = state.mode === 'server'
   renderSpeeds()
   // quality: with server recordings "HD (server)" or "SD (NVR)"; otherwise the NVR's SD or HD as before
-  const kind = state.avail && (server || state.quality === 'sd-nvr') ? 'server' : 'nvr'
+  // this camera's quality: the viewer's own choice, unless it fell back to the NVR on its own (pb-sources.js qualityForCam)
+  const quality = qualityForCam(camKey(), state.quality, nvrFallback.used)
+  const kind = state.avail && (server || quality === 'sd-nvr') ? 'server' : 'nvr'
   if (qualitySel.dataset.kind !== kind) {
     if (kind === 'server') setOptions(qualitySel, [['server', 'HD (server)'], ['sd-nvr', 'SD (NVR)']], server ? 'server' : 'sd-nvr')
     else setOptions(qualitySel, [[1, 'SD (light)'], [0, 'HD']], state.stream)
@@ -729,13 +745,14 @@ function settleStart(sock) {
  * Plays the NVR's own recording from the current position instead of the server's, with a notice:
  * "SD (NVR)", as the viewer would choose it, so the quality menu says what is playing and "HD
  * (server)" tries the server again. `why` opens the notice. False (nothing done) when this camera
- * has had its one already.
+ * has had its one already. Only this camera goes over (nvrFallback.take, pb-sources.js): a NAS
+ * outage on one camera used to force every camera opened afterwards onto the NVR too, and kept them
+ * there after the NAS came back.
  */
 function fallBackToNvr(sock, why) {
   if (!nvrFallback.take(sock.cam)) return false
   if (ws === sock) closeSocket()
   else settleStart(sock)
-  state.quality = 'sd-nvr'
   state.stream = 1
   hideMessage() // (the server's "Playback failed: ..." is in the notice instead)
   showNotice(`${why}. Playing the NVR's copy instead; choose "HD (server)" to try the server again.`)
@@ -1768,7 +1785,9 @@ $('shortcutsClose').addEventListener('click', () => shortcutsDlg.close())
 qualitySel.addEventListener('change', () => {
   const v = qualitySel.value
   if (v === 'server' || v === 'sd-nvr') {
-    // server recordings (HD) or the NVR's SD: the other mode, at the same moment
+    // server recordings (HD) or the NVR's SD: the other mode, at the same moment. The viewer's own
+    // choice for this camera, so an earlier NAS-outage fallback (fallBackToNvr) no longer overrides it
+    nvrFallback.clear(camKey())
     state.quality = v
     if (v === 'sd-nvr') state.stream = 1
     return reloadKeepingPosition().then(() => {
@@ -2222,7 +2241,7 @@ async function start() {
   }
   state.date = fmtDate(state.nvrNow)
   const tl = await fetchTimeline()
-  if (pickMode({ timeline: tl, h265: state.h265, quality: state.quality }).mode === 'server') {
+  if (pickMode({ timeline: tl, h265: state.h265, quality: qualityForCam(camKey(), state.quality, nvrFallback.used) }).mode === 'server') {
     if (Number.isFinite(tl.tzOffsetMs)) state.tz = tl.tzOffsetMs
     state.nvrNow = tl.now
     state.date = fmtDate(state.nvrNow)
