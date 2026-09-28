@@ -45,7 +45,10 @@ const TRIGGER_WORDS = {
   popVideo: 'pop-up video', email: 'email', sysAudio: 'sound', recOn: 'record', alarmOutOn: 'alarm output', presetOn: 'PTZ preset',
   sysSnap: 'NVR snapshot', popMsg: 'pop-up message', manualAudio: 'manual sound', manualLight: 'manual light'
 }
-const ACK_WORDS = { mutex: 'a detection that cannot run beside it', 'no-filter': 'no person/vehicle filter', 'short-hold': 'a short hold time', 'no-lines': 'no line drawn' }
+const ACK_WORDS = { mutex: 'a detection that cannot run beside it', 'no-filter': 'no person/vehicle filter', 'short-hold': 'a short hold time', 'no-lines': 'no line drawn', 'no-schedule': 'no schedule: it would never detect' }
+/** A camera with no schedule has the null GUID ('None' in the NVR's web client), which is never in the NVR's list. */
+const NO_SCHEDULE = '{00000000-0000-0000-0000-000000000000}'
+const NO_SCHEDULE_NAME = 'None (never detects)'
 const HEADLINES = {
   done: 'Saved: the camera reports every change as asked.',
   partial: 'Partly saved: the camera kept some of it (below).',
@@ -101,8 +104,8 @@ export function changeOf(cfg, draft) {
   return out
 }
 
-/** A schedule's name from the NVR's list, or its id when the list does not have it. */
-const scheduleName = (id, schedules = []) => schedules.find((s) => s.id === id)?.name ?? id
+/** A schedule's name from the NVR's list, or its id when the list does not have it (no schedule: says so). */
+const scheduleName = (id, schedules = []) => schedules.find((s) => s.id === id)?.name ?? (String(id).toUpperCase() === NO_SCHEDULE ? NO_SCHEDULE_NAME : id)
 
 /** What one slot shows beside its number: its state and whether it is saved. */
 export function slotText(line, saved) {
@@ -166,7 +169,10 @@ export function unchangedSince(before, cfg) {
  */
 export function scheduleChoices(cfg, schedules = []) {
   const list = schedules.map((s) => ({ id: s.id, name: s.name }))
-  if (!list.some((s) => s.id === cfg.scheduleGuid)) list.unshift({ id: cfg.scheduleGuid, name: schedules.length ? 'the camera\'s current schedule (not in the NVR\'s list)' : 'the camera\'s current schedule' })
+  if (!list.some((s) => s.id === cfg.scheduleGuid)) {
+    const none = String(cfg.scheduleGuid).toUpperCase() === NO_SCHEDULE
+    list.unshift({ id: cfg.scheduleGuid, name: none ? NO_SCHEDULE_NAME : schedules.length ? 'the camera\'s current schedule (not in the NVR\'s list)' : 'the camera\'s current schedule' })
+  }
   return list
 }
 

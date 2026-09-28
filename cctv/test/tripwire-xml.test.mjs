@@ -297,6 +297,17 @@ const keys = (r) => r.warnings.map((w) => w.key)
   check('already on: a hold time under 10 s still warns', same(keys(r2), ['short-hold']))
 }
 check('off and staying off: a short hold is not warned', same(keys(checkChange(c3, { holdTime: 5 })), []))
+{
+  // F5: a camera whose schedule is the null GUID ('None' in the NVR's web client) never detects
+  const none = parseTripwire(CH3.replace(` scheduleGuid="${S247}"`, ` scheduleGuid="${NULL_GUID}"`))
+  const r = checkChange(none, { enabled: true, holdTime: 10, lines: lines(ROAD) })
+  check('switched on with no schedule (the null GUID): the no-schedule warning, with words', r.refuse === null && same(keys(r), ['no-filter', 'no-schedule']) && /never detect/.test(r.warnings.at(-1)?.text ?? ''), JSON.stringify(r.warnings))
+  const fixed = checkChange(none, { enabled: true, holdTime: 10, lines: lines(ROAD), scheduleGuid: S247 }, { schedules: parseSchedules(SCHEDULES) })
+  check('... not when the same change gives it a schedule', fixed.refuse === null && same(keys(fixed), ['no-filter']), JSON.stringify(fixed))
+  check('... nor when it stays off', same(keys(checkChange(none, { holdTime: 10 })), []))
+  const toNone = checkChange(c3, { scheduleGuid: NULL_GUID }, { schedules: parseSchedules(SCHEDULES) })
+  check('the null GUID is accepted as a schedule (it is not in the NVR\'s list), so an Undo can put it back', toNone.refuse === null, JSON.stringify(toNone))
+}
 
 // ---- flatten -----------------------------------------------------------------------------------
 {

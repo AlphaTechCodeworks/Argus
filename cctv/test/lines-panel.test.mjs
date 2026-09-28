@@ -98,6 +98,15 @@ const S24x5 = schedules.find((s) => s.name === '24x5').id
 // ---- choices and warnings shown before anything is sent -------------------------------------------------
 check('scheduleChoices: the NVR\'s list', show(scheduleChoices(ch3, schedules).map((s) => s.name)) === '["24x7","24x5","24x2"]')
 check('  the camera\'s own schedule is added when the list lacks it (or could not be read)', scheduleChoices(ch3, []).length === 1 && scheduleChoices(ch3, [])[0].id === ch3.scheduleGuid && scheduleChoices({ ...ch3, scheduleGuid: '{11111111-2222-3333-4444-555555555555}' }, schedules).length === 4)
+{
+  // F5: no schedule at all (the null GUID, 'None' in the NVR's web client) is named for what it does
+  const NONE = '{00000000-0000-0000-0000-000000000000}'
+  const choices = scheduleChoices({ ...ch3, scheduleGuid: NONE }, schedules)
+  check('  a camera with no schedule: listed first as "None (never detects)"', choices.length === 4 && choices[0].id === NONE && choices[0].name === 'None (never detects)', show(choices))
+  check('  and named so in a result', valueText('schedule', NONE, schedules) === 'None (never detects)')
+  const v = resultView({ fields: [{ key: 'enabled', want: 'true', got: 'true', status: 'as asked' }], sideEffects: [], warningsAcked: ['no-schedule'] })
+  check('  the no-schedule warning confirmed, in words', show(v.acked) === '["no schedule: it would never detect"]', show(v.acked))
+}
 check('mutexOn: only the detections that are on, in words', mutexOn(ch3).length === 0 && show(mutexOn({ ...ch3, mutex: [{ object: 'perimeter', on: true }, { object: 'osc', on: false }] })) === '["intrusion zones"]')
 check('blockedText: none on the captured cameras', blockedText(ch1) === null && blockedText(ch3) === null && blockedText(ch4) === null)
 const blocked = blockedText({ ...ch3, triggerWhiteLight: true })

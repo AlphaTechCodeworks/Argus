@@ -23,7 +23,8 @@
 //   all while the camera's own sound or white-light trigger is on (the floodlight is worked by hand
 //   only; those two are never sent);
 // - warnings that need an acknowledgement tied to the exact change (409 needsAck + ackToken): a
-//   detection that cannot run beside this one, no person/vehicle filter, a short hold time, no line;
+//   detection that cannot run beside this one, no person/vehicle filter, a short hold time, no line,
+//   no schedule (None: the camera would never detect);
 // - the change is logged (with every setting before it) BEFORE anything is sent;
 // - it is read back at 1.5, 3 and 6 s and every field of the answer is compared, including those
 //   the web client never sends: each changed field is "as asked" or "not applied", and any other

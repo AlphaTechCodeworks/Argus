@@ -328,6 +328,10 @@ function warningsFor(cfg, next) {
   if (next.enabled && next.lines.every(isCleared)) {
     out.push({ key: 'no-lines', text: 'Line crossing would be on with no line drawn: it cannot detect anything until a line is set.' })
   }
+  // 'None' in the NVR's web client: the camera then detects at no time at all
+  if (next.enabled && String(next.scheduleGuid).toUpperCase() === NULL_GUID) {
+    out.push({ key: 'no-schedule', text: 'Line crossing would be on with no schedule (None): the camera would never detect anything. Choose a schedule such as 24x7.' })
+  }
   return out
 }
 
@@ -353,7 +357,8 @@ export function checkChange(cfg, change, { schedules = [] } = {}) {
   if ('scheduleGuid' in change) {
     const g = change.scheduleGuid
     if (typeof g !== 'string' || !GUID.test(g)) return refuse('scheduleGuid must be a schedule id like {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}')
-    if (schedules.length && !schedules.some((s) => s.id === g)) return refuse('That schedule is not one of the NVR\'s schedules')
+    // the null GUID ('None') is never in the NVR's list, but a camera can have it: an Undo must be able to put it back
+    if (schedules.length && g.toUpperCase() !== NULL_GUID && !schedules.some((s) => s.id === g)) return refuse('That schedule is not one of the NVR\'s schedules')
   }
   if ('lines' in change) {
     const why = linesProblem(cfg, change.lines)
