@@ -56,7 +56,8 @@
 //  - The open file (the one being written, rec-index noteOpen) is followed: refreshed every
 //    tailPollMs; once it is closed (noteClosed) the next file follows. Reaching the newest frame
 //    faster than 1x drops to 1x ({type:'speed', speed:1, reason:'newest'}).
-//  - A file that cannot be opened (ENOENT: deleted by housekeeping, EACCES) is skipped (logged once).
+//  - A file that cannot be opened (ENOENT: deleted by housekeeping, EACCES) is skipped (logged once),
+//    and so is an empty one (closed, no keyframe on disk): its span plays as a hole, notice and all.
 //    Any other failure sends {type:'error'} and closes the socket (1011); it never throws.
 //  - Flow control: reading stops while the socket has more than pauseAbove bytes queued and starts
 //    again below resumeBelow; at most readAheadMs x |speed| of footage and maxQueueBytes are queued.
@@ -1154,16 +1155,26 @@ export class ServerPlayback {
 
   // ---- files -----------------------------------------------------------------------------------
 
-  /** Opens seg, or the next readable one in direction dir (a deleted file is skipped): { seg, reader } or null. */
+  /**
+   * Opens seg, or the next readable one in direction dir: { seg, reader } or null. A deleted file is
+   * skipped, and so is an empty one (a closed file with no keyframe on disk: a zero-byte segment the
+   * share left behind, still indexed as recorded). Played, an empty file was its whole span waited out
+   * in real time on a black picture; skipped, the callers see the hole from the file before to the
+   * file after (#nextFile, #prevFile) or a start that jumped (#startStep), with the usual notice.
+   * The file being written is never skipped: it is empty only until its first frames arrive.
+   */
   async #openSeg(seg, dir, stale) {
     for (let n = 0; seg && n < 1000; n++) {
       try {
-        return { seg, reader: await this.#reader(seg) }
+        const reader = await this.#reader(seg)
+        if (!(reader.rows.length === 0 && !reader.growing)) return { seg, reader }
+        if (stale()) return null
+        this.#logSkip(seg, { code: 'no frames' })
       } catch (e) {
         if (stale() || !SKIP_CODES.has(e?.code)) throw e
         this.#logSkip(seg, e)
-        seg = dir > 0 ? this.index.next(this.nvr.id, this.ch, seg.startMs) : this.index.prev(this.nvr.id, this.ch, seg.startMs)
       }
+      seg = dir > 0 ? this.index.next(this.nvr.id, this.ch, seg.startMs) : this.index.prev(this.nvr.id, this.ch, seg.startMs)
     }
     return null
   }

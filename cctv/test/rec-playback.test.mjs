@@ -821,6 +821,60 @@ for (const speed of [2, 4]) {
   ws.close(1000)
 }
 
+// ---- an empty file: played as a hole, not waited out on a black picture --------------------------------------
+// 343 zero-byte segments were indexed as recorded. A seek into one, or playback running into one, used to
+// wait out its whole span in real time on a black picture (median 27 s, up to 5 min).
+{
+  const T10 = Date.UTC(2026, 8, 24, 15, 0, 10)
+  const all = makeFrames(prng(31), T10, 600) // 3 contiguous files of 8 s
+  const cam10 = await recordGroups(10, [all.slice(0, 200), all.slice(200, 400), all.slice(400)])
+  const exp10 = await readBack(cam10.segs)
+  const empty = cam10.segs[1]
+  await fsp.writeFile(empty.path, '') // what the share left behind: the row, and no bytes
+  await fsp.writeFile(`${empty.path}.idx`, '')
+  const kept = exp10.filter((f) => f.seg !== empty.path)
+  const firstOf = (seg) => exp10.find((f) => f.seg === seg.path)
+  check('empty file: 3 files of 8 s, the middle one emptied but still indexed', cam10.segs.length === 3 && IDX.byPath(empty.path)?.endMs > IDX.byPath(empty.path)?.startMs && (await fsp.stat(empty.path)).size === 0)
+
+  {
+    // playing into it at 4x: 8 s of nothing would be a 2 s wait
+    const { ws } = open(10, exp10[0].ts, { opts: { endGraceMs: 300 } })
+    ws.command({ speed: 4 })
+    await until(() => ws.texts.some((m) => m.type === 'end'), 10_000)
+    const bad = seqCheck(ws.bins, kept, usMap(kept))
+    check('empty file, played into: the files either side play whole, in order', ws.bins.length === kept.length && !bad, bad || `${ws.bins.length}/${kept.length}`)
+    const i3 = ws.bins.findIndex((b) => b.us === firstOf(cam10.segs[2]).us)
+    const wall = i3 > 0 ? ws.bins[i3].at - ws.bins[i3 - 1].at : Infinity
+    check('  it is jumped at once, not waited out', wall < 400, `${wall.toFixed(0)} ms from the last frame before it to the first after`)
+    const nt = ws.texts.find((m) => m.type === 'notice')
+    check('  with the usual "not recorded" notice, covering its span', /^Skipped \d\d:\d\d:\d\d–\d\d:\d\d:\d\d: not recorded$/.test(nt?.message ?? '') && nt.from <= empty.startMs + 1000 && nt.to >= empty.endMs - 1000, J(nt))
+    check('  no error, and end newest at the end', !ws.texts.some((m) => m.type === 'error') && ws.closedWith === 0 && ws.texts.at(-1)?.newest === true, J(ws.texts))
+    ws.close(1000)
+  }
+  {
+    // a seek into it: the next file, with the notice, straight away
+    const T = empty.startMs + 3000
+    const { ws } = open(10, T)
+    await until(() => ws.bins.length > 0, 3000)
+    const st = started(ws)
+    const first3 = firstOf(cam10.segs[2])
+    check('empty file, started in: a notice, then started at the next file\'s first key', ws.texts[0]?.type === 'notice' && Math.abs(ws.texts[0].from - T) < 1 && st && Math.abs(st.from - first3.ts) < 0.001 && st.at === st.from, J(ws.texts.slice(0, 2)))
+    check('  and its first frame comes at once, not after the rest of the empty span', ws.bins[0]?.us === first3.us && ws.bins[0].at - ws.t0 < 1000, `${(ws.bins[0]?.at - ws.t0).toFixed(0)} ms`)
+    ws.close(1000)
+  }
+  {
+    // reverse, across it: from the last file's keyframes to the first file's without a wait for the empty one
+    const { ws } = open(10, firstOf(cam10.segs[2]).ts + 4000)
+    ws.command({ speed: -4 })
+    await until(() => ws.texts.some((m) => m.type === 'end' && m.reverse), 10_000)
+    const seg1 = new Set(exp10.filter((f) => f.seg === cam10.segs[0].path).map((f) => f.us))
+    const i1 = ws.bins.findIndex((b) => seg1.has(b.us))
+    const wall = i1 > 0 ? ws.bins[i1].at - ws.bins[i1 - 1].at : Infinity
+    check('empty file, in reverse: jumped too', i1 > 0 && wall < 1000, `${wall.toFixed(0)} ms`)
+    ws.close(1000)
+  }
+}
+
 // ---- flow control: a backed-up socket stops the reader ------------------------------------------------------
 {
   const stats = {}
