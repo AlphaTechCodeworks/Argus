@@ -23,6 +23,8 @@
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
+  NvrFallback,
+  SERVER_START_TIMEOUT_MS,
   ScrubThrottle,
   convertTime,
   describeSkew,
@@ -34,8 +36,10 @@ import {
   prerollUntil,
   recordedFrom as stretchFrom,
   scrubTimeoutMs,
+  serverFailed,
   shift,
-  speedFor
+  speedFor,
+  watchesStart
 } from './pb-sources.js'
 import { MAX_BOXES, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
@@ -621,6 +625,7 @@ function pushFrame(data) {
 
 function closeSocket() {
   if (!ws) return
+  settleStart(ws)
   ws.onclose = null
   ws.close()
   ws = null
@@ -679,8 +684,59 @@ function serverSeek(t) {
     sock.ackOnFrame = null
     if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(cmd))
     else sock.pending = cmd // (sent when it opens)
+    watchStart(sock, cmd.gen, target)
   }
   scheduleDraw()
+}
+
+// ---- server mode: the share failing ----------------------------------------------------
+//
+// The server's recordings are on one NAS share. When it is down, a server playback ends with
+// "Playback failed: the recording store could not be read" or, while a read hangs, never starts.
+// The NVR has its own copy, so the page plays that from the same moment instead, once per camera
+// (pb-sources.js NvrFallback): the viewer used to have to find "SD (NVR)" by hand.
+const nvrFallback = new NvrFallback()
+
+/**
+ * Watch generation `gen` (the start, or a seek) of sock: no answer within SERVER_START_TIMEOUT_MS
+ * and the NVR's copy plays instead. Only a start into the server's own footage is watched
+ * (watchesStart): a stretch only the NVR has starts as slowly as the NVR does.
+ */
+function watchStart(sock, gen, target) {
+  settleStart(sock)
+  if (!watchesStart(state.stretches, target)) return
+  sock.startTimer = setTimeout(() => {
+    sock.startTimer = null
+    // answered meanwhile (started, or a newer scrub's reply), or no longer the page's socket
+    if (ws !== sock || sock.okGen >= gen) return
+    const slow = `The server has not started playing after ${SERVER_START_TIMEOUT_MS / 1000} s`
+    // this camera has had its one: say so, and leave the socket be in case the server gets there
+    if (!fallBackToNvr(sock, slow)) showMessage(`${slow}: its recordings may be unreachable. Choose "SD (NVR)" to play the NVR's copy.`)
+  }, SERVER_START_TIMEOUT_MS)
+}
+
+/** The start being watched on sock was answered (or the socket is done with): no fallback for it. */
+function settleStart(sock) {
+  clearTimeout(sock?.startTimer)
+  if (sock) sock.startTimer = null
+}
+
+/**
+ * Plays the NVR's own recording from the current position instead of the server's, with a notice:
+ * "SD (NVR)", as the viewer would choose it, so the quality menu says what is playing and "HD
+ * (server)" tries the server again. `why` opens the notice. False (nothing done) when this camera
+ * has had its one already.
+ */
+function fallBackToNvr(sock, why) {
+  if (!nvrFallback.take(sock.cam)) return false
+  if (ws === sock) closeSocket()
+  else settleStart(sock)
+  state.quality = 'sd-nvr'
+  state.stream = 1
+  hideMessage() // (the server's "Playback failed: ..." is in the notice instead)
+  showNotice(`${why}. Playing the NVR's copy instead; choose "HD (server)" to try the server again.`)
+  reloadKeepingPosition()
+  return true
 }
 
 function openServer(start) {
@@ -698,6 +754,7 @@ function openServer(start) {
   sock.okGen = -1 // the generation whose frames are shown (announced by started or scrub)
   sock.pending = null
   sock.ackOnFrame = null // a scrub's reply came: its keyframe frees the throttle
+  sock.startTimer = null // watchStart: no answer to the start or a seek yet
   sock.onopen = () => {
     if (state.speed !== 1) sock.send(JSON.stringify({ speed: state.speed }))
     if (sock.pending) sock.send(JSON.stringify(sock.pending))
@@ -716,10 +773,15 @@ function openServer(start) {
   }
   sock.onclose = (e) => {
     if (ws !== sock) return
+    settleStart(sock)
     ws = null
     if (e.code === 1013) showMessage('The NVR is busy with other playbacks. Try again in a moment.')
+    // a failed server playback (the share down, say): the NVR's copy, once per camera, with the
+    // server's own message ({type:'error'}, just before this) as the notice's reason
+    else if (serverFailed(e.code, e.reason)) fallBackToNvr(sock, (sock.error ?? 'Server playback failed').replace(/[.\s]+$/, ''))
   }
   ws = sock
+  watchStart(sock, 0, start)
 }
 
 function onServerStatus(sock, msg) {
@@ -727,6 +789,7 @@ function onServerStatus(sock, msg) {
     case 'started': {
       if (msg.gen !== sock.gen) return
       sock.okGen = msg.gen
+      settleStart(sock)
       // a server start at 1x-4x sends the frames from the keyframe before `at` at once (the
       // preroll): decoded, not shown; its keyframe is the poster. Keyframe starts, reverse and
       // NVR legs have none (pb-sources.js prerollUntil)
@@ -760,8 +823,11 @@ function onServerStatus(sock, msg) {
       showNotice(msg.message)
       return
     case 'end':
+      settleStart(sock) // (nothing to play there is an answer too)
       return onServerEnd(msg)
     case 'error':
+      settleStart(sock) // (the close that follows decides)
+      sock.error = msg.message // (said again if the page goes over to the NVR)
       showMessage(msg.message)
       return
     // 'stream': server footage is the main stream, asked for as such

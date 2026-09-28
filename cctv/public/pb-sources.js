@@ -1,7 +1,8 @@
 // The playback page's pure logic (no DOM), for playback from the server's recordings (phase 3):
 // the server's and the NVR's recordings merged into one list of stretches, lookups on it, the
-// choice between server and NVR playback for a day, the scrub throttle, the clock-skew hint and the
-// conversions between the two time bases. Tested offline: test/pb-sources.test.mjs.
+// choice between server and NVR playback for a day, going over to the NVR when the server cannot
+// read its recordings, the scrub throttle, the clock-skew hint and the conversions between the two
+// time bases. Tested offline: test/pb-sources.test.mjs.
 //
 // Time bases: server footage is stamped with the server's clock, NVR footage with the NVR's, and
 // the NVR's clock differs by skewMs (NVR clock - server clock; nvr1 runs about 3 min 40 s fast).
@@ -130,6 +131,50 @@ export function pickMode({ timeline, h265, quality }) {
     return { mode: 'server', transcode: true, why: 'This recording is H.265, which this browser cannot decode: the server is converting it to H.264 as it plays.' }
   }
   return { mode: 'server', transcode: false, why: 'Server recordings.' }
+}
+
+// ---- the share failing: the NVR's copy instead ----------------------------------------------------
+// The server's recordings live on one NAS share, mounted soft: when it is down a read fails after a
+// few minutes (EIO) or hangs until then. The server ends the session as a failed playback
+// (rec-playback.mjs #fail), and the page plays the NVR's own recording from the same moment instead.
+
+/** How long a start or seek into the server's footage may go without {type:'started'} before that. */
+export const SERVER_START_TIMEOUT_MS = 8000
+
+/**
+ * Whether a server socket's close says its playback failed (1011 'playback failed'). Not a busy NVR
+ * (1013), a normal close, a full converter ('transcode busy': its message says what to do) or no
+ * server recordings: the NVR's copy is no answer to those, or the page already knows.
+ */
+export function serverFailed(code, reason) {
+  return code === 1011 && reason === 'playback failed'
+}
+
+/**
+ * Whether a start or seek at t is watched for SERVER_START_TIMEOUT_MS: yes when it reads the server's
+ * files. A stretch only the NVR has (src 'nvr') is played by the NVR's own session, whose start can
+ * take 10 s on a good day and has its own failure path (rec-playback.mjs #legDone); it is not the share.
+ */
+export function watchesStart(list, t) {
+  return stretchAt(list, t)?.src !== 'nvr'
+}
+
+/**
+ * Once per camera: the first failure of a camera's server playback goes over to the NVR, any later one
+ * (the viewer chose "HD (server)" again) is shown as it is. So a camera whose NVR copy fails too can
+ * never go round in a loop between the two.
+ */
+export class NvrFallback {
+  constructor() {
+    this.used = new Set()
+  }
+
+  /** true the first time for `cam` (and remembered), false after. */
+  take(cam) {
+    if (this.used.has(cam)) return false
+    this.used.add(cam)
+    return true
+  }
 }
 
 /** How long a scrub waits for its reply before the next position is sent all the same (ScrubThrottle). */

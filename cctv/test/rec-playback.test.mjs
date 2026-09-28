@@ -875,6 +875,41 @@ for (const speed of [2, 4]) {
   }
 }
 
+// ---- the store failing (the NAS share down): a plain-English error, never "EIO: i/o error, read" --------------
+{
+  const failing = (code, where) => ({
+    async open(p, flags) {
+      if (where === 'open') throw Object.assign(new Error(`${code}: i/o error, open '${p}'`), { code })
+      const fh = await fsp.open(p, flags)
+      return {
+        read: async () => {
+          throw Object.assign(new Error(`${code}: i/o error, read`), { code })
+        },
+        stat: () => fh.stat(),
+        close: () => fh.close()
+      }
+    }
+  })
+  for (const [code, where] of [['EIO', 'read'], ['EIO', 'open'], ['ETIMEDOUT', 'read'], ['EHOSTDOWN', 'open']]) {
+    const lines = []
+    const { ws } = open(3, exp3[0].ts, { opts: { fs: failing(code, where), log: (l) => lines.push(l) } })
+    await until(() => ws.closedWith !== 0, 3000)
+    const err = ws.texts.find((m) => m.type === 'error')
+    check(`${code} on ${where}: "the recording store could not be read", in words`, err?.message === 'Playback failed: The recording store could not be read (network storage problem)', err?.message)
+    check('  the socket closes as a failed playback (the page then plays the NVR\'s copy)', ws.closedWith === 1011 && ws.closeReason === 'playback failed', `${ws.closedWith} ${ws.closeReason}`)
+    // EIO is not a file that went away: skipping it would say "not recorded" and try the next file, and the next
+    check('  it is not skipped as a missing file: no "not recorded" notice, nothing started', !ws.texts.some((m) => m.type === 'notice' || m.type === 'started'), J(ws.texts))
+    check('  the log keeps what the system said', lines.some((l) => l.includes('failed') && l.includes(code)), lines.join(' | '))
+  }
+  {
+    // anything else is reported as it was
+    const odd = { open: async () => { throw new Error('something else went wrong') } }
+    const { ws } = open(3, exp3[0].ts, { opts: { fs: odd } })
+    await until(() => ws.closedWith !== 0, 3000)
+    check('another failure keeps its own message', ws.texts.find((m) => m.type === 'error')?.message === 'Playback failed: something else went wrong', J(ws.texts))
+  }
+}
+
 // ---- flow control: a backed-up socket stops the reader ------------------------------------------------------
 {
   const stats = {}

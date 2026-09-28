@@ -58,7 +58,9 @@
 //    faster than 1x drops to 1x ({type:'speed', speed:1, reason:'newest'}).
 //  - A file that cannot be opened (ENOENT: deleted by housekeeping, EACCES) is skipped (logged once),
 //    and so is an empty one (closed, no keyframe on disk): its span plays as a hole, notice and all.
-//    Any other failure sends {type:'error'} and closes the socket (1011); it never throws.
+//    Any other failure sends {type:'error'} and closes the socket (1011 'playback failed'); it never
+//    throws. The store itself failing (EIO and the like: the NAS share down) is said in words, and
+//    the page then plays the NVR's copy (public/playback.js).
 //  - Flow control: reading stops while the socket has more than pauseAbove bytes queued and starts
 //    again below resumeBelow; at most readAheadMs x |speed| of footage and maxQueueBytes are queued.
 //  - H.265 for a browser that cannot decode it (&h265=0 on the URL, transcode.mjs): the frames go
@@ -114,6 +116,13 @@ const READER_IDLE_MS = 60_000 // a kept file unused this long is closed
 // the rate. The wall-time limit in the pacer still holds.
 const KEY_SPACING_SLACK = 0.9
 const SKIP_CODES = new Set(['ENOENT', 'EACCES'])
+// The store itself failing (the NAS share down or unreachable; it is mounted soft, so a stuck read ends
+// in one of these after a few minutes). Not skipped like a missing file: that would not cover a read
+// failing mid-file, would call footage that exists "not recorded", and in a full outage would try
+// file after file, each one hanging. The session ends (#fail) with this said in words rather than
+// "EIO: i/o error, read", and the page plays the NVR's copy instead (playback.js).
+const STORE_CODES = new Set(['EIO', 'ETIMEDOUT', 'EHOSTDOWN', 'EHOSTUNREACH', 'ESTALE', 'ENOTCONN'])
+const STORE_FAILED = 'The recording store could not be read (network storage problem)'
 /** NVR fallback legs (rec-fallback.mjs): { coverage(nvr, ch, fromMs, toMs), start(opts) }; null: gaps are jumped. */
 const defaultLegs = nvrLegs
 // NVR coverage shorter than this is clock jitter at the edge of server footage, not a stretch to play
@@ -1245,7 +1254,9 @@ export class ServerPlayback {
   #fail(e) {
     if (this.closed) return
     this.log(`[${this.nvr.id}] server playback ch${this.ch + 1} failed: ${e?.message ?? e}`)
-    this.#send({ type: 'error', message: `Playback failed: ${e?.message ?? e}` })
+    // the viewer gets what went wrong in words; the log above keeps what the system said
+    const why = STORE_CODES.has(e?.code) ? STORE_FAILED : (e?.message ?? e)
+    this.#send({ type: 'error', message: `Playback failed: ${why}` })
     this.ws.close(1011, 'playback failed')
     this.close()
   }

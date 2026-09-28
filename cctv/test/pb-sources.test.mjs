@@ -1,14 +1,18 @@
 // Offline tests for the playback page's pure logic (public/pb-sources.js): the server's and the NVR's
 // recordings merged into one list of stretches, lookups on it, the choice between server and NVR
-// playback for a day (plan R6), the scrub throttle (one scrub in flight, the newest position wins),
-// the clock-skew hint and the conversions between the two time bases.
+// playback for a day (plan R6), going over to the NVR when the share fails, the scrub throttle (one
+// scrub in flight, the newest position wins), the clock-skew hint and the conversions between the
+// two time bases.
 //   node cctv/test/pb-sources.test.mjs
+import { readFileSync } from 'node:fs'
 import {
   CONVERTED_SCRUB_TIMEOUT_MS,
   LIVE_MARGIN_MS,
   NVR_SPEEDS,
+  NvrFallback,
   SCRUB_TIMEOUT_MS,
   SERVER_SPEEDS,
+  SERVER_START_TIMEOUT_MS,
   ScrubThrottle,
   convertTime,
   describeSkew,
@@ -20,9 +24,11 @@ import {
   prerollUntil,
   recordedFrom,
   scrubTimeoutMs,
+  serverFailed,
   shift,
   speedFor,
-  stretchAt
+  stretchAt,
+  watchesStart
 } from '../public/pb-sources.js'
 
 let failures = 0
@@ -228,6 +234,35 @@ check('convertTime: server -> nvr adds the skew, nvr -> server subtracts it', co
 check('  the same mode: unchanged (nvr -> nvr as today, whatever the NVRs); null stays null', convertTime(1000, 'nvr', 'nvr', { fromSkew: 5, toSkew: 9 }) === 1000 && convertTime(1000, 'server', 'server') === 1000 && convertTime(null, 'server', 'nvr', { toSkew: 5 }) === null)
 check('speeds: server -32..32 without 0, NVR 1..8', SERVER_SPEEDS.join() === '-32,-16,-8,-4,-2,-1,1,2,4,8,16,32' && NVR_SPEEDS.join() === '1,2,4,8')
 check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any server speed', speedFor('nvr', -4) === 1 && speedFor('nvr', 16) === 8 && speedFor('nvr', 4) === 4 && speedFor('server', -4) === -4 && speedFor('server', 32) === 32 && speedFor('server', 3) === 1)
+
+// ---- the share failing: the NVR's copy instead, once per camera --------------------------------------------
+// 09-26 13:00-13:56 the NAS was down: server playback ended with "Playback failed: EIO: i/o error, read"
+// or a spinner for minutes, and the viewer had to find "SD (NVR)" by hand.
+{
+  check('the start watch is 8 s', SERVER_START_TIMEOUT_MS === 8000)
+  check('serverFailed: a failed server playback (1011 "playback failed", rec-playback.mjs #fail)', serverFailed(1011, 'playback failed'))
+  check('  not the NVR being busy, nor a viewer or the page closing it', !serverFailed(1013, 'NVR offline') && !serverFailed(1000, '') && !serverFailed(1001, '') && !serverFailed(1005, ''))
+  check('  nor the refusals the viewer can do nothing about by switching (a converter full, no recordings)', !serverFailed(1011, 'transcode busy') && !serverFailed(1011, 'server recordings not available'))
+  const list = [{ s: 0, e: 100, src: 'server' }, { s: 100, e: 200, src: 'nvr' }, { s: 200, e: 300, src: 'server' }]
+  check('watchesStart: a start in the server\'s own footage is watched (its files are read)', watchesStart(list, 50) && watchesStart(list, 250))
+  check('  one in a stretch only the NVR has is not: that is the NVR\'s own start, sometimes 10 s slow', !watchesStart(list, 150))
+  check('  one between stretches, or with none known yet, is watched (the server reads the next file)', watchesStart(list, 400) && watchesStart([], 50) && watchesStart(null, 50))
+  const fb = new NvrFallback()
+  check('NvrFallback: the first failure of a camera goes over to the NVR', fb.take('nvr1/4') === true)
+  check('  the second of the same camera does not (its failure is shown: never a loop)', fb.take('nvr1/4') === false && fb.take('nvr1/4') === false)
+  check('  another camera still gets its one', fb.take('solus/5') === true && fb.take('solus/5') === false)
+
+  // the page: which of these it uses and where (it has no DOM-free half to run here). Its line
+  // endings are whatever the checkout left (CRLF on a Windows working copy), so they are evened out.
+  const page = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const fn = (name) => page.slice(page.indexOf(`function ${name}(`), page.indexOf('\n}\n', page.indexOf(`function ${name}(`)))
+  check('page: one NvrFallback for the page, keyed by the socket\'s camera', /const nvrFallback = new NvrFallback\(\)/.test(page) && /nvrFallback\.take\(sock\.cam\)/.test(page))
+  check('  a server socket that closes as a failed playback goes over', /serverFailed\(e\.code, e\.reason\)/.test(fn('openServer')) && /fallBackToNvr\(sock/.test(fn('openServer')))
+  check('  a start is watched when the socket opens, and a seek on the open socket too', /watchStart\(sock, 0, /.test(fn('openServer')) && /watchStart\(sock, cmd\.gen, /.test(fn('serverSeek')))
+  check('  the watch waits SERVER_START_TIMEOUT_MS, only where watchesStart says so, and stands down once that generation is answered', /SERVER_START_TIMEOUT_MS/.test(fn('watchStart')) && /watchesStart\(state\.stretches, /.test(fn('watchStart')) && /okGen >= gen/.test(fn('watchStart')))
+  check('  "started" and "end" end the watch; closing the socket does too', /case 'started': \{[^}]*settleStart\(sock\)/.test(page) && /case 'end':\s*settleStart\(sock\)/.test(page) && /settleStart\(ws\)/.test(fn('closeSocket')))
+  check('  going over plays the NVR at the same moment (SD (NVR), the position kept) and says so', /state\.quality = 'sd-nvr'/.test(fn('fallBackToNvr')) && /reloadKeepingPosition\(\)/.test(fn('fallBackToNvr')) && /showNotice\(/.test(fn('fallBackToNvr')))
+}
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
