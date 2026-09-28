@@ -39,7 +39,7 @@ import {
 } from './pb-sources.js'
 import { MAX_BOXES, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
-import { allowedSpeeds, clampSpeed, frameStep, shuttleLabel, shuttleRate } from './pb-transport.js'
+import { allowedSpeeds, clampSpeed, frameStep, ignoredRepeat, shuttleLabel, shuttleRate } from './pb-transport.js'
 import { DEFAULT_OSD, drawOsd, osdFont, osdIsOff, osdLayout } from './osd-overlay.js'
 
 // Video is decoded here in the browser, exactly as the camera encoded it; the
@@ -1784,6 +1784,8 @@ dateInput.addEventListener('change', async () => {
 document.addEventListener('keydown', (e) => {
   // a textarea counts too: B in the bookmark notes used to open a second bookmark dialog
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return
+  // a held arrow: one seek per press, not one NVR playback per auto-repeat (pb-transport.js)
+  if (ignoredRepeat(e)) return
   if (e.key === ' ') {
     e.preventDefault()
     togglePause()

@@ -155,6 +155,27 @@ await lateReturn('pb-a')
   ws.close(1000)
 }
 
+{
+  // A viewer who holds an arrow key over an NVR-only stretch opens and closes a playback per key
+  // repeat. Each one waits for the NVR's clock first; one closed meanwhile must not go on to take a
+  // login (2.4-3.9 s each on a remote NVR) only to hand it straight back.
+  const f = fakeNvr('pb-f')
+  const held = []
+  f.lane.run = (_task, { priority = PRIORITY.NORMAL } = {}) => {
+    f.jobs.push(priority)
+    return new Promise((resolve) => held.push(() => resolve(true)))
+  }
+  const ws = fakeWs()
+  openPlayback(f, ws)
+  await sleep(20)
+  check('a playback that is opening waits for the NVR clock first', held.length === 1 && f.logins === 0, `${held.length} held, ${f.logins} logins`)
+  ws.close(1000) // the viewer moved on
+  held.shift()()
+  await sleep(50)
+  check('closed while the clock was read: it never takes a login', f.logins === 0, `${f.logins} logins`)
+  check('  nor asks the NVR for anything more', f.jobs.length === 1 && held.length === 0, `${f.jobs.length} jobs, ${held.length} held`)
+}
+
 // ---- after the cool-down
 await sleep(COOL_MS + 100)
 {

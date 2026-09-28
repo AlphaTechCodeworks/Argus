@@ -1,13 +1,15 @@
 // Offline tests for the playback page's transport logic (public/pb-transport.js): the spring-back
 // shuttle's rate and label, what each source is allowed to play, clamping a speed to that, frame
-// stepping and when only keyframes are worth fetching.
+// stepping, when only keyframes are worth fetching and which held-key repeats are ignored.
 //   node cctv/test/pb-transport.test.mjs
+import { readFileSync } from 'node:fs'
 import {
   DEAD_ZONE,
   SPEEDS,
   allowedSpeeds,
   clampSpeed,
   frameStep,
+  ignoredRepeat,
   needsKeyframesOnly,
   shuttleLabel,
   shuttleRate
@@ -127,6 +129,20 @@ const check = (name, ok, extra = '') => {
   check('  and for every reverse rate', [-1, -2, -4, -8, -16].every(needsKeyframesOnly))
   check('  but not at 1x to 4x forward', [1, 2, 4].every((r) => !needsKeyframesOnly(r)))
   check('  paused needs nothing special', needsKeyframesOnly(0) === false)
+}
+
+// ---- a held key ---------------------------------------------------------------------------------
+// Holding the ±10 s or next-event key over a stretch only the NVR has started one NVR playback per
+// key repeat: 17 in 2.4 s on rigginglot camera 10 put that NVR into its 60 s "busy" cool-down.
+{
+  const key = (k, repeat, shiftKey = false) => ({ key: k, repeat, shiftKey })
+  check('held key: the repeats of ArrowLeft/ArrowRight are ignored', ignoredRepeat(key('ArrowLeft', true)) && ignoredRepeat(key('ArrowRight', true)))
+  check('  with Shift too (next and previous event)', ignoredRepeat(key('ArrowLeft', true, true)) && ignoredRepeat(key('ArrowRight', true, true)))
+  check('  the first press still goes', !ignoredRepeat(key('ArrowLeft', false)) && !ignoredRepeat(key('ArrowRight', false, true)))
+  check('  other keys repeat as they always did (zoom, frame step)', !ignoredRepeat(key('+', true)) && !ignoredRepeat(key('-', true)) && !ignoredRepeat(key(',', true)) && !ignoredRepeat(key('.', true)))
+  check('  rubbish is not ignored rather than an error', !ignoredRepeat(null) && !ignoredRepeat({}))
+  const page = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8')
+  check('the playback page asks before it seeks on a key', /if \(ignoredRepeat\(e\)\) return/.test(page) && /import \{[^}]*\bignoredRepeat\b[^}]*\} from '\.\/pb-transport\.js'/.test(page))
 }
 
 console.log(failures === 0 ? '\nall passed' : `\n${failures} failed`)

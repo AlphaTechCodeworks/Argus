@@ -1,6 +1,7 @@
 // The playback page's transport logic (no DOM): how fast and which way time moves. The spring-back
 // shuttle's rate and label, what each source is allowed to play, clamping a speed to that, frame
-// stepping and when only keyframes are worth fetching. Tested offline: test/pb-transport.test.mjs.
+// stepping, when only keyframes are worth fetching and which held-key repeats to ignore. Tested
+// offline: test/pb-transport.test.mjs.
 //
 // The two ladders below mirror SERVER_SPEEDS and NVR_SPEEDS in pb-sources.js. They are repeated
 // rather than imported so this module stays free of the rest of the page and its test runs under
@@ -89,4 +90,17 @@ export function frameStep(currentS, direction, fps) {
  */
 export function needsKeyframesOnly(rate) {
   return rate < 0 || Math.abs(rate) >= 8
+}
+
+/** Keys that seek wherever they land: ±10 s, and with Shift the next or previous event. */
+const SEEK_KEYS = new Set(['ArrowLeft', 'ArrowRight'])
+
+/**
+ * Whether a keydown is a held seek key's auto-repeat, to be ignored. Each seek can open a playback
+ * (an NVR mode reopen, or an NVR leg over a stretch only the NVR has), and a held key repeats about
+ * 30 times a second: 17 NVR playbacks in 2.4 s once put an NVR into its 60 s "busy" cool-down. One
+ * press is one seek; a throttle would still flood a slow NVR, just more slowly.
+ */
+export function ignoredRepeat(e) {
+  return Boolean(e?.repeat) && SEEK_KEYS.has(e.key)
 }

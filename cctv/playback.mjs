@@ -434,6 +434,11 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
         const t = [Date.now()]
         const now = await nvrNow()
         t.push(Date.now())
+        // Closed while the clock was read (a held arrow key opens and drops one per repeat): stop
+        // here, before the login. Taking one costs the NVR 2.4-3.9 s and a place in its small pool,
+        // only to be handed straight back; a burst of them put rigginglot into its cool-down.
+        // (Nothing below awaits before sessions.acquire(), so this one check covers it.)
+        if (this.closed) return this.#unregister()
         // asking for footage up to "now" (the file still being written) makes the NVR
         // take a 10 s timeout before starting, so stop a little short of it
         const stop = Math.min(this.start + SESSION_HOURS * 3_600_000, now - LIVE_EDGE_MS)
