@@ -13,8 +13,8 @@
 // So every WATCH_EVERY_MS the watcher asks each online NVR that has at least one camera with lines
 // switched on (tripwire.mjs keeps that list in lines-on.json) and hands each tripwire alarm on those
 // cameras to onCrossing. It only reads, and only through the caller's `query` (nvr-xml.mjs transparent
-// on the server), so the XML queue, the read breaker and the busy refusals all apply; a refusal only
-// skips that NVR for that tick.
+// on the server), so the XML queue, the read breaker and the busy refusals all apply; a refusal, a
+// failure or a late answer leaves that NVR alone for a while (BACKOFF_MS), the others are still asked.
 //
 // Everything it touches is passed in (the NVR list, the lines list, the query, the clock), and it
 // does not import nvr-xml.mjs, which loads the native SDK: the tests run on a PC without it.
@@ -24,6 +24,16 @@ import { kid, kids, parseXml } from './xml.mjs'
 export const WATCH_EVERY_MS = 5000
 /** A failing NVR is logged at most this often: the watcher asks it every 5 s. */
 export const FAIL_LOG_MS = 10 * 60_000
+/**
+ * After a failed or late answer an NVR is not asked for this long, the next step after each further
+ * one, until an answer comes back in time. A read that times out holds the SDK past its limit, and the
+ * event intake and this watcher ask nobody while any call is overdue: asking again after every late
+ * return would keep every NVR's intake paused for as long as the NVR stays slow.
+ */
+export const BACKOFF_MS = [30_000, 60_000, 120_000, 240_000, 300_000]
+/** An answer slower than this is late (queryAlarmStatus usually takes about 0.1 s): the NVR or its queue is struggling. */
+export const LATE_MS = 10_000
+const backoffFor = (strikes) => BACKOFF_MS[Math.min(Math.max(1, strikes), BACKOFF_MS.length) - 1]
 /** How an event found by the watcher says where it came from (events-db `source`). */
 export const SOURCE_ALARM_STATUS = 'alarm-status'
 const CROSSING_DETAIL = 'the camera’s own line-crossing alarm, read from the NVR’s live alarm list'
@@ -79,7 +89,8 @@ function camerasByNvr(keys) {
  * have seen it, measured on this server's clock so an NVR clock that is off cannot give an end before
  * the start. A failed query is
  * logged at most once per NVR per FAIL_LOG_MS and skipped; what was seen before it is kept, so an
- * alarm that outlasts a failure is not reported as new afterwards.
+ * alarm that outlasts a failure is not reported as new afterwards. After a failed or late (LATE_MS)
+ * query that NVR is left alone for BACKOFF_MS (30 s, doubling to 5 min) until one answers in time.
  *
  * @param {object} deps
  * @param {() => Iterable<object>} deps.nvrs         the NVRs (nvrs.mjs Nvr: id, name, online, degraded, stopped)
@@ -93,15 +104,26 @@ function camerasByNvr(keys) {
  * @returns {{ stop: () => void, tick: () => Promise<string[]> }} tick resolves to the ids of the NVRs it asked
  */
 export function startAlarmWatch({ nvrs, linesOn, query, onCrossing, everyMs = WATCH_EVERY_MS, log = console.log, now = Date.now, sdkBusy = () => false }) {
-  /** nvr id -> { busy, seen: Map('<ch>/<startMs>' -> first seen ms), fails, loggedAt, told } */
+  /**
+   * nvr id -> { busy, seen: Map('<ch>/<startMs>' -> first seen ms), fails, loggedAt, told,
+   *             strikes (failed or late answers in a row), nextAt (not asked before), lateLoggedAt }
+   */
   const state = new Map()
   let stopped = false
   let listLoggedAt = -Infinity
 
   const stateOf = (id) => {
     let s = state.get(id)
-    if (!s) state.set(id, (s = { busy: false, seen: new Map(), fails: 0, loggedAt: -Infinity, told: false }))
+    if (!s) state.set(id, (s = { busy: false, seen: new Map(), fails: 0, loggedAt: -Infinity, told: false, strikes: 0, nextAt: 0, lateLoggedAt: -Infinity }))
     return s
+  }
+
+  /** A failed or late answer: the NVR is left alone for the next step of BACKOFF_MS. @returns the wait (ms) */
+  const holdOff = (s, atMs) => {
+    s.strikes++
+    const wait = backoffFor(s.strikes)
+    s.nextAt = atMs + wait
+    return wait
   }
 
   /** One NVR: one query, then each tripwire alarm on a camera with lines on. Never throws. */
@@ -110,15 +132,17 @@ export function startAlarmWatch({ nvrs, linesOn, query, onCrossing, everyMs = WA
     s.busy = true
     try {
       let items
+      const askedAt = now()
       try {
         items = parseAlarmStatus(await query(nvr))
       } catch (e) {
         s.fails++
         const nowMs = now()
+        const wait = holdOff(s, nowMs)
         if (nowMs - s.loggedAt >= FAIL_LOG_MS) {
           s.loggedAt = nowMs
           s.told = true
-          log(`[alarm-watch] ${nvr.id}: could not read the alarm list (${String(e?.message ?? e).slice(0, 120)}); until it answers, line crossings there are only found by the slower recorded-file intake (logged at most every ${FAIL_LOG_MS / 60_000} min)`)
+          log(`[alarm-watch] ${nvr.id}: could not read the alarm list (${String(e?.message ?? e).slice(0, 120)}); not asked again for ${wait / 1000} s, longer after each failure; until it answers, line crossings there are only found by the slower recorded-file intake (logged at most every ${FAIL_LOG_MS / 60_000} min)`)
         }
         return
       }
@@ -127,6 +151,18 @@ export function startAlarmWatch({ nvrs, linesOn, query, onCrossing, everyMs = WA
       s.fails = 0
       s.told = false
       const nowMs = now()
+      // late, but an answer: its alarms are still filed below
+      const tookMs = nowMs - askedAt
+      if (tookMs > LATE_MS) {
+        const wait = holdOff(s, nowMs)
+        if (nowMs - s.lateLoggedAt >= FAIL_LOG_MS) {
+          s.lateLoggedAt = nowMs
+          log(`[alarm-watch] ${nvr.id}: the alarm list took ${Math.round(tookMs / 1000)} s to answer; not asked again for ${wait / 1000} s, longer while it stays slow (logged at most every ${FAIL_LOG_MS / 60_000} min)`)
+        }
+      } else {
+        s.strikes = 0
+        s.nextAt = 0
+      }
       const seen = new Map()
       const tried = new Set()
       for (const it of items) {
@@ -184,12 +220,16 @@ export function startAlarmWatch({ nvrs, linesOn, query, onCrossing, everyMs = WA
     const asked = []
     const runs = []
     const listed = new Set()
+    const nowMs = now()
     for (const nvr of nvrs()) {
       listed.add(nvr.id)
       const mine = cams.get(nvr.id)
       if (!mine || !nvr.online || nvr.degraded || nvr.stopped) continue
+      const s = stateOf(nvr.id)
       // its last query has not come back yet: never two at once to one NVR
-      if (stateOf(nvr.id).busy) continue
+      if (s.busy) continue
+      // backing off after a failed or late answer
+      if (nowMs < s.nextAt) continue
       asked.push(nvr.id)
       runs.push(watchOne(nvr, mine))
     }

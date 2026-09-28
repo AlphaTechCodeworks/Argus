@@ -7,7 +7,7 @@
 //   node cctv/test/alarm-watch.test.mjs
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { FAIL_LOG_MS, SOURCE_ALARM_STATUS, WATCH_EVERY_MS, crossingHandler, parseAlarmStatus, startAlarmWatch } from '../alarm-watch.mjs'
+import { BACKOFF_MS, FAIL_LOG_MS, LATE_MS, SOURCE_ALARM_STATUS, WATCH_EVERY_MS, crossingHandler, parseAlarmStatus, startAlarmWatch } from '../alarm-watch.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -166,10 +166,13 @@ function watcher({ nvrList, lines, answer, ...more }) {
 
 {
   let fail = false
+  let t0 = 0
+  const asked2 = [] // when nvr-2 was asked, from t0
   const { w, calls, crossings, logs } = watcher({
     nvrList: [{ id: 'nvr-2', online: true }, { id: 'nvr-6', online: true }],
     lines: ['nvr-2/2', 'nvr-6/0'],
     answer: (nvr) => {
+      if (nvr.id === 'nvr-2') asked2.push(t - t0)
       if (fail && nvr.id === 'nvr-2') throw new Error('Too many NVR settings requests at once (10 waiting); nothing was sent. Try again shortly')
       return withAi(TRIP)
     }
@@ -177,32 +180,96 @@ function watcher({ nvrList, lines, answer, ...more }) {
   await w.tick()
   check('before the failure: one crossing', crossings.length === 1 && crossings[0].again === false)
   fail = true
-  const t0 = t
+  t0 = t
+  asked2.length = 0
   await w.tick()
   const mine = () => logs.filter((l) => l.includes('nvr-2'))
   check('a failed query is logged, naming the NVR and the reason', mine().length === 1 && mine()[0].includes('Too many NVR settings requests'), JSON.stringify(logs))
+  check('... and how long it is left alone', /not asked again for 30 s/.test(mine()[0]), mine()[0])
   for (let i = 0; i < 20; i++) {
     t += WATCH_EVERY_MS
     await w.tick()
   }
-  check('... not again for the next 20 failing ticks', mine().length === 1, JSON.stringify(logs))
-  check('... which were still tried (a failure only skips that tick)', calls.filter((c) => c === 'nvr-2').length === 22)
+  check('... not logged again for the next 20 ticks', mine().length === 1, JSON.stringify(logs))
+  check('... which do not ask it every 5 s: it backs off, 30 s then 60 s', asked2.join() === '0,30000,90000', asked2.join())
   check('... and the other NVR was not held up', calls.filter((c) => c === 'nvr-6').length === 22 && logs.every((l) => !l.includes('nvr-6')))
   t = t0 + FAIL_LOG_MS
   await w.tick()
-  check('... logged again once FAIL_LOG_MS (10 min) has passed', mine().length === 2 && FAIL_LOG_MS === 600_000)
+  check('... logged again once FAIL_LOG_MS (10 min) has passed', mine().length === 2 && FAIL_LOG_MS === 600_000 && asked2.at(-1) === FAIL_LOG_MS, asked2.join())
   fail = false
   t += WATCH_EVERY_MS
   await w.tick()
-  check('answering again is logged once', mine().length === 3 && /answers again \(after 22 failed reads\)/.test(mine()[2]), mine()[2])
+  check('... not asked during its back-off (4 min after a 4th failure), even though it would answer now', asked2.at(-1) === FAIL_LOG_MS && mine().length === 2, asked2.join())
+  t = t0 + FAIL_LOG_MS + 240_000
+  await w.tick()
+  check('answering again is logged once', mine().length === 3 && /answers again \(after 4 failed reads\)/.test(mine()[2]), mine()[2])
   check('an alarm listed across the failure is still the same alarm, not a new one', crossings.length === 2 && crossings[1].again === true && crossings[1].startMs === START)
   fail = true
   t += WATCH_EVERY_MS
+  const before = asked2.length
+  await w.tick()
+  check('an answer in time resets the back-off: asked on the next tick, and 30 s after a new failure', asked2.length === before + 1)
+  t += 25_000
   await w.tick()
   fail = false
+  const held = asked2.length === before + 1
   t += WATCH_EVERY_MS
   await w.tick()
+  check('... (not asked 25 s after it, asked at 30 s)', held && asked2.length === before + 2, asked2.join())
   check('a failure soon after is not logged (nor its recovery): the 10 min apply per NVR, not per failure', mine().length === 3, JSON.stringify(mine()))
+  w.stop()
+}
+
+{
+  check('BACKOFF_MS: 30 s, doubling, up to 5 min', BACKOFF_MS.join() === '30000,60000,120000,240000,300000')
+  const at = []
+  const { w } = watcher({
+    nvrList: [{ id: 'nvr-2', online: true }],
+    lines: ['nvr-2/2'],
+    answer: () => {
+      at.push(t)
+      throw Object.assign(new Error('NET_SDK_TransparentConfig (alarm watch) did not return within 20000 ms'), { name: 'SdkTimeout' })
+    }
+  })
+  for (let i = 0; i < 400; i++) {
+    await w.tick()
+    t += WATCH_EVERY_MS
+  }
+  const gaps = at.slice(1).map((v, i) => v - at[i])
+  check('an NVR that keeps failing is asked after 30, 60, 120 and 240 s, then every 5 min',
+    gaps.slice(0, 4).join() === '30000,60000,120000,240000' && gaps.length >= 7 && gaps.slice(4).every((g) => g === 300_000), gaps.join())
+  w.stop()
+}
+
+{
+  // A late answer: queryAlarmStatus usually takes about 0.1 s; one that takes longer than LATE_MS
+  // means the NVR (or its queue) is struggling, and asking again every 5 s only adds to it
+  let slow = true
+  const at = []
+  const { w, crossings, logs } = watcher({
+    nvrList: [{ id: 'nvr-2', online: true }],
+    lines: ['nvr-2/2'],
+    answer: () => {
+      at.push(t)
+      if (slow) t += LATE_MS + 1000
+      return withAi(TRIP)
+    }
+  })
+  await w.tick()
+  const answered = t
+  check('a late answer is still used: its crossing is filed', crossings.length === 1 && crossings[0].again === false)
+  check('... logged with how long it took and how long the NVR is left alone', logs.length === 1 && /nvr-2/.test(logs[0]) && /11 s/.test(logs[0]) && /not asked again for 30 s/.test(logs[0]), JSON.stringify(logs))
+  for (let i = 0; i < 5; i++) {
+    t += WATCH_EVERY_MS
+    await w.tick()
+  }
+  check('... and the NVR is not asked for 30 s after it', at.length === 1, at.length)
+  slow = false
+  t = answered + 30_000
+  await w.tick()
+  t += WATCH_EVERY_MS
+  await w.tick()
+  check('an answer in time after that: asked every tick again', at.length === 3, at.map((x) => x - answered).join())
   w.stop()
 }
 
