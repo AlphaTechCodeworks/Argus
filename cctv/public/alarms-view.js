@@ -74,6 +74,31 @@ const clock = (ms) => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit'
 const day = (ms) => new Date(ms).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
 
 /**
+ * The kinds of event that come with a picture of the moment. event-snapshot.mjs takes one for each
+ * line crossing from Argus's own recording; nothing takes one for any other kind, so no other row
+ * asks the server for one.
+ */
+export const SNAPSHOT_KINDS = Object.freeze(['line-crossing'])
+/**
+ * How long after an event starts its picture may still be on its way. The snapshot waits up to
+ * three minutes for the recording to cover the moment (event-snapshot.mjs SNAP_WAIT_MS), and the
+ * two minutes on top cover the recording's last file being written and ffmpeg. A picture still
+ * missing after that is not coming, so the page stops asking for it on every refresh.
+ */
+export const SNAPSHOT_SETTLE_MS = 5 * 60_000
+
+/** Where an event's picture is served, or null for a kind that never has one. */
+export function snapshotUrl(event) {
+  const id = event?.id
+  // the id goes into a URL: only the whole number the database gave is let through
+  if (!SNAPSHOT_KINDS.includes(event?.type) || !Number.isSafeInteger(id) || id <= 0) return null
+  return `/api/events/${id}/snapshot`
+}
+
+/** Whether a picture that failed to load may still arrive, so the next refresh should ask again. */
+export const snapshotMayArrive = (startMs, now = Date.now()) => Number.isFinite(startMs) && now - startMs < SNAPSHOT_SETTLE_MS
+
+/**
  * One row per alarm, ready to paint.
  * `needsAck` is the one the eye should go to: the page exists to show what still needs a person.
  */
@@ -95,7 +120,9 @@ export function alarmRows(alarms, { now = Date.now() } = {}) {
     startMs: a.startMs,
     endMs: a.endMs ?? null,
     nvr: a.nvr,
-    ch: a.ch
+    ch: a.ch,
+    // a line crossing's picture (event-snapshot.mjs), or null for kinds that never have one
+    snapshot: snapshotUrl(a)
   }))
 }
 
@@ -125,3 +152,26 @@ export function ruleSummary(rule) {
 
 /** The colour class for a priority, so the list is scannable without reading it. */
 export const priorityClass = (p) => `pri-${PRIORITIES.includes(p) ? p : 'low'}`
+
+/**
+ * The alarm a link points at, or null. A phone alert links to /alarms.html#event=<id>
+ * (line-actions.mjs eventLink); anything else after the # (a tab name such as #rules) is not one.
+ */
+export function eventFromHash(hash) {
+  const raw = new URLSearchParams(String(hash ?? '').replace(/^#/, '')).get('event')
+  if (!raw || !/^\d{1,15}$/.test(raw)) return null
+  const id = Number(raw)
+  return id > 0 ? id : null
+}
+
+/**
+ * What the page says when the alarm a link points at is not in the list it shows, or '' when there
+ * is no link or the alarm is there. Never "it does not exist": the list covers a window of dates
+ * (the last week unless changed), and the server leaves out the alarms of cameras this viewer may
+ * not see (alarms.mjs), so its absence here proves neither.
+ */
+export function linkedEventNote(id, rows) {
+  if (id === null || id === undefined) return ''
+  if ((rows ?? []).some((r) => r.id === id)) return ''
+  return `The alarm the link points to (number ${id}) is not in the list below: it may be older than the dates shown, or on a camera you cannot see. Widen the dates under More filters to look further back.`
+}

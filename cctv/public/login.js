@@ -13,7 +13,11 @@ form.addEventListener('submit', async (e) => {
       body: JSON.stringify({ user: form.user.value.trim(), password: form.password.value })
     })
     if (res.ok) {
-      location.href = '/'
+      // Signed out when a phone alert's link was tapped: the server sent the browser here from
+      // /alarms.html#event=<id>, and the browser kept the # across that redirect (the Fetch
+      // standard carries a fragment over when the new address has none). Go on to that alarm
+      // rather than to the grid.
+      location.href = /^#event=\d{1,15}$/.test(location.hash) ? `/alarms.html${location.hash}` : '/'
       return
     }
     const body = await res.json().catch(() => ({}))

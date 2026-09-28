@@ -6,7 +6,7 @@
 // Everything imported here is served from this folder: the browser cannot reach above it, which is
 // why the kinds, the words and the priorities live in alarms-view.js and the server imports them
 // from there rather than the other way round.
-import { EVENT_KINDS, PRIORITIES, alarmRows, filterSummary, labelOf, priorityClass, ruleSummary } from './alarms-view.js'
+import { EVENT_KINDS, PRIORITIES, alarmRows, eventFromHash, filterSummary, labelOf, linkedEventNote, priorityClass, ruleSummary, snapshotMayArrive } from './alarms-view.js'
 import { fillCameraSelect } from './camera-choice.js'
 import { MotionTuner } from './motion-tune.js'
 
@@ -16,6 +16,14 @@ const REFRESH_MS = 30_000
 let cameras = []
 let admin = false
 let tuner = null
+// The alarm a link pointed at (a phone alert opens /alarms.html#event=<id>): marked in the list on
+// every repaint, scrolled to once per link.
+let linked = eventFromHash(location.hash)
+let scrolledTo = null
+// Line-crossing pictures, kept across the 30 s refresh so the list does not fetch and redraw every
+// thumbnail each time; and the alarms whose picture is known not to be coming.
+const thumbs = new Map()
+const noPicture = new Set()
 
 const jsonOf = (r) => r.json().catch(() => ({}))
 const say = (el, text) => { el.textContent = text }
@@ -50,9 +58,13 @@ async function loadAlarms() {
   const body = await jsonOf(res)
   if (!res.ok) return say($('summary'), body.error ?? 'The alarms could not be read.')
   admin = body.admin === true
-  say($('summary'), filterSummary(body.summary, { acked: $('filters').elements.acked.value === 'false' }))
-  paintAlarms(alarmRows(body.alarms))
+  const rows = alarmRows(body.alarms)
+  // A linked alarm that is not in this list is explained on the summary line, which is read out as
+  // a status: whoever followed the link learns why they are not looking at it.
+  say($('summary'), [filterSummary(body.summary, { acked: $('filters').elements.acked.value === 'false' }), linkedEventNote(linked, rows)].filter(Boolean).join(' · '))
+  paintAlarms(rows)
   paintSources(body.sources)
+  showLinked()
 }
 
 function paintAlarms(rows) {
@@ -67,11 +79,13 @@ function paintAlarms(rows) {
     td.textContent = 'Nothing matches these filters. See “Where these come from” below for what this page can and cannot report.'
     tr.append(td)
     list.append(tr)
+    thumbs.clear()
     return
   }
   for (const r of rows) {
     const tr = document.createElement('tr')
-    tr.className = `${priorityClass(r.priority)}${r.needsAck ? ' needs-ack' : ''}`
+    tr.className = `${priorityClass(r.priority)}${r.needsAck ? ' needs-ack' : ''}${r.id === linked ? ' al-target' : ''}`
+    tr.dataset.event = String(r.id)
     const cell = (text) => {
       const td = document.createElement('td')
       td.textContent = text ?? '—'
@@ -88,7 +102,10 @@ function paintAlarms(rows) {
     const ago = document.createElement('small')
     ago.textContent = r.ago
     when.append(r.when, ago)
-    tr.append(pri, when, cell(r.camera), cell(r.what), cell(r.lasted), cell(r.ack || (r.needsAck ? 'not yet' : '')))
+    const what = cell(r.what)
+    // a line crossing's picture sits under its name (event-snapshot.mjs takes it from the recording)
+    if (r.snapshot && !noPicture.has(r.id)) what.append(thumbFor(r))
+    tr.append(pri, when, cell(r.camera), what, cell(r.lasted), cell(r.ack || (r.needsAck ? 'not yet' : '')))
 
     const actions = document.createElement('td')
     actions.className = 'al-actions'
@@ -100,6 +117,9 @@ function paintAlarms(rows) {
     tr.append(actions)
     list.append(tr)
   }
+  // pictures of rows that have left the list (acknowledged, filtered out, too old) are let go
+  const shown = new Set(rows.map((r) => r.id))
+  for (const id of thumbs.keys()) if (!shown.has(id)) thumbs.delete(id)
 }
 
 const button = (text, fn, cls = '') => {
@@ -115,6 +135,54 @@ const link = (text, href) => {
   a.textContent = text
   a.href = href
   return a
+}
+
+/**
+ * A line crossing's picture: a thumbnail that opens the full picture in a new tab. Loaded lazily
+ * (the browser fetches it only when the row comes near the screen): the list can hold hundreds of
+ * rows, and each picture is a file the server reads from disk. The same element is reused on every
+ * refresh, so a picture is fetched once rather than every 30 s.
+ */
+function thumbFor(row) {
+  const kept = thumbs.get(row.id)
+  if (kept) return kept
+  const a = document.createElement('a')
+  a.className = 'al-snap'
+  a.href = row.snapshot
+  a.target = '_blank'
+  a.rel = 'noopener'
+  a.title = 'Open the picture'
+  const img = document.createElement('img')
+  // the alarm a link pointed at is looked at straight away: its picture should not wait for a scroll
+  img.loading = row.id === linked ? 'eager' : 'lazy'
+  img.decoding = 'async'
+  img.alt = `${row.what}, ${row.camera}, ${row.when}`
+  // No picture: it is taken from the recording up to three minutes after the crossing, or there was
+  // no recording to take it from, or this user may not play that camera back. The empty frame goes;
+  // the next refresh asks again only while the picture may still be on its way.
+  img.addEventListener('error', () => {
+    a.remove()
+    thumbs.delete(row.id)
+    if (!snapshotMayArrive(row.startMs)) noPicture.add(row.id)
+  }, { once: true })
+  img.src = row.snapshot
+  a.append(img)
+  thumbs.set(row.id, a)
+  return a
+}
+
+/**
+ * The alarm a link pointed at: brought into view once per link, and given the focus so a keyboard
+ * or a screen reader starts there. Later refreshes keep it marked but leave the scrolling to the user.
+ */
+function showLinked() {
+  if (linked === null || scrolledTo === linked) return
+  const tr = $('list').querySelector(`tr[data-event="${linked}"]`)
+  if (!tr) return
+  scrolledTo = linked
+  tr.tabIndex = -1
+  tr.scrollIntoView({ block: 'center' })
+  tr.focus({ preventScroll: true })
 }
 
 async function acknowledge(row) {
@@ -276,6 +344,9 @@ async function start() {
   $('tuneCamera').prepend(new Option('choose a camera…', ''))
   $('tuneCamera').value = ''
 
+  // A link to one alarm must find it even if someone has acknowledged it already: the list opens on
+  // "still needing a look", which would hide exactly the alarm the link was sent about.
+  if (linked !== null) $('filters').elements.acked.value = ''
   await Promise.all([loadAlarms(), loadRules()])
   setInterval(loadAlarms, REFRESH_MS)
 }
@@ -283,6 +354,19 @@ async function start() {
 $('logout')?.addEventListener('click', async () => {
   await fetch('/api/logout', { method: 'POST' }).catch(() => {})
   location.href = '/login.html'
+})
+
+// A second alert tapped while this page is open changes only what follows the #: follow it here,
+// without a reload. A tab link (#rules) is not an alarm and just clears the mark.
+addEventListener('hashchange', () => {
+  const id = eventFromHash(location.hash)
+  if (id === linked) return
+  linked = id
+  scrolledTo = null
+  for (const tr of $('list').querySelectorAll('tr.al-target')) tr.classList.remove('al-target')
+  if (id === null) return
+  $('filters').elements.acked.value = ''
+  loadAlarms()
 })
 
 start()
