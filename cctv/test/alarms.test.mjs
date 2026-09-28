@@ -419,10 +419,14 @@ const json = (o) => async () => o
   check('... and on another NVR', addEvent(lc({ nvr: 'nvr6', startMs: B + S }), B + 6 * MIN).isNew)
 }
 
-// A recorded file folds into a crossing whose time it overlaps or touches, not only one starting within
-// 30 s of it: a file already open for motion starts long before the alarm, and one crossing must stay
-// one event, one phone alert and one snapshot. The alarm watcher's own rows keep the start-to-start
-// rule, so a long file's end never swallows the alert of a later crossing the camera raised afresh.
+// A recorded file folds into a crossing when the file's time [start, end] overlaps that crossing's own
+// start ± 30 s (the alarm's start as stored), not only when the two starts are within 30 s: a file
+// already open for motion starts long before the alarm, and one crossing must stay one event, one
+// phone alert and one snapshot. Never by touching an end that an earlier fold moved out: back-to-back
+// files would chain into the first crossing, and the later crossings in them (the intake is the
+// fallback for crossings the watcher missed) would get no alert, bookmark or snapshot. The alarm
+// watcher's own rows keep the start-to-start rule, so a long file's end never swallows the alert of a
+// later crossing the camera raised afresh.
 {
   const C = T0 + 700 * MIN
   const lc = (o) => ({ nvr: 'nvr7', ch: 1, type: 'line-crossing', subtype: 'tripwire', source: 'alarm-status', ...o })
@@ -434,11 +438,15 @@ const json = (o) => async () => o
   check('a recording that started 3 min before the alarm (a file open for motion) folds into the watcher’s crossing', !early.isNew && early.event.id === w.event.id, JSON.stringify(early.event))
   check('... keeping the alarm’s start, its end moved out to the file’s', early.event.startMs === C && early.event.endMs === C + 60 * S, JSON.stringify(early.event))
   check('... while that file’s motion row is an event of its own', motion.isNew && motion.event.type === 'motion')
-  const next = addEvent(rec({ startMs: C + 61 * S, endMs: C + 200 * S }), C + 5 * MIN)
-  check('the next file of the same recording, starting as the crossing’s time ends, folds in too', !next.isNew && next.event.id === w.event.id && next.event.endMs === C + 200 * S, JSON.stringify(next.event))
   const apart = addEvent(rec({ startMs: C + 300 * S, endMs: C + 330 * S }), C + 7 * MIN)
-  check('a recorded crossing well clear of it (100 s after its end) is its own event', apart.isNew && apart.event.id !== w.event.id)
+  check('a recorded crossing well clear of it is its own event', apart.isNew && apart.event.id !== w.event.id)
   check('the camera holds two crossings and one motion event', eventsOfCamera('nvr7', 1, C - 5 * MIN, C + 10 * MIN).map((e) => e.type).sort().join() === 'line-crossing,line-crossing,motion')
+  // the edges of the window: a file ending 25 s before the alarm, or starting 25 s after it, is the same crossing
+  const E = T0 + 800 * MIN
+  const w2 = addEvent(lc({ ch: 5, startMs: E }), E)
+  check('a file ending 25 s before the alarm’s start folds in (the alarm’s start ± 30 s)', addEvent(rec({ ch: 5, startMs: E - 3 * MIN, endMs: E - 25 * S }), E + 3 * MIN).event.id === w2.event.id)
+  check('... and one starting 25 s after it', addEvent(rec({ ch: 5, startMs: E + 25 * S, endMs: E + 2 * MIN }), E + 4 * MIN).event.id === w2.event.id)
+  check('... but one ending 31 s before it is its own event', addEvent(rec({ ch: 6, startMs: E - 3 * MIN, endMs: E - 31 * S }), E + 3 * MIN).isNew && addEvent(lc({ ch: 6, startMs: E }), E + 3 * MIN).isNew)
 
   const D = T0 + 900 * MIN
   const first = addEvent(lc({ ch: 2, startMs: D }), D)
@@ -446,6 +454,28 @@ const json = (o) => async () => o
   check('a 40 min file folds into the crossing it started with', !long.isNew && long.event.id === first.event.id && long.event.endMs === D + 40 * MIN)
   const later = addEvent(lc({ ch: 2, startMs: D + 10 * MIN }), D + 10 * MIN)
   check('... but a crossing the watcher sees 10 min into that file is still its own event (its own alert)', later.isNew && later.event.id !== first.event.id)
+}
+
+// Regression (re-review of F3): back-to-back recorded files must not chain into the first crossing
+// through the end each earlier fold moved out.
+{
+  const T = T0 + 1000 * MIN
+  const rec = (o) => ({ nvr: 'nvr8', type: 'line-crossing', subtype: 'tripwire', source: 'nvr-recordings', ...o })
+  // A: two back-to-back files, no watcher row
+  const a1 = addEvent(rec({ ch: 1, startMs: T, endMs: T + 10 * MIN }), T + 11 * MIN)
+  const a2 = addEvent(rec({ ch: 1, startMs: T + 10 * MIN + S, endMs: T + 20 * MIN }), T + 21 * MIN)
+  check('A: a file is a new event, and the next back-to-back file is a new event too (its own alert)', a1.isNew && a2.isNew && a2.event.id !== a1.event.id, JSON.stringify([a1.event, a2.event].map((e) => [e.id, e.startMs - T, e.endMs - T])))
+  check('A: the first keeps its own end', getEvent(a1.event.id).endMs === T + 10 * MIN)
+  // B: a watcher crossing at T, then three back-to-back files: only the one covering its start folds in
+  const w = addEvent({ nvr: 'nvr8', ch: 2, type: 'line-crossing', subtype: 'tripwire', startMs: T, source: 'alarm-status' }, T)
+  const b1 = addEvent(rec({ ch: 2, startMs: T - 3 * MIN, endMs: T + 60 * S }), T + 5 * MIN)
+  const b2 = addEvent(rec({ ch: 2, startMs: T + 61 * S, endMs: T + 5 * MIN }), T + 6 * MIN)
+  const b3 = addEvent(rec({ ch: 2, startMs: T + 5 * MIN + S, endMs: T + 9 * MIN }), T + 10 * MIN)
+  check('B: the file covering the watcher crossing’s start folds into it', !b1.isNew && b1.event.id === w.event.id && getEvent(w.event.id).endMs === T + 60 * S, JSON.stringify(getEvent(w.event.id)))
+  check('B: the later back-to-back files are new events, not chained into it', b2.isNew && b3.isNew && new Set([w.event.id, b2.event.id, b3.event.id]).size === 3, JSON.stringify([b2, b3].map((r) => [r.isNew, r.event.id, r.event.startMs - T])))
+  check('B: the camera holds three crossings: 0-60 s, 61 s-5 min, 5 min 1 s-9 min',
+    eventsOfCamera('nvr8', 2, T - 5 * MIN, T + 10 * MIN).map((e) => `${(e.startMs - T) / S}-${(e.endMs - T) / S}`).join() === '0-60,61-300,301-540',
+    eventsOfCamera('nvr8', 2, T - 5 * MIN, T + 10 * MIN).map((e) => `${(e.startMs - T) / S}-${(e.endMs - T) / S}`).join())
 }
 
 closeEvents()
