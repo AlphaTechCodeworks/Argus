@@ -7,7 +7,9 @@
 //   written as a temp file + rename (never half-written), mode 0600; the file before each save is
 //   kept as data/camera-links.json.bak.
 //
-//   GET /api/camera-links                       -> { links, version, suggestions }   (everyone signed in)
+//   GET /api/camera-links                       -> { links, version, suggestions }   (everyone signed in;
+//                                               a viewer is told only about the cameras they may watch
+//                                               or play back: server.mjs hands in only those as cameras)
 //   PUT /api/admin/camera-links { links, version } -> { links, version }
 //                                               or 409 { error, links, version } (the latest)
 //   POST /api/admin/camera-links { action: 'link' | 'unlink', from, to, label?, oneWay?, version }

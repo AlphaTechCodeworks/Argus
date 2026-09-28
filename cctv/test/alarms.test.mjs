@@ -328,7 +328,7 @@ const json = (o) => async () => o
   check('and the bookmark covers the alarm with margin', bm[1].bookmark.startMs < target.startMs)
 
   const viewer = { user: 'bob', admin: false, cameras: () => [] }
-  check('a viewer can read the rules', (await handleAlarms('GET', '/api/alarms/rules', json({}), viewer))[0] === 200)
+  check('a viewer can read the rules on cameras they may see', (await handleAlarms('GET', '/api/alarms/rules', json({}), viewer))[0] === 200)
   check('but not make one', (await handleAlarms('POST', '/api/alarms/rules', json({ name: 'x' }), viewer))[0] === 403)
   const made = await handleAlarms('POST', '/api/alarms/rules', json({ name: 'Gate at night', types: ['motion'], priority: 'high' }), who)
   check('an admin can', made[0] === 201 && made[1].rule.name === 'Gate at night')
@@ -339,6 +339,22 @@ const json = (o) => async () => o
   check('a viewer cannot delete one', (await handleAlarms('DELETE', '/api/alarms/rules/1', json({}), viewer))[0] === 403)
   check('a rule that is not there is a 404', (await handleAlarms('GET', '/api/alarms/rules/99999', json({}), who))[0] === 404)
   check('bad JSON is a 400, not a 500', (await handleAlarms('POST', '/api/alarms/rules', async () => { throw new SyntaxError('bad') }, who))[0] === 400)
+
+  // rights: a rule on cameras a viewer may not see is not theirs to read (it says which cameras raise
+  // alarms, and when nobody is watching)
+  const hidden = await handleAlarms('POST', '/api/alarms/rules', json({ name: 'Far yard', cameras: ['rigginglot/2'], types: ['motion'], notify: true, schedule: [{ days: [1], from: '22:00', to: '06:00' }] }), who)
+  const mixed = await handleAlarms('POST', '/api/alarms/rules', json({ name: 'Gate and far yard', cameras: ['nvr1/0', 'rigginglot/2'], types: ['motion'] }), who)
+  const anyCam = await handleAlarms('POST', '/api/alarms/rules', json({ name: 'Anything', types: ['motion'] }), who)
+  const gateOnly = { user: 'carol', admin: false, cameras: () => [], canSee: (nvr, ch) => nvr === 'nvr1' && ch === 0 }
+  const seen = (await handleAlarms('GET', '/api/alarms/rules', json({}), gateOnly))[1].rules
+  check('a rule on cameras the viewer may not see is not listed', !seen.some((r) => r.id === hidden[1].rule.id))
+  check('... nor read by its id (404)', (await handleAlarms('GET', `/api/alarms/rules/${hidden[1].rule.id}`, json({}), gateOnly))[0] === 404)
+  check('a rule on some of their cameras shows only those', JSON.stringify(seen.find((r) => r.id === mixed[1].rule.id)?.cameras) === '["nvr1/0"]')
+  check('... by its id too', JSON.stringify((await handleAlarms('GET', `/api/alarms/rules/${mixed[1].rule.id}`, json({}), gateOnly))[1].rule?.cameras) === '["nvr1/0"]')
+  check('a rule on any camera is still listed', seen.some((r) => r.id === anyCam[1].rule.id))
+  check('no camera key the viewer may not see appears anywhere', !JSON.stringify(seen).includes('rigginglot'))
+  check('an admin still sees the whole rule', (await handleAlarms('GET', `/api/alarms/rules/${mixed[1].rule.id}`, json({}), who))[1].rule.cameras.length === 2)
+  for (const r of [hidden, mixed, anyCam]) await handleAlarms('DELETE', `/api/alarms/rules/${r[1].rule.id}`, json({}), who)
 }
 
 // --- the page's pure view code --------------------------------------------------------------------------

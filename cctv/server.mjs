@@ -621,15 +621,18 @@ const handleRequest = async (req, res) => {
   if (store) return sendJson(res, ...store)
   // Which camera adjoins which: read by everyone signed in (the follow strip needs it), changed by
   // admins only. The admin path goes through the same guard block below as every other admin write.
+  // The read is built from the cameras this user may see: camera-links.mjs drops every link and
+  // suggestion whose either end is not among them, labels and all.
   if (pathname === LINKS_PATH) {
-    const answer = await handleCameraLinks(req.method, pathname, () => readJsonObject(req, LINKS_BODY_LIMIT), { cameras: allCameras, maps: readMaps })
+    const answer = await handleCameraLinks(req.method, pathname, () => readJsonObject(req, LINKS_BODY_LIMIT), { cameras: () => allCameras().filter((c) => canSee(c.nvr, c.ch)), maps: readMaps })
     if (answer) return sendJson(res, answer[0], answer[1], answer[2])
   }
   // What each camera draws over its own picture: its name and the clock. Read by everyone signed
-  // in, because every page that shows video draws it; changed by admins only, which the handler
-  // checks for itself. The NVRs refuse to say or set their own OSD, so this is the app's.
+  // in, because every page that shows video draws it, but only for the cameras they may see (the
+  // text is a name); changed by admins only, which the handler checks for itself. The NVRs refuse
+  // to say or set their own OSD, so this is the app's.
   if (pathname === OSD_PATH || pathname === ADMIN_OSD_PATH) {
-    const answer = await handleCameraOsd(req.method, pathname, () => readJsonObject(req, 16 * 1024), { admin: who.admin })
+    const answer = await handleCameraOsd(req.method, pathname, () => readJsonObject(req, 16 * 1024), { admin: who.admin, canSee })
     if (answer) return sendJson(res, ...answer)
   }
   if (pathname.startsWith('/api/admin/')) {

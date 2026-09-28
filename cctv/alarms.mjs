@@ -201,12 +201,27 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
   const { user = null, admin = false, cameras = () => [], now = Date.now(), canSee = () => true } = deps
   // an alarm on a camera this user may not see does not exist for them (rights.mjs, via server.mjs)
   const visible = (row) => Boolean(row) && canSee(row.nvr, row.ch)
+  // A rule names cameras. One about cameras this user may not see is not theirs to read: it says
+  // which cameras raise alarms and when nobody is watching. Cameras they may not see are left out of
+  // the rest. An empty list means every camera, so a rule stripped down to none would read as "any
+  // camera": it is dropped instead, as is a damaged one (its camera list could not be read, so it
+  // reads as empty). Admins edit rules and see them whole.
+  const ruleFor = (rule) => {
+    if (admin || !rule) return rule
+    if (rule.damaged) return null
+    if (!rule.cameras.length) return rule
+    const cameras = rule.cameras.filter((k) => {
+      const slash = String(k).lastIndexOf('/')
+      return slash > 0 && canSee(k.slice(0, slash), Number(k.slice(slash + 1)))
+    })
+    return cameras.length ? { ...rule, cameras } : null
+  }
   if (!user) return [401, { error: 'Not signed in' }, NO_STORE]
 
   try {
     // ---- the rules
     if (path === '/api/alarms/rules') {
-      if (method === 'GET') return [200, { rules: listRules(), admin }, NO_STORE]
+      if (method === 'GET') return [200, { rules: listRules().map(ruleFor).filter(Boolean), admin }, NO_STORE]
       if (method === 'POST') {
         if (!admin) return [403, { error: 'Only an admin can change alarm rules' }, NO_STORE]
         const res = createRule(await readJson(), user, now)
@@ -217,7 +232,7 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
     const ruleId = RULE.exec(path)
     if (ruleId) {
       if (method === 'GET') {
-        const rule = getRule(ruleId[1])
+        const rule = ruleFor(getRule(ruleId[1]))
         return rule ? [200, { rule }, NO_STORE] : [404, { error: 'No such rule' }, NO_STORE]
       }
       if (!admin) return [403, { error: 'Only an admin can change alarm rules' }, NO_STORE]

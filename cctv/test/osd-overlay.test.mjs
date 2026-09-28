@@ -260,5 +260,9 @@ const bottom = (l) => l.box.y + l.box.h
   check('mp4.mjs knows nothing about the overlay', !/osd-overlay/.test(src('../mp4.mjs')))
 }
 
+// an overlay's text is a camera's name: server.mjs hands the read the rights check, so a viewer is
+// told only about the cameras they may see (camera-notes.mjs handleOsd; osd-rights.test.mjs)
+check('server.mjs hands /api/osd the rights check', /handleCameraOsd\([\s\S]{0,200}canSee/.test(src('../server.mjs')))
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

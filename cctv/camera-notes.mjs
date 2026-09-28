@@ -32,7 +32,8 @@
 //     because these settings are read and written by the pages, which speak in NVR ids and channel
 //     numbers, exactly as camera-links.mjs does. The notes above are keyed by the NVR's hardware
 //     address because they outlive an NVR being re-added; an overlay position is cheap to set again.
-//   GET  /api/osd          -> { default, cameras }   (everyone signed in: every page draws it)
+//   GET  /api/osd          -> { default, cameras }   (everyone signed in: every page draws it; a
+//                             viewer gets only the cameras they may see, as the text is a name)
 //   PUT  /api/admin/osd    { default?, cameras? }    (admins; a camera set to null goes back to the default)
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -246,7 +247,8 @@ export function osdSettings() {
  * @param {string} method
  * @param {string} pathname
  * @param {() => Promise<any>} readJson
- * @param {{ admin?: boolean }} ctx
+ * @param {{ admin?: boolean, canSee?: (nvr: string, ch: number) => boolean }} ctx canSee: which
+ *   cameras this person may watch or play back (server.mjs, rights.mjs); missing, none
  * @returns {Promise<null | [number, any, object?]>} null when the path is not ours
  */
 export async function handleOsd(method, pathname, readJson, ctx = {}) {
@@ -255,7 +257,16 @@ export async function handleOsd(method, pathname, readJson, ctx = {}) {
     if (pathname === OSD_PATH) {
       if (method !== 'GET') return [405, { error: 'Method not allowed' }]
       // Never cached: an overlay moved on one screen should be right on the next page load.
-      return [200, osdSettings(), { 'cache-control': 'no-store' }]
+      const all = osdSettings()
+      if (ctx.admin === true) return [200, all, { 'cache-control': 'no-store' }]
+      // default deny: an overlay's text is a camera's name, so anyone else gets only the cameras
+      // they may see (and the default, which every page draws with)
+      const see = typeof ctx.canSee === 'function' ? ctx.canSee : () => false
+      const cameras = Object.fromEntries(Object.entries(all.cameras).filter(([k]) => {
+        const slash = k.lastIndexOf('/')
+        return slash > 0 && see(k.slice(0, slash), Number(k.slice(slash + 1)))
+      }))
+      return [200, { default: all.default, cameras }, { 'cache-control': 'no-store' }]
     }
     if (!ctx.admin) return [403, { error: 'Only admins can change the overlay' }]
     if (method !== 'PUT') return [405, { error: 'Method not allowed' }]

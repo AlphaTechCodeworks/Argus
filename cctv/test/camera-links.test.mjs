@@ -176,6 +176,12 @@ check('data/camera-links.json in DATA_DIR', LINKS_FILE === join(DATA, 'camera-li
   check('  the suggestions are a separate field, never mixed in with the links', Array.isArray(body.suggestions['nvr1/0']) && body.suggestions['nvr1/0'].every((n) => n.suggested === true) && Object.values(body.links).flat().every((n) => n.suggested === undefined))
   check('  a pair already linked is not suggested', !body.suggestions['nvr1/0']?.some((n) => n.to === 'nvr1/1'))
 
+  // a viewer's read is built from the cameras they may see (server.mjs): no link or suggestion to,
+  // from or labelled with another camera reaches them
+  const [, mine] = await handleCameraLinks('GET', LINKS_PATH, async () => ({}), { cameras: () => cameraList().filter((c) => c.nvr === 'nvr1'), maps })
+  const named = JSON.stringify({ links: mine.links, suggestions: mine.suggestions })
+  check('a read built from the cameras one may see names no other camera', !named.includes('nvr2') && to(mine.links, 'nvr1/0').join() === 'nvr1/1', named)
+
   const [notAdmin] = await call('PUT', ADMIN_LINKS_PATH, { links: {}, version: body.version })
   check('a write by someone who is not an admin is refused', notAdmin === 403)
   const [noVersion] = await call('PUT', ADMIN_LINKS_PATH, { links: {} }, true)
@@ -218,6 +224,7 @@ check('data/camera-links.json in DATA_DIR', LINKS_FILE === join(DATA, 'camera-li
   check('  after the login check (everyone signed in, so the follow strip works for viewers)', read > src.indexOf('const user = currentUser(req)'))
   check('  before the admin-only routes', read < src.indexOf("if (pathname.startsWith('/api/admin/'))"))
   check('server.mjs dispatches the write route inside the admin block', write > src.indexOf("if (pathname.startsWith('/api/admin/'))"))
+  check('the links read is built from the cameras this user may see', /if \(pathname === LINKS_PATH\)[\s\S]{0,400}canSee\(/.test(src))
 }
 
 // ---- the map editor -----------------------------------------------------------------------------
