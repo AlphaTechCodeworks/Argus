@@ -44,6 +44,8 @@
 //   /api/exports               -> evidence exports (admins): list, start, progress, download,
 //                                 delete; see export-api.mjs and export-job.mjs
 //   WS   /motion?nvr=ID&...    -> motion search inside a box, see motion.mjs
+//   GET  /api/events/:id/snapshot -> an event's picture (JPEG), for users who may play that
+//                                 camera back, see event-snapshot.mjs
 //
 // Wire format of each WebSocket message (little endian):
 //   byte 0      flags  (bit0 = keyframe)
@@ -119,6 +121,7 @@ import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
 import { audit, handleAudit, pruneAudit } from './audit.mjs'
 import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
+import { handleSnapshot, sweepSnapshots } from './event-snapshot.mjs'
 import { handleAlarms } from './alarms.mjs'
 import { handleLineAlert } from './line-actions.mjs'
 import { handleOsd } from './osd.mjs'
@@ -186,6 +189,8 @@ if (LIVE_WORKER) {
     runHousekeeping({ index: recIndex() })
       .then(() => pruneAudit(auth.DATA_DIR)) // a year of audit is kept; older rows go with the rest
       .then(() => thinAndRetain())
+      // pictures of events that are gone (event-snapshot.mjs; it never throws)
+      .then(() => sweepSnapshots())
       .catch((e) => console.warn(`[housekeeping] failed: ${e.message}`))
       .finally(() => (busy = false))
   }, 5 * 60_000).unref()
@@ -577,6 +582,10 @@ const handleRequest = async (req, res) => {
   if (marks) return sendJson(res, ...marks)
   const views = await handleViews(req.method, pathname, () => readJsonObject(req, 32768), user)
   if (views) return sendJson(res, ...views)
+  // An event's picture (event-snapshot.mjs): a JPEG, not JSON, so it is answered here, before the JSON
+  // routes; who may see it is decided inside (a playback right for that camera)
+  const snapRoute = /^\/api\/events\/(\d{1,15})\/snapshot$/.exec(pathname)
+  if (snapRoute) return handleSnapshot(req, res, snapRoute[1], who)
   // alarms and events of cameras this user may not see stay out of their lists (rights.mjs): watching
   // live or playing back that camera is what lets them see what happened on it
   const canSee = (nvr, ch) => who.admin || ['live', 'playback-server', 'playback-nvr'].some((a) => can(who, a, { nvr, ch }))
