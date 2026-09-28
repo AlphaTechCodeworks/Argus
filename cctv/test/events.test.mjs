@@ -14,7 +14,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-events-test-'))
 writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ alice: { hash: 'x', role: 'admin' } }))
 
 const {
-  CONTINUOUS_BITS, EVENT_TYPES, MODE_TYPES, TYPE_NAMES,
+  CONTINUOUS_BITS, EVENT_TYPES, MODE_TYPES, RECORD_TYPE_BITS, TYPE_NAMES,
   eventWindow, eventsForMode, inSchedule, inWindows, isEventMode,
   recordWindows, shouldRecord, typesFromRecordBits
 } = await import('../event-rules.mjs')
@@ -45,7 +45,17 @@ const S = 1000
   const both = typesFromRecordBits(0x2 | 0x4)
   check('scheduled + motion is one motion event', both.length === 1 && both[0].type === 'motion')
   const two = typesFromRecordBits(0x4 | 0x400)
-  check('one file can carry two reasons', two.length === 2 && two.some((t) => t.type === 'motion') && two.some((t) => t.subtype === 'tripwire'), JSON.stringify(two))
+  check('one file can carry two reasons', two.length === 2 && two.some((t) => t.type === 'motion') && two.some((t) => t.type === 'line-crossing' && t.subtype === 'tripwire'), JSON.stringify(two))
+  // The camera's own line-crossing detection is a kind of its own, so a rule can ask for exactly
+  // that; the NVR's other intelligent bits stay 'ai'.
+  const tripwire = typesFromRecordBits(0x400)
+  check('0x400 is a line crossing (tripwire)', tripwire.length === 1 && tripwire[0].type === 'line-crossing' && tripwire[0].subtype === 'tripwire', JSON.stringify(tripwire))
+  const crossed = typesFromRecordBits(0x80)
+  check('0x80 is a line crossing (line crossed)', crossed.length === 1 && crossed[0].type === 'line-crossing' && crossed[0].subtype === 'line crossed', JSON.stringify(crossed))
+  const bothLines = typesFromRecordBits(0x2 | 0x80 | 0x400)
+  check('both line bits in one file give two line-crossing rows', bothLines.length === 2 && bothLines.every((t) => t.type === 'line-crossing'), JSON.stringify(bothLines))
+  check('area entered (0x800) is still smart detection', typesFromRecordBits(0x800)[0].type === 'ai' && typesFromRecordBits(0x800)[0].subtype === 'area entered')
+  check('no smart-detection bit is left with a line subtype', RECORD_TYPE_BITS.every((r) => r.type !== 'ai' || !/line|tripwire/.test(r.subtype)))
   check('0x1000 is a face', typesFromRecordBits(0x1000)[0].type === 'face')
   check('0x20 is tamper', typesFromRecordBits(0x20)[0].type === 'tamper')
   // The honest half: a bit we have no name for is reported as a bit, not as motion.
@@ -61,6 +71,9 @@ const S = 1000
   check('ai-person exists as a name but is marked unconfirmed', person && person.confirmed === false)
   check('ai-vehicle likewise', EVENT_TYPES.find((t) => t.type === 'ai-vehicle')?.confirmed === false)
   check('motion is confirmed', EVENT_TYPES.find((t) => t.type === 'motion')?.confirmed === true)
+  const line = EVENT_TYPES.find((t) => t.type === 'line-crossing')
+  check('line-crossing is a confirmed kind with words for people', line?.confirmed === true && line.label === 'Line crossing', JSON.stringify(line))
+  check('... and says where it comes from', /line-crossing/.test(line?.from ?? '') && /0x80/.test(line?.from ?? '') && /0x400/.test(line?.from ?? ''), line?.from)
   // Nothing in the mapping may ever produce an unconfirmed kind.
   const produced = new Set()
   for (let bit = 1; bit <= 0x8000; bit <<= 1) for (const t of typesFromRecordBits(bit)) produced.add(t.type)
@@ -124,10 +137,11 @@ const S = 1000
 
 // --- which events a mode cares about -----------------------------------------------------------------
 {
-  const mixed = [{ type: 'motion' }, { type: 'ai' }, { type: 'face' }, { type: 'camera-offline' }, { type: 'pos' }]
+  const mixed = [{ type: 'motion' }, { type: 'ai' }, { type: 'line-crossing' }, { type: 'face' }, { type: 'camera-offline' }, { type: 'pos' }]
   check('motion mode takes motion only', eventsForMode(mixed, 'motion').length === 1)
-  check('ai mode takes the smart ones', eventsForMode(mixed, 'ai').length === 2, JSON.stringify(eventsForMode(mixed, 'ai')))
-  check('ai-or-motion takes all three', eventsForMode(mixed, 'ai-or-motion').length === 3)
+  // A crossing was an 'ai' event until it got a kind of its own; the ai modes still record for it.
+  check('ai mode takes the smart ones, line crossings included', eventsForMode(mixed, 'ai').length === 3 && eventsForMode(mixed, 'ai').some((e) => e.type === 'line-crossing'), JSON.stringify(eventsForMode(mixed, 'ai')))
+  check('ai-or-motion takes all four', eventsForMode(mixed, 'ai-or-motion').length === 4)
   check('continuous is not an event mode', !isEventMode('continuous') && eventsForMode(mixed, 'continuous').length === 0)
   check('off is not either', !isEventMode('off'))
   check('every mode in MODE_TYPES lists only known kinds', Object.values(MODE_TYPES).flat().every((t) => TYPE_NAMES.includes(t)))
@@ -352,6 +366,34 @@ const S = 1000
   const r = await intake.tick()
   check('once nothing is overdue, intake carries on', r?.nvr === 'a' && asked.join() === 'clock a,recordings a/0', asked.join())
   check('pollable: sdkBusy is a no, with a sentence', !pollable({ id: 'n', online: true }, T0, { sdkBusy: true }).ok && /overdue/.test(pollable({ id: 'n', online: true }, T0, { sdkBusy: true }).why))
+}
+
+// --- one crossing, two sources ------------------------------------------------------------------------------
+//
+// The alarm watcher files a crossing within seconds. Minutes later this intake finds the NVR's
+// recording of the same crossing: a few seconds earlier (pre-record), with both line bits. That must
+// stay one event, and must not reach the rules (and the phone) a second time. Real store, temp file.
+{
+  const { addEvent, closeEvents, eventsOfCamera, lastEventMs } = await import('../events-db.mjs')
+  const at = T0 + 30 * MIN
+  const first = addEvent({ nvr: 'lc1', ch: 2, type: 'line-crossing', subtype: 'tripwire', startMs: at, source: 'alarm-status' }, at)
+  check('the alarm watcher’s crossing is stored', first.isNew && first.event.id > 0)
+  const seen = []
+  const intake = makeEventIntake({
+    listNvrs: () => [{ id: 'lc1', name: 'LC', online: true }],
+    camerasOf: () => [{ ch: 2 }],
+    recordings: async () => ({ events: [[at - 5 * S, at + 40 * S, 0x2 | 0x80 | 0x400]] }),
+    onEvent: (e) => seen.push(e),
+    now: () => at + 3 * MIN,
+    log: () => {},
+    store: { addEvent, lastEventMs }
+  })
+  const r = await intake.tick()
+  check('the recording of the same crossing is not a new event', r?.stored === 0 && seen.length === 0, JSON.stringify({ r, seen: seen.length }))
+  const rows = eventsOfCamera('lc1', 2, at - MIN, at + MIN)
+  check('... the camera still has one row', rows.length === 1, JSON.stringify(rows.map((x) => `${x.type}/${x.subtype}@${x.startMs - at}`)))
+  check('... with the alarm’s start and the recording’s end', rows[0]?.startMs === at && rows[0]?.endMs === at + 40 * S, JSON.stringify(rows[0]))
+  closeEvents()
 }
 
 // --- the read-only command probe ------------------------------------------------------------------------

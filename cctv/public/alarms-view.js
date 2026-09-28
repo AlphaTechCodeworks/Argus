@@ -31,6 +31,9 @@ export const EVENT_KINDS = Object.freeze([
   { type: 'tamper', label: 'Camera tampered with', confirmed: true },
   { type: 'sensor', label: 'Alarm input', confirmed: true },
   { type: 'ai', label: 'Smart detection', confirmed: true },
+  // The camera's own line-crossing detection. A kind of its own rather than one more 'ai' subtype,
+  // so the "Line crossing" alarm rule can ask for exactly this and nothing else the camera's AI does.
+  { type: 'line-crossing', label: 'Line crossing', confirmed: true },
   { type: 'face', label: 'Face', confirmed: true },
   { type: 'pos', label: 'Till (POS)', confirmed: true },
   { type: 'ai-person', label: 'Person detected', confirmed: false },

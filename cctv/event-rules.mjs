@@ -29,7 +29,8 @@ const FROM = Object.freeze({
   'video-loss': 'the NVR’s video-loss recordings (DD_RECORD_TYPE)',
   tamper: 'the NVR’s occlusion recordings (DD_RECORD_TYPE_SHELTER)',
   sensor: 'the NVR’s sensor recordings (DD_RECORD_TYPE_SENSOR)',
-  ai: 'the NVR’s intelligent recordings (tripwire, intrusion, object, exception)',
+  ai: 'the NVR’s intelligent recordings (area entered, object left or taken, exception, overspeed, behaviour)',
+  'line-crossing': 'the camera’s own line-crossing detection (NVR alarm status; recordings 0x80/0x400)',
   face: 'the NVR’s face recordings (DD_RECORD_TYPE_VFD)',
   pos: 'the NVR’s POS recordings (DD_RECORD_TYPE_POS)',
   // The two people ask for by name, and exactly the two this app cannot produce. The recorded-event
@@ -70,10 +71,13 @@ export const RECORD_TYPE_BITS = Object.freeze([
   { bit: 0x0010, type: 'ai', subtype: 'behaviour' },
   { bit: 0x0020, type: 'tamper', subtype: 'occlusion' },
   { bit: 0x0040, type: 'ai', subtype: 'overspeed' },
-  { bit: 0x0080, type: 'ai', subtype: 'line crossed' },
+  // The two line bits are the camera's own line-crossing detection, which has a kind of its own:
+  // the alarm watcher (alarm-watch.mjs) files the same crossings under it within seconds, and
+  // events-db.mjs folds the recording's rows into that event (MERGE_MS).
+  { bit: 0x0080, type: 'line-crossing', subtype: 'line crossed' },
   { bit: 0x0100, type: 'ai', subtype: 'object left or taken' },
   { bit: 0x0200, type: 'ai', subtype: 'exception' },
-  { bit: 0x0400, type: 'ai', subtype: 'tripwire' },
+  { bit: 0x0400, type: 'line-crossing', subtype: 'tripwire' },
   { bit: 0x0800, type: 'ai', subtype: 'area entered' },
   { bit: 0x1000, type: 'face', subtype: '' },
   { bit: 0x2000, type: 'pos', subtype: '' },
@@ -318,8 +322,10 @@ export function shouldRecord(events, nowMs, { preS = 0, postS = 0, graceMs = 0 }
  */
 export const MODE_TYPES = Object.freeze({
   motion: ['motion'],
-  ai: ['ai', 'face'],
-  'ai-or-motion': ['ai', 'face', 'motion']
+  // A line crossing was an 'ai' event until it got a kind of its own; a camera that records on
+  // smart detections must still open a window when something crosses its line.
+  ai: ['ai', 'line-crossing', 'face'],
+  'ai-or-motion': ['ai', 'line-crossing', 'face', 'motion']
 })
 
 /** Whether this mode is driven by events at all. */

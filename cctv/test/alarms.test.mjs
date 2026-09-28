@@ -20,7 +20,7 @@ const {
   filterAlarms, labelOf, prioritise, priorityRank, ruleMatches, summarise, withinQuietGap
 } = await import('../event-rules.mjs')
 const {
-  acknowledge, addEvent, classify, closeEvents, createRule, deleteRule, eventsOfCamera,
+  MERGE_MS, acknowledge, addEvent, classify, closeEvents, createRule, deleteRule, eventsOfCamera,
   forgetEventsBefore, getEvent, lastEventMs, listEvents, listRules, unackedEvents,
   unacknowledge, updateRule
 } = await import('../events-db.mjs')
@@ -53,6 +53,7 @@ const json = (o) => async () => o
   check('and it defaults to the quietest priority', bare.value.priority === DEFAULT_PRIORITY)
   check('and to not notifying', bare.value.notify === false)
   check('an unconfirmed kind may still be written into a rule', checkRule({ name: 'x', types: ['ai-person'] }).ok)
+  check('a rule may name line crossings', checkRule({ name: 'Line crossing', types: ['line-crossing'], priority: 'high', notify: true, minGapS: 30 }).ok)
 }
 
 // --- matching ----------------------------------------------------------------------------------
@@ -65,6 +66,13 @@ const json = (o) => async () => o
   check('another camera does not', !ruleMatches({ ...all, cameras: ['nvr1/4'] }, ev))
   check('the right kind matches', ruleMatches({ ...all, types: ['motion'] }, ev))
   check('another kind does not', !ruleMatches({ ...all, types: ['ai'] }, ev))
+  const crossing = { nvr: 'nvr2', ch: 2, type: 'line-crossing', subtype: 'tripwire', startMs: T0 }
+  check('a line-crossing rule matches a crossing', ruleMatches({ ...all, types: ['line-crossing'] }, crossing))
+  check('... on its own cameras only', !ruleMatches({ ...all, cameras: ['nvr2/3'], types: ['line-crossing'] }, crossing))
+  check('... and not motion', !ruleMatches({ ...all, types: ['line-crossing'] }, ev))
+  check('a smart-detection rule no longer catches a crossing', !ruleMatches({ ...all, types: ['ai'] }, crossing))
+  const told = applyRules([{ ...all, id: 9, types: ['line-crossing'], priority: 'high', notify: true }], crossing)
+  check('a crossing under a notifying line rule is high and tells someone', told.priority === 'high' && told.notify === true, JSON.stringify(told))
   check('the schedule is applied', !ruleMatches({ ...all, schedule: [{ from: '22:00', to: '23:00' }] }, ev))
   check('and the site offset with it', ruleMatches({ ...all, schedule: [{ from: '04:00', to: '06:00' }] }, ev, { tzOffsetMin: -240 }))
   check('cameraKey is the key used everywhere else', cameraKey('nvr1', 3) === 'nvr1/3')
@@ -125,9 +133,9 @@ const json = (o) => async () => o
 
 // --- naming and clips -------------------------------------------------------------------------------
 {
-  const named = nameCameras([{ nvr: 'n', ch: 1, type: 'ai', subtype: 'tripwire', startMs: T0, endMs: T0 + 5 * S }], [{ nvr: 'n', ch: 1, name: 'Yard' }])
+  const named = nameCameras([{ nvr: 'n', ch: 1, type: 'line-crossing', subtype: 'tripwire', startMs: T0, endMs: T0 + 5 * S }], [{ nvr: 'n', ch: 1, name: 'Yard' }])
   check('a camera gets its name', named[0].camera === 'Yard')
-  check('and the kind gets a label', named[0].typeLabel === labelOf('ai'))
+  check('and the kind gets a label', named[0].typeLabel === labelOf('line-crossing') && named[0].typeLabel === 'Line crossing', named[0].typeLabel)
   check('a camera the server does not know keeps its key', nameCameras([{ nvr: 'n', ch: 9, type: 'motion', startMs: T0 }], [])[0].camera === 'n/9')
 
   const clip = clipOf(named[0])
@@ -139,6 +147,7 @@ const json = (o) => async () => o
   const msg = alarmMessage(named[0], { ruleName: 'Yard at night' })
   check('a notification reuses the phase 1 message shape', ['key', 'kind', 'title', 'detail', 'severity'].every((k) => k in msg), JSON.stringify(msg))
   check('its title says what and where', /Yard/.test(msg.title), msg.title)
+  check('... naming a crossing as one', /^Line crossing \(tripwire\)/.test(msg.title), msg.title)
   check('it names the rule that decided', /Yard at night/.test(msg.detail), msg.detail)
   check('a critical alarm is high severity to the sender', alarmMessage({ ...named[0], priority: 'critical' }).severity === 'high')
   check('a low one is not', alarmMessage({ ...named[0], priority: 'low' }).severity === 'medium')
@@ -159,7 +168,8 @@ const json = (o) => async () => o
   check('but an event that has grown is extended', longer.event.endMs === T0 + 30 * S)
   const shorter = addEvent({ ...e, endMs: T0 + 10 * S }, T0 + 3 * MIN)
   check('and never shrunk back', shorter.event.endMs === T0 + 30 * S)
-  check('a different kind at the same moment is its own event', addEvent({ ...e, type: 'ai', subtype: 'tripwire' }, T0).isNew)
+  // (a line crossing folds only into another line crossing, never into this motion event)
+  check('a different kind at the same moment is its own event', addEvent({ ...e, type: 'line-crossing', subtype: 'tripwire' }, T0).isNew)
 
   check('the newest event time is known per camera', lastEventMs('nvr1', 3) === T0)
   check('and per NVR', lastEventMs('nvr1') === T0)
@@ -312,11 +322,11 @@ const json = (o) => async () => o
 {
   const rows = alarmRows([
     { id: 1, camera: 'Gate', type: 'motion', subtype: '', priority: 'critical', startMs: T0, endMs: T0 + 5 * S, ackMs: null },
-    { id: 2, camera: 'Yard', type: 'ai', subtype: 'tripwire', priority: 'low', startMs: T0 - MIN, endMs: null, ackMs: T0, ackUser: 'bob', ackNote: 'fox' }
+    { id: 2, camera: 'Yard', type: 'line-crossing', subtype: 'tripwire', priority: 'low', startMs: T0 - MIN, endMs: null, ackMs: T0, ackUser: 'bob', ackNote: 'fox' }
   ], { now: T0 + 5 * MIN })
   check('every alarm becomes a row', rows.length === 2)
   check('the kind is put into words', rows[0].what === labelOf('motion'), rows[0].what)
-  check('a subtype is shown beside it', /tripwire/.test(rows[1].what), rows[1].what)
+  check('a subtype is shown beside it', rows[1].what === 'Line crossing (tripwire)', rows[1].what)
   check('an unacknowledged row is marked as needing someone', rows[0].needsAck === true && rows[1].needsAck === false)
   check('an acknowledged row says who and what they said', /bob/.test(rows[1].ack) && /fox/.test(rows[1].ack), rows[1].ack)
   check('one still open is not given a made-up length', rows[1].lasted === null)
@@ -335,6 +345,55 @@ const json = (o) => async () => o
   check('a rule reads as a sentence', /Motion/.test(summary) && /Yard|nvr1\/3/.test(summary), summary)
   check('and says it notifies', /notif/i.test(summary), summary)
   check('a rule with no limits says so', /any camera/i.test(ruleSummary({ name: 'x', cameras: [], types: [], priority: 'low' })), ruleSummary({ name: 'x', cameras: [], types: [], priority: 'low' }))
+}
+
+// --- line crossings fold together --------------------------------------------------------------------------
+//
+// One crossing reaches the store twice: the alarm watcher files it within seconds, and the recording
+// list finds the NVR's recording of it minutes later, a few seconds earlier (pre-record) and often
+// with both line bits. Somebody walking along a line also crosses it several times in a few seconds.
+// A line crossing starting within 30 s of another on the same camera is folded into it; nothing else
+// ever is.
+{
+  check('the fold window is 30 s', MERGE_MS === 30_000, String(MERGE_MS))
+  const B = T0 + 500 * MIN
+  const lc = (o) => ({ nvr: 'nvr5', ch: 2, type: 'line-crossing', subtype: 'tripwire', source: 'alarm-status', ...o })
+
+  const a = addEvent(lc({ startMs: B }), B)
+  check('a first crossing is a new event', a.isNew && a.event.type === 'line-crossing')
+  const same = addEvent(lc({ startMs: B }), B + 5 * S)
+  check('the same alarm seen again is still one row, with no end made up', !same.isNew && same.event.id === a.event.id && same.event.endMs === null, JSON.stringify(same.event))
+  const rec = addEvent(lc({ subtype: 'line crossed', source: 'nvr-recordings', startMs: B - 5 * S, endMs: B + 40 * S }), B + 3 * MIN)
+  check('its recording, 5 s earlier and with the other line bit, is folded in', !rec.isNew && rec.event.id === a.event.id, JSON.stringify(rec.event))
+  check('... and moves the end out to the recording’s', rec.event.endMs === B + 40 * S, `${rec.event.endMs - B}`)
+  check('... keeping the first sighting’s start, subtype and source', rec.event.startMs === B && rec.event.subtype === 'tripwire' && rec.event.source === 'alarm-status', JSON.stringify(rec.event))
+  const edge = addEvent(lc({ startMs: B + 30 * S }), B + 4 * MIN)
+  check('a crossing exactly 30 s later is still folded in', !edge.isNew && edge.event.id === a.event.id)
+  check('... and never pulls the end back', edge.event.endMs === B + 40 * S, `${edge.event.endMs - B}`)
+
+  const later = addEvent(lc({ startMs: B + 31 * S }), B + 4 * MIN)
+  check('31 s later is a new event', later.isNew && later.event.id !== a.event.id)
+  const between = addEvent(lc({ startMs: B + 45 * S }), B + 4 * MIN)
+  check('a crossing near two events joins the nearer one', !between.isNew && between.event.id === later.event.id)
+  check('... whose end grows to it', between.event.endMs === B + 45 * S, `${between.event.endMs - B}`)
+  check('the camera holds two crossing events, not five', eventsOfCamera('nvr5', 2, B - MIN, B + MIN).length === 2)
+
+  // Somebody already looked at it: its recording turning up later must not make a fresh alarm.
+  acknowledge(a.event.id, 'bob', 'a walker', B + 5 * MIN)
+  const afterAck = addEvent(lc({ subtype: 'line crossed', source: 'nvr-recordings', startMs: B + 2 * S, endMs: B + 50 * S }), B + 6 * MIN)
+  check('an acknowledged crossing still takes its recording', !afterAck.isNew && afterAck.event.id === a.event.id && afterAck.event.ackNote === 'a walker' && afterAck.event.endMs === B + 50 * S)
+
+  // Nothing else folds: other kinds, other cameras, other NVRs.
+  const m1 = addEvent({ nvr: 'nvr5', ch: 2, type: 'motion', startMs: B + 2 * S, source: 'x' }, B + 6 * MIN)
+  const m2 = addEvent({ nvr: 'nvr5', ch: 2, type: 'motion', startMs: B + 4 * S, source: 'x' }, B + 6 * MIN)
+  check('motion beside a crossing is its own event', m1.isNew)
+  check('motion never folds into motion', m2.isNew && m2.event.id !== m1.event.id)
+  const mot = addEvent({ nvr: 'nvr5', ch: 3, type: 'motion', startMs: B, source: 'x' }, B + 6 * MIN)
+  const lone = addEvent(lc({ ch: 3, startMs: B + 5 * S }), B + 6 * MIN)
+  check('a crossing beside only a motion event is its own event', lone.isNew && lone.event.id !== mot.event.id)
+  check('... and the motion event is left alone', getEvent(mot.event.id).endMs === null && getEvent(mot.event.id).type === 'motion')
+  check('a crossing on another camera is its own event', addEvent(lc({ ch: 4, startMs: B + S }), B + 6 * MIN).isNew)
+  check('... and on another NVR', addEvent(lc({ nvr: 'nvr6', startMs: B + S }), B + 6 * MIN).isNew)
 }
 
 closeEvents()

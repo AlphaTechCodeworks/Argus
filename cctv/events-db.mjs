@@ -20,6 +20,17 @@ import { DEFAULT_PRIORITY, PRIORITIES, checkRule } from './event-rules.mjs'
 export const EVENTS_DB = join(DATA_DIR, 'recordings.db')
 /** One page of results. A guard against a runaway query, not a paging scheme. */
 export const MAX_RESULTS = 1000
+/**
+ * Line crossings on one camera starting closer together than this are one event. One crossing
+ * reaches us twice: the alarm watcher (alarm-watch.mjs) sees the camera's alarm within seconds, and
+ * the recording-list intake (events.mjs) finds the NVR's recording of it minutes later, starting a
+ * few seconds earlier because of the NVR's pre-record and often carrying both line bits (0x80 and
+ * 0x400). Somebody walking along a line also crosses it several times in a few seconds. Folding
+ * these keeps one row, one phone alert and one snapshot per crossing instead of three or four.
+ */
+export const MERGE_MS = 30_000
+/** The only kind that is folded; every other kind keeps one row per thing the NVR reported. */
+const MERGED_TYPE = 'line-crossing'
 
 const EV_COLS = `id, nvr, ch, type, subtype, start_ms AS startMs, end_ms AS endMs, source, detail,
   priority, rule_id AS ruleId, rule_name AS ruleName, notified_ms AS notifiedMs,
@@ -44,6 +55,11 @@ function open(file = EVENTS_DB) {
       (nvr, ch, type, subtype, start_ms, end_ms, source, detail, priority, rule_id, rule_name, seen_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     find: db.prepare(`SELECT ${EV_COLS} FROM events WHERE nvr = ? AND ch = ? AND type = ? AND subtype = ? AND start_ms = ?`),
+    // The event of one kind on one camera whose start is nearest a given time, inside a window
+    // (addEvent's folding of line crossings). Any subtype: the two line bits are the same crossing.
+    // Served by events_cam (nvr, ch, start_ms).
+    nearest: db.prepare(`SELECT ${EV_COLS} FROM events WHERE nvr = ? AND ch = ? AND type = ? AND start_ms >= ? AND start_ms <= ?
+      ORDER BY ABS(start_ms - ?), start_ms, id LIMIT 1`),
     byId: db.prepare(`SELECT ${EV_COLS} FROM events WHERE id = ?`),
     // The window query is the only filter with an index behind it; the rest are applied in JS by
     // event-rules.filterAlarms, which the page uses on the same data.
@@ -123,7 +139,32 @@ function toRule(row) {
 // ---- events ------------------------------------------------------------------------------------
 
 /**
+ * Folds a line crossing into the line-crossing event of the same camera whose start is nearest its
+ * own, if that is within MERGE_MS either side. Returns what addEvent returns, or null when there is
+ * none and the crossing is stored as a row of its own.
+ *
+ * An acknowledged event takes its later sightings too. The usual case is the recording list finding,
+ * minutes later, a crossing somebody has already looked at; storing that as a fresh alarm would ring
+ * the phone again for something already dealt with.
+ */
+function foldCrossing(s, e, start) {
+  const near = plain(s.nearest.get(String(e.nvr), Number(e.ch), MERGED_TYPE, start - MERGE_MS, start + MERGE_MS, start))
+  if (!near) return null
+  // null and undefined mean "no end yet": Number(null) is 0, which is 1970 rather than an end
+  const endIn = e.endMs === null || e.endMs === undefined ? NaN : Number(e.endMs)
+  const reach = Math.round(Math.max(start, Number.isFinite(endIn) ? endIn : start))
+  const held = Math.max(near.startMs, Number.isFinite(near.endMs) ? near.endMs : near.startMs)
+  // Only the end moves. The start is the row's identity (the unique key) and the moment the snapshot
+  // and the bookmark are taken around; it is usually the alarm's own time, which is nearer the
+  // crossing than the recording's pre-record start.
+  if (reach > held) s.extend.run(reach, near.id, reach)
+  return { event: plain(s.byId.get(near.id)), isNew: false }
+}
+
+/**
  * Records one event, or returns the row already there.
+ * A line crossing within MERGE_MS of another on the same camera is folded into that one instead (its
+ * end moved out, isNew false), so every caller treats it like an event it already had.
  * @param {{nvr, ch, type, subtype?, startMs, endMs?, source?, detail?, priority?, ruleId?, ruleName?}} e
  * @returns {{ event: object, isNew: boolean }}
  */
@@ -131,6 +172,10 @@ export function addEvent(e, nowMs = Date.now()) {
   const s = open()
   const subtype = String(e.subtype ?? '')
   const start = Math.round(Number(e.startMs))
+  if (String(e.type) === MERGED_TYPE && Number.isFinite(start)) {
+    const folded = foldCrossing(s, e, start)
+    if (folded) return folded
+  }
   const res = s.add.run(
     String(e.nvr), Number(e.ch), String(e.type), subtype, start,
     Number.isFinite(Number(e.endMs)) ? Math.round(Number(e.endMs)) : null,
