@@ -247,7 +247,7 @@ const locationState = () =>
 const lastSegmentMs = (nvrId, ch) => {
   const index = recIndex()
   if (!index) return null
-  const closed = index.lastEnds(nvrId, ch).segEnd
+  const closed = index.lastSegmentEnd(nvrId, ch)
   const open = index.openOf(nvrId, ch)?.startMs ?? null
   return closed === null && open === null ? null : Math.max(closed ?? 0, open ?? 0)
 }
