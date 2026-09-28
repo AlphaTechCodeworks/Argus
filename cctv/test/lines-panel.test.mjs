@@ -189,5 +189,41 @@ check('undoText: when and by whom', /^Undo puts back the line settings from befo
   check('  the camera\'s sound and white light are never among what the panel sends', !/triggerAudio|triggerWhiteLight/.test(src.slice(src.indexOf('export function changeOf'), src.indexOf('/** A schedule\'s name'))))
 }
 
+// ---- the drawing canvas and the tile's still picture (F9) ----------------------------------------------
+// While a tile shows its kept still (stills.js), its player canvas is hidden until the first frame. The
+// panel's canvases sit in the same tile and must never be hidden with it: an invisible overlay takes no
+// pointer events, so nothing could be drawn.
+{
+  const css = readFileSync(join(import.meta.dirname, '..', 'public', 'style.css'), 'utf8')
+  const rule = /\.tile\.has-still > canvas([^{]*)\{\s*visibility: hidden;/.exec(css)
+  check('the still hides the player canvas only: not the osd, the drawing overlay or the loupe', Boolean(rule) && ['.osd', '.ln-overlay', '.ln-loupe'].every((c) => rule[1].includes(`:not(${c})`)), rule?.[0])
+
+  // a live frame that arrives while the kept still is still being read: the still must not come back
+  const { clearStill, showStill } = await import('../public/stills.js')
+  let giveBlob = null
+  const made = []
+  const revoked = []
+  globalThis.caches = { open: async () => ({ match: async () => ({ blob: () => new Promise((r) => (giveBlob = r)) }) }) }
+  const savedCreate = URL.createObjectURL
+  const savedRevoke = URL.revokeObjectURL
+  URL.createObjectURL = () => {
+    made.push('blob:still-1')
+    return 'blob:still-1'
+  }
+  URL.revokeObjectURL = (u) => revoked.push(u)
+  const classes = new Set()
+  const tile = { isConnected: true, dataset: {}, style: {}, classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c), contains: (c) => classes.has(c) } }
+  const painting = showStill(tile, 'nvr-2', 2)
+  for (let i = 0; i < 5 && !giveBlob; i++) await new Promise((r) => setImmediate(r))
+  clearStill(tile) // the first frame, while the still's blob is being read
+  giveBlob?.({})
+  await painting
+  check('a still read after the first live frame is not shown (the canvas is not hidden again)', typeof giveBlob === 'function' && !classes.has('has-still') && !tile.style.backgroundImage && !tile.dataset.stillUrl, JSON.stringify({ classes: [...classes], style: tile.style, dataset: tile.dataset }))
+  check('... and no object URL is left behind for it', made.length === revoked.length, `${made.length} made, ${revoked.length} let go`)
+  URL.createObjectURL = savedCreate
+  URL.revokeObjectURL = savedRevoke
+  delete globalThis.caches
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

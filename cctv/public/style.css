@@ -1767,7 +1767,7 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 /* a tile's last-seen still, shown until its live picture arrives (stills.js) */
 .tile.has-still { background-size: contain; background-position: center; background-repeat: no-repeat; }
 .tile.has-still::after { content: ''; position: absolute; inset: 0; background: rgba(0,0,0,.28); pointer-events: none; z-index: 0; }
-.tile.has-still > canvas:not(.osd) { visibility: hidden; } /* the player canvas is opaque black until its first frame */
+.tile.has-still > canvas:not(.osd):not(.ln-overlay):not(.ln-loupe) { visibility: hidden; } /* the player canvas is opaque black until its first frame; the Lines panel's drawing canvases in the same tile stay (a hidden one takes no pointer) */
 /* Health: the live indicator */
 .hp-live { display: inline-flex; align-items: center; gap: 6px; align-self: flex-end; font-size: 12px; color: var(--text-muted); }
 .hp-live::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }

@@ -17,7 +17,11 @@ export async function showStill(tile, nvr, ch) {
     if (typeof caches === 'undefined') return
     const res = await (await caches.open(STORE)).match(keyOf(nvr, ch))
     if (!res || !tile.isConnected || tile.dataset.live === '1') return
-    const url = URL.createObjectURL(await res.blob())
+    const blob = await res.blob()
+    // the first live frame may have come while the still was read: clearStill has run already, and a
+    // still shown now would stay, hiding the live canvas under it
+    if (!tile.isConnected || tile.dataset.live === '1') return
+    const url = URL.createObjectURL(blob)
     tile.dataset.stillUrl = url
     tile.classList.add('has-still')
     tile.style.backgroundImage = `url("${url}")`
