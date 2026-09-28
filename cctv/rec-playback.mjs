@@ -15,7 +15,9 @@
 //  - Start and seek: the frames from the keyframe at or before T are queued and the pacer is anchored
 //    at T, so the frames before T go out at once (the preroll; the browser decodes them without
 //    showing them), then the rest in time.
-//  - 1x, 2x, 4x: every frame. 8x-32x and every reverse speed: keyframes only, skipped evenly so that
+//  - 1x, 2x, 4x: every frame, except that 2x and 4x are keyframes only while the frames are converted
+//    (H.265 for a browser that cannot decode it, below: the conversion keeps up with 1x and not much
+//    more). 8x-32x and every reverse speed: keyframes only, skipped evenly so that
 //    consecutive ones are about |speed| x 1000 / maxKeysPerS ms of footage apart, and never more than
 //    maxKeysPerS a second of wall time (the pacer holds them back). With a longer GOP every keyframe
 //    goes, at its media time: |speed| x 1000 / GOP (ms) of them a second. Reverse walks the keyframes back,
@@ -285,6 +287,7 @@ export class ServerPlayback {
     Object.assign(this, { clientH265, pool, makeTranscoder })
     this.xcode = null // the running conversion (H.265 recordings, a browser that cannot decode them)
     this.slot = null // its place under the concurrency cap
+    this.converts = false // this viewer's frames are converted (#noteCodec): 2x and 4x are keyframes only
     Object.assign(this, { ws, nvr, ch, start, index, legs, fs, now, readAheadMs, maxQueueBytes, pauseAbove, resumeBelow, gapMs, lagMs, maxKeysPerS, tailPollMs, endGraceMs, noticeGapMs, legWaitMs, legSpanMs, prefetchMs, log })
     this.leg = null // { handle, gen, fromMs, toMs, keyMode }: an NVR leg is playing (the pacer is idle)
     this.closed = false
@@ -332,8 +335,33 @@ export class ServerPlayback {
     sendJson(this.ws, obj)
   }
 
+  /**
+   * Keyframes only: reverse, 8x and up, and 2x and 4x while this viewer's frames are converted. The
+   * conversion keeps up with 1x and not much more (4K at 1920 wide: 1.2-1.3x), so at 2x and 4x half
+   * the frames or fewer arrived, in stutters (smoothness report, cause 2c): keyframes are a steady
+   * slideshow instead.
+   */
   #keyMode() {
-    return this.speed < 0 || this.speed >= 8
+    return this.speed < 0 || this.speed >= 8 || (this.speed > 1 && this.converts)
+  }
+
+  /**
+   * Called for every file opened: the first one this viewer's browser cannot decode (H.265 with
+   * &h265=0) makes the session a converting one for good, as the conversion itself is. It is known
+   * here, before a start or restart picks its mode, so a start at 2x is keyframes only from its first
+   * frame rather than switching once the first converted frame has gone out.
+   */
+  #noteCodec(codec) {
+    if (!this.converts && wantsTranscode({ clientH265: this.clientH265, codec })) this.converts = true
+  }
+
+  /**
+   * One picture at a time goes to the conversion: a scrub (one keyframe, then paused) and keyframes
+   * only. Nothing follows such a picture for a while (a second at 2x), and ffmpeg's parser holds a
+   * picture until the next one begins, so each one is ended at once (Transcoder.endPicture).
+   */
+  #oneAtATime() {
+    return this.cur.phase === 'scrub' || this.#keyMode()
   }
 
   // ---- commands --------------------------------------------------------------------------------
@@ -503,7 +531,9 @@ export class ServerPlayback {
           if (r === 'started') break
           continue
         }
-        if (item.buf && keyMode) {
+        // (keyframes: a delta frame here was read before the mode changed under a running play -- an
+        // H.265 file after H.264 ones, at 2x for a browser that cannot decode it -- and goes at its time)
+        if (item.buf && keyMode && item.isKey) {
           if (now - this.lastKeyWall < minWall) break // at most maxKeysPerS a second
           this.lastKeyWall = now
         }
@@ -529,6 +559,7 @@ export class ServerPlayback {
       // frame is sent from the callback below, in this same wire format and at this same time. The
       // position is moved on here all the same, so pacing does not wait on the encoder.
       if (this.#transcode(item)) {
+        if (this.#oneAtATime()) this.xcode.endPicture()
         this.lastTs = item.ts
         if (this.preroll !== null && item.ts >= this.preroll) this.preroll = null
         return
@@ -572,6 +603,7 @@ export class ServerPlayback {
         onFail: (e) => this.#fail(new Error(`could not convert this H.265 recording (${e.message})`)),
         log: this.log
       })
+      this.converts = true // (a scrub opens its file without #openSeg)
       this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: converting H.265 to H.264 for this browser`)
     }
     this.xcode.push(item.ts, item.isKey, item.buf)
@@ -802,10 +834,10 @@ export class ServerPlayback {
       return false
     }
     this.#send({ type: 'scrub', gen: c.gen, at: kf.ts })
+    // Converted, the picture is ended in #deliver (#oneAtATime, while the phase is still 'scrub'):
+    // nothing follows this keyframe, and ffmpeg would hold it until a next picture began, so the drag
+    // showed no picture at all.
     this.#deliver({ buf: kf.buf, isKey: true, codec: r.codec, ts: kf.ts })
-    // Converted: nothing follows this keyframe, and ffmpeg would hold it until a next picture began,
-    // so the drag showed no picture at all. (No conversion running: nothing happens.)
-    this.xcode?.endPicture()
     this.cur = { phase: 'scrubbed', t: kf.ts }
     return false
   }
@@ -1180,7 +1212,10 @@ export class ServerPlayback {
     for (let n = 0; seg && n < 1000; n++) {
       try {
         const reader = await this.#reader(seg)
-        if (!(reader.rows.length === 0 && !reader.growing)) return { seg, reader }
+        if (!(reader.rows.length === 0 && !reader.growing)) {
+          this.#noteCodec(reader.codec)
+          return { seg, reader }
+        }
         if (stale()) return null
         this.#logSkip(seg, { code: 'no frames' })
       } catch (e) {

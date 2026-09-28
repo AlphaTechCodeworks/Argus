@@ -77,20 +77,26 @@ const h264 = {
   key: (rnd, len = 3000) => Buffer.concat([nal(true, [0x67, 0x64], rnd, 12), nal(false, [0x68], rnd, 4), nal(false, [0x65, 0x88], rnd, len)]),
   p: (rnd, len = 600) => nal(true, [0x41, 0x9a], rnd, len)
 }
+// H.265 the same way (2-byte NAL headers): VPS, SPS, PPS, then an IDR slice; a TRAIL_R slice. The byte
+// after a slice's header has its top bit set: first_slice_segment_in_pic_flag, a new picture.
+const h265 = {
+  key: (rnd, len = 3000) => Buffer.concat([nal(true, [0x40, 0x01], rnd, 12), nal(false, [0x42, 0x01], rnd, 12), nal(false, [0x44, 0x01], rnd, 4), nal(false, [0x26, 0x01, 0x80], rnd, len)]),
+  p: (rnd, len = 600) => nal(true, [0x02, 0x01, 0x80], rnd, len)
+}
 
 /**
  * n frames at 25 fps from t0, a key every `gop`. Arrival stamps as the recorder makes them: the NVR
  * sends in bursts (every 200-300 ms), so a frame's stamp is the first burst at or after its capture
  * time: key times jitter by up to 300 ms and never go back.
  */
-function makeFrames(rnd, t0, n, { gop = 50 } = {}) {
+function makeFrames(rnd, t0, n, { gop = 50, codec = h264 } = {}) {
   const out = []
   let burst = t0
   for (let i = 0; i < n; i++) {
     const cap = t0 + i * 40
     while (burst < cap) burst += 200 + Math.floor(rnd() * 101)
     const isKey = i % gop === 0
-    out.push({ buf: isKey ? h264.key(rnd, 1500 + Math.floor(rnd() * 2000)) : h264.p(rnd, 150 + Math.floor(rnd() * 700)), isKey, ts: burst })
+    out.push({ buf: isKey ? codec.key(rnd, 1500 + Math.floor(rnd() * 2000)) : codec.p(rnd, 150 + Math.floor(rnd() * 700)), isKey, ts: burst })
   }
   return out
 }
@@ -1061,6 +1067,106 @@ for (const speed of [2, 4]) {
     const err = ws.texts.find((t) => t.type === 'error')
     check('over the cap: an honest message, no frames and no ffmpeg', Boolean(err) && /already converting/.test(err.message) && ws.bins.length === 0 && xs.length === 0, err?.message)
     check('  the socket is closed, and not with the code that means "the NVR is busy"', ws.closedWith === 1011, String(ws.closedWith))
+  }
+
+  // ---- 2x and 4x while converting: keyframes only (smoothness report, cause 2c) ----
+  // The conversion keeps up with 1x and not much more, so at 2x and 4x every frame meant half of
+  // them or fewer arriving, in stutters. Keyframes only is a steady slideshow instead, and each one
+  // is ended at once: nothing follows it for up to a second, and ffmpeg would hold it until then.
+  // camera 10: 8 s of H.265 at 25 fps, a keyframe every second; camera 11: 4 s of H.264, then 4 s of H.265
+  const T10 = Date.UTC(2026, 8, 24, 15, 0, 10)
+  const cam10 = await recordGroups(10, [makeFrames(prng(12), T10, 200, { gop: 25, codec: h265 })], 'h265')
+  const exp10 = await readBack(cam10.segs)
+  const keys10 = exp10.filter((f) => f.isKey)
+  check('h265 footage (camera 10): 200 H.265 pictures read back, a keyframe every 25', exp10.length === 200 && keys10.length === 8, `${exp10.length} frames, ${keys10.length} keys`)
+  const T11 = Date.UTC(2026, 8, 24, 16, 0, 10)
+  const all11 = makeFrames(prng(13), T11, 200, { gop: 25 })
+  const cam11a = await recordGroups(11, [all11.slice(0, 100)], 'h264')
+  const cam11b = await recordGroups(11, [all11.slice(100).map((f) => ({ ...f, buf: f.isKey ? h265.key(prng(f.ts)) : h265.p(prng(f.ts)) }))], 'h265')
+  const exp11a = await readBack(cam11a.segs)
+  const exp11b = await readBack(cam11b.segs)
+  check('mixed footage (camera 11): an H.264 file, then an H.265 one straight after it', exp11a.length === 100 && exp11b.length === 100 && /\.h264$/.test(cam11a.segs[0].path) && /\.h265$/.test(cam11b.segs[0].path), `${exp11a.length} ${exp11b.length}`)
+
+  const converted = (b) => b.codec === 0 && b.buf[0] === 0xaa // (the stand-in marks what it converted)
+  const freePool = () => ({ active: 0, acquire: () => ({ release: () => {} }) })
+  /** '' when bins are consecutive keyframes of keys (the list the footage has), else what is wrong. */
+  const keySeq = (bins, keys) => {
+    const at = keys.findIndex((k) => Math.abs(k.ts - bins[0]?.tsMs) < 0.001)
+    if (at < 0) return `the first frame (${bins[0]?.tsMs}) is not a keyframe of the footage`
+    for (let j = 0; j < bins.length; j++) if (Math.abs(bins[j].tsMs - keys[at + j]?.ts) >= 0.001) return `frame ${j} is not keyframe ${at + j}`
+    return ''
+  }
+  const medianGap = (bins) => {
+    const g = bins.slice(1).map((b, i) => b.at - bins[i].at).sort((a, b) => a - b)
+    return g[g.length >> 1] ?? 0
+  }
+  {
+    // the page sends its speed as soon as the socket opens: at 2x from the first frame on
+    const xs = []
+    const { ws, session } = open(10, T10 + 100, { extra: '&h265=0', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    ws.command({ speed: 2 })
+    await until(() => ws.bins.length >= 4, 4000)
+    const bins = ws.bins.slice()
+    check('converting at 2x from the start: keyframes only, every one converted', bins.length >= 4 && bins.every((b) => b.key && converted(b)), `${bins.length} frames, ${bins.filter((b) => !b.key).length} not keys`)
+    check('  consecutive keyframes of the footage, none skipped', keySeq(bins, keys10) === '', keySeq(bins, keys10))
+    const gap = medianGap(bins)
+    check('  at their media time (a keyframe a second at 2x: one every ~500 ms), not in a burst', gap > 350 && gap < 700, `${Math.round(gap)} ms`)
+    check('  each keyframe is pushed and then ended at once', xs.length === 1 && J(xs[0].calls.slice(0, 6)) === J(['push', 'end', 'push', 'end', 'push', 'end']), xs[0]?.calls.join())
+    session.close()
+  }
+  {
+    // 1x plays every frame; 2x switches to keyframes (the conversion reset); 4x too; back at 1x, every frame again
+    const xs = []
+    const { ws, session } = open(10, T10 + 100, { extra: '&h265=0', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.filter((b) => !b.key).length >= 3, 3000)
+    check('converting at 1x: every frame (no change there)', ws.bins.some((b) => !b.key) && ws.bins.every(converted) && !xs[0].calls.includes('end'), `${ws.bins.length} frames`)
+    const r0 = xs[0].resets
+    ws.command({ speed: 2 })
+    const n2 = ws.bins.length
+    await until(() => ws.bins.length >= n2 + 3, 3000)
+    const at2 = ws.bins.slice(n2)
+    check('  1x to 2x: the conversion is reset once, then keyframes only', xs[0].resets === r0 + 1 && at2.length >= 3 && at2.every((b) => b.key && converted(b)) && keySeq(at2, keys10) === '', `${xs[0].resets - r0} resets, ${at2.length} frames: ${keySeq(at2, keys10)}`)
+    ws.command({ speed: 4 })
+    const n4 = ws.bins.length
+    await until(() => ws.bins.length >= n4 + 2, 3000)
+    const at4 = ws.bins.slice(n4)
+    check('  4x: keyframes only', at4.length >= 2 && at4.every((b) => b.key && converted(b)), `${at4.length} frames`)
+    ws.command({ speed: 1 })
+    const n1 = ws.bins.length
+    await until(() => ws.bins.slice(n1).filter((b) => !b.key).length >= 3, 3000)
+    check('  back at 1x: every frame again', ws.bins.slice(n1).filter((b) => !b.key).length >= 3)
+    session.close()
+  }
+  {
+    // nobody converting: 2x is every frame, as before
+    const xs = []
+    const h = open(10, T10 + 100, { extra: '&h265=1', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    h.ws.command({ speed: 2 })
+    await until(() => h.ws.bins.filter((b) => !b.key).length >= 5, 3000)
+    check('2x on H.265 for a browser that decodes it: every frame, untouched (unchanged)', h.ws.bins.filter((b) => !b.key).length >= 5 && h.ws.bins.every((b) => b.codec === 1) && xs.length === 0)
+    h.session.close()
+    const c = open(0, T0 + 1000, { extra: '&h265=0', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    c.ws.command({ speed: 2 })
+    await until(() => c.ws.bins.filter((b) => !b.key).length >= 5, 3000)
+    check('  and 2x on an H.264 recording for a browser that cannot decode H.265: every frame (nothing to convert)', c.ws.bins.filter((b) => !b.key).length >= 5 && c.ws.bins.every((b) => b.codec === 0 && !converted(b)) && xs.length === 0)
+    c.session.close()
+  }
+  {
+    // an H.265 file after H.264 ones, at 2x: the H.264 frames already read play out at their time,
+    // every one of them; from the H.265 file on, keyframes only
+    const xs = []
+    const { ws, session } = open(11, T11 + 100, { extra: '&h265=0', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    ws.command({ speed: 2 })
+    const bStart = exp11b[0].ts
+    await until(() => ws.bins.filter((b) => b.tsMs >= bStart).length >= 3, 6000)
+    const a = ws.bins.filter((b) => b.tsMs < bStart)
+    const b = ws.bins.filter((b) => b.tsMs >= bStart)
+    const aExp = exp11a.filter((f) => f.ts >= a[0]?.tsMs)
+    check('H.264 then H.265 at 2x: the H.264 frames go out untouched, every one', a.length > 0 && a.every((f) => !converted(f)) && a.length === aExp.length && seqCheck(a, aExp, usMap(aExp)) === '', `${a.length}/${aExp.length} ${seqCheck(a, aExp, usMap(aExp))}`)
+    check('  at their media time, not held to the keyframe rate', a.length < 2 || a.at(-1).at - a[0].at < (a.at(-1).tsMs - a[0].tsMs) / 2 + 500, `${Math.round(a.at(-1)?.at - a[0]?.at)} ms for ${Math.round(a.at(-1)?.tsMs - a[0]?.tsMs)} ms of footage`)
+    check('  then the H.265 file: keyframes only, converted, from its first one', b.length >= 3 && b.every((f) => f.key && converted(f)) && keySeq(b, exp11b.filter((f) => f.isKey)) === '' && Math.abs(b[0].tsMs - bStart) < 0.001, keySeq(b, exp11b.filter((f) => f.isKey)))
+    check('  time never goes back', ws.bins.every((f, i) => i === 0 || f.tsMs > ws.bins[i - 1].tsMs))
+    session.close()
   }
 }
 
