@@ -23,6 +23,7 @@ const {
   backoffFor, daysToAsk, eventsFromRecordings, itemsOf, makeEventIntake, offlineEvents,
   pollable, probeEvents, probeShapes, sourceReport, summariseProbe
 } = await import('../events.mjs')
+const events = await import('../events.mjs')
 const { FEED_FRESH_MS, buildWindowMessage, shouldWrite, windowsFor } = await import('../rec-modes.mjs')
 const { buildMotionEdit, readArea, readMotionAnswer, writeMotionThreshold } = await import('../motion-tune.mjs')
 
@@ -366,6 +367,84 @@ const S = 1000
   const r = await intake.tick()
   check('once nothing is overdue, intake carries on', r?.nvr === 'a' && asked.join() === 'clock a,recordings a/0', asked.join())
   check('pollable: sdkBusy is a no, with a sentence', !pollable({ id: 'n', online: true }, T0, { sdkBusy: true }).ok && /overdue/.test(pollable({ id: 'n', online: true }, T0, { sdkBusy: true }).why))
+}
+{
+  // One camera whose search fails (FindFile refused, or its file list broke off) must not keep the
+  // NVR's other cameras from being asked. Its failure is no longer "no footage" (playback.mjs), so
+  // restarting the list from the first camera after every failure would never reach the ones after it.
+  const CAMERA_REST = events.CAMERA_REST_MS
+  let now = T0
+  const asked = []
+  const logged = []
+  const intake = makeEventIntake({
+    listNvrs: () => [{ id: 'a', name: 'A', online: true }],
+    camerasOf: () => [{ ch: 0 }, { ch: 1 }, { ch: 2 }],
+    recordings: async (_nvr, ch) => {
+      asked.push(ch)
+      if (ch === 1) throw new Error('the NVR could not search its recordings')
+      return { events: [] }
+    },
+    now: () => now,
+    log: (l) => logged.push(l),
+    store: { addEvent: () => ({ event: null, isNew: false }), intakeCursorMs: () => null }
+  })
+  await intake.tick()
+  now += CAMERA_REST
+  const failed = await intake.tick()
+  check('a camera whose search fails is a failure (reported, logged, backed off)', failed?.ch === 1 && /could not search/.test(failed.error ?? '') && logged.length === 1, JSON.stringify(failed))
+  now += backoffFor(1) + 1
+  const next = await intake.tick()
+  check('after the back-off the NVR\'s next camera is asked, not the list again from the first', next?.ch === 2 && !next.error && asked.join() === '0,1,2', asked.join())
+  now += MIN_POLL_MS + 1
+  await intake.tick()
+  now += CAMERA_REST
+  const again = await intake.tick()
+  check('... and the failing camera is asked again on the next round', again?.ch === 1 && asked.join() === '0,1,2,0,1', asked.join())
+}
+
+// --- the intake's clock: the last read while it is fresh -------------------------------------------------
+//
+// The intake read each NVR's clock for every camera it asked (GetDeviceTime, a 15 s-capable round trip
+// on these NVRs queued behind every other main-process SDK call): about 1,500 reads an hour. A read
+// under a minute old is used as it is; an older one is read again, as background work.
+{
+  check('events.mjs exports intakeClock and CLOCK_REUSE_MS (a minute)', typeof events.intakeClock === 'function' && events.CLOCK_REUSE_MS === 60_000)
+  const fakeNvr = (last) => {
+    const nvr = { reads: [], last }
+    nvr.playback = {
+      lastClock: () => (nvr.last ? { ...nvr.last } : null),
+      clock: async (opts) => {
+        nvr.reads.push(opts ?? null)
+        return { now: T0, tzOffsetMs: -4 * 3_600_000, skewMs: 0 }
+      }
+    }
+    return nvr
+  }
+  const intakeClock = events.intakeClock ?? (async () => null)
+  const fresh = fakeNvr({ tzOffsetMs: -5 * 3_600_000, skewMs: 0, at: T0 - 30_000 })
+  const c1 = intakeClock(fresh, T0)
+  check('intakeClock answers with a promise (events.mjs catches a failed read)', typeof c1?.then === 'function')
+  const r1 = await c1
+  check('a clock read 30 s old is used: the NVR is not asked', r1?.tzOffsetMs === -5 * 3_600_000 && fresh.reads.length === 0, JSON.stringify({ r1, reads: fresh.reads }))
+  const old = fakeNvr({ tzOffsetMs: -5 * 3_600_000, skewMs: 0, at: T0 - 61_000 })
+  const r2 = await intakeClock(old, T0)
+  check('one over a minute old: read again', r2?.tzOffsetMs === -4 * 3_600_000 && old.reads.length === 1, JSON.stringify({ r2, reads: old.reads }))
+  check('... as background work (a late return does not hold that NVR\'s playback and searches)', old.reads[0]?.background === true, JSON.stringify(old.reads))
+  const never = fakeNvr(null)
+  await intakeClock(never, T0)
+  check('no clock read yet: read', never.reads.length === 1 && never.reads[0]?.background === true)
+  const failing = { playback: { lastClock: () => null, clock: async () => { throw new Error('GetDeviceTime failed') } } }
+  const err = await intakeClock(failing, T0).catch((e) => e)
+  check('a failed read rejects (the intake then falls back as before)', err instanceof Error && /GetDeviceTime failed/.test(err.message), String(err))
+}
+
+// --- nvrs.mjs wires the intake to the NVR as background work --------------------------------------------
+{
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../nvrs.mjs', import.meta.url), 'utf8')
+  check('nvrs.mjs: the intake\'s searches are background searches (their late return does not cool the NVR)',
+    /recordings: \(nvr, ch, date\) => nvr\.playback\.recordings\(ch, date, \{ background: true \}\)/.test(src))
+  check('nvrs.mjs: the intake\'s clock is intakeClock (the last read under a minute old)', /clock: \(nvr\) => intakeClock\(nvr\)/.test(src) && /intakeClock/.test(src.slice(src.indexOf('async function startEvents'), src.indexOf('makeEventIntake({'))))
 }
 
 // --- one crossing, two sources ------------------------------------------------------------------------------

@@ -301,6 +301,25 @@ export const FIRST_LOOK_MS = 6 * 3_600_000
 /** The delay after `fails` consecutive failures. */
 export const backoffFor = (fails) => BACKOFF_MS[Math.min(Math.max(0, fails - 1), BACKOFF_MS.length - 1)]
 
+/** A clock read this recent is good enough for the intake: it only needs the NVR's time zone. */
+export const CLOCK_REUSE_MS = 60_000
+
+/**
+ * The NVR's clock for the intake (only its tzOffsetMs is used, to pick the local days to ask): its
+ * last clock read (playback.mjs lastClock) while that is under CLOCK_REUSE_MS old, otherwise a new
+ * read. Reading it for every camera was about 1,500 GetDeviceTime calls an hour, each one a round
+ * trip of up to 15 s on these NVRs queued behind every other SDK call of the main process, and one
+ * that hung stalled all of them. A new read is background work: nobody waits on it, so coming back
+ * late does not hold that NVR's playback and searches (sdk.mjs). Always a promise (pollCamera
+ * catches a failed read).
+ * @returns {Promise<{ tzOffsetMs: number }>}
+ */
+export async function intakeClock(nvr, nowMs = Date.now()) {
+  const last = nvr.playback.lastClock?.() ?? null
+  if (last && nowMs - last.at < CLOCK_REUSE_MS) return last
+  return nvr.playback.clock({ background: true })
+}
+
 /**
  * Whether an NVR should be asked at all right now. Every "no" here is a reason not to add load to a
  * box that is already struggling, and is returned as a sentence so the Events page can say why
@@ -431,7 +450,11 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
         s.lastWhy = `could not be asked: ${String(e?.message ?? e).slice(0, 80)}`
         s.lastError = s.lastWhy
         s.nextAt = nowMs + backoffFor(s.fails)
-        s.queue = [] // start the list again next time rather than skipping the rest of the cameras
+        // The rest of the list goes on after the back-off, and this camera is asked again on the next
+        // round. Starting the list again from the first camera would never reach the cameras after
+        // one whose search keeps failing (a refused or broken search is an error now, not "no
+        // footage", playback.mjs); nothing is lost meanwhile, as each camera's search starts from
+        // its own newest filed event.
         log(`[events] ${nvr.id}/${ch + 1}: ${s.lastWhy}; next try in ${Math.round(backoffFor(s.fails) / 60_000)} min`)
         return { nvr: nvr.id, ch, stored: 0, error: s.lastWhy }
       }

@@ -9,6 +9,8 @@
 //   (nvr1 runs about 3 min 40 s fast): NVR times are converted with -skewMs. It never throws: an NVR
 //   that is offline, recovering (degraded), busy (NvrBusy) or failing gives { ranges: [], reason }.
 //   It never calls the NVR's clock when the last clock read is known (playback.mjs lastClock()).
+//   Its clock reads and searches are background work (playback.mjs recordings { background }): nobody
+//   waits on one, and one that came back late held all playback and searches of that NVR for 60 s.
 //
 // startLeg(): one NVR playback (playback.mjs PlaybackSession, unchanged: its own pacing, speeds 1-8,
 //   flow control and login) run through a proxy WebSocket. The proxy converts what the session sends:
@@ -61,7 +63,7 @@ export async function nvrCoverage(nvr, ch, fromMs, toMs, { now = Date.now, ttlTo
   let clock
   try {
     clock = nvr.playback.lastClock?.() ?? null
-    if (!clock) clock = await nvr.playback.clock()
+    if (!clock) clock = await nvr.playback.clock({ background: true })
   } catch (e) {
     return { ranges: [], reason: reasonOf(e, 'the NVR clock could not be read') }
   }
@@ -102,7 +104,7 @@ function dayRanges(nvr, cache, ch, date, ttl, t) {
   const hit = cache.get(key)
   if (hit && t - hit.at < hit.ttl) return hit.promise
   const promise = Promise.resolve()
-    .then(() => nvr.playback.recordings(ch, date))
+    .then(() => nvr.playback.recordings(ch, date, { background: true }))
     .then((r) => (Array.isArray(r?.ranges) ? r.ranges : []))
   const entry = { at: t, ttl, promise }
   cache.set(key, entry)

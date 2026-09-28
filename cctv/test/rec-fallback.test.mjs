@@ -206,19 +206,20 @@ function busyError() {
  * mode 'fail': the session answers {type:'error'} and closes, as PlaybackSession does.
  */
 function fakeNvr({ cover = [], mode = 'ok', clockKnown = true, stepMs = 200, everyMs = 4, gop = 10 } = {}) {
-  const nvr = { id: NVR_ID, name: 'NVR n1', online: true, degraded: false, mode, busy: false, fail: false, connects: [], recCalls: [], clockCalls: 0 }
+  const nvr = { id: NVR_ID, name: 'NVR n1', online: true, degraded: false, mode, busy: false, fail: false, connects: [], recCalls: [], clockCalls: 0, clockOpts: [] }
   const nvrCover = cover.map(([s, e]) => [s + SKEW, e + SKEW])
   let last = clockKnown ? { tzOffsetMs: TZ, skewMs: SKEW, at: Date.now() } : null
   nvr.playback = {
     lastClock: () => (last ? { ...last } : null),
-    async clock() {
+    async clock(opts) {
       nvr.clockCalls++
+      nvr.clockOpts.push(opts ?? null)
       if (nvr.busy) throw busyError()
       last = { tzOffsetMs: TZ, skewMs: SKEW, at: Date.now() }
       return { now: Date.now() + SKEW, tzOffsetMs: TZ, skewMs: SKEW }
     },
-    async recordings(ch, date) {
-      nvr.recCalls.push({ ch, date, at: performance.now() })
+    async recordings(ch, date, opts) {
+      nvr.recCalls.push({ ch, date, at: performance.now(), opts: opts ?? null })
       if (nvr.hang) return new Promise(() => {}) // a search that never answers
       if (nvr.busy) throw busyError()
       if (nvr.fail) throw new Error('FindFile failed')
@@ -310,6 +311,9 @@ check('exports: nvrCoverage, startLeg, nvrLegs {coverage, start}', typeof fb.nvr
   const r1 = await cov(nvr, 0, A0, A1)
   check('coverage: ranges in server time (the NVR answers in its clock, 220 s fast), one search of its local day', J(r1.ranges) === J([[A0 + 600_000, A0 + 1_800_000]]) && !r1.reason && nvr.recCalls.length === 1 && nvr.recCalls[0].date === '2026-09-24' && nvr.recCalls[0].ch === 0, `${J(r1)} ${J(nvr.recCalls)}`)
   check('coverage: skewMs and tzOffsetMs come with the answer', r1.skewMs === SKEW && r1.tzOffsetMs === TZ, J(r1))
+  // coverage is background work (server playback's NVR stretches, backfill): nobody waits on the
+  // search, so one that comes back late must not hold the NVR's playback and searches (sdk.mjs)
+  check('coverage: the search is a background search', nvr.recCalls[0].opts?.background === true, J(nvr.recCalls[0].opts))
   const r2 = await cov(nvr, 0, A0 + 900_000, A0 + 1_200_000)
   check('coverage: clipped to the window (from the cache)', J(r2.ranges) === J([[A0 + 900_000, A0 + 1_200_000]]) && nvr.recCalls.length === 1, J(r2))
   now = NOW + 30_000
@@ -370,6 +374,7 @@ check('exports: nvrCoverage, startLeg, nvrLegs {coverage, start}', typeof fb.nvr
   const nc = fakeNvr({ cover: [[A0, A1]], clockKnown: false })
   const rc = await cov(nc, 0, A0, A1)
   check('no clock read yet: clock() is called once, then the search', nc.clockCalls === 1 && nc.recCalls.length === 1 && rc.ranges.length === 1 && rc.skewMs === SKEW, J(rc))
+  check('... that clock read is background work too', nc.clockOpts[0]?.background === true, J(nc.clockOpts))
   const nc2 = fakeNvr({ clockKnown: false })
   nc2.online = false
   await cov(nc2, 0, A0, A1)

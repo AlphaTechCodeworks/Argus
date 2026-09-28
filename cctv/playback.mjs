@@ -42,11 +42,21 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, Transcoder, clientCanDecodeH265, lightPool, pool as transcodePool } from './transcode.mjs'
-import { bind, codecOf, coolingLeftMs, encodeFrame, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
+import { bind, codecOf, coolingLeftMs, encodeFrame, errorText, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
 import { lastHang } from './watchdog.mjs'
 
-// FindNext* result codes continue the SDK error enum: NET_SDK_FILE_SUCCESS is 85
+// FindNext* result codes continue the SDK error enum: NET_SDK_FILE_SUCCESS is 85 (one more item).
+// A file walk is complete only when it ends with 86 NET_SDK_FILE_NOFIND or 87 NET_SDK_NOMOREFILE;
+// 88 NET_SDK_FILE_EXCEPTION, 89 NET_SDK_TRY_LATER, -1 or anything else means the list broke off,
+// and a list that broke off used to be drawn as the whole day.
 const FILE_SUCCESS = 85
+const WALK_COMPLETE = new Set([86, 87])
+// How old the NVR's last clock read may be and still be used instead of asking again: GetDeviceTime
+// is a round trip of up to 15 s on these NVRs, queued behind every other SDK call of this process,
+// and one that hung stalled all NVR work here. The clocks stay within seconds of this server's, and
+// the reuse takes only the time zone and the skew (/api/playback/now always reads the clock).
+const SEARCH_CLOCK_MS = 10 * 60_000 // a recordings() search
+const OPEN_CLOCK_MS = 5 * 60_000 // a playback open
 const PLAYCTRL = { PAUSE: 0, FF: 1, RESUME: 3, NORMAL: 6 }
 // NET_SDK_RPB_SPEED_*; from 8x the NVR sends keyframes only (16x/32x: one per ~2 s of footage)
 export const SPEED_CODE = { 2: 7, 4: 8, 8: 9, 16: 10, 32: 11 }
@@ -127,6 +137,9 @@ const StopPlayBack = fn('bool NET_SDK_StopPlayBack(int64 handle)')
 // otherwise each function's own budget in sdk.mjs)
 const REAL_DATE_CALLS = { FindRecDate, FindNextRecDate, FindRecDateClose, timeoutMs: undefined }
 let dateCalls = REAL_DATE_CALLS
+// ... and the recorded-file search with its clock read, the same way
+const REAL_SEARCH_CALLS = { GetDeviceTime, FindFile, FindNextFile, FindClose, timeoutMs: undefined }
+let searchCalls = REAL_SEARCH_CALLS
 
 /** Every NVR's saved recording days and breaker: { [id]: { at, dates, openUntil, why } }. */
 const readDatesFile = () => {
@@ -170,18 +183,27 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
   const op = (task, priority = PRIORITY.NORMAL) => nvr.lane.run(task, { priority })
   const call = (f, ...args) => sdkCallT({ nvr: nvr.id, tag: 'playback' }, f, ...args)
   const callLate = (onLate, f, ...args) => sdkCallT({ nvr: nvr.id, tag: 'playback', onLate }, f, ...args)
+  // The SDK call options of a search or clock read. background: the event intake's, coverage's
+  // and motion search's, which nobody waits on: their own tag, and one that comes back late does
+  // not cool the NVR (sdk.mjs), which would refuse every viewer's playback and searches of it for a
+  // minute. The timeline's searches and playback's clock reads cool it as before.
+  const searchOpts = (background = false) => ({ nvr: nvr.id, tag: background ? 'background search' : 'playback', background })
 
   /**
    * Walks a search handle with next() and closes it afterwards. If a call times out, the
    * native call is still using the handle, so it is closed only once that call returns.
-   * timeoutMs: for every call of the walk (default: each function's own budget).
+   * opts: timeoutMs for every call of the walk (default: each function's own budget); tag and
+   * background as searchOpts; end(code): called with the code that ended the walk (anything but
+   * FILE_SUCCESS), and may throw when that code means the list broke off.
    */
-  const walk = async (h, next, close, onItem, timeoutMs = undefined) => {
+  const walk = async (h, next, close, onItem, { timeoutMs, tag = 'playback', background = false, end = null } = {}) => {
     let late = false
-    const t = (onLate, f, ...args) => sdkCallT({ nvr: nvr.id, tag: 'playback', timeoutMs, onLate }, f, ...args)
+    const t = (onLate, f, ...args) => sdkCallT({ nvr: nvr.id, tag, background, timeoutMs, onLate }, f, ...args)
     const closeLater = () => t(undefined, close, h).catch(() => {})
     try {
-      for (let item = {}; (await t(closeLater, next, h, item)) === FILE_SUCCESS; item = {}) onItem(item)
+      let code
+      for (let item = {}; (code = await t(closeLater, next, h, item)) === FILE_SUCCESS; item = {}) onItem(item)
+      end?.(code)
     } catch (e) {
       if (e?.name === 'SdkTimeout') late = true
       throw e
@@ -190,7 +212,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
     }
   }
   // a search handle that arrives after its timeout is closed straight away
-  const closeIfLate = (close) => (h) => h > 0 && call(close, h).catch(() => {})
+  const closeIfLate = (close, opts = searchOpts()) => (h) => h > 0 && sdkCallT(opts, close, h).catch(() => {})
 
   /**
    * Throws NvrBusy while the NVR recovers or cools down after late calls (sdk.mjs nvrCooling).
@@ -220,13 +242,15 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
    * absorbs a few minutes of clock error; that error is skewMs (e.g. nvr1 runs about 3 min 40 s
    * fast). Server recordings are stamped with the server's clock. Under SKEW_MIN_MS skewMs is 0:
    * DD_TIME has whole seconds.
-   * @param {boolean} inLane true when already running inside this NVR's lane (don't take a second slot)
+   * @param {{ inLane?: boolean, background?: boolean }} [opts] inLane: already running inside this
+   *   NVR's lane (don't take a second slot); background: as searchOpts
    */
-  const clock = async (inLane = false) => {
+  const clock = async ({ inLane = false, background = false } = {}) => {
     const read = async () => {
       checkBusy()
       const t = {}
-      return (await call(GetDeviceTime, userId(), t)) ? t : null
+      const { GetDeviceTime: getTime, timeoutMs } = searchCalls
+      return (await sdkCallT({ ...searchOpts(background), timeoutMs }, getTime, userId(), t)) ? t : null
     }
     if (!inLane) checkBusy() // answer at once rather than queue behind slow calls
     // ordinary work (NORMAL): HIGH is for stops, which must get through a busy lane
@@ -242,7 +266,20 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
   }
   /** The last clock() read ({ tzOffsetMs, skewMs, at }), or null: never calls the NVR. */
   const lastClock = () => (lastClockRead ? { ...lastClockRead } : null)
-  const nvrNow = async (inLane = false) => (await clock(inLane)).now
+  const nvrNow = async (opts) => (await clock(opts)).now
+  /**
+   * The NVR's clock as clock() answers it, from the last read while that is under maxAgeMs old (now:
+   * this server's clock plus the skew then), otherwise read now (opts as clock()). Refuses while the
+   * NVR is busy either way, as clock() does: a playback or search must not start then.
+   */
+  const recentClock = async (maxAgeMs, opts = {}) => {
+    checkBusy()
+    const last = lastClockRead
+    if (last && Date.now() - last.at < maxAgeMs) {
+      return { now: Date.now() + last.skewMs, tzOffsetMs: last.tzOffsetMs, skewMs: last.skewMs }
+    }
+    return clock(opts)
+  }
 
   // ---- recording days (see the top): cache on disk, breaker, not just after a login
   const saved = readDatesFile()[nvr.id] ?? {}
@@ -311,7 +348,10 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
         const h = await sdkCallT({ nvr: nvr.id, tag: 'playback', timeoutMs, onLate: closeIfLate(close) }, find, userId())
         if (h <= 0) throw new Error('FindRecDate failed')
         const dates = []
-        await walk(h, next, close, (d) => dates.push(`${d.year}-${pad(d.month)}-${pad(d.mday)}`), timeoutMs)
+        // (any code but 85 ends this walk, unlike the file walk: a short list only moves the date
+        // picker's lower limit, while an error is not cached and would ask FindRecDate, the search
+        // that wedged the SDK, again on every page load)
+        await walk(h, next, close, (d) => dates.push(`${d.year}-${pad(d.month)}-${pad(d.mday)}`), { timeoutMs })
         datesCache = { at: datesNow(), dates: dates.sort() }
         saveDates()
         return datesCache.dates
@@ -327,24 +367,40 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
     }))
   }
 
-  /** Recorded ranges (merged) and event recordings for one channel on one NVR-local day (date = YYYY-MM-DD). */
-  const recordings = async (ch, date) => {
+  /**
+   * Recorded ranges (merged) and event recordings for one channel on one NVR-local day (date = YYYY-MM-DD).
+   * Throws when the NVR could not say: a refused search (it refuses offline or unconfigured channels
+   * too) or a file list that broke off is not "no footage". The timeline then shows the day as
+   * unknown ("Could not load recordings"), the event intake and backfill ask again later, coverage
+   * gives a reason and motion search stops with the error.
+   * background: the event intake's, coverage's and motion search's search (see searchOpts).
+   */
+  const recordings = async (ch, date, { background = false } = {}) => {
     checkBusy()
+    const opts = searchOpts(background)
+    const { FindFile: find, FindNextFile: next, FindClose: close, timeoutMs } = searchCalls
     return serial(() => op(async () => {
-      const { now, tzOffsetMs } = await clock(true) // (checks busy again first)
+      // (checks busy again first: the NVR may have got busy while this waited for its turn)
+      const { now, tzOffsetMs } = await recentClock(SEARCH_CLOCK_MS, { inLane: true, background })
       // the local day, as UTC times
       const dayStart = Date.parse(`${date}T00:00:00Z`) - tzOffsetMs
       if (Number.isNaN(dayStart)) throw new Error('bad date')
       const dayEnd = Math.min(dayStart + 86_400_000 - 1000, now)
       if (dayEnd <= dayStart) return { ranges: [], events: [] }
-      const h = await callLate(closeIfLate(FindClose), FindFile, userId(), ch, toDD(dayStart), toDD(dayEnd))
-      // the NVR refuses searches on offline or unconfigured channels: treat as no footage
-      if (h <= 0) return { ranges: [], events: [] }
+      const unknown = (why) => new Error(`${why}, so what it recorded on ${date} is unknown`)
+      // (with a limit past the SDK's own 20 s wait, sdk.mjs, a search it gave up on lands here too)
+      const h = await sdkCallT({ ...opts, timeoutMs, onLate: closeIfLate(close, opts) }, find, userId(), ch, toDD(dayStart), toDD(dayEnd))
+      if (h <= 0) throw unknown('the NVR refused the search (FindFile failed)')
       const files = []
-      await walk(h, FindNextFile, FindClose, (f) => {
+      const end = (code) => {
+        if (WALK_COMPLETE.has(code)) return
+        const text = errorText(code)
+        throw unknown(`the NVR's file list broke off (code ${code}${text.startsWith('error ') ? '' : `, ${text}`})`)
+      }
+      await walk(h, next, close, (f) => {
         const start = fromDD(f.startTime)
         if (start <= now) files.push({ start, end: Math.min(fromDD(f.stopTime), now), type: f.dwRecType })
-      })
+      }, { ...opts, timeoutMs, end })
       files.sort((a, b) => a.start - b.start)
       const ranges = []
       for (const f of files) {
@@ -432,7 +488,8 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
     async #open() {
       try {
         const t = [Date.now()]
-        const now = await nvrNow()
+        // the last clock read while it is under 5 min old (see OPEN_CLOCK_MS); refused while busy
+        const { now } = await recentClock(OPEN_CLOCK_MS)
         t.push(Date.now())
         // Closed while the clock was read (a held arrow key opens and drops one per repeat): stop
         // here, before the login. Taking one costs the NVR 2.4-3.9 s and a place in its small pool,
@@ -789,5 +846,10 @@ export async function playbackApi(nvr, pathname, params) {
 export const _test = {
   setDateCalls(calls) {
     dateCalls = calls ? { ...REAL_DATE_CALLS, ...calls } : REAL_DATE_CALLS
+  },
+  // the same for the recorded-file search and the clock read: { GetDeviceTime, FindFile,
+  // FindNextFile, FindClose, timeoutMs }, each a stand-in with .async(...args, cb) (null: the real ones)
+  setSearchCalls(calls) {
+    searchCalls = calls ? { ...REAL_SEARCH_CALLS, ...calls } : REAL_SEARCH_CALLS
   }
 }

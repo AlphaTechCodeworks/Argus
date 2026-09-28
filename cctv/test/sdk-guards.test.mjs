@@ -237,6 +237,80 @@ const fake = (ms, result = 1, err = null) => ({
   await sleep(COOL_MS + 50)
 }
 
+// ---- a background call (event intake, coverage, motion search) back late does not cool its NVR ----
+// Nobody waits on those. nvr1's intake searches came back "5 s late" (the SDK's own 20 s give-up)
+// and each time held that NVR's playback and searches for 60 s (playback report, problem 5).
+{
+  const lines = []
+  const warn = console.warn
+  console.warn = (...a) => lines.push(a.join(' '))
+  const bg = sdkCallT({ nvr: 'cool-bg', tag: 'background search', background: true, timeoutMs: 50 }, fake(250)).catch((e) => e)
+  await sleep(120)
+  check('a background call that is late still counts while it is inside the SDK', nvrCooling('cool-bg') === true && lateCalls('cool-bg') === 1)
+  check('... it still rejects at its time limit', (await bg)?.name === 'SdkTimeout')
+  await sleep(250) // it has come back now, 200 ms after its time limit
+  check('a background call that came back late leaves its NVR not cooling', nvrCooling('cool-bg') === false && lateCalls('cool-bg') === 0)
+  check('... and nothing is logged about holding anything', !lines.some((l) => l.includes('[cool-bg]') && l.includes('holding')), lines.join(' | '))
+  await sdkCallT({ nvr: 'cool-fg', tag: 'playback', timeoutMs: 50 }, fake(200)).catch(() => {})
+  await sleep(250)
+  check('the same call without background still cools its NVR', nvrCooling('cool-fg') === true)
+  console.warn = warn
+  await sleep(COOL_MS + 50)
+}
+
+// ---- what the cool-down holds, said as it is for the process ---------------------------------------
+// In the main process with live workers it holds only playback and searches (live view and recording
+// run in the workers, with their own SDK); in a worker, new streams; without workers, all of them.
+{
+  const lines = []
+  const warn = console.warn
+  console.warn = (...a) => lines.push(a.join(' '))
+  const saved = { CCTV_WORKER_NVR: process.env.CCTV_WORKER_NVR, CCTV_LIVE_WORKER: process.env.CCTV_LIVE_WORKER }
+  const setEnv = (env) => {
+    for (const k of Object.keys(saved)) {
+      if (env[k] === undefined) delete process.env[k]
+      else process.env[k] = env[k]
+    }
+  }
+  const saidFor = async (id, env) => {
+    setEnv(env)
+    try {
+      await sdkCallT({ nvr: id, timeoutMs: 50 }, fake(150)).catch(() => {})
+      await sleep(150)
+    } finally {
+      setEnv(saved)
+    }
+    return lines.find((l) => l.startsWith(`[${id}]`)) ?? ''
+  }
+  const main = await saidFor('say-main', { CCTV_LIVE_WORKER: 'on' })
+  check('main process with live workers: "holding playback and searches", not new streams', /came back \d+ s late: holding playback and searches on this NVR for [\d.]+ s$/.test(main) && !main.includes('new streams'), main)
+  const worker = await saidFor('say-worker', { CCTV_WORKER_NVR: 'say-worker' })
+  check('a live worker: "holding new streams"', /holding new streams on this NVR/.test(worker) && !worker.includes('playback'), worker)
+  const alone = await saidFor('say-alone', {})
+  check('main process without workers: new streams, playback and searches', /holding new streams, playback and searches on this NVR/.test(alone), alone)
+  console.warn = warn
+  await sleep(COOL_MS + 50)
+}
+
+// ---- time limits the SDK's own waits fit inside --------------------------------------------------
+{
+  const budgetOf = sdk.budgetOf ?? (() => 0)
+  // [lib] the SDK waits 20 s for a FindFile reply and gives up with a failed handle: inside our limit
+  // that is a plain failure, not a late return that cools the NVR
+  check('FindFile: time limit at least 21 s (the SDK gives up by itself at 20 s)', budgetOf('NET_SDK_FindFile') >= 21_000, budgetOf('NET_SDK_FindFile'))
+  // [lib] on NVMS-9000 GetDeviceTime is an XML round trip the SDK waits up to 15 s for
+  check('GetDeviceTime: time limit at least 16 s (the SDK waits up to 15 s)', budgetOf('NET_SDK_GetDeviceTime') >= 16_000, budgetOf('NET_SDK_GetDeviceTime'))
+  check('an unknown function gets the default limit', budgetOf('NET_SDK_Nothing') === 30_000, budgetOf('NET_SDK_Nothing'))
+}
+
+// ---- error texts ---------------------------------------------------------------------------------
+{
+  const { errorText } = sdk
+  check('error 27 (NET_SDK_BUSY) has a text', !/^error /.test(errorText(27)) && /busy/i.test(errorText(27)), errorText(27))
+  check('error 31 (NET_SDK_DVR_NORESOURCE) has a text', !/^error /.test(errorText(31)) && /resource/i.test(errorText(31)), errorText(31))
+  check('unknown codes still read "error N"', errorText(4242) === 'error 4242')
+}
+
 // ---- victims and roots (the watchdog's late rule counts roots only) -----------------------
 {
   const warn = console.warn

@@ -1050,13 +1050,13 @@ export const eventStatus = () => eventIntake?.status() ?? []
 /**
  * An NVR's clock minus this server's, from its last clock read (playback.mjs lastClock), for
  * line-actions.mjs onServerClock: a crossing's snapshot and bookmark are taken on this server's clock,
- * its recordings' time base. The intake reads each NVR's clock on every poll; before the first read
- * after a start, and under 2 s, it is 0 and the event's own times are used.
+ * its recordings' time base. The intake reads each NVR's clock about once a minute; before the first
+ * read after a start, and under 2 s, it is 0 and the event's own times are used.
  */
 const skewOf = (nvrId) => nvrs.get(nvrId)?.playback?.lastClock?.()?.skewMs ?? 0
 
 async function startEvents() {
-  const [{ makeEventIntake }, { buildWindowMessage }, { eventsOfCamera }, { makeAlarmNotifier }, { makeSender }] = await Promise.all([
+  const [{ intakeClock, makeEventIntake }, { buildWindowMessage }, { eventsOfCamera }, { makeAlarmNotifier }, { makeSender }] = await Promise.all([
     import('./events.mjs'), import('./rec-modes.mjs'), import('./events-db.mjs'), import('./alarms.mjs'), import('./alert-send.mjs')
   ])
   const sender = makeSender({ settings: () => getSettings().alerts ?? {} })
@@ -1096,8 +1096,10 @@ async function startEvents() {
   eventIntake = makeEventIntake({
     listNvrs: () => [...nvrs.values()],
     camerasOf: (nvr) => nvr.channels.filter((c) => c.configured !== false),
-    recordings: (nvr, ch, date) => nvr.playback.recordings(ch, date),
-    clock: (nvr) => nvr.playback.clock(),
+    // background work: nobody waits on these, so one that comes back late does not hold the NVR's
+    // playback and searches (sdk.mjs); the clock is the NVR's last read while it is under a minute old
+    recordings: (nvr, ch, date) => nvr.playback.recordings(ch, date, { background: true }),
+    clock: (nvr) => intakeClock(nvr),
     onEvent: (event) => {
       void notifier.handle(event).catch((e) => console.warn(`[alarms] ${e.message}`))
       // the stored row stays on the NVR's time; its snapshot and bookmark are on this server's clock

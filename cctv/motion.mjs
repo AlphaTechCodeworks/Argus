@@ -151,12 +151,15 @@ export async function motionScan(nvr, ws, url) {
   try {
     // NVR motion events for the range (the day-by-day search the timeline uses)
     const events = []
-    // recordings are listed per NVR-local day; from/to are UTC
-    const { tzOffsetMs } = await nvr.playback.clock()
+    // recordings are listed per NVR-local day; from/to are UTC. Background searches: one that comes
+    // back late must not hold every other viewer's playback of this NVR for a minute (sdk.mjs). A
+    // failed one ends the search with its error: it used to read as a day without events, which left
+    // that day unscanned whenever another day had some.
+    const { tzOffsetMs } = await nvr.playback.clock({ background: true })
     const DAY = 86_400_000
     for (let day = Math.floor((from + tzOffsetMs) / DAY) * DAY; day < to + tzOffsetMs; day += DAY) {
       const date = new Date(day).toISOString().slice(0, 10)
-      const res = await nvr.playback.recordings(ch, date)
+      const res = await nvr.playback.recordings(ch, date, { background: true })
       events.push(...res.events)
     }
     const { chunks, total } = plan(from, to, events)

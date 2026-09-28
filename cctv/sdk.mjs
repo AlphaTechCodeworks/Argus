@@ -53,20 +53,26 @@ const BUDGETS = {
   NET_SDK_StopPlayBack: 10_000,
   NET_SDK_PlayBackControl: 10_000,
   NET_SDK_SetPlayDataCallBack: 10_000,
-  NET_SDK_FindFile: 15_000,
+  // the SDK waits 20 s for the NVR's answer and then gives up by itself with a failed handle: a
+  // plain failure, not a late return (at 15 s every one of them came back "5 s late" and cooled nvr1)
+  NET_SDK_FindFile: 21_000,
   NET_SDK_FindNextFile: 15_000,
   NET_SDK_FindClose: 10_000,
   NET_SDK_FindRecDate: 15_000,
   NET_SDK_FindNextRecDate: 15_000,
   NET_SDK_FindRecDateClose: 10_000,
-  NET_SDK_GetDeviceTime: 10_000
+  NET_SDK_GetDeviceTime: 16_000 // on NVMS-9000 an XML round trip (queryTimeCfg) the SDK waits up to 15 s for
 }
 const DEFAULT_BUDGET = 30_000
 const SLOW_LOG_MS = 2000
 // An NVR whose call came back after its time limit "cools down" for this long (nvrCooling): no
-// new streams start on it and its stalled streams are not restarted, so a slow NVR does not
-// collect more stuck calls, which the SDK makes other NVRs' calls queue behind. (SDK_COOL_MS: for tests)
+// new streams start on it and its stalled streams are not restarted, and (main process) its playback
+// searches and new playbacks are refused as busy, so a slow NVR does not collect more stuck calls,
+// which the SDK makes other NVRs' calls queue behind. (SDK_COOL_MS: for tests)
 const COOL_MS = Number(process.env.SDK_COOL_MS ?? 60_000)
+
+/** A function's time limit (ms) by its C name, for a call that sets none (sdkCallT timeoutMs). */
+export const budgetOf = (name) => BUDGETS[name] ?? DEFAULT_BUDGET
 
 const names = new WeakMap() // koffi function -> C name
 /** Declares an SDK function from a C-like signature and remembers its name for logs and budgets. */
@@ -94,6 +100,16 @@ const lateReturnAt = new Map() // NVR id -> when one of its calls last came back
 // coming back, the library is still working and killing the process would only lose the healthy ones.
 const returnAtByNvr = new Map()
 
+/**
+ * What a cool-down holds back in this process, for its log line: a live worker's new streams; in the
+ * main process with live workers (CCTV_LIVE_WORKER=on), only playback and searches, since live view
+ * and recording run in the workers with their own SDK; in a main process without workers, all of it.
+ */
+const coolHolds = () => {
+  if (process.env.CCTV_WORKER_NVR) return 'new streams'
+  return process.env.CCTV_LIVE_WORKER === 'on' ? 'playback and searches' : 'new streams, playback and searches'
+}
+
 /** A call to an NVR came back after its time limit: the NVR cools down from now (logged once per episode). */
 const noteLateReturn = (entry, budget) => {
   const now = Date.now()
@@ -101,7 +117,7 @@ const noteLateReturn = (entry, budget) => {
   lateReturnAt.set(entry.nvr, now)
   if (prev !== undefined && now - prev < COOL_MS) return
   const lateS = Math.round((now - entry.startedAt - budget) / 1000)
-  console.warn(`[${entry.nvr}] ${entry.name}${entry.tag ? ` (${entry.tag})` : ''} came back ${lateS} s late: holding new streams on this NVR for ${COOL_MS / 1000} s`)
+  console.warn(`[${entry.nvr}] ${entry.name}${entry.tag ? ` (${entry.tag})` : ''} came back ${lateS} s late: holding ${coolHolds()} on this NVR for ${COOL_MS / 1000} s`)
 }
 
 const settleListeners = new Set()
@@ -141,9 +157,14 @@ export const refuseNewCalls = (why = 'the process is stopping') => {
 
 /**
  * Runs an SDK function on a worker thread with a time limit.
- * @param {{ timeoutMs?: number, tag?: string, nvr?: string, exclusive?: string|string[], mayBlock?: boolean, onLate?: (result: any, err?: Error) => void }} opts
+ * @param {{ timeoutMs?: number, tag?: string, nvr?: string, exclusive?: string|string[], mayBlock?: boolean, background?: boolean, onLate?: (result: any, err?: Error) => void }} opts
  *   mayBlock: this call is known to block inside the SDK when the NVR does not answer (logins),
  *   so the watchdog does not treat it on its own as a hung SDK
+ *   background: nobody waits on this call (the event intake's, coverage's and motion search's
+ *   searches and clock reads), so coming back late does not start its NVR's cool-down: an intake
+ *   search back late held every viewer's playback and searches of nvr1 for 60 s. While it is inside
+ *   the SDK past its limit it still counts as late (lateCalls, nvrCooling), as other calls queue
+ *   behind it then.
  *   onLate: called when the native call finishes after its timeout, with its result
  *   (e.g. a LivePlay that returns a handle nobody is waiting for any more), or with
  *   result undefined and the error if it failed late
@@ -157,7 +178,7 @@ export const refuseNewCalls = (why = 'the process is stopping') => {
 export function sdkCallT(opts, fn, ...args) {
   // (cName: a test's stand-in for a bound function, test/fake-sdk.mjs, named like the real one)
   const name = names.get(fn) ?? fn?.cName ?? 'sdk call'
-  const budget = opts.timeoutMs ?? BUDGETS[name] ?? DEFAULT_BUDGET
+  const budget = opts.timeoutMs ?? budgetOf(name)
   return new Promise((resolve, reject) => {
     let settled = false
     let timer = null
@@ -178,7 +199,7 @@ export function sdkCallT(opts, fn, ...args) {
       // mayBlock: this call is known to sit inside the SDK for minutes when the far end does not
       // answer (logins). It still counts as work in flight, but the watchdog does not read it on
       // its own as a hung SDK (see watchdog.mjs).
-      const entry = { name, tag: opts.tag ?? '', nvr: opts.nvr ?? '', mayBlock: opts.mayBlock === true, startedAt: Date.now(), late: false }
+      const entry = { name, tag: opts.tag ?? '', nvr: opts.nvr ?? '', mayBlock: opts.mayBlock === true, background: opts.background === true, startedAt: Date.now(), late: false }
       inFlight.set(id, entry)
       if (TRACE) trace(`> ${id} ${name} ${entry.tag} nvr=${entry.nvr}${typeof args[0] === 'number' || typeof args[0] === 'bigint' ? ` a0=${args[0]}` : ''} running=${running}`)
       timer = setTimeout(() => {
@@ -202,8 +223,9 @@ export function sdkCallT(opts, fn, ...args) {
           if (entry.nvr) returnAtByNvr.set(entry.nvr, lastReturnAt)
           // a late login (mayBlock) does not cool its NVR: a login is known to sit in the SDK for a
           // while, logoutLate tidies up one we gave up on, and a new session is exactly when the
-          // recorder wants to start its streams (02:30:11: a login 1 s late held 23 cameras for 60 s)
-          if (entry.late && entry.nvr && !entry.queuedBehind && !entry.mayBlock) noteLateReturn(entry, budget)
+          // recorder wants to start its streams (02:30:11: a login 1 s late held 23 cameras for 60 s).
+          // Nor does a late background call (see background above): nobody was waiting on it.
+          if (entry.late && entry.nvr && !entry.queuedBehind && !entry.mayBlock && !entry.background) noteLateReturn(entry, budget)
           release()
           try {
             const ms = Date.now() - entry.startedAt
@@ -460,8 +482,13 @@ const ERRORS = {
   9: 'not connected',
   11: 'network receive error',
   12: 'network timeout',
+  27: 'busy', // NET_SDK_BUSY
+  31: 'NVR has no resources left', // NET_SDK_DVR_NORESOURCE
   50: 'user does not exist',
   55: 'too many users',
+  // FindNext* codes that end a walk early (85 one more item, 86 none found, 87 no more)
+  88: 'file exception',
+  89: 'try later',
   92: 'unknown user',
   93: 'user name or password empty',
   95: 'NVR busy',
