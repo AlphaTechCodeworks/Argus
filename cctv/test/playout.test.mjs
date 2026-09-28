@@ -2,7 +2,7 @@
 // real cameras through the real PlayoutClock, with a stand-in for the player's display loop
 // (60 Hz refresh, newest due frame shown, older due frames skipped, at most 45 frames queued).
 //   node cctv/test/playout.test.mjs
-import { PLAYOUT_DEFAULTS, PlayoutClock } from '../public/playout.js'
+import { PLAYBACK_CLOCK, PLAYOUT_DEFAULTS, PlayoutClock } from '../public/playout.js'
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -206,6 +206,44 @@ for (const drift of [0.0049, -0.0049]) {
   const next = c.schedule(8 * 40 + 13_040, 11)
   check('hole: the frame after it is shown after every frame queued before it', after > lastBefore, `after ${after.toFixed(0)} vs last queued ${lastBefore.toFixed(0)}`)
   check('hole: frames after it keep their spacing', Math.abs(next - after - 40) < 1, `${(next - after).toFixed(1)} ms`)
+}
+
+// ---- playback: the server stalls for 1.7 s and then carries on 1.7 s behind -----------------------
+// (smoothness report, cause 1.) Nothing is lost: the server's pacer resumes where it was, so every
+// later frame arrives 1.7 s late. The live clock waits a second of such frames before re-anchoring:
+// the stall, a second shown as each frame lands, then a second freeze of a buffer's length. The
+// playback clock re-anchors on the first of them: one freeze, then even again.
+{
+  const STALL_MS = 1700
+  const arr = []
+  for (let i = 0; i < 30 * 30; i++) {
+    const cap = i * FRAME_MS
+    const late = cap >= 10_000 ? STALL_MS : 0 // the stall starts 10 s in
+    arr.push({ at: 1000 + cap + late + (i % 5) * 3, ts: 40_000 + cap })
+  }
+  const freezes = (r) => {
+    const after = r.shown.filter((s) => s.now > 1000 + 9000)
+    return after.slice(1).map((s, i) => s.now - after[i].now).filter((g) => g > 100)
+  }
+  const pb = replay(arr, PLAYBACK_CLOCK)
+  const live = replay(arr, { ...PLAYBACK_CLOCK, lateForMs: PLAYOUT_DEFAULTS.lateForMs }) // what playback had before
+  const f = freezes(pb)
+  check('playback clock: a 1.7 s server stall freezes the picture once, not twice', f.length === 1, `freezes ${f.map(Math.round).join(', ')} ms`)
+  check('... where the old setting froze twice', freezes(live).length === 2, `freezes ${freezes(live).map(Math.round).join(', ')} ms`)
+  check('playback clock: nothing skipped, and paced again after the stall', pb.skipped === 0 && pb.immediateAt.filter((t) => t > 1000 + 10_000 + STALL_MS + 100).length === 0, `skipped ${pb.skipped}, ${pb.immediateAt.length} shown with no wait`)
+  const post = pb.shown.filter((s) => s.now > 1000 + 10_000 + STALL_MS + 1000)
+  const gaps = post.slice(1).map((s, i) => s.now - post[i].now)
+  check('playback clock: even frame spacing after the stall', gaps.filter((g) => g > 20 && g < 50).length / gaps.length > 0.95)
+}
+{
+  // Only playback re-anchors at once: live keeps its second's grace (a live stream's bursts are the
+  // NVR's, and the live pages never pass these options).
+  const { readFileSync } = await import('node:fs')
+  const page = (f) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8')
+  check('the playback clock re-anchors at once, with the buffer playback had', PLAYBACK_CLOCK.lateForMs === 0 && PLAYBACK_CLOCK.startDelayMs === 300 && PLAYBACK_CLOCK.minDelayMs === 200 && PLAYBACK_CLOCK.maxDelayMs === 1000)
+  check('live keeps a second before it re-anchors', PLAYOUT_DEFAULTS.lateForMs === 1000)
+  check('the playback page and the camera wall use the playback clock', /clock: PLAYBACK_CLOCK/.test(page('playback.js')) && /clock: PLAYBACK_CLOCK/.test(page('wall.js')))
+  check('no live page uses it or sets lateForMs', ['viewer.js', 'live-tile.js', 'player.js'].every((f) => !/PLAYBACK_CLOCK|lateForMs/.test(page(f))))
 }
 
 console.log(failures ?`\n${failures} FAILED` : '\nall passed')

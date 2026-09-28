@@ -38,6 +38,16 @@ export const PLAYOUT_DEFAULTS = {
   slewDeadMs: 5 // smaller drift errors are left alone
 }
 
+/**
+ * Recorded footage (playback.js, and wall.js with it): a larger buffer than live, and frames far too
+ * late re-anchor at once. The server paces playback on its main thread; when that stalls (1.3-1.9 s,
+ * smoothness report cause 1) its pacer resumes where it was, so every later frame is as late as the
+ * stall was. Waiting lateForMs to be sure showed those frames as they landed for a second and then
+ * froze again for a buffer's length: two freezes for one stall. Live keeps the default, where a late
+ * run is often the NVR catching up and passes by itself.
+ */
+export const PLAYBACK_CLOCK = { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 1000, lateForMs: 0 }
+
 export class PlayoutClock {
   constructor(options = {}) {
     this.opts = { ...PLAYOUT_DEFAULTS, ...options }

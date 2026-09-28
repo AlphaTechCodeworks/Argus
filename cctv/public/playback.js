@@ -21,6 +21,7 @@
 // Switching between them (quality "SD (NVR)", or a camera or day in the other mode) converts the
 // position by the NVR's clock skew.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { PLAYBACK_CLOCK } from './playout.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
   NvrFallback,
@@ -184,7 +185,7 @@ let drag = null // { x, startMs, moved, box } while the timeline is being panned
 const boxSeek = new WeakMap()
 
 const player = new VideoPlayer(videoEl.querySelector('canvas'), {
-  clock: { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 1000 },
+  clock: PLAYBACK_CLOCK,
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
     noteStart()
