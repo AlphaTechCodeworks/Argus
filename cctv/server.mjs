@@ -33,6 +33,8 @@
 //   GET  /api/health           -> the Health page: alerts, NVRs, cameras, drive, last backup,
 //                                 and live CPU/memory/network/disk/GPU figures
 //   POST /api/admin/alerts/test { method: 'ntfy'|'email' } -> sends a test message (admins)
+//   POST /api/admin/lines/alert { nvr, ch, on } -> a camera's line-crossing phone alert on or off
+//                                 (admins): the "Line crossing" alarm rule, see line-actions.mjs
 //   GET  /healthz              -> used by the Docker healthcheck
 //   WS   /live?nvr=ID&ch=N&stream=S -> binary frames, S: 0 = main, 1 = sub
 //   WS   /live-mux             -> every live tile of a page on one socket, see live-mux.mjs
@@ -118,6 +120,7 @@ import { audit, handleAudit, pruneAudit } from './audit.mjs'
 import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
 import { handleAlarms } from './alarms.mjs'
+import { handleLineAlert } from './line-actions.mjs'
 import { handleOsd } from './osd.mjs'
 import { runRetention, runThinning } from './thinning.mjs'
 import { detectEncoder } from './transcode.mjs'
@@ -770,6 +773,13 @@ const handleRequest = async (req, res) => {
       }
       const [status, body] = await handleSiteNotes(req.method, site, () => readJsonObject(req, 4096))
       return sendJson(res, status, body)
+    }
+    // The Lines panel's "Alert my phone for this camera": the camera joins or leaves the "Line
+    // crossing" alarm rule, and the ntfy topic is made the first time one is switched on.
+    if (pathname === '/api/admin/lines/alert') {
+      const known = (id, ch) => Boolean(nvrs.get(id)?.channels.some((c) => c.ch === ch && c.configured !== false))
+      const [status, body] = await handleLineAlert(req.method, () => readJsonObject(req, 1024), user, { knownCamera: known })
+      return sendJson(res, status, body, status === 405 ? { allow: 'POST' } : {})
     }
     if (pathname === '/api/admin/alerts/test' && req.method === 'POST') {
       const { method } = await readJsonObject(req, 1024)

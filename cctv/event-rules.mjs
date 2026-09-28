@@ -386,18 +386,29 @@ export function summarise(alarms) {
   return out
 }
 
+/** "HH:MM:SS" on the site's clock (tzOffsetMin: minutes to add to UTC, site-time.mjs). */
+const siteClock = (ms, tzOffsetMin) => new Date(ms + tzOffsetMin * 60_000).toISOString().slice(11, 19)
+
 /**
  * One line of text for a notification, reusing the phase 1 delivery shape ({ key, kind, title,
  * detail, severity }) so alert-send.mjs needs no changes at all.
+ *
+ * With `tzOffsetMin` the detail starts with when it happened on the site's clock: the sender
+ * stamps each line with the server's own clock, which runs on UTC, and an alarm read late from an
+ * NVR happened before it was sent. `link` (line-actions.mjs eventLink) goes on a line of its own,
+ * so a phone shows it as a link to the event in Argus.
  */
-export function alarmMessage(alarm, { ruleName = '' } = {}) {
+export function alarmMessage(alarm, { ruleName = '', link = '', tzOffsetMin = null } = {}) {
   const where = alarm.camera || cameraKey(alarm.nvr, alarm.ch)
   const what = alarm.subtype ? `${labelOf(alarm.type)} (${alarm.subtype})` : labelOf(alarm.type)
+  const start = Number(alarm.startMs)
+  const when = Number.isFinite(tzOffsetMin) && Number.isFinite(start) ? `at ${siteClock(start, tzOffsetMin)}` : ''
+  const text = [when, alarm.detail, ruleName ? `rule: ${ruleName}` : ''].filter(Boolean).join(' · ')
   return {
     key: `alarm/${alarm.id ?? `${alarm.nvr}/${alarm.ch}/${alarm.startMs}`}`,
     kind: 'alarm',
     title: `${what} — ${where}`,
-    detail: [alarm.detail, ruleName ? `rule: ${ruleName}` : ''].filter(Boolean).join(' · '),
+    detail: [text, link].filter(Boolean).join('\n'),
     // The phase 1 sender knows two words for urgency, so the four priorities fold onto them.
     severity: priorityRank(alarm.priority) <= priorityRank('high') ? 'high' : 'medium'
   }

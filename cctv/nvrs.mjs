@@ -1052,7 +1052,19 @@ async function startEvents() {
     import('./events.mjs'), import('./rec-modes.mjs'), import('./events-db.mjs'), import('./alarms.mjs'), import('./alert-send.mjs')
   ])
   const sender = makeSender({ settings: () => getSettings().alerts ?? {} })
-  const notifier = makeAlarmNotifier({ sender, tzOffsetMin: () => siteOffsetMin(), nameOf: (key) => allCameras().find((c) => `${c.nvr}/${c.ch}` === key)?.name ?? key })
+  // the alert's link back to the event in Argus (settings publicUrl): passed in rather than
+  // imported by alarms.mjs, whose tests run without the SDK that settings.mjs loads
+  // never fatal: without line-actions.mjs the alerts still go, only without the link
+  const eventLink = await import('./line-actions.mjs').then((m) => m.eventLink, (e) => {
+    console.warn(`[alarms] alerts go without a link to the event: ${e.message}`)
+    return () => ''
+  })
+  const notifier = makeAlarmNotifier({
+    sender,
+    tzOffsetMin: () => siteOffsetMin(),
+    nameOf: (key) => allCameras().find((c) => `${c.nvr}/${c.ch}` === key)?.name ?? key,
+    linkOf: (row) => eventLink(row.id)
+  })
 
   eventIntake = makeEventIntake({
     listNvrs: () => [...nvrs.values()],

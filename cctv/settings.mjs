@@ -6,6 +6,8 @@
 //                  cameras: { "<nvr>/<ch>": { ...only the fields that differ, plus locationId } } },
 //     memory: { recentMinutes },            // recent footage kept in RAM: warms the file cache, rec-cache.mjs
 //     thumbnails: 'off' | '1m' | '5m',
+//     publicUrl: 'https://cctv.jfl.gripe',  // where Argus is reached from outside: the phone alert's
+//                                           // link to an event (line-actions.mjs eventLink); '' = none
 //     storage: { locations: [...], netshares: [...], lowFreePct, floorFreePct } }
 //                                           // locations: see storage.mjs; netshares: see netshares.mjs
 //                                           // (a netshare never holds a password: only root has it)
@@ -39,6 +41,9 @@ export const DEFAULTS = Object.freeze({
   },
   memory: { recentMinutes: 2 },
   thumbnails: 'off',
+  // The address people reach Argus at from outside the site, without a trailing slash. A phone
+  // alert links to its event there (line-actions.mjs eventLink); '' leaves the link out.
+  publicUrl: 'https://cctv.jfl.gripe',
   storage: { locations: [], netshares: [], lowFreePct: 15, floorFreePct: 5 },
   alerts: {
     ntfy: { url: 'https://ntfy.sh', topic: '' },
@@ -87,6 +92,24 @@ const topic = (v) => {
 const oneOf = (name, list) => (v) => {
   if (!list.includes(v)) throw new HttpError(400, `${name} must be one of: ${list.join(', ')}`)
   return v
+}
+/**
+ * publicUrl: an http(s) address with no user name, password, ? or #, because a link is made by
+ * adding "/alarms.html#event=<id>" to it; a trailing slash is dropped for the same reason. '' is
+ * allowed and means "no link in messages".
+ */
+const publicUrl = (v) => {
+  const s = str('publicUrl', 200)(v).trim().replace(/\/+$/, '')
+  if (!s) return ''
+  let u
+  try {
+    u = new URL(s)
+  } catch {
+    throw new HttpError(400, 'publicUrl is not an address')
+  }
+  if (!/^https?:$/.test(u.protocol)) throw new HttpError(400, 'publicUrl must start with https:// or http://')
+  if (u.username || u.password || /[?#]/.test(s)) throw new HttpError(400, 'publicUrl must be a plain address (no user name, password, ? or #)')
+  return s
 }
 const REC_FIELDS = {
   mode: oneOf('mode', MODES),
@@ -153,6 +176,8 @@ function validate(s) {
   }
   oneOf('memory.recentMinutes', RECENT_MINUTES)(s.memory.recentMinutes)
   oneOf('thumbnails', THUMBNAILS)(s.thumbnails)
+  // (fromFile checks one camera at a time with a partial settings object that has no publicUrl)
+  if ('publicUrl' in s) publicUrl(s.publicUrl)
   int('Low-space threshold (% free)', 1, 50)(s.storage.lowFreePct)
   int('Hard floor (% free)', 1, 50)(s.storage.floorFreePct)
   if (s.storage.floorFreePct >= s.storage.lowFreePct) throw new HttpError(400, 'the hard floor must be below the low-space threshold')
@@ -201,6 +226,7 @@ function fromFile(j) {
   }
   tryPart(() => (s.memory.recentMinutes = oneOf('', RECENT_MINUTES)(j.memory.recentMinutes)))
   tryPart(() => (s.thumbnails = oneOf('', THUMBNAILS)(j.thumbnails)))
+  tryPart(() => (s.publicUrl = publicUrl(j.publicUrl)))
   if (isPlainObject(j.storage)) {
     const low = j.storage.lowFreePct
     const floor = j.storage.floorFreePct
@@ -355,6 +381,7 @@ export function saveSettings(patch, user, { internal = false } = {}) {
     Object.assign(next.memory, m)
   }
   if ('thumbnails' in patch) next.thumbnails = patch.thumbnails
+  if ('publicUrl' in patch) next.publicUrl = publicUrl(patch.publicUrl)
   if ('storage' in patch) {
     const st = needObject(patch.storage, 'storage')
     knownKeys(st, internal ? ['locations', 'netshares', 'lowFreePct', 'floorFreePct'] : ['lowFreePct', 'floorFreePct'], 'storage.')

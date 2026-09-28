@@ -151,6 +151,12 @@ const json = (o) => async () => o
   check('it names the rule that decided', /Yard at night/.test(msg.detail), msg.detail)
   check('a critical alarm is high severity to the sender', alarmMessage({ ...named[0], priority: 'critical' }).severity === 'high')
   check('a low one is not', alarmMessage({ ...named[0], priority: 'low' }).severity === 'medium')
+  // the phone alert for a line crossing: when on the site's clock, and a link back to the event
+  const linked = alarmMessage(named[0], { ruleName: 'Yard at night', link: 'https://cctv.example/alarms.html#event=42', tzOffsetMin: -240 })
+  check('with the site offset the detail starts with the site time', linked.detail.startsWith('at 05:00:00 · '), linked.detail)
+  check('  and the link is a line of its own, last', linked.detail.split('\n').length === 2 && linked.detail.split('\n')[1] === 'https://cctv.example/alarms.html#event=42', linked.detail)
+  check('  an offset of 0 is still an offset (UTC site)', alarmMessage(named[0], { tzOffsetMin: 0 }).detail === 'at 09:00:00', alarmMessage(named[0], { tzOffsetMin: 0 }).detail)
+  check('without them the detail is as before', msg.detail === 'rule: Yard at night' && !msg.detail.includes('\n'), msg.detail)
 
   check('an acknowledgement note is checked', checkAck({ note: 'checked the yard, it was a fox' }).ok)
   check('a huge note is refused', !checkAck({ note: 'x'.repeat(501) }).ok)
@@ -257,6 +263,23 @@ const json = (o) => async () => o
   await new Promise((r) => setImmediate(r))
   check('the same alarm is never delivered twice', sent.length === 2, `${sent.length}`)
   check('because the row remembers it was sent', sameAgain.notifiedMs > 0)
+
+  // the link and the site's time reach what the sender is given
+  const got = []
+  const toSender = { deliver: async (alerts) => got.push(alerts[0]) }
+  const linking = makeAlarmNotifier({ sender: toSender, rules: () => rules, now: () => now, tzOffsetMin: () => -240, linkOf: (row) => `https://cctv.example/alarms.html#event=${row.id}`, log: () => {} })
+  now += 10 * MIN
+  const four = addEvent({ nvr: 'nvr1', ch: 0, type: 'motion', startMs: now, source: 'x' }, now).event
+  await linking.handle(four)
+  await new Promise((r) => setImmediate(r))
+  check('the message carries the link to the event', got.length === 1 && got[0].detail.endsWith(`\nhttps://cctv.example/alarms.html#event=${four.id}`), JSON.stringify(got))
+  check('  and when it happened on the site clock', got[0]?.detail.startsWith(`at ${new Date(now - 240 * MIN).toISOString().slice(11, 19)} · `), got[0]?.detail)
+  const broken = makeAlarmNotifier({ sender: toSender, rules: () => rules, now: () => now, linkOf: () => { throw new Error('settings unreadable') }, log: () => {} })
+  now += 10 * MIN
+  const five = addEvent({ nvr: 'nvr1', ch: 0, type: 'motion', startMs: now, source: 'x' }, now).event
+  await broken.handle(five)
+  await new Promise((r) => setImmediate(r))
+  check('a link that cannot be made costs the link, not the alert', got.length === 2 && !got[1].detail.includes('\n'), JSON.stringify(got[1]))
 }
 
 // --- the routes --------------------------------------------------------------------------------------

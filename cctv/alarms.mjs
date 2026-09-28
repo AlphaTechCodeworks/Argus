@@ -96,8 +96,11 @@ export function nameCameras(alarms, cameras) {
  * @param {() => object[]} [deps.rules]          the rules, read fresh so an edit takes effect at once
  * @param {() => number} [deps.tzOffsetMin]      site wall-clock offset, for rule schedules
  * @param {(key: string) => string} [deps.nameOf]
+ * @param {(row: object) => string} [deps.linkOf]  the event's address in Argus for the message
+ *   (line-actions.mjs eventLink, passed in by nvrs.mjs: importing it here would load settings.mjs
+ *   and with it the SDK, and this module's tests run without one); '' leaves the link out
  */
-export function makeAlarmNotifier({ sender, rules = listRules, tzOffsetMin = () => 0, nameOf = null, now = Date.now, log = console.log }) {
+export function makeAlarmNotifier({ sender, rules = listRules, tzOffsetMin = () => 0, nameOf = null, linkOf = () => '', now = Date.now, log = console.log }) {
   /** "<ruleId>|<camera>" -> when we last sent for it */
   const lastSent = new Map()
 
@@ -114,9 +117,16 @@ export function makeAlarmNotifier({ sender, rules = listRules, tzOffsetMin = () 
       lastSent.set(gateKey, nowMs)
 
       const named = nameOf ? { ...row, camera: nameOf(cameraKey(row.nvr, row.ch)) } : row
+      // A link that cannot be made (settings unreadable) costs the link, never the alert.
+      let link = ''
+      try {
+        link = String(linkOf(row) ?? '')
+      } catch (e) {
+        log(`[alarms] no link for alarm ${row.id}: ${e?.message ?? e}`)
+      }
       // Fire and forget, like the health alerts: delivery has its own retries and a slow mail
       // server must never hold up the poll that found the event.
-      void Promise.resolve(sender.deliver([alarmMessage(named, { ruleName: verdict.rule?.name ?? '' })], 'opened'))
+      void Promise.resolve(sender.deliver([alarmMessage(named, { ruleName: verdict.rule?.name ?? '', link, tzOffsetMin: tzOffsetMin() })], 'opened'))
         .catch((e) => log(`[alarms] could not deliver: ${e?.message ?? e}`))
       noteNotified(row.id, nowMs)
       return { ...row, notifiedMs: nowMs }
