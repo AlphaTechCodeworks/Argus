@@ -25,8 +25,18 @@ const throwsAsync = async (fn) => {
 }
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
 
+// The accounts and rights the routes ask about (rights.mjs reads DATA_DIR when it is first imported,
+// so this comes before the imports): v may export nvr1/1 as a pack, w the same camera as stills.
+const rightsDir = mkdtempSync(join(tmpdir(), 'cctv-export-rights-'))
+process.env.DATA_DIR = rightsDir
+writeFileSync(join(rightsDir, 'users.json'), JSON.stringify({ boss: { hash: 'x', role: 'admin' }, v: { hash: 'x', role: 'viewer' }, w: { hash: 'x', role: 'viewer' } }))
+writeFileSync(join(rightsDir, 'rights.json'), JSON.stringify({ version: 1, users: {
+  v: { grants: { export: ['nvr1/1'] }, formats: ['pack'] },
+  w: { grants: { export: ['nvr1/1'] }, formats: ['stills'] }
+} }))
+
 const job = await import('../export-job.mjs')
-const { handleExports } = await import('../export-api.mjs')
+const { downloadExport, handleExports } = await import('../export-api.mjs')
 const { verifyPack } = await import('../export-pack.mjs')
 
 // ---- synthetic footage ---------------------------------------------------------------------
@@ -330,6 +340,45 @@ const runToEnd = async () => {
   check('deleting it twice is a 404, not a crash', (await api('DELETE', `/api/exports/${id}`))[0] === 404)
 }
 
+// ---- who reaches which export -------------------------------------------------------------------
+// One export right used to open every export: v, allowed nvr1/1 as a pack, could list everybody's
+// jobs, download an admin's export of another NVR in another format, and delete it.
+
+{
+  job._test.reset()
+  const V = { user: 'v', admin: false }
+  const W = { user: 'w', admin: false }
+  const as = (who) => (method, pathname) => handleExports({ method, pathname, readJson: async () => ({}), who, user: who.user, index: fakeIndex(), dataDir, clockOf })
+  const make = async (who, over) => {
+    const started = job.startExport(request(over), { dataDir, index: fakeIndex(), who, user: who.user, clockOf })
+    await runToEnd()
+    return started.id
+  }
+  const other = await make(ADMIN, { clips: [clip({ nvr: 'nvr-2', ch: 0 })] }) // an admin's pack of another NVR
+  const bossSame = await make(ADMIN, {}) // an admin's pack of v's own camera
+  const mine = await make(V, {}) // v's own pack of nvr1/1
+  const download = async (who, id) => {
+    const out = { status: 0, bytes: 0 }
+    const res = { writableEnded: false, writeHead(s) { out.status = s }, write(c) { out.bytes += c.length; return true }, end() { this.writableEnded = true }, once() {}, destroy() {} }
+    await downloadExport({ pathname: `/api/exports/${id}/download`, method: 'GET', who, res, dataDir, sendJson: (r, s) => { out.status = s } })
+    return out
+  }
+  const v = as(V)
+  const listed = (await v('GET', '/api/exports'))[1].exports.map((j) => j.id)
+  check('v lists only the export she made', listed.length === 1 && listed[0] === mine, JSON.stringify(listed))
+  check('another NVR\'s export is 404 to her', (await v('GET', `/api/exports/${other}`))[0] === 404)
+  const stolen = await download(V, other)
+  check('...its download is 404 with no bytes written', stolen.status === 404 && stolen.bytes === 0, JSON.stringify(stolen))
+  check('...and she cannot delete it', (await v('DELETE', `/api/exports/${other}`))[0] === 404 && job.getExport(dataDir, other)?.state === 'done')
+  check('an admin\'s export of her own camera is not hers to delete either', (await v('DELETE', `/api/exports/${bossSame}`))[0] === 404 && job.getExport(dataDir, bossSame) !== null)
+  check('her own export downloads', (await download(V, mine)).status === 200)
+  const w = as(W)
+  check('w, allowed that camera as stills only, cannot open a pack of it', (await w('GET', `/api/exports/${bossSame}`))[0] === 404 && (await download(W, bossSame)).status === 404)
+  const a = as(ADMIN)
+  check('an admin still lists every export', (await a('GET', '/api/exports'))[1].exports.length === 3)
+  check('...and deletes any of them', (await a('DELETE', `/api/exports/${other}`))[0] === 200 && (await a('DELETE', `/api/exports/${bossSame}`))[0] === 200 && (await v('DELETE', `/api/exports/${mine}`))[0] === 200)
+}
+
 // ---- the ZIP wrapper and the streaming crypto ------------------------------------------------------
 
 {
@@ -362,5 +411,6 @@ const runToEnd = async () => {
 check('exports live under the data directory', existsSync(join(dataDir, 'exports')) && readdirSync(recDir).every((f) => !f.includes('export')))
 
 rmSync(root, { recursive: true, force: true })
+rmSync(rightsDir, { recursive: true, force: true })
 console.log(failures ? `\n${failures} FAILED` : '\nAll passed')
 process.exit(failures ? 1 : 0)

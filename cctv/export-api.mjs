@@ -9,7 +9,9 @@
 // Decided by rights.mjs the same way playback is: an export is a permanent copy
 // of footage, so it can be no easier to obtain than watching it. The per-clip check happens again
 // inside planExport for each camera, so a future per-camera rights model needs no change here.
-import { canAny } from './rights.mjs'
+// A finished export is that footage, so reaching one (list, progress, download, cancel, delete) is
+// asked again on every request: mayReach below.
+import { can, canAny } from './rights.mjs'
 import { ExportError, cancelExport, getExport, listExports, packDirOf, removeExport, startExport, zipEntriesOf, zipStream } from './export-job.mjs'
 
 const ROUTE = /^\/api\/exports(?:\/([A-Za-z0-9-]{1,64})(?:\/(download))?)?$/
@@ -17,6 +19,20 @@ const ROUTE = /^\/api\/exports(?:\/([A-Za-z0-9-]{1,64})(?:\/(download))?)?$/
 /** The coarse "may this person use exports at all" gate; the camera AND the format are checked again
  *  per clip inside planExport, which is what actually decides. */
 const mayExport = (who) => canAny(who, 'export')
+
+/**
+ * Whether this person may reach one job: see it listed, open it, download it, cancel or delete it.
+ * An admin reaches every job. Anyone else only their own, and only while their export right still
+ * covers every camera in it in its format: holding an export's id must be no easier than making it
+ * today, and one export right used to open every export (an admin's evidence of another site, in
+ * a format the holder may not use, and the delete button on it). Asked on every request, so a
+ * revoked right counts at once; a refusal is 404, so another person's export is not even confirmed.
+ * A job with no clips (a damaged record) decides nothing, so it is an admin's alone.
+ */
+const mayReach = (who, job) =>
+  can(who, 'admin') ||
+  (typeof who?.user === 'string' && who.user !== '' && job.by === who.user && job.clips.length > 0 &&
+    job.clips.every((c) => can(who, 'export', { nvr: c.nvr, ch: c.ch, format: job.format })))
 
 /**
  * @param {{method:string, pathname:string, readJson:()=>Promise<object>, who:object, user:string,
@@ -32,14 +48,14 @@ export async function handleExports({ method, pathname, readJson, who, user, ind
 
   try {
     if (!id) {
-      if (method === 'GET') return [200, { exports: listExports(dataDir) }]
+      if (method === 'GET') return [200, { exports: listExports(dataDir).filter((j) => mayReach(who, j)) }]
       if (method === 'POST') return [201, startExport(await readJson(), { dataDir, index, who, user, clockOf })]
       return [405, { error: 'Method not allowed' }]
     }
-    if (method === 'GET') {
-      const job = getExport(dataDir, id)
-      return job ? [200, job] : [404, { error: 'Unknown export' }]
-    }
+    // before GET and DELETE alike, so a refused user cannot cancel someone else's running job either
+    const job = getExport(dataDir, id)
+    if (!job || !mayReach(who, job)) return [404, { error: 'Unknown export' }]
+    if (method === 'GET') return [200, job]
     if (method === 'DELETE') {
       // Cancelling first and then removing is deliberate: a running job is asked to stop and its
       // work folder is swept away, so "delete" always means there is nothing left either way.
@@ -68,7 +84,7 @@ export async function downloadExport({ pathname, method, who, res, dataDir, head
   if (method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' }), true
   const job = getExport(dataDir, id)
   const dir = packDirOf(dataDir, id)
-  if (!job || !dir) return sendJson(res, 404, { error: 'That export is not ready to download' }), true
+  if (!job || !dir || !mayReach(who, job)) return sendJson(res, 404, { error: 'That export is not ready to download' }), true
 
   const name = String(job.downloadName).replace(/["\\]/g, '_')
   res.writeHead(200, {

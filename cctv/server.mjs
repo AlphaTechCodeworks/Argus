@@ -41,8 +41,9 @@
 //   /api/playback/*?nvr=ID, WS /playback?nvr=ID -> recorded video, see playback.mjs
 //   WS   /playback?nvr=ID&...&src=auto -> from the server's own recordings, see rec-playback.mjs
 //   GET  /api/playback/timeline?nvr=ID&ch=N&from=ms&to=ms -> the server's own recordings, see rec-api.mjs
-//   /api/exports               -> evidence exports (admins): list, start, progress, download,
-//                                 delete; see export-api.mjs and export-job.mjs
+//   /api/exports               -> evidence exports: list, start, progress, download, delete (each
+//                                 person their own while their export right covers it, an admin
+//                                 every one); see export-api.mjs and export-job.mjs
 //   WS   /motion?nvr=ID&...    -> motion search inside a box, see motion.mjs
 //   GET  /api/events/:id/snapshot -> an event's picture (JPEG), for users who may play that
 //                                 camera back, see event-snapshot.mjs
