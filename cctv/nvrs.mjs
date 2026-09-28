@@ -1069,17 +1069,20 @@ async function startEvents() {
   // A line crossing the recorded-file intake finds itself (record bits 0x80/0x400) gets the same
   // automatic bookmark and snapshot as one the alarm watch saw first (line-actions.mjs onLineCrossing
   // ignores every other event type, so it is safe to call for every event this intake reports). Loaded
-  // non-fatally, like eventLink above: without it the intake still stores and alerts the crossing,
-  // only without a bookmark or a picture.
-  const onLineCrossing = await import('./line-actions.mjs').then((m) => m.onLineCrossing, (e) => {
-    console.warn(`[lines] recorded crossings get no automatic bookmark or snapshot: ${e.message}`)
-    return null
-  })
+  // non-fatally, the same way as startLineWatch below: a failed import logs one warning and the intake
+  // carries on, only without a bookmark or a picture for these.
+  const lineCrossing = await Promise.all([import('./line-actions.mjs'), import('./event-snapshot.mjs')]).then(
+    ([{ onLineCrossing }, { takeSnapshot }]) => ({ onLineCrossing, takeSnapshot }),
+    (e) => {
+      console.warn(`[lines] recorded crossings get no automatic bookmark or snapshot: ${e.message}`)
+      return null
+    }
+  )
   const nameOf = (key) => allCameras().find((c) => `${c.nvr}/${c.ch}` === key)?.name ?? key
   const snapshot = (event) => {
     const index = recIndex()
     // no recordings index here (no live worker, or it could not be opened): nothing to take a picture from
-    return index ? import('./event-snapshot.mjs').then(({ takeSnapshot }) => takeSnapshot(event, { index }), () => null) : Promise.resolve(null)
+    return index ? lineCrossing.takeSnapshot(event, { index }) : Promise.resolve(null)
   }
 
   eventIntake = makeEventIntake({
@@ -1089,7 +1092,7 @@ async function startEvents() {
     clock: (nvr) => nvr.playback.clock(),
     onEvent: (event) => {
       void notifier.handle(event).catch((e) => console.warn(`[alarms] ${e.message}`))
-      if (onLineCrossing) void onLineCrossing(event, { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
+      if (lineCrossing) void lineCrossing.onLineCrossing(event, { snapshot, nameOf }).catch((e) => console.warn(`[lines] ${e.message}`))
     },
     log: console.warn,
     // any overdue call, for any NVR: the SDK runs one call at a time for all of them

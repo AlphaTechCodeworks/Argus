@@ -39,8 +39,8 @@ check('crossingHandler is given a grew callback so a long alarm\'s bookmark can 
   /crossingHandler\(\{\s*addEvent,\s*handle: \(event\) => \{[\s\S]*?\},\s*grew: \(event\) => void onLineCrossing\(event, \{ snapshot, nameOf \}\)/.test(watchBody))
 
 check('the recorded-file intake\'s onEvent also calls onLineCrossing for line-crossing events, loaded non-fatally',
-  /const onLineCrossing = await import\('\.\/line-actions\.mjs'\)\.then\(\(m\) => m\.onLineCrossing, \(e\) => \{/.test(src) &&
-  /if \(onLineCrossing\) void onLineCrossing\(event, \{ snapshot, nameOf \}\)\.catch/.test(src))
+  /const lineCrossing = await Promise\.all\(\[import\('\.\/line-actions\.mjs'\), import\('\.\/event-snapshot\.mjs'\)\]\)\.then\(\s*\(\[\{ onLineCrossing \}, \{ takeSnapshot \}\]\) => \(\{ onLineCrossing, takeSnapshot \}\),/.test(src) &&
+  /if \(lineCrossing\) void lineCrossing\.onLineCrossing\(event, \{ snapshot, nameOf \}\)\.catch/.test(src))
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exitCode = failures ? 1 : 0
