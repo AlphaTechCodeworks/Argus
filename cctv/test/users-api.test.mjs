@@ -38,6 +38,33 @@ check('nobody removes their own account', (await call('DELETE', '/api/admin/user
 check('a viewer is removed', st === 200 && !Object.hasOwn(auth.loadUsers(), 'guard'))
 check('and can no longer sign in', !(await auth.checkLogin('guard', 'guard-pass-1')))
 
+// ---- rights rows follow the accounts (rights.mjs) --------------------------------------------------
+// A removed account's rights must not wait for the next person given its name, and neither may its
+// sessions: the new holder starts with nothing, and the old holder's cookie stays dead.
+const rights = await import('../rights.mjs')
+;[st] = await call('POST', '/api/admin/users', { name: 'gone', password: 'first-holder-1', role: 'viewer' })
+rights.saveRights('gone', { grants: { live: ['*'], 'playback-nvr': ['*'] } })
+const oldToken = auth.createSession('gone')
+await call('DELETE', '/api/admin/users/gone')
+check('removing an account drops its rights row', !Object.hasOwn(rights.loadRights().users, 'gone'))
+await new Promise((r) => setTimeout(r, 5))
+;[st] = await call('POST', '/api/admin/users', { name: 'gone', password: 'second-holder', role: 'viewer' })
+const g = { user: 'gone', admin: false }
+check('a re-created name starts with no access', st === 200 && !rights.can(g, 'live', { nvr: 'nvr1', ch: 0 }) && !rights.canAny(g, 'playback-nvr'))
+check('...and has no rights row to inherit', JSON.stringify(rights.rightsOf('gone')) === JSON.stringify(rights.emptyRights()))
+check("the earlier holder's cookie stays dead", auth.verifySession(oldToken) === null)
+check('a fresh sign-in works', auth.verifySession(auth.createSession('gone')) === 'gone')
+// a stale admin row must not make a re-created viewer an admin
+;[st] = await call('POST', '/api/admin/users', { name: 'exadm', password: 'exadmin-pass', role: 'admin' })
+rights.saveRights('exadm', { admin: true })
+await call('DELETE', '/api/admin/users/exadm')
+await call('POST', '/api/admin/users', { name: 'exadm', password: 'now-a-viewer', role: 'viewer' })
+check('a stale admin row does not survive', !rights.can({ user: 'exadm', admin: false }, 'admin') && JSON.stringify(rights.rightsOf('exadm')) === JSON.stringify(rights.emptyRights()))
+// a new viewer made while there is no rights.json yet: the migration must not hand them live '*'
+rmSync(rights.RIGHTS_FILE, { force: true })
+;[st] = await call('POST', '/api/admin/users', { name: 'fresh', password: 'fresh-viewer-1', role: 'viewer' })
+check('a new viewer starts with no access even before rights.json exists', st === 200 && !rights.can({ user: 'fresh', admin: false }, 'live', { nvr: 'nvr1', ch: 0 }))
+
 rmSync(dir, { recursive: true, force: true })
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

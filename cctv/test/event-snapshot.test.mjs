@@ -12,7 +12,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-snap-test-'))
-writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ alice: { hash: 'x', role: 'admin' }, bob: { hash: 'x', role: 'viewer' } }))
+// (every rights row below has an account: a row without one grants nothing, rights.mjs rightsOf)
+writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ alice: { hash: 'x', role: 'admin' }, bob: { hash: 'x', role: 'viewer' }, carol: { hash: 'x', role: 'viewer' }, dave: { hash: 'x', role: 'viewer' } }))
 // bob may watch live only; carol may play nvr1/3 back from the server; dave may play all of nvr1 back from the NVR
 writeFileSync(join(process.env.DATA_DIR, 'rights.json'), JSON.stringify({
   version: 1,

@@ -10,9 +10,15 @@
 // The same rules as adduser.mjs, and two of its own: the last admin cannot be removed or made a
 // viewer (nobody could administer the system after), and an admin cannot remove themselves. The
 // password is hashed here (auth.mjs hashPassword) and never stored, logged or sent back.
+//
+// Rights follow the account. A removed account's rights row goes with it, and a new account starts
+// with none (rights.mjs forgetRights): a new viewer sees nothing until an admin ticks something, and
+// a name that comes back never inherits what its last holder was allowed. A new account records
+// `since`, so the last holder's unexpired cookie does not sign in as the new one (auth.mjs).
 import { audit } from './audit.mjs'
 import { DATA_DIR, hashPassword, loadUsers, saveUsers } from './auth.mjs'
 import { HttpError } from './nvr-xml.mjs'
+import { forgetRights } from './rights.mjs'
 
 const NAME_RE = /^[\w.@-]{1,64}$/
 const ROLES = ['viewer', 'admin']
@@ -44,8 +50,9 @@ export async function handleUsers(method, pathname, readJson, who) {
     if (existed && users[name].role === 'admin' && role !== 'admin' && admins(users).length <= 1) {
       throw new HttpError(409, `${name} is the only admin: add another admin first`)
     }
-    users[name] = { ...(users[name] ?? {}), role, ...(password !== null ? { hash: await hashPassword(password) } : {}) }
+    users[name] = { ...(users[name] ?? {}), role, ...(password !== null ? { hash: await hashPassword(password) } : {}), ...(existed ? {} : { since: Date.now() }) }
     saveUsers(users)
+    if (!existed) forgetRights(name) // a row left behind by an earlier account of this name
     audit(DATA_DIR, { user: who.user, action: existed ? 'user-change' : 'user-add', target: name, detail: `${role}${password !== null ? ', password set' : ''}`, ok: true })
     console.log(`[users] ${who.user} ${existed ? 'changed' : 'added'} ${name} (${role}${password !== null ? ', password set' : ''})`)
     return [200, { user: { name, role } }]
@@ -59,6 +66,7 @@ export async function handleUsers(method, pathname, readJson, who) {
     if (users[name].role === 'admin' && admins(users).length <= 1) throw new HttpError(409, `${name} is the only admin`)
     delete users[name]
     saveUsers(users)
+    forgetRights(name)
     audit(DATA_DIR, { user: who.user, action: 'user-remove', target: name, ok: true })
     console.log(`[users] ${who.user} removed ${name}`)
     return [200, { removed: name }]

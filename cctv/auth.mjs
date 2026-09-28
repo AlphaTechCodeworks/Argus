@@ -97,9 +97,17 @@ export const verifySession = (token) => {
   if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) return null
   if (Number(parts[1]) < Date.now()) return null
   const user = Buffer.from(parts[0], 'base64url').toString()
+  const users = loadUsers()
   // hasOwn, not `in`: `'constructor' in {}` is true, and a name that resolves through
   // Object.prototype must not count as an account.
-  return Object.hasOwn(loadUsers(), user) ? user : null // removed users lose access immediately
+  if (!Object.hasOwn(users, user)) return null // removed users lose access immediately
+  // The token names the account only by name, so a name removed and made again would take the old
+  // holder's unexpired cookie with it. An account made from the app or adduser.mjs records `since`;
+  // a token issued before then (issued = expiry - TTL) belongs to the earlier account. An account
+  // made before `since` existed has none and keeps its sessions as before.
+  const since = users[user]?.since
+  if (Number.isFinite(since) && Number(parts[1]) - SESSION_TTL_MS < since) return null
+  return user
 }
 
 // A cookie value that is not valid percent-encoding ("cctv_session=%") made decodeURIComponent

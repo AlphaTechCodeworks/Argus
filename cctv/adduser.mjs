@@ -4,8 +4,13 @@
 //   node cctv/adduser.mjs <name> --viewer    make an existing user a viewer (keeps the password)
 //   node cctv/adduser.mjs --remove <name>    remove a user
 //   node cctv/adduser.mjs --list             list users and roles
+//
+// Rights follow the account, as they do for one made in the app (users-api.mjs): removing an account
+// drops its rights row, and a new account starts with none and records `since` (auth.mjs), so a name
+// that comes back inherits neither the last holder's rights nor their sessions.
 import { hashPassword, loadUsers, saveUsers } from './auth.mjs'
 import { askHidden } from './prompt.mjs'
+import { forgetRights } from './rights.mjs'
 
 const args = process.argv.slice(2)
 const flags = new Set(args.filter((a) => a.startsWith('--')))
@@ -25,6 +30,7 @@ if (flags.has('--remove')) {
   }
   delete users[name]
   saveUsers(users)
+  forgetRights(name)
   console.log(`Removed ${name}`)
   process.exit(0)
 }
@@ -60,7 +66,9 @@ if (!process.env.CCTV_NEW_PASSWORD && (await askHidden('Repeat password: ')) !==
 
 const existed = name in users
 const role = flags.has('--admin') ? 'admin' : flags.has('--viewer') ? 'viewer' : (users[name]?.role ?? 'viewer')
-users[name] = { hash: await hashPassword(password), role }
+// (a password change keeps the account's other fields, `since` among them)
+users[name] = { ...(existed ? users[name] : { since: Date.now() }), hash: await hashPassword(password), role }
 saveUsers(users)
+if (!existed) forgetRights(name) // a row left behind by an earlier account of this name
 console.log(`${existed ? 'Updated' : 'Added'} ${name} (${role})`)
 process.exit(0)

@@ -9,8 +9,9 @@
 //   - It never reads a role, a user id or a rights list out of a request body. The caller passes
 //     the `who` that server.mjs built from the signed session cookie; everything else is hostile.
 //   - It never grants by accident. The only reason can() ever returns true without a stored grant
-//     is `who.admin` from the session (see honourSessionAdmin below), which is how an install with
-//     no rights file yet, and CCTV_AUTH=off development, keep working.
+//     is admin: the account's role in users.json (rightsOf), or `who.admin` from the session (see
+//     honourSessionAdmin below), which is how an install with no rights file yet, and CCTV_AUTH=off
+//     development, keep working. Admin is stored nowhere else: an admin flag in a row is ignored.
 //
 // Storage: data/rights.json, written 0600 by temp-file-and-rename like settings.mjs.
 //
@@ -28,7 +29,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { DATA_DIR, loadUsers } from './auth.mjs'
+import { DATA_DIR, loadUsers, saveUsers } from './auth.mjs'
 import { fileCache } from './file-cache.mjs'
 import { audit, useRights } from './audit.mjs'
 
@@ -127,21 +128,25 @@ function readRights() {
 /**
  * The rights of one named user.
  *
- * The fallback matters more than the lookup: a user who has no row at all keeps the role their
- * account already carries in users.json. An admin there is an admin here. Without that, dropping
- * this module onto a running server — or an admin created later with adduser.mjs — would lock the
- * owner out of their own system, and there is no console to recover from.
+ * Admin is the account's role in users.json and nothing else. The session, the /api/admin gate,
+ * users-api.mjs and adduser.mjs all read the role, so a second admin flag stored here could only
+ * ever disagree with it: a demoted admin kept every camera through a stale admin row, and switching
+ * Admin off in the access editor changed nothing while the role still said admin. The flag stored
+ * in a row is ignored; saveRights writes the Admin switch to the role instead. An admin created
+ * later with adduser.mjs is therefore an admin here at once, with or without a row.
+ *
+ * A row whose account is gone grants nothing: a name that comes back is a new person.
  * @param {string} name
  */
 export function rightsOf(name) {
   if (!isString(name) || !name) return emptyRights()
+  const accounts = loadUsers()
+  if (!Object.hasOwn(accounts, name)) return emptyRights()
   const users = loadRights().users
   // Object.hasOwn as well as the null prototype above: belt and braces, because getting this
   // wrong hands an attacker a rights row for any name that happens to exist on Object.prototype.
-  if (Object.hasOwn(users, name)) return users[name]
-  const accounts = loadUsers()
-  const row = emptyRights()
-  if (Object.hasOwn(accounts, name) && accounts[name]?.role === 'admin') row.admin = true
+  const row = Object.hasOwn(users, name) ? { ...users[name] } : emptyRights()
+  row.admin = accounts[name]?.role === 'admin'
   return row
 }
 
@@ -183,35 +188,61 @@ function writeStore(store) {
   rightsCache.forget()
 }
 
+/** The stored rows of accounts that exist, in a fresh null-prototype object (never the cached one). */
+function rowsOfAccounts(users, accounts) {
+  const out = Object.create(null)
+  for (const name of Object.keys(users)) if (name !== '__proto__' && Object.hasOwn(accounts, name)) out[name] = users[name]
+  return out
+}
+
 /**
  * Stores one user's rights. Two refusals, both deliberate:
  *   - an unknown account cannot be given rights (a typo would otherwise create a ghost row that
  *     springs to life the day somebody creates that name);
  *   - the last admin cannot be demoted. Locking every admin out of a running CCTV server is not
  *     recoverable from the web interface, and this is the only place it could happen.
+ * The Admin switch is written to the account's role in users.json (see rightsOf: the role is the only
+ * admin there is). Rows left behind by accounts that no longer exist are dropped on the way.
  * @throws {Error & {status:number}}
  */
 export function saveRights(name, raw) {
   const bad = (status, message) => Object.assign(new Error(message), { status })
   if (!isString(name) || !/^[\w.@-]{1,64}$/.test(name)) throw bad(400, 'user name is missing or not allowed')
-  if (!Object.hasOwn(loadUsers(), name)) throw bad(400, `there is no account called ${name}`)
+  const accounts = loadUsers()
+  if (!Object.hasOwn(accounts, name)) throw bad(400, `there is no account called ${name}`)
   const store = loadRights()
   const row = cleanRights(raw)
-  const after = Object.assign(Object.create(null), store.users, { [name]: row })
-  // Count admins as they will be, including accounts with no row yet (rightsOf's fallback).
-  const accounts = loadUsers()
-  const admins = Object.keys(accounts).filter((u) => (Object.hasOwn(after, u) ? after[u].admin : accounts[u]?.role === 'admin'))
+  // Count admins as they will be: every account's role, with this one's as it is being saved.
+  const admins = Object.keys(accounts).filter((u) => (u === name ? row.admin : accounts[u]?.role === 'admin'))
   if (admins.length === 0) throw bad(400, 'there must be at least one admin; make someone else an admin first')
-  store.users = after
+  store.users = Object.assign(rowsOfAccounts(store.users, accounts), { [name]: row })
   writeStore(store)
+  if (row.admin !== (accounts[name]?.role === 'admin')) saveUsers({ ...accounts, [name]: { ...accounts[name], role: row.admin ? 'admin' : 'viewer' } })
   return row
 }
 
-/** Every account that is an admin right now, sorted. The Health page shows this. */
-export function adminList() {
+/**
+ * Drops one user's stored row. Called when an account is removed and when a new one is made, so a
+ * name that comes back starts from rightsOf's fallback (nothing, or admin for an admin account)
+ * instead of inheriting whatever the last holder of that name was allowed. With no rights.json yet,
+ * loadRights migrates first (a viewer would get live '*'), and the new name's row goes straight after.
+ * @returns {boolean} whether there was a row to drop
+ */
+export function forgetRights(name) {
+  if (!isString(name) || !name || name === '__proto__') return false
   const store = loadRights()
+  if (!Object.hasOwn(store.users, name)) return false
+  const users = Object.assign(Object.create(null), store.users) // never change the cached object
+  delete users[name]
+  store.users = users
+  writeStore(store)
+  return true
+}
+
+/** Every account that is an admin right now (its role in users.json), sorted. The Health page shows this. */
+export function adminList() {
   return Object.entries(loadUsers())
-    .filter(([name, u]) => (Object.hasOwn(store.users, name) ? store.users[name].admin : u?.role === 'admin'))
+    .filter(([, u]) => u?.role === 'admin')
     .map(([name]) => name)
     .sort()
 }

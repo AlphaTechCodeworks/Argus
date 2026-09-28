@@ -221,7 +221,8 @@ const SAM = { user: 'sam', admin: false }
   writeFileSync(R.RIGHTS_FILE, JSON.stringify({ users: 'not an object' }))
   check('a file with a nonsense users field denies everyone', R.can(VIEWER, 'live', { nvr: 'n1', ch: 0 }) === false)
   writeFileSync(R.RIGHTS_FILE, JSON.stringify({ users: { jo: { admin: true } } }))
-  check('a hand-edited file granting admin is honoured (it is the source of truth)', R.can({ user: 'jo', admin: false }, 'admin') === true)
+  // admin is the account's role in users.json and nothing else: a flag in this file never decides it
+  check('a hand-edited admin flag in rights.json grants nothing (users.json decides)', R.can({ user: 'jo', admin: false }, 'admin') === false)
   writeFileSync(R.RIGHTS_FILE, good)
   chmodSync(R.RIGHTS_FILE, 0o600)
 }
@@ -277,6 +278,73 @@ const SAM = { user: 'sam', admin: false }
   check('grantText of nothing says so', grantText([]) === 'no access' && grantText(undefined) === 'no access')
   check('the note warns while there is only one admin', /only admin/.test(renderRights({ users: [{ user: 'a', admin: true }], actions: [], formats: [] }).note))
   check('renderRights survives a junk body', renderRights(null).users.length === 0 && renderRights({}).users.length === 0)
+}
+
+// ---- admin is kept in one place: the account's role in users.json ----------------------------------
+// Two stores deciding admin meant a demoted admin kept every camera (a stale admin:true row), and the
+// editor's Admin switch could not take admin away (the users.json role still said admin).
+const auth = await import('../auth.mjs')
+const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs builds it from the session
+{
+  auth.saveUsers({
+    boss: { hash: 'x', role: 'admin' },
+    bob: { hash: 'x', role: 'admin' },
+    alice: { hash: 'x', role: 'admin' },
+    carol: { hash: 'x', role: 'viewer' },
+    jo: { hash: 'x', role: 'viewer' },
+    sam: { hash: 'x', role: 'viewer' }
+  })
+  R.migrateRights() // bob and alice get the migration's admin rows
+  check('setup: the migration stored an admin row for bob', R.loadRights().users.bob?.admin === true)
+
+  // (i) demoted in users.json, the stale admin row must not keep him an admin
+  auth.saveUsers({ ...auth.loadUsers(), bob: { hash: 'x', role: 'viewer' } })
+  check('a demoted admin loses every camera, whatever his old row says', R.can(whoOf('bob'), 'live', { nvr: 'nvr1', ch: 0 }) === false)
+  check('...and every export', R.canAny(whoOf('bob'), 'export') === false)
+  check('...and is not listed as an admin', !R.adminList().includes('bob'), R.adminList().join())
+
+  // (ii) the editor's Admin switch off really takes admin away
+  R.saveRights('alice', { admin: false, grants: { live: ['solus'] } })
+  check('saving admin:false makes the account a viewer in users.json', auth.isAdmin('alice') === false && auth.loadUsers().alice.role === 'viewer')
+  check('...so she keeps only what was ticked', R.can(whoOf('alice'), 'live', { nvr: 'nvr1', ch: 0 }) === false && R.can(whoOf('alice'), 'live', { nvr: 'solus', ch: 2 }) === true)
+  check('...and the password is untouched', auth.loadUsers().alice.hash === 'x')
+
+  // (iii) and the switch on makes an admin
+  R.saveRights('carol', { admin: true })
+  check('saving admin:true makes the account an admin in users.json', auth.isAdmin('carol') === true && R.can(whoOf('carol'), 'admin') === true)
+
+  // (iv) the last admin still cannot be switched off, and users.json keeps the role
+  R.saveRights('carol', { admin: false })
+  const last = threw(() => R.saveRights('boss', { admin: false }))
+  check('the last admin cannot be demoted', last?.status === 400 && /at least one admin/.test(last.message), last?.message)
+  check('...and users.json still has boss as an admin', auth.loadUsers().boss.role === 'admin' && R.adminList().join() === 'boss', R.adminList().join())
+
+  // (v) a row whose account is gone is nothing
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 1, users: { ...R.loadRights().users, ghost2: { admin: true, grants: { live: ['*'] }, formats: [] } } }))
+  check('a row left behind by a removed account is not an admin', R.rightsOf('ghost2').admin === false)
+  check('...and grants nothing', R.can({ user: 'ghost2', admin: false }, 'live', { nvr: 'nvr1', ch: 0 }) === false && JSON.stringify(R.rightsOf('ghost2')) === JSON.stringify(R.emptyRights()))
+}
+
+// ---- rights rows follow the accounts ---------------------------------------------------------------
+{
+  // a stale row (the production data has one called "NAME") is never shown, and goes on the next save
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 1, users: { ...R.loadRights().users, NAME: { admin: false, grants: { live: ['*'] }, formats: [] } } }))
+  const [, listed] = await R.handleRights('GET', '/api/admin/rights', async () => ({}), ADMIN)
+  check('GET /api/admin/rights lists only existing accounts', !listed.users.some((u) => u.user === 'NAME' || u.user === 'ghost2') && listed.users.length === Object.keys(auth.loadUsers()).length, listed.users.map((u) => u.user).join())
+  const [st] = await R.handleRights('POST', '/api/admin/rights', async () => ({ user: 'NAME', rights: { grants: { live: ['*'] } } }), ADMIN)
+  check('POST /api/admin/rights refuses a user that does not exist', st === 400)
+  R.saveRights('jo', { grants: { live: ['nvr1/0'] } })
+  const stored = Object.keys(R.loadRights().users)
+  check('the next save prunes rows of accounts that do not exist', !stored.includes('NAME') && !stored.includes('ghost2') && stored.includes('jo'), stored.join())
+
+  // forgetRights: an account removed or created drops its row, so a name that comes back starts clean
+  check('forgetRights removes the row', R.forgetRights('jo') === true && !Object.hasOwn(R.loadRights().users, 'jo'))
+  check('...and the account then has no access at all', JSON.stringify(R.rightsOf('jo')) === JSON.stringify(R.emptyRights()))
+  check('...a second forget is a no-op', R.forgetRights('jo') === false)
+  R.saveRights('boss', { admin: true, grants: { live: ['nvr1'] } })
+  R.forgetRights('boss')
+  check('an admin account with its row forgotten is still an admin (the role decides)', R.rightsOf('boss').admin === true && R.can(whoOf('boss'), 'admin') === true)
+  check('forgetRights ignores junk names', R.forgetRights(null) === false && R.forgetRights('') === false && R.forgetRights('__proto__') === false)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
