@@ -467,8 +467,10 @@ const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO
   const wait = await job2.fill(row2)
   const after = index.backfillRow(row2.id)
   check('floor: footage from before the hole is not written at all', pulled(11).length === 0, J(pulled(11).map((x) => (x.startMs - HOLE_FROM) / 1000)))
-  check('floor: ... so that pull is a failure: attempt counted, row pending, backed off', after.state === 'pending' && after.attempts === 1 && job2.nextTry.get(row2.id) > NOW && wait === bf.ERROR_BACKOFF_MS[0], J({ after, wait }))
-  check('floor: ... and the next pick does not take the same row straight away', chooseGap([{ ...after, nextTryMs: job2.nextTry.get(row2.id) }], { now: NOW, nvrs: job2.nvrView(), retentionMsOf: () => 30 * DAY }).row === null)
+  check('floor: ... so that pull is a failure: attempt counted, row pending, the row backed off', after.state === 'pending' && after.attempts === 1 && job2.nextTry.get(row2.id) === NOW + bf.ERROR_BACKOFF_MS[0], J({ after, nextTry: job2.nextTry.get(row2.id) - NOW }))
+  // the back-off is the row's; the job itself only rests, and must wake while the row still waits
+  check('floor: ... the job rests a tick, not the row\'s back-off', wait >= job2.tickMs && wait < bf.ERROR_BACKOFF_MS[0], `${wait}`)
+  check('floor: ... and when the job wakes the pick does not take the same row', chooseGap([{ ...after, nextTryMs: job2.nextTry.get(row2.id) }], { now: NOW + wait, nvrs: job2.nvrView(), retentionMsOf: () => 30 * DAY }).row === null)
   index.backfillSet(row2.id, { state: 'permanent', note: 'test tidy-up' })
 }
 {
@@ -482,19 +484,26 @@ const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO
   check('floor: the job gives the leg floorMs 1 ms before the piece it pulls', leg.calls[0]?.floorMs === leg.calls[0]?.fromMs - 1, J(leg.calls))
   check('progress: the leg did write files (outside the hole)', pulled(12).length > 0)
   check('progress: a pull that did not shorten the hole is a failure, not progress', after.state === 'pending' && after.attempts === 1 && /hole/.test(after.lastError ?? ''), J(after))
-  check('progress: ... it backs off rather than resting for the rate limit', wait === bf.ERROR_BACKOFF_MS[0] && job.nextTry.get(row.id) === NOW + bf.ERROR_BACKOFF_MS[0], `${wait}`)
+  check('progress: ... the row backs off, the job only rests a tick before its next pick', job.nextTry.get(row.id) === NOW + bf.ERROR_BACKOFF_MS[0] && wait >= job.tickMs && wait < bf.ERROR_BACKOFF_MS[0], `${wait}`)
   check('progress: ... and says so in the job state', /hole/.test(job.last.what) && job.last.errors === 1, J(job.last))
-  // a second failed try doubles the wait, as any other failure does
+  // a second failed try doubles the row's wait, as any other failure does
   const wait2 = await job.fill(index.backfillRow(row.id))
-  check('progress: the next failed try waits longer', wait2 === bf.backoffMs(2, bf.ERROR_BACKOFF_MS) && index.backfillRow(row.id).attempts === 2, `${wait2}`)
+  check('progress: the next failed try makes the row wait longer', job.nextTry.get(row.id) === NOW + bf.backoffMs(2, bf.ERROR_BACKOFF_MS) && index.backfillRow(row.id).attempts === 2 && wait2 < bf.ERROR_BACKOFF_MS[0], `${wait2}`)
   index.backfillSet(row.id, { state: 'permanent', note: 'test tidy-up' })
+
+  // a failed pull still used the NVR's bandwidth: the job's rest after it honours the rate limit
+  const slow = makeJob({ leg: fakeLeg({ span: (from) => [from - 3 * MIN, from - MIN] }), cfg: { perNvrMbps: 0.004 } })
+  const rowS = holeOn(14)
+  const waitS = await slow.fill(rowS)
+  check('progress: after a failed pull the job still rests for the rate limit (~50 kB at 4 kbit/s)', waitS > 60_000 && waitS < bf.ERROR_BACKOFF_MS[0] && slow.nextTry.get(rowS.id) === NOW + bf.ERROR_BACKOFF_MS[0], `${waitS}`)
+  index.backfillSet(rowS.id, { state: 'permanent', note: 'test tidy-up' })
 
   // under a second of the hole is not progress either
   const tiny = fakeLeg({ span: (from) => [from, from + 500], stepMs: 400 })
   const job2 = makeJob({ leg: tiny })
   const row2 = holeOn(13)
   const wait3 = await job2.fill(row2)
-  check('progress: shortening the hole by under a second is a failure too', index.backfillRow(row2.id).attempts === 1 && wait3 === bf.ERROR_BACKOFF_MS[0], J({ row: index.backfillRow(row2.id), wait3 }))
+  check('progress: shortening the hole by under a second is a failure too', index.backfillRow(row2.id).attempts === 1 && job2.nextTry.get(row2.id) === NOW + bf.ERROR_BACKOFF_MS[0] && wait3 < bf.ERROR_BACKOFF_MS[0], J({ row: index.backfillRow(row2.id), wait3 }))
   index.backfillSet(row2.id, { state: 'permanent', note: 'test tidy-up' })
 }
 {
@@ -514,6 +523,89 @@ const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO
   check('oldest first: with 5,100 newer rows in the ledger the oldest pending hole is the one pulled', leg.calls.length === 1 && leg.calls[0].fromMs === OLD_FROM, J({ calls: leg.calls.map((c) => (c.fromMs - NOW) / DAY), what: job.last.what }))
   check('oldest first: ... and it is filled', index.backfillRow(oldest.id).state === 'filled', J(index.backfillRow(oldest.id)))
   for (const id of filler) index.backfillRemove(id)
+}
+
+// ---- one stuck row must not hold the whole job (playback report 9, review) -----------------------
+//
+// fill() handed a failed row's back-off to tick() as the job's rest, and set the row's nextTry to that
+// same moment: the job woke just as the row came due, and the row -- stuck, so the oldest, so first in
+// the pick -- was pulled again. Over 8 h a hole the NVR had nothing for was pulled at 0, 5, 15, 35, 75,
+// 155, 275 and 395 min, and a fillable hole on the same NVR was never tried. These drive the real
+// tick() at the delay it arms each time, each on an index of its own.
+{
+  const fairRoot = mkdtempSync(join(tmpdir(), 'backfill-fair-'))
+  let n = 0
+  /**
+   * A running job on a fresh index with one 3-minute hole per [nvr, ch, daysAgo], and a leg that
+   * records every pull and plays `legOf(nvrId, ch)` (a fakeLeg; the default fills the hole).
+   */
+  const setup = (holes, { legOf = () => null, coverage } = {}) => {
+    const idx = openRecIndex(join(fairRoot, `fair-${++n}.db`))
+    const rows = holes.map(([nvr, ch, days]) => {
+      const from = NOW - days * DAY
+      idx.addSegment({ nvr, ch, path: join(fairRoot, `${n}-${nvr}-${ch}a.h264`), startMs: from - 10 * MIN, endMs: from, bytes: 1000, keyframes: 10, loc: 'L1' })
+      idx.addSegment({ nvr, ch, path: join(fairRoot, `${n}-${nvr}-${ch}b.h264`), startMs: from + 3 * MIN, endMs: from + 13 * MIN, bytes: 1000, keyframes: 10, loc: 'L1' })
+      return idx.backfillNote({ nvr, ch, fromMs: from, toMs: from + 3 * MIN, reason: null, kind: 'unknown' }, NOW)
+    })
+    const good = fakeLeg()
+    const pulls = []
+    const leg = (o) => {
+      pulls.push({ nvr: o.nvr.id, ch: o.ch, atMs: nowBox.t - NOW })
+      return (legOf(o.nvr.id, o.ch) ?? good)(o)
+    }
+    const job = makeJob({ leg, coverage, cfg: { restSeconds: 30 }, extra: { index: idx, locations: () => [{ id: 'L1', path: fairRoot, role: 'main' }] } })
+    job.running = true
+    return { idx, rows, job, pulls }
+  }
+  /** Ticks the job at the delay it arms each time, until `forMs` of simulated time has gone by. */
+  const run = async (job, forMs) => {
+    const until = nowBox.t + forMs
+    for (let i = 0; nowBox.t < until && i < 5000; i++) {
+      await job.tick()
+      nowBox.t += job.timer?._idleTimeout ?? job.tickMs
+    }
+    job.stop('test')
+  }
+
+  for (const [what, stuck] of [['writes only footage from before the hole', { span: (from) => [from - 3 * MIN, from - MIN] }], ['has nothing inside the hole', { silent: true }]]) {
+    nowBox.t = NOW
+    // the stuck hole is the oldest, so it is always first in the pick; one fillable hole on the same
+    // NVR, one on another
+    const { idx, rows, job, pulls } = setup([['nvr-1', 1, 20], ['nvr-1', 2, 19], ['nvr-2', 3, 18]], { legOf: (nvr, ch) => (ch === 1 ? fakeLeg(stuck) : null) })
+    await run(job, 8 * HOUR)
+    const on = (ch) => pulls.filter((p) => p.ch === ch)
+    check(`one stuck row (the NVR ${what}): the first tick pulls it`, pulls[0]?.ch === 1, J(pulls.slice(0, 3)))
+    check(`one stuck row (${what}): the next tick, when the job wakes, pulls another row instead`, pulls[1]?.ch === 2 && pulls[1].atMs < 2 * MIN, J(pulls.slice(0, 3)))
+    check(`one stuck row (${what}): the other rows, on both NVRs, are filled`, idx.backfillRow(rows[1].id).state === 'filled' && idx.backfillRow(rows[2].id).state === 'filled', J(pulls.slice(0, 4)))
+    // the stuck row is still tried, but only on its own back-off ladder: 5, 10, 20, ... min apart
+    const gaps = on(1).slice(1).map((p, i) => p.atMs - on(1)[i].atMs)
+    check(`one stuck row (${what}): it is still retried, each time only after its own back-off`, on(1).length >= 4 && on(1).length <= 8 && gaps.every((g, i) => g >= bf.backoffMs(i + 1, bf.ERROR_BACKOFF_MS)), J(on(1).map((p) => p.atMs / MIN)))
+    check(`one stuck row (${what}): it stays pending, with its attempts counted`, idx.backfillRow(rows[0].id).state === 'pending' && idx.backfillRow(rows[0].id).attempts === on(1).length, J(idx.backfillRow(rows[0].id)))
+    idx.close()
+  }
+
+  // An NVR that cannot be asked (its search fails) or whose leg breaks off is a problem with the NVR,
+  // not the row: the NVR stands down for the row's back-off, so the short rest does not become a new
+  // search or leg on it every tick, and the other NVRs carry on meanwhile.
+  const searchFails = async (nvr, ch, from, to) => (nvr.id === 'nvr-1' ? { ranges: [], reason: 'the NVR search failed' } : { ranges: [[from, to]], skewMs: 0 })
+  // a leg that errors before a frame, with a message that is not a refusal
+  const breakingLeg = () => ({ fromMs, toMs }) => ({ done: Promise.resolve({ reason: 'error', message: 'the connection was reset' }), close() {}, command() {}, fromMs, toMs })
+  for (const [what, opts] of [['search fails', { coverage: searchFails }], ['leg breaks off', { legOf: (nvr) => (nvr === 'nvr-1' ? breakingLeg() : null) }]]) {
+    nowBox.t = NOW
+    const asked = []
+    const coverage = opts.coverage ?? (async (_n, _ch, from, to) => ({ ranges: [[from, to]], skewMs: 0 }))
+    const counted = async (nvr, ch, from, to) => {
+      asked.push({ nvr: nvr.id, ch, atMs: nowBox.t - NOW })
+      return coverage(nvr, ch, from, to)
+    }
+    const { idx, rows, job } = setup([['nvr-1', 1, 20], ['nvr-1', 2, 19], ['nvr-2', 3, 18]], { ...opts, coverage: counted })
+    await run(job, 4 * MIN)
+    check(`an NVR whose ${what}: it stands down, and the job goes on with the other NVR`, asked[0]?.nvr === 'nvr-1' && asked[1]?.nvr === 'nvr-2' && asked[1].atMs < 2 * MIN && idx.backfillRow(rows[2].id).state === 'filled', J(asked))
+    check(`an NVR whose ${what}: it is not asked again for its next row inside the back-off`, asked.filter((a) => a.nvr === 'nvr-1').length === 1 && idx.backfillRow(rows[1].id).attempts === 0, J(asked))
+    check(`an NVR whose ${what}: the row it failed on counts the attempt and waits its back-off`, idx.backfillRow(rows[0].id).attempts === 1 && job.nextTry.get(rows[0].id) === NOW + bf.ERROR_BACKOFF_MS[0], J(idx.backfillRow(rows[0].id)))
+    idx.close()
+  }
+  nowBox.t = NOW
 }
 {
   // the run flag is on disk, so a restart picks the job back up (roadmap 2b point 3)

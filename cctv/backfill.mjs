@@ -642,12 +642,22 @@ export class BackfillJob {
     const now = this.now()
     const cfg = this.cfg()
     const nvr = this.nvrs instanceof Map ? this.nvrs.get(row.nvr) : this.nvrs?.[row.nvr]
-    const fail = (message, ladder = ERROR_BACKOFF_MS) => {
+    // A failed try backs off the ROW (nextTry, on its ladder); the job itself only rests (restMs, a
+    // tick by default) and then picks again, which passes over this row and takes the next deadline.
+    // Returning the row's back-off as the job's rest woke the job just as that back-off ran out, and
+    // the same row -- stuck, so the oldest, so first in the pick -- was pulled again: one hole the NVR
+    // had nothing for was all the job did for 8 h, pulled at 0, 5, 15, 35 ... 395 min (report 9).
+    //   stop 'nvr': the NVR could not be asked, or broke off. It stands down for the same wait
+    //               (nvrBackoff), so the short rest is not a new search or leg on it every tick.
+    //   stop 'job': no other row would get past this either (no storage, a refusal); the job waits.
+    const fail = (message, { ladder = ERROR_BACKOFF_MS, stop = 'row', restMs = this.tickMs } = {}) => {
       const attempts = (row.attempts ?? 0) + 1
+      const wait = backoffMs(attempts, ladder)
       this.index.backfillSet(row.id, { attempts, lastTryMs: now, lastError: message })
-      this.nextTry.set(row.id, this.now() + backoffMs(attempts, ladder))
+      this.nextTry.set(row.id, this.now() + wait)
+      if (stop === 'nvr') this.nvrBackoff.set(row.nvr, this.now() + wait)
       this.last = { ...this.last, at: now, what: message, errors: this.last.errors + 1 }
-      return backoffMs(attempts, ladder)
+      return stop === 'job' ? wait : restMs
     }
     if (!nvr) return fail(`${row.nvr} is not configured any more`)
 
@@ -666,7 +676,7 @@ export class BackfillJob {
     try {
       cov = await this.coverage(nvr, row.ch, row.fromMs, row.toMs, { now: () => this.now() })
     } catch (e) {
-      return fail(`the NVR search failed (${e?.message ?? e})`)
+      return fail(`the NVR search failed (${e?.message ?? e})`, { stop: 'nvr' })
     }
     const plan = gapPlan({ fromMs: row.fromMs, toMs: row.toMs }, { now, nvrRetentionMs: this.retentionMs(), coverage: cov })
     if (plan.permanent) {
@@ -675,9 +685,10 @@ export class BackfillJob {
       return 0
     }
     if (!plan.decided) {
-      // "we could not ask" - a refusal-shaped answer waits much longer than an ordinary hiccup
+      // "we could not ask" - a refusal-shaped answer waits much longer than an ordinary hiccup, and
+      // holds the whole job as a refusal from a leg does; an ordinary one stands down only that NVR
       const refused = /refus|busy|offline/i.test(String(plan.why ?? ''))
-      return fail(plan.why ?? 'the NVR gave no answer', refused ? REFUSED_BACKOFF_MS : ERROR_BACKOFF_MS)
+      return fail(plan.why ?? 'the NVR gave no answer', refused ? { ladder: REFUSED_BACKOFF_MS, stop: 'job' } : { stop: 'nvr' })
     }
 
     // 3. Only the parts that are BOTH missing here and present there, in bounded pieces.
@@ -694,7 +705,7 @@ export class BackfillJob {
       return 0
     }
     const loc = this.locations().find((l) => l.role !== 'archive') ?? null
-    if (!loc) return fail('no storage location available')
+    if (!loc) return fail('no storage location available', { stop: 'job' })
 
     // 4. One piece per turn. Anything can have changed by the next one, so it is checked again.
     this.busyNvrs.add(row.nvr)
@@ -704,10 +715,14 @@ export class BackfillJob {
       result = await this.pull({ nvr, row, loc, fromMs: work[0][0], toMs: work[0][1], skewMs: cov.skewMs ?? 0 })
     } catch (e) {
       this.busyNvrs.delete(row.nvr)
-      return fail(`the pull failed (${e?.message ?? e})`)
+      // a throw here is this end (the writer, the disk), not the row or the NVR: the job waits
+      return fail(`the pull failed (${e?.message ?? e})`, { stop: 'job' })
     }
     this.busyNvrs.delete(row.nvr)
     const elapsed = this.now() - started
+    // The rest after a pull that got nowhere: it still used the NVR, so the rate limit holds, and it
+    // is never shorter than a tick.
+    const rested = Math.max(this.tickMs, restAfterMs(result.bytes ?? 0, elapsed, Number(cfg.perNvrMbps ?? 8), Number(cfg.restSeconds ?? 30)))
 
     if (result.refused) {
       // The NVR turned us away. This is nvr-2's normal state, and the only right answer is to stop
@@ -721,7 +736,12 @@ export class BackfillJob {
       this.log(`${row.nvr} refused (${result.message}); leaving it alone for ${Math.round(wait / 60_000)} min`)
       return wait
     }
-    if (!result.segments.length) return fail(result.message ?? 'the NVR sent no usable video')
+    if (!result.segments.length) {
+      // A leg that played to its end with nothing usable is about this stretch (row 2658: the NVR has
+      // nothing inside the hole, and the floor drops what it plays from before it). One that broke off
+      // or ran out of time is about the NVR, which stands down rather than get a new leg every tick.
+      return fail(result.message ?? 'the NVR sent no usable video', { stop: result.brokeOff ? 'nvr' : 'row', restMs: rested })
+    }
 
     // 5. Index what landed, marked as backfilled so an export can say where it came from. Also when
     //    it turns out not to be progress (below): the files are on disk, and a file the index does not
@@ -736,9 +756,9 @@ export class BackfillJob {
     // the hole is a failed try, with the back-off that comes with one. Counting it as progress cleared
     // the retry wait, and the same row was pulled again on the next tick.
     if (left.length && missingMs - totalMs(left.map((h) => [h.fromMs, h.toMs])) < MIN_PROGRESS_MS) {
-      const wait = fail(`pulled ${Math.round(ms / 1000)} s from the NVR, but the hole got less than a second shorter`)
-      this.log(`${row.nvr}/${row.ch + 1}: ${this.last.what}; next try in ${Math.round(wait / 60_000)} min`)
-      return wait
+      const rest = fail(`pulled ${Math.round(ms / 1000)} s from the NVR, but the hole got less than a second shorter`, { restMs: rested })
+      this.log(`${row.nvr}/${row.ch + 1}: ${this.last.what}; next try of this hole in ${Math.round((this.nextTry.get(row.id) - this.now()) / 60_000)} min`)
+      return rest
     }
     this.index.backfillSet(row.id, left.length ? { attempts: row.attempts ?? 0, lastTryMs: now, lastError: null, note: `partly filled, ${left.length} piece(s) left` } : { state: 'filled', filledMs: filledAt, lastError: null, note: null })
     this.nextTry.delete(row.id)
@@ -778,7 +798,9 @@ export class BackfillJob {
     const message = done.message ?? (done.reason === 'timeout' ? 'the NVR leg ran out of time' : null)
     // A leg that failed before a single frame, with a refusal-shaped message, is the NVR saying no.
     const refused = done.reason === 'error' && sink.stats.frames === 0 && /refus|busy|limit|resource|no capacity|failed to start/i.test(String(message ?? ''))
-    return { segments, bytes: sink.stats.bytes, frames: sink.stats.frames, refused, message: segments.length ? null : (message ?? 'the NVR sent no video') }
+    // brokeOff: the leg errored or ran out of time, as against playing to its end
+    const brokeOff = done.reason === 'error' || done.reason === 'timeout'
+    return { segments, bytes: sink.stats.bytes, frames: sink.stats.frames, refused, brokeOff, message: segments.length ? null : (message ?? 'the NVR sent no video') }
   }
 
   // ---- what the page shows
