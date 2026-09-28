@@ -251,7 +251,7 @@ const S = 1000
       stored.push(row)
       return { event: row, isNew: true }
     },
-    lastEventMs: () => null
+    intakeCursorMs: () => null
   }
   const asked = []
   let now = T0
@@ -295,7 +295,7 @@ const S = 1000
     recordings: async () => { throw new Error('the NVR is not answering') },
     now: () => now,
     log: () => {},
-    store: { addEvent: () => ({ event: null, isNew: false }), lastEventMs: () => null }
+    store: { addEvent: () => ({ event: null, isNew: false }), intakeCursorMs: () => null }
   })
   const r = await intake.tick()
   check('a failure is reported, not thrown', r?.error && /not answering/.test(r.error), JSON.stringify(r))
@@ -306,7 +306,7 @@ const S = 1000
 {
   // One pass at a time. On 09-27 a FindRecDate stuck in the SDK had each 5 s tick ask yet another
   // NVR's clock, and every one of those queued behind it: six overdue calls and a restart.
-  const quiet = { addEvent: () => ({ event: null, isNew: false }), lastEventMs: () => null }
+  const quiet = { addEvent: () => ({ event: null, isNew: false }), intakeCursorMs: () => null }
   const nvrs = [{ id: 'a', name: 'A', online: true }, { id: 'b', name: 'B', online: true }]
   const asked = []
   const never = new Promise(() => {})
@@ -356,7 +356,7 @@ const S = 1000
     sdkBusy: () => busy,
     now: () => T0,
     log: () => {},
-    store: { addEvent: () => ({ event: null, isNew: false }), lastEventMs: () => null }
+    store: { addEvent: () => ({ event: null, isNew: false }), intakeCursorMs: () => null }
   })
   check('with an SDK call overdue, a tick asks no NVR at all', (await intake.tick()) === null && asked.length === 0, asked.join())
   const st = intake.status()
@@ -374,7 +374,7 @@ const S = 1000
 // recording of the same crossing: a few seconds earlier (pre-record), with both line bits. That must
 // stay one event, and must not reach the rules (and the phone) a second time. Real store, temp file.
 {
-  const { addEvent, closeEvents, eventsOfCamera, lastEventMs } = await import('../events-db.mjs')
+  const { addEvent, closeEvents, eventsOfCamera, intakeCursorMs } = await import('../events-db.mjs')
   const at = T0 + 30 * MIN
   const first = addEvent({ nvr: 'lc1', ch: 2, type: 'line-crossing', subtype: 'tripwire', startMs: at, source: 'alarm-status' }, at)
   check('the alarm watcher’s crossing is stored', first.isNew && first.event.id > 0)
@@ -386,7 +386,7 @@ const S = 1000
     onEvent: (e) => seen.push(e),
     now: () => at + 3 * MIN,
     log: () => {},
-    store: { addEvent, lastEventMs }
+    store: { addEvent, intakeCursorMs }
   })
   const r = await intake.tick()
   check('the recording of the same crossing is not a new event', r?.stored === 0 && seen.length === 0, JSON.stringify({ r, seen: seen.length }))
@@ -394,6 +394,37 @@ const S = 1000
   check('... the camera still has one row', rows.length === 1, JSON.stringify(rows.map((x) => `${x.type}/${x.subtype}@${x.startMs - at}`)))
   check('... with the alarm’s start and the recording’s end', rows[0]?.startMs === at && rows[0]?.endMs === at + 40 * S, JSON.stringify(rows[0]))
   closeEvents()
+}
+
+// --- the intake's own cursor --------------------------------------------------------------------------------
+//
+// The intake asks the NVR only for the local days from the newest row it filed itself onwards. A
+// crossing the alarm watcher files just after midnight must not move that on to today: the recordings
+// of the last minutes before midnight are only in yesterday's answer, and would never be read.
+{
+  const db = await import('../events-db.mjs')
+  const TZ = -4 * 3_600_000 // the site is at UTC-4
+  const midnight = Date.UTC(2026, 8, 28) - TZ // 2026-09-28 00:00 site time
+  db.addEvent({ nvr: 'cur1', ch: 3, type: 'motion', subtype: '', startMs: midnight - 12 * MIN, endMs: midnight - 11 * MIN, source: SOURCE_RECORDINGS }, midnight - 10 * MIN)
+  db.addEvent({ nvr: 'cur1', ch: 3, type: 'line-crossing', subtype: 'tripwire', startMs: midnight + MIN, source: 'alarm-status' }, midnight + MIN + 5 * S)
+  const asked = []
+  const intake = makeEventIntake({
+    listNvrs: () => [{ id: 'cur1', name: 'Cursor', online: true }],
+    camerasOf: () => [{ ch: 3 }],
+    clock: async () => ({ tzOffsetMs: TZ }),
+    recordings: async (_nvr, _ch, date) => {
+      asked.push(date)
+      return { events: [] }
+    },
+    now: () => midnight + 5 * MIN,
+    log: () => {}
+  })
+  await intake.tick()
+  check('a crossing the watcher filed after midnight does not move the intake past yesterday: both days are asked', asked.join() === '2026-09-27,2026-09-28', asked.join())
+  check('the intake’s cursor is its own newest row, whatever else the camera has',
+    typeof db.intakeCursorMs === 'function' && db.intakeCursorMs('cur1', 3) === midnight - 12 * MIN && db.intakeCursorMs('cur1', 9) === null)
+  check('... while lastEventMs still means the camera’s newest row of any source', db.lastEventMs('cur1', 3) === midnight + MIN)
+  db.closeEvents()
 }
 
 // --- the read-only command probe ------------------------------------------------------------------------

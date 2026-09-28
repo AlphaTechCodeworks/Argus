@@ -31,6 +31,12 @@ export const MAX_RESULTS = 1000
 export const MERGE_MS = 30_000
 /** The only kind that is folded; every other kind keeps one row per thing the NVR reported. */
 const MERGED_TYPE = 'line-crossing'
+/**
+ * How a row filed by the recording-list intake says where it came from. Defined here and re-exported
+ * by events.mjs, which imports this module (not the other way round): the intake's cursor and the
+ * fold both have to tell its rows from the alarm watcher's.
+ */
+export const SOURCE_RECORDINGS = 'nvr-recordings'
 
 const EV_COLS = `id, nvr, ch, type, subtype, start_ms AS startMs, end_ms AS endMs, source, detail,
   priority, rule_id AS ruleId, rule_name AS ruleName, notified_ms AS notifiedMs,
@@ -73,6 +79,10 @@ function open(file = EVENTS_DB) {
     classify: db.prepare('UPDATE events SET priority = ?, rule_id = ?, rule_name = ? WHERE id = ?'),
     lastOf: db.prepare('SELECT MAX(start_ms) AS m FROM events WHERE nvr = ? AND ch = ?'),
     lastOfNvr: db.prepare('SELECT MAX(start_ms) AS m FROM events WHERE nvr = ?'),
+    // The intake's cursor: its own newest row. ORDER BY ... LIMIT 1 rather than MAX(): source is not
+    // in events_cam (nvr, ch, start_ms), and MAX with it loses SQLite's min/max shortcut and reads every
+    // row of the camera on every tick; this walks the index from the newest end and stops at the first.
+    lastOfIntake: db.prepare('SELECT start_ms AS m FROM events WHERE nvr = ? AND ch = ? AND source = ? ORDER BY start_ms DESC LIMIT 1'),
     forget: db.prepare('DELETE FROM events WHERE start_ms < ? AND ack_ms IS NULL'),
     rules: db.prepare(`SELECT ${RULE_COLS} FROM alarm_rules ORDER BY id`),
     ruleById: db.prepare(`SELECT ${RULE_COLS} FROM alarm_rules WHERE id = ?`),
@@ -268,6 +278,17 @@ export function noteNotified(id, nowMs = Date.now()) {
 export const lastEventMs = (nvr, ch = null) => {
   const s = open()
   const row = ch === null ? s.lastOfNvr.get(String(nvr)) : s.lastOf.get(String(nvr), Number(ch))
+  return Number.isFinite(row?.m) ? row.m : null
+}
+
+/**
+ * Where the recording-list intake (events.mjs) takes up a camera again: the newest start among the
+ * rows it filed itself (SOURCE_RECORDINGS), or null. Not lastEventMs: the alarm watcher files
+ * crossings seconds after they start, and one filed just after midnight would move the intake on to
+ * today, so yesterday's last minutes, which only yesterday's file list has, would never be read.
+ */
+export const intakeCursorMs = (nvr, ch) => {
+  const row = open().lastOfIntake.get(String(nvr), Number(ch), SOURCE_RECORDINGS)
   return Number.isFinite(row?.m) ? row.m : null
 }
 

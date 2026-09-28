@@ -64,10 +64,10 @@
 //   - backs off exponentially on every failure and does not come back for a while
 //   - runs at the lane's LOW priority through the playback search the timeline already uses, so it
 //     queues behind live video rather than in front of it
-//   - asks only for the stretch since the newest event it already holds, not the whole month
+//   - asks only for the stretch since the newest event it filed itself, not the whole month
 import { XML_HEADER, kid, kids, parseXml } from './xml.mjs'
 import { typesFromRecordBits } from './event-rules.mjs'
-import { addEvent, lastEventMs } from './events-db.mjs'
+import { SOURCE_RECORDINGS, addEvent, intakeCursorMs } from './events-db.mjs'
 
 const OUT_BYTES = 64 * 1024
 
@@ -221,8 +221,8 @@ export function summariseProbe(run) {
 
 // ---- the intake that actually runs --------------------------------------------------------------
 
-/** How a stored event says where it came from. */
-export const SOURCE_RECORDINGS = 'nvr-recordings'
+/** How a stored event says where it came from. SOURCE_RECORDINGS lives in events-db.mjs (its cursor and fold need it). */
+export { SOURCE_RECORDINGS }
 export const SOURCE_SERVER = 'server'
 
 /**
@@ -357,7 +357,7 @@ export function daysToAsk(fromMs, toMs, tzOffsetMs = 0, maxDays = 2) {
  * @param {() => boolean} [deps.sdkBusy] true while any SDK call in this process is overdue
  *   (sdk.mjs lateCalls() > 0): then no NVR is asked at all
  */
-export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null, onEvent = () => {}, now = Date.now, log = console.log, store = { addEvent, lastEventMs }, sdkBusy = () => false }) {
+export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null, onEvent = () => {}, now = Date.now, log = console.log, store = { addEvent, intakeCursorMs }, sdkBusy = () => false }) {
   /** nvr id -> { nextAt, fails, queue: [ch], lastWhy } */
   const state = new Map()
   let offline = new Map() // camera key -> online, for the offline/online comparison
@@ -376,7 +376,9 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
   async function pollCamera(nvr, ch) {
     const nowMs = now()
     const tzOffsetMs = clock ? (await clock(nvr).catch(() => ({ tzOffsetMs: 0 }))).tzOffsetMs ?? 0 : 0
-    const since = store.lastEventMs(nvr.id, ch) ?? nowMs - FIRST_LOOK_MS
+    // its own rows only (events-db intakeCursorMs): a watcher crossing filed seconds after it started
+    // must not move the intake past the recordings it has not read yet
+    const since = store.intakeCursorMs(nvr.id, ch) ?? nowMs - FIRST_LOOK_MS
     let stored = 0
     for (const date of daysToAsk(since, nowMs, tzOffsetMs)) {
       const recs = await recordings(nvr, ch, date)
