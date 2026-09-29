@@ -108,16 +108,21 @@ const payload = (n) => {
  * Opens a remote page: its tiles subscribe 15 ms apart from 0 ms, the link writes `linkMbps`, the
  * controller looks every TICK_MS from the first sub (its timer starts with the first socket), and it
  * plays for `durMs`. H.264 throughout.
- * @param {{ tiles: { ch: number, cam: ReturnType<typeof camera>, standIn?: [number, number] }[], linkMbps: number,
- *   durMs: number, poolMax?: number }} o
- *   standIn: a cold sub's stand-in, the main stream's GOP the worker replays into it at once, as [its
- *   keyframe, the whole GOP] in KB (sub-bridge.mjs; verify-6), with no main-stream frames after it.
- *   Sent whole, as on 29 Sep: the burst the controller must ride out. (A remote viewer's stand-in now
- *   sends only the keyframe, and only while the page has room: live-mux-server.test.mjs replays that.)
+ * @param {{ tiles: { ch: number, cam: ReturnType<typeof camera>, standIn?: [number, number],
+ *   main?: [number, number, number, number] }[], linkMbps: number, durMs: number, poolMax?: number,
+ *   remote?: boolean }} o
+ *   standIn: a cold sub's stand-in as on 29 Sep, cut short: the main stream's GOP the worker replays into
+ *   it at once, as [its keyframe, the whole GOP] in KB (verify-6), sent whole, and no main-stream frames
+ *   after it. A remote viewer's stand-in is no longer that (sub-bridge.mjs): see main.
+ *   main: a cold sub's stand-in from the camera's running main stream, as [Mbit/s, keyframe KB, GOP KB,
+ *   running since (ms, before the page opened: where in its GOP it is)], 20 fps: once the stand-in wants
+ *   it, the worker sends its GOP so far at once through the fan-out (verify-6), then its frames as they
+ *   come, for as long as it is wanted. remote (true): the stand-in is a remote viewer's, the main
+ *   stream's keyframes while the page has room for them; false: a local viewer's, every frame.
  * @returns {{ lines: string[], downs: string[], live: AdaptiveLive }} lines: the controller's, each
  *   with the second it was said at in front
  */
-export function openPage({ tiles, linkMbps, durMs, poolMax = 16 }) {
+export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true }) {
   const clock = virtualClock()
   try {
     const lines = []
@@ -145,6 +150,27 @@ export function openPage({ tiles, linkMbps, durMs, poolMax = 16 }) {
       }
     }
     for (const c of cams) if (c.cam.from < 0) frames(c, -1)
+    // a stand-in's running main stream (main): the worker sends it only while it is wanted, and when it
+    // starts, the GOP so far at once, then each frame as it comes
+    const mains = cams.filter((c) => c.main).map((c) => {
+      const [mbps, keyKB, gopKB, from] = c.main
+      const cam = camera({ fps: 20, kbps: mbps * 1000, gopS: (gopKB * 8) / (mbps * 1000), keyShare: keyKB / gopKB, from })
+      const first = Math.ceil(from / cam.every)
+      return (c.mainStream = { cam, stream: new HubStream(hub, c.ch, 0), next: first, first, lastKey: null, sending: false })
+    })
+    const mainFrame = (m, n, isKey) => m.stream.onFrame(encodeFrame(payload(isKey ? m.cam.key : m.cam.delta), isKey, 0, n * m.cam.every), isKey)
+    const mainFrames = (m, upTo) => {
+      for (; m.next * m.cam.every <= upTo; m.next++) {
+        const isKey = (m.next - m.first) % m.cam.perGop === 0
+        if (isKey) m.lastKey = m.next
+        m.sending &&= m.stream.wanted
+        if (!m.stream.wanted) continue
+        if (!m.sending) for (let n = m.lastKey ?? m.next; n < m.next; n++) mainFrame(m, n, n === m.lastKey)
+        m.sending = true
+        mainFrame(m, m.next, isKey)
+      }
+    }
+    for (const m of mains) mainFrames(m, -1)
     const ws = linkSocket((linkMbps * 1e6) / 8)
     serveMux(ws, {
       session: () => 'owner',
@@ -159,7 +185,7 @@ export function openPage({ tiles, linkMbps, durMs, poolMax = 16 }) {
           const gop = [encodeFrame(payload(keyKB * 1000), true, 0, -1000)]
           for (let i = 1; i < 20; i++) gop.push(encodeFrame(payload(Math.round(((gopKB - keyKB) * 1000) / 19)), false, 0, -1000 + i * 50))
           bridgeSub(channel, { sub: c.stream, main: { gop, add(tap) { replayGop(this.gop, tap) }, remove() {} }, clientH265: false })
-        }
+        } else if (c.mainStream && !(c.stream.gop.length > 0)) bridgeSub(channel, { sub: c.stream, main: c.mainStream.stream, clientH265: false, remote })
         live.attach('owner-pc', { ws: channel, nvrId: 'nvr-2', ch: sub.ch, type: 1, source: c.stream })
         clearInterval(live.timer) // looked at below, on the page's clock
       }
@@ -171,6 +197,7 @@ export function openPage({ tiles, linkMbps, durMs, poolMax = 16 }) {
       ws.write(STEP) // what the link wrote over the step just gone: a frame queued now goes at the next
       for (const c of cams) if (!c.channel && at >= c.subAt) ws.emit('message', Buffer.from(JSON.stringify({ op: 'sub', id: c.ch + 1, nvr: 'nvr-2', ch: c.ch, stream: 1 })), false)
       for (const c of cams) frames(c, at)
+      for (const m of mains) mainFrames(m, at)
       if (at > 0 && at % TICK_MS === 0) live.tick()
     }
     const said = lines.filter((l) => l.includes('[adaptive]'))
