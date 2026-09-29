@@ -98,6 +98,14 @@ export const CLIMB_AFTER_MS = 20_000
 export const CLIMB_FAILED_MS = 30_000
 export const MAX_CLIMB_AFTER_MS = 80_000
 export const CLIMB_RESET_MS = 5 * 60_000
+/**
+ * A viewer whose last socket closed is remembered this long, and one back within it starts one level
+ * above where it left, not at full: twice on 29 Sep every socket of the page closed and came back
+ * (03:55:42, 04:19:39), and it started again at full on the link that had just taken it down. Longer
+ * is a new visit, at full: the owner came back after 7.5 min at 04:15:57, and a page knocked down by
+ * one burst must come back whole on a reload (verify-1).
+ */
+export const REMEMBER_MS = 15_000
 /** A level change is given this long to show its effect before another. */
 export const SETTLE_MS = 4000
 
@@ -159,9 +167,9 @@ export function nextLevel(v, { pressure, now, overBudget = false, starved = fals
 
 /** One remote browser: its sockets and the level they are on. */
 class Viewer {
-  constructor(key, now) {
+  constructor(key, now, level = startLevel()) {
     this.key = key
-    this.level = startLevel()
+    this.level = level
     this.changedAt = now
     this.cleanSince = now
     this.climbAfterMs = CLIMB_AFTER_MS // (nextLevel)
@@ -172,6 +180,7 @@ class Viewer {
     // its own start-up going out (GRACE_MS): marks, per socket, the bytes its link will have written
     // once what was queued then has gone; opening: taken as its tiles open, for OPENING_MS
     this.grace = { from: now, marks: new Map(), opening: true }
+    this.left = new Set() // level streams its closed sockets left with nobody on them (for their 10 s)
     this.sockets = new Set() // { ws, nvrId, ch, type, source, stream, sent }
     this.sentAt = 0
     this.sentBytes = 0
@@ -183,6 +192,7 @@ export class AdaptiveLive {
   constructor({ pool = new TranscodePool(maxPhoneStreams()), makeTranscoder, log = (l) => console.log(l), budgetBps = wanBudgetBps(), now = () => Date.now() } = {}) {
     Object.assign(this, { pool, makeTranscoder, log, budgetBps, now })
     this.viewers = new Map() // key -> Viewer
+    this.gone = new Map() // key -> { level, at }: viewers whose last socket closed, for REMEMBER_MS
     this.streams = new Map() // `${nvr}/${ch}/${type}@${level}` -> PhoneStream
     this.timer = null
   }
@@ -250,7 +260,7 @@ export class AdaptiveLive {
   attach(viewerKey, { ws, nvrId, ch, type, source, clientH265 = false, codec }) {
     const now = this.now()
     let v = this.viewers.get(viewerKey)
-    if (!v) this.viewers.set(viewerKey, (v = new Viewer(viewerKey, now)))
+    if (!v) this.viewers.set(viewerKey, (v = this.#arrive(viewerKey, now)))
     const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null, sent: 0 }
     entry.stream = this.#streamFor(entry, v.level)
     entry.stream.add(ws)
@@ -268,11 +278,35 @@ export class AdaptiveLive {
       return send(data, ...rest)
     }
     ws.on?.('close', () => {
-      entry.stream.remove(ws)
+      const s = entry.stream
+      s.remove(ws)
       v.sockets.delete(entry)
-      if (v.sockets.size === 0) this.viewers.delete(viewerKey)
+      for (const x of v.left) if (x.closed) v.left.delete(x)
+      if (s !== source && s.clients.size === 0) v.left.add(s)
+      if (v.sockets.size === 0) this.#leave(v)
     })
     this.#start()
+  }
+
+  /** A viewer's first socket: a new viewer, at full; or one back within REMEMBER_MS, one level above where it left. */
+  #arrive(key, now) {
+    const was = this.gone.get(key)
+    this.gone.delete(key)
+    if (!was || now - was.at > REMEMBER_MS) return new Viewer(key, now)
+    const v = new Viewer(key, now, Math.max(0, was.level - 1))
+    this.log(`[adaptive] ${key.slice(0, 8)}: back after ${((now - was.at) / 1000).toFixed(1)} s, at ${LEVELS[v.level].id} (it left at ${LEVELS[was.level].id})`)
+    return v
+  }
+
+  /** Its last socket has closed: remembered for REMEMBER_MS. */
+  #leave(v) {
+    if (this.viewers.get(v.key) === v) this.viewers.delete(v.key)
+    this.gone.set(v.key, { level: v.level, at: this.now() })
+    // It comes back one level above, if at all: the streams its sockets left at this level would keep
+    // their conversion slots for their 10 s (phone-live.mjs STOP_DELAY_MS), and the level it comes back
+    // to needs them. (At full they are its H.265 conversions, the same when it comes back: they stay.)
+    if (v.level > 0) for (const s of v.left) if (s.clients.size === 0) s.close()
+    v.left.clear()
   }
 
   #move(v, level, why) {
@@ -285,7 +319,9 @@ export class AdaptiveLive {
     // for its 10 s (phone-live.mjs STOP_DELAY_MS) anyway: a 16-tile page stepping 15 -> 8 found 4 slots
     // free and left 12 tiles on the camera's own stream, and at 4 all 16 -- more to send, not less, so
     // the next step followed (no conversion started for 16 tiles at 03:55:28, 04:08:13, 04:08:17; verify-1).
-    const left = new Set()
+    // With them go the streams its closed tiles left at this level, waiting out their 10 s.
+    const left = new Set(v.left)
+    v.left.clear()
     for (const e of v.sockets) {
       if (e.stream === e.source) continue
       e.stream.remove(e.ws)
@@ -389,6 +425,7 @@ export class AdaptiveLive {
   /** One look at every remote viewer. */
   tick() {
     const now = this.now()
+    for (const [key, was] of this.gone) if (now - was.at > REMEMBER_MS) this.gone.delete(key)
     let total = 0
     for (const v of this.viewers.values()) {
       const dt = v.sentAt ? (now - v.sentAt) / 1000 : 0

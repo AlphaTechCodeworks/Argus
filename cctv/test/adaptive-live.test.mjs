@@ -294,6 +294,61 @@ const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 30
   clearInterval(live.timer)
 }
 
+// ---- a page back within 15 s comes back one level above where it left (verify-1) ----
+{
+  // Twice on 29 Sep every socket of the owner's page closed and came back (03:55:42, 04:19:39): it was
+  // forgotten and started again at full, on the link that had just taken it down.
+  let now = T
+  const logs = []
+  const pool = new TranscodePool(8)
+  const live = new AdaptiveLive({ pool, makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => now })
+  const open = () => [fakeWs(), fakeWs()].map((ws, i) => (live.attach('6d4bf842cafe', { ws, nvrId: 'n1', ch: i, type: 1, source: gopSource(30) }), ws))
+  const socks = open()
+  for (let i = 0; i < 3; i++) {
+    now += SETTLE_MS
+    heldAt(socks, now)
+    live.tick()
+  }
+  check('a page stepped down to 4: its two tiles on conversions', LEVELS[live.viewers.get('6d4bf842cafe').level].id === '4' && pool.active === 2)
+  for (const ws of socks) ws.handlers.close()
+  check('every socket of it closes: forgotten, and the slots of the level it left given back at once (not 10 s later)', live.viewers.size === 0 && pool.active === 0, `${pool.active} slots`)
+  now += 14_000
+  open()
+  const v = live.viewers.get('6d4bf842cafe')
+  check('back 14 s later: one level above where it left, 8, not full', LEVELS[v.level].id === '8', LEVELS[v.level].id)
+  check('... and said, once', logs.filter((l) => l.includes(': back after')).join() === '[adaptive] 6d4bf842: back after 14.0 s, at 8 (it left at 4)', logs.join(' | '))
+  check('... its tiles on level 8\'s conversions', [...v.sockets].every((e) => e.stream !== e.source && e.stream.fps === 8) && pool.active === 2, `${pool.active} slots`)
+  for (const e of [...v.sockets]) e.ws.handlers.close()
+  now += 15_001
+  live.tick()
+  open()
+  check('back 15 s and more later: a new visit, at full', live.viewers.get('6d4bf842cafe').level === 0)
+  clearInterval(live.timer)
+}
+{
+  // A tile closed at a level leaves its stream there for its 10 s (a tile that reconnects finds it); a
+  // level change closes it with the others, and its slot is there for the new level.
+  let now = T
+  const pool = new TranscodePool(3)
+  const live = new AdaptiveLive({ pool, makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9, now: () => now })
+  const socks = [0, 1, 2].map((i) => { const ws = fakeWs(); live.attach('left', { ws, nvrId: 'n1', ch: i, type: 1, source: gopSource(30) }); return ws })
+  const v = live.viewers.get('left')
+  for (let i = 0; i < 2; i++) {
+    now += SETTLE_MS
+    heldAt(socks, now)
+    live.tick()
+  }
+  socks[2].handlers.close()
+  const late = fakeWs()
+  live.attach('left', { ws: late, nvrId: 'n1', ch: 7, type: 1, source: gopSource(30) })
+  check('at 8, a tile closed and another opened: no slot for the new one while the closed one\'s stream stays', LEVELS[v.level].id === '8' && pool.active === 3 && [...v.sockets].filter((e) => e.stream === e.source).length === 1)
+  now += SETTLE_MS
+  heldAt([socks[0], socks[1], late], now)
+  live.tick()
+  check('... down to 4: that stream closed with the others, a slot for every tile', LEVELS[v.level].id === '4' && [...v.sockets].every((e) => e.stream !== e.source), `${pool.active} slots, ${[...v.sockets].filter((e) => e.stream === e.source).length} raw`)
+  clearInterval(live.timer)
+}
+
 // ---- pressure: what a page has queued against how fast its socket drains (stutter report 2.1) ----
 // It was any queue over 256 KB at one look, and on 29 Sep all 12 steps down said "video backing up": a
 // page opening or a level change queues more than that by itself, and it was still going out at the
