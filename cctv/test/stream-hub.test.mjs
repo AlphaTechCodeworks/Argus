@@ -68,6 +68,35 @@ check('frames for an unwanted stream are ignored', !hub.streams.has('18:0') && a
   check('closeAll: no unwant sent afterwards', sent.filter((m) => m.t === 'unwant').length === unwants)
 }
 {
+  // A socket moved onto the camera's own stream by a level change (adaptive-live.mjs) joins at that
+  // stream's next keyframe, with nothing replayed: it has the picture the replay would start from, and
+  // a replay of the GOP so far stepped it back in time by up to a keyframe interval (stutter report
+  // 2.5, verify-5). The caller says where it starts (waitForKey); the stream sends nothing before that.
+  const h = new StreamHub('n3', () => {}, { stopDelayMs: { 0: 50, 1: 50 } })
+  const s3 = h.getStream(1, 1)
+  s3.add(fakeWs())
+  s3.onFrame(P(true), true)
+  s3.onFrame(P(false), false)
+  const moved = { ...fakeWs(), waitForKey: true }
+  s3.add(moved, { replay: false })
+  check('add with replay: false: the GOP so far is not replayed', moved.got.length === 0)
+  s3.onFrame(P(false), false)
+  check('... it waits for a keyframe, as the caller left it', moved.got.length === 0)
+  s3.onFrame(P(true), true)
+  check('... and takes the stream from there', moved.got.length === 1 && moved.got[0][0] === 1)
+  // added from inside the fan-out of a keyframe (a tap that watches for it): that keyframe, once
+  const joins = { ...fakeWs(), waitForKey: true }
+  let armed = false
+  const tap = { ...fakeWs(), send(buf) { if (armed && buf[0] === 1) { s3.remove(this); s3.add(joins, { replay: false }) } } }
+  s3.add(tap) // (the replay it is sent as it joins is not what it watches for)
+  armed = true
+  s3.onFrame(P(false), false)
+  s3.onFrame(P(true), true)
+  s3.onFrame(P(false), false)
+  check('a socket added by a tap as a keyframe goes out: that keyframe and what follows, each once, nothing before', joins.got.length === 2 && joins.got[0][0] === 1 && joins.got[1][0] === 0 && !s3.clients.has(tap), `${joins.got.map((x) => x[0])}`)
+  check('... a default add still replays the GOP (a new tile)', (() => { const n = fakeWs(); s3.add(n); return n.got.length === 2 })())
+}
+{
   // I2: restart request goes to the worker
   const h = new StreamHub('n2', (m) => sent.push(m))
   h.restartStream(5, 1, 'sub-stream codec changed')

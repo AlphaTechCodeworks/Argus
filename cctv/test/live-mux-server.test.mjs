@@ -8,8 +8,8 @@ import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { WebSocket, WebSocketServer } from 'ws'
 import {
-  MAX_CHANNELS, MAX_MALFORMED, MAX_MESSAGE_BYTES, MESSAGE_BURST, MESSAGES_PER_S, SOCKET_CAP_BYTES, SOCKET_SOFT_BYTES,
-  SUB_BURST, SUBS_PER_S, serveMux
+  DRAIN_WINDOW_MS, MAX_CHANNELS, MAX_MALFORMED, MAX_MESSAGE_BYTES, MESSAGE_BURST, MESSAGES_PER_S, SOCKET_CAP_BYTES,
+  SOCKET_SOFT_BYTES, SUB_BURST, SUBS_PER_S, serveMux
 } from '../live-mux.mjs'
 import { StreamHub } from '../stream-hub.mjs'
 import { CAP_BYTES, STUCK_MS, gateSend } from '../backpressure.mjs'
@@ -17,7 +17,8 @@ import { REPLAY_MAX_BYTES } from '../gop-replay.mjs'
 import { bridgeSub } from '../sub-bridge.mjs'
 import { AdaptiveLive, PRESSURE_BYTES, SETTLE_MS } from '../adaptive-live.mjs'
 import { TranscodePool } from '../transcode.mjs'
-import { PHONE_SPARE, liveAttacher } from '../live-attach.mjs'
+import { H265_QUIET_MS, PHONE_SPARE, liveAttacher } from '../live-attach.mjs'
+import { camera } from './remote-page.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -98,7 +99,7 @@ class FakeSocket {
 }
 
 /** A mux on a fake socket; attach records each channel (or does what the test says). */
-function setup({ attach } = {}) {
+function setup({ attach, who } = {}) {
   const ws = new FakeSocket()
   const state = { user: 'ann', t: 0 }
   const attached = []
@@ -107,7 +108,8 @@ function setup({ attach } = {}) {
     session: () => state.user,
     attach: attach ?? ((channel, sub, user) => attached.push({ channel, sub, user })),
     now: () => state.t,
-    log: (l) => logs.push(l)
+    log: (l) => logs.push(l),
+    who
   })
   return { ws, mux, state, attached, logs }
 }
@@ -409,6 +411,110 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('the socket closing: the channel reads as closed and sends nothing', c.readyState === 3 && ws.sent.length === 0)
 }
 
+// ---- every close of a page's socket is logged: its code and reason, why, and what it never wrote.
+// On 29 Sep a remote page was forgotten and restarted at full twice, and nothing said whether its
+// socket had been cut, by what, or how far behind it was (stutter report 2.10) ----
+{
+  const { ws, state, attached, logs } = setup({ who: 'remote' })
+  for (const id of [1, 2, 3]) ws.msg(sub(id))
+  attached[0].channel.send(frame(false, 1, 999_996)) // 1 MB with its id
+  state.t = 4000
+  ws.drain()
+  attached[0].channel.send(frame(false, 1, 1_999_996))
+  state.t = 812_000
+  ws.readyState = 3
+  ws.emit('close', 1001, Buffer.from('going away'))
+  check('a page\'s socket closing is logged: remote or local, how long it was open, code and reason, channels, what was never written, drain rate, bytes written',
+    logs.at(-1) === '[live-mux] a remote page\'s socket closed after 812 s: code 1001 "going away"; 3 channels, 2.00 MB never written, draining at 0.0 Mbit/s; 1.00 MB written in all (0.0 Mbit/s on average)', logs.at(-1))
+  ws.emit('close', 1006)
+  check('... once', logs.filter((l) => l.includes('socket closed')).length === 1)
+}
+{
+  // the socket dies with a backlog: ws calls the queued sends back with an error, maybe before its
+  // 'close'. Those bytes were never written: not counted as written, and still in the line.
+  const { ws, state, attached, logs } = setup()
+  ws.msg(sub(1))
+  attached[0].channel.send(frame(false, 1, 999_996))
+  state.t = 1000
+  const lost = ws.queue.shift()
+  ws.bufferedAmount -= lost.bytes
+  lost.cb(new Error('socket gone'))
+  ws.readyState = 3
+  ws.emit('close', 1006, Buffer.alloc(0))
+  check('... a send called back with an error (the socket gone): never written, not written', /; 1 channels, 1\.00 MB never written, draining at 0\.0 Mbit\/s; 0\.00 MB written in all/.test(logs.at(-1)), logs.at(-1))
+}
+{
+  // the keep-alive (backpressure.mjs) cut it: the line says so, not just 1006
+  const { ws, logs } = setup({ who: 'remote' })
+  ws.msg(sub(1))
+  ws.closeCause = 'keep-alive: no answer to the last ping'
+  ws.readyState = 3
+  ws.emit('close', 1006, Buffer.alloc(0))
+  check('... cut by the keep-alive: the line says so', /: code 1006 \(keep-alive: no answer to the last ping\); 1 channels, 0\.00 MB never written, draining: idle;/.test(logs.at(-1)), logs.at(-1))
+}
+{
+  // a burst queued just before the close: too little busy time to say how fast it drained, which is
+  // not "idle" with a megabyte never written (review of 29 Sep)
+  const { ws, state, attached, logs } = setup()
+  ws.msg(sub(1))
+  attached[0].channel.send(frame(false, 1, 999_996))
+  state.t += 100
+  ws.readyState = 3
+  ws.emit('close', 1006, Buffer.alloc(0))
+  check('... a megabyte queued 0.1 s before: "not measured yet", not "idle"', /; 1 channels, 1\.00 MB never written, draining: not measured yet;/.test(logs.at(-1)), logs.at(-1))
+}
+{
+  // closed by the server itself (too many requests, bad messages, signed out): the reason it gave
+  const { ws, logs } = setup()
+  ws.msg(sub(1))
+  ws.msg({ op: 'sub', id: 2, nvr: 'n1', ch: 3, stream: 1 })
+  for (let i = 0; i <= MAX_MALFORMED; i++) ws.msg('not json')
+  ws.emit('close', 1008, Buffer.from('bad messages'))
+  check('... closed by the server: the reason it gave, and the channels it had then', /^\[live-mux\] a page's socket closed after 0 s: code 1008 "bad messages" \(closed by the server: bad messages\); 2 channels,/.test(logs.at(-1)), logs.at(-1))
+}
+
+// ---- the page's socket's drain rate: bytes written a second while it had something queued, from
+// ws's write callbacks, over the last DRAIN_WINDOW_MS (adaptive-live logs it at every level change;
+// verify-1: queued bytes alone say nothing about how long they take to go) ----
+{
+  const { ws, state, attached } = setup()
+  ws.msg(sub(1))
+  const c = attached[0].channel
+  check('drainBps: nothing queued yet, so no rate (null)', c.drainBps === null, String(c.drainBps))
+  for (let i = 0; i < 4; i++) c.send(frame(false, 1, 99_996)) // 100 KB each with its id
+  for (let i = 1; i <= 4; i++) {
+    state.t = i * 250
+    ws.drain(1)
+  }
+  check('4 x 100 KB written over the 1 s they were queued: 400 KB/s', Math.round(c.drainBps) === 400_000, String(c.drainBps))
+  check('writtenBytes: every byte the page\'s socket has written, ever (adaptive-live\'s grace after a level change)', c.writtenBytes === 400_000, String(c.writtenBytes))
+  // which page socket a channel is on: adaptive-live tells a browser's page gone dead from its new one
+  ws.msg({ op: 'sub', id: 2, nvr: 'n1', ch: 4, stream: 1 })
+  const other = setup()
+  other.ws.msg(sub(1))
+  check('page: the same for every channel of one socket, another socket\'s its own', c.page != null && attached[1].channel.page === c.page && other.attached[0].channel.page != null && other.attached[0].channel.page !== c.page)
+  state.t = 3000
+  check('... idle since: still the rate it drained at while it had something to write', Math.round(c.drainBps) === 400_000, String(c.drainBps))
+  state.t = 1000 + DRAIN_WINDOW_MS + 1
+  check('... nothing queued for a whole window: no rate', c.drainBps === null, String(c.drainBps))
+  // a slower stretch, queued throughout: the window holds only it
+  const t0 = state.t
+  for (let i = 0; i < 12; i++) c.send(frame(false, 1, 99_996))
+  for (let i = 1; i <= 8; i++) {
+    state.t = t0 + i * 1000
+    ws.drain(1)
+  }
+  check('a backlog written at 100 KB a second: the rate over the last window is that', Math.abs(c.drainBps - 100_000) < 2000, String(c.drainBps))
+  check('... the same on every channel of the page', (ws.msg(sub(2)), attached[1].channel.drainBps === c.drainBps))
+  // a burst written within a few ms (into the kernel's buffer, not over the link): too short to say
+  const { ws: ws2, state: st2, attached: at2 } = setup()
+  ws2.msg(sub(1))
+  at2[0].channel.send(frame(true, 1, 600_000))
+  st2.t = 20
+  ws2.drain()
+  check('... 600 KB gone in 20 ms: too little busy time to call it a rate (null)', at2[0].channel.drainBps === null, String(at2[0].channel.drainBps))
+}
+
 // ---- bufferedAmount: each channel's own part of the socket's queue ----
 {
   const { ws, mux, attached } = setup()
@@ -427,23 +533,32 @@ const fanOut = (c, buf, isKey, type, now) => {
 }
 {
   // A remote page in the full-size view over an 8x8 grid: 64 sub channels and the main, 65 on one
-  // socket, all going through adaptive-live. The main queues 300 KB: the page's link is not keeping
-  // up. An even share (300 KB / 65) was under the pressure mark until 65 x 256 KB were queued.
-  let t = 0
-  const live = new AdaptiveLive({ pool: new TranscodePool(4), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e12, now: () => t })
+  // socket, all going through adaptive-live. The main queues 1 MB on a page whose socket writes 100 KB
+  // a second: the page's link is not keeping up. An even share (1 MB / 65) was under the pressure
+  // mark until 65 x 256 KB were queued; now every channel reads the whole socket's queue, and how long
+  // it takes to go at the rate the socket drains.
+  let state = null
+  const live = new AdaptiveLive({ pool: new TranscodePool(4), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e12, now: () => state.t })
   const src = { gop: [], viewers: new Set(), add(w) { this.viewers.add(w); w.waitForKey = true }, remove(w) { this.viewers.delete(w) } }
-  const { ws, attached } = setup({ attach: (channel, s) => { attached.push({ channel, sub: s }); live.attach('page', { ws: channel, nvrId: 'n1', ch: s.ch, type: s.stream, source: src }) } })
+  const page = setup({ attach: (channel, s) => { attached.push({ channel, sub: s }); live.attach('page', { ws: channel, nvrId: 'n1', ch: s.ch, type: s.stream, source: src }) } })
+  const { ws, attached } = page
+  state = page.state
   for (let i = 0; i < 64; i++) ws.msg(sub(i + 1, { ch: i }))
   ws.msg(sub(100, { ch: 5, stream: 0 }))
   const main = attached.at(-1).channel
-  t = SETTLE_MS + 1
+  state.t = SETTLE_MS + 1
   live.tick()
   check('adaptive-live: 65 channels of one page are one viewer, on the camera\'s own stream while nothing is queued', live.viewers.get('page')?.sockets.size === 65 && live.viewers.get('page').level === 0)
-  main.send(frame(true, 1, 300_000))
-  check('... the main queues 300 KB: over the pressure mark for every channel of the page', 300_000 > PRESSURE_BYTES && attached.every((a) => a.channel.sharedBufferedAmount > PRESSURE_BYTES))
-  t += SETTLE_MS + 1
+  for (let i = 0; i < 10; i++) main.send(frame(i === 0, 1, 99_996))
+  state.t += 1000
+  ws.drain(1) // 100 KB in the second since: 900 KB to go, 9 s
+  check('... the main queues 1 MB: every channel of the page reads the whole socket\'s queue, and its drain rate', attached.every((a) => a.channel.sharedBufferedAmount === 900_000 && Math.round(a.channel.drainBps) === 100_000) && 900_000 > PRESSURE_BYTES)
   live.tick()
-  check('... and the next tick steps the page down a level', live.viewers.get('page').level === 1, `level ${live.viewers.get('page').level}`)
+  check('... over a second to go at one look: not yet', live.viewers.get('page').level === 0)
+  state.t += 2000
+  ws.drain(2)
+  live.tick()
+  check('... and at the next (7 s to go): the page steps down a level', live.viewers.get('page').level === 1, `level ${live.viewers.get('page').level}`)
   ws.drain()
   for (const a of attached) a.channel.close()
   await tick()
@@ -582,7 +697,7 @@ const fanOut = (c, buf, isKey, type, now) => {
 
 // ---- terminate: the whole socket, every channel ----
 {
-  const { ws, mux, state, attached } = setup()
+  const { ws, mux, state, attached, logs } = setup()
   for (const id of [1, 2]) ws.msg(sub(id))
   const counts = attached.map((a) => closeCounter(a.channel))
   attached[0].channel.send(frame(true, 1, 1000))
@@ -593,6 +708,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   await tick()
   await tick()
   check('... their handlers run once, also after the socket\'s own close', counts.every((n) => n.v === 1))
+  check('... and the close is logged as that, with the channels it had', /: code 1006 \(nothing written for 30 s\); 2 channels, 0\.00 MB never written, draining at 0\.0 Mbit\/s;/.test(logs.at(-1)), logs.at(-1))
 }
 
 // ---- in the real pipeline: HubStream, gateSend, sub-bridge ----
@@ -665,8 +781,9 @@ const fanOut = (c, buf, isKey, type, now) => {
   let allowed = true
   const asked = []
   const adaptive = { calls: [], attach(key, o) { this.calls.push({ key, ...o }) } }
-  const phone = { ok: true, calls: [], attach(key, stream, type, ws) { this.calls.push({ key, stream, type, ws }); return this.ok } }
-  const attachLive = liveAttacher({ can: (who, action, target) => { asked.push({ who, action, target }); return allowed }, currentUser: () => 'ann', adaptiveLive: adaptive, phoneLive: phone })
+  const phone = { ok: true, calls: [], attach(key, stream, type, ws, opts) { this.calls.push({ key, stream, type, ws, opts }); return this.ok } }
+  const attachLogs = []
+  const attachLive = liveAttacher({ can: (who, action, target) => { asked.push({ who, action, target }); return allowed }, currentUser: () => 'ann', adaptiveLive: adaptive, phoneLive: phone, log: (l) => attachLogs.push(l) })
   const who = { user: 'ann', admin: false }
   const base = { who, ch: 3, streamType: 0, clientH265: false, phone15: false }
   const run = (o = {}, r = req()) => { const w = fakeWs(); const nvr = o.nvr ?? mkNvr(); attachLive(w, r, { ...base, nvr, ...o }); return { w, nvr } }
@@ -688,12 +805,43 @@ const fanOut = (c, buf, isKey, type, now) => {
   const cold = x.nvr.getStream(3, 1)
   const stand = [...x.nvr.getStream(3, 0).viewers]
   check('... a cold sub-stream: the main stream stands in (sub-bridge), the viewer waits on its sub-stream', cold.viewers.has(x.w) && stand.length === 1 && stand[0].background === true)
+  // every stand-in is logged, with its camera and whether the viewer is remote (stutter report 2.6),
+  // from its first frame sent
+  stand[0].send(frame(true))
+  check('... logged with its camera and "local"', attachLogs.at(-1) === "[sub-bridge] n1/4, local viewer: stand-in started: the main stream until the sub-stream's first frame", attachLogs.join(' | '))
+  x.w.send(frame(true))
+  check('... and its end', /^\[sub-bridge\] n1\/4, local viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): 1 frame, 0\.00 MB sent, 0 held back$/.test(attachLogs.at(-1)), attachLogs.at(-1))
+  x = run({ streamType: 1, nvr: mkNvr({ subCold: true }) }, req('127.0.0.1'))
+  for (const s of x.nvr.getStream(3, 0).viewers) s.send(frame(true))
+  check('... a remote viewer\'s stand-in is logged as remote, and as keyframes', attachLogs.at(-1) === "[sub-bridge] n1/4, remote viewer: stand-in started: the main stream's keyframes until the sub-stream's first frame", attachLogs.at(-1))
+  // A remote viewer's stand-in is the main stream's keyframes only, each while its page keeps up
+  // (sub-bridge.mjs): on 29 Sep a remote page's stand-ins were whole main streams, 2-5 Mbit/s each
+  // into a 3.5-6.5 Mbit/s tunnel (stutter report 2.6, verify-6). A local viewer's is every frame.
+  const fed = (addr) => {
+    const y = run({ streamType: 1, nvr: mkNvr({ subCold: true }) }, req(addr))
+    const [tap] = y.nvr.getStream(3, 0).viewers
+    for (const k of [true, false, false, true, false]) tap.send(frame(k))
+    return y.w.sent.map((b) => (b[0] === 1 ? 'K' : 'd')).join('')
+  }
+  check('... a remote viewer\'s stand-in: the main stream\'s keyframes only', fed('127.0.0.1') === 'KK', fed('127.0.0.1'))
+  check('... a local viewer\'s: every frame, as before', fed('192.168.1.20') === 'KddKd', fed('192.168.1.20'))
+  adaptive.calls.length = 0
   x = run({ clientH265: true }, req('127.0.0.1'))
   const key = createHash('sha1').update('ann|Desktop|c=1').digest('hex')
   const call = adaptive.calls.at(-1)
   check('... a remote viewer: adaptive-live, one key per browser (user, user agent, cookie)', adaptive.calls.length === 1 && call.key === key && call.ws === x.w && call.nvrId === 'n1' && call.ch === 3 && call.type === 0 && call.clientH265 === true && x.nvr.getStream(3, 0).viewers.size === 0)
+  // what the NVR saw each stream send (nvrs.mjs codecSeen): a main started on demand has no keyframe
+  // yet, and adaptive-live must not send its first one, H.265, to a PC that cannot decode it (stutter
+  // report 2.7)
+  check('... no codec seen for it: none passed', call.codec === undefined, JSON.stringify(call.codec))
+  const seen = mkNvr()
+  seen.codecSeen = new Map([['3:0', { codec: 'h265', width: 3840, height: 2160 }], ['3:1', { codec: 'h264' }]])
+  run({ nvr: seen }, req('127.0.0.1'))
+  run({ nvr: seen, streamType: 1 }, req('127.0.0.1'))
+  check('... the codec the NVR saw on that very stream (main H.265, sub H.264)', adaptive.calls.at(-2).codec === 'h265' && adaptive.calls.at(-2).type === 0 && adaptive.calls.at(-1).codec === 'h264' && adaptive.calls.at(-1).type === 1, JSON.stringify(adaptive.calls.slice(-2).map((c) => c.codec)))
   x = run({ phone15: true }, req('192.168.1.20', { 'user-agent': 'Mozilla/5.0 (iPhone)' }))
   check('... a phone asking for 15 fps: the shared thinned stream', phone.calls.length === 1 && phone.calls[0].key === 'n1/3/0' && phone.calls[0].ws === x.w && x.nvr.getStream(3, 0).viewers.size === 0)
+  check('... which names its camera in the log, the channel from 1', phone.calls[0].opts?.camera === 'n1/4', JSON.stringify(phone.calls[0].opts))
   phone.ok = false
   x = run({ phone15: true }, req('192.168.1.20', { 'user-agent': 'Mozilla/5.0 (iPhone)' }))
   check('... no room for it: the camera\'s own stream', phone.calls.length === 2 && x.nvr.getStream(3, 0).viewers.has(x.w))
@@ -739,8 +887,9 @@ const fanOut = (c, buf, isKey, type, now) => {
   const phoneReq = { socket: { remoteAddress: '192.168.1.30' }, headers: { 'user-agent': 'Mozilla/5.0 (iPhone)', cookie: 'c=1' } }
   const deskReq = { socket: { remoteAddress: '192.168.1.20' }, headers: { 'user-agent': 'Desktop', cookie: 'c=1' } }
   const mkPhone = (free = 16, running = []) => ({ free, calls: [], detached: [], attach(key, stream, type, ws, opts) { this.calls.push({ key, stream, type, ws, opts }); return true }, detach(key, ws) { this.detached.push({ key, ws }) }, room() { return this.free }, has(key) { return running.includes(key) } })
+  const heldLogs = []
   const run = ({ nvr = mkNvr(), phone = mkPhone(), r = phoneReq, clientH265 = false } = {}) => {
-    const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive: phone })
+    const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive: phone, log: (l) => heldLogs.push(l) })
     const w = fakeWs()
     attach(w, r, { nvr, who: { user: 'ann' }, ch: 3, streamType: 1, clientH265, phone15: true })
     return { w, nvr, phone, sub: nvr.getStream(3, 1), main: nvr.getStream(3, 0) }
@@ -749,6 +898,9 @@ const fanOut = (c, buf, isKey, type, now) => {
   let x = run()
   const conv = x.phone.calls.find((c) => c.key === KEY)
   check('held sub, phone, H.265 main that plays: the stand-in is the main converted for phones, a conversion of its own asking in the background', conv && conv.stream === x.main && conv.type === 0 && conv.opts?.background === true && conv.ws.background === true && x.main.viewers.size === 0, JSON.stringify(x.phone.calls.map((c) => c.key)))
+  check('... its conversion names its camera in the log', conv?.opts?.camera === 'v4/4', JSON.stringify(conv?.opts))
+  conv.ws.send(frame(true)) // the conversion's first frame
+  check('... its stand-in logged as held, and converted for a phone', heldLogs.at(-1) ==="[sub-bridge] v4/4, local viewer, sub-stream held at the NVR's limit, main converted for a phone: stand-in started: the main stream until the sub-stream's first frame", heldLogs.join(' | '))
   check('... the held sub-stream itself is not thinned (nothing to thin; no conversion place held for it)', !x.phone.calls.some((c) => c.key === 'v4/3/1') && x.sub.viewers.has(x.w))
   x.w.send(frame(true)) // the sub-stream's first frame (there is room now): the stand-in ends
   check('... its first frame ends the stand-in, and the converted stream is let go', x.phone.detached.length === 1 && x.phone.detached[0].key === KEY && x.phone.detached[0].ws === conv.ws)
@@ -777,7 +929,7 @@ const fanOut = (c, buf, isKey, type, now) => {
     const hub = new StreamHub('v4', (m) => sent.push(m))
     const nvr = { ...mkNvr(), getStream: (ch, type) => hub.getStream(ch, type) }
     const phoneLive = new PhoneLive({ pool: new TranscodePool(16), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {} })
-    const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive })
+    const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive, log: () => {} })
     attach(fakeWs(), phoneReq, { nvr, who: { user: 'ann' }, ch: 3, streamType: 1, clientH265: false, phone15: true })
     const mains = sent.filter((m) => m.t === 'want' && m.ch === 3 && m.type === 0)
     check('... real hub + phone-live: the stand-in\'s conversion asks the worker for the main as background, never foreground', mains.length === 1 && mains[0].background === true && phoneLive.has(KEY), JSON.stringify(sent))
@@ -863,17 +1015,232 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('... "stream":-0 passes the channel check as 0: the main stream all the same, "hd not allowed"', m.ws.texts().some((t) => t.op === 'end' && t.id === 10 && t.code === 1008 && t.reason === 'hd not allowed'), JSON.stringify(m.ws.texts()))
 }
 
+// ---- live-attach.mjs: an H.265 main standing in for a browser without H.265 is said once in
+// H265_QUIET_MS per camera and viewer. It sends nothing and ends at once, and the tile, with no
+// picture, asks again every 8-16 s: 14-16 held tiles on value4u were about 2 lines a second for as
+// long as the owner's page was open (review of 29 Sep) ----
+{
+  // a main stream as stream-hub.mjs has it: add replays its GOP (here an H.265 keyframe) at once
+  const mkStream = (gop) => ({ gop, viewers: new Set(), add(w) { this.viewers.add(w); for (const m of this.gop) w.send(m) }, remove(w) { this.viewers.delete(w) } })
+  const h265Key = () => { const b = frame(true); b[1] = 1; return b }
+  const mkNvr = () => ({
+    id: 'v4', liveOnline: true, streams: new Map(),
+    subHeld: () => true,
+    getStream(ch, type) {
+      const k = `${ch}/${type}`
+      if (!this.streams.has(k)) this.streams.set(k, mkStream(type === 1 ? [] : [h265Key()]))
+      return this.streams.get(k)
+    }
+  })
+  const fakeWs = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, sent: [], send(d) { this.sent.push(d) }, on() { return this }, close() {} })
+  const deskReq = (cookie = 'c=1') => ({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'user-agent': 'Desktop', cookie } })
+  const logs = []
+  let t = 0
+  const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive: {}, log: (l) => logs.push(l), now: () => t })
+  const nvr = mkNvr()
+  const open = (ch = 19, r = deskReq()) => attach(fakeWs(), r, { nvr, who: { user: 'ann' }, ch, streamType: 1, clientH265: false, phone15: false })
+  open()
+  check('an H.265 stand-in for a browser without H.265: one line, saying it is said once in 10 min', logs.length === 1 && logs[0] === "[sub-bridge] v4/20, remote viewer, sub-stream held at the NVR's limit: stand-in ended after 0.0 s, having sent nothing (the main stream is H.265, which this browser cannot play); said once in 10 min for this camera and viewer", JSON.stringify(logs))
+  for (let i = 1; i <= 50; i++) {
+    t = i * 10_000 // the tile asking again every 10 s, for 500 s
+    open()
+  }
+  check('... asked again every 10 s for 500 s: nothing more', logs.length === 1, `${logs.length} lines`)
+  open(20)
+  open(19, deskReq('c=2'))
+  check('... another camera, or another viewer: its own line', logs.length === 3 && logs[1].startsWith('[sub-bridge] v4/21, ') && logs[2].startsWith('[sub-bridge] v4/20, '), JSON.stringify(logs.slice(1)))
+  t = H265_QUIET_MS
+  open()
+  check('... 10 min on: said again, with how many were left out', logs.length === 4 && logs[3].endsWith('; said once in 10 min for this camera and viewer, 50 left out since the last'), logs.at(-1))
+}
+
+// ---- a remote page with stand-ins, in the real pipeline: live-attach.mjs, sub-bridge.mjs,
+// stream-hub.mjs and the page's socket over a link of 5 Mbit/s, the owner's tunnel on 29 Sep (3.5-6.5
+// Mbit/s). A stand-in's main reaches the parent once the stand-in wants it: first the worker's replay
+// of its GOP so far, at once, through the fan-out (verify-6), then its frames as they come. H.264
+// throughout (this PC plays no H.265: the H.265 mains of a page stand in for nothing). ----
+{
+  const LINK = 5e6 / 8 // bytes a second
+  const STEP = 5 // ms
+  const bufs = new Map()
+  /** A frame of `size` bytes, H.264; body[21] says whose: 'M' a main stream's, 'S' a sub-stream's. */
+  const tagged = (key, main, size) => {
+    const k = `${key}${main}${size}`
+    if (!bufs.has(k)) bufs.set(k, frame(key, main ? 77 : 83, size))
+    return bufs.get(k)
+  }
+  /**
+   * The page's tiles subscribe 15 ms apart, from 0, and it plays for durMs; at full, every tile on the
+   * camera's own stream (the level controller is adaptive-live.test's).
+   * @param {string} addr the viewer's address: 127.0.0.1 through the tunnel, else the local network
+   * @param {{ subs: { ch: number, cam: object }[], mains: { [ch: number]: [number, number, number, number] },
+   *   held?: number[], durMs: number, keysOnly?: boolean }} page mains: a stand-in's main as [Mbit/s,
+   *   keyframe KB, GOP KB, running since (ms, before the page opened: where in its GOP it is)], 20 fps;
+   *   held: sub-streams held at the NVR's limit; keysOnly: the mains' keyframes alone reach the stand-ins
+   *   (with a local address: keyframes only, under nothing but the stand-in's own gate)
+   * @returns {{ maxQueue: number, subWaitMs: number, standIn: number, pictures: Map<number, { at: number, key: boolean }[]>, logs: string[] }}
+   *   maxQueue: the most the page's socket had queued; subWaitMs: the longest a sub-stream's frame
+   *   waited on it; standIn: the stand-ins' bytes; pictures: per channel, when its stand-in's frames went
+   */
+  const playPage = (addr, { subs: tiles, mains: measured, held = [], durMs, keysOnly = false }) => {
+    const hub = new StreamHub('nvr-2', () => {}, { stopDelayMs: { 0: 5, 1: 5 } })
+    const nvr = { id: 'nvr-2', liveOnline: true, getStream: (ch, type) => hub.getStream(ch, type), subHeld: (ch) => held.includes(ch), subFull: () => false }
+    const adaptiveLive = { attach(key, { ws, source }) { source.add(ws); ws.on('close', () => source.remove(ws)) } }
+    const logs = []
+    const attachLive = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive, phoneLive: {}, log: (l) => logs.push(l) })
+    const r = { socket: { remoteAddress: addr }, headers: { 'user-agent': 'Desktop', cookie: 'c=1' } }
+    const { ws, state } = setup({ attach: (channel, s) => attachLive(channel, r, { nvr, who: { user: 'ann' }, ch: s.ch, streamType: s.stream, clientH265: false, phone15: false }) })
+    const src = (ch, type, cam) => ({ ch, type, cam, stream: hub.getStream(ch, type), next: Math.ceil(cam.from / cam.every), first: Math.ceil(cam.from / cam.every), lastKey: null, replayed: false })
+    const subs = tiles.map((t) => src(t.ch, 1, t.cam))
+    const mains = Object.entries(measured).map(([ch, [mbps, keyKB, gopKB, from]]) => src(Number(ch), 0, camera({ fps: 20, kbps: mbps * 1000, gopS: (gopKB * 8) / (mbps * 1000), keyShare: keyKB / gopKB, from })))
+    // every frame of a stream due by `upTo` (ms after the page opened)
+    const frames = (s, upTo) => {
+      while (s.next * s.cam.every <= upTo) {
+        const n = s.next++
+        const key = (n - s.first) % s.cam.perGop === 0
+        if (key) s.lastKey = n
+        if (s.type === 0 && !s.stream.wanted) continue
+        if (s.type === 0 && !s.replayed) {
+          s.replayed = true
+          for (let m = s.lastKey; m < (keysOnly ? Math.min(n, s.lastKey + 1) : n); m++) s.stream.onFrame(tagged(m === s.lastKey, true, m === s.lastKey ? s.cam.key : s.cam.delta), m === s.lastKey)
+        }
+        if (s.type === 0 && keysOnly && !key) continue
+        s.stream.onFrame(tagged(key, s.type === 0, key ? s.cam.key : s.cam.delta), key)
+      }
+    }
+    for (const s of subs) if (s.cam.from < 0) frames(s, -1)
+    for (const s of mains) frames(s, -1)
+    // the link: each message is written once the link has had the time for all of it; the time each
+    // one was queued at is kept beside the socket's queue, in the same order
+    const queuedAt = []
+    let stamped = 0
+    let credit = 0
+    const out = { maxQueue: 0, subWaitMs: 0, standIn: 0, pictures: new Map(), logs }
+    for (let at = 0; at <= durMs; at += STEP) {
+      state.t = at
+      credit += (LINK * STEP) / 1000
+      while (ws.queue.length && credit >= ws.queue[0].bytes) {
+        credit -= ws.queue[0].bytes
+        const m = queuedAt.shift()
+        if (m.sub) out.subWaitMs = Math.max(out.subWaitMs, at - m.at)
+        ws.drain(1)
+      }
+      if (!ws.queue.length) credit = 0 // an idle link saves nothing up
+      subs.forEach((s, i) => { if (at === i * 15) ws.msg({ op: 'sub', id: s.ch + 1, nvr: 'nvr-2', ch: s.ch, stream: 1 }) })
+      for (const s of subs) frames(s, at)
+      for (const s of mains) frames(s, at)
+      for (; stamped < ws.sent.length; stamped++) {
+        const d = ws.sent[stamped]
+        const f = typeof d === 'string' ? null : Buffer.concat(d.parts)
+        queuedAt.push({ at, sub: f?.[4 + 21] === 83 })
+        if (f?.[4 + 21] === 77) {
+          out.standIn += f.length - 4
+          const ch = f.readUInt32LE(0) - 1
+          out.pictures.set(ch, [...(out.pictures.get(ch) ?? []), { at, key: f[4] === 1 }])
+        }
+      }
+      out.maxQueue = Math.max(out.maxQueue, ws.bufferedAmount)
+    }
+    return out
+  }
+  const mb = (n) => (n / 1e6).toFixed(2)
+  const said = (a, b) => `remote: ${mb(a.maxQueue)} MB queued at most, sub frames waiting up to ${a.subWaitMs} ms, ${mb(a.standIn)} MB of stand-ins; every frame: ${mb(b.maxQueue)} MB, ${b.subWaitMs} ms, ${mb(b.standIn)} MB`
+  /**
+   * A stand-in's pictures: how many, all keyframes, the first (ms after its tile asked), and the longest
+   * without one until `until`: from its tile asking (gap), and once it had one (apart: what its tile
+   * counts as no video, live-tile.js; one with no picture yet waits without saying so).
+   */
+  const shown = (o, ch, askedAt, until) => {
+    const p = (o.pictures.get(ch) ?? []).filter((x) => x.at <= until)
+    const edges = [askedAt, ...p.map((x) => x.at), until]
+    const gaps = edges.slice(1).map((x, i) => x - edges[i])
+    return { ch, n: p.length, keys: p.every((x) => x.key), first: p.length ? p[0].at - askedAt : null, gap: Math.max(...gaps), apart: p.length ? Math.max(...gaps.slice(1)) : null }
+  }
+
+  // The 03:55 page of 29 Sep (stutter report 2.6, verify-6; the page adaptive-live.test.mjs replays for
+  // its levels): 16 nvr-2 sub tiles, 5 of them running, 11 cold and starting when the journal has them
+  // start (1.05 to 29.32 s after the page opened), each 250 kbit/s at 18-30 fps. The H.264 mains of three
+  // of the cold ones stand in until then, as measured: nvr-2/10 5.18 Mbit/s, keyframe 634 KB of a 1279
+  // KB GOP, until 8.58 s; /17 3.99 Mbit/s, 499 of 950 KB, until 10.27 s; /21 2.25 Mbit/s, 243 of 690 KB,
+  // until 27.13 s.
+  const cold = [1.05, 2.16, 3.35, 4.72, 6.51, 8.58, 10.27, 12.25, 24.38, 27.13, 29.32]
+  const coldCh = [2, 3, 4, 6, 7, 9, 16, 18, 19, 20, 21] // cams 3, 4, 5, 7, 8, 10, 17, 19, 20, 21, 22
+  const warmCh = [0, 1, 5, 17, 22] // cams 1, 2, 6, 18, 23
+  const fps = [20.6, 20.6, 30, 30, 18.3, 20.6, 30, 25.4, 30, 30, 20, 20, 25.4, 27.5, 30, 20]
+  const p0355 = {
+    subs: [
+      ...warmCh.map((ch, i) => ({ ch, cam: camera({ fps: fps[i], kbps: 250, from: -5000 - i * 413 }) })),
+      ...coldCh.map((ch, i) => ({ ch, cam: camera({ fps: fps[5 + i], kbps: 250, from: cold[i] * 1000 }) }))
+    ],
+    mains: { 9: [5.18, 634, 1279, -10_000], 16: [3.99, 499, 950, -10_700], 20: [2.25, 243, 690, -11_300] },
+    durMs: 32_000
+  }
+  const before = playPage('192.168.1.20', p0355) // every frame, as a local viewer still gets them, and as a remote one did
+  const after = playPage('127.0.0.1', p0355) // through the tunnel
+  console.log(`INFO  the 03:55 page open over 5 Mbit/s, ${said(after, before)}`)
+  check('the 03:55 page with every stand-in frame (as on 29 Sep): the page backs up over 4 MB, its tiles over 6 s behind', before.maxQueue > 4e6 && before.subWaitMs > 6000, said(after, before))
+  // Keyframes alone are still about half of these mains (/10: 634 KB of its 1279 KB GOP every 2 s, 2.6
+  // Mbit/s). Keyframes only, under nothing but the stand-in's own gate (its 4 MB cap; verify-6's fix as
+  // it stood): as bad as every frame. Hence a remote viewer's waits for the page's room (sub-bridge.mjs).
+  const gated = playPage('192.168.1.20', { ...p0355, keysOnly: true })
+  const gatedSaid = `${mb(gated.maxQueue)} MB queued at most, sub frames waiting up to ${gated.subWaitMs} ms, ${mb(gated.standIn)} MB of stand-ins`
+  console.log(`INFO  ... keyframes only under the stand-in's own cap: ${gatedSaid}`)
+  check('... keyframes only, under the stand-in\'s own 4 MB cap: still over 4 MB queued, its tiles over 6 s behind', gated.maxQueue > 4e6 && gated.subWaitMs > 6000, gatedSaid)
+  // a stand-in's keyframe goes only if the page's queue with it goes within ROOM_S (0.6 s) at the rate
+  // its socket drains, or, that rate not measured yet, into less than RESUME_BELOW: at most that and
+  // the biggest keyframe (634 KB), with the frames the page's tiles send meanwhile
+  check('... a remote viewer\'s: under 1.1 MB queued, and no tile\'s frame waits 2 s', after.maxQueue < 1.1e6 && after.subWaitMs < 2000, said(after, before))
+  // ROOM_S of 5 Mbit/s is 375 KB with what the page has queued. /21's 243 KB keyframes fit, one a GOP
+  // once the page's opening replays have gone; /10's 634 KB and /17's 499 KB never do. /10's first
+  // went as its tile asked, the page's rate not measured yet, and its tile held that picture until its
+  // own sub-stream came, 8.4 s on; /17's showed nothing until its own.
+  const shows = [9, 16, 20].map((ch) => shown(after, ch, p0355.subs.findIndex((t) => t.ch === ch) * 15, cold[coldCh.indexOf(ch)] * 1000))
+  const [s10, s17, s21] = shows
+  check('... its stand-ins: keyframes that fit the page\'s room: /21\'s one a GOP (2.45 s) from 3.2 s, /17\'s none, /10\'s first alone, as its tile asked', shows.every((s) => s.keys) && s21.n >= 8 && s21.first < 3500 && s21.apart <= 2450 && s17.n === 0 && s10.n === 1 && s10.first === 0, JSON.stringify(shows))
+  check('... its log lines say keyframes', after.logs.some((l) => /^\[sub-bridge\] nvr-2\/10, remote viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): \d+ keyframes?, [\d.]+ MB sent, \d+ held back(, \d+ left out once the sub-stream ran)?$/.test(l)), after.logs.join(' | '))
+  // (With every frame all three showed at once, 7 s behind like every tile of the page. With keyframes
+  // let through while the page had less than RESUME_BELOW queued, /10's came at least every 4 s, but
+  // they stepped the whole page down in about half the phases of its keyframes: adaptive-live.test.mjs.
+  // That is the cost: a main whose keyframe is more than ROOM_S of the link shows nothing, or at a
+  // page's opening its first picture held, until its own sub-stream comes, as with no stand-in. Held
+  // 8.4 s, as /10's here, its tile says "no video" from 5 s and may reconnect at 8 (live-tile.js looks
+  // once a second).)
+
+  // A tile held at the NVR's sub-stream limit (value4u holds 14-16 for minutes; verify-6), its main as
+  // nvr-2/21's (2.25 Mbit/s, 243 KB keyframes every 2.45 s), on a page of 15 running sub-streams (3.75
+  // Mbit/s): its first picture once the page's opening replays have gone, then one a GOP, never long
+  // enough without one for its tile to say "no video" (5 s, live-tile.js NO_VIDEO_MS), and the page
+  // keeps up. With every frame the page carries 6 Mbit/s.
+  const pHeld = {
+    subs: [
+      ...Array.from({ length: 15 }, (_, ch) => ({ ch, cam: camera({ fps: 20 + (ch % 3) * 5, kbps: 250, from: -3000 - ch * 211 }) })),
+      { ch: 15, cam: camera({ fps: 20, kbps: 250, from: 1e9 }) }
+    ],
+    mains: { 15: [2.25, 243, 690, -11_300] },
+    held: [15],
+    durMs: 60_000
+  }
+  const heldBefore = playPage('192.168.1.20', pHeld)
+  const heldAfter = playPage('127.0.0.1', pHeld)
+  console.log(`INFO  a held tile's stand-in for 60 s, ${said(heldAfter, heldBefore)}`)
+  const h = shown(heldAfter, 15, 15 * 15, pHeld.durMs)
+  check('a held tile\'s stand-in on a remote page: its first within 6 s, then a keyframe a GOP (2.45 s)', h.keys && h.n >= 20 && h.first < 6000 && h.apart <= 2450, JSON.stringify(h))
+  check('... and the page keeps up: under 1 MB queued, no tile\'s frame waits 1.5 s (every frame: over 4 MB, 6 s)', heldAfter.maxQueue < 1e6 && heldAfter.subWaitMs < 1500 && heldBefore.maxQueue > 4e6 && heldBefore.subWaitMs > 6000, said(heldAfter, heldBefore))
+  check('... its lines say it is held, and keyframes', heldAfter.logs[0] === "[sub-bridge] nvr-2/16, remote viewer, sub-stream held at the NVR's limit: stand-in started: the main stream's keyframes until the sub-stream's first frame", heldAfter.logs.join(' | '))
+}
+
 // ---- server.mjs wiring (source shape: importing server.mjs starts the NVRs) ----
 {
   const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
   check('the upgrade lets /live-mux through, with the same origin and session checks as /live', /\['\/live', '\/live-mux', '\/playback', '\/motion'\]\.includes\(url\.pathname\) \|\| !sameOrigin \|\| !currentUser\(req\)/.test(src))
   check('/live-mux is upgraded by a ws server of its own, whose maxPayload is MAX_MESSAGE_BYTES', /const muxWss = new WebSocketServer\(\{ noServer: true, maxPayload: MAX_MESSAGE_BYTES \}\)/.test(src) && /const server = url\.pathname === '\/live-mux' \? muxWss : wss\n\s*server\.handleUpgrade\(req, socket, head, \(ws\) => server\.emit\('connection', ws, req\)\)/.test(src))
-  check('... pinged like the others, with the same connection handler', /keepAlive\(muxWss\)/.test(src) && /wss\.on\('connection', onConnection\)/.test(src) && /muxWss\.on\('connection', onConnection\)/.test(src))
+  check('... pinged like the others (a pong late behind its backlog is waited for: backpressure.test), with the same connection handler', /keepAlive\(muxWss, \{ quiet: /.test(src) && /wss\.on\('connection', onConnection\)/.test(src) && /muxWss\.on\('connection', onConnection\)/.test(src))
   const conn = src.slice(src.indexOf('const onConnection'))
-  check('/live-mux is served right after meterSocket, before the NVR lookup', /meterSocket\(ws, [^)]*\)\n[\s\S]*?if \(url\.pathname === '\/live-mux'\) \{\n\s*serveMux\(ws,/.test(conn) && conn.indexOf("'/live-mux'") < conn.indexOf('nvrs.get('))
+  check('/live-mux is served right after meterSocket, before the NVR lookup', /meterSocket\(ws, [^)]*\)\n[\s\S]*?if \(url\.pathname === '\/live-mux'\) \{\n\s*pageSockets\.set\(ws, serveMux\(ws,/.test(conn) && conn.indexOf("'/live-mux'") < conn.indexOf('nvrs.get('))
   check('/live and every mux channel go through the same attachLive (live-attach.mjs)', (src.match(/attachLive\((ws|channel), req,/g) ?? []).length === 2 && /const attachLive = liveAttacher\(\{ can, currentUser, adaptiveLive, phoneLive, track: watch\.track \}\)/.test(src) && !/function attachLive/.test(src))
   check('the session is checked again for each sub', /session: \(\) => currentUser\(req\)/.test(src))
   check('/live parses its stream once, strictly (stream-param.mjs)', /streamType: streamParam\(url\.searchParams\.get\('stream'\)\)/.test(src) && !/Number\(url\.searchParams\.get\('stream'\)/.test(src))
+  check('the page socket\'s close is logged as remote or local, by the rule live-attach uses', /serveMux\(ws, \{[\s\S]{0,400}?who: isRemoteAddress\(req\.socket\.remoteAddress\) \? 'remote' : 'local'/.test(src))
 }
 
 // ---- over a real ws socket ----

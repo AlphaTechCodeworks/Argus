@@ -12,6 +12,7 @@ import {
   CODEC_H265,
   DECODE_THREADS,
   DEFAULT_MAX,
+  GOP_FRAMES,
   NICE,
   PLAYBACK_LIMITS,
   RENDER_NODE,
@@ -123,6 +124,17 @@ const check = (name, ok, extra = '') => {
   const hw = ffmpegArgs({ encoder: 'h264_vaapi' }).join(' ')
   check('  hardware: h264_vaapi on the render node, decode and encode both on the GPU', /-c:v h264_vaapi/.test(hw) && hw.includes(RENDER_NODE) && /-hwaccel vaapi/.test(hw) && /-hwaccel_output_format vaapi/.test(hw), hw)
   check('  hardware output is still raw H.264 on stdout', /-f h264 pipe:1/.test(hw) && !/libx264/.test(hw))
+
+  // The keyframe interval, in pictures out. 50 unless the caller says: playback and a phone on the
+  // local network are unchanged. A remote viewer's live conversion asks for 2 s of its own output
+  // rate (phone-live.mjs gopFor): 50 pictures was 3.3 s at 15 fps and 12.5 s at 4, the wait for a
+  // picture after every drop (stutter report 2.7).
+  check('gop: a keyframe every 50 pictures when not given (playback, phones: unchanged)', GOP_FRAMES === 50 && / -g 50 /.test(s) && / -g 50 /.test(capped) && / -g 50 /.test(hw), s)
+  const g60 = ffmpegArgs({ encoder: 'libx264', ...PLAYBACK_LIMITS, gop: 60 }).join(' ')
+  check('  gop 60: -g 60, and no other keyframe interval', / -g 60 /.test(g60) && (g60.match(/ -g /g) ?? []).length === 1, g60)
+  check('  on the GPU too', / -g 40 /.test(ffmpegArgs({ encoder: 'h264_vaapi', gop: 40 }).join(' ')))
+  const odd = [0, -3, 2.5, NaN, '30', null].map((gop) => ffmpegArgs({ encoder: 'libx264', gop }).join(' ').match(/ -g (\S+) /)?.[1])
+  check('  anything but a whole number above 0: the default 50', J(odd) === J(['50', '50', '50', '50', '50', '50']), J(odd))
   check('probeArgs: a short self-contained encode that proves the GPU really works', probeArgs().join(' ').includes('-c:v h264_vaapi') && probeArgs().join(' ').includes('-f null'))
 }
 
@@ -241,6 +253,18 @@ function harness(opts = {}) {
   fireIdle()
   check('  the last picture follows once ffmpeg has gone quiet (a scrub shows its still)', frames.length === 3 && frames[2].ts === 2080)
 
+  // pending: the pictures pushed in and not handed back yet, those ffmpeg keeps (a live conversion's
+  // backlog: phone-live.mjs resets one that falls too far behind the camera)
+  const hp = harness({ keepEvery: 2 })
+  const was = hp.t.pending
+  hp.t.push(3000, true, IDR)
+  for (const ts of [3040, 3080, 3120, 3160]) hp.t.push(ts, false, P)
+  const kept = hp.t.pending
+  hp.procs[0].stdout.emit('data', Buffer.concat([SPS, PPS, IDR, P]))
+  const afterOne = hp.t.pending
+  hp.t.reset()
+  check('  pending: the pictures kept (1 in 2) pushed in and not handed back; none after a reset', was === 0 && kept === 3 && afterOne === 2 && hp.t.pending === 0, J([was, kept, afterOne, hp.t.pending]))
+
   // frames handed back in presentation order get the presentation times, not a shuffled set
   const h2 = harness()
   h2.t.push(5000, true, IDR)
@@ -280,7 +304,12 @@ function harness(opts = {}) {
   const h5 = harness()
   h5.t.push(1000, true, IDR)
   check('  lowDelay not given: low_delay, as before', /low_delay/.test(h5.procs[0].args.join(' ')))
+  check('  gop not given: a keyframe every 50 pictures, as before', / -g 50 /.test(h5.procs[0].args.join(' ')), h5.procs[0].args.join(' '))
   h5.t.close()
+  const h7 = harness({ gop: 30 })
+  h7.t.push(1000, true, IDR)
+  check('  the keyframe interval it is given reaches ffmpeg (gop)', / -g 30 /.test(h7.procs[0].args.join(' ')), h7.procs[0].args.join(' '))
+  h7.t.close()
 }
 
 // ---- ending a picture: a scrub's single keyframe ------------------------------------------------

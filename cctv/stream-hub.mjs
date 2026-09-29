@@ -29,7 +29,12 @@ export class HubStream {
     this.fg = false // a real viewer (not only a warm-up) has asked for it: told to the worker
   }
 
-  add(ws) {
+  /**
+   * @param {{ replay?: boolean }} [o] replay false: nothing is replayed, and the socket starts where
+   *   its waitForKey says (a socket adaptive-live.mjs moves here at this stream's keyframe, from inside
+   *   its fan-out: it takes that keyframe as it goes out, once)
+   */
+  add(ws, { replay = true } = {}) {
     clearTimeout(this.stopTimer)
     this.stopTimer = null
     this.clients.add(ws)
@@ -42,6 +47,7 @@ export class HubStream {
       this.fg = true
       this.hub.send(want(this.ch, this.type, false))
     }
+    if (!replay) return
     // replay the current GOP so the picture appears without waiting for the next keyframe
     if (this.gop.length > 0) replayGop(this.gop, ws)
     else ws.waitForKey = true

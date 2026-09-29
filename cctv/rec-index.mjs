@@ -45,6 +45,15 @@ CREATE INDEX IF NOT EXISTS segments_start ON segments (start_ms);
 -- they are meant to be, so it costs nothing to keep. Building it on an index that predates it reads
 -- every row once, at the first start with this code.
 CREATE INDEX IF NOT EXISTS segments_long ON segments (nvr, ch, end_ms) WHERE ${LONG_ROW};
+-- One storage location's rows (LOCATION_SQL): locationUse('ram-spool') every 30 s read every row to
+-- find the spool's few or none, 40 ms of the main thread on production's 377,000 (29 Sep). start_ms
+-- keeps the oldest files of a location in order without a sort: an index on loc alone, or on (loc,
+-- bytes), had the main drive's oldest(50) sort all of its rows instead of walking segments_start
+-- (0.3-1.3 s on a 377,000-row copy). Building it on an index that predates it reads every row once,
+-- at the first start with this code: 1.6-1.8 s and 11 MB more file for 377,000 synthetic rows on the
+-- development PC (whose full scan of them takes 200-270 ms, against 40 ms on production); every open
+-- after that, 7-10 ms.
+CREATE INDEX IF NOT EXISTS segments_loc ON segments (loc, start_ms);
 CREATE TABLE IF NOT EXISTS gaps (
   id INTEGER PRIMARY KEY, nvr TEXT NOT NULL, ch INTEGER NOT NULL, from_ms INTEGER NOT NULL,
   to_ms INTEGER NOT NULL, reason TEXT);
@@ -152,6 +161,17 @@ export const CAMERA_SQL = {
   firstCh: 'SELECT MIN(ch) AS ch FROM segments WHERE nvr = ?',
   nextCh: 'SELECT MIN(ch) AS ch FROM segments WHERE nvr = ? AND ch > ?'
 }
+/**
+ * The lookups on one storage location: locationUse() (the RAM spool's rows, every 30 s on the main
+ * thread: nvrs.mjs watchSpool, ram-spool.mjs) and the oldest files on one location (housekeeping and
+ * thinning, every 5 min per location; ram-spool.mjs). Kept here as text so rec-index-scans.test.mjs
+ * can check each one's query plan.
+ */
+export const LOCATION_SQL = {
+  locBytes: 'SELECT COALESCE(SUM(bytes), 0) AS b, COUNT(*) AS n FROM segments WHERE loc = ?',
+  oldestAt: `SELECT ${SEG_COLS} FROM segments WHERE loc = ? ORDER BY start_ms LIMIT ?`,
+  oldestOf: `SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND loc = ? ORDER BY start_ms LIMIT ?`
+}
 /** lastSegmentEnd() without a bound: later than any start. */
 const NO_BOUND = Number.MAX_SAFE_INTEGER
 const plain = (r) => ({ ...r }) // node:sqlite rows have a null prototype
@@ -193,13 +213,13 @@ export function openRecIndex(file) {
     byPath: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE path = ?`),
     gaps: db.prepare('SELECT nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason FROM gaps WHERE nvr = ? AND ch = ? AND to_ms >= ? AND from_ms <= ? ORDER BY from_ms'),
     oldest: db.prepare(`SELECT ${SEG_COLS} FROM segments ORDER BY start_ms LIMIT ?`),
-    oldestAt: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE loc = ? ORDER BY start_ms LIMIT ?`),
-    oldestOf: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND loc = ? ORDER BY start_ms LIMIT ?`),
+    oldestAt: db.prepare(LOCATION_SQL.oldestAt),
+    oldestOf: db.prepare(LOCATION_SQL.oldestOf),
     olderThan: db.prepare(CAMERA_SQL.olderThan),
     remove: db.prepare('DELETE FROM segments WHERE path = ?'),
     // ram-spool.mjs: a segment copied from memory to a drive keeps its row, with its new place
     moveSeg: db.prepare('UPDATE segments SET path = ?, loc = ? WHERE path = ?'),
-    locBytes: db.prepare('SELECT COALESCE(SUM(bytes), 0) AS b, COUNT(*) AS n FROM segments WHERE loc = ?'),
+    locBytes: db.prepare(LOCATION_SQL.locBytes),
     has: db.prepare('SELECT 1 AS one FROM segments WHERE path = ?'),
     firstNvr: db.prepare(CAMERA_SQL.firstNvr),
     nextNvr: db.prepare(CAMERA_SQL.nextNvr),

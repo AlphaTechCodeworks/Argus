@@ -430,6 +430,69 @@ const wire = (isKey, codec, payload, ts = 0) => {
   await rec.stop()
 }
 
+// ---- the sub-stream a trickling main dropped to is refused at once: back to the main within seconds.
+// 29 Sep, value4u cam 25: "only trickled video ... recording the sub-stream" at 04:21:03, the sub
+// "refused ... trying again in 513 s" at 04:21:10, and "not recorded 04:20:58 - 04:29:44": 525 s of a
+// camera that was sending video (stutter report 2.10). Long past the start: a refusal backs off 5-10 min.
+{
+  const streams = new Map()
+  const asked = [] // stream types asked for, in order (0 main, 1 sub)
+  const sent = []
+  let now = Date.UTC(2026, 8, 29, 4, 20, 48)
+  const rec = new Recorder({ nvrId: 'v4', getStream: (ch, type) => { asked.push(type); const k = `${ch}:${type}`; return streams.get(k) ?? streams.set(k, fakeStream()).get(k) }, online: () => true, channels: () => [24], send: (m) => sent.push(m), now: () => now, writerOpts: { rollOffsetMs: 0 } })
+  rec.startedAt = -Infinity
+  rec.apply({ recording: recording({ 'v4/24': { mode: 'continuous' } }), locations: [location('LV4')] })
+  const tapOn = (type) => [...(streams.get(`24:${type}`)?.clients ?? [])][0]
+  const key = async (type) => { tapOn(type)?.send(wire(true, 1, Buffer.from([0, 0, 0, 1, 0x26, 0]), now)); await rec.idle() }
+  const ticks = (ms) => { for (let t = 0; t < ms; t += 250) { now += 250; rec.tick() } }
+  const gaps = () => sent.filter((m) => m.t === 'recgap').map(({ fromMs, toMs, reason }) => ({ fromMs, toMs, reason }))
+  const warned = []
+  const warn = console.warn
+  console.warn = (line) => warned.push(String(line))
+  // the main trickles: keyframes 5 s apart, and the third short gap drops the camera to its sub
+  await key(0)
+  for (let i = 0; i < 2; i++) { now += 5000; await key(0) }
+  const lastMain = now // 04:20:58, the last frame written
+  now += 5000
+  await key(0)
+  ticks(250)
+  check('trickle, then sub: the camera is on its sub-stream', tapOn(1) && !tapOn(0) && J(asked) === '[0,1]', J(asked))
+  // the NVR sends nothing on the sub: 7 s later it counts as refused (LiveStream.lastFailure, fast)
+  now += 7000
+  streams.get('24:1').lastFailure = { at: now, fast: true, reason: 'no video within 8 s' }
+  const tRefused = now
+  rec.tick()
+  ticks(5000)
+  check('sub refused within 60 s of the trickle drop: back on the main stream within 5 s', tapOn(0) && !tapOn(1) && J(asked) === '[0,1,0]', J(asked))
+  check('... not the 5-10 min back-off', !(rec.cams.get(24).refusedUntil > now), `refusedUntil ${rec.cams.get(24).refusedUntil ? `now +${rec.cams.get(24).refusedUntil - now} ms` : 0}`)
+  check('... and says so', warned.some((l) => /^\[rec v4\/25\] refused by the NVR \(no video within 8 s\): the sub-stream it dropped to for a main that only trickled; back to the main stream now, the sub-stream left alone for \d+ s$/.test(l)), warned.join(' | '))
+  now += 1000
+  await key(0) // the trickle comes back into the file
+  // (the trickle's first two short gaps have rows of their own, before lastMain)
+  const g = gaps().filter((r) => r.fromMs >= lastMain)
+  check('... one gap row, from the last frame written to the main\'s first frame back: seconds, not 525 s', g.length === 1 && g[0].fromMs === lastMain && g[0].toMs === now && now - lastMain < 30_000, `${J(g)}, ${(now - lastMain) / 1000} s (refused at +${(tRefused - lastMain) / 1000} s)`)
+  // the main goes on trickling: while the sub is left alone, the trickle is recorded, not dropped again
+  for (let i = 0; i < 4; i++) { now += 5000; await key(0); ticks(250) }
+  check('... the trickle goes on being recorded: no drop to the refused sub-stream while it is left alone', tapOn(0) && !tapOn(1) && J(asked) === '[0,1,0]', J(asked))
+  // ...until its back-off is over (10 min at most): then a trickle drops it to the sub again
+  now = (rec.cams.get(24).subRefusedUntil || now + 10 * 60_000) + 1000
+  await key(0)
+  for (let i = 0; i < 3; i++) { now += 5000; await key(0) }
+  ticks(250)
+  check('... after the sub-stream\'s back-off, a trickle drops it to the sub again', tapOn(1) && !tapOn(0) && J(asked) === '[0,1,0,1]', J(asked))
+  // this sub records for 2 minutes, then is refused: not just after a drop, so the usual back-off
+  await key(1)
+  now += 120_000
+  await key(1)
+  streams.get('24:1').lastFailure = { at: now, fast: true, reason: 'refused in 30 ms: error 31' }
+  rec.tick()
+  const wait = rec.cams.get(24).refusedUntil - now
+  ticks(5000)
+  check('a sub refused 2 min after the drop (it recorded meanwhile): the usual 5-10 min back-off, as before', !tapOn(0) && !tapOn(1) && wait >= 5 * 60_000 && wait <= 10 * 60_000 && J(asked) === '[0,1,0,1]', `${J(asked)}, ${wait} ms`)
+  console.warn = warn
+  await rec.stop()
+}
+
 // ---- an NVR set to record on its sub-streams (settings recording.nvrs[id].stream = 'sub')
 {
   const streams = new Map()

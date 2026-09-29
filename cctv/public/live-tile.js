@@ -3,6 +3,7 @@
 import { clearStill, maybeKeepStill, showStill } from './stills.js'
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
 import { liveSocket } from './live-mux.js'
+import { activeTrace } from './frame-trace.js'
 
 // Whether this device can play H.265, told to the server with each live stream: a remote viewer
 // who can is sent an H.265 camera as it is (about half the data of H.264 for the same picture)
@@ -102,9 +103,13 @@ export class LiveTile {
    * @param {{ nvr: string, ch: number }} cam
    * @param {number} streamType
    * @param {number} startDelayMs tiles open slightly staggered so a big grid doesn't hit the NVR all at once
-   * @param {{ pacing?: boolean, clock?: object, statsVisible?: () => boolean, onDisconnect?: () => void,
+   * @param {{ pacing?: boolean, clock?: object, maxQueuedFrames?: number, noRewindMs?: number, statsVisible?: () => boolean, onDisconnect?: () => void,
    *   onFirstFrame?: () => void, onUnsupported?: (codecId: number) => void }} [opts]
-   *   clock: PlayoutClock options (the "Smooth" setting); onFirstFrame: the first frame is on screen;
+   *   clock: PlayoutClock options (the "Smooth" setting; a page through the tunnel's REMOTE_CLOCK);
+   *   maxQueuedFrames: decoded frames the player keeps (the tunnel's bigger buffer: viewer.js);
+   *   noRewindMs: no frame shown at or before one shown already, within this (a page through the
+   *   tunnel: player.js REMOTE_NO_REWIND_MS);
+   *   onFirstFrame: the first frame is on screen;
    *   recording: tells the dot whether the server is also recording this camera (red rather than
    *   green); leave it out where that is not known. onUnsupported: replaces the built-in handling (main -> sub fallback, message) when the
    *   browser can't play the stream
@@ -138,7 +143,12 @@ export class LiveTile {
     this.player = new VideoPlayer(tile.querySelector('canvas'), {
       pacing: opts.pacing ?? true,
       paintFirst: true, // the camera appears the moment its first keyframe is decoded
+      // each frame timed as it arrives, and the burst after a hiccup decoded, not dropped to the next
+      // keyframe as if the decoder could not keep up (player.js; stutter report 2.2, 29 Sep)
+      arrivalClock: true,
       clock: opts.clock,
+      maxQueuedFrames: opts.maxQueuedFrames,
+      noRewindMs: opts.noRewindMs,
       maxFps: opts.maxFps,
       onUnsupported: (codecId) => (opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)),
       onFrame: () => {
@@ -239,6 +249,7 @@ export class LiveTile {
       this.connect()
     }
     const s = this.player.stats
+    activeTrace()?.stats(this, s) // the D overlay's frame trace (frame-trace.js), when one runs
     const ws = this.ws
     const open = (this.source ? true : ws && ws.readyState === 1) && !this.suspended && !this.closed
     const since = open ? this.now() - (this.lastDataAt || this.now()) : 0
@@ -284,7 +295,8 @@ export class LiveTile {
         `decoded ${s.coded} · visible ${s.visible} · canvas ${this.player?.canvas?.width ?? '?'}×${this.player?.canvas?.height ?? '?'}`,
         `${s.fps} fps · jitter ${s.jitterMs} ms`,
         `buffer ${s.delayMs} ms · ${s.kbps} kbps`,
-        `dropped ${s.dropped} · late ${s.late} · resync ${s.resyncs}`
+        // (older: frames held back for being at or before one shown, on a page through the tunnel)
+        `dropped ${s.dropped} · late ${s.late} · resync ${s.resyncs}${s.older ? ` · older ${s.older}` : ''}`
       ].join('\n')
     }
     // Once a second, which is exactly the resolution of the clock being shown.
@@ -315,9 +327,14 @@ export class LiveTile {
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
     this.connectAt = this.now()
+    // The frame trace (frame-trace.js), when the viewer runs one from the D overlay: each frame as it
+    // arrives here, on this tile's socket or channel, and what happens to the connection. Otherwise
+    // one call per frame that finds none.
+    activeTrace()?.event(this, 'connect', this.streamType === MAIN_STREAM ? 'main' : 'sub')
     this.ws.onopen = () => {
       this.lastDataAt = this.now()
       lastOpenAt = this.lastDataAt
+      activeTrace()?.event(this, 'open')
     }
     this.ws.onmessage = (e) => {
       this.lastDataAt = this.now()
@@ -325,9 +342,12 @@ export class LiveTile {
       // yet); it is activity all the same, so the stall watchdog leaves the tile alone
       if (typeof e.data === 'string') return this.#note(e.data)
       this.attempts = 0
-      this.onMessage(new Uint8Array(e.data))
+      const buf = new Uint8Array(e.data)
+      activeTrace()?.frame(this, buf)
+      this.onMessage(buf)
     }
     this.ws.onclose = (e) => {
+      activeTrace()?.event(this, 'close')
       this.player.reset()
       if (this.closed) return
       // the main stream refused for want of Live HD (at once, or taken away while it played): not
@@ -421,6 +441,7 @@ export class LiveTile {
     if (!src?.lendable || src.streamType !== this.streamType || src.nvr !== this.nvr || src.ch !== this.ch) return false
     this.source = src
     this.lastDataAt = this.now()
+    activeTrace()?.event(this, 'borrow', src) // its frames are the source's, traced there
     for (const m of src.gop) this.onMessage(m)
     this.tap = (buf) => {
       this.lastDataAt = this.now()
@@ -473,6 +494,7 @@ export class LiveTile {
    */
   suspend() {
     this.suspended = true
+    activeTrace()?.event(this, 'suspend')
   }
 
   /**
@@ -482,8 +504,12 @@ export class LiveTile {
    */
   resume() {
     if (!this.suspended || this.closed) return
+    // the frame trace says which way it came back, as its replay must do the same (test/live-replay.mjs
+    // segments); said while still hidden, so a trace that first sees the tile here knows it was
+    const kept = this.lendable
+    activeTrace()?.event(this, 'resume', kept ? 'kept' : 'reconnect')
     this.suspended = false
-    if (this.lendable) {
+    if (kept) {
       this.player.reset()
       for (const m of this.gop) this.#decode(m)
       return
@@ -518,6 +544,7 @@ export class LiveTile {
   }
 
   close() {
+    if (!this.closed) activeTrace()?.event(this, 'end')
     liveTiles.delete(this)
     this.closed = true
     this.#unborrow()

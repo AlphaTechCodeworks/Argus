@@ -69,6 +69,12 @@ const FROZEN_MS = 45_000
 const STUTTER_WINDOW_MS = 90_000
 const STUTTER_COUNT = 3
 const STUTTER_REASON = 'the main stream only trickled video (repeated short gaps)'
+// ...but a trickle is footage, and a sub-stream the NVR refuses is none. One refused within this long
+// of such a drop sends the camera straight back to the main stream, and the sub-stream is left alone
+// for a refusal's back-off (5-10 min) instead of the camera. On 29 Sep value4u refused cam 25's sub
+// 7 s after its main was dropped for trickling, and the camera, still sending video, recorded nothing
+// for the 513 s back-off: 525 s missing (stutter report 2.10).
+const TRICKLE_SUB_MS = 60_000
 // A camera already recording when its stream setting (recording.stream) changes is moved to the stream
 // the setting now calls for, at most one camera per NVR this often. Setting nvr-2 to 'sub' in one go
 // would otherwise stop and start ~25 streams at once on an NVR that is already struggling to serve
@@ -210,7 +216,9 @@ export class Recorder {
       let cam = this.cams.get(ch)
       if (!cam) {
         const now = this.now()
-        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0, pick: { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }, wantType: MAIN, bySetting: false, createdAt: now, frameAt: 0, stutterAt: [] }
+        // (trickleAt: when a trickling main last dropped it to the sub; subRefusedUntil: that sub-stream,
+        // refused just after, is left alone until then: TRICKLE_SUB_MS)
+        cam = { ch, tap: null, stream: null, writer: null, loc: null, locationId: w.locationId, gap: null, lastAt: 0, lastTs: 0, clk: null, waitKey: false, lastError: null, camOnline: true, attachedAt: 0, refusedUntil: 0, pick: { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }, wantType: MAIN, bySetting: false, createdAt: now, frameAt: 0, stutterAt: [], trickleAt: 0, subRefusedUntil: 0 }
         cam.tap = this.#tapFor(cam)
         this.cams.set(ch, cam)
         // recording before the restart (on in the first settings), back now: not recorded from the
@@ -261,16 +269,28 @@ export class Recorder {
       // onSub -- so the refused sub was asked for again at the next tick, and LiveStream restarted it
       // about once a minute for as long as the NVR said no, with a warning each time.)
       const dropping = next.type === SUB && cam.wantType !== SUB
+      // the sub-stream a main that only trickled dropped it to a moment ago (TRICKLE_SUB_MS): back to that main
+      const backToMain = cam.wantType === SUB && cam.trickleAt > 0 && now - cam.trickleAt <= TRICKLE_SUB_MS && this.#streamPref(cam.ch) === 'auto' && !cam.bySetting
       const reason = `refused by the NVR (${f.reason || 'no reason given'})`
       cam.lastError = { at: now, loc: cam.loc?.id ?? null, reason }
       this.#gapFrom(cam, reason)
+      const [lo, hi] = now - this.startedAt < STARTUP_GRACE_MS ? STARTUP_BACKOFF_MS : REFUSED_BACKOFF_MS
       if (dropping) {
         // Worth trying at once rather than after the backoff: every minute spent waiting is a
         // minute of footage that does not exist, and the sub-stream costs the NVR very little.
         cam.refusedUntil = 0
         console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}; ${next.why}`)
+      } else if (backToMain) {
+        // At once (the next tick): the sub-stream waits out the backoff, not the camera. Its pick starts
+        // afresh on the main, so a refusal of that main backs off as any first refusal does, and does not
+        // drop it to the sub it just lost; #noteStutter leaves the trickle alone until subRefusedUntil.
+        cam.subRefusedUntil = now + lo + Math.round(Math.random() * (hi - lo))
+        cam.trickleAt = 0
+        cam.stutterAt = []
+        cam.pick = { refusals: 0, onSub: false, subSince: 0, lastRefusedAt: 0 }
+        cam.refusedUntil = 0
+        console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}: the sub-stream it dropped to for a main that only trickled; back to the main stream now, the sub-stream left alone for ${Math.round((cam.subRefusedUntil - now) / 1000)} s`)
       } else {
-        const [lo, hi] = now - this.startedAt < STARTUP_GRACE_MS ? STARTUP_BACKOFF_MS : REFUSED_BACKOFF_MS
         cam.refusedUntil = now + lo + Math.round(Math.random() * (hi - lo))
         if (!cam.refusedLogged) console.warn(`[rec ${this.nvrId}/${cam.ch + 1}] ${reason}; trying again in ${Math.round((cam.refusedUntil - now) / 1000)} s`)
         if (lo === REFUSED_BACKOFF_MS[0]) cam.refusedLogged = true
@@ -516,11 +536,15 @@ export class Recorder {
    */
   #noteStutter(cam, now) {
     if (cam.wantType !== MAIN || cam.pick?.onSub || !this.allowSubFallback() || this.#streamPref(cam.ch) !== 'auto') return false
+    // the sub-stream refused just after the last drop (TRICKLE_SUB_MS): the trickle is all there is
+    // until that sub's back-off is over, and is recorded, gaps and all
+    if (now < cam.subRefusedUntil) return false
     cam.stutterAt.push(now)
     const cutoff = now - STUTTER_WINDOW_MS
     while (cam.stutterAt.length && cam.stutterAt[0] < cutoff) cam.stutterAt.shift()
     if (cam.stutterAt.length < STUTTER_COUNT) return false
     cam.stutterAt = []
+    cam.trickleAt = now
     cam.pick = { ...cam.pick, refusals: REFUSALS_BEFORE_SUB, lastRefusedAt: now }
     cam.lastError = { at: now, loc: cam.loc?.id ?? null, reason: STUTTER_REASON }
     const next = chooseStream(cam.pick, now, { allowSub: true })
