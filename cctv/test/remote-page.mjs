@@ -111,7 +111,9 @@ const payload = (n) => {
  * @param {{ tiles: { ch: number, cam: ReturnType<typeof camera>, standIn?: [number, number] }[], linkMbps: number,
  *   durMs: number, poolMax?: number }} o
  *   standIn: a cold sub's stand-in, the main stream's GOP the worker replays into it at once, as [its
- *   keyframe, the whole GOP] in KB (sub-bridge.mjs; verify-6), with no main-stream frames after it
+ *   keyframe, the whole GOP] in KB (sub-bridge.mjs; verify-6), with no main-stream frames after it.
+ *   Sent whole, as on 29 Sep: the burst the controller must ride out. (A remote viewer's stand-in now
+ *   sends only the keyframe, and only while the page has room: live-mux-server.test.mjs replays that.)
  * @returns {{ lines: string[], downs: string[], live: AdaptiveLive }} lines: the controller's, each
  *   with the second it was said at in front
  */

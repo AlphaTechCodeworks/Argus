@@ -95,7 +95,8 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track 
     // camera's main stream meanwhile, until the sub-stream's own first frame (sub-bridge.mjs). Its
     // start and end are logged with the camera and whether the viewer is remote: on 29 Sep a remote
     // page's stand-ins could only be guessed from the code (stutter report 2.6, verify-6). The H.265
-    // one that sends nothing, once in H265_QUIET_MS for the camera and viewer.
+    // one that sends nothing, once in H265_QUIET_MS for the camera and viewer. A remote viewer's is
+    // the main stream's keyframes only, as its page has room (sub-bridge.mjs).
     if (streamType === 1 && !(stream.gop?.length > 0)) {
       const main = nvr.getStream(ch, 0)
       const stand = standIn(nvr, ch, main, { phone, held, clientH265, phoneLive })
@@ -104,7 +105,7 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track 
         const text = why === 'h265' ? h265Line(line, `${nvr.id}/${ch}|${viewerOf(req, currentUser)}`) : line
         if (text) log(`${tag} ${text}`)
       }
-      bridgeSub(ws, { sub: stream, main: stand, clientH265, log: say })
+      bridgeSub(ws, { sub: stream, main: stand, clientH265, remote, log: say })
     }
     // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry, per
     // browser (viewerOf). With the codec the NVR saw on this stream: a main started on demand has no

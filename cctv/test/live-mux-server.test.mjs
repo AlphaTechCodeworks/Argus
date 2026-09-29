@@ -18,6 +18,7 @@ import { bridgeSub } from '../sub-bridge.mjs'
 import { AdaptiveLive, PRESSURE_BYTES, SETTLE_MS } from '../adaptive-live.mjs'
 import { TranscodePool } from '../transcode.mjs'
 import { H265_QUIET_MS, PHONE_SPARE, liveAttacher } from '../live-attach.mjs'
+import { camera } from './remote-page.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -807,7 +808,18 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('... and its end', /^\[sub-bridge\] n1\/4, local viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): 1 frame, 0\.00 MB sent, 0 held back$/.test(attachLogs.at(-1)), attachLogs.at(-1))
   x = run({ streamType: 1, nvr: mkNvr({ subCold: true }) }, req('127.0.0.1'))
   for (const s of x.nvr.getStream(3, 0).viewers) s.send(frame(true))
-  check('... a remote viewer\'s stand-in is logged as remote', attachLogs.at(-1) === "[sub-bridge] n1/4, remote viewer: stand-in started: the main stream until the sub-stream's first frame", attachLogs.at(-1))
+  check('... a remote viewer\'s stand-in is logged as remote, and as keyframes', attachLogs.at(-1) === "[sub-bridge] n1/4, remote viewer: stand-in started: the main stream's keyframes until the sub-stream's first frame", attachLogs.at(-1))
+  // A remote viewer's stand-in is the main stream's keyframes only, each while its page keeps up
+  // (sub-bridge.mjs): on 29 Sep a remote page's stand-ins were whole main streams, 2-5 Mbit/s each
+  // into a 3.5-6.5 Mbit/s tunnel (stutter report 2.6, verify-6). A local viewer's is every frame.
+  const fed = (addr) => {
+    const y = run({ streamType: 1, nvr: mkNvr({ subCold: true }) }, req(addr))
+    const [tap] = y.nvr.getStream(3, 0).viewers
+    for (const k of [true, false, false, true, false]) tap.send(frame(k))
+    return y.w.sent.map((b) => (b[0] === 1 ? 'K' : 'd')).join('')
+  }
+  check('... a remote viewer\'s stand-in: the main stream\'s keyframes only', fed('127.0.0.1') === 'KK', fed('127.0.0.1'))
+  check('... a local viewer\'s: every frame, as before', fed('192.168.1.20') === 'KddKd', fed('192.168.1.20'))
   adaptive.calls.length = 0
   x = run({ clientH265: true }, req('127.0.0.1'))
   const key = createHash('sha1').update('ann|Desktop|c=1').digest('hex')
@@ -956,6 +968,156 @@ const fanOut = (c, buf, isKey, type, now) => {
   t = H265_QUIET_MS
   open()
   check('... 10 min on: said again, with how many were left out', logs.length === 4 && logs[3].endsWith('; said once in 10 min for this camera and viewer, 50 left out since the last'), logs.at(-1))
+}
+
+// ---- a remote page with stand-ins, in the real pipeline: live-attach.mjs, sub-bridge.mjs,
+// stream-hub.mjs and the page's socket over a link of 5 Mbit/s, the owner's tunnel on 29 Sep (3.5-6.5
+// Mbit/s). A stand-in's main reaches the parent once the stand-in wants it: first the worker's replay
+// of its GOP so far, at once, through the fan-out (verify-6), then its frames as they come. H.264
+// throughout (this PC plays no H.265: the H.265 mains of a page stand in for nothing). ----
+{
+  const LINK = 5e6 / 8 // bytes a second
+  const STEP = 5 // ms
+  const bufs = new Map()
+  /** A frame of `size` bytes, H.264; body[21] says whose: 'M' a main stream's, 'S' a sub-stream's. */
+  const tagged = (key, main, size) => {
+    const k = `${key}${main}${size}`
+    if (!bufs.has(k)) bufs.set(k, frame(key, main ? 77 : 83, size))
+    return bufs.get(k)
+  }
+  /**
+   * The page's tiles subscribe 15 ms apart, from 0, and it plays for durMs; at full, every tile on the
+   * camera's own stream (the level controller is adaptive-live.test's).
+   * @param {string} addr the viewer's address: 127.0.0.1 through the tunnel, else the local network
+   * @param {{ subs: { ch: number, cam: object }[], mains: { [ch: number]: [number, number, number, number] },
+   *   held?: number[], durMs: number }} page mains: a stand-in's main as [Mbit/s, keyframe KB, GOP KB,
+   *   running since (ms, before the page opened: where in its GOP it is)], 20 fps; held: sub-streams
+   *   held at the NVR's limit
+   * @returns {{ maxQueue: number, subWaitMs: number, standIn: number, pictures: Map<number, { at: number, key: boolean }[]>, logs: string[] }}
+   *   maxQueue: the most the page's socket had queued; subWaitMs: the longest a sub-stream's frame
+   *   waited on it; standIn: the stand-ins' bytes; pictures: per channel, when its stand-in's frames went
+   */
+  const playPage = (addr, { subs: tiles, mains: measured, held = [], durMs }) => {
+    const hub = new StreamHub('nvr-2', () => {}, { stopDelayMs: { 0: 5, 1: 5 } })
+    const nvr = { id: 'nvr-2', liveOnline: true, getStream: (ch, type) => hub.getStream(ch, type), subHeld: (ch) => held.includes(ch), subFull: () => false }
+    const adaptiveLive = { attach(key, { ws, source }) { source.add(ws); ws.on('close', () => source.remove(ws)) } }
+    const logs = []
+    const attachLive = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive, phoneLive: {}, log: (l) => logs.push(l) })
+    const r = { socket: { remoteAddress: addr }, headers: { 'user-agent': 'Desktop', cookie: 'c=1' } }
+    const { ws, state } = setup({ attach: (channel, s) => attachLive(channel, r, { nvr, who: { user: 'ann' }, ch: s.ch, streamType: s.stream, clientH265: false, phone15: false }) })
+    const src = (ch, type, cam) => ({ ch, type, cam, stream: hub.getStream(ch, type), next: Math.ceil(cam.from / cam.every), first: Math.ceil(cam.from / cam.every), lastKey: null, replayed: false })
+    const subs = tiles.map((t) => src(t.ch, 1, t.cam))
+    const mains = Object.entries(measured).map(([ch, [mbps, keyKB, gopKB, from]]) => src(Number(ch), 0, camera({ fps: 20, kbps: mbps * 1000, gopS: (gopKB * 8) / (mbps * 1000), keyShare: keyKB / gopKB, from })))
+    // every frame of a stream due by `upTo` (ms after the page opened)
+    const frames = (s, upTo) => {
+      while (s.next * s.cam.every <= upTo) {
+        const n = s.next++
+        const key = (n - s.first) % s.cam.perGop === 0
+        if (key) s.lastKey = n
+        if (s.type === 0 && !s.stream.wanted) continue
+        if (s.type === 0 && !s.replayed) {
+          s.replayed = true
+          for (let m = s.lastKey; m < n; m++) s.stream.onFrame(tagged(m === s.lastKey, true, m === s.lastKey ? s.cam.key : s.cam.delta), m === s.lastKey)
+        }
+        s.stream.onFrame(tagged(key, s.type === 0, key ? s.cam.key : s.cam.delta), key)
+      }
+    }
+    for (const s of subs) if (s.cam.from < 0) frames(s, -1)
+    for (const s of mains) frames(s, -1)
+    // the link: each message is written once the link has had the time for all of it; the time each
+    // one was queued at is kept beside the socket's queue, in the same order
+    const queuedAt = []
+    let stamped = 0
+    let credit = 0
+    const out = { maxQueue: 0, subWaitMs: 0, standIn: 0, pictures: new Map(), logs }
+    for (let at = 0; at <= durMs; at += STEP) {
+      state.t = at
+      credit += (LINK * STEP) / 1000
+      while (ws.queue.length && credit >= ws.queue[0].bytes) {
+        credit -= ws.queue[0].bytes
+        const m = queuedAt.shift()
+        if (m.sub) out.subWaitMs = Math.max(out.subWaitMs, at - m.at)
+        ws.drain(1)
+      }
+      if (!ws.queue.length) credit = 0 // an idle link saves nothing up
+      subs.forEach((s, i) => { if (at === i * 15) ws.msg({ op: 'sub', id: s.ch + 1, nvr: 'nvr-2', ch: s.ch, stream: 1 }) })
+      for (const s of subs) frames(s, at)
+      for (const s of mains) frames(s, at)
+      for (; stamped < ws.sent.length; stamped++) {
+        const d = ws.sent[stamped]
+        const f = typeof d === 'string' ? null : Buffer.concat(d.parts)
+        queuedAt.push({ at, sub: f?.[4 + 21] === 83 })
+        if (f?.[4 + 21] === 77) {
+          out.standIn += f.length - 4
+          const ch = f.readUInt32LE(0) - 1
+          out.pictures.set(ch, [...(out.pictures.get(ch) ?? []), { at, key: f[4] === 1 }])
+        }
+      }
+      out.maxQueue = Math.max(out.maxQueue, ws.bufferedAmount)
+    }
+    return out
+  }
+  const mb = (n) => (n / 1e6).toFixed(2)
+  const said = (a, b) => `remote: ${mb(a.maxQueue)} MB queued at most, sub frames waiting up to ${a.subWaitMs} ms, ${mb(a.standIn)} MB of stand-ins; every frame: ${mb(b.maxQueue)} MB, ${b.subWaitMs} ms, ${mb(b.standIn)} MB`
+  /** A stand-in's pictures: how many, all keyframes, the first (ms after its tile asked), and the longest without one until `until`. */
+  const shown = (o, ch, askedAt, until) => {
+    const p = (o.pictures.get(ch) ?? []).filter((x) => x.at <= until)
+    const edges = [askedAt, ...p.map((x) => x.at), until]
+    return { ch, n: p.length, keys: p.every((x) => x.key), first: p.length ? p[0].at - askedAt : null, gap: Math.max(...edges.slice(1).map((x, i) => x - edges[i])) }
+  }
+
+  // The 03:55 page of 29 Sep (stutter report 2.6, verify-6; the page adaptive-live.test.mjs replays for
+  // its levels): 16 nvr-2 sub tiles, 5 of them running, 11 cold and starting when the journal has them
+  // start (1.05 to 29.32 s after the page opened), each 250 kbit/s at 18-30 fps. The H.264 mains of three
+  // of the cold ones stand in until then, as measured: nvr-2/10 5.18 Mbit/s, keyframe 634 KB of a 1279
+  // KB GOP, until 8.58 s; /17 3.99 Mbit/s, 499 of 950 KB, until 10.27 s; /21 2.25 Mbit/s, 243 of 690 KB,
+  // until 27.13 s.
+  const cold = [1.05, 2.16, 3.35, 4.72, 6.51, 8.58, 10.27, 12.25, 24.38, 27.13, 29.32]
+  const coldCh = [2, 3, 4, 6, 7, 9, 16, 18, 19, 20, 21] // cams 3, 4, 5, 7, 8, 10, 17, 19, 20, 21, 22
+  const warmCh = [0, 1, 5, 17, 22] // cams 1, 2, 6, 18, 23
+  const fps = [20.6, 20.6, 30, 30, 18.3, 20.6, 30, 25.4, 30, 30, 20, 20, 25.4, 27.5, 30, 20]
+  const p0355 = {
+    subs: [
+      ...warmCh.map((ch, i) => ({ ch, cam: camera({ fps: fps[i], kbps: 250, from: -5000 - i * 413 }) })),
+      ...coldCh.map((ch, i) => ({ ch, cam: camera({ fps: fps[5 + i], kbps: 250, from: cold[i] * 1000 }) }))
+    ],
+    mains: { 9: [5.18, 634, 1279, -10_000], 16: [3.99, 499, 950, -10_700], 20: [2.25, 243, 690, -11_300] },
+    durMs: 32_000
+  }
+  const before = playPage('192.168.1.20', p0355) // every frame, as a local viewer still gets them, and as a remote one did
+  const after = playPage('127.0.0.1', p0355) // through the tunnel
+  console.log(`INFO  the 03:55 page open over 5 Mbit/s, ${said(after, before)}`)
+  check('the 03:55 page with every stand-in frame (as on 29 Sep): the page backs up over 4 MB, its tiles over 6 s behind', before.maxQueue > 4e6 && before.subWaitMs > 6000, said(after, before))
+  // a stand-in's keyframe goes into a page with less than RESUME_BELOW queued: at most that and the
+  // biggest keyframe (634 KB), with the frames the page's tiles send meanwhile
+  check('... a remote viewer\'s: under 1.1 MB queued, and no tile\'s frame waits 2 s', after.maxQueue < 1.1e6 && after.subWaitMs < 2000, said(after, before))
+  const shows = [9, 16, 20].map((ch) => shown(after, ch, p0355.subs.findIndex((t) => t.ch === ch) * 15, cold[coldCh.indexOf(ch)] * 1000))
+  check('... its stand-ins: keyframes only, the first at once (nvr-2/10\'s as its tile asked)', shows.every((s) => s.n > 0 && s.keys) && shows[0].first === 0, JSON.stringify(shows))
+  check('... its log lines say keyframes', after.logs.some((l) => /^\[sub-bridge\] nvr-2\/10, remote viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): \d+ keyframes, [\d.]+ MB sent, \d+ held back$/.test(l)), after.logs.join(' | '))
+  // (Three stand-ins on a link this full take turns as its room comes: nvr-2/17's keyframes kept
+  // coming just after /10's had taken it, and it showed its first picture at 10.2 s, as its own
+  // sub-stream came. With every frame it showed at once, 7 s behind like every tile of the page.)
+
+  // A tile held at the NVR's sub-stream limit (value4u holds 14-16 for minutes; verify-6), its main as
+  // nvr-2/21's (2.25 Mbit/s, 243 KB keyframes every 2.45 s), on a page of 15 running sub-streams (3.75
+  // Mbit/s): a picture a GOP, never long enough without one for its tile to say "no video" (5 s,
+  // live-tile.js NO_VIDEO_MS), and the page keeps up. With every frame the page carries 6 Mbit/s.
+  const pHeld = {
+    subs: [
+      ...Array.from({ length: 15 }, (_, ch) => ({ ch, cam: camera({ fps: 20 + (ch % 3) * 5, kbps: 250, from: -3000 - ch * 211 }) })),
+      { ch: 15, cam: camera({ fps: 20, kbps: 250, from: 1e9 }) }
+    ],
+    mains: { 15: [2.25, 243, 690, -11_300] },
+    held: [15],
+    durMs: 60_000
+  }
+  const heldBefore = playPage('192.168.1.20', pHeld)
+  const heldAfter = playPage('127.0.0.1', pHeld)
+  console.log(`INFO  a held tile's stand-in for 60 s, ${said(heldAfter, heldBefore)}`)
+  const h = shown(heldAfter, 15, 15 * 15, pHeld.durMs)
+  check('a held tile\'s stand-in on a remote page: a keyframe a GOP (2.45 s), none more than 5 s apart', h.keys && h.n >= 20 && h.gap < 5000, JSON.stringify(h))
+  check('... and the page keeps up: under 1 MB queued, no tile\'s frame waits 1.5 s (every frame: over 4 MB, 6 s)', heldAfter.maxQueue < 1e6 && heldAfter.subWaitMs < 1500 && heldBefore.maxQueue > 4e6 && heldBefore.subWaitMs > 6000, said(heldAfter, heldBefore))
+  check('... its lines say it is held, and keyframes', heldAfter.logs[0] === "[sub-bridge] nvr-2/16, remote viewer, sub-stream held at the NVR's limit: stand-in started: the main stream's keyframes until the sub-stream's first frame", heldAfter.logs.join(' | '))
 }
 
 // ---- server.mjs wiring (source shape: importing server.mjs starts the NVRs) ----
