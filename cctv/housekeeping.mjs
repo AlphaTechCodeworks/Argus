@@ -4,14 +4,18 @@
 //  2. over the location's space limit (limitGB, of Argus's recordings as the index counts them,
 //     1 GB = 1,000,000,000 bytes; the owner's 12,000 GB on the shared NAS, 2026-09-29): the oldest
 //     first by the same scoring as 3, down to the limit, never footage from the newest 24 h (a loud
-//     warning when that is all that is left);
+//     warning when that is all that is left); only a limit saved through storage.mjs since then, which
+//     stamps limitSetAt (location-health.mjs spaceLimit: the old page's limits were notes);
 //  3. on a location with less than its low mark free (its own lowFreePct, else storage.lowFreePct):
 //     the oldest segments first, taking first the camera furthest past its full-video days
 //     (fullDays); footage inside a camera's full-video days is kept unless free space is below the
 //     hard floor (its own floorFreePct, else storage.floorFreePct: then the oldest of it goes too,
 //     with a warning).
 // Bookmarked and exported stretches (bookmarks.mjs protectedRanges) are never deleted by any of them
-// since 2026-09-29; bookmarks that cannot be read stop the run before any file.
+// since 2026-09-29; bookmarks that cannot be read stop the run before any file (an alarm, which pages,
+// for a location below its low mark). A bookmarked stretch is stepped over in one look, not walked a
+// row at a time (segment-delete.mjs firstUnprotected, CameraCursors.skipTo), and the walks let the event
+// loop go round every 10 ms (makePacer).
 // The .idx goes with its segment, the index row is removed, empty folders are removed. Only
 // files inside their location's folder are ever deleted, and only on a location whose marker
 // matches (storage.mjs): with a drive unplugged its mount point is an empty folder on the system
@@ -24,9 +28,9 @@
 // on with the bytes of the files deleted; afterwards it must be seen to have risen (segment-delete.mjs
 // checkFreeRose: a NAS keeping deleted files would otherwise be deleted from every run for nothing).
 import { resolve, sep } from 'node:path'
-import { freeMarks } from './location-health.mjs'
+import { freeMarks, spaceLimit } from './location-health.mjs'
 import { shareCall } from './share-calls.mjs'
-import { CameraCursors, Heap, PROBE_BYTES, checkFreeRose, dirOf, freeingStalled, makeDeleter, stallEnded, _test as deleting } from './segment-delete.mjs'
+import { CameraCursors, Heap, PROBE_BYTES, afterStretch, checkFreeRose, dirOf, firstUnprotected, freeingStalled, makeDeleter, makePacer, stallEnded, _test as deleting } from './segment-delete.mjs'
 import { protectionFor } from './thinning.mjs'
 
 const DAY = 86_400_000
@@ -46,16 +50,18 @@ const pctOf = (bytes, total) => (total > 0 ? (bytes / total) * 100 : 100)
 const gbText = (b) => `${(b / GB).toFixed(1)} GB`
 const whenText = (ms) => `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`
 
-/** What the last run left to say per location (the Storage page, the alerts): locId -> { limitBlocked, notFreeing }. */
+/** What the last run left to say per location (the Storage page, the alerts): locId -> { path, limitBlocked, notFreeing, bookmarksUnread }. */
 let lastAlarms = new Map()
 
 /**
  * The alarms of the last run, by location: the space limit that could not be met (everything left is
- * from the newest 24 h or bookmarked), and deleting that does not free space. [{ id, path, kind, text }]
+ * from the newest 24 h or bookmarked), deleting that does not free space, and a location below its low
+ * mark while nothing can be deleted because the bookmarks cannot be read. [{ id, path, kind, text }]
  */
 export function housekeepingAlarms() {
   const out = []
   for (const [id, a] of lastAlarms) {
+    if (a.bookmarksUnread) out.push({ id, path: a.path, kind: 'bookmarks-unread', text: a.bookmarksUnread })
     if (a.limitBlocked) out.push({ id, path: a.path, kind: 'limit-blocked', text: a.limitBlocked })
     const st = freeingStalled(id)
     if (st) out.push({ id, path: a.path, kind: 'not-freeing', text: a.notFreeing ?? `${a.path}: deleting files did not free space on it` })
@@ -71,7 +77,7 @@ export function housekeepingCandidates() {
   return housekeepingAlarms().map((a) => ({
     key: `drive-full/${a.id}/${a.kind}`,
     kind: 'drive-full',
-    title: a.kind === 'not-freeing' ? `${a.path}: deleting files does not free space` : `${a.path} is over its space limit`,
+    title: a.kind === 'not-freeing' ? `${a.path}: deleting files does not free space` : a.kind === 'bookmarks-unread' ? `${a.path} is low on space and nothing is deleted: the bookmarks cannot be read` : `${a.path} is over its space limit`,
     detail: a.text
   }))
 }
@@ -127,12 +133,32 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
   } catch (e) {
     warn(`bookmarks could not be read (${e.message}): nothing deleted this run`)
     out.protection = 'unread'
+    // Nothing is deleted, the floor included (it never asked the bookmarks before 2026-09-29): a location
+    // below its low mark will fill, so that is an alarm, which pages (review of p2-delete: with the
+    // bookmarks database locked, the shared NAS would fill to 0 with a console line only). The alarms this
+    // run could not look at again are kept as the last run left them.
+    const alarms = new Map([...lastAlarms].map(([id, a]) => [id, { ...a, bookmarksUnread: null }]))
+    for (const loc of locs) {
+      if (!here.has(loc.id)) continue
+      let f = null
+      try {
+        f = await freeOf(loc)
+      } catch {} // not readable now: storage.mjs reports the location
+      const a = alarms.get(loc.id) ?? { path: loc.path, limitBlocked: null, notFreeing: null, bookmarksUnread: null }
+      const { lowFreePct } = freeMarks(settings, loc)
+      const pct = Number.isFinite(f?.freeBytes) && f?.totalBytes > 0 ? pctOf(Number(f.freeBytes), Number(f.totalBytes)) : null
+      if (pct !== null && pct < lowFreePct) a.bookmarksUnread = `${loc.path}: ${pct.toFixed(1)}% free (low mark ${lowFreePct}%), but nothing is deleted on it, not even below the floor: the bookmarks could not be read (${e.message}), and footage that cannot be told from bookmarked footage is left alone. Recording stops when it is full.`
+      alarms.set(loc.id, a)
+    }
+    lastAlarms = alarms
     return out
   }
   out.protection = guard.mode
 
   const alarms = new Map()
   const cams = here.size ? index.cameras() : []
+  // the event loop goes round every PACE_MS of the walks below (segment-delete.mjs makePacer)
+  const pace = makePacer()
   const unsafe = new Set() // tried and could not, or must not: not tried again in this run
   let taken = 0 // files handed to a helper this run, every location together (MAX_DELETES)
   for (const loc of locs) {
@@ -145,8 +171,10 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
   async function location(loc) {
     const root = resolve(loc.path)
     const marks = freeMarks(settings, loc)
-    const limitBytes = Number(loc.limitGB) > 0 ? Number(loc.limitGB) * GB : null
-    const row = { id: loc.id, path: loc.path, limitBytes, useBytes: null, freeBytes: null, totalBytes: null, deleted: {}, limitBlocked: null }
+    // (a limit the old page saved as a note is not enforced until saved again: spaceLimit)
+    const limit = spaceLimit(loc)
+    const limitBytes = limit.enforced ? limit.bytes : null
+    const row = { id: loc.id, path: loc.path, limitBytes, limitNotEnforced: limit.bytes !== null && !limit.enforced, useBytes: null, freeBytes: null, totalBytes: null, deleted: {}, limitBlocked: null }
     out.locations.push(row)
     alarms.set(loc.id, { path: loc.path, limitBlocked: null, notFreeing: null })
     const alarm = alarms.get(loc.id)
@@ -164,8 +192,14 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
     row.totalBytes = free?.totalBytes ?? null
     const retentionOf = new Map(cams.map((c) => [`${c.nvr}/${c.ch}`, camRec(settings, c.nvr, c.ch).retentionDays]))
     const shortest = Math.min(...[...retentionOf.values()].map(Number).filter(Number.isFinite))
-    const oldest = Number.isFinite(shortest) ? index.oldest(1, { loc: loc.id })[0] : null
-    const retentionDue = Boolean(oldest && oldest.startMs < now - shortest * DAY)
+    // The oldest row no bookmark covers: everything before it is bookmarked, and every rule below starts
+    // there. Bookmarked footage is never deleted, so it stays the oldest for good; each run walked all of
+    // it again, row by row (review of p2-delete, 2026-09-29: 10,440 rows and 261 index reads a run for one
+    // 2-hour bookmark 40 days old, 120-136 ms of main thread on the production VM). Now one look a stretch.
+    const gate = await firstUnprotected({ index, locId: loc.id, guard, pace })
+    for (const p of gate.passed) out.skipped.push({ path: p.path, why: 'bookmarked or exported' })
+    const oldest = gate.row
+    const retentionDue = Boolean(oldest && Number.isFinite(shortest) && oldest.startMs < now - shortest * DAY)
     const overLimit = limitBytes !== null && use > limitBytes
     const lowB = free ? (free.totalBytes * marks.lowFreePct) / 100 : null
     const floorB = free ? (free.totalBytes * marks.floorFreePct) / 100 : null
@@ -173,15 +207,19 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
     if (free && stallEnded(loc.id, free.freeBytes)) log(`[housekeeping] ${loc.path}: the free space of the files deleted earlier has come back: deleting for free space goes on as before`)
     const stall = freeingStalled(loc.id)
     let lowNeeded = free !== null && free.freeBytes < lowB
-    const probing = Boolean(stall && lowNeeded && now >= stall.retryAt)
+    // one small try an hour; below the hard floor one every run (segment-delete.mjs says why)
+    const belowFloor = free !== null && free.freeBytes < floorB
+    const probing = Boolean(stall && lowNeeded && (now >= stall.retryAt || belowFloor))
     if (stall && lowNeeded && !probing) {
-      alarm.notFreeing = `${loc.path}: deleting files did not free space on it at ${whenText(stall.since)} (a recycle bin or snapshots on the NAS?): nothing deleted on it for free space until one small try at ${whenText(stall.retryAt)}; it is ${pctOf(free.freeBytes, free.totalBytes).toFixed(1)}% free`
+      alarm.notFreeing = `${loc.path}: deleting files did not free space on it at ${whenText(stall.since)} (a recycle bin or snapshots on the NAS, or another program writing to the share?): nothing deleted on it for free space until one small try at ${whenText(stall.retryAt)} (every run below its hard floor); it is ${pctOf(free.freeBytes, free.totalBytes).toFixed(1)}% free`
       warn(alarm.notFreeing)
       lowNeeded = false
     }
+    if (probing && belowFloor && now < stall.retryAt) warn(`${loc.path}: below its hard floor (${pctOf(free.freeBytes, free.totalBytes).toFixed(1)}% free), and deleting files did not free space on it at ${whenText(stall.since)}: one small try this run (at most ${gbText(PROBE_BYTES)}), oldest first`)
     if (!retentionDue && !overLimit && !lowNeeded) return
 
-    const cur = new CameraCursors({ index, locId: loc.id, cams })
+    // (nothing no bookmark covers: every camera starts past the end, and nothing is read)
+    const cur = new CameraCursors({ index, locId: loc.id, cams, fromMs: oldest ? oldest.startMs : Number.MAX_SAFE_INTEGER })
     const fullOf = new Map(cams.map((c) => [`${c.nvr}/${c.ch}`, camRec(settings, c.nvr, c.ch).fullDays]))
     const counts = new Map() // why -> { files, bytes }
     const del = makeDeleter({
@@ -206,8 +244,8 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
       onStop: (message) => warn(`${loc.path}: ${message}`)
     })
     const going = () => !del.stopped && taken < MAX_DELETES
-    const passed = { protected: 0, refused: 0 } // rows passed over on this location, and why
-    /** Whether a row may be deleted at all: inside this location's folder, not bookmarked, not refused before. */
+    const passed = { protected: gate.passed.length, refused: 0 } // rows or stretches passed over on this location, and why
+    /** Whether a row may be deleted at all: inside this location's folder, not refused before. */
     const may = (s) => {
       if (unsafe.has(s.path)) {
         passed.refused++
@@ -219,16 +257,24 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
         passed.refused++
         return false
       }
-      if (guard.protected(s)) {
-        out.skipped.push({ path: s.path, why: 'bookmarked or exported' })
-        unsafe.add(s.path)
-        passed.protected++
-        return false
-      }
       return true
     }
-    /** Moves the camera past its row, and deletes it if it may be. */
+    /**
+     * Moves the camera past its row, and deletes it if it may be. A row in a bookmarked stretch is never
+     * deleted: if it starts inside the stretch, so does every row of the camera up to the stretch's end,
+     * and the camera steps over all of them at once (its next look starts after the stretch); a file that
+     * starts before the stretch and runs into it is passed by itself. Said once per stretch and camera.
+     */
     const take = async (c, s, why) => {
+      await pace()
+      const st = guard.stretchOf(s)
+      if (st) {
+        out.skipped.push({ path: s.path, why: 'bookmarked or exported' })
+        passed.protected++
+        if (s.startMs >= st[0]) cur.skipTo(c, afterStretch(st))
+        else cur.next(c)
+        return
+      }
       cur.next(c)
       if (!may(s)) return
       taken++
@@ -288,7 +334,8 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
     if (lowNeeded && going()) {
       const freeNow = () => free.freeBytes + del.doneBytes + del.pendingBytes
       const before = del.doneBytes + del.pendingBytes
-      // one small try an hour on a location where deleting did not free space
+      // one small try on a location where deleting did not free space (an hour apart; every run below
+      // its floor), footage past its full-video days first as ever
       const room = () => !probing || del.doneBytes + del.pendingBytes - before < PROBE_BYTES
       const pctNow = () => pctOf(freeNow(), free.totalBytes).toFixed(1)
       if (freeNow() < lowB) {

@@ -30,7 +30,7 @@
 import { closeSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { freeMarks } from './location-health.mjs'
-import { checkFreeRose, freeingStalled, makeDeleter } from './segment-delete.mjs'
+import { afterStretch, checkFreeRose, firstUnprotected, freeingStalled, makeDeleter, makePacer } from './segment-delete.mjs'
 import { parseIdx } from './segment-writer.mjs'
 import { shareCall } from './share-calls.mjs'
 import { markerPresent } from './storage-report.mjs'
@@ -84,21 +84,51 @@ function normaliseRanges(raw) {
   return out
 }
 
-const overlaps = (ranges, fromMs, toMs) => ranges.some(([a, b]) => fromMs <= b && toMs >= a)
+/** The ranges oldest first, those that overlap or touch made one. */
+function mergeRanges(ranges) {
+  const out = []
+  for (const [a, b] of [...ranges].sort((x, y) => x[0] - y[0])) {
+    const last = out.at(-1)
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b)
+    else out.push([a, b])
+  }
+  return out
+}
 
 /**
  * A guard object for one run: .protected(seg) says whether a segment must be left alone.
  * `mode` is 'none' (no bookmarks module yet) or 'ranges'. A run's `protection` can also be
  * 'unread': asking threw, and the run stopped before any file (the two catches below).
  * housekeeping.mjs asks through this too since 2026-09-29.
+ *
+ * .stretchOf(seg) is the protected stretch [from, to] the segment overlaps, or null. The deletion jobs
+ * use it to step over a stretch in one look: every row that STARTS inside a stretch is in it, whatever
+ * the camera (protectedRanges does not look at the camera), so none of them needs reading. Passing them
+ * one by one on the main thread was 120-136 ms for a 2-hour bookmark on the production VM, and about
+ * 1.5 s for a 24-hour one, every run, since bookmarked footage is never deleted and so stays the oldest
+ * (review of p2-delete, 2026-09-29). The ranges are merged and looked up by halving, not one by one.
  */
 export async function protectionFor(fromMs, toMs, { protectedRanges } = {}) {
   const fn = protectedRanges === undefined ? await loadProtectedRanges() : protectedRanges
-  if (typeof fn !== 'function') return { mode: 'none', ranges: [], protected: () => false }
+  if (typeof fn !== 'function') return { mode: 'none', ranges: [], protected: () => false, stretchOf: () => null }
   // A throw here is fatal for the run: we cannot tell bookmarked footage from the rest, and the
   // only safe thing to do with footage you cannot identify is nothing.
-  const ranges = normaliseRanges(await fn(fromMs, toMs))
-  return { mode: 'ranges', ranges, protected: (s) => overlaps(ranges, s.startMs, s.endMs ?? s.startMs) }
+  const ranges = mergeRanges(normaliseRanges(await fn(fromMs, toMs)))
+  const stretchOf = (s) => {
+    const from = s.startMs
+    const to = s.endMs ?? s.startMs
+    // the first stretch that ends at or after the segment's start; the segment overlaps it if it
+    // starts no later than the segment ends (every later stretch starts later still)
+    let lo = 0
+    let hi = ranges.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (ranges[mid][1] < from) lo = mid + 1
+      else hi = mid
+    }
+    return lo < ranges.length && ranges[lo][0] <= to ? ranges[lo] : null
+  }
+  return { mode: 'ranges', ranges, protected: (s) => stretchOf(s) !== null, stretchOf }
 }
 
 // ---- the safety net around every file operation ---------------------------------------------
@@ -412,6 +442,13 @@ const FLOOR_WALK = 200
  * the switch is answered while it runs: `armed()` (storage-jobs.mjs) is asked before each batch, and Off
  * or Dry run stops it there.
  *
+ * Bookmarked stretches are stepped over in one look each (review of p2-delete, 2026-09-29): each camera's
+ * walk starts at the oldest row no bookmark covers on a mounted location (firstUnprotected), and a
+ * camera's walk, or the floor's, that comes to a row starting inside a stretch goes on after its end. A
+ * bookmark past the days kept is never deleted, so it stays the oldest for good, and passing its rows one
+ * by one was every run's cost, dry run included. `skipped` lists such a stretch once per walk, not once
+ * per row.
+ *
  * @param {{ share?: Function, armed?: () => boolean, sleep?: Function }} o (and the rest as before)
  * @returns {Promise<{ dryRun, deleted: {path, why, bytes}[], skipped: {path, why}[],
  *                     warnings: string[], freedBytes: number, protection: 'ranges'|'none'|'unread' }>}
@@ -492,9 +529,22 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
     return !d.stopped
   }
 
+  // where each mounted location's footage stops being bookmarked (everything before is): the walks below
+  // start there
+  const pace = makePacer()
+  const firstFree = new Map() // location id -> the start of its oldest row no bookmark covers
+  for (const loc of locs.values()) {
+    if (!here.has(loc.id)) continue
+    const g = await firstUnprotected({ index, locId: loc.id, guard, pace })
+    for (const p of g.passed) out.skipped.push({ path: p.path, why: 'bookmarked or exported' })
+    if (g.row) firstFree.set(loc.id, g.row.startMs)
+  }
+  // (rows on a location not mounted, or not in the list, cannot be deleted this run either way)
+  const startAt = firstFree.size ? Math.min(...firstFree.values()) : null
+
   // 1. per-camera retention days, oldest first (olderThan is ordered by start_ms)
   let n = 0
-  for (const { nvr, ch } of index.cameras()) {
+  for (const { nvr, ch } of startAt === null ? [] : index.cameras()) {
     if (switched) break
     const rec = camRec(settings, nvr, ch)
     if (!Number.isFinite(rec.retentionDays)) {
@@ -502,19 +552,33 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
       continue
     }
     const cutoff = now - rec.retentionDays * DAY
+    let fromMs = startAt
     for (let loop = 0; loop < 100 && n < maxDeletes && !switched; loop++) {
-      const batch = index.olderThan(nvr, ch, cutoff, BATCH).filter((s) => !refused.has(s.path))
+      const raw = index.olderThan(nvr, ch, cutoff, BATCH, fromMs)
+      const batch = raw.filter((s) => !refused.has(s.path))
       if (!batch.length) break
       let any = false
+      let jumped = false
       for (const s of batch) {
         if (n >= maxDeletes || switched) break
+        await pace()
+        // a row starting inside a bookmarked stretch: so does the camera's every row to its end
+        const st = guard.stretchOf(s)
+        if (st && s.startMs >= st[0]) {
+          out.skipped.push({ path: s.path, why: 'bookmarked or exported' })
+          fromMs = afterStretch(st)
+          jumped = true
+          break
+        }
         if (await del(s, 'past its retention days')) {
           any = true
           n++
         }
       }
       // (rows queued and not sent yet are still in the index, and refused: the next look passes them)
-      if (!any) break
+      if (!any && !jumped) break
+      // an answer that was not full had every such row: no need to ask again
+      if (!jumped && raw.length < BATCH) break
     }
   }
   await flushAll()
@@ -534,7 +598,7 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
     if (pct(free) >= floorFreePct) continue
     const stall = dryRun ? null : freeingStalled(loc.id)
     if (stall && now < stall.retryAt) {
-      warn(`${loc.path}: below the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%), but deleting files did not free space on it (a recycle bin or snapshots on the NAS?): nothing deleted on it for free space (housekeeping tries again at ${new Date(stall.retryAt).toISOString()})`)
+      warn(`${loc.path}: below the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%), but deleting files did not free space on it (a recycle bin or snapshots on the NAS, or another program writing to the share?): nothing deleted on it for free space here (housekeeping makes one small try each run while it is below its floor)`)
       continue
     }
     warn(`${loc.path}: below the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%): ${dryRun ? 'would delete' : 'deleting'} the oldest footage, even inside its retention`)
@@ -543,13 +607,22 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
     const base = d ? d.doneBytes : 0
     let dryFreed = 0
     const counted = () => free.freeBytes + (d ? d.doneBytes - base + d.pendingBytes : dryFreed)
-    let fromMs
+    // (from its oldest row no bookmark covers; none: nothing here may go)
+    let fromMs = firstFree.get(loc.id) ?? Number.MAX_SAFE_INTEGER
     walk: for (let loop = 0; loop < 1000 && n < maxDeletes && counted() < floorB; loop++) {
       const rows = index.oldest(FLOOR_WALK, { loc: loc.id, fromMs }).filter((s) => !refused.has(s.path))
       if (!rows.length) break
       for (const s of rows) {
         fromMs = s.startMs
         if (n >= maxDeletes || counted() >= floorB || d?.stopped || switched) break walk
+        await pace()
+        // a row starting inside a bookmarked stretch: so does every row here to its end, whatever the camera
+        const st = guard.stretchOf(s)
+        if (st && s.startMs >= st[0]) {
+          out.skipped.push({ path: s.path, why: 'bookmarked or exported' })
+          fromMs = afterStretch(st)
+          continue walk
+        }
         if (await del(s, 'below the free-space floor')) {
           n++
           if (!d) dryFreed += Number(s.bytes) || 0

@@ -358,6 +358,41 @@ function world() {
   w.index.close()
 }
 {
+  // A 2-hour bookmark on 87 cameras (bookmarks protect every camera), 200 days old: past the days kept,
+  // so it stays the oldest footage for good. Each run -- dry run too, every 5 minutes -- passed its 10,440
+  // rows one by one, and below the floor walked them again 200 at a time (review of p2-delete,
+  // 2026-09-29). Now a stretch is one look: each walk starts after it.
+  const w = world()
+  const CAMS = 87
+  const b0 = NOW - 200 * DAY
+  const rows = (k0, k1, base) => {
+    for (let k = k0; k < k1; k++) for (let c = 0; c < CAMS; c++) w.index.addSegment({ nvr: 'n1', ch: c, path: join(w.root, 'n1', String(c), `${base + k * 60_000}.h264`), startMs: base + k * 60_000, endMs: base + k * 60_000 + 59_000, bytes: 1, keyframes: 1, loc: 'L1' })
+  }
+  rows(0, 120, b0)
+  rows(0, 3, NOW - 190 * DAY) // past the 180 days too, and not bookmarked: these go
+  rows(0, 3, NOW - 2 * DAY)
+  const inStretch = (d) => {
+    const start = Number(d.path.match(/(\d+)\.h264$/)[1])
+    return start >= b0 - 60_000 && start <= b0 + 2 * 3_600_000 + 60_000
+  }
+  const counting = () => {
+    const calls = {}
+    return { calls, index: new Proxy(w.index, { get: (t, k) => (typeof t[k] === 'function' ? (...a) => ((calls[k] = (calls[k] ?? 0) + 1), t[k](...a)) : t[k]) }) }
+  }
+  const ranges = () => [[b0, b0 + 2 * 3_600_000]]
+  // dry run, room to spare: retention only
+  const x = counting()
+  const r = await runRetention({ index: x.index, settings: w.settings(), now: NOW, present: w.present, freeOf: () => ({ freeBytes: 90, totalBytes: 100 }), protectedRanges: ranges })
+  check('a bookmarked stretch past the days kept: the rows after it go, none of it', r.deleted.length === 3 * CAMS && !r.deleted.some(inStretch), `${r.deleted.length} would go, ${r.deleted.filter(inStretch).length} of them bookmarked`)
+  check('... retention steps over it: at most one look per camera, not a row at a time (10,440 rows)', (x.calls.olderThan ?? 0) <= CAMS && r.skipped.length <= CAMS + 1, `${x.calls.olderThan} olderThan, ${r.skipped.length} skipped entries`)
+  // dry run below the floor (1 % free), nothing past its days (a year kept): the floor's walk
+  const y = counting()
+  const f = await runRetention({ index: y.index, settings: { ...w.settings(), recording: { defaults: { ...DEFAULTS, retentionDays: 365 }, cameras: {} } }, now: NOW, present: w.present, freeOf: () => ({ freeBytes: 1, totalBytes: 100 }), protectedRanges: ranges, maxDeletes: 400 })
+  const floor = f.deleted.filter((d) => /floor/.test(d.why))
+  check('... and so does the floor\'s walk: the oldest after it, with a few looks, not 53 looks of 200 bookmarked rows', floor.length === 4 && !floor.some(inStretch) && (y.calls.oldest ?? 0) <= 6 && f.skipped.length <= 2, `${floor.length} below the floor, ${floor.filter(inStretch).length} bookmarked; ${y.calls.oldest} oldest, ${f.skipped.length} skipped entries`)
+  w.index.close()
+}
+{
   const w = world()
   const s = w.add('n1', 0, 200)
   const r = await runRetention({

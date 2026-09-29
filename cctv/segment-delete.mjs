@@ -21,7 +21,9 @@
 // The safeguards stay where they were and are not loosened here: the callers check the marker and
 // that a file is inside its location's folder, and skip bookmarked stretches; the helper checks the
 // marker again (read at that moment) and the folder on its own, and refuses anything else.
-import { dirname, resolve } from 'node:path'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { DATA_DIR } from './auth.mjs'
 
 /** Files per call to the helper (each file and its .idx is two file calls; each one that comes back restarts its clock). */
 export const DELETE_BATCH = 100
@@ -133,17 +135,21 @@ export const dirOf = (seg) => dirname(resolve(seg.path))
  * Each camera's rows on one location, oldest first, read as they are needed: one statement for every
  * camera's first FIRST_ROWS (index.oldestPerCamera), then MORE_ROWS more for a camera that runs out
  * (index.oldestOf from where it got to). Rows a job passes over (bookmarked, outside the folder, a
- * file that would not go) stay passed over for the rest of the run.
+ * file that would not go) stay passed over for the rest of the run. `fromMs`: every camera starts
+ * there (firstUnprotected: the rows before it are all bookmarked). skipTo() steps a camera over a
+ * bookmarked stretch with one look instead of a row at a time.
  */
 export class CameraCursors {
-  /** @param {{ index: object, locId: string, cams: { nvr, ch }[] }} o */
-  constructor({ index, locId, cams, first = FIRST_ROWS, more = MORE_ROWS }) {
+  /** @param {{ index: object, locId: string, cams: { nvr, ch }[], fromMs?: number|null }} o */
+  constructor({ index, locId, cams, fromMs = null, first = FIRST_ROWS, more = MORE_ROWS }) {
     this.index = index
     this.locId = locId
+    this.fromMs = fromMs
     this.first = first
     this.more = more
     this.filled = false
-    this.list = cams.map((c, order) => ({ key: `${c.nvr}/${c.ch}`, nvr: c.nvr, ch: c.ch, order, rows: [], i: 0, full: false, done: false, lastStart: null, atLast: new Set() }))
+    // from: where the camera's next look starts when it is not simply on from its last row (skipTo)
+    this.list = cams.map((c, order) => ({ key: `${c.nvr}/${c.ch}`, nvr: c.nvr, ch: c.ch, order, rows: [], i: 0, full: false, done: false, lastStart: null, atLast: new Set(), from: null }))
   }
 
   fill() {
@@ -151,7 +157,8 @@ export class CameraCursors {
     this.filled = true
     if (!this.list.length) return
     const byKey = new Map(this.list.map((c) => [c.key, c]))
-    for (const r of this.index.oldestPerCamera(this.locId, this.list, this.first)) byKey.get(`${r.nvr}/${r.ch}`)?.rows.push(r)
+    const rows = this.fromMs === null ? this.index.oldestPerCamera(this.locId, this.list, this.first) : this.index.oldestPerCamera(this.locId, this.list, this.first, this.fromMs)
+    for (const r of rows) byKey.get(`${r.nvr}/${r.ch}`)?.rows.push(r)
     for (const c of this.list) {
       c.full = c.rows.length >= this.first
       if (!c.rows.length) c.done = true
@@ -167,9 +174,11 @@ export class CameraCursors {
         break
       }
       // from the last start passed, that one included (another file may start in the same millisecond),
-      // less the rows already passed there
-      const raw = this.index.oldestOf(c.nvr, c.ch, this.locId, this.more, c.lastStart ?? Number.MIN_SAFE_INTEGER)
-      const rows = raw.filter((r) => !(r.startMs === c.lastStart && c.atLast.has(r.path)))
+      // less the rows already passed there; or from the end of a stretch skipTo() stepped over
+      const from = c.from ?? c.lastStart ?? this.fromMs ?? Number.MIN_SAFE_INTEGER
+      const raw = this.index.oldestOf(c.nvr, c.ch, this.locId, this.more, from)
+      const rows = c.from !== null ? raw : raw.filter((r) => !(r.startMs === c.lastStart && c.atLast.has(r.path)))
+      c.from = null
       c.rows = rows
       c.i = 0
       c.full = raw.length >= this.more
@@ -178,6 +187,24 @@ export class CameraCursors {
       if (!rows.length) c.done = true
     }
     return c.done ? null : c.rows[c.i]
+  }
+
+  /**
+   * Moves the camera past every row that starts before `fromMs` (the end of a bookmarked stretch): the
+   * rows already read are passed here, and if they run out the camera's next look starts at fromMs, so
+   * the rows in between are never read. Nothing is asked of the index here.
+   */
+  skipTo(c, fromMs) {
+    this.fill()
+    while (c.i < c.rows.length && c.rows[c.i].startMs < fromMs) this.next(c)
+    if (c.done || c.i < c.rows.length) return
+    if (!c.full) {
+      c.done = true // its last look was not full: there is nothing after these
+      return
+    }
+    c.from = Math.max(c.from ?? Number.MIN_SAFE_INTEGER, fromMs)
+    c.lastStart = null
+    c.atLast = new Set()
   }
 
   /** The camera's next row if it is already here (never asks the index); null otherwise. */
@@ -194,6 +221,71 @@ export class CameraCursors {
     c.atLast.add(r.path)
   }
 }
+
+/** Where a walk goes on after a protected stretch [from, to] (thinning.mjs protectionFor's stretchOf): the first start after it. Starts are whole milliseconds. */
+export const afterStretch = (st) => Math.floor(st[1]) + 1
+
+/**
+ * Where a deletion job's walk of one location can start: the first row, oldest first, that no protected
+ * stretch covers (`row`, null when there is none).
+ * Bookmarked footage is never deleted, so it stays the oldest there for good; walking it row by row was
+ * every run's cost (review of p2-delete, 2026-09-29). Here a stretch costs one look: the rows that start
+ * inside it are all protected and are not read. A file that starts before a stretch and runs into it
+ * is protected too, and passed by itself. Every row that starts before `row` is protected.
+ * `passed`: the first row of each stretch stepped over.
+ * @param {{ index: object, locId: string, guard: { stretchOf: Function }, pace?: () => Promise<void> }} o
+ * @returns {Promise<{ row: object|null, passed: { path, stretch }[] }>}
+ */
+export async function firstUnprotected({ index, locId, guard, pace = null, look = 100 }) {
+  const passed = []
+  let fromMs = null
+  let atStart = new Set() // rows at fromMs already passed (files that run into a stretch)
+  // the first look is one row: with no bookmark at the oldest end (the usual case) that is all it takes
+  for (let want = 1; ; want = look) {
+    const raw = fromMs === null ? index.oldest(want, { loc: locId }) : index.oldest(want, { loc: locId, fromMs })
+    // (a full look made only of rows already passed -- more than `look` files starting in the same
+    // millisecond, all running into a stretch, never written on purpose -- ends the walk: nothing found,
+    // which only ever deletes less)
+    const rows = raw.filter((r) => !(r.startMs === fromMs && atStart.has(r.path)))
+    if (!rows.length) return { row: null, passed }
+    let jumped = false
+    for (const r of rows) {
+      const st = guard.stretchOf(r)
+      if (!st) return { row: r, passed }
+      if (r.startMs >= st[0]) {
+        passed.push({ path: r.path, stretch: st })
+        fromMs = afterStretch(st)
+        atStart = new Set()
+        jumped = true
+        break
+      }
+      // protected, but it starts before the stretch: passed by itself
+      if (r.startMs !== fromMs) atStart = new Set()
+      fromMs = r.startMs
+      atStart.add(r.path)
+    }
+    if (!jumped && raw.length < want) return { row: null, passed }
+    await pace?.()
+  }
+}
+
+/**
+ * A pacer for a job's walk on the main thread: `await pace()` between steps lets the event loop go round
+ * once `ms` have gone by since it last did, so no stretch of the walk holds up live video, pages and
+ * alarm checks for longer than that and one step (the 50 ms rule). The review of p2-delete measured 196-204
+ * ms for a 3,000-file run on the production VM, part of it all 87 cameras refilling in one go; paced,
+ * 36-44 ms there (2026-09-29). What is left above 50 ms is a WAL checkpoint inside one removeMany (80-181
+ * ms, now and then): moving checkpoints off the main thread is Task 12's.
+ */
+export function makePacer(ms = PACE_MS) {
+  let last = performance.now()
+  return async () => {
+    if (performance.now() - last < ms) return
+    await new Promise((r) => setImmediate(r))
+    last = performance.now()
+  }
+}
+export const PACE_MS = 10
 
 /** A binary heap; `before(a, b)` true when a comes out first. */
 export class Heap {
@@ -249,16 +341,58 @@ export class Heap {
 // late. If not, the location is "stalled": nothing more is deleted on it for free space (retention and
 // the space limit go by the index, not by free space, and go on), with a loud warning; an hour later
 // one small try (PROBE_BYTES) is allowed, and free space seen to rise with it ends the stall.
+//
+// Since the review of p2-delete (2026-09-29):
+// - The share is shared: another program writing to it during the check (the other backups on the NAS)
+//   can make free space look stuck too. The warning says so, and below the hard floor housekeeping makes
+//   its small try every run instead of every hour: deleting comes back within 5 minutes once such a
+//   writer pauses, while a NAS that really keeps deleted files loses at most PROBE_BYTES a run of its
+//   oldest footage (which its recycle bin or snapshots then still hold).
+// - A stall is kept in DATA_DIR (STALLS_FILE), not in memory only: after each restart, a NAS with a
+//   recycle bin had its whole shortfall deleted again, up to 20,000 files (about 240 GB), before it
+//   stalled once more.
 
 export const RISE_MIN_BYTES = 1e9
 export const RISE_WAITS_MS = [10_000, 20_000]
 export const STALL_RETRY_MS = 60 * 60_000
 export const PROBE_BYTES = 2e9
 
-const stalls = new Map() // location id -> { since, retryAt, deletedBytes, roseBytes }
+const stalls = new Map() // location id -> { since, retryAt, deletedBytes, roseBytes, freeAfter }
+/** Where the stalls are kept across restarts (a small file on the system disk, never on a share). */
+export const STALLS_FILE = 'storage-stalls.json'
+let loaded = false
 
-/** { since, retryAt, deletedBytes, roseBytes } while deleting on the location is known not to free space, else null. */
+/** The stalls kept in DATA_DIR, read once (a few lines, on the system disk). */
+function load() {
+  if (loaded) return
+  loaded = true
+  let j = null
+  try {
+    j = JSON.parse(readFileSync(join(DATA_DIR, STALLS_FILE), 'utf8'))
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn(`[housekeeping] ${STALLS_FILE} could not be read (${e.message}): locations where deleting did not free space are not known until found again`)
+    return
+  }
+  for (const [id, st] of Object.entries(j ?? {})) {
+    if (st && Number.isFinite(st.since) && Number.isFinite(st.retryAt) && Number.isFinite(st.deletedBytes)) stalls.set(id, st)
+  }
+}
+
+/** Writes the stalls to DATA_DIR (a temporary file, then renamed over the old one). Never throws. */
+function save() {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true })
+    const f = join(DATA_DIR, STALLS_FILE)
+    writeFileSync(`${f}.tmp`, `${JSON.stringify(Object.fromEntries(stalls), null, 1)}\n`)
+    renameSync(`${f}.tmp`, f)
+  } catch (e) {
+    console.warn(`[housekeeping] ${STALLS_FILE} could not be written (${e.message}): a restart forgets where deleting did not free space`)
+  }
+}
+
+/** { since, retryAt, deletedBytes, roseBytes, freeAfter } while deleting on the location is known not to free space, else null. */
 export function freeingStalled(locId) {
+  load()
   const s = stalls.get(locId)
   return s ? { ...s } : null
 }
@@ -272,10 +406,12 @@ const gbText = (b) => `${(b / 1e9).toFixed(1)} GB`
  * @returns {boolean} whether it was stalled and is not any more
  */
 export function stallEnded(locId, freeBytes) {
+  load()
   const s = stalls.get(locId)
   if (!s || !Number.isFinite(freeBytes) || !Number.isFinite(s.freeAfter)) return false
   if (freeBytes - s.freeAfter < s.deletedBytes / 2) return false
   stalls.delete(locId)
+  save()
   return true
 }
 
@@ -288,6 +424,7 @@ export function stallEnded(locId, freeBytes) {
 export async function checkFreeRose({ loc, before, deletedBytes, freeOf, now = Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), waits = RISE_WAITS_MS }) {
   const out = { checked: false, rose: null, stalled: false, cleared: false, warning: null }
   if (!(deletedBytes >= RISE_MIN_BYTES) || !Number.isFinite(before?.freeBytes)) return out
+  load()
   const want = deletedBytes / 2
   for (let i = 0; ; i++) {
     let f
@@ -300,6 +437,7 @@ export async function checkFreeRose({ loc, before, deletedBytes, freeOf, now = D
     out.rose = n(f?.freeBytes) - before.freeBytes
     if (out.rose >= want) {
       out.cleared = stalls.delete(loc.id)
+      if (out.cleared) save()
       return out
     }
     if (i >= waits.length) break
@@ -307,17 +445,27 @@ export async function checkFreeRose({ loc, before, deletedBytes, freeOf, now = D
   }
   out.stalled = true
   stalls.set(loc.id, { since: now, retryAt: now + STALL_RETRY_MS, deletedBytes, roseBytes: out.rose, freeAfter: before.freeBytes + out.rose })
+  save()
   const waited = waits.reduce((a, b) => a + b, 0) / 1000
-  out.warning = `${loc.path}: deleted ${gbText(deletedBytes)} but its free space rose by only ${gbText(out.rose)} in ${waited} s: the share may keep deleted files (a recycle bin, or snapshots). Nothing more is deleted on it for free space (one small try an hour); recording stops when it is full. Check the NAS.`
+  out.warning = `${loc.path}: deleted ${gbText(deletedBytes)} but its free space rose by only ${gbText(out.rose)} in ${waited} s: the share may keep deleted files (a recycle bin, or snapshots), or another program writing to the share at the same time (another backup) used the space. Nothing more is deleted on it for free space (one small try an hour; every run while it is below its hard floor, at most ${gbText(PROBE_BYTES)} each); recording stops when it is full. Check the NAS.`
   return out
 }
 
 export const _test = {
   reset() {
+    loaded = true
     stalls.clear()
+    save()
   },
   setStall(id, s) {
+    load()
     if (s) stalls.set(id, s)
     else stalls.delete(id)
+    save()
+  },
+  /** As after a restart: forgets the stalls in memory, reads them again from DATA_DIR at the next look. */
+  reload() {
+    stalls.clear()
+    loaded = false
   }
 }

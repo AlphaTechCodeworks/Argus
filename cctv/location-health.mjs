@@ -30,6 +30,20 @@ export function freeMarks(settings, loc) {
   return { lowFreePct: own(loc?.lowFreePct) ?? s.lowFreePct ?? 15, floorFreePct: own(loc?.floorFreePct) ?? s.floorFreePct ?? 5 }
 }
 
+/**
+ * A location's space limit for Argus's recordings (limitGB, 1 GB = 1,000,000,000 bytes) and whether it
+ * is enforced. Enforced (housekeeping.mjs deletes down to it) only once saved through storage.mjs since
+ * 2026-09-29, which checks it against the drive's or share's size, asks first on the page, and stamps
+ * limitSetAt. Before that the limit was a note: the old page saved it with no question and no check, so
+ * a value saved then must not start deleting on the first run after the deploy (review of p2-delete).
+ * @returns {{ gb: number|null, bytes: number|null, enforced: boolean }}
+ */
+export function spaceLimit(loc) {
+  const gb = Number(loc?.limitGB)
+  if (!(gb > 0) || !Number.isFinite(gb)) return { gb: null, bytes: null, enforced: false }
+  return { gb, bytes: gb * 1e9, enforced: typeof loc.limitSetAt === 'string' && loc.limitSetAt !== '' }
+}
+
 /** The size in bytes of the filesystem holding `path`, or null. Synchronous: local drives only. */
 export function sizeOfFolder(path) {
   try {
