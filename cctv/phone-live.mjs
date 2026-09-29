@@ -26,10 +26,12 @@ const STOP_DELAY_MS = 10_000
 /** Frames looked at to learn the stream's frame rate before converting. */
 export const RATE_SAMPLES = 12
 /**
- * A conversion held to maxLagS (a remote viewer's) is given this long, in the camera's time from its
- * first frame, to work through the GOP it starts from (a fresh tile's replay: up to a keyframe
- * interval, 3.2 s on an nvr sub, all at once) before what is in it counts (#lag). At 1.5x real time
- * a 3.2 s GOP is gone in 2.1 s.
+ * A conversion held to maxLagS (a remote viewer's) is given this long, in the camera's time from the
+ * first frame that comes live after it starts, to work through the GOP it starts from (a fresh tile's
+ * replay: up to a keyframe interval, 3.2 s on an nvr sub, all at once) before what is in it counts,
+ * whether it is under the line by then or not (#lag). Counted from that GOP's keyframe, a 3 s GOP left
+ * it 2 s. At 1.5x real time a converter gains half a second a second on the camera: a 3.2 s GOP comes
+ * under a 2 s line about 2.4 s after its first picture, and is worked off in 6.4 s.
  */
 export const CATCH_UP_MS = 5000
 /** ...and never held to fewer pictures than this in it (a trickle's 2 s is one or two). */
@@ -198,7 +200,8 @@ export class PhoneStream {
     this.redo = 0 // the rate read again, more than 2x off: what it follows from the camera's next keyframe (#redo)
     this.xcode = null
     this.keepEvery = 1 // of the source's frames, the one in how many its converter keeps
-    this.lagFrom = null // capture time of its converter's first frame (#lag: CATCH_UP_MS)
+    this.lagFrom = null // capture time of the first frame that came live to its converter (#lag: CATCH_UP_MS)
+    this.pictured = false // (#lag) its converter has handed back a picture
     this.lagArmed = false // (#lag) what is in its converter counts: it has caught up, or had CATCH_UP_MS to
     this.lagSince = null // (#lag) since when, by the clock, too much has been in it
     this.lagResets = 0
@@ -359,6 +362,7 @@ export class PhoneStream {
     this.eachPicture = this.slowFps > 0 && fps > 0 && fps < this.slowFps
     this.keepEvery = keepEvery
     this.lagFrom = null
+    this.pictured = false
     this.lagArmed = false
     this.lagSince = null
     this.xcode = this.makeTranscoder({
@@ -459,7 +463,6 @@ export class PhoneStream {
   #push(f) {
     this.xcode.push(f.ts, f.isKey, f.payload)
     if (this.eachPicture) this.xcode.endPicture?.()
-    this.lagFrom ??= f.ts
   }
 
   /**
@@ -469,16 +472,22 @@ export class PhoneStream {
    * push went on writing to its stdin, the remote picture fell further behind and the server's memory
    * grew for as long as the load lasted. A level-full conversion is 1.38-1.50 cores for a 4K H.265 camera
    * at 1x (f24fe50), with little margin on a busy box (the final review of live-smooth). The GOP it
-   * starts from, pushed at once, is its own start: counted once it has caught up, or CATCH_UP_MS after
-   * its first frame (lagFrom). Over for LAG_HOLD_MS by the clock, not frames handed in at once.
+   * starts from, pushed at once, and its own start-up are its start: counted once its first picture is
+   * back and it is under the line, or CATCH_UP_MS after the first frame that came live (lagFrom),
+   * whatever it has handed back. It was armed while ffmpeg had yet to hand back its first picture: a
+   * fresh full-size view whose replayed GOP was just under the line went over it while ffmpeg started
+   * (0.5 s, 10 more pictures in), and was reset at its open, 1.5 s with nothing on screen and a "fell
+   * behind" line, at 1.3-1.68x real time (the review of d5390d6). Over for LAG_HOLD_MS by the clock, not
+   * frames handed in at once.
    */
   #lag(f) {
     // (a picture handed out as it went in can end in a socket moving off it, and the stream closing)
     const pending = this.xcode?.pending
     if (!(pending >= 0) || !(this.rate > 0)) return
+    this.lagFrom ??= f.ts
     const most = Math.max(MIN_LAG_PICTURES, Math.ceil((this.maxLagS * this.rate) / this.keepEvery))
     if (!this.lagArmed) {
-      if (pending > most && f.ts - this.lagFrom <= CATCH_UP_MS) return
+      if ((!this.pictured || pending > most) && f.ts - this.lagFrom <= CATCH_UP_MS) return
       this.lagArmed = true
     }
     if (pending <= most) {
@@ -494,6 +503,7 @@ export class PhoneStream {
   }
 
   #onConverted(ts, isKey, out) {
+    this.pictured = true
     this.#fanOut(encodeFrame(out, isKey, CODEC_H264, ts), isKey)
   }
 
