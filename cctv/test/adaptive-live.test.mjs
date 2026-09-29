@@ -1,6 +1,6 @@
 // Tests for the remote viewers' frame-rate levels (adaptive-live.mjs), with fake streams: no ffmpeg.
 //   node cctv/test/adaptive-live.test.mjs
-import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, SWITCH_WAIT_MS, TICK_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
+import { AdaptiveLive, CLIMB_AFTER_MS, FULL_MAX, FULL_STOP_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, SWITCH_WAIT_MS, TICK_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
 import { encodeFrame, parseFrame } from '../phone-live.mjs'
 import { HubStream } from '../stream-hub.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
@@ -925,6 +925,104 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   live.attach('back2', { ws: fakeWs(), nvrId: 'nvr-2', ch: 6, type: 1, source: two })
   check('  a GOP of 2 frames 1.25 s apart: too few to read a rate off (a trickle, or a hole): not remembered', !live.rates.has('nvr-2/6/1'), String(live.rates.get('nvr-2/6/1')))
   clearInterval(live.timer)
+}
+
+// ---- what level full's conversions cost (the final review of live-smooth) ----
+// A level-full conversion is playback's: 1920 wide, every frame, two decoder threads, 1.38-1.50 cores
+// for a 4K H.265 camera at 1x (f24fe50), where level 15's was 0.85 (1280 wide, 1 in 2; ev-remote A9).
+// Playback holds its own to 2 (CCTV_TRANSCODE_MAX); these drew on the 16 of the live pool alone.
+/**
+ * `n` H.265 mains at 20 fps (a keyframe every 2 s) on the real fan-out, and the stop timers on the
+ * test's clock: play(ms) moves it 50 ms at a time, the cameras sending, the controller looking every
+ * TICK_MS; peak: the most level-full conversions running at once.
+ */
+function fullRig(n) {
+  const real = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout }
+  const timers = new Map()
+  let seq = 0
+  const r = { now: T, xs: [], logs: [], peak: 0 }
+  globalThis.setTimeout = (fn, ms = 0) => {
+    const h = { n: ++seq, unref() { return this } }
+    timers.set(h, { at: r.now + ms, fn })
+    return h
+  }
+  globalThis.clearTimeout = (h) => timers.delete(h)
+  r.restore = () => Object.assign(globalThis, real)
+  r.live = new AdaptiveLive({ pool: new TranscodePool(16), makeTranscoder: (o) => { const x = { o, closed: false, push() {}, endPicture() {}, close() { this.closed = true } }; r.xs.push(x); return x }, log: (l) => r.logs.push(l), budgetBps: 1e9, now: () => r.now })
+  const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
+  r.mains = Array.from({ length: n }, (_, ch) => ({ s: new HubStream(hub, ch, 0), n: 0, ts: 0 }))
+  r.full = () => [...r.live.streams].filter(([k, s]) => k.endsWith('@full') && !s.closed).length
+  r.sock = () => {
+    const w = { ...fakeWs(), overSince: null, closers: [], on(e, f) { if (e === 'close') w.closers.push(f) } }
+    w.close = () => { w.readyState = 3; for (const f of w.closers) f() }
+    return w
+  }
+  r.play = (ms) => {
+    for (const end = r.now + ms; r.now < end;) {
+      r.now += 50
+      for (const [h, x] of [...timers]) if (x.at <= r.now) { timers.delete(h); x.fn() }
+      for (const m of r.mains) {
+        const key = m.n % 40 === 0
+        m.s.onFrame(encodeFrame(Buffer.alloc(key ? 40 : 8), key, 1, m.ts), key)
+        m.n++
+        m.ts += 50
+      }
+      if ((r.now - T) % TICK_MS === 0) r.live.tick()
+      r.peak = Math.max(r.peak, r.full())
+    }
+  }
+  return r
+}
+{
+  // A remote PC steps its full-size view with ‹ › through 8 H.265 mains, one every 2 s (viewer.js
+  // openSingle: the main tile closes, the next camera's opens). Each conversion it left went on
+  // converting every frame for its 10 s stop delay: 5-6 running at once, about 7-8 cores for one
+  // viewer watching one camera (final-res/step.mjs), against about 4.5 before the branch.
+  const r = fullRig(8)
+  try {
+    r.live.attach('stepper', { ws: r.sock(), nvrId: 'n', ch: 99, type: 1, source: new HubStream({ send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }, 99, 1) }) // its grid, behind
+    clearInterval(r.live.timer)
+    r.play(3000)
+    let cur = null
+    const onFull = []
+    for (let i = 0; i < 8; i++) {
+      cur?.close()
+      cur = r.sock()
+      r.live.attach('stepper', { ws: cur, nvrId: 'n', ch: i, type: 0, source: r.mains[i].s, codec: 'h265' })
+      r.play(2000)
+      onFull.push(r.live.streams.get(`n/${i}/0@full`)?.clients.has(cur) === true)
+    }
+    check('a remote PC stepping its full-size view through 8 H.265 mains every 2 s: never more than 2 level-full conversions running (it was 5-6)', r.peak <= 2, `peak ${r.peak}`)
+    check('  every camera it steps to is converted at full', onFull.every(Boolean), onFull.join())
+    cur.close()
+    r.play(FULL_STOP_MS + 100)
+    check(`  the last one left: its conversion closes within ${FULL_STOP_MS / 1000} s (it was 10 s)`, r.full() === 0 && r.xs.every((x) => x.closed), `${r.full()} running`)
+  } finally {
+    r.restore()
+  }
+}
+{
+  // Three remote PCs, each in a full-size view of a different 4K H.265 camera: 4.3 cores beside the 2
+  // playback conversions' 2.9, against the 5.8 or so free (before the branch 2.55). At most FULL_MAX at
+  // full; the next is given level 15's stream (1280 wide), and full once one is free again.
+  const r = fullRig(3)
+  try {
+    const socks = [0, 1, 2].map((ch) => {
+      const ws = r.sock()
+      r.live.attach(`pc${ch}`, { ws, nvrId: 'n', ch, type: 0, source: r.mains[ch].s, codec: 'h265' })
+      clearInterval(r.live.timer)
+      return ws
+    })
+    r.play(1000)
+    const third = r.live.streams.get('n/2/0@15')
+    check(`three PCs at full on three H.265 mains: ${FULL_MAX} level-full conversions, the third on level 15's (1280 wide)`, FULL_MAX === 2 && r.full() === 2 && third?.clients.has(socks[2]) && third.maxWidth === 1280, `${[...r.live.streams.keys()]}`)
+    check('  said once', r.logs.filter((l) => l.includes('full-size conversions run already')).length === 1, r.logs.join(' | '))
+    socks[0].close()
+    r.play(2 * TICK_MS + 2000)
+    check('  one PC gone: the third goes over to full at the camera\'s next keyframe, and never more than 2 at once', r.live.streams.get('n/2/0@full')?.clients.has(socks[2]) && r.peak <= 2, `${[...r.live.streams].map(([k, s]) => `${k}:${s.clients.size}${s.closed ? ' closed' : ''}`)} peak ${r.peak}`)
+  } finally {
+    r.restore()
+  }
 }
 
 // ---- level changes without a freeze or a jump back (stutter report 2.5, verify-5) ----

@@ -19,13 +19,14 @@
 // the same browser writes is a page gone, its socket not closed yet, and is not read (#dead). Twenty
 // seconds with nothing piling up and it goes back up one, longer after a climb that failed
 // (CLIMB_FAILED_MS); a page whose sockets all closed and came back within REMEMBER_MS comes back one
-// level above where it left. On top of that, when all
-// remote viewers together send more than the uplink budget (CCTV_WAN_BUDGET_MBPS, 20 by default), the
-// viewer taking the most is stepped down first: one person on a good link must not starve everyone else.
+// level above where it left. On top of that, when all remote viewers together send more than the
+// uplink budget (CCTV_WAN_BUDGET_MBPS, 20 by default), the viewer taking the most is stepped down
+// first: one person on a good link must not starve everyone else.
 //
 // Viewers on the same level share one conversion per camera, so the cost follows the number of
 // cameras being watched remotely, not the number of people watching. Conversions have their own cap
-// (phone-live.mjs maxPhoneStreams); a viewer who cannot get a slot gets the camera's own stream.
+// (phone-live.mjs maxPhoneStreams); a viewer who cannot get a slot gets the camera's own stream. Level
+// full's of main streams, playback's size and cost, one of their own (FULL_MAX): past it, level 15's.
 //
 // A level change moves a tile without a freeze or a jump back (#retarget): it keeps its picture until
 // the new stream has one, and goes over at the camera's next keyframe, where the new level's stream
@@ -65,8 +66,28 @@ export const LEVELS = Object.freeze([
  * for a viewer, it read 0.5 fps off two keyframes 2 s apart. And a hole in what it learns from is left
  * out, a rate read on too few frames read again at the 12th (rejudge): nvr-2's freezes as streams open
  * read a 20 fps main as 1.6 fps, for the conversion's whole life (the final review of live-smooth).
+ * One that falls more than 2 s of the camera behind (a load that takes its niced ffmpeg below real
+ * time) starts again at the camera's next keyframe (maxLagS): it fell further behind for as long as the
+ * load lasted, and its backlog grew in the server's memory.
  */
-export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true, rejudge: true })
+export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true, rejudge: true, maxLagS: 2 })
+/**
+ * Level full's conversions of main streams running at once, at most (the final review of live-smooth).
+ * Each is playback's (1920 wide, every frame, two decoder threads): 1.38-1.50 cores for a 4K H.265
+ * camera at 1x (f24fe50), where level 15's was 0.85 (1280 wide, 1 in 2; ev-remote A9). Playback holds
+ * its own to 2 (transcode.mjs CCTV_TRANSCODE_MAX); these drew on the live pool's 16 alone, and three PCs
+ * each in a full-size view of a 4K H.265 camera wanted 4.3 cores beside playback's 2.9, against about
+ * 5.8 free (before the branch 2.55). Past the cap a main is given level 15's stream, and full once one
+ * is free again; one that nobody is on any more (its stop delay running) gives its place up at once.
+ */
+export const FULL_MAX = 2
+/**
+ * How long a level-full conversion nobody is on runs on (phone-live.mjs PhoneStream stopDelayMs; 10 s
+ * for the other levels). A PC stepping its full-size view with ‹ › every 2 s left each one converting
+ * every frame for 10 s: 5-6 at once, about 7-8 cores for one viewer watching one camera. A step back
+ * within it finds its conversion running; later, a new one starts from the camera's replay.
+ */
+export const FULL_STOP_MS = 2000
 export const TICK_MS = 2000
 /**
  * A link that is not keeping up: what its page has queued takes longer than QUEUE_S to go at the rate
@@ -317,6 +338,13 @@ export class AdaptiveLive {
     const key = this.#keyFor(entry, level)
     let s = this.streams.get(key)
     if (!s || s.closed) {
+      // a main's level-full conversion past FULL_MAX: level 15's stream, until one is free (the tick's
+      // #retarget at full asks again)
+      if (level === 0 && entry.type === 0 && !this.#roomAtFull()) {
+        if (!entry.fullWait) this.log(`[adaptive] ${entry.nvrId}/${entry.ch + 1}: its main on level 15's stream, not full: ${FULL_MAX} full-size conversions run already`)
+        entry.fullWait = true
+        return this.#streamFor(entry, 1, { fps })
+      }
       const slot = this.pool.acquire()
       if (!slot) return entry.source // no room for another conversion: the camera's own stream
       // level full is only ever for browsers that cannot play H.265 (#converts), so an H.265 stream
@@ -326,11 +354,28 @@ export class AdaptiveLive {
       // for this camera stream (#passes). One sent as it is that its rate read again says to convert
       // takes a slot then (rejudge).
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), onRate, acquire: () => this.pool.acquire(), onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), onRate, acquire: () => this.pool.acquire(), onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
       this.#made = s
     }
+    if (level === 0) entry.fullWait = false
     return s
+  }
+
+  /**
+   * Whether a main's level-full conversion may start (FULL_MAX): one that nobody is on or waits for
+   * (its FULL_STOP_MS running) is closed to make room, the one left longest first.
+   */
+  #roomAtFull() {
+    const idle = []
+    let busy = 0
+    for (const [key, s] of this.streams) {
+      if (!key.endsWith('/0@full') || s.closed) continue
+      if (s.clients.size === 0 && !this.#awaited(s)) idle.push(s)
+      else busy++
+    }
+    while (busy + idle.length >= FULL_MAX && idle.length) idle.shift().close()
+    return busy + idle.length < FULL_MAX
   }
 
   /**
@@ -638,7 +683,8 @@ export class AdaptiveLive {
     this.gone.set(v.key, { level: v.level, at: this.now() })
     // It comes back one level above, if at all: the streams its sockets left at this level would keep
     // their conversion slots for their 10 s (phone-live.mjs STOP_DELAY_MS), and the level it comes back
-    // to needs them. (At full they are its H.265 conversions, the same when it comes back: they stay.)
+    // to needs them. (At full they are its H.265 conversions, the same when it comes back: they stay
+    // their FULL_STOP_MS.)
     // Not one another viewer's tile waits to switch to: made for that one, it would go from under it.
     if (v.level > 0) for (const s of v.left) if (s.clients.size === 0 && !this.#awaited(s)) s.close()
     v.left.clear()
