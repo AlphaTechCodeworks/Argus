@@ -20,7 +20,9 @@
 //     without waiting for the next, stamped 8 a second);
 //   - a remote PC's live view of an H.265 camera at level full (adaptive-live.mjs -> phone-live.mjs):
 //     every frame out at its own time, a keyframe every 2 s, 1920 wide, no keyframe past the 1 s
-//     buffer, and faster than real time with room to spare, on 4K at 20 fps and 1440p at 30.
+//     buffer, and faster than real time with room to spare, on 4K at 20 fps and 1440p at 30;
+//   - the same for a camera that trickles (0.8 fps, keyframes only), fed in real time: the first
+//     picture soon after the second frame, and each picture out as it goes in, none held back.
 // ffmpeg runs behind ionice and nice here exactly as in the service. Nothing reaches an NVR.
 //   node cctv/test/transcode-ffmpeg.test.mjs        (on the server copy)
 import { execFileSync, spawn } from 'node:child_process'
@@ -569,6 +571,42 @@ for (const c of [
   // ahead of real time with room to spare on a busy server: the conversion runs at nice 10 behind the
   // recorder, and one that falls behind is a picture that falls behind
   check('  converted at least 1.5x faster than real time', speed >= 1.5, `${speed.toFixed(2)}x`)
+  for (const s of live.streams.values()) s.close()
+  clearInterval(live.timer)
+}
+
+// ---- a remote viewer's live view of a camera that trickles: each picture out as it goes in (stutter report 2.9) ----
+// nvr-2's wharf mains sent 0.4-2.8 fps on 29 Sep, keyframes only. A remote PC's conversion of one learnt
+// its rate from 12 frames (15 s at 0.8 fps), and then ffmpeg put each picture out two pictures late:
+// its parser holds a picture until the next one begins, and the second decoder thread one more (2.7 s
+// at 0.8 fps; the first picture 3.9 s after the first keyframe, even once the rate was decided within
+// 1 s). The whole path, fed in real time: six keyframes of a 720p H.265 camera, 1.25 s apart.
+{
+  const GAP = 1250
+  const clip = testVideo({ size: '1280x720', src: 'testsrc2', frames: 6, gop: 1 })
+  const units = splitUnits(clip, CODEC.h265).units
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(2), log: (l) => logs.push(l), budgetBps: 1e12 })
+  const src = { gop: [], viewers: new Set(), add(w) { this.viewers.add(w) }, remove(w) { this.viewers.delete(w) } }
+  const ws = { OPEN: 1, readyState: 1, bufferedAmount: 0, got: [], send(b) { this.got.push({ at: performance.now(), ...parseFrame(b) }) }, on() {}, close() {} }
+  live.attach('pc', { ws, nvrId: 'n1', ch: 0, type: 0, source: src, codec: 'h265' })
+  const handed = []
+  const t0 = performance.now()
+  for (let i = 0; i < units.length; i++) {
+    while (performance.now() < t0 + i * GAP) await sleep(5)
+    handed.push(performance.now())
+    const msg = encodeFrame(clip.subarray(units[i].start, units[i].end), units[i].isKey, CODEC_H265, T0 + i * GAP)
+    for (const v of [...src.viewers]) v.send(msg)
+  }
+  await sleep(QUIET_MS)
+  const got = ws.got
+  const late = got.map((g) => g.at - handed[Math.round((g.ts - T0) / GAP)])
+  const said = `${got.length} out, the first ${Math.round((got[0]?.at ?? NaN) - t0)} ms after the first keyframe, each ${late.map((l) => Math.round(l)).join(', ')} ms after its own frame`
+  info(`an H.265 main trickling at 0.8 fps, remote PC at full: ${said}`)
+  check('an H.265 main trickling at 0.8 fps, remote PC at full: decided at its second frame, converted picture by picture', logs.some((l) => l === '[phone-live] n1/1: converting a main stream at 0.8 fps to H.264, every frame kept, each picture out as it comes'), logs.join(' | '))
+  check('  its first picture within 2 s of the first keyframe (the second frame is at 1.25 s)', got.length > 0 && got[0].at - t0 <= 2000, said)
+  check('  every picture from the second on, as H.264, in order, none held back for the next', got.length === units.length - 1 && got.every((g, i) => g.codec === CODEC_H264 && Math.abs(g.ts - (T0 + (i + 1) * GAP)) < 0.5), said)
+  check('  each out within 0.6 s of its own frame (two held in ffmpeg made it 2.7 s)', late.length > 0 && late.every((l) => l <= 600), said)
   for (const s of live.streams.values()) s.close()
   clearInterval(live.timer)
 }
