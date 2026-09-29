@@ -172,8 +172,9 @@ export function switchOnWarning(jobs) {
   const d = jobs?.defaults ?? {}
   const full = Number.isFinite(d.fullDays) ? `older than ${days(d.fullDays)}` : 'older than its full-video days'
   const total = Number.isFinite(d.retentionDays) ? `older than ${days(d.retentionDays)}` : 'older than its total days'
+  // the same test as planText: no time-lapse is promised where there is no stretch for it
   const what =
-    d.after === 'timelapse'
+    d.after === 'timelapse' && !(d.fullDays >= d.retentionDays)
       ? `Footage ${full} (the full-video days) will be rewritten to time-lapse, one picture every ${d.timelapseS ?? '?'} s, and footage ${total} (the total days) deleted, for good.`
       : `Footage ${total} (the total days) will be deleted, for good.`
   const own = jobs?.camerasOwnDays ? `\n\n${cams(jobs.camerasOwnDays)} (Settings › Recording) and ${jobs.camerasOwnDays === 1 ? 'follows' : 'follow'} those.` : ''
@@ -286,10 +287,10 @@ if (typeof document !== 'undefined') {
 
   document.getElementById('sj-form')?.addEventListener('submit', async (e) => {
     e.preventDefault()
-    const now = jobs?.mode
+    const current = jobs?.mode
     const want = document.querySelector('input[name="sj-mode"]:checked')?.value
-    if (!want || !now) return
-    if (want === now) {
+    if (!want || !current) return
+    if (want === current) {
       picked = null
       return say('No change')
     }

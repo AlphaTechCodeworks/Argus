@@ -308,7 +308,9 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   check('the confirm says bookmarked and exported stretches are kept', /Bookmarked and exported stretches are kept/.test(w), w)
   check('the confirm mentions cameras with days of their own', /2 cameras/.test(w), w)
   const wk = switchOnWarning({ ...base, defaults: { ...base.defaults, after: 'keep' } })
-  check('with "keep everything" the confirm promises no time-lapse, only deletion', !/time-lapse/.test(wk.replace(/^Switch time-lapse and retention ON\?/, '')) && /older than 30 days/.test(wk) && /for good/.test(wk), wk)
+  const we = switchOnWarning({ ...base, defaults: { ...base.defaults, fullDays: 30 } })
+  check('with full days equal to the total, the confirm promises no time-lapse either', !/rewritten/.test(we) && /older than 30 days/.test(we), we)
+  check('with "keep everything" the confirm promises no time-lapse, only deletion',!/time-lapse/.test(wk.replace(/^Switch time-lapse and retention ON\?/, '')) && /older than 30 days/.test(wk) && /for good/.test(wk), wk)
 }
 
 // ---- the page's files ---------------------------------------------------------------------------
