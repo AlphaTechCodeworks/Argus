@@ -53,10 +53,12 @@ function virtualClock() {
 
 /**
  * The page's socket as ws has it: each message (its fragments, as live-mux sends them) queues until the
- * link has written it, at `bps` bytes a second, and ws then runs its send callback.
+ * link has written it, at `bps` bytes a second, and ws then runs its send callback. gone(n): its browser
+ * has gone (a network change) and the server's socket was not told: the path takes n bytes more, then
+ * nothing is written again.
  */
 function linkSocket(bps) {
-  const ws = { OPEN: 1, readyState: 1, bufferedAmount: 0, handlers: {}, queue: [], parts: 0, credit: 0 }
+  const ws = { OPEN: 1, readyState: 1, bufferedAmount: 0, handlers: {}, queue: [], parts: 0, credit: 0, room: Infinity, written: 0 }
   ws.on = (ev, fn) => ((ws.handlers[ev] ??= []).push(fn), ws)
   ws.emit = (ev, ...a) => { for (const fn of ws.handlers[ev] ?? []) fn(...a) }
   ws.send = (data, opts, cb) => {
@@ -71,14 +73,17 @@ function linkSocket(bps) {
   ws.write = (ms) => {
     if (!ws.queue.length) return (ws.credit = 0)
     ws.credit += (bps * ms) / 1000
-    while (ws.queue.length && ws.credit >= ws.queue[0].bytes) {
+    while (ws.queue.length && ws.credit >= ws.queue[0].bytes && ws.room >= ws.queue[0].bytes) {
       const m = ws.queue.shift()
       ws.credit -= m.bytes
       ws.bufferedAmount -= m.bytes
+      ws.room -= m.bytes
+      ws.written += m.bytes
       m.cb?.()
     }
     if (!ws.queue.length) ws.credit = 0 // an idle link saves nothing up
   }
+  ws.gone = (n) => (ws.room = n)
   ws.close = () => {}
   ws.terminate = () => {}
   return ws
@@ -119,10 +124,14 @@ const payload = (n) => {
  *   it, the worker sends its GOP so far at once through the fan-out (verify-6), then its frames as they
  *   come, for as long as it is wanted. remote (true): the stand-in is a remote viewer's, the main
  *   stream's keyframes while the page has room for them; false: a local viewer's, every frame.
- * @returns {{ lines: string[], downs: string[], live: AdaptiveLive }} lines: the controller's, each
- *   with the second it was said at in front
+ *   reload: at deadAt ms the page's browser changes network (public/live-mux.js drops its socket and
+ *   opens another), and the server's socket is not told: it takes pipeBytes more, then writes nothing
+ *   and stays open (keep-alive would cut it 30 s later, backpressure.mjs; here it never goes); at
+ *   openAt the same browser's new page socket opens, its tiles subscribing 15 ms apart as at first.
+ * @returns {{ lines: string[], downs: string[], live: AdaptiveLive, written: number[] }} lines: the
+ *   controller's, each with the second it was said at in front; written: bytes each page socket wrote
  */
-export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true }) {
+export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true, reload = null }) {
   const clock = virtualClock()
   try {
     const lines = []
@@ -140,7 +149,7 @@ export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true }
     }
     const live = new AdaptiveLive({ pool: new TranscodePool(poolMax), makeTranscoder, log: (l) => lines.push(`${((clock.now() - START) / 1000).toFixed(2)} ${l}`), budgetBps: 1e12, now: clock.now })
     const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
-    const cams = tiles.map((t) => ({ ...t, stream: new HubStream(hub, t.ch, 1), next: Math.ceil(t.cam.from / t.cam.every), first: Math.ceil(t.cam.from / t.cam.every), subAt: null, channel: null }))
+    const cams = tiles.map((t) => ({ ...t, stream: new HubStream(hub, t.ch, 1), next: Math.ceil(t.cam.from / t.cam.every), first: Math.ceil(t.cam.from / t.cam.every) }))
     // every frame due by `upTo` (ms after the page opened), at its capture time
     const frames = (c, upTo) => {
       while (c.next * c.cam.every <= upTo) {
@@ -171,37 +180,45 @@ export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true }
       }
     }
     for (const m of mains) mainFrames(m, -1)
-    const ws = linkSocket((linkMbps * 1e6) / 8)
-    serveMux(ws, {
-      session: () => 'owner',
-      now: clock.now,
-      log: () => {},
-      attach: (channel, sub) => {
-        const c = cams.find((x) => x.ch === sub.ch)
-        c.channel = channel
-        // as live-attach.mjs does it: a cold sub's stand-in first, then the level controller
-        if (c.standIn && !(c.stream.gop.length > 0)) {
-          const [keyKB, gopKB] = c.standIn
-          const gop = [encodeFrame(payload(keyKB * 1000), true, 0, -1000)]
-          for (let i = 1; i < 20; i++) gop.push(encodeFrame(payload(Math.round(((gopKB - keyKB) * 1000) / 19)), false, 0, -1000 + i * 50))
-          bridgeSub(channel, { sub: c.stream, main: { gop, add(tap) { replayGop(this.gop, tap) }, remove() {} }, clientH265: false })
-        } else if (c.mainStream && !(c.stream.gop.length > 0)) bridgeSub(channel, { sub: c.stream, main: c.mainStream.stream, clientH265: false, remote })
-        live.attach('owner-pc', { ws: channel, nvrId: 'nvr-2', ch: sub.ch, type: 1, source: c.stream })
-        clearInterval(live.timer) // looked at below, on the page's clock
-      }
-    })
-    cams.forEach((c, i) => (c.subAt = i * 15))
+    // a page socket, its tiles subscribing 15 ms apart from `from` ms
+    const pages = []
+    const open = (from) => {
+      const ws = linkSocket((linkMbps * 1e6) / 8)
+      const channels = new Map() // ch -> its channel on this socket
+      serveMux(ws, {
+        session: () => 'owner',
+        now: clock.now,
+        log: () => {},
+        attach: (channel, sub) => {
+          const c = cams.find((x) => x.ch === sub.ch)
+          channels.set(c.ch, channel)
+          // as live-attach.mjs does it: a cold sub's stand-in first, then the level controller
+          if (c.standIn && !(c.stream.gop.length > 0)) {
+            const [keyKB, gopKB] = c.standIn
+            const gop = [encodeFrame(payload(keyKB * 1000), true, 0, -1000)]
+            for (let i = 1; i < 20; i++) gop.push(encodeFrame(payload(Math.round(((gopKB - keyKB) * 1000) / 19)), false, 0, -1000 + i * 50))
+            bridgeSub(channel, { sub: c.stream, main: { gop, add(tap) { replayGop(this.gop, tap) }, remove() {} }, clientH265: false })
+          } else if (c.mainStream && !(c.stream.gop.length > 0)) bridgeSub(channel, { sub: c.stream, main: c.mainStream.stream, clientH265: false, remote })
+          live.attach('owner-pc', { ws: channel, nvrId: 'nvr-2', ch: sub.ch, type: 1, source: c.stream })
+          clearInterval(live.timer) // looked at below, on the page's clock
+        }
+      })
+      pages.push({ ws, from, channels })
+    }
+    open(0)
     const STEP = 5
     for (let at = 0; at <= durMs; at += STEP) {
       clock.to(START + at)
-      ws.write(STEP) // what the link wrote over the step just gone: a frame queued now goes at the next
-      for (const c of cams) if (!c.channel && at >= c.subAt) ws.emit('message', Buffer.from(JSON.stringify({ op: 'sub', id: c.ch + 1, nvr: 'nvr-2', ch: c.ch, stream: 1 })), false)
+      if (reload && at === reload.deadAt) pages[0].ws.gone(reload.pipeBytes)
+      if (reload && at === reload.openAt) open(at)
+      for (const p of pages) p.ws.write(STEP) // what the link wrote over the step just gone: a frame queued now goes at the next
+      for (const p of pages) cams.forEach((c, i) => { if (!p.channels.has(c.ch) && at >= p.from + i * 15) p.ws.emit('message', Buffer.from(JSON.stringify({ op: 'sub', id: c.ch + 1, nvr: 'nvr-2', ch: c.ch, stream: 1 })), false) })
       for (const c of cams) frames(c, at)
       for (const m of mains) mainFrames(m, at)
       if (at > 0 && at % TICK_MS === 0) live.tick()
     }
     const said = lines.filter((l) => l.includes('[adaptive]'))
-    return { lines: said, downs: said.filter((l) => /: (full|15|8) -> (15|8|4) /.test(l)), live }
+    return { lines: said, downs: said.filter((l) => /: (full|15|8) -> (15|8|4) /.test(l)), live, written: pages.map((p) => p.ws.written) }
   } finally {
     clock.restore()
   }

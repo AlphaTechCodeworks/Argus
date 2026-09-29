@@ -15,9 +15,11 @@
 // cannot keep up, and it goes down a level: what its page has queued takes more than QUEUE_S to go at
 // the rate the socket drains, on two looks in a row, or a tile has been held back over its cap for
 // more than HELD_MS. What a page opening or a level change queues by itself (every tile's replay, the
-// first keyframes) is let go out first (GRACE_MS). Twenty seconds with nothing piling up and it goes
-// back up one, longer after a climb that failed (CLIMB_FAILED_MS); a page whose sockets all closed and
-// came back within REMEMBER_MS comes back one level above where it left. On top of that, when all
+// first keyframes) is let go out first (GRACE_MS). A page socket that writes nothing while another of
+// the same browser writes is a page gone, its socket not closed yet, and is not read (#dead). Twenty
+// seconds with nothing piling up and it goes back up one, longer after a climb that failed
+// (CLIMB_FAILED_MS); a page whose sockets all closed and came back within REMEMBER_MS comes back one
+// level above where it left. On top of that, when all
 // remote viewers together send more than the uplink budget (CCTV_WAN_BUDGET_MBPS, 20 by default), the
 // viewer taking the most is stepped down first: one person on a good link must not starve everyone else.
 //
@@ -211,6 +213,10 @@ class Viewer {
     // its own start-up going out (GRACE_MS): marks, per socket, the bytes its link will have written
     // once what was queued then has gone; opening: taken as its tiles open, for OPENING_MS
     this.grace = { from: now, marks: new Map(), opening: true }
+    // its /live-mux page sockets (live-mux.mjs MuxChannel.page): what each had written at the last look,
+    // for how many looks in a row that has not grown, whether it ever has, and whether its being left
+    // out has been said (#dead)
+    this.pages = new Map() // page -> { written, still, wrote, said }
     this.left = new Set() // level streams its closed sockets left with nobody on them (for their 10 s)
     this.sockets = new Set() // { ws, nvrId, ch, type, source, stream, sent, lastTs, switch, ... } (attach)
     this.sentAt = 0
@@ -586,9 +592,14 @@ export class AdaptiveLive {
     }
     entry.stream = this.#streamFor(entry, v.level)
     entry.stream.add(ws)
+    // A page opening: what its tiles queue as they open (their replays, and a stand-in's before them:
+    // live-attach.mjs) is its own start-up. So is a page socket of a browser that has one already: a
+    // second tab, or a page that changed network. public/live-mux.js drops a socket it has heard nothing
+    // on and opens another, while the server's end of the old one can stay open for a minute; the new
+    // page's tiles came here with no opening of their own (the final review of live-smooth).
+    const page = ws.page ?? null
+    if (page && !(v.grace?.opening && now - v.grace.from < OPENING_MS) && ![...v.sockets].some((e) => e.ws.page === page)) v.grace = { from: now, marks: new Map(), opening: true }
     v.sockets.add(entry)
-    // a page opening: what its tiles queue as they open (their replays, and a stand-in's before them:
-    // live-attach.mjs) is its own start-up
     if (v.grace?.opening && now - v.grace.from < OPENING_MS) v.grace.marks = this.#marks(v)
     ws.on?.('close', () => {
       this.#cancelSwitch(entry)
@@ -682,8 +693,13 @@ export class AdaptiveLive {
     let top = null
     let queued = -1
     let over = 0
+    const dead = new Map() // a dead page's queue, left out (#dead)
     for (const e of v.sockets) {
       const q = e.ws.sharedBufferedAmount ?? e.ws.bufferedAmount ?? 0
+      if (this.#dead(v, e)) {
+        dead.set(e.ws.page, q)
+        continue
+      }
       if (q > queued) [top, queued] = [e, q]
       if (e.ws.overSince != null) over++
     }
@@ -693,6 +709,7 @@ export class AdaptiveLive {
     if (bps === null) text += queued > 0 ? ', draining: not measured yet' : ', draining: idle'
     else if (typeof bps === 'number') text += `, draining at ${((bps * 8) / 1e6).toFixed(1)} Mbit/s${bps > 0 ? ` (${(queued / bps).toFixed(1)} s)` : ''}`
     if (over) text += `, ${over} held over ${over === 1 ? 'its' : 'their'} cap`
+    if (dead.size) text += `; a dead page's ${([...dead.values()].reduce((a, q) => a + q, 0) / 1e6).toFixed(2)} MB left out`
     return text
   }
 
@@ -728,23 +745,69 @@ export class AdaptiveLive {
    * Whether a viewer's own start-up is still going out (GRACE_MS): what its sockets had queued when its
    * page opened or its level last changed, not all written yet. Counted in bytes written, not read off
    * the queue: behind a burst the queue holds what the cameras sent meanwhile, and on a link near its
-   * rate that takes many seconds more to come down than the burst itself does to go.
+   * rate that takes many seconds more to come down than the burst itself does to go. A dead page's
+   * never will (#dead).
    */
   #inGrace(v, now) {
     const g = v.grace
     if (!g) return false
     if (g.opening && now - g.from < OPENING_MS) return true
     g.opening = false
-    if (now - g.from < GRACE_MS) for (const [e, mark] of g.marks) if (v.sockets.has(e) && this.#written(e) < mark) return true
+    if (now - g.from < GRACE_MS) for (const [e, mark] of g.marks) if (v.sockets.has(e) && !this.#dead(v, e) && this.#written(e) < mark) return true
     v.grace = null
+    return false
+  }
+
+  /**
+   * Once a look, what each of a viewer's page sockets has written (#dead), and the one it finds dead
+   * said once: which page's queue the level no longer reads.
+   */
+  #lookAtPages(v) {
+    const seen = new Map()
+    for (const e of v.sockets) if (e.ws.page && !seen.has(e.ws.page)) seen.set(e.ws.page, e)
+    for (const [page, e] of seen) {
+      const written = this.#written(e)
+      const was = v.pages.get(page)
+      if (!was) v.pages.set(page, { written, still: 0, wrote: written > 0, said: false })
+      else if (written !== was.written) Object.assign(was, { written, still: 0, wrote: true, said: false })
+      else was.still++
+    }
+    for (const page of v.pages.keys()) if (!seen.has(page)) v.pages.delete(page)
+    for (const [page, e] of seen) {
+      const p = v.pages.get(page)
+      if (p.said || !this.#dead(v, e)) continue
+      p.said = true
+      this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket of this browser has written nothing for ${(p.still * TICK_MS) / 1000} s while another of its sockets writes: its ${(this.#queued(e) / 1e6).toFixed(2)} MB queued left out (a page gone, its socket not closed yet, or a tab that stopped reading)`)
+    }
+  }
+
+  /**
+   * Whether a socket's page has gone dead: its page socket has written nothing since the look before,
+   * while another page socket of the same browser has. A PC or a phone through the tunnel that changes
+   * network drops its page socket and opens a new one (public/live-mux.js), and the server's socket to
+   * cloudflared stays open: its queue is never written, drains at 0, and was read as the link, every look
+   * over and its tiles held over their caps. The new page, the same browser, was stepped full -> 15 -> 8
+   * -> 4 and held there until the dead one went, 60 s and more (keep-alive waits for 30 s with nothing
+   * written, backpressure.mjs), then 60 s of climbs back (the final review of live-smooth). One look, not
+   * two: the path to the browser takes a few MB more after it has gone, and the queue reads over from the
+   * look its writes stop at, so at two the step down came first (a 6 MB path: full -> 15 at 32 s). Two
+   * sockets of one browser share its link, and one that writes nothing while the other writes is not
+   * being read. Both stopped: nothing tells a dead page from a link that stopped, and both count.
+   */
+  #dead(v, e) {
+    const page = e.ws.page
+    const p = page && v.pages.get(page)
+    if (!p || p.still < 1) return false
+    for (const [other, q] of v.pages) if (other !== page && q.wrote && q.still === 0) return true
     return false
   }
 
   /** This look's pressure on a viewer's link: why, or null (QUEUE_S, PRESSURE_LOOKS, HELD_MS, GRACE_MS). */
   #pressure(v, now) {
+    this.#lookAtPages(v)
     let held = 0
-    for (const e of v.sockets) if (e.ws.overSince != null && now - e.ws.overSince > HELD_MS) held++
-    const over = !this.#inGrace(v, now) && [...v.sockets].some((e) => this.#over(e))
+    for (const e of v.sockets) if (e.ws.overSince != null && now - e.ws.overSince > HELD_MS && !this.#dead(v, e)) held++
+    const over = !this.#inGrace(v, now) && [...v.sockets].some((e) => !this.#dead(v, e) && this.#over(e))
     v.overLooks = over ? v.overLooks + 1 : 0
     if (v.overLooks >= PRESSURE_LOOKS) return 'video backing up on its link'
     if (held) return `${held === 1 ? 'a tile' : `${held} tiles`} held over ${held === 1 ? 'its' : 'their'} cap for more than ${HELD_MS / 1000} s`
