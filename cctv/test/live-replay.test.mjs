@@ -65,6 +65,68 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
   check('... a tile suspended twice (the grid hidden again) is not counted twice', twice.length === 2 && twice[0] !== twice[1], JSON.stringify(twice.map((p) => [p.fromMs, p.arr.length])))
   check('... after the close, from the reconnect\'s open', parts[2].fromMs === 31_000 && parts[2].arr[0].ts === 30_950 && parts[2].arr.at(-1).ts === 49_950, JSON.stringify(parts[2] && [parts[2].fromMs, parts[2].arr[0]]))
 }
+{
+  // A hidden tile's connection drops (the page's socket, or the server ending the channel) and comes
+  // back while the full-size view is still open: the tile stays hidden across the reconnect
+  // (live-tile.js keeps `suspended`), keeping the new connection's stream, and shows nothing until its
+  // resume. The review of 29 Sep found the replay playing those 19 s as if they had been on screen.
+  const frames = []
+  for (let i = 0; i < 1000; i++) if (i * 50 + 60 < 20_030 || i * 50 + 60 > 21_000) frames.push([i * 50 + 60, i * 50, 1000, i % 40 === 0 ? 1 : 0])
+  const tile = { id: 1, frames, events: [[0, 'connect', 'sub'], [0, 'open'], [10_030, 'suspend'], [20_030, 'close'], [20_500, 'connect', 'sub'], [21_000, 'open'], [40_030, 'resume', 'kept']] }
+  const parts = segments(tile)
+  const hidden = parts.flatMap((p) => p.arr).filter((f) => f.ts >= 10_000 && f.ts < 38_000)
+  check('segments: a hidden tile that reconnects stays hidden: nothing between its suspend and its resume is played', parts.length === 2 && hidden.length === 0, JSON.stringify(parts.map((p) => [p.fromMs, p.arr.length, p.arr[0].ts])))
+  check('... and its resume decodes what it kept from the new connection, from its last keyframe', parts[1]?.fromMs === 40_030 && parts[1].arr[0].isKey && parts[1].arr[0].ts === 38_000 && parts[1].arr.filter((f) => f.at === 40_030).length === 40 && parts[1].arr.at(-1).ts === 49_950)
+}
+{
+  // Back from hiding with nothing fresh kept (a camera trickling, nothing for 3 s; or more than
+  // HOLD_MAX_BYTES since its keyframe): live-tile.js resume() connects again instead of decoding what
+  // it kept, and the trace says so ('resume', 'reconnect'). The replay must not decode the kept GOP
+  // then as well: the new connection's replay of it would follow, frames stepping back and resyncs
+  // the real tile never had (the review of 29 Sep).
+  const frames = []
+  for (let i = 0; i < 1200; i++) {
+    const at = i * 50 + 60
+    if (at > 26_000 && at < 30_300) continue // nothing arrives from 26 s: no longer lendable at 30 s
+    frames.push([at, i * 50, 1000, i % 40 === 0 ? 1 : 0])
+  }
+  // the new connection opens at 30.2 s and starts with the camera's latest keyframe (28 s), in a burst
+  const replay = []
+  for (let ts = 28_000, at = 30_300; ts <= 30_250; ts += 50, at += 1) replay.push([at, ts, 1000, ts === 28_000 ? 1 : 0])
+  const all = [...frames.filter((f) => f[0] < 30_300), ...replay, ...frames.filter((f) => f[1] > 30_250).map((f) => [Math.max(f[0], 30_400), ...f.slice(1)])]
+  const tile = { id: 1, frames: all, events: [[0, 'connect', 'sub'], [0, 'open'], [10_030, 'suspend'], [30_030, 'resume', 'reconnect'], [30_030, 'connect', 'sub'], [30_200, 'open']] }
+  const parts = segments(tile)
+  check('segments: a resume that connects again starts afresh from the new connection, nothing kept decoded', parts.length === 2 && parts[1].fromMs === 30_200 && parts[1].arr[0].at === 30_300 && parts[1].arr[0].ts === 28_000 && parts[1].arr.every((f, i) => i === 0 || f.ts > parts[1].arr[i - 1].ts), JSON.stringify(parts.map((p) => [p.fromMs, p.arr.length, p.arr[0]])))
+  const r = await playTile(tile)
+  const fresh = await playTile({ id: 1, frames: all.filter((f) => f[0] >= 30_300), events: [[30_030, 'connect', 'sub'], [30_200, 'open']] })
+  const oldEvents = tile.events.map((e) => (e[1] === 'resume' ? [e[0], 'resume'] : e))
+  const wrong = await playTile({ ...tile, events: oldEvents })
+  check('... and replays as any new connection with that start does, not with the kept GOP in front (4 resyncs, 11 dropped)', r.backwards === 0 && r.resyncs === fresh.resyncs && r.dropped === fresh.dropped && wrong.resyncs > r.resyncs, `${brief(r)} fresh ${brief(fresh)} kept in front ${brief(wrong)}`)
+  const old = segments({ ...tile, events: oldEvents })
+  check('... a trace from before the resume said which (no word): as a resume that decoded what it kept', old[1]?.fromMs === 30_030 && old[1].arr[0].at === 30_030 && old[1].arr[0].ts === 24_000, JSON.stringify(old.map((p) => [p.fromMs, p.arr.length, p.arr[0]])))
+}
+{
+  // A trace started while the full-size view is open: the grid's tiles are already hidden when the
+  // recorder first sees them (the recorder says so first: frame-trace.js), so their frames are not
+  // played until the resume.
+  let now = 0
+  const tr = new FrameTrace({ now: () => now, wallNow: () => 0, later: () => 1, cancel: () => {}, durationMs: 60_000 })
+  const tile = { nvr: 'nvr-2', ch: 3, streamType: 1, suspended: true }
+  const US0 = 1_759_118_880_000_000
+  for (let i = 0; i < 600; i++) {
+    now = i * 50 + 60
+    if (now > 15_000 && tile.suspended) {
+      tile.suspended = false
+      tr.event(tile, 'resume', 'kept')
+    }
+    const b = new Uint8Array(64)
+    b[0] = i % 40 === 0 ? 1 : 0
+    new DataView(b.buffer).setBigInt64(8, BigInt(US0 + i * 50_000), true)
+    tr.frame(tile, b)
+  }
+  const parts = segments(JSON.parse(JSON.stringify(tr.stop())).tiles[0])
+  check('segments: a trace started over a hidden tile plays nothing of it before its resume', parts.length === 1 && parts[0].fromMs === 15_010 && parts[0].arr[0].isKey && parts[0].arr[0].ts === 14_000 && parts[0].arr[0].at === 15_010, JSON.stringify(parts.map((p) => [p.fromMs, p.arr.length, p.arr[0]])))
+}
 
 // ---- nothing shown is invented, and the page it fakes is put back ----
 {

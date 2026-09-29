@@ -446,9 +446,12 @@ export class LiveTile {
    */
   resume() {
     if (!this.suspended || this.closed) return
+    // the frame trace says which way it came back, as its replay must do the same (test/live-replay.mjs
+    // segments); said while still hidden, so a trace that first sees the tile here knows it was
+    const kept = this.lendable
+    activeTrace()?.event(this, 'resume', kept ? 'kept' : 'reconnect')
     this.suspended = false
-    activeTrace()?.event(this, 'resume')
-    if (this.lendable) {
+    if (kept) {
       this.player.reset()
       for (const m of this.gop) this.#decode(m)
       return

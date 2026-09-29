@@ -298,6 +298,58 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   check('... the D overlay\'s counters once a second', JSON.stringify(a.stats) === '[[1000,20,3,2,1,350]]', JSON.stringify(a.stats))
   check('... a tile borrowing it records the borrow, and no frames of its own', b.camera === 'n1/10' && JSON.stringify(b.events.map((e) => e.slice(1))) === '[["borrow",1],["end"]]' && b.frames.length === 0, JSON.stringify(b))
 }
+// a trace started while the full-size view is open, and the two ways back from it: the trace must say
+// which tiles were already hidden or borrowing, and whether a resume decoded what the tile kept or
+// connected again, or its replay (test/live-replay.mjs) plays what the viewer never saw
+{
+  const { startTrace, stopTrace } = await import('../public/frame-trace.js')
+  const mk = (ch, o = {}) => {
+    const x = new LiveTile({ querySelector: (s) => ({ ...parts, '.status': el() })[s], append() {} }, { nvr: 'n1', ch }, 1, 0, { now: () => now, ...o })
+    clearTimeout(x.retry)
+    x.player.push = () => {}
+    return x
+  }
+  const open = (x) => {
+    x.connect()
+    const w = sockets.at(-1)
+    w.readyState = 1
+    w.onopen()
+    return (key) => {
+      const b = new Uint8Array(40)
+      b[0] = key ? 1 : 0
+      w.onmessage({ data: b.buffer })
+    }
+  }
+  const grid = mk(11)
+  const sendGrid = open(grid)
+  sendGrid(true)
+  grid.suspend() // under the full-size view, before the trace starts
+  const lender = mk(12)
+  const sendLender = open(lender)
+  sendLender(true)
+  lender.suspend()
+  const view = mk(12, { borrowFrom: lender }) // the full-size view, borrowing its grid tile
+  const quiet = mk(13)
+  const sendQuiet = open(quiet)
+  sendQuiet(true)
+  quiet.suspend()
+  let clock = 0
+  const tr = startTrace({ now: () => clock, later: () => 1, cancel: () => {} })
+  clock = 20
+  sendGrid(false)
+  clock = 30
+  view.updateStatus()
+  grid.resume() // still connected, frames in the last 3 s: decodes what it kept
+  now += 4000 // nothing from the quiet one for 4 s: not lendable
+  clock = 40
+  quiet.resume() // connects again
+  stopTrace()
+  for (const x of [grid, lender, view, quiet]) x.close()
+  const events = (tile) => JSON.stringify(tr.records.get(tile)?.events.map((e) => e.slice(1)))
+  check('trace started over a hidden tile: "suspend" comes first, then its frames', events(grid) === '[["suspend"],["resume","kept"]]' && tr.records.get(grid).frames.length === 1 && tr.records.get(grid).events[0][0] === 20, events(grid))
+  check('... over a full-size view borrowing: "borrow" first, naming its lender, itself hidden', events(view) === '[["borrow",3]]' && tr.records.get(lender)?.id === 3 && events(lender) === '[["suspend"]]', `${events(view)} ${events(lender)}`)
+  check('... a resume with nothing fresh kept says it connected again, before its new connect', events(quiet) === '[["suspend"],["resume","reconnect"],["connect","sub"]]', events(quiet))
+}
 t.close()
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

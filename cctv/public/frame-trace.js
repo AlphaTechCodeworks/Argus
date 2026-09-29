@@ -19,9 +19,11 @@
 //     tile's first frame's, epoch ms), so the numbers stay short; bytes the whole message, header
 //     included; key 1 for a keyframe. A tile borrowing another's stream (the full-size view) records
 //     no frames of its own: they are the other tile's.
-//   events: [atMs, what, ...]: connect (with the stream asked for), open, close, suspend, resume,
-//     borrow (with the id of the tile lent from), size (width, height, from a keyframe's header),
-//     codec (a change), end.
+//   events: [atMs, what, ...]: connect (with the stream asked for), open, close, suspend, resume
+//     (with "kept": it decoded the stream it kept, or "reconnect": nothing fresh kept, it connected
+//     again), borrow (with the id of the tile lent from), size (width, height, from a keyframe's
+//     header), codec (a change), end. A tile already hidden or borrowing when the trace first sees it
+//     has "suspend" or "borrow" first, at that moment.
 //   stats: [atMs, fps, dropped, late, resyncs, delayMs], the D overlay's counters (player.stats),
 //     once a second: what the viewer saw, to set against what the replay says they would see.
 
@@ -80,12 +82,19 @@ export class FrameTrace {
     return this.done ? this.durationMs : Math.min(this.durationMs, this.now() - this.t0)
   }
 
-  /** A tile's record, made the first time the tile is seen. */
-  #rec(tile) {
+  /**
+   * A tile's record, made the first time the tile is seen, with what it is doing then: a trace
+   * started while a full-size view is open finds the grid's tiles and the two started ahead already
+   * hidden, and the view already borrowing. Without a "suspend" first their hidden frames replay as
+   * shown (the review of 29 Sep). `what`: the event being recorded, not said twice.
+   */
+  #rec(tile, what = null) {
     let r = this.records.get(tile)
     if (!r) {
       r = { id: this.records.size + 1, camera: `${tile.nvr}/${tile.ch + 1}`, nvr: tile.nvr, ch: tile.ch, stream: tile.streamType === 0 ? 'main' : 'sub', codec: null, capture0: null, us0: null, width: 0, height: 0, frames: [], events: [], stats: [] }
       this.records.set(tile, r)
+      if (tile.suspended && what !== 'suspend') r.events.push([this.#at(), 'suspend'])
+      if (tile.source && what !== 'borrow') r.events.push([this.#at(), 'borrow', this.#rec(tile.source).id])
     }
     return r
   }
@@ -140,7 +149,7 @@ export class FrameTrace {
   /** Something that happened to a tile's connection or display (see the file's events above). */
   event(tile, what, ...args) {
     if (!this.#open()) return
-    const r = this.#rec(tile)
+    const r = this.#rec(tile, what)
     r.events.push([this.#at(), what, ...args.map((a) => (a && typeof a === 'object' ? this.#rec(a).id : a))])
   }
 

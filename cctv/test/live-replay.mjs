@@ -250,10 +250,14 @@ export const tileArrivals = (tile) => tile.frames.map(([at, ts, bytes, key]) => 
 /**
  * The stretches a tile's player really played, each from a fresh start: its frames between the
  * connection's (re)opening and its close (the tile resets its player on a close), leaving out the
- * frames that came while it was suspended (hidden under the full-size view: kept, not decoded). On
- * resume the tile decodes what it kept from its last keyframe at once (live-tile.js resume): a new
- * stretch that starts with those frames, all arriving at the resume. A stretch starts when its
- * connection opened (or the resume), or with its first frame when the trace began mid-stream.
+ * frames that came while it was suspended (hidden under the full-size view: kept, not decoded). A
+ * hidden tile stays hidden across a reconnect (live-tile.js keeps `suspended`), and a trace started
+ * over one says it is hidden first (frame-trace.js). On resume the tile decodes what it kept from its
+ * last keyframe at once (live-tile.js resume): a new stretch that starts with those frames, all
+ * arriving at the resume -- unless the trace says it had nothing fresh kept and connected again
+ * ('resume', 'reconnect'), when the stretch starts empty and the new connection's frames follow. A
+ * stretch starts when its connection opened (or the resume), or with its first frame when the trace
+ * began mid-stream.
  * @returns {{ fromMs: number, arr: object[] }[]}
  */
 export function segments(tile) {
@@ -262,21 +266,28 @@ export function segments(tile) {
   const out = []
   let cur = { fromMs: arr[0]?.at ?? 0, arr: [] }
   let suspended = false
-  let gop = null // the stream since its last keyframe, as the tile keeps it (live-tile.js #keep)
+  // the stream since its last keyframe, as the tile keeps it (live-tile.js #keep). Not dropped on a
+  // close: the tile keeps it too, and the new connection's first frame, a keyframe, replaces it.
+  let gop = null
   let mi = 0
   const cut = () => {
     if (cur.arr.length) out.push(cur)
   }
   const apply = (e) => {
-    const [at, what] = e
+    const [at, what, how] = e
     if ((what === 'connect' || what === 'open') && !suspended && !cur.arr.length) cur.fromMs = at
     else if (what === 'suspend' && !suspended) {
       cut()
       suspended = true
     } else if (what === 'resume' && suspended) {
       suspended = false
-      cur = { fromMs: at, arr: (gop ?? []).map((f) => ({ ...f, at })) }
-    } else if (what === 'close' || what === 'end') {
+      // (a trace from before resume said which way: decoded what it kept, as it then always tried)
+      cur = { fromMs: at, arr: how === 'reconnect' ? [] : (gop ?? []).map((f) => ({ ...f, at })) }
+    } else if (what === 'close') {
+      // the player is reset; a hidden tile stays hidden, and connects again to keep the stream
+      if (!suspended) cut()
+      cur = { fromMs: at, arr: [] }
+    } else if (what === 'end') {
       if (!suspended) cut()
       suspended = false
       gop = null

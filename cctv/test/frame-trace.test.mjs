@@ -98,6 +98,31 @@ check('off unless started: no trace', activeTrace() === null)
 }
 
 {
+  // A trace started while the full-size view is open: the grid's tiles and the two started ahead are
+  // already hidden (suspended), and the view already borrows its camera's grid tile. The recorder says
+  // so first, when it first sees each tile, or a replay would count their hidden frames as shown.
+  let now = 0
+  const t = new FrameTrace({ now: () => now, later: () => 1, cancel: () => {} })
+  const hidden = { nvr: 'n1', ch: 0, streamType: 1, suspended: true }
+  const lender = { nvr: 'n1', ch: 1, streamType: 1, suspended: true }
+  const view = { nvr: 'n1', ch: 1, streamType: 1, suspended: false, source: lender }
+  const plain = { nvr: 'n1', ch: 2, streamType: 1, suspended: false }
+  now = 40
+  t.frame(hidden, frame({ key: true, us: US0 }))
+  now = 50
+  t.stats(view, { fps: 20, dropped: 0, late: 0, resyncs: 0, delayMs: 300 })
+  t.frame(plain, frame({ key: true, us: US0 }))
+  const again = { nvr: 'n1', ch: 3, streamType: 1, suspended: true } // seen first by its own suspend
+  t.event(again, 'suspend')
+  const x = t.stop()
+  const ev = (tile) => JSON.stringify(x.tiles.find((r) => r.id === t.records.get(tile)?.id)?.events)
+  check('a tile already hidden when the trace first sees it: "suspend" first, at that moment', ev(hidden) === '[[40,"suspend"]]', ev(hidden))
+  check('... a tile already borrowing: "borrow" first, naming the tile lent from (itself hidden)', ev(view) === '[[50,"borrow",3]]' && t.records.get(lender)?.id === 3 && ev(lender) === '[[50,"suspend"]]', `${ev(view)} ${ev(lender)}`)
+  check('... a tile neither: nothing added', ev(plain) === '[]', ev(plain))
+  check('... a tile first seen by its own suspend: said once', ev(again) === '[[50,"suspend"]]', ev(again))
+}
+
+{
   // memory: past TRACE_MAX_FRAMES the frames stop and the file says so
   const t = new FrameTrace({ now: () => 1, later: () => 1, cancel: () => {} })
   const tile = { nvr: 'n1', ch: 0, streamType: 1 }
