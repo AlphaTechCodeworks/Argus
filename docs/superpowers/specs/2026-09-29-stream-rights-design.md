@@ -138,7 +138,10 @@ it where it applies. Each is the code as committed (ledger: "Fix round after the
   live-attach.mjs: Live and Live HD from the session and the account's role now, as the access watch
   asks), when the move is decided and again when it goes over (up to 10 s later). A no: not moved,
   nothing more sent, the socket closed 1008 with the watch's reason ('hd not allowed' when only Live
-  HD went). A sub-stream's streams never carry the main and are not asked (L5). A remote viewer's
+  HD went). A main live-smooth keeps on the conversion it has for want of a slot (`slotless`,
+  334aa45: an H.265 camera for a browser without it) has its move put off, not given up: it is asked
+  at every look (2 s) while it waits, and closed at the next look after Live HD goes. A sub-stream's
+  streams never carry the main and are not asked (L5). A remote viewer's
   stand-in is the main's keyframes only, inside L3's Live HD branch, and its end line says
   "Live HD was taken away" when its handle is closed.
 

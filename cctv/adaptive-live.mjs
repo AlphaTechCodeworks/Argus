@@ -247,9 +247,10 @@ class Viewer {
     // once what was queued then has gone; opening: taken as its tiles open, for OPENING_MS
     this.grace = { from: now, marks: new Map(), opening: true }
     // its /live-mux page sockets (live-mux.mjs MuxChannel.page): what each had written at the last look,
-    // for how many looks in a row that has not grown, whether it ever has, and whether its being left
-    // out has been said (#dead)
-    this.pages = new Map() // page -> { written, still, wrote, said }
+    // for how many looks in a row that has not grown, whether it ever has, whether it had something to
+    // write at the last look (written since the one before, or something queued), for how many looks in
+    // a row it has written nothing though it had, and whether its being left out has been said (#dead)
+    this.pages = new Map() // page -> { written, still, wrote, busy, stuck, said }
     this.left = new Set() // level streams its closed sockets left with nobody on them (for their 10 s)
     this.sockets = new Set() // { ws, nvrId, ch, type, source, stream, sent, lastTs, switch, ... } (attach)
     this.sentAt = 0
@@ -366,7 +367,7 @@ export class AdaptiveLive {
       // bigger than it went in (nvr-2/6 0.37 -> 0.47 Mbit/s; the stutter report: do not convert grid
       // sub-streams at level 15), and at full nothing is thinned.
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, now: this.now, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
       this.#made = s
     }
@@ -376,7 +377,9 @@ export class AdaptiveLive {
 
   /**
    * Whether a main's level-full conversion may start (FULL_MAX): one that nobody is on or waits for
-   * (its FULL_STOP_MS running) is closed to make room, the one left longest first.
+   * (its FULL_STOP_MS running) is closed to make room, the one left longest first (PhoneStream emptyAt):
+   * the one left last is the one a PC stepping back with ‹ finds running. They went in the order they
+   * were made (the review of d5390d6).
    */
   #roomAtFull() {
     const idle = []
@@ -386,6 +389,8 @@ export class AdaptiveLive {
       if (s.clients.size === 0 && !this.#awaited(s)) idle.push(s)
       else busy++
     }
+    const left = (s) => s.emptyAt ?? -Infinity // (never had anyone on it: first)
+    idle.sort((a, b) => (left(a) < left(b) ? -1 : left(a) > left(b) ? 1 : 0))
     while (busy + idle.length >= FULL_MAX && idle.length) idle.shift().close()
     return busy + idle.length < FULL_MAX
   }
@@ -415,7 +420,10 @@ export class AdaptiveLive {
    *    went over at once, and a climb onto another viewer's stream held up to that stream's keyframe
    *    interval (1.07 s in the review of ef43e60);
    *  - onto one from the camera's own frames (its stream, or one passing them on): at once, and nothing
-   *    until that stream's next keyframe at or past what it had (#guard).
+   *    until that stream's next keyframe at or past what it had (#guard);
+   *  - no slot free, the conversion it is on not its own to hand over, and a camera stream its browser
+   *    cannot play (H.265): it stays on that conversion (entry.slotless), as a main past FULL_MAX stays
+   *    on level 15's, and every look tries again.
    * @param {{ down?: boolean }} [o] down: to send less (a step down; a tile that finds a slot at last)
    */
   #retarget(e, level, { down = false } = {}) {
@@ -424,13 +432,16 @@ export class AdaptiveLive {
     let made = this.#made
     // a main about to be put on another stream (or made one, for a switch): only while its viewer may
     // still see main (#mayMove); a stream made for it that nobody is on closes again
-    if (want !== e.stream && e.switch?.to !== want && !this.#mayMove(e)) {
+    const due = want !== e.stream && e.switch?.to !== want
+    if (due && !this.#mayMove(e)) {
       if (made && made.clients.size === 0 && !this.#awaited(made)) made.close()
       return
     }
     // no slot for its level's stream while its own conversion holds one: that one hands its slot over
     // (not one another socket is on or waits for: closing it would free nothing, and cost its picture)
-    const own = e.stream && e.stream !== e.source && !e.stream.passthrough && e.stream.clients.size === 1 && !this.#awaited(e.stream)
+    const converted = e.stream && e.stream !== e.source && !e.stream.passthrough && !e.stream.closed
+    const own = converted && e.stream.clients.size === 1 && !this.#awaited(e.stream)
+    e.slotless = false
     if (want === e.source && own && this.#converts(e, level)) {
       // with a picture: at the camera's next keyframe, the rate it has now handed to the new stream
       if (e.lastTs !== null) {
@@ -443,6 +454,21 @@ export class AdaptiveLive {
       this.#leaveStream(e)
       want = this.#streamFor(e, level)
       made = this.#made
+    }
+    // No slot, and a conversion it cannot hand over (another socket's too): an H.265 camera stream for a
+    // browser that cannot play it stays on the conversion it has. It went onto the camera's own stream:
+    // with FULL_MAX reached and the pool at its cap, two PCs sharing level 15's stream of a camera found
+    // room at full as another PC stepped down, and no slot, and were sent 1.5 s of H.265 (40 frames) -- a
+    // PC without HEVC shows black, and its full-size view falls back to the sub-stream for 2 minutes
+    // (viewer.js NO_MAIN_MS; the review of d5390d6). No slot is no room: the tick asks again at every look.
+    // A main so kept has a move due that is only put off: it is asked at every look as at any move
+    // (#mayMove, above), so one whose Live HD went is closed at the next look, not kept on a conversion --
+    // another viewer's, maybe -- until the access watch's sweep; here too when it waited to switch to the
+    // camera's own stream (decided before the camera was known to be H.265) and was not asked above.
+    if (want === e.source && converted && this.#converts(e, level) && this.#h265(e) && !e.clientH265) {
+      if (!due && !this.#mayMove(e)) return
+      e.slotless = true
+      return this.#cancelSwitch(e)
     }
     if (want === e.stream) return this.#cancelSwitch(e)
     if (e.switch?.to === want) return
@@ -571,7 +597,8 @@ export class AdaptiveLive {
 
   /**
    * Whether a socket may be put on another stream now (#retarget, and where a switch it waits for goes
-   * over: #swap, #handOver, #cutOver, up to SWITCH_MAX_MS after it was decided). A main's viewer is asked
+   * over: #swap, #handOver, #cutOver, up to SWITCH_MAX_MS after it was decided; at every look while
+   * #retarget keeps it on its conversion for want of a slot, slotless). A main's viewer is asked
    * again (mayMain, live-attach.mjs: Live and Live HD, from the session and the rights as they are now),
    * which answers true or the access watch's refusal: 'hd not allowed' (only Live HD went), 'not
    * allowed', 'signed out'; anything else, a check that throws included, is a no ('hd not allowed', or
@@ -684,8 +711,9 @@ export class AdaptiveLive {
     // lastTs: capture time of the last frame it was sent that its browser can show (#retarget); after /
     // afterAt: nothing older than this goes to it, since then (#guard); switch: a move waiting for the
     // new stream's first picture (#switchTo); passAt: whether its level sends it as it is (#passes);
-    // refused: a main whose viewer may no longer see it, found at a move (#mayMove), sent nothing more
-    const entry = { ws, nvrId, ch, type, source, clientH265, codec, mayMain, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null, refused: false }
+    // refused: a main whose viewer may no longer see it, found at a move (#mayMove), sent nothing more;
+    // slotless: kept on the conversion it had, for want of a slot for its level's (#retarget)
+    const entry = { ws, nvrId, ch, type, source, clientH265, codec, mayMain, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null, refused: false, slotless: false }
     // Every frame to this socket, the replay as it joins too: a move waiting to switch goes over at the
     // new stream's start, and nothing older than it had goes after one (#pass). Then the bytes, for the
     // uplink budget and the Health page, and for what a plain /live socket has written (#written).
@@ -878,17 +906,25 @@ export class AdaptiveLive {
     for (const e of v.sockets) if (e.ws.page && !seen.has(e.ws.page)) seen.set(e.ws.page, e)
     for (const [page, e] of seen) {
       const written = this.#written(e)
+      const queued = this.#queued(e)
       const was = v.pages.get(page)
-      if (!was) v.pages.set(page, { written, still: 0, wrote: written > 0, said: false })
-      else if (written !== was.written) Object.assign(was, { written, still: 0, wrote: true, said: false })
+      if (!was) {
+        v.pages.set(page, { written, still: 0, wrote: written > 0, busy: written > 0 || queued > 0, stuck: 0, said: false })
+        continue
+      }
+      // (stuck: nothing written since a look at which it had something to write)
+      const wrote = written !== was.written
+      if (wrote) Object.assign(was, { written, still: 0, wrote: true, said: false })
       else was.still++
+      was.stuck = !wrote && was.busy ? was.stuck + 1 : 0
+      was.busy = wrote || queued > 0
     }
     for (const page of v.pages.keys()) if (!seen.has(page)) v.pages.delete(page)
     for (const [page, e] of seen) {
       const p = v.pages.get(page)
       if (p.said || !this.#dead(v, e)) continue
       p.said = true
-      this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket of this browser has written nothing for ${(p.still * TICK_MS) / 1000} s while another of its sockets writes: its ${(this.#queued(e) / 1e6).toFixed(2)} MB queued left out (a page gone, its socket not closed yet, or a tab that stopped reading)`)
+      this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket of this browser has written nothing for ${(p.stuck * TICK_MS) / 1000} s while another of its sockets writes: its ${(this.#queued(e) / 1e6).toFixed(2)} MB queued left out (a page gone, its socket not closed yet, or a tab that stopped reading)`)
     }
   }
 
@@ -904,11 +940,15 @@ export class AdaptiveLive {
    * look its writes stop at, so at two the step down came first (a 6 MB path: full -> 15 at 32 s). Two
    * sockets of one browser share its link, and one that writes nothing while the other writes is not
    * being read. Both stopped: nothing tells a dead page from a link that stopped, and both count.
+   * Only while it has something queued, and has written none of what it had to write at the look
+   * before: one with nothing to send is idle (a tab whose cameras froze), and was counted dead and said
+   * so once a freeze ("its 0.00 MB queued left out"; the review of d5390d6); one idle until a frame came
+   * just as a look did is not stuck yet either.
    */
   #dead(v, e) {
     const page = e.ws.page
     const p = page && v.pages.get(page)
-    if (!p || p.still < 1) return false
+    if (!p || p.stuck < 1 || this.#queued(e) <= 0) return false
     for (const [other, q] of v.pages) if (other !== page && q.wrote && q.still === 0) return true
     return false
   }
@@ -962,8 +1002,9 @@ export class AdaptiveLive {
         // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
         // Below full, a tile left on the camera's own stream for want of a slot tries again: one may
         // have come free since. It stayed raw for as long as the page stayed on that level (verify-1).
+        // So does one kept on the conversion it had for want of one (#retarget: slotless).
         // (Going there is sending less, as a step down: SWITCH_WAIT_MS.)
-        for (const e of v.sockets) if (v.level === 0 || e.stream === e.source) this.#retarget(e, v.level, { down: v.level > 0 })
+        for (const e of v.sockets) if (v.level === 0 || e.stream === e.source || e.slotless) this.#retarget(e, v.level, { down: v.level > 0 })
         if (n.stays && v.stayedAt !== v.level) {
           v.stayedAt = v.level
           this.log(`[adaptive] ${v.key.slice(0, 8)}: stays at ${LEVELS[v.level].id}, a level lower would find no conversion slot either (${n.stays}; ${this.#state(v, this.#link(v))})`)

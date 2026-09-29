@@ -1,6 +1,6 @@
 // Tests live video thinned for phones (phone-live.mjs), with a fake converter: no ffmpeg needed.
 //   node cctv/test/phone-live.test.mjs
-import { LAG_HOLD_MS, PhoneLive, PhoneStream, encodeFrame, frameRate, gopFor, isPhoneRequest, keepEveryFor, parseFrame, steadyRate } from '../phone-live.mjs'
+import { CATCH_UP_MS, LAG_HOLD_MS, PhoneLive, PhoneStream, encodeFrame, frameRate, gopFor, isPhoneRequest, keepEveryFor, parseFrame, steadyRate } from '../phone-live.mjs'
 import { HubStream } from '../stream-hub.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
 
@@ -581,9 +581,89 @@ check('  a trickle at 0.8 fps is one (1250 ms steps); two steps, one a hole: the
   const joined = lagging(FULL, { speed: 2.5, fps: 30, keyEvery: 100, replay: 90 })
   check('  a new one converting from a 3 s GOP replayed at once (90 pictures in it), at 2.5x: not reset, it catches up', joined.xs[0]?.resets === 0 && joined.most > 60, `resets ${joined.xs[0]?.resets}, at most ${joined.most}`)
   const stuck = lagging(FULL, { speed: 0.8, fps: 30, keyEvery: 100, replay: 90, n: 300 })
-  check('  ... at 0.8x it never catches up: reset 5 s after its first frame, and a second over, at the latest', stuck.xs[0]?.resets >= 1, `resets ${stuck.xs[0]?.resets}, at most ${stuck.most}`)
+  check('  ... at 0.8x it never catches up: reset 5 s after its first live frame, and a second over, at the latest', stuck.xs[0]?.resets >= 1, `resets ${stuck.xs[0]?.resets}, at most ${stuck.most}`)
   const phone = lagging({}, { speed: 0.5 })
   check('  a phone on the local network: as before, nothing reset', phone.xs[0]?.resets === 0 && !phone.logs.some((l) => l.includes('fell behind')), `resets ${phone.xs[0]?.resets}`)
+
+  /**
+   * A fresh level-full conversion of a 20 fps main whose GOP replayed as it joins is R frames (its
+   * keyframe first), through a converter that hands back nothing until t0 s after its first frame (its
+   * process, the probe, a 4K keyframe: 0.24-0.41 s on the server, transcode-ffmpeg.test's INFO) and then
+   * runs at `speed` x real time; never: it hands back nothing at all. Live frames then come in real time.
+   * resetAt: its first reset, in ms from the first live frame.
+   */
+  const starting = ({ R, speed, t0, fps = 20, keyEvery = 40, n = 120, never = false }) => {
+    const clock = { wall: 0 }
+    const frame = (i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i % keyEvery === 0, 1, (i * 1000) / fps)
+    const gop = Array.from({ length: R }, (_, i) => frame(i))
+    const src = fakeSource()
+    src.add = function (ws) { this.viewers.add(ws); for (const m of gop) ws.send(m) }
+    const xs = []
+    const logs = []
+    const s = new PhoneStream({
+      source: src, type: 0, slot: { release() {} }, camera: 'n1/1', log: (l) => logs.push(l), now: () => clock.wall, ...FULL,
+      makeTranscoder: (o) => {
+        const x = {
+          o, from: null, ts: [], out: 0, resets: 0, resetAt: null,
+          get pending() { return this.ts.length - this.out },
+          tick() {
+            if (this.from === null || never) return
+            const can = Math.floor(((clock.wall - this.from) / 1000 - t0) * fps * speed)
+            while (this.out < Math.min(this.ts.length, can)) o.onFrame(this.ts[this.out++], false, Buffer.from([1]))
+          },
+          push(ts, k) {
+            if (this.from === null) {
+              if (!k) return
+              this.from = clock.wall
+            }
+            this.ts.push(ts)
+            this.tick()
+          },
+          reset() { this.resets++; this.resetAt ??= clock.wall; this.from = null; this.ts = []; this.out = 0 },
+          endPicture() {},
+          close() {}
+        }
+        xs.push(x)
+        return x
+      }
+    })
+    s.add(fakeWs())
+    // (the replay at 0, the first live frame 1/fps later, as lag-start.mjs has them)
+    for (let i = R; i < R + n; i++) {
+      clock.wall = ((i - R + 1) * 1000) / fps
+      xs[0]?.tick()
+      src.emit(frame(i))
+    }
+    const at = xs[0]?.resetAt
+    return { resets: xs[0]?.resets ?? 0, resetAt: at == null ? null : at - 1000 / fps, logs }
+  }
+  // Armed before its first picture, a GOP replayed just under the line (40 pictures at 20 fps) went over
+  // it while ffmpeg started, and a converter well above real time was reset at its open: ~1.5 s with
+  // nothing on screen and a "fell behind" line (the review of d5390d6, lag-start.mjs: at 1.3x with its
+  // first picture at 0.5 s, GOPs of 35-39 frames). Armed once a picture is back, and under the line.
+  for (const speed of [1.68, 1.5, 1.3]) {
+    for (const t0 of [0.3, 0.5]) {
+      const hit = []
+      for (let R = 1; R <= 40; R++) {
+        const r = starting({ R, speed, t0 })
+        if (r.resets > 0 || r.logs.some((l) => l.includes('fell behind'))) hit.push(R)
+      }
+      check(`a fresh level-full conversion at ${speed}x real time, its first picture ${t0} s after its first frame: not reset at its start, whatever its GOP replay (1-40 frames)`, hit.length === 0, hit.length ? `reset for GOP replays of ${hit.join(',')} frames` : 'none reset')
+    }
+  }
+  // CATCH_UP_MS counts from the first live frame: from the replayed keyframe, a 3 s GOP (60 frames) left
+  // it 2 s, and a 1.3x converter still 3 s of the camera behind was reset then.
+  const long = starting({ R: 60, speed: 1.3, t0: 0.5, keyEvery: 80, n: 200 })
+  check('  a 3 s GOP replayed (60 frames), first picture at 0.5 s, 1.3x: not reset (CATCH_UP_MS from the first live frame, not the replayed keyframe)', long.resets === 0, long.resets ? `reset at ${long.resetAt} ms` : 'not reset')
+  // a converter that is really too slow is still reset, whatever its start
+  const slowStart = starting({ R: 39, speed: 0.5, t0: 0.5, n: 200 })
+  check('  one at 0.5x, its first picture at 0.5 s and a GOP of 39: still reset, said once', slowStart.resets >= 1 && slowStart.logs.filter((l) => l.includes('fell behind the camera')).length === 1, `resets ${slowStart.resets} at ${slowStart.resetAt} ms`)
+  const slowOne = starting({ R: 1, speed: 0.8, t0: 0.3, n: 300 })
+  check('  one at 0.8x from a lone keyframe: still reset', slowOne.resets >= 1, `resets ${slowOne.resets}`)
+  // ...and one that hands back nothing at all (an ffmpeg that hangs): CATCH_UP_MS after the first live
+  // frame, whatever has come back, and LAG_HOLD_MS over
+  const hung = starting({ R: 20, speed: 1, t0: 0, never: true, n: 200 })
+  check(`  one that hands back nothing: reset ${CATCH_UP_MS / 1000} s after the first live frame and ${LAG_HOLD_MS / 1000} s over, not before`, hung.resets >= 1 && hung.resetAt >= CATCH_UP_MS + LAG_HOLD_MS && hung.resetAt <= CATCH_UP_MS + LAG_HOLD_MS + 100, `resets ${hung.resets} at ${hung.resetAt} ms`)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
