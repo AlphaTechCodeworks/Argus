@@ -62,6 +62,8 @@ export const RIGHTS_V1_BACKUP = join(DATA_DIR, 'rights.v1.json')
 export const RIGHTS_SHADOW = join(DATA_DIR, 'rights.v2.json')
 /** Where an upgrade keeps a copy of a shadow it could not use (it then gives Live HD to nobody: upgradeToV2). */
 export const RIGHTS_SHADOW_UNREADABLE = `${RIGHTS_SHADOW}.unreadable`
+/** No shadow was written before 2026 (it came with this release): an earlier writtenAt is not a time it was written at. */
+const SHADOW_FIRST_MS = Date.UTC(2026, 0, 1)
 const VERSION = 2
 
 /** The six things a person can be allowed to do. Anything not in here is refused outright. */
@@ -176,9 +178,10 @@ function noteNewer(from) {
 /**
  * The shadow as { writtenAt, users: { name: [targets] } }; null when there is none; { unreadable: why }
  * when there is one that cannot be used (unreadable, not JSON, not a shadow, a writtenAt that is no
- * time a Date can hold), which the upgrade must not take for "none": that would give Live HD = Live to
- * everyone, back to every account it had been taken from (upgradeToV2 fails closed instead). An
- * account's entry that is not a list holds no Live HD, for the same reason (it is still remembered).
+ * time a Date can hold, or before 2026), which the upgrade must not take for "none": that would give
+ * Live HD = Live to everyone, back to every account it had been taken from (upgradeToV2 fails closed
+ * instead). An account's entry that is not a list holds no Live HD, for the same reason (it is still
+ * remembered).
  * An unusable shadow comes with its bytes (`bytes`), for the copy upgradeToV2 keeps; none when it
  * could not be read at all.
  */
@@ -195,6 +198,9 @@ function readShadow() {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('not a rights shadow')
     // within the Date range (+-8.64e15 ms): the upgrade's audit row prints it, and toISOString throws past it
     if (!Number.isFinite(raw.writtenAt) || Math.abs(raw.writtenAt) > 8.64e15) throw new Error('its writtenAt is not a time')
+    // and not before this file existed (0, 1970, a clock that was wrong): every account with users.json
+    // `since` would count as made after it, and get Live HD = Live
+    if (raw.writtenAt < SHADOW_FIRST_MS) throw new Error('its writtenAt is before any shadow was written')
     if (!raw.users || typeof raw.users !== 'object' || Array.isArray(raw.users)) throw new Error('it has no users')
     const users = Object.create(null)
     for (const [name, list] of Object.entries(raw.users)) {
@@ -251,7 +257,8 @@ const someNames = (list) => (list.length > 8 ? `${list.slice(0, 8).join(', ')} a
  *
  * Two cases fail closed. A row that already carries a live-hd list (a version 2 file whose version was
  * mangled into a string or a fraction, read as version 1) keeps that list, cut to its Live: never
- * widened to Live or by the shadow, as a version 2 file is read as it is. A shadow that is there but
+ * widened to Live or by the shadow, as a version 2 file is read as it is; a live-hd there that is not
+ * a list is an empty one, as a version 2 file reads it. A shadow that is there but
  * cannot be used is not "no shadow" (that would give everyone Live HD = Live, back to every account it
  * had been taken from): every account gets no Live HD (an admin keeps everything: admin is the role),
  * and the audit row and the console say so, with the accounts to give it back to. A copy of its bytes
@@ -277,12 +284,15 @@ function upgradeToV2(users, text, from, raw = {}, said = from) {
   const viewer = (name) => Object.hasOwn(accounts, name) && accounts[name]?.role !== 'admin'
   for (const name of Object.keys(users).sort()) {
     const row = users[name]
-    const own = Object.hasOwn(raw, name) ? raw[name]?.grants?.['live-hd'] : undefined
+    // a live-hd key at all, a list or not (as cleanRights reads the grants): a version 2 file reads one
+    // that is not a list as [], so it is the row's own list here too, never Live
+    const grants = Object.hasOwn(raw, name) ? raw[name]?.grants : undefined
+    const own = grants !== null && typeof grants === 'object' && !Array.isArray(grants) && Object.hasOwn(grants, 'live-hd')
     if (bad !== null) {
       row.grants['live-hd'] = []
       if (viewer(name) && row.grants.live.length) withheld.push(name)
-    } else if (Array.isArray(own)) {
-      // what the file already says (cleanRights kept it in the row), only ever narrowed: to Live
+    } else if (own) {
+      // what the file already says (cleanRights kept it in the row, [] when not a list), only ever narrowed: to Live
       row.grants['live-hd'] = intersectTargets(row.grants['live-hd'], row.grants.live)
       kept.push(name)
     } else {

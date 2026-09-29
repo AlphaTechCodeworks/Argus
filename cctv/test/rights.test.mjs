@@ -635,6 +635,17 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   writeFileSync(R.RIGHTS_FILE, J({ version: '2', users: { jo: { grants: { live: ['n1'], 'live-hd': ['n1/0'] } }, sam: { grants: { live: ['n5'] } } } }))
   quiet(() => R.loadRights())
   check('... with a shadow: a row\'s own list, never widened by the shadow; a row without one as the shadow says (cut to Live)', J(R.rightsOf('jo').grants['live-hd']) === J(['n1/0']) && J(R.rightsOf('sam').grants['live-hd']) === J(['n5']))
+  // a live-hd that is there but not a list (a string, null, an object) is the row's own list as well: empty,
+  // as a version 2 file reads it; never Live, and never the shadow's
+  rmSync(R.RIGHTS_SHADOW, { force: true })
+  writeFileSync(R.RIGHTS_FILE, J({ version: '2', users: { jo: { grants: { live: ['n1'], 'live-hd': 'n1/0' } }, sam: { grants: { live: ['n5'], 'live-hd': null } }, boss: { grants: { live: ['*'], 'live-hd': {} } } } }))
+  quiet(() => R.loadRights())
+  check('... a live-hd that is not a list (a string, null, an object): its own list, empty, not all of its Live', R.rightsOf('jo').grants['live-hd'].length === 0 && R.rightsOf('sam').grants['live-hd'].length === 0 && R.can(VIEWER, 'live-hd', { nvr: 'n1', ch: 0 }) === false && R.can(SAM, 'live-hd', { nvr: 'n5', ch: 0 }) === false && J(disk().users.jo.grants['live-hd']) === '[]', `jo ${J(R.rightsOf('jo').grants['live-hd'])}, sam ${J(R.rightsOf('sam').grants['live-hd'])}`)
+  check('... named as kept in the audit row', /Live HD kept as the file had it \(cut to Live\) for 3 account\(s\) \(boss, jo, sam\)/.test(systemRows().at(-1)?.detail ?? ''), systemRows().at(-1)?.detail)
+  writeFileSync(R.RIGHTS_SHADOW, J({ version: 2, writtenAt: Date.now() - 1000, users: { jo: ['*'] } }))
+  writeFileSync(R.RIGHTS_FILE, J({ version: 2.5, users: { jo: { grants: { live: ['n1'], 'live-hd': 'n1' } } } }))
+  quiet(() => R.loadRights())
+  check('... and with a shadow that holds Live HD for it: still its own, empty', R.rightsOf('jo').grants['live-hd'].length === 0, J(R.rightsOf('jo').grants['live-hd']))
 
   // (b) a shadow that exists but cannot be used: kept aside as rights.v2.json.unreadable, Live HD for nobody
   // (admins keep everything: admin is the role), named in the audit row and on the console
@@ -645,6 +656,12 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
     ['writtenAt -1e300', '{"version":2,"writtenAt":-1e300,"users":{"jo":["n1"],"sam":["n5"]}}'],
     ['writtenAt just past the Date range', J({ version: 2, writtenAt: 8.64e15 + 1, users: { jo: ['n1'], sam: ['n5'] } })],
     ['writtenAt not a number', J({ version: 2, writtenAt: '2026-09-29', users: { jo: ['n1'], sam: ['n5'] } })],
+    // in the Date range, but no time a shadow was written at: every account with users.json `since` would
+    // count as made after it, and get Live HD = Live
+    ['writtenAt 0', J({ version: 2, writtenAt: 0, users: { jo: ['n1'], sam: ['n5'] } })],
+    ['writtenAt -1', J({ version: 2, writtenAt: -1, users: { jo: ['n1'], sam: ['n5'] } })],
+    ['writtenAt 1 (1970)', J({ version: 2, writtenAt: 1, users: { jo: ['n1'], sam: ['n5'] } })],
+    ['writtenAt just before 2026 (the shadow came with this release)', J({ version: 2, writtenAt: Date.UTC(2026, 0, 1) - 1, users: { jo: ['n1'], sam: ['n5'] } })],
     ['users not an object', J({ version: 2, writtenAt: Date.now(), users: ['jo'] })],
     ['a list, not a shadow', '[]']
   ]
@@ -664,6 +681,21 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
     check('... Playback SD beyond an HD right named as such (jo has Live there, but no Live HD now)', d.includes("1 account(s) (jo) have Playback SD on cameras without Live HD or Playback HD: there the NVR's recordings and event pictures are now SD only"), d)
     check('... and the same on the console', said.some((l) => l.includes('rights.v2.json.unreadable') && l.includes('re-grant it in the access editor') && l.includes('(jo, sam)')), said.join(' | '))
   }
+  // the widening itself: writtenAt 0, and an account made since (users.json `since`), which would count as made
+  // after the shadow and get Live HD = Live
+  auth.saveUsers({ ...auth.loadUsers(), jo: { hash: 'x', role: 'viewer', since: Date.now() - 5000 } })
+  rmSync(UNREADABLE, { recursive: true, force: true })
+  writeFileSync(R.RIGHTS_SHADOW, J({ version: 2, writtenAt: 0, users: { jo: [], sam: [] } }))
+  writeFileSync(R.RIGHTS_FILE, v1)
+  quiet(() => R.loadRights())
+  check('shadow writtenAt 0 and an account made since: not "made after the shadow" (Live HD = Live), Live HD for nobody', R.rightsOf('jo').grants['live-hd'].length === 0 && R.can(VIEWER, 'live-hd', { nvr: 'n1', ch: 0 }) === false, J(R.rightsOf('jo').grants['live-hd']))
+  auth.saveUsers({ ...auth.loadUsers(), jo: { hash: 'x', role: 'viewer' } })
+  rmSync(UNREADABLE, { recursive: true, force: true })
+  // from 2026 on it is a time the shadow may have been written at
+  writeFileSync(R.RIGHTS_SHADOW, J({ version: 2, writtenAt: Date.UTC(2026, 0, 1), users: { jo: ['n1/0'], sam: [] } }))
+  writeFileSync(R.RIGHTS_FILE, `${v1} `)
+  quiet(() => R.loadRights())
+  check('shadow written at the start of 2026: used (restored, cut to Live)', J(R.rightsOf('jo').grants['live-hd']) === J(['n1/0']) && R.rightsOf('sam').grants['live-hd'].length === 0 && !existsSync(UNREADABLE), J(R.rightsOf('jo').grants['live-hd']))
   // an account's entry that is not a list: no Live HD for that account (not "not remembered", which is Live)
   rmSync(UNREADABLE, { recursive: true, force: true })
   writeFileSync(R.RIGHTS_SHADOW, J({ version: 2, writtenAt: Date.now() - 1000, users: { jo: 'n1', sam: ['n5'] } }))
