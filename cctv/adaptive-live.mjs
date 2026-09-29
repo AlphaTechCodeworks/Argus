@@ -16,9 +16,10 @@
 // the rate the socket drains, on two looks in a row, or a tile has been held back over its cap for
 // more than HELD_MS. What a page opening or a level change queues by itself (every tile's replay, the
 // first keyframes) is let go out first (GRACE_MS). Twenty seconds with nothing piling up and it goes
-// back up one. On top of that, when all remote viewers together
-// send more than the uplink budget (CCTV_WAN_BUDGET_MBPS, 20 by default), the viewer taking the most
-// is stepped down first: one person on a good link must not starve everyone else.
+// back up one, longer after a climb that failed (CLIMB_FAILED_MS); a page whose sockets all closed and
+// came back within REMEMBER_MS comes back one level above where it left. On top of that, when all
+// remote viewers together send more than the uplink budget (CCTV_WAN_BUDGET_MBPS, 20 by default), the
+// viewer taking the most is stepped down first: one person on a good link must not starve everyone else.
 //
 // Viewers on the same level share one conversion per camera, so the cost follows the number of
 // cameras being watched remotely, not the number of people watching. Conversions have their own cap
