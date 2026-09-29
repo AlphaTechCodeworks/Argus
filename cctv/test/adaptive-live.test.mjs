@@ -114,5 +114,24 @@ function fakeWs() {
   clearInterval(live.timer)
 }
 
+{
+  // a level's conversion names its camera in the log, the channel counted from 1 (stutter report 2.10)
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9 })
+  const src = fakeSource('cam')
+  src.gop = [Buffer.from([1, 1])] // H.265: converted at once, even at the top level
+  live.attach('named', { ws: fakeWs(), nvrId: 'nvr-2', ch: 4, type: 0, source: src })
+  const frameAt = (i) => {
+    const b = Buffer.alloc(24)
+    b[0] = i % 12 === 0 ? 1 : 0
+    b[1] = 1
+    b.writeBigInt64LE(BigInt(Math.round(i * 33.3 * 1000)), 8)
+    return b
+  }
+  for (let i = 0; i < 13; i++) for (const tap of src.viewers) tap.send(frameAt(i))
+  check('a level\'s conversion names its camera in the log', logs.some((l) => l.startsWith('[phone-live] nvr-2/5: converting a main stream')), logs.join(' | '))
+  clearInterval(live.timer)
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

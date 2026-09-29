@@ -114,7 +114,7 @@ export class AdaptiveLive {
       const slot = this.pool.acquire()
       if (!slot) return entry.source // no room for another conversion: the camera's own stream
       const L = LEVELS[level]
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
     }
     return s

@@ -73,11 +73,16 @@ export function encodeFrame(payload, isKey, codec, tsMs) {
 export class PhoneStream {
   /**
    * @param {{ source: { add: Function, remove: Function }, type: number, slot: { release: Function },
-   *   makeTranscoder?: Function, onEmpty?: Function, log?: Function, stopDelayMs?: number }} o
+   *   makeTranscoder?: Function, onEmpty?: Function, log?: Function, stopDelayMs?: number, camera?: string }} o
+   *   camera: the camera as the log names it, the NVR and the channel from 1 ("nvr-2/5")
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, background = false }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, background = false, camera = '?' }) {
     // fps / crf / kbps: the level this stream is thinned to (adaptive-live.mjs picks one per viewer)
     Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps })
+    // Every line names its camera. On 29 Sep they named none, and the 15-24 conversions a remote
+    // viewer's level change started at once could only be matched to cameras by their timing
+    // (stutter report 2.10).
+    this.who = `[phone-live] ${camera}${background ? ' (stand-in)' : ''}:`
     this.clients = new Set()
     this.gop = []
     this.samples = []
@@ -132,7 +137,7 @@ export class PhoneStream {
         // already 15 fps or less and small: converting would only cost CPU and picture
         this.passthrough = true
         this.slot.release() // costs nothing: the slot is for streams that cost a core
-        this.log(`[phone-live] a sub stream at ${fps.toFixed(1)} fps: sent as it is`)
+        this.log(`${this.who} a sub stream at ${fps.toFixed(1)} fps: sent as it is`)
         return this.#fanOut(buf, f.isKey)
       }
       this.xcode = this.makeTranscoder({
@@ -143,10 +148,10 @@ export class PhoneStream {
         crf: this.crf,
         maxKbps: this.type === 0 ? this.mainKbps : this.subKbps,
         onFrame: (ts, isKey, out) => this.#onConverted(ts, isKey, out),
-        onFail: (e) => this.log(`[phone-live] conversion failed: ${e.message}`),
+        onFail: (e) => this.log(`${this.who} conversion failed: ${e.message}`),
         log: this.log
       })
-      this.log(`[phone-live] converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps to about ${this.fps}: keeping 1 in ${keepEvery}`)
+      this.log(`${this.who} converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps to about ${this.fps}: keeping 1 in ${keepEvery}`)
       const held = this.held ?? []
       this.held = null
       for (const h of held) this.xcode.push(h.ts, h.isKey, h.payload)
@@ -191,14 +196,14 @@ export class PhoneLive {
 
   /**
    * Attaches a phone's socket to the thinned stream, or returns false when the cap is reached (the
-   * caller then attaches it to the normal stream).
+   * caller then attaches it to the normal stream). camera: the camera as the log names it ("nvr-2/5").
    */
-  attach(key, source, type, ws, { background = false } = {}) {
+  attach(key, source, type, ws, { background = false, camera } = {}) {
     let s = this.streams.get(key)
     if (!s || s.closed) {
       const slot = this.pool.acquire()
       if (!slot) return false
-      s = new PhoneStream({ source, type, slot, background, makeTranscoder: this.makeTranscoder, log: this.log, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source, type, slot, background, camera, makeTranscoder: this.makeTranscoder, log: this.log, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
     }
     s.add(ws)

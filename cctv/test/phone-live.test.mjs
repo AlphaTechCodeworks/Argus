@@ -73,6 +73,28 @@ const makeTranscoder = (o) => {
   check('a slow sub stream is passed through, not converted', made.length === 0 && a.got.length > 0)
   check('  and gives its slot back', pool.active === 0)
 }
+{
+  // Every [phone-live] line names its camera (nvr/channel from 1): the 29 Sep lines named none, and a
+  // conversion could only be matched to a camera by its timing (stutter report 2.10)
+  const logs = []
+  made.length = 0
+  const live = new PhoneLive({ pool: new TranscodePool(4), makeTranscoder, log: (l) => logs.push(l) })
+  const slow = fakeSource()
+  live.attach('nvr-2/4/1', slow, 1, fakeWs(), { camera: 'nvr-2/5' })
+  for (let i = 0; i < 20; i++) slow.emit(encodeFrame(Buffer.from([0, 0, 1, 1]), i % 12 === 0, 0, i * 83.3))
+  const fast = fakeSource()
+  live.attach('nvr-2/0/0', fast, 0, fakeWs(), { camera: 'nvr-2/1' })
+  for (let i = 0; i < 24; i++) fast.emit(encodeFrame(Buffer.from([0, 0, 1, 1]), i % 12 === 0, 1, i * 33.3))
+  made[0].o.onFail(new Error('ffmpeg exited'))
+  const stand = fakeSource()
+  live.attach('value4u/9/0/standin', stand, 0, fakeWs(), { background: true, camera: 'value4u/10' })
+  for (let i = 0; i < 24; i++) stand.emit(encodeFrame(Buffer.from([0, 0, 1, 1]), i % 12 === 0, 1, i * 33.3))
+  check('a pass-through line names its camera', logs.some((l) => l === '[phone-live] nvr-2/5: a sub stream at 12.0 fps: sent as it is'), logs.join(' | '))
+  check('a conversion line names its camera', logs.some((l) => l === '[phone-live] nvr-2/1: converting a main stream at 30.0 fps to about 15: keeping 1 in 2'), logs.join(' | '))
+  check('a failed conversion names its camera', logs.some((l) => l === '[phone-live] nvr-2/1: conversion failed: ffmpeg exited'), logs.join(' | '))
+  check('a stand-in\'s conversion says it is one', logs.some((l) => l.startsWith('[phone-live] value4u/10 (stand-in): converting a main stream')), logs.join(' | '))
+  check('every [phone-live] line names a camera', logs.length === 4 && logs.every((l) => /^\[phone-live\] [\w-]+\/\d+( \(stand-in\))?: /.test(l)), logs.join(' | '))
+}
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

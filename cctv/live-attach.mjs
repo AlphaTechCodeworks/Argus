@@ -34,7 +34,7 @@ function standIn(nvr, ch, main, { phone, held, clientH265, phoneLive }) {
   if (!phone || !held || clientH265 || !h265 || !nvr.mainPlaying?.(ch)) return main
   const key = `${nvr.id}/${ch}/0/standin`
   if (!phoneLive.has?.(key) && !(phoneLive.room?.() >= PHONE_SPARE)) return main
-  return { gop: main.gop, add: (tap) => phoneLive.attach(key, main, 0, tap, { background: true }), remove: (tap) => phoneLive.detach(key, tap) }
+  return { gop: main.gop, add: (tap) => phoneLive.attach(key, main, 0, tap, { background: true, camera: `${nvr.id}/${ch + 1}` }), remove: (tap) => phoneLive.detach(key, tap) }
 }
 
 /**
@@ -87,7 +87,7 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track 
     // and a conversion place held open for it is one its stand-in may need -- unless it is H.265,
     // which a phone may not play as it is (a sub tile that cannot decode its stream closes for good)
     const subH265 = nvr.codecSeen?.get?.(`${ch}:1`)?.codec === 'h265'
-    if (phone && (!held || subH265) && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws)) return
+    if (phone && (!held || subH265) && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws, { camera: `${nvr.id}/${ch + 1}` })) return
     stream.add(ws)
     ws.on('close', () => stream.remove(ws))
   }

@@ -665,7 +665,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   let allowed = true
   const asked = []
   const adaptive = { calls: [], attach(key, o) { this.calls.push({ key, ...o }) } }
-  const phone = { ok: true, calls: [], attach(key, stream, type, ws) { this.calls.push({ key, stream, type, ws }); return this.ok } }
+  const phone = { ok: true, calls: [], attach(key, stream, type, ws, opts) { this.calls.push({ key, stream, type, ws, opts }); return this.ok } }
   const attachLive = liveAttacher({ can: (who, action, target) => { asked.push({ who, action, target }); return allowed }, currentUser: () => 'ann', adaptiveLive: adaptive, phoneLive: phone })
   const who = { user: 'ann', admin: false }
   const base = { who, ch: 3, streamType: 0, clientH265: false, phone15: false }
@@ -694,6 +694,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('... a remote viewer: adaptive-live, one key per browser (user, user agent, cookie)', adaptive.calls.length === 1 && call.key === key && call.ws === x.w && call.nvrId === 'n1' && call.ch === 3 && call.type === 0 && call.clientH265 === true && x.nvr.getStream(3, 0).viewers.size === 0)
   x = run({ phone15: true }, req('192.168.1.20', { 'user-agent': 'Mozilla/5.0 (iPhone)' }))
   check('... a phone asking for 15 fps: the shared thinned stream', phone.calls.length === 1 && phone.calls[0].key === 'n1/3/0' && phone.calls[0].ws === x.w && x.nvr.getStream(3, 0).viewers.size === 0)
+  check('... which names its camera in the log, the channel from 1', phone.calls[0].opts?.camera === 'n1/4', JSON.stringify(phone.calls[0].opts))
   phone.ok = false
   x = run({ phone15: true }, req('192.168.1.20', { 'user-agent': 'Mozilla/5.0 (iPhone)' }))
   check('... no room for it: the camera\'s own stream', phone.calls.length === 2 && x.nvr.getStream(3, 0).viewers.has(x.w))
@@ -749,6 +750,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   let x = run()
   const conv = x.phone.calls.find((c) => c.key === KEY)
   check('held sub, phone, H.265 main that plays: the stand-in is the main converted for phones, a conversion of its own asking in the background', conv && conv.stream === x.main && conv.type === 0 && conv.opts?.background === true && conv.ws.background === true && x.main.viewers.size === 0, JSON.stringify(x.phone.calls.map((c) => c.key)))
+  check('... its conversion names its camera in the log', conv?.opts?.camera === 'v4/4', JSON.stringify(conv?.opts))
   check('... the held sub-stream itself is not thinned (nothing to thin; no conversion place held for it)', !x.phone.calls.some((c) => c.key === 'v4/3/1') && x.sub.viewers.has(x.w))
   x.w.send(frame(true)) // the sub-stream's first frame (there is room now): the stand-in ends
   check('... its first frame ends the stand-in, and the converted stream is let go', x.phone.detached.length === 1 && x.phone.detached[0].key === KEY && x.phone.detached[0].ws === conv.ws)
