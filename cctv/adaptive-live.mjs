@@ -99,6 +99,8 @@ export const FULL_MAX = 2
  */
 export const FULL_STOP_MS = 2000
 export const TICK_MS = 2000
+/** A viewer's look that throws is said at most once in this long a viewer, with how many were not (tick). */
+export const LOOK_FAILED_SAY_MS = 60_000
 /**
  * A link that is not keeping up: what its page has queued takes longer than QUEUE_S to go at the rate
  * the page's socket drains (live-mux.mjs drainBps), on PRESSURE_LOOKS looks in a row. It was any queue
@@ -256,6 +258,8 @@ class Viewer {
     this.sentAt = 0
     this.sentBytes = 0
     this.bps = 0
+    this.lookFailedAt = null // when a look of it that threw was last said (tick, LOOK_FAILED_SAY_MS)
+    this.lookFails = 0 // looks that threw since then, not said
   }
 }
 
@@ -791,12 +795,14 @@ export class AdaptiveLive {
     // one keyframe interval: so the tiles that need a slot of their own go onto the new level first, and
     // those still on a conversion after them -- one that finds none free hands its own over to the new
     // one at the camera's next keyframe (#retarget, #handOver). A switch the last move left waiting is
-    // dropped first.
+    // dropped first. On no stream at all: a main refused at a move after it was taken off its stream here
+    // (#retarget), its socket not closed yet -- a ws socket says 'close' once the peer answers, up to its
+    // 30 s close timeout behind a backed-up link (the bypass hunt on the merge with live-smooth).
     const left = new Set(v.left)
     v.left.clear()
     for (const e of v.sockets) {
       this.#cancelSwitch(e)
-      if (e.stream === e.source || e.stream === this.streams.get(this.#keyFor(e, level)) || e.lastTs !== null) continue
+      if (!e.stream || e.stream === e.source || e.stream === this.streams.get(this.#keyFor(e, level)) || e.lastTs !== null) continue
       e.stream.remove(e.ws)
       left.add(e.stream)
       e.stream = null
@@ -979,44 +985,68 @@ export class AdaptiveLive {
     }
     // over the budget: the one taking most goes down first
     const heaviest = total > this.budgetBps ? [...this.viewers.values()].sort((a, b) => b.bps - a.bps)[0] : null
+    // Each viewer's look on its own: one that throws (a bug) must not stall every viewer after it in the
+    // Map -- no steps down or climbs, no switch cut over past its time -- at every look for as long as it
+    // throws. A main refused at a move while on no stream did that until its socket closed, up to ws's
+    // 30 s close timeout (#move; the bypass hunt on the merge with live-smooth).
     for (const v of this.viewers.values()) {
-      // a switch still waiting past its time (its stream sent nothing to go over on: held over its cap,
-      // or the camera stalled): over now (#switchTo)
-      for (const e of v.sockets) if (e.switch && now - e.switch.at > e.switch.waitMs) this.#cutOver(e)
-      // overSince: backpressure.mjs gateSend sets it while the socket is over its cap (and clears it
-      // once it drains). waitForKey is not used: a move sets it on purpose. A /live-mux channel's own
-      // bufferedAmount is only its part of the page's socket: the whole socket's queue
-      // (sharedBufferedAmount) is what every tile of the page waits behind.
-      const pressure = this.#pressure(v, now)
-      // more than half its tiles already on the camera's own stream for want of a slot: a level lower
-      // would find no more slots than this one and thin none of them (verify-1)
-      const n = nextLevel(v, { pressure, now, overBudget: v === heaviest, starved: this.#raw(v) * 2 > v.sockets.size })
-      if (n.level !== v.level) this.#move(v, n.level, n.why)
-      else {
-        // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
-        // without the HEVC codec (#streamFor converts it). A camera found to be H.265 only after its
-        // socket was attached (no keyframe then, and no codec the NVR had seen) moves to its conversion
-        // here -- that socket alone -- and one whose keyframe shows H.264 after all moves back to its
-        // own stream. This used to move the whole viewer to 15 fps: every tile of the browser went through
-        // a conversion because one full-screen main stream was H.265 (slow starts, 15 fps, the
-        // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
-        // Below full, a tile left on the camera's own stream for want of a slot tries again: one may
-        // have come free since. It stayed raw for as long as the page stayed on that level (verify-1).
-        // So does one kept on the conversion it had for want of one (#retarget: slotless).
-        // (Going there is sending less, as a step down: SWITCH_WAIT_MS.)
-        for (const e of v.sockets) if (v.level === 0 || e.stream === e.source || e.slotless) this.#retarget(e, v.level, { down: v.level > 0 })
-        if (n.stays && v.stayedAt !== v.level) {
-          v.stayedAt = v.level
-          this.log(`[adaptive] ${v.key.slice(0, 8)}: stays at ${LEVELS[v.level].id}, a level lower would find no conversion slot either (${n.stays}; ${this.#state(v, this.#link(v))})`)
-        }
+      try {
+        this.#look(v, now, heaviest)
+      } catch (err) {
+        this.#lookFailed(v, now, err)
       }
-      v.changedAt = n.changedAt
-      v.cleanSince = n.cleanSince
-      v.climbAfterMs = n.climbAfterMs
-      v.climbedAt = n.climbedAt
-      v.pressedAt = n.pressedAt
     }
     this.lastTotalBps = total
+  }
+
+  /** One viewer's look (tick): a switch past its time, then its level. */
+  #look(v, now, heaviest) {
+    // a switch still waiting past its time (its stream sent nothing to go over on: held over its cap,
+    // or the camera stalled): over now (#switchTo)
+    for (const e of v.sockets) if (e.switch && now - e.switch.at > e.switch.waitMs) this.#cutOver(e)
+    // overSince: backpressure.mjs gateSend sets it while the socket is over its cap (and clears it
+    // once it drains). waitForKey is not used: a move sets it on purpose. A /live-mux channel's own
+    // bufferedAmount is only its part of the page's socket: the whole socket's queue
+    // (sharedBufferedAmount) is what every tile of the page waits behind.
+    const pressure = this.#pressure(v, now)
+    // more than half its tiles already on the camera's own stream for want of a slot: a level lower
+    // would find no more slots than this one and thin none of them (verify-1)
+    const n = nextLevel(v, { pressure, now, overBudget: v === heaviest, starved: this.#raw(v) * 2 > v.sockets.size })
+    if (n.level !== v.level) this.#move(v, n.level, n.why)
+    else {
+      // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
+      // without the HEVC codec (#streamFor converts it). A camera found to be H.265 only after its
+      // socket was attached (no keyframe then, and no codec the NVR had seen) moves to its conversion
+      // here -- that socket alone -- and one whose keyframe shows H.264 after all moves back to its
+      // own stream. This used to move the whole viewer to 15 fps: every tile of the browser went through
+      // a conversion because one full-screen main stream was H.265 (slow starts, 15 fps, the
+      // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
+      // Below full, a tile left on the camera's own stream for want of a slot tries again: one may
+      // have come free since. It stayed raw for as long as the page stayed on that level (verify-1).
+      // So does one kept on the conversion it had for want of one (#retarget: slotless).
+      // (Going there is sending less, as a step down: SWITCH_WAIT_MS.)
+      for (const e of v.sockets) if (v.level === 0 || e.stream === e.source || e.slotless) this.#retarget(e, v.level, { down: v.level > 0 })
+      if (n.stays && v.stayedAt !== v.level) {
+        v.stayedAt = v.level
+        this.log(`[adaptive] ${v.key.slice(0, 8)}: stays at ${LEVELS[v.level].id}, a level lower would find no conversion slot either (${n.stays}; ${this.#state(v, this.#link(v))})`)
+      }
+    }
+    v.changedAt = n.changedAt
+    v.cleanSince = n.cleanSince
+    v.climbAfterMs = n.climbAfterMs
+    v.climbedAt = n.climbedAt
+    v.pressedAt = n.pressedAt
+  }
+
+  /** A viewer's look that threw (tick): said once in LOOK_FAILED_SAY_MS a viewer, with how many were not. */
+  #lookFailed(v, now, err) {
+    v.lookFails++
+    if (v.lookFailedAt !== null && now - v.lookFailedAt < LOOK_FAILED_SAY_MS) return
+    const more = v.lookFails - 1
+    v.lookFailedAt = now
+    v.lookFails = 0
+    const at = String(err?.stack ?? '').split('\n').find((l) => l.trim().startsWith('at '))?.trim()
+    this.log(`[adaptive] ${v.key.slice(0, 8)}: its look failed, the other viewers looked at as usual: ${err?.message ?? err}${at ? ` (${at})` : ''}${more > 0 ? ` (${more} more since it was last said)` : ''}`)
   }
 
   #start() {
