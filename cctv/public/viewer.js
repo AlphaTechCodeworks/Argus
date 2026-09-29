@@ -1040,7 +1040,7 @@ traceBtn.addEventListener('click', () => {
       host: location.host,
       userAgent: navigator.userAgent,
       layout: layoutSelect.value,
-      page: page + 1,
+      gridPage: page + 1,
       single,
       smooth: smoothBox.checked,
       pacing: PACING,
