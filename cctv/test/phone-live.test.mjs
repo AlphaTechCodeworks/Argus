@@ -1,6 +1,6 @@
 // Tests live video thinned for phones (phone-live.mjs), with a fake converter: no ffmpeg needed.
 //   node cctv/test/phone-live.test.mjs
-import { PhoneLive, PhoneStream, encodeFrame, frameRate, gopFor, isPhoneRequest, keepEveryFor, parseFrame } from '../phone-live.mjs'
+import { PhoneLive, PhoneStream, encodeFrame, frameRate, gopFor, isPhoneRequest, keepEveryFor, parseFrame, steadyRate } from '../phone-live.mjs'
 import { HubStream } from '../stream-hub.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
 
@@ -118,7 +118,7 @@ const makeTranscoder = (o) => {
 
 // ---- what a remote viewer's level asks of its stream (adaptive-live.mjs) ----
 // (REMOTE_CONVERSION there: how every level's conversion runs, and how soon it starts)
-const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true }
+const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true, rejudge: true }
 {
   /** One PhoneStream fed `n` frames at `fps` (a keyframe every 12), with a fake converter. */
   const run = (opts, { type = 0, codec = 1, fps = 30, n = 24 } = {}) => {
@@ -431,6 +431,88 @@ const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, s
   check('a 20 fps H.265 main at full: two decoder threads and nothing ended, as before (their speed is what 20 fps needs)', fast.o.lowDelay === false && fast.args.includes('-threads 2') && !fast.calls.includes('end') && fast.calls.length > 0, `${fast.args} | ${fast.calls.slice(0, 4)}`)
   const phone = slow({}, { n: 14 })
   check('a phone on the local network: its conversion as before (the converter\'s own low_delay, nothing ended)', phone.o.lowDelay === undefined && !phone.calls.includes('end') && phone.calls.length > 0, phone.calls.slice(0, 4).join(', '))
+}
+
+// ---- a hole in a new stream's first second (the final review of live-smooth) ----
+// A remote viewer's stream decided its rate after 12 frames or 1 s of capture time, on the mean over
+// the span, and never judged again: one hole of 1 s or more in that first second read a normal camera as
+// a trickle, for the stream's whole life. nvr-2 freezes all its cameras for 11-32 s just when streams
+// are opened (stutter report 2.3), and JPB DOOR has 28 holes over 1 s in 10 minutes. Now a hole is left
+// out of the reading (steadyRate), and a rate read on fewer than FIRM_INTERVALS intervals is read again
+// at the 12th frame; more than 2x off, the stream's settings follow from the camera's next keyframe.
+check('steadyRate: an even stream as frameRate reads it (20 fps; a "19 fps" camera, 1 step in 7 of 67 ms)',
+  steadyRate([0, 50, 100, 150, 200, 250]) === 20 && Math.abs(steadyRate([0, 50, 100, 150, 200, 250, 300, 367, 417, 467, 517, 567]) - frameRate([0, 50, 100, 150, 200, 250, 300, 367, 417, 467, 517, 567])) < 1e-9)
+check('  a 30 fps sub on the 60 Hz grid (33 and 50 ms steps, 25.4 fps): the mean, as frameRate (the median would read 30)',
+  Math.abs(steadyRate([0, 33, 67, 117, 150, 183, 233, 267, 300, 350, 383, 417]) - frameRate([0, 33, 67, 117, 150, 183, 233, 267, 300, 350, 383, 417])) < 1e-9)
+check('  a hole of 1.2 s among 50 ms steps left out: 20 fps (frameRate: 6.5)', steadyRate([0, 50, 1250, 1300, 1350, 1400, 1450, 1500, 1550, 1600, 1650, 1700]) === 20, String(steadyRate([0, 50, 1250, 1300, 1350, 1400, 1450, 1500, 1550, 1600, 1650, 1700])))
+check('  a 15 s freeze after 3 steps of 33 ms left out: 30 fps', Math.abs(steadyRate([0, 33.3, 66.7, 100, 15100]) - 30) < 0.01, String(steadyRate([0, 33.3, 66.7, 100, 15100])))
+check('  a trickle at 0.8 fps is one (1250 ms steps); two steps, one a hole: the slower reading (the 12th frame reads it again)', steadyRate([0, 1250, 2500]) === 0.8 && steadyRate([0, 50, 1250]) === 1.6 && steadyRate([5]) === 0 && steadyRate([]) === 0)
+{
+  /**
+   * One PhoneStream on a camera of `fps` (a keyframe every `keyEvery` frames), fed `n` frames with a
+   * hole of `hole` ms after frame `holeAfter`; `slots` conversion slots in all, one of them its own.
+   */
+  const holed = (opts, { type = 0, codec = 1, fps = 20, keyEvery = 40, hole = 1200, holeAfter = 1, n = 120, slots = 1 } = {}) => {
+    const src = fakeSource()
+    const xs = []
+    const logs = []
+    const rates = []
+    const out = []
+    let free = slots - 1
+    const slot = () => ({ gone: false, release() { if (!this.gone) { this.gone = true; free++ } } })
+    const s = new PhoneStream({
+      source: src, type, slot: slot(), camera: 'n1/1', log: (l) => logs.push(l), onRate: (r) => rates.push(r), acquire: () => (free > 0 ? (free--, slot()) : null), ...opts,
+      makeTranscoder: (o) => {
+        const x = { o, pushed: [], closed: false, push(ts, k) { if (this.pushed.push(ts) % o.keepEvery === 1 || o.keepEvery === 1) o.onFrame(ts, k, Buffer.from([1])) }, endPicture() {}, close() { this.closed = true } }
+        xs.push(x)
+        return x
+      }
+    })
+    const ws = fakeWs()
+    ws.send = (b) => { const g = parseFrame(b); out.push({ ts: g.ts, key: g.isKey, converted: g.payload.length === 1 }) }
+    s.add(ws)
+    let ts = 0
+    const keys = []
+    for (let i = 0; i < n; i++) {
+      if (i % keyEvery === 0) keys.push(ts)
+      src.emit(encodeFrame(Buffer.from([0, 0, 1, 1]), i % keyEvery === 0, codec, ts))
+      ts += i === holeAfter ? hole : 1000 / fps
+    }
+    return { s, xs, logs, rates, out, keys, free: () => free }
+  }
+  const show = (r) => JSON.stringify({ xs: r.xs.map((x) => ({ k: x.o.keepEvery, g: x.o.gop, low: x.o.lowDelay, first: x.pushed[0], closed: x.closed })), logs: r.logs, rates: r.rates })
+
+  // a 4K H.265 main at full, 20 fps: a 1.2 s hole read it as 1.6 fps, -g 3 and one decoder thread for good
+  const full = holed({ fps: 0, crf: 25, mainKbps: 2500, maxWidth: 1920, h264Only: true, ...REMOTE })
+  const last = full.xs.at(-1)
+  const args = last ? ffmpegArgs(last.o).join(' ') : ''
+  check('a 20 fps H.265 main at level full, a 1.2 s hole after its first keyframe: converted from its next keyframe as 20 fps, a keyframe every 2 s (-g 40), two decoder threads',
+    full.xs.length === 2 && full.xs[0].closed && last.o.keepEvery === 1 && last.o.gop === 40 && last.o.lowDelay === false && args.includes('-threads 2') && / -g 40 /.test(args) && last.pushed[0] === full.keys[1], show(full))
+  check('  meanwhile converted as the 1 s rule read it (1.6 fps: picture by picture), never handed on as its rate; 20 fps is', full.xs[0].o.lowDelay === true && full.rates.join() === '20', show(full))
+  check('  the log says it read the rate again, and how it converts now', full.logs.some((l) => l === '[phone-live] n1/1: its rate read again on its first 12 frames: 20.0 fps, not 1.6 (a hole as it started); from the camera\'s next keyframe:') && full.logs.at(-1) === '[phone-live] n1/1: converting a main stream at 20.0 fps to H.264, every frame kept', show(full))
+  const ts = full.out.map((o) => o.ts)
+  check('  what goes out never steps back', ts.length > 0 && ts.every((t, i) => i === 0 || t >= ts[i - 1]), ts.slice(0, 20).join())
+
+  // a 30 fps sub at level 8: read as a trickle and sent as it is, 30 fps where level 8 sends 8
+  const sub = holed({ fps: 8, crf: 27, subKbps: 450, ...REMOTE }, { type: 1, codec: 0, fps: 30, keyEvery: 60 })
+  check('a 30 fps sub at level 8, a 1.2 s hole after its first keyframe: not left sent as it is: converted from its next keyframe, 1 in 4, a keyframe every 15 pictures (2 s), two decoder threads',
+    !sub.s.passthrough && sub.xs.length === 1 && sub.xs[0].o.keepEvery === 4 && sub.xs[0].o.gop === 15 && sub.xs[0].o.lowDelay === false && Math.abs(sub.xs[0].pushed[0] - sub.keys[1]) < 0.01 && sub.free() === 0, show(sub))
+  const after = sub.out.filter((o) => o.ts >= sub.keys[1])
+  check('  its own frames up to that keyframe, then only converted ones, about 8 a second', sub.out.filter((o) => o.ts < sub.keys[1]).every((o) => !o.converted) && after.length > 0 && after.every((o) => o.converted) && after.length <= Math.ceil((sub.keys.length ? (sub.out.at(-1).ts - sub.keys[1]) / 1000 : 0) * 7.5) + 1, `${after.length} converted | ${show(sub)}`)
+  const none = holed({ fps: 8, crf: 27, subKbps: 450, ...REMOTE, acquire: () => null }, { type: 1, codec: 0, fps: 30, keyEvery: 60 })
+  check('  no conversion slot free then: still sent as it is, and said', none.s.passthrough && none.xs.length === 0 && none.logs.at(-1) === '[phone-live] n1/1: a sub stream at 30.0 fps: still sent as it is, no conversion slot free', show(none))
+
+  // an H.264 main at 15 whose NVR froze 15 s after its keyframe and 3 frames: read on 4 steps, the hole
+  // left out, at once (it read 0.3 fps: -g 1, every picture a keyframe, 1 in 1 kept: 30 fps, not 15)
+  const froze = holed({ fps: 15, ...REMOTE }, { type: 0, codec: 0, fps: 30, keyEvery: 60, hole: 15_000, holeAfter: 3 })
+  check('an H.264 main at 15, a 15 s NVR freeze after its keyframe and 3 frames: 30 fps at once (the freeze left out), 1 in 2, -g 30, nothing read again', froze.xs.length === 1 && froze.xs[0].o.keepEvery === 2 && froze.xs[0].o.gop === 30 && froze.rates.length === 1 && Math.abs(froze.rates[0] - 30) < 0.01 && !froze.logs.some((l) => l.includes('read again')), show(froze))
+
+  // a camera that really trickles: read again at its 12th frame (15 s), the same, nothing changed
+  const trickle = holed({ fps: 15, ...REMOTE }, { type: 1, codec: 0, fps: 0.8, keyEvery: 1, hole: 1250, n: 14 })
+  check('a sub trickling at 0.8 fps: sent as it is from its 2nd frame, read again at its 12th, the same: nothing restarted, its rate handed on then', trickle.s.passthrough && trickle.xs.length === 0 && trickle.rates.join() === '0.8' && trickle.logs.length === 1, show(trickle))
+  // a phone on the local network: its 12 frames and the mean, as before (the local-network rule)
+  const phone = holed({}, { type: 1, codec: 0, fps: 30, keyEvery: 60 })
+  check('a phone on the local network: 12 frames, read as before (the hole in the mean), nothing read again', phone.logs.length === 1 && phone.logs[0].startsWith('[phone-live] n1/1: a sub stream at 7.2 fps') && phone.rates.length === 1, show(phone))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
