@@ -63,11 +63,12 @@ export const PLAYBACK_CLOCK = { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 
 /**
  * Live on a page opened through the Cloudflare tunnel or the tailnet (viewer.js; stutter report 2.4
  * with verify-4's corrections, 29 Sep). The page's one socket through the tunnel stalls now and then
- * for longer than live's buffer, up to 800 ms, can hold: another tile's keyframe ahead of it (634 KB
- * takes 0.8-1.5 s at 3.3-6 Mbit/s), a lost packet (0.6% of the bytes are sent again). Each stall froze
- * the picture and then jumped ahead, and live's buffer grows only 40 ms a second, and only after two
- * late frames in one. The replay of a 1.2 s stall every 20 s: 97% of frames shown, 3 freezes a
- * minute; with this profile 100% and one freeze, the first (test/live-replay.test.mjs).
+ * for longer than live's buffer can hold (350 ms, growing to 800 at most): another tile's keyframe
+ * ahead of it (634 KB takes 0.8-1.5 s at 3.3-6 Mbit/s), a lost packet (0.6% of the bytes are sent
+ * again). Each stall froze the picture and then jumped ahead, and live's buffer grows only 40 ms a
+ * second, and only after two late frames in one. The replay of a 1.2 s stall every 20 s: 97% of
+ * frames shown, 3 freezes a minute; with this profile 100% and one freeze, the first
+ * (test/live-replay.test.mjs).
  *
  *  - stretchLate: a frame that comes late grows the buffer by its lateness and 30 ms at once. The
  *    picture is standing still waiting for it anyway, so nothing visible moves: that frame and the

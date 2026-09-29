@@ -30,7 +30,7 @@ export function isLocalHost(host = globalThis.location?.hostname) {
     if ([a, b, c, d].some((n) => n > 255)) return false
     return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
   }
-  if (h.startsWith('[')) return /^\[(::1|fe[89ab][0-9a-f]?:|f[cd][0-9a-f]{0,2}:)/.test(h)
+  if (h.startsWith('[')) return /^\[(::1\]|fe[89ab][0-9a-f]?:|f[cd][0-9a-f]{0,2}:)/.test(h)
   if (/^\d+(\.\d+)*$/.test(h)) return false // (not an address: 256.1.1.1)
   return !h.includes('.') || /\.(local|lan|home\.arpa|internal)$/.test(h)
 }

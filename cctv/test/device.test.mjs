@@ -18,7 +18,7 @@ check('phones are held to 15 fps, PCs are not held', maxLiveFps({ userAgentData:
 // local one keeps live's own, exactly as it was.
 const local = ['192.168.1.232', '10.0.0.5', '172.16.0.1', '172.31.255.254', '127.0.0.1', '169.254.10.1', 'localhost', 'LOCALHOST', 'localhost.', 'argus.localhost', '[::1]', '[fe80::1]', '[fd12:3456::1]', 'nvr-box.local', 'argus', 'argus.lan', 'argus.home.arpa', 'argus.internal', '', undefined]
 for (const h of local) check(`local: ${JSON.stringify(h)}`, isLocalHost(h) === true)
-const remote = ['cctv.jfl.gripe', 'cctv.jfl.gripe.', '100.101.102.103', 'argus.tail1234.ts.net', '8.8.8.8', '172.32.0.1', '172.15.0.1', '192.169.1.1', '11.0.0.1', '[2001:db8::1]', '256.1.1.1', 'local.example.com', '192.168.1.232.nip.io']
+const remote = ['cctv.jfl.gripe', 'cctv.jfl.gripe.', '100.101.102.103', 'argus.tail1234.ts.net', '8.8.8.8', '172.32.0.1', '172.15.0.1', '192.169.1.1', '11.0.0.1', '[2001:db8::1]', '[::100:1]', '[::ffff:808:808]', '256.1.1.1', 'local.example.com', '192.168.1.232.nip.io']
 for (const h of remote) check(`remote: ${JSON.stringify(h)}`, isLocalHost(h) === false)
 check('with no host named, the page\'s own (location.hostname)', (() => {
   const had = Object.getOwnPropertyDescriptor(globalThis, 'location')
