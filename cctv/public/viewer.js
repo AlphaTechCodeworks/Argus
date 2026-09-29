@@ -476,7 +476,9 @@ function nativeFullButton(tile) {
     if (video.dataset.from !== cv.dataset.fsid) {
       cv.dataset.fsid ||= String(Math.random())
       video.dataset.from = cv.dataset.fsid
-      video.srcObject = cv.captureStream(15)
+      // no frame rate: each picture the tile paints becomes the video's next frame. At 15 the video
+      // sampled the canvas every 67 ms, and a 20 fps camera judders again (stutter report 2.8)
+      video.srcObject = cv.captureStream()
       video.play().catch(() => {})
     }
     return true

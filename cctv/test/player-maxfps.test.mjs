@@ -14,8 +14,13 @@
 // a 30 fps one every 2nd frame, 15 a second 67 ms apart. A stream that goes back in time (a switch, a
 // camera clock set back) is drawn at once, not held until it passes the last frame drawn.
 //
+// The iPhone's own full-screen player shows the tile's canvas through canvas.captureStream (viewer.js);
+// with a rate of 15 it sampled the canvas every 67 ms and put the same judder back. With no rate it
+// takes each picture as it is painted.
+//
 // Replayed through the real player in virtual time on a 60 Hz display (test/live-replay.mjs).
 //   node cctv/test/player-maxfps.test.mjs
+import { readFileSync } from 'node:fs'
 import { NETS, REMOTE_LIVE, arrivals, play, rng, switchArrivals } from './live-replay.mjs'
 
 let failures = 0
@@ -130,6 +135,13 @@ function camera({ stepMs, keyEvery = 40, keyStepMs = stepMs, oddEvery = 0, oddSt
   const d = await draws(arr, { fps: 20, fromMs: 25_000 })
   const back = (x) => x.steps.filter((s) => s < 0).length
   check('a stream switched to an older keyframe: stepped back at once, still no longer than on a PC', back(d) >= 1 && back(d) === back(pc) && d.maxStillMs <= pc.maxStillMs + 17, `phone: still ${d.maxStillMs} ms, ${back(d)} back; PC: still ${pc.maxStillMs} ms, ${back(pc)} back`)
+}
+
+// ---- the iPhone's full-screen player takes every picture painted ----
+{
+  const viewer = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8')
+  const calls = viewer.match(/\.captureStream\([^)]*\)/g) ?? []
+  check('viewer.js: the iPhone full screen captures the canvas with no frame rate (each paint)', calls.length > 0 && calls.every((c) => c === '.captureStream()'), calls.join(' '))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
