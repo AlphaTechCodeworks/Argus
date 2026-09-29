@@ -10,19 +10,21 @@
 //   - loopWorstMs(): the longest pause of the last minute, for /healthz and each worker's STATS.
 // A day of these lines is the baseline each later fix is judged against.
 //
-// Why a beat of its own and not the watchdog's 5 s check: that check is late only when a pause
-// covers the moment it was due, so it would see a 1 s pause at a random moment one time in five.
-// A 20 ms beat is late after every pause, by the pause (to within 20 ms). It costs 50 wake-ups a
-// second of a few microseconds each; the main process already wakes thousands of times a second.
-// monitorEventLoopDelay was tried first (2026-09-29): read and reset every 5 s, it loses the first
-// interval after each reset, so a pause just after a reset, or read before its timer fired, is
-// never recorded (a 1 s busy loop read as 32 ms).
+// How. A beat every 100 ms: a pause makes the next beat late, so every pause over 100 ms is seen
+// (the watchdog's 5 s check is late only when a pause covers the moment it was due: one 1 s pause
+// in five). How late the beat is says the pause to within 100 ms; the loop's own idle time (the time
+// it spent waiting for work, performance.nodeTiming.idleTime) makes it exact: in the gap between two
+// beats the thread was busy for gap - idle, which is the pause plus the little else it did then.
+// Why not faster, or monitorEventLoopDelay (all measured on the production VM, 2026-09-29): each
+// wake-up of a process there costs 80-270 us of CPU, so a 20 ms beat cost 0.4-1.3% of a core per
+// process (100 ms: 0.03-0.2%); monitorEventLoopDelay wakes as often, and read and reset every 5 s it
+// loses the interval after each reset (a 1 s busy loop read as 32 ms).
 //
 // Started by watchdog.mjs startWatchdog(), which the main process and every NVR worker run.
 import { performance } from 'node:perf_hooks'
 
 export const BLOCKED_MS = 250 // a pause this long is a line in the log
-const BEAT_MS = 20
+const BEAT_MS = 100
 const WINDOW_MS = 60_000 // loopWorstMs() looks this far back
 // Something pausing the loop every second would be 86,400 lines a day in a journal capped at 1 GB
 // that already grows about 66 MB a day (perf report D7): the first MAX_LINES in a minute are logged
@@ -36,14 +38,21 @@ function threadCpuMs() {
   return (u.user + u.system) / 1000
 }
 
+/** How long this loop has waited for work since it started, in ms, or null where Node cannot tell. */
+function loopIdleMs() {
+  const v = performance.nodeTiming?.idleTime
+  return Number.isFinite(v) ? v : null
+}
+
 /**
  * The arithmetic, with no timer: beat() is called every beatMs, and a beat that comes late comes
  * late by the pause just ended.
- * @param {{ beatMs?: number, blockedMs?: number, windowMs?: number, maxLines?: number,
- *           now?: () => number, cpuMs?: () => number|null, log?: (line: string) => void }} [o]
+ * @param {{ beatMs?: number, blockedMs?: number, windowMs?: number, maxLines?: number, now?: () => number,
+ *           idleMs?: () => number|null, cpuMs?: () => number|null, log?: (line: string) => void }} [o]
  */
-export function loopWatch({ beatMs = BEAT_MS, blockedMs = BLOCKED_MS, windowMs = WINDOW_MS, maxLines = MAX_LINES, now = () => performance.now(), cpuMs = threadCpuMs, log = console.warn } = {}) {
+export function loopWatch({ beatMs = BEAT_MS, blockedMs = BLOCKED_MS, windowMs = WINDOW_MS, maxLines = MAX_LINES, now = () => performance.now(), idleMs = loopIdleMs, cpuMs = threadCpuMs, log = console.warn } = {}) {
   let last = now()
+  let lastIdle = idleMs()
   let lastCpu = cpuMs()
   // the longest pause that ended in each second of the window: [second, ms]
   const seconds = []
@@ -62,10 +71,19 @@ export function loopWatch({ beatMs = BEAT_MS, blockedMs = BLOCKED_MS, windowMs =
   return {
     beat() {
       const t = now()
+      const idle = idleMs()
       const cpu = cpuMs()
-      const late = Math.max(0, t - last - beatMs)
+      const gap = Math.max(0, t - last)
+      const late = Math.max(0, gap - beatMs)
+      // Late by more than a beat: the loop did not turn for at least that long, and what it was busy
+      // with in the gap is the better figure (the beat's lateness alone is short by up to a beat). Not
+      // otherwise: a loop busy with many short jobs is not paused, however little it idles. A pause
+      // while the loop was idle (the whole machine stopped) shows only as the lateness.
+      const busy = idle === null || lastIdle === null ? 0 : Math.max(0, gap - (idle - lastIdle))
+      const pause = late > beatMs ? Math.max(late, Math.min(busy, gap)) : late
       const used = cpu === null || lastCpu === null ? null : Math.max(0, cpu - lastCpu)
       last = Math.max(last, t) // (a clock that went back is no pause, and not a long one next time)
+      lastIdle = idle
       lastCpu = cpu
       const m = Math.floor(last / 60_000)
       if (m !== minute) {
@@ -75,15 +93,15 @@ export function loopWatch({ beatMs = BEAT_MS, blockedMs = BLOCKED_MS, windowMs =
         untold = 0
         untoldMost = 0
       }
-      note(Math.floor(last / 1000), late)
-      if (late <= blockedMs) return
+      note(Math.floor(last / 1000), pause)
+      if (pause <= blockedMs) return
       if (lines >= maxLines) {
         untold++
-        untoldMost = Math.max(untoldMost, late)
+        untoldMost = Math.max(untoldMost, pause)
         return
       }
       lines++
-      const ms = Math.round(late)
+      const ms = Math.round(pause)
       if (used === null) return log(`[loop] blocked ${ms} ms`)
       // the CPU figure covers the whole gap between two beats, so it can be a little over the pause
       const c = Math.min(ms, Math.round(used))

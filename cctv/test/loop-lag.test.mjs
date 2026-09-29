@@ -22,95 +22,103 @@ const msOf = (l) => Number(l.match(/^\[loop\] blocked (\d+) ms/)?.[1])
 
 check('the threshold is 250 ms', BLOCKED_MS === 250)
 
-// ---- the arithmetic, on a clock of our own --------------------------------------------------------
-{
-  let t = 0
-  let cpu = 0
-  const lines = []
-  const w = loopWatch({ beatMs: 20, now: () => t, cpuMs: () => cpu, log: (l) => lines.push(l) })
-  const beats = (n, cpuEach = 0) => {
-    for (let i = 0; i < n; i++) {
-      t += 20
-      cpu += cpuEach
-      w.beat()
-    }
+// ---- the arithmetic, on clocks of our own -------------------------------------------------------------
+/**
+ * A loop of our own: `run(idle, busy)` has it wait `idle` ms, then work `busy` ms (computing, or
+ * waiting in a synchronous call when `onCpu` is false), then take the beat that was due.
+ */
+function fakeLoop(o = {}) {
+  const c = { t: 0, idle: 0, cpu: 0, lines: [] }
+  c.w = loopWatch({ now: () => c.t, idleMs: () => (o.noIdle ? null : c.idle), cpuMs: () => (o.noCpu ? null : c.cpu), log: (l) => c.lines.push(l), ...o.watch })
+  c.run = (idle, busy, onCpu = true) => {
+    c.t += idle + busy
+    c.idle += idle
+    if (onCpu) c.cpu += busy
+    c.w.beat()
   }
-  beats(50)
-  check('beats on time: no line, nothing worst', lines.length === 0 && w.worstMs() === 0, `${lines} / ${w.worstMs()}`)
+  // n beats on time with the loop 5% busy (the main thread's load on 09-29)
+  c.quiet = (n) => {
+    for (let i = 0; i < n; i++) c.run(95, 5)
+  }
+  return c
+}
+{
+  const c = fakeLoop()
+  c.quiet(50)
+  check('beats on time: no line, and the worst is nothing', c.lines.length === 0 && c.w.worstMs() === 0, `${c.lines} / ${c.w.worstMs()}`)
 
-  // a 1 s block spent computing: the next beat comes 1,020 ms after the last one
-  t += 1020
-  cpu += 1000
-  w.beat()
-  check('a 1 s block: one line, "[loop] blocked 1000 ms"', lines.length === 1 && msOf(lines[0]) === 1000, lines.join(' | '))
-  check('...that says the thread was computing through it', /computed for 1000 ms of it$/.test(lines[0]), lines[0])
-  check('...and it is the worst of the last minute', w.worstMs() === 1000)
+  // a 1 s block spent computing, 30 ms after the last beat: that beat is 930 ms late
+  c.run(30, 1000)
+  check('a 1 s block: one line, "[loop] blocked 1000 ms" (not the 930 ms the beat was late)', c.lines.length === 1 && msOf(c.lines[0]) === 1000, c.lines.join(' | '))
+  check('...that says the thread was computing through it', /computed for 1000 ms of it$/.test(c.lines[0]), c.lines[0])
+  check('...and it is the worst of the last minute', c.w.worstMs() === 1000)
 
-  beats(10)
-  t += 240 + 20 // 240 ms late: under the threshold
-  w.beat()
-  check('a 240 ms pause: no line, but the worst still says 1000', lines.length === 1 && w.worstMs() === 1000)
+  c.quiet(10)
+  c.run(50, 240)
+  check('a 240 ms pause: no line, but the worst still says 1000', c.lines.length === 1 && c.w.worstMs() === 1000)
 
-  // 12 s waiting on the NAS (a synchronous unlink on a slow share): hardly any CPU
-  t += 12_000 + 20
-  cpu += 40
-  w.beat()
-  check('a 12 s pause spent waiting says so', lines.length === 2 && msOf(lines[1]) === 12_000 && /computed for 40 ms of it \(the rest was waiting: synchronous file or network I\/O on this thread, or the whole machine paused\)$/.test(lines[1]), lines[1])
-  check('the worst of the last minute is now 12000', w.worstMs() === 12_000)
+  // 12 s waiting on the NAS (a synchronous unlink on a slow share): busy, hardly any CPU
+  c.run(10, 12_000, false)
+  check('a 12 s pause spent waiting says so', c.lines.length === 2 && msOf(c.lines[1]) === 12_000 && /computed for 0 ms of it \(the rest was waiting: synchronous file or network I\/O on this thread, or the whole machine paused\)$/.test(c.lines[1]), c.lines[1])
+  check('the worst of the last minute is now 12000', c.w.worstMs() === 12_000)
 
   // a minute of on-time beats later, both have left the window
-  beats(3001)
-  check('a minute later the worst is back to 0', w.worstMs() === 0, String(w.worstMs()))
-  check('...and no more lines', lines.length === 2)
+  c.quiet(601)
+  check('a minute later the worst is back to what a quiet loop does (0)', c.w.worstMs() === 0, String(c.w.worstMs()))
+  check('...and no more lines', c.lines.length === 2)
+}
+{
+  // busy nearly all the time with short jobs, never long: the beats come on time, so no pause
+  const c = fakeLoop()
+  for (let i = 0; i < 100; i++) c.run(2, 103)
+  check('a loop 98% busy with short jobs: no line, the worst is how late the beats were', c.lines.length === 0 && c.w.worstMs() === 5, `${c.lines} / ${c.w.worstMs()}`)
+}
+{
+  // the whole VM stopped for 1.2 s while the loop waited for work (verify-6, 17:02:22): that time
+  // counts as the loop's idle time, so only the beat's lateness shows it
+  const c = fakeLoop()
+  c.run(95, 5)
+  c.t += 1200 + 100
+  c.idle += 1200 + 100
+  c.w.beat()
+  check('the machine paused while the loop waited: logged, by the lateness, as waiting', c.lines.length === 1 && msOf(c.lines[0]) === 1200 && /computed for 0 ms of it \(the rest was waiting/.test(c.lines[0]), c.lines[0])
 }
 {
   // no per-thread CPU figure (Node before 23.9): the line is just the pause
-  let t = 0
-  const lines = []
-  const w = loopWatch({ beatMs: 20, now: () => t, cpuMs: () => null, log: (l) => lines.push(l) })
-  t += 20
-  w.beat()
-  t += 520
-  w.beat()
-  check('without a CPU figure: "[loop] blocked 500 ms" and nothing more', lines.length === 1 && lines[0] === '[loop] blocked 500 ms', lines[0])
+  const c = fakeLoop({ noCpu: true })
+  c.run(0, 500)
+  check('without a CPU figure: "[loop] blocked 500 ms" and nothing more', c.lines.length === 1 && c.lines[0] === '[loop] blocked 500 ms', c.lines[0])
 }
 {
-  // Something pausing the loop every second must not fill the journal (69 MB a day already, root
+  // no idle figure either: the lateness alone (short by up to a beat)
+  const c = fakeLoop({ noCpu: true, noIdle: true })
+  c.run(30, 1000)
+  check('without the loop\'s idle time: the lateness, "[loop] blocked 930 ms"', c.lines.length === 1 && c.lines[0] === '[loop] blocked 930 ms', c.lines[0])
+}
+{
+  // Something pausing the loop every second must not fill the journal (66 MB a day already, root
   // disk 2.9 GB free on 09-29): 20 lines a minute, then one line for the rest when the minute ends.
-  let t = 0
-  const lines = []
-  const w = loopWatch({ beatMs: 20, now: () => t, cpuMs: () => null, log: (l) => lines.push(l) })
-  t = 20
-  w.beat()
+  const c = fakeLoop({ noCpu: true })
   for (let i = 0; i < 25; i++) {
-    t += 300 + 20 // a 300 ms pause
-    w.beat()
-    t += 20
-    w.beat()
+    c.run(0, 300) // a 300 ms pause
+    c.quiet(1)
   }
-  t += 400 + 20 // the longest of those not logged: 400 ms
-  w.beat()
-  check('26 pauses in one minute: 20 lines', blockedLines(lines).length === 20, String(lines.length))
-  while (t < 60_000) {
-    t += 20
-    w.beat()
-  }
-  t += 20
-  w.beat()
-  const rest = lines.filter((l) => /^\[loop\] 6 more pauses over 250 ms/.test(l))
-  check('...then one line for the other 6 once the minute is over, with the longest', lines.length === 21 && rest.length === 1 && /the longest 400 ms/.test(rest[0]), lines.at(-1))
-  t += 300 + 20
-  w.beat()
-  check('...and the next minute logs one by one again', lines.length === 22 && msOf(lines.at(-1)) === 300, lines.at(-1))
+  c.run(0, 400) // the longest of those not logged: 400 ms
+  check('26 pauses in one minute: 20 lines', blockedLines(c.lines).length === 20, String(c.lines.length))
+  while (c.t < 60_000) c.quiet(1)
+  const rest = c.lines.filter((l) => /^\[loop\] 6 more pauses over 250 ms/.test(l))
+  check('...then one line for the other 6 once the minute is over, with the longest', c.lines.length === 21 && rest.length === 1 && /the longest 400 ms/.test(rest[0]), c.lines.at(-1))
+  c.run(0, 300)
+  check('...and the next minute logs one by one again', c.lines.length === 22 && msOf(c.lines.at(-1)) === 300, c.lines.at(-1))
 }
 {
   // a clock that goes backwards (it should not: performance.now is monotonic) is no pause
-  let t = 10_000
-  const lines = []
-  const w = loopWatch({ beatMs: 20, now: () => t, cpuMs: () => null, log: (l) => lines.push(l) })
-  t -= 5000
-  w.beat()
-  check('time going backwards: no line, no negative worst', lines.length === 0 && w.worstMs() === 0)
+  const c = fakeLoop()
+  c.quiet(100)
+  c.t -= 5000
+  c.w.beat()
+  c.quiet(10)
+  check('time going backwards: no line, no negative worst', c.lines.length === 0 && c.w.worstMs() === 0, `${c.lines} / ${c.w.worstMs()}`)
 }
 
 // ---- the real thing: this process's own loop --------------------------------------------------------
