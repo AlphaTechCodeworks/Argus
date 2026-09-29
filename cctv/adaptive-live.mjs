@@ -185,7 +185,8 @@ export class AdaptiveLive {
     }
     let text = `${(Math.max(0, queued) / 1e6).toFixed(2)} MB queued`
     const bps = top?.ws.drainBps
-    if (bps === null) text += ', draining: idle'
+    // no rate: nothing queued in the window, or a burst queued too lately to measure (not "idle")
+    if (bps === null) text += queued > 0 ? ', draining: not measured yet' : ', draining: idle'
     else if (typeof bps === 'number') text += `, draining at ${((bps * 8) / 1e6).toFixed(1)} Mbit/s${bps > 0 ? ` (${(queued / bps).toFixed(1)} s)` : ''}`
     if (over) text += `, ${over} held over ${over === 1 ? 'its' : 'their'} cap`
     return text

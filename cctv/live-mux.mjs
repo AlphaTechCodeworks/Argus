@@ -424,10 +424,13 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
     const why = String(reason ?? '')
     const because = ws.closeCause ?? cause
     const bps = mux.drain.bps()
+    const unwritten = mux.queued + mux.drain.lost
     const mb = (n) => (n / 1e6).toFixed(2)
     const mbit = (perS) => ((perS * 8) / 1e6).toFixed(1)
+    // no rate: nothing queued in the window, or a burst queued too lately to measure (not "idle")
+    const draining = bps !== null ? `draining at ${mbit(bps)} Mbit/s` : unwritten > 0 ? 'draining: not measured yet' : 'draining: idle'
     log(`[live-mux] a ${who ? `${who} ` : ''}page's socket closed after ${Math.round(secs)} s: code ${code}${why ? ` "${why}"` : ''}${because ? ` (${because})` : ''}; ` +
-      `${channelsAtEnd} channels, ${mb(mux.queued + mux.drain.lost)} MB never written, ${bps === null ? 'draining: idle' : `draining at ${mbit(bps)} Mbit/s`}; ` +
+      `${channelsAtEnd} channels, ${mb(unwritten)} MB never written, ${draining}; ` +
       `${mb(mux.drain.written)} MB written in all (${mbit(secs > 0 ? mux.drain.written / secs : 0)} Mbit/s on average)`)
   })
   // a frame ws cannot read (bad UTF-8, a bad opcode, over maxPayload) closes the socket by itself;

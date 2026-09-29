@@ -452,6 +452,17 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('... cut by the keep-alive: the line says so', /: code 1006 \(keep-alive: no answer to the last ping\); 1 channels, 0\.00 MB never written, draining: idle;/.test(logs.at(-1)), logs.at(-1))
 }
 {
+  // a burst queued just before the close: too little busy time to say how fast it drained, which is
+  // not "idle" with a megabyte never written (review of 29 Sep)
+  const { ws, state, attached, logs } = setup()
+  ws.msg(sub(1))
+  attached[0].channel.send(frame(false, 1, 999_996))
+  state.t += 100
+  ws.readyState = 3
+  ws.emit('close', 1006, Buffer.alloc(0))
+  check('... a megabyte queued 0.1 s before: "not measured yet", not "idle"', /; 1 channels, 1\.00 MB never written, draining: not measured yet;/.test(logs.at(-1)), logs.at(-1))
+}
+{
   // closed by the server itself (too many requests, bad messages, signed out): the reason it gave
   const { ws, logs } = setup()
   ws.msg(sub(1))

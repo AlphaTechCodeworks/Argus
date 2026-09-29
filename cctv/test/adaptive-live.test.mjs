@@ -158,6 +158,15 @@ function fakeWs() {
   now += CLIMB_AFTER_MS
   live.tick()
   check('a climb logs the same, with an idle link', logs.at(-1) === '[adaptive] link: 15 -> full (clean for 20 s; 3 cameras; 0.00 MB queued, draining: idle; 0 on the raw stream for want of a conversion slot, 0 of 1 free)', logs.at(-1))
+  // a burst queued just before the look: too little busy time yet to say how fast it drains, which
+  // is not "idle" with megabytes queued (review of 29 Sep)
+  page.sharedBufferedAmount = 1_900_000
+  now += SETTLE_MS
+  live.tick()
+  check('... megabytes queued, no rate yet: "not measured yet", not "idle"', logs.at(-1).includes('; 1.90 MB queued, draining: not measured yet;'), logs.at(-1))
+  page.sharedBufferedAmount = 0
+  now += CLIMB_AFTER_MS
+  live.tick()
   // a viewer on plain /live sockets (no page socket to measure): the queue, and no rate
   const solo = fakeWs()
   live.attach('solo', { ws: solo, nvrId: 'n1', ch: 9, type: 1, source: fakeSource('cam9') })
