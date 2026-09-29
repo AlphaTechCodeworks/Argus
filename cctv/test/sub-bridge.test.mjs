@@ -2,6 +2,7 @@
 // stream goes to the viewer until the sub-stream's first frame does, then only the sub-stream.
 // Fake streams and sockets; no SDK.
 //   node cctv/test/sub-bridge.test.mjs
+import { RESUME_BELOW } from '../backpressure.mjs'
 import { bridgeSub } from '../sub-bridge.mjs'
 
 let failures = 0
@@ -196,6 +197,110 @@ const socket = () => {
   sub.gop = [frame('s-k', true)]
   bridgeSub(socket(), { sub, main: new FakeStream(), clientH265: true, log: (l) => logs.push(l) })
   check('no stand-in (the sub-stream runs): nothing logged', logs.length === 0)
+}
+
+// ---- a remote viewer (through the tunnel): the main stream's keyframes only, each while its page keeps
+// up. On 29 Sep a remote page's stand-ins were whole main streams, 2-5 Mbit/s each with their GOP
+// replayed at once, into a 3.5-6.5 Mbit/s tunnel (stutter report 2.6, verify-6) ----
+{
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  main.gop = [frame('m-k1', true), frame('m-d1', false), frame('m-d2', false)]
+  const ws = socket()
+  const b = bridgeSub(ws, { sub, main, clientH265: true, remote: true })
+  check('remote: the main stream\'s GOP replayed into it: its keyframe alone', ws.got.join() === 'm-k1', ws.got.join())
+  main.frame(frame('m-d3', false), false)
+  check('... no frame between keyframes', ws.got.join() === 'm-k1', ws.got.join())
+  main.frame(frame('m-k2', true), true)
+  check('... the next keyframe goes: a picture a GOP, a slideshow that moves', ws.got.join() === 'm-k1,m-k2', ws.got.join())
+  ws.send(frame('s-k', true))
+  main.frame(frame('m-k3', true), true)
+  check('... the sub-stream\'s first frame ends it, as for a local viewer', ws.got.join() === 'm-k1,m-k2,s-k' && !b.active() && main.clients.size === 0, ws.got.join())
+  ws.send(frame('s-d', false))
+  check('... and every frame of its own stream goes after it', ws.got.at(-1) === 's-d')
+}
+{
+  // On a page open the parent's main stream is a new one, and the worker replays its GOP through the
+  // fan-out, frame after frame (verify-6), not through add
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  const ws = socket()
+  bridgeSub(ws, { sub, main, clientH265: true, remote: true })
+  main.frame(frame('m-k', true), true)
+  for (let i = 0; i < 30; i++) main.frame(frame(`m-d${i}`, false), false)
+  check('remote: the worker\'s replay through the fan-out: its keyframe alone', ws.got.join() === 'm-k', ws.got.join())
+}
+{
+  // a local viewer, said as such: every frame, as before
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  main.gop = [frame('m-k1', true), frame('m-d1', false)]
+  const ws = socket()
+  bridgeSub(ws, { sub, main, clientH265: true, remote: false })
+  main.frame(frame('m-d2', false), false)
+  check('a local viewer: every frame of the main stream, as before', ws.got.join() === 'm-k1,m-d1,m-d2', ws.got.join())
+}
+{
+  // Each keyframe only while the viewer's page keeps up: less than RESUME_BELOW queued on its socket --
+  // for a channel of a /live-mux page, the whole page's queue, which every tile waits behind. Keyframes
+  // alone are still about half of these mains (nvr-2/10: 634 KB of a 1279 KB GOP every 2 s, 2.6 Mbit/s),
+  // and the stand-in's own cap (4 MB of its own) let three of them fill a 5 Mbit/s page for seconds.
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  const ws = socket()
+  ws.sharedBufferedAmount = RESUME_BELOW // other tiles' frames: this channel has nothing of its own queued
+  const logs = []
+  let t = 0
+  bridgeSub(ws, { sub, main, clientH265: true, remote: true, log: (l) => logs.push(l), now: () => t })
+  main.frame(frame('m-k1', true), true)
+  check('remote: its page with RESUME_BELOW queued: the keyframe is held back', ws.got.length === 0, ws.got.join())
+  check('... the viewer\'s own wait for its keyframe untouched', ws.waitForKey === true)
+  check('... nothing sent: nothing logged yet', logs.length === 0, logs.join(' | '))
+  ws.sharedBufferedAmount = RESUME_BELOW - 1
+  main.frame(frame('m-d', false), false)
+  main.frame(frame('m-k2', true), true)
+  check('... its page under it: the next keyframe goes', ws.got.join() === 'm-k2', ws.got.join())
+  check('... its start logged as keyframes', logs.length === 1 && logs[0] === 'stand-in started: the main stream\'s keyframes until the sub-stream\'s first frame', logs.join(' | '))
+  main.frame(frame('m-k3', true), true)
+  t = 6000
+  ws.send(frame('s-k', true))
+  check('... and its end, with the keyframes it sent and those held back', logs.length === 2 && logs[1] === 'stand-in ended after 6.0 s (the sub-stream came): 2 keyframes, 0.00 MB sent, 1 held back', logs.join(' | '))
+}
+{
+  // The sub-stream runs but its keyframe has not gone to this socket yet: a fan-out holds it back while
+  // the socket's own queue is over RESUME_BELOW, and there that is the stand-in's last keyframe. More of
+  // the main would hold it back again (the page replay in live-mux-server.test.mjs: with every frame,
+  // nvr-2/17's stand-in outlived its sub-stream's start by 22 s)
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  const ws = socket()
+  const b = bridgeSub(ws, { sub, main, clientH265: true, remote: true })
+  main.frame(frame('m-k1', true), true)
+  sub.frame(frame('s-k', true), true) // running (not sent here: this socket is not its viewer in this test)
+  main.frame(frame('m-k2', true), true)
+  check('remote: once the sub-stream runs, no more of the main: its own keyframe is next', ws.got.join() === 'm-k1' && b.active(), ws.got.join())
+}
+{
+  // a /live socket of its own (no page): its own queue
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  const ws = socket()
+  ws.bufferedAmount = RESUME_BELOW
+  bridgeSub(ws, { sub, main, clientH265: true, remote: true })
+  main.frame(frame('m-k1', true), true)
+  ws.bufferedAmount = 0
+  main.frame(frame('m-k2', true), true)
+  check('remote, a /live socket: held while its own queue is RESUME_BELOW, then the next keyframe', ws.got.join() === 'm-k2', ws.got.join())
+}
+{
+  // a remote browser without H.265 and an H.265 main: nothing, ended at once, as for a local one
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  main.gop = [frame('m-k', true, 1)]
+  const ws = socket()
+  const logs = []
+  const b = bridgeSub(ws, { sub, main, clientH265: false, remote: true, log: (l, why) => logs.push([l, why]), now: () => 0 })
+  check('remote, H.265 main, browser without H.265: nothing sent, ended at once, said as before', ws.got.length === 0 && !b.active() && main.clients.size === 0 && logs.length === 1 && logs[0][1] === 'h265', JSON.stringify(logs))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
