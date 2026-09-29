@@ -95,7 +95,11 @@ check('4 s for an SD picture, a week before a mark is tried again', SD_FALLBACK_
   check('playback.mjs #watch: noSdAction decides, with the right and the camera\'s HD-only mark asked now', /this\.sdWait\.tick\(Date\.now\(\), running\)\) \{\n\s*const act = noSdAction\(\{ waitedMs: this\.sdWait\.ms, mayMain: askMain\(this\.allowMain\), marked: hdOnly\.has\(this\.ch\) \}\)\n\s*if \(act === 'switch'\) return this\.#switchToMain\(\)\n\s*if \(act === 'refuse'\) return this\.#refuseHd\(\)/.test(src))
   const sw = body('async #switchToMain() {')
   const asked = sw.indexOf('if (!askMain(this.allowMain)) {')
-  check('playback.mjs #switchToMain: asked again once the SD playback has stopped, before main is said, watched or opened', asked > sw.indexOf('StopPlayBack') && asked < sw.indexOf('this.onMain()') && asked < sw.indexOf("type: 'stream'") && asked < sw.indexOf('this.#open()') && /if \(!askMain\(this\.allowMain\)\) \{\n\s*this\.#refuseHd\(\)\n\s*return this\.#unregister\(\)/.test(sw))
+  check('playback.mjs #switchToMain: asked again once the SD playback has stopped, before main is said, watched or opened', asked > sw.indexOf('StopPlayBack') && asked < sw.indexOf('this.onMain()') && asked < sw.indexOf("type: 'stream'") && asked < sw.indexOf('this.#open()') && /if \(!askMain\(this\.allowMain\)\) \{\n\s*this\.#refuseHd\(HD_ASK_MESSAGE\)\n\s*return this\.#unregister\(\)/.test(sw))
+  // that refusal is for the right taken away, on any camera: a camera not marked HD only is not said to
+  // have "no SD recording" (on the camera wall the words stay on the tile)
+  const refuse = body('\n    #refuseHd(') // (the method, not a call to it)
+  check('playback.mjs #refuseHd: says the words it is given, "No SD recording ..." when none (noSdAction\'s refusal)', /#refuseHd\(message = HD_ONLY_MESSAGE\) \{/.test(refuse) && /this\.send\(\{ type: 'error', message \}\)/.test(refuse) && /import \{ HD_ASK_MESSAGE, HD_NOT_ALLOWED, HD_ONLY_MESSAGE \} from '\.\/stream-param\.mjs'/.test(src))
   check('playback.mjs connect: a camera marked HD only goes to main at once only for a viewer who may see main (anyone else is tried in SD)', /const asMain = main \|\| \(hdOnly\.has\(ch\) && askMain\(allowMain\)\)/.test(src))
   check('playback.mjs: the stream is never read from the URL (the caller decides)', !/searchParams\.get\('stream'\)/.test(src))
 }

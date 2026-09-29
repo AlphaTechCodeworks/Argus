@@ -17,6 +17,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'pb-hd-switch-'))
 const pb = await import('../playback.mjs')
+const { HD_ASK_MESSAGE } = await import('../stream-param.mjs')
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -156,6 +157,9 @@ const until = async (pred, ms) => {
   nvr.playback.connect(ws, url('pb-gone'), { main: false, allowMain: () => ++asked === 1, onMain: () => told++ })
   await until(() => ws.closedWith !== null, 8000)
   check('the right taken away during the switch: {type:"error"}, 1008 "hd not allowed", no {type:"stream"}, nothing watched for main', ws.closedWith?.reason === 'hd not allowed' && ws.sent.at(-1)?.type === 'error' && !ws.sent.some((m) => m.type === 'stream') && asked === 2 && told === 0, `${JSON.stringify(ws.closedWith)} ${types(ws)} asked ${asked}`)
+  // the camera is not marked HD only: the words are for the right, not "No SD recording" (they stay on a
+  // camera wall tile)
+  check('... its words: HD needs Playback HD or Live HD (not "No SD recording", on a camera not marked HD only)', ws.sent.at(-1)?.message === HD_ASK_MESSAGE && !nvr.playback.isHdOnly(0), ws.sent.at(-1)?.message)
 }
 
 // (M1, a slower open) the login waits 9 s, then SetPlayDataCallBack 1.5 s: longer than IDLE_END_MS (8 s),

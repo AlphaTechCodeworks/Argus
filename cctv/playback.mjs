@@ -51,7 +51,7 @@ import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, Transcoder, clientCanDecode
 import { bind, codecOf, coolingLeftMs, encodeFrame, errorText, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
 import { lastHang } from './watchdog.mjs'
 import { SdWait, hdOnlyStore, noSdAction } from './hd-only.mjs'
-import { HD_NOT_ALLOWED, HD_ONLY_MESSAGE } from './stream-param.mjs'
+import { HD_ASK_MESSAGE, HD_NOT_ALLOWED, HD_ONLY_MESSAGE } from './stream-param.mjs'
 
 // FindNext* result codes continue the SDK error enum: NET_SDK_FILE_SUCCESS is 85 (one more item).
 // A file walk is complete only when it ends with 86 NET_SDK_FILE_NOFIND or 87 NET_SDK_NOMOREFILE;
@@ -750,10 +750,13 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       }
     }
 
-    /** No SD frame came, and this viewer may not see main: said, and the session ends. */
-    #refuseHd() {
+    /**
+     * No SD frame came, and this viewer may not see main: said, and the session ends. `message`: the words
+     * (by default that no SD recording came: noSdAction's refusal, on a camera marked HD only).
+     */
+    #refuseHd(message = HD_ONLY_MESSAGE) {
       console.log(`[${nvr.id}] playback ch${this.ch + 1}: no SD recording came, and main is not allowed for this viewer`)
-      this.send({ type: 'error', message: HD_ONLY_MESSAGE })
+      this.send({ type: 'error', message })
       this.close()
       this.ws.close(1008, HD_NOT_ALLOWED)
     }
@@ -776,9 +779,11 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       this.xcode?.reset()
       if (this.closed) return this.#unregister()
       // asked again now: the right may have gone while the NVR stopped the SD playback, and the sweep
-      // then still saw this socket on the sub-stream (which needs Playback SD alone)
+      // then still saw this socket on the sub-stream (which needs Playback SD alone). Said as what it is,
+      // HD needing the right: the camera need not be marked HD only, where no frame is no footage (and
+      // on the camera wall the words stay on the tile)
       if (!askMain(this.allowMain)) {
-        this.#refuseHd()
+        this.#refuseHd(HD_ASK_MESSAGE)
         return this.#unregister() // (the SD playback is stopped already: only its login is left)
       }
       console.log(`[${nvr.id}] playback ch${this.ch + 1}: no SD recording, switching to HD`)
