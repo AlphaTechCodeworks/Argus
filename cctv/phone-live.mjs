@@ -106,7 +106,11 @@ export class PhoneStream {
    *   ended as it goes in (a remote viewer's: a camera that trickles); 0, not given: as lowDelay says
    *   fromNextKey: made for sockets a level change moves off a picture (adaptive-live.mjs): converted
    *   from the camera's next keyframe as it comes, not the one held from the replay as it joined (older
-   *   than what they have on screen); startTs then says which keyframe that is
+   *   than what they have on screen); startTs then says which keyframe that is, or, while the camera's
+   *   own frames it passed on as it learnt go on up to it, the last of theirs (where a socket joining
+   *   meanwhile starts). Its ffmpeg starts at that keyframe, as every conversion's at its first: started
+   *   ahead, the first picture came 0 ms (a sub, 30 fps) and 12 ms (1080p H.265 at 20) sooner, of 85
+   *   and 169 ms (the server, 29 Sep)
    *   srcFps: the source's frame rate, when the caller knows it already: decided on it at the first
    *   frame, nothing learnt (adaptive-live.mjs #handOver makes a stream inside the camera's keyframe's
    *   fan-out, and with fromNextKey it converts from that very keyframe); 0, not given: learnt
@@ -219,9 +223,21 @@ export class PhoneStream {
         if (f.isKey && !this.joining) this.startTs ??= f.ts
         return this.#fanOut(buf, f.isKey)
       }
-      // the camera's own frames sent while learning are not for anyone joining from now on: a socket
-      // that joins waits for the conversion's first keyframe, as it always did
-      this.gop = []
+      const held = this.held ?? []
+      this.held = null
+      // Made for sockets a level change moves off a picture (fromNextKey): the keyframe held from the
+      // replay as it joined is older than what they have on screen, by up to a keyframe interval, and so
+      // is one it has already sent on as it came while learning. Converted from there, their picture
+      // stepped back (1.4 s in the stutter investigation's replay) and ffmpeg first caught up through
+      // seconds they had seen: at a step down, 14-20 such catch-ups at once (29 Sep 04:08:08; stutter
+      // report 2.5, verify-5). From the camera's next keyframe instead.
+      const next = this.fromNextKey && (!this.heldLive || (this.ownTs !== null && held[0] && held[0].ts <= this.ownTs))
+      // The camera's own frames sent while learning are not for anyone joining from now on: a socket
+      // that joins waits for the conversion's first keyframe, as it always did. Unless they go on up to
+      // the keyframe it converts from (next): then a socket that joins meanwhile is where startTs says,
+      // their last keyframe, and it was sent the deltas alone, nothing it could show for a keyframe
+      // interval (keyframes under 1 s apart, or a trickle; the review of ef43e60).
+      if (!next) this.gop = []
       // A slow source is converted picture by picture. ffmpeg's parser holds a picture until the next
       // one begins, and the second decoder thread (lowDelay false) one more: measured through the real
       // ffmpeg on the server (29 Sep), an H.265 main at 0.8 fps came out 2.7 s after each frame, its
@@ -247,15 +263,7 @@ export class PhoneStream {
       })
       const what = this.fps > 0 ? `to about ${this.fps}: keeping 1 in ${keepEvery}` : 'to H.264, every frame kept'
       this.log(`${this.who} converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps ${what}${this.eachPicture ? ', each picture out as it comes' : ''}`)
-      const held = this.held ?? []
-      this.held = null
-      // Made for sockets a level change moves off a picture (fromNextKey): the keyframe held from the
-      // replay as it joined is older than what they have on screen, by up to a keyframe interval, and so
-      // is one it has already sent on as it came while learning. Converted from there, their picture
-      // stepped back (1.4 s in the stutter investigation's replay) and ffmpeg first caught up through
-      // seconds they had seen: at a step down, 14-20 such catch-ups at once (29 Sep 04:08:08; stutter
-      // report 2.5, verify-5). From the camera's next keyframe instead, its converter already running.
-      if (this.fromNextKey && (!this.heldLive || (this.ownTs !== null && held[0] && held[0].ts <= this.ownTs))) {
+      if (next) {
         this.awaitKey = true
         return this.#awaiting(buf, f)
       }
@@ -280,9 +288,12 @@ export class PhoneStream {
     if (this.ownTs !== null && !this.joining) this.#own(buf, f)
   }
 
-  /** One of the camera's own frames sent on as it came (learnMs; see #onSource). */
+  /**
+   * One of the camera's own frames sent on as it came (learnMs; see #onSource). A socket joining now
+   * starts at the last of their keyframes (the GOP it is replayed), and startTs says so.
+   */
   #own(buf, f) {
-    if (f.isKey) this.startTs ??= f.ts
+    if (f.isKey) this.startTs = f.ts
     this.ownTs = f.ts
     this.#fanOut(buf, f.isKey)
   }

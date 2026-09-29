@@ -271,6 +271,26 @@ const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, s
   const pass = feed({ fps: 15, ...REMOTE, fromNextKey: true }, { fps: 20, keyEvery: 40, replay: 20, n: 42 })
   check('fromNextKey, sent as it is: its first keyframe out is the camera\'s next one (startTs)', pass.s.passthrough && pass.s.startTs === 2000 && pass.out[0]?.ts === 2000 && pass.out[0].key, show(pass))
 }
+{
+  // ...and a socket joining it after it decided, before its conversion's first picture (a trickle, or
+  // keyframes under 1 s apart). It said it starts at the camera's own keyframe it had passed on
+  // (startTs), and the socket switching to it goes over when its old stream reaches that. Decided by
+  // then, the stream had thrown the camera's frames it passed on away for anyone joining, and converted
+  // from the keyframe after: the socket was sent the camera's deltas, which it cannot show without their
+  // keyframe, and nothing it could show for a keyframe interval (the review of ef43e60). Those frames go
+  // on up to that keyframe, so they are there for a socket joining too, from the last of their keyframes.
+  const src = fakeSource()
+  const s = new PhoneStream({ source: src, type: 1, slot: { release() {} }, camera: 'n1/1', log: () => {}, fps: 8, crf: 27, subKbps: 450, ...REMOTE, fromNextKey: true, makeTranscoder })
+  const frame = (i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i % 8 === 0, 0, i * 50) // 20 fps, a keyframe every 0.4 s
+  for (let i = 0; i < 14; i++) src.emit(frame(i)) // decided at the 12th (0.6 s), to convert from the keyframe at 0.8 s
+  const ws = fakeWs()
+  s.add(ws)
+  for (let i = 14; i < 24; i++) src.emit(frame(i))
+  const got = ws.got.map((b) => { const f = parseFrame(b); return { ts: f.ts, key: f.isKey, converted: f.payload.length === 1 } })
+  const own = got.filter((f) => !f.converted).map((f) => f.ts)
+  check('fromNextKey, a socket joining after it decided on live frames: sent the camera\'s own frames from their last keyframe (startTs) on, then the conversion from the keyframe after, nothing missed',
+    s.startTs === 400 && got[0]?.key && own.join() === '400,450,500,550,600,650,700,750' && got.find((f) => f.converted)?.ts === 800 && got.every((f, i) => i === 0 || f.ts > got[i - 1].ts), `startTs ${s.startTs} ${JSON.stringify(got.slice(0, 3))}`)
+}
 
 // ---- a stream made at the camera's keyframe, its rate known (adaptive-live.mjs #handOver) ----
 // No conversion slot free at a step down: a tile keeps its own conversion to the camera's next keyframe,
