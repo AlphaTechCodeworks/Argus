@@ -44,6 +44,11 @@ const threw = (fn) => {
 const ADMIN = { user: 'boss', admin: true }
 const VIEWER = { user: 'jo', admin: false }
 const SAM = { user: 'sam', admin: false }
+const J = JSON.stringify
+// a POST body's rights as a current editor sends them: every grantable list present, live-hd included
+// (a body without it is an editor page from before Live HD, refused 409 outdated)
+const v2 = (rights = {}) => ({ ...rights, grants: { 'live-hd': [], ...(rights.grants ?? {}) } })
+const auditRowsAll = () => readFileSync(join(DATA, 'audit.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
 
 // ---- the migration -------------------------------------------------------------------------
 // This is the part that decides whether anybody is locked out of a running server.
@@ -63,6 +68,7 @@ const SAM = { user: 'sam', admin: false }
   check('a viewer is not an admin', store.users.jo.admin === false)
   check('a viewer keeps live everywhere, as before', store.users.jo.grants.live.join() === '*')
   check('a viewer keeps NVR playback everywhere, as before', store.users.jo.grants['playback-nvr'].join() === '*')
+  check('a viewer keeps full screen at full quality everywhere (Live HD *), as before', store.users.jo.grants['live-hd']?.join() === '*')
   check('a viewer gains NO server playback (canPlayServer refused them)', store.users.jo.grants['playback-server'].length === 0)
   check('a viewer gains NO export', store.users.jo.grants.export.length === 0 && store.users.jo.formats.length === 0)
   check('adminList names both admins', R.adminList().join() === 'boss,legacy', R.adminList().join())
@@ -231,7 +237,7 @@ const SAM = { user: 'sam', admin: false }
 {
   const json = (o) => async () => o
   const [s1, b1] = await R.handleRights('GET', '/api/admin/rights', json({}), ADMIN)
-  check('GET as admin: 200 with every account', s1 === 200 && b1.users.length === 4 && b1.actions.length === 5, JSON.stringify(b1?.actions))
+  check('GET as admin: 200 with every account', s1 === 200 && b1.users.length === 4 && b1.actions.length === 6 && b1.actions[1] === 'live-hd', JSON.stringify(b1?.actions))
   check('GET lists the admins', b1.admins.includes('boss'))
 
   const [s2, b2] = await R.handleRights('GET', '/api/admin/rights', json({}), VIEWER)
@@ -248,20 +254,16 @@ const SAM = { user: 'sam', admin: false }
   check('no session at all: 403', s5 === 403)
 
   const joSeen = b1.users.find((u) => u.user === 'jo').seen
-  const [s6, b6] = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { grants: { live: ['n1'] }, formats: ['pack'] }, seen: joSeen }), ADMIN)
+  const [s6, b6] = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: v2({ grants: { live: ['n1'] }, formats: ['pack'] }), seen: joSeen }), ADMIN)
   check('POST as admin: 200 and the stored row comes back', s6 === 200 && b6.rights.grants.live.join() === 'n1')
-  const [s7, b7] = await R.handleRights('POST', '/api/admin/rights', json({ user: 'ghost', rights: {} }), ADMIN)
+  const [s7, b7] = await R.handleRights('POST', '/api/admin/rights', json({ user: 'ghost', rights: v2() }), ADMIN)
   check('POST for an unknown account: 400', s7 === 400 && /no account/.test(b7.error), b7?.error)
 
   const [s8, , h8] = await R.handleRights('DELETE', '/api/admin/rights', json({}), ADMIN)
   check('an unsupported method: 405 with an Allow header', s8 === 405 && /POST/.test(h8.allow))
   check('another path: not handled (null)', (await R.handleRights('GET', '/api/admin/nvrs', json({}), ADMIN)) === null)
 
-  const [s9, b9] = await R.handleRights('GET', '/api/rights/me', json({}), VIEWER)
-  check('/api/rights/me: a viewer may read their own rights', s9 === 200 && b9.user === 'jo' && b9.admin === false)
-  check('...and it is their OWN row, not a way to read anyone else', b9.rights.grants.live.join() === 'n1')
-  const [s10] = await R.handleRights('GET', '/api/rights/me', json({}), null)
-  check('/api/rights/me with no session: 401', s10 === 401)
+  check('/api/rights/me is not handled any more (it was never reachable: handleRights runs inside the admin block)', (await R.handleRights('GET', '/api/rights/me', json({}), VIEWER)) === null)
 }
 
 // ---- STALE EDITOR: POST /api/admin/rights is a compare-and-swap on the `seen` GET hands out ----
@@ -274,19 +276,19 @@ const SAM = { user: 'sam', admin: false }
   check('GET /api/admin/rights: each row carries a seen token', typeof joRow.seen === 'string' && joRow.seen.length > 0, JSON.stringify(joRow))
   check('rightsToken is exported and agrees with what GET sent', R.rightsToken(R.rightsOf('jo')) === joRow.seen)
 
-  const wrong = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { grants: { live: ['n9'] } }, seen: 'not-the-real-token' }), ADMIN)
+  const wrong = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: v2({ grants: { live: ['n9'] } }), seen: 'not-the-real-token' }), ADMIN)
   check('POST with the wrong seen token: 409 stale', wrong[0] === 409 && wrong[1].stale === true && /reopen/i.test(wrong[1].error), JSON.stringify(wrong[1]))
   check('...and the stored row is not touched', R.rightsOf('jo').grants.live.join() === 'n1')
 
-  const missing = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { grants: { live: ['n9'] } } }), ADMIN) // no seen at all
+  const missing = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: v2({ grants: { live: ['n9'] } }) }), ADMIN) // no seen at all
   check('POST with no seen token at all: refused the same way (an old client cannot overwrite blindly)', missing[0] === 409 && missing[1].stale === true)
   check('...and the stored row is still not touched', R.rightsOf('jo').grants.live.join() === 'n1')
 
   // an account that does not exist: saveRights' own "no account" 400 still wins over a stale refusal
-  const unknown = await R.handleRights('POST', '/api/admin/rights', json({ user: 'ghost', rights: {} }), ADMIN)
+  const unknown = await R.handleRights('POST', '/api/admin/rights', json({ user: 'ghost', rights: v2() }), ADMIN)
   check('an unknown account: 400, not 409 (there is no row to be stale about)', unknown[0] === 400)
 
-  const fresh = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: { grants: { live: ['n1', 'n9'] }, formats: ['pack'] }, seen: joRow.seen }), ADMIN)
+  const fresh = await R.handleRights('POST', '/api/admin/rights', json({ user: 'jo', rights: v2({ grants: { live: ['n1', 'n9'] }, formats: ['pack'] }), seen: joRow.seen }), ADMIN)
   check('POST with the token GET just handed out: saved', fresh[0] === 200 && fresh[1].rights.grants.live.join() === 'n1,n9', JSON.stringify(fresh[1]))
   check('...and the token moves on once the row changes', R.rightsToken(R.rightsOf('jo')) !== joRow.seen)
   // put jo back exactly as later checks in this file expect
@@ -310,22 +312,22 @@ const SAM = { user: 'sam', admin: false }
   const lastFor = (user) => auditRows().filter((r) => r.action === 'rights-change' && r.target === user).at(-1)
 
   const seenOf = (user) => R.rightsToken(R.rightsOf(user))
-  const promote = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: { admin: true }, seen: seenOf('sam') }), ADMIN)
+  const promote = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: v2({ admin: true }), seen: seenOf('sam') }), ADMIN)
   check('sam is promoted', promote[0] === 200 && promote[1].rights.admin === true)
   check('the audit row says "made admin", not just "admin;"', /made admin;/.test(lastFor('sam').detail), lastFor('sam').detail)
 
   // no role change (still admin): the plain "admin; " summary is kept, exactly as before this fix
-  const same = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: { admin: true, grants: { live: ['nvr1'] } }, seen: seenOf('sam') }), ADMIN)
+  const same = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: v2({ admin: true, grants: { live: ['nvr1'] } }), seen: seenOf('sam') }), ADMIN)
   check('sam stays admin', same[0] === 200 && same[1].rights.admin === true)
   check('the audit row keeps the plain "admin; " summary, no "made admin" (nothing changed)', /^admin; /.test(lastFor('sam').detail) && !/made admin/.test(lastFor('sam').detail), lastFor('sam').detail)
 
-  const demote = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: { admin: false }, seen: seenOf('sam') }), ADMIN)
+  const demote = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: v2({ admin: false }), seen: seenOf('sam') }), ADMIN)
   check('sam is demoted', demote[0] === 200 && demote[1].rights.admin === false)
   check('the audit row says "admin removed", where it used to say nothing at all', /admin removed;/.test(lastFor('sam').detail), lastFor('sam').detail)
   check('...and it is not confused with "made admin"', !/made admin/.test(lastFor('sam').detail))
 
   // never an admin, never touched: no role wording either way, only the grant summary
-  const untouched = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: { grants: { live: ['nvr2'] } }, seen: seenOf('sam') }), ADMIN)
+  const untouched = await R.handleRights('POST', '/api/admin/rights', json({ user: 'sam', rights: v2({ grants: { live: ['nvr2'] } }), seen: seenOf('sam') }), ADMIN)
   check('a viewer whose admin flag never changes: no "admin;"/"made admin"/"admin removed" wording at all', untouched[0] === 200 && !/admin/.test(lastFor('sam').detail), lastFor('sam').detail)
   R.saveRights('sam', {}) // back to a clean viewer with no grants, as later sections expect
 }
@@ -398,7 +400,7 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 1, users: { ...R.loadRights().users, NAME: { admin: false, grants: { live: ['*'] }, formats: [] } } }))
   const [, listed] = await R.handleRights('GET', '/api/admin/rights', async () => ({}), ADMIN)
   check('GET /api/admin/rights lists only existing accounts', !listed.users.some((u) => u.user === 'NAME' || u.user === 'ghost2') && listed.users.length === Object.keys(auth.loadUsers()).length, listed.users.map((u) => u.user).join())
-  const [st] = await R.handleRights('POST', '/api/admin/rights', async () => ({ user: 'NAME', rights: { grants: { live: ['*'] } } }), ADMIN)
+  const [st] = await R.handleRights('POST', '/api/admin/rights', async () => ({ user: 'NAME', rights: v2({ grants: { live: ['*'] } }) }), ADMIN)
   check('POST /api/admin/rights refuses a user that does not exist', st === 400)
   R.saveRights('jo', { grants: { live: ['nvr1/0'] } })
   const stored = Object.keys(R.loadRights().users)
@@ -470,6 +472,56 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   check("server.mjs: /api/playback/recordings (an NVR search) asks playback-nvr only", /^[^\n]*\n[\s\S]{0,300}if \(!can\(who, 'playback-nvr', target\)\) return sendJson\(res, 403/.test(recordings) && !/playback-server/.test(recordings.slice(0, 400)))
   const motion = src.slice(src.indexOf("url.pathname === '/motion'"))
   check("server.mjs: /motion (reads the NVR's recordings) asks playback-nvr only", /if \(!can\(who, 'playback-nvr', target\)\) return ws\.close\(1008/.test(motion.slice(0, 400)) && !/playback-server/.test(motion.slice(0, 400)))
+}
+
+// ---- Live HD (stream rights, 2026-09-29) ------------------------------------------------------------------
+{
+  auth.saveUsers({ boss: { hash: 'x', role: 'admin' }, jo: { hash: 'x', role: 'viewer' }, sam: { hash: 'x', role: 'viewer' } })
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1/0', 'n2'] } })
+  check('live-hd: allowed where Live covers the camera too', R.can(VIEWER, 'live-hd', { nvr: 'n1', ch: 0 }) === true)
+  check('live-hd: refused where Live does not, whatever live-hd says (it counts only with Live)', R.can(VIEWER, 'live-hd', { nvr: 'n2', ch: 0 }) === false)
+  check('live-hd: refused on a camera of a Live site it does not list', R.can(VIEWER, 'live-hd', { nvr: 'n1', ch: 1 }) === false)
+  check('live-hd: an admin always', R.can(ADMIN, 'live-hd', { nvr: 'n9', ch: 9 }) === true)
+  R.saveRights('jo', { grants: { 'live-hd': ['*'] } })
+  check('canAny(live-hd) with no Live at all: false', R.canAny(VIEWER, 'live-hd') === false)
+  check('Live HD alone reveals no site (sitesFor)', R.sitesFor(VIEWER, [{ id: 'n1', site: 'S', name: 'N', status: 'online' }]).length === 0)
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1'] } })
+  check('canAny(live-hd) with Live: true', R.canAny(VIEWER, 'live-hd') === true)
+}
+// mayHd: the one rule for a recorded or still picture from the main stream
+{
+  R.saveRights('jo', { grants: { 'playback-nvr': ['n1'] } })
+  check('mayHd: Playback SD alone may not see main', R.mayHd(VIEWER, 'n1', 0) === false)
+  R.saveRights('jo', { grants: { 'playback-nvr': ['n1'], live: ['n1'], 'live-hd': ['n1/0'] } })
+  check('mayHd: Live HD on that camera may, not on the next one', R.mayHd(VIEWER, 'n1', 0) === true && R.mayHd(VIEWER, 'n1', 1) === false)
+  R.saveRights('jo', { grants: { 'playback-server': ['n1/1'] } })
+  check('mayHd: Playback HD on that camera may', R.mayHd(VIEWER, 'n1', 1) === true && R.mayHd(VIEWER, 'n1', 0) === false)
+  check('mayHd: no session, a junk channel or no NVR: refused; an admin: allowed', R.mayHd(null, 'n1', 1) === false && R.mayHd(VIEWER, 'n1', -1) === false && R.mayHd(VIEWER, '', 1) === false && R.mayHd(ADMIN, 'n1', 7) === true)
+}
+// intersectTargets: the cameras two grant lists both cover
+{
+  const I = R.intersectTargets
+  check("intersect: '*' with anything is that thing", J(I(['*'], ['n1', 'n2/3'])) === J(['n1', 'n2/3']) && J(I(['n1/0'], ['*'])) === J(['n1/0']))
+  check('intersect: a site with one of its cameras is the camera', J(I(['n1'], ['n1/3'])) === J(['n1/3']) && J(I(['n1/3'], ['n1'])) === J(['n1/3']))
+  check('intersect: the same site or camera is itself', J(I(['n1', 'n2/4'], ['n1', 'n2/4'])) === J(['n1', 'n2/4']))
+  check('intersect: other sites or cameras give nothing (n1 is not n10)', J(I(['n1', 'n2/1'], ['n3', 'n2/2', 'n10'])) === '[]')
+  check('intersect: nothing on either side is nothing', J(I([], ['*'])) === '[]' && J(I(['*'], [])) === '[]' && J(I(undefined, ['*'])) === '[]')
+}
+
+// ---- editors from before Live HD, and the diff-first audit detail -----------------------------------------
+{
+  const lastRightsRow = (user) => auditRowsAll().filter((r) => r.action === 'rights-change' && r.target === user).at(-1)
+  auth.saveUsers({ boss: { hash: 'x', role: 'admin' }, jo: { hash: 'x', role: 'viewer' } })
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 2, users: {} }))
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1'] } })
+  const seen = R.rightsToken(R.rightsOf('jo'))
+  const [s, b] = await R.handleRights('POST', '/api/admin/rights', async () => ({ user: 'jo', rights: { grants: { live: ['n1'] } }, seen }), ADMIN)
+  check('an editor from before Live HD (no live-hd list): 409 outdated, never stale (no reopen loop)', s === 409 && b.outdated === true && !('stale' in b) && /reload/i.test(b.error), J(b))
+  check('... and the stored row keeps its Live HD', J(R.rightsOf('jo').grants['live-hd']) === J(['n1']))
+  const [s2] = await R.handleRights('POST', '/api/admin/rights', async () => ({ user: 'jo', rights: v2({ grants: { live: ['n1'] } }), seen }), ADMIN)
+  check('with the live-hd list: saved, and the audit row starts with the change', s2 === 200 && /^removed live-hd: n1 \| now: live=n1 live-hd=none /.test(lastRightsRow('jo').detail), lastRightsRow('jo')?.detail)
+  check('rightsChangeDetail: nothing changed says so', R.rightsChangeDetail(R.rightsOf('jo'), R.rightsOf('jo')).startsWith('no changes | now: '))
+  check('rightsChangeDetail: formats too', /added formats: mp4/.test(R.rightsChangeDetail(R.rightsOf('jo'), { ...R.rightsOf('jo'), formats: ['mp4'] })))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

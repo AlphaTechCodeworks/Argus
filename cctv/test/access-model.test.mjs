@@ -318,5 +318,8 @@ const grantsOf = (state) => M.toRow(state).grants
   check('3000 random clicks: every row is already clean, and every camera tick matches the row', bad === null, J(bad))
 }
 
+// ---- a stored Live HD list survives a save (stream rights): the editor never drops it ---------------------
+check('Live HD kept through the editor: fromRow then toRow gives the same list', J(M.toRow(M.fromRow(row({ live: ['nvr1'], 'live-hd': ['nvr1'] }), tree)).grants['live-hd']) === J(['nvr1']))
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

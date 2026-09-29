@@ -1,5 +1,5 @@
-// Per-user rights: who may watch live, play back from the server, play back from the NVR, export
-// (and in which formats), and administer. Rights are granted per site (a whole NVR) or per camera.
+// Per-user rights: who may watch live, watch live at full quality, play back from the NVR or from this
+// server, export (and in which formats), and administer. Granted per site (a whole NVR) or per camera.
 //
 // This is the security layer, so it is written to one rule: DEFAULT DENY. can() returns true only
 // when a grant explicitly says so. Anything unexpected — a missing file, a corrupt row, an unknown
@@ -13,23 +13,33 @@
 //     honourSessionAdmin below), which is how an install with no rights file yet, and CCTV_AUTH=off
 //     development, keep working. Admin is stored nowhere else: an admin flag in a row is ignored.
 //
+// The actions, with the access editor's names: live (Live: the grid, on the camera's sub-stream),
+// live-hd (Live HD: full screen at full quality, the main stream; it counts only where live covers
+// the camera too), playback-nvr (Playback SD: the NVR's own recordings), playback-server (Playback HD:
+// this server's own recordings), export (with its formats). mayHd below is the one rule for a
+// recorded or still picture from the main stream: Live HD or Playback HD on the camera.
+//
 // Storage: data/rights.json, written 0600 by temp-file-and-rename like settings.mjs.
 //
-//   { version: 1, users: { alice: { admin: false, grants: { live: ['*'], 'playback-server':
-//     ['nvr1', 'nvr2/3'], 'playback-nvr': [], export: ['nvr1/0'] }, formats: ['pack'] } } }
+//   { version: 1, users: { alice: { admin: false, grants: { live: ['*'], 'live-hd': ['nvr1'],
+//     'playback-server': ['nvr1', 'nvr2/3'], 'playback-nvr': [], export: ['nvr1/0'] }, formats: ['pack'] } } }
 //
 // A target in a grant list is one of:
 //   '*'        every camera on every NVR ("site-wide" in the plan's words)
 //   'nvr1'     every camera on that one NVR
 //   'nvr1/3'   channel 3 of that NVR, and nothing else
 //
-//   GET  /api/admin/rights            -> { users, actions, formats, failures }; each user's row
+//   GET  /api/admin/rights            -> { users, actions, formats, admins }; each user's row
 //                                         carries `seen`, a token of it right now
 //   POST /api/admin/rights            { user, rights, seen } -> { user, rights }
-//                                         or 409 { error, stale: true } when `seen` is missing or does
+//                                         409 { error, stale: true } when `seen` is missing or does
 //                                         not match: a stale editor screen must not silently put back
-//                                         access someone else already took away while it sat open
-//   GET  /api/rights/me               -> { user, admin, rights }   (anyone signed in: their own)
+//                                         access someone else already took away while it sat open;
+//                                         409 { error, outdated: true } when rights.grants['live-hd']
+//                                         is missing: an editor page from before Live HD would store
+//                                         it empty
+// The pages learn what they may do per camera from /api/cameras (liveCameras, playbackCameras), not
+// from their rights row.
 
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -41,8 +51,8 @@ import { audit, useRights } from './audit.mjs'
 export const RIGHTS_FILE = join(DATA_DIR, 'rights.json')
 const VERSION = 1
 
-/** The five things a person can be allowed to do. Anything not in here is refused outright. */
-export const ACTIONS = Object.freeze(['live', 'playback-server', 'playback-nvr', 'export', 'admin'])
+/** The six things a person can be allowed to do. Anything not in here is refused outright. */
+export const ACTIONS = Object.freeze(['live', 'live-hd', 'playback-server', 'playback-nvr', 'export', 'admin'])
 
 /** Export formats, matching export-job.mjs's FORMATS. An export grant with no format is useless. */
 export const FORMATS = Object.freeze(['pack', 'mp4', 'stills'])
@@ -171,7 +181,8 @@ export function rightsToken(row) {
  * Builds the first rights.json from users.json, preserving exactly what everyone can do today:
  *   - an admin (including an old role-less account, which auth.mjs already calls an admin)
  *     becomes admin here, so nothing they do changes;
- *   - a viewer gets live and NVR playback everywhere, which is what viewers have always had,
+ *   - a viewer gets live, full screen at full quality (live-hd) and NVR playback everywhere,
+ *     which is what viewers have always had,
  *     and gets no server playback and no export, which is what canPlayServer already refused them.
  * Nobody gains anything. If the file cannot be written the rights are still returned, so a
  * read-only data folder degrades to "same as before" rather than to "everyone locked out".
@@ -184,7 +195,7 @@ export function migrateRights() {
     users[name] =
       u?.role === 'admin'
         ? { ...emptyRights(), admin: true }
-        : { ...emptyRights(), grants: { ...emptyGrants(), live: ['*'], 'playback-nvr': ['*'] } }
+        : { ...emptyRights(), grants: { ...emptyGrants(), live: ['*'], 'live-hd': ['*'], 'playback-nvr': ['*'] } }
   }
   const store = { version: VERSION, users }
   try {
@@ -327,7 +338,7 @@ function parseTarget(target) {
  *
  * @param {{user?:string, admin?:boolean}|string|null|undefined} who the session's user — built by
  *   server.mjs from the signed cookie. Never pass anything that came out of a request body.
- * @param {'live'|'playback-server'|'playback-nvr'|'export'|'admin'} action
+ * @param {'live'|'live-hd'|'playback-server'|'playback-nvr'|'export'|'admin'} action
  * @param {{nvr?:string, ch?:number, format?:string}|string|null} [target] the camera, and for an
  *   export the format. An export with no format named is refused: "may export something" is not a
  *   question this system answers.
@@ -350,6 +361,9 @@ export function can(who, action, target = null, { honourSessionAdmin = true } = 
 
   const { nvr, ch, format } = parseTarget(target)
   if (!covers(rights.grants[action], nvr, ch)) return false
+  // Live HD is an add-on to Live on the same camera, never a way in by itself: a stray live-hd target
+  // (hand-edited, restored from the shadow) grants nothing where Live does not cover the camera too
+  if (action === 'live-hd' && !covers(rights.grants.live, nvr, ch)) return false
   if (action !== 'export') return true
   // An export grant is only half a permission: the format has to be allowed too.
   return format !== null && FORMATS.includes(format) && rights.formats.includes(format)
@@ -370,6 +384,7 @@ export function canAny(who, action) {
   if (action === 'admin') return rights.admin
   const list = rights.grants[action] ?? []
   if (list.length === 0) return false
+  if (action === 'live-hd' && rights.grants.live.length === 0) return false // HD counts only with Live
   // An export grant over cameras but no format allowed is not an export permission at all.
   return action !== 'export' || rights.formats.length > 0
 }
@@ -388,7 +403,8 @@ export function sitesFor(who, list) {
   const { grants } = rightsOf(user)
   const onNvr = (t, id) => t === '*' || t === id || t.startsWith(`${id}/`)
   return list
-    .filter((s) => GRANTABLE.some((a) => (grants[a] ?? []).some((t) => onNvr(t, s.id))))
+    // Live HD alone shows nothing (it counts only with Live), so it reveals no site either
+    .filter((s) => GRANTABLE.some((a) => a !== 'live-hd' && (grants[a] ?? []).some((t) => onNvr(t, s.id))))
     .map(({ id, site, name, status }) => ({ id, site, name, status }))
 }
 
@@ -405,6 +421,43 @@ export const canPlayNvr = (who, nvrId, ch) =>
   can(who, 'playback-nvr', { nvr: isString(nvrId) && nvrId ? nvrId : null, ch: Number.isInteger(ch) && ch >= 0 ? ch : null })
 
 /**
+ * May this person see a recorded or still picture from this camera's main stream: Live HD or Playback
+ * HD on it. The one rule for the NVR's main stream in playback (with playback-nvr, rec-playback.mjs)
+ * and the full-size event picture (event-snapshot.mjs). Live main asks live-hd alone (live-attach.mjs):
+ * Playback HD does not open full screen live.
+ */
+export const mayHd = (who, nvrId, ch) => {
+  const t = { nvr: isString(nvrId) && nvrId ? nvrId : null, ch: Number.isInteger(ch) && ch >= 0 ? ch : null }
+  return can(who, 'live-hd', t) || can(who, 'playback-server', t)
+}
+
+/** The one target covering exactly the cameras both cover, or null: '*' ∩ x = x, 'n1' ∩ 'n1/3' = 'n1/3'. */
+function meet(a, b) {
+  if (a === '*') return b
+  if (b === '*') return a
+  const nvrA = a.includes('/') ? a.slice(0, a.indexOf('/')) : a
+  const nvrB = b.includes('/') ? b.slice(0, b.indexOf('/')) : b
+  if (nvrA !== nvrB) return null
+  if (!a.includes('/')) return b
+  if (!b.includes('/')) return a
+  return a === b ? a : null
+}
+
+/**
+ * The cameras two grant lists both cover, as a grant list (sorted, each target once): what an upgrade
+ * after a rollback restores of the Live HD the shadow remembers, limited to the Live there is now
+ * (upgradeToV2), and what the shadow's first write keeps (writeStore).
+ */
+export function intersectTargets(a, b) {
+  const out = new Set()
+  for (const x of a ?? []) for (const y of b ?? []) {
+    const m = meet(x, y)
+    if (m) out.add(m)
+  }
+  return [...out].sort()
+}
+
+/**
  * May this person play back anything at all on this NVR? /api/playback/now and /dates answer for the
  * whole NVR (its clock and time zone, the days it holds recordings) and each ask costs an SDK call
  * to it, so they are for someone who may play back at least one of its cameras, not for everyone
@@ -417,7 +470,28 @@ export function canPlayAnyOn(who, nvrId, chs = []) {
 
 // ------------------------------------------------------------------------------------- the route
 
-const ROUTES = { '/api/admin/rights': ['GET', 'POST'], '/api/rights/me': ['GET'] }
+const ROUTES = { '/api/admin/rights': ['GET', 'POST'] }
+
+/**
+ * The detail of a rights-change audit row: what changed first, then the whole row, so the audit's
+ * 500-character cut (audit.mjs) takes the summary and never the change. The role note comes first:
+ * an unchanged "admin" reads the same for someone always an admin and someone just now demoted
+ * (rights.admin is false either way once they are out), so a role change says so explicitly.
+ */
+export function rightsChangeDetail(before, after) {
+  const roleNote = before.admin === after.admin ? (after.admin ? 'admin; ' : '') : after.admin ? 'made admin; ' : 'admin removed; '
+  const changes = []
+  const diff = (label, was, now) => {
+    const added = now.filter((t) => !was.includes(t))
+    const removed = was.filter((t) => !now.includes(t))
+    if (added.length) changes.push(`added ${label}: ${added.join('|')}`)
+    if (removed.length) changes.push(`removed ${label}: ${removed.join('|')}`)
+  }
+  for (const a of GRANTABLE) diff(a, before.grants?.[a] ?? [], after.grants?.[a] ?? [])
+  diff('formats', before.formats ?? [], after.formats ?? [])
+  const now = `${GRANTABLE.map((a) => `${a}=${after.grants[a].join('|') || 'none'}`).join(' ')} formats=${after.formats.join('|') || 'none'}`
+  return `${roleNote}${changes.length ? changes.join('; ') : 'no changes'} | now: ${now}`
+}
 
 /**
  * @param {string} method
@@ -432,13 +506,6 @@ export async function handleRights(method, pathname, readJson, who) {
   if (!methods.includes(method)) return [405, { error: 'Method not allowed' }, { allow: methods.join(', ') }]
 
   const name = isString(who) ? who : isString(who?.user) ? who.user : null
-
-  if (pathname === '/api/rights/me') {
-    if (!name && !(who && who.admin === true)) return [401, { error: 'Sign in first' }]
-    const mine = name ? rightsOf(name) : emptyRights()
-    return [200, { user: name, admin: mine.admin || who?.admin === true, rights: mine, actions: ACTIONS, formats: FORMATS }]
-  }
-
   if (!can(who, 'admin')) return [403, { error: 'Only admins can change rights' }]
   if (method === 'GET') return [200, { users: listRights(), actions: ACTIONS, formats: FORMATS, admins: adminList() }]
 
@@ -447,30 +514,26 @@ export async function handleRights(method, pathname, readJson, who) {
     // The name comes from the body because an admin is editing somebody else. The *authority* to
     // do so came from the session above, which is the part that must never be client-supplied.
     const user = String(body?.user ?? '')
+    // An editor page opened before Live HD existed knows four rights: its row would store live-hd
+    // empty, taking full screen at full quality from that person everywhere, and its "Reopen" after
+    // the stale refusal below would do exactly that. So a body without the live-hd list is refused
+    // first, without the `stale` flag: that page is told to reload, not offered a reopen.
+    if (!Array.isArray(body?.rights?.grants?.['live-hd'])) {
+      return [409, { error: 'This page is from an older version of Argus: reload it (the access was not saved)', outdated: true }]
+    }
     // Compare-and-swap (STALE EDITOR): the access editor's GET handed out this row's `seen` token.
     // If it does not match the row as it is right now, somebody else changed this person's access
     // while the editor sat open, and saving the whole row it opened with would silently put that
-    // change back. A missing token fails the same `!==` compare, so an old client that never learned
-    // about `seen` is refused too, rather than allowed to overwrite blindly. Only checked for an
-    // account that exists: for one that does not, saveRights below gives the clearer "no account" 400.
+    // change back. A missing token fails the same `!==` compare. Only checked for an account that
+    // exists: for one that does not, saveRights below gives the clearer "no account" 400.
     const before = rightsOf(user)
     if (Object.hasOwn(loadUsers(), user) && body?.seen !== rightsToken(before)) {
       return [409, { error: 'Someone changed this person\'s access since you opened it; reopen to see it', stale: true }]
     }
     const rights = saveRights(user, body?.rights)
     // "Who gave them permission" is the first question after "who did it", so a rights change is
-    // itself an audited event. The stored row is recorded, not what was posted: they differ
-    // whenever cleanRights() has thrown something out.
-    // The role is the one flag the grant summary below cannot show truthfully by itself: an unchanged
-    // "admin" would read the same for someone who was always an admin and someone just now demoted
-    // (rights.admin is false either way once they are out), so a demotion has to say so explicitly.
-    const roleNote = before.admin === rights.admin ? (rights.admin ? 'admin; ' : '') : rights.admin ? 'made admin; ' : 'admin removed; '
-    audit(DATA_DIR, {
-      user: name ?? 'dev',
-      action: 'rights-change',
-      target: user,
-      detail: `${roleNote}${GRANTABLE.map((a) => `${a}=${rights.grants[a].join('|') || 'none'}`).join(' ')} formats=${rights.formats.join('|') || 'none'}`
-    })
+    // itself an audited event: the stored row (not what was posted), the change first.
+    audit(DATA_DIR, { user: name ?? 'dev', action: 'rights-change', target: user, detail: rightsChangeDetail(before, rights) })
     return [200, { user, rights }]
   } catch (e) {
     // Everything that can go wrong here is the caller's fault (unknown account, bad name, bad

@@ -24,8 +24,9 @@
 //   { admin, formats, grants: { <action>: { all, nvrs: [id], cams: ['id/ch'], kept: [target] } } }
 // all is '*'; nvrs and cams are targets on the tree; kept is every other target, as stored.
 
-/** The per-camera rights rights.mjs knows ('admin' is the account's role, not a grant). */
-export const GRANTABLE = Object.freeze(['live', 'playback-server', 'playback-nvr', 'export'])
+/** The per-camera rights rights.mjs knows ('admin' is the account's role, not a grant). Live HD has no
+ * column of its own until the five-column editor; its list is kept as stored, so a save never takes it. */
+export const GRANTABLE = Object.freeze(['live', 'live-hd', 'playback-server', 'playback-nvr', 'export'])
 /** Export formats, in rights.mjs's order (it saves them in this order whatever order they are ticked). */
 export const FORMATS = Object.freeze(['pack', 'mp4', 'stills'])
 export const FORMAT_LABELS = Object.freeze({ pack: 'Evidence pack', mp4: 'MP4', stills: 'Stills' })
@@ -296,7 +297,7 @@ function playbackCell(server, nvr) {
 
 const cellsOf = (one) => ({ live: one('live'), playback: playbackCell(one('playback-server'), one('playback-nvr')), export: one('export') })
 
-const KEPT_LABELS = { live: 'Live', 'playback-server': 'Playback (server)', 'playback-nvr': 'Playback (NVR)', export: 'Export' }
+const KEPT_LABELS = { live: 'Live', 'live-hd': 'Live HD', 'playback-server': 'Playback (server)', 'playback-nvr': 'Playback (NVR)', export: 'Export' }
 
 /** The old grants the tree cannot show, one entry per target, with the rights it carries. */
 function keptList(state, idx) {
