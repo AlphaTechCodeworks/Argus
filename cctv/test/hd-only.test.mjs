@@ -82,12 +82,17 @@ check('4 s for an SD picture, a week before a mark is tried again', SD_FALLBACK_
 // ---- no SD frame, for a viewer who may or may not see main (stream rights) --------------------------------
 {
   check('SD_REFUSE_MS: longer than the switch, shorter than the "end of recording" notice (IDLE_END_MS, 8 s)', SD_REFUSE_MS === 6000 && SD_REFUSE_MS > SD_FALLBACK_MS && SD_REFUSE_MS < 8000)
-  check('noSdAction: wait on under 4 s of playing, whoever it is', noSdAction({ waitedMs: 3999, mayMain: true }) === null && noSdAction({ waitedMs: 3999, mayMain: false }) === null)
-  check('... then over to main for a viewer who may see main', noSdAction({ waitedMs: 4000, mayMain: true }) === 'switch')
-  check('... anyone else waits longer (nothing to switch to), then is refused', noSdAction({ waitedMs: 5999, mayMain: false }) === null && noSdAction({ waitedMs: 6000, mayMain: false }) === 'refuse')
+  check('noSdAction: wait on under 4 s of playing, whoever it is, marked or not', [true, false].every((marked) => noSdAction({ waitedMs: 3999, mayMain: true, marked }) === null && noSdAction({ waitedMs: 3999, mayMain: false, marked }) === null))
+  check('... then over to main for a viewer who may see main, marked or not', noSdAction({ waitedMs: 4000, mayMain: true, marked: false }) === 'switch' && noSdAction({ waitedMs: 4000, mayMain: true, marked: true }) === 'switch')
+  check('... anyone else, on a camera marked HD only, waits longer (nothing to switch to), then is refused', noSdAction({ waitedMs: 5999, mayMain: false, marked: true }) === null && noSdAction({ waitedMs: 6000, mayMain: false, marked: true }) === 'refuse')
+  // no frame on a camera nobody has seen to be HD only is no footage in that stretch (the camera off that
+  // day, a motion-only schedule, before the NVR's retention): never a refusal, which the camera wall keeps
+  // for the tile's life; the session tells the page the recording ended ("end", IDLE_END_MS), as before
+  check('... anyone else, on a camera NOT marked HD only: never refused, however long (the session ends as a recording does)', [6000, 8000, 60_000, 3_600_000].every((waitedMs) => noSdAction({ waitedMs, mayMain: false, marked: false }) === null))
+  check('... and a mark that is not the literal true (a caller that forgot to ask) refuses nobody', noSdAction({ waitedMs: 60_000, mayMain: false }) === null && noSdAction({ waitedMs: 60_000, mayMain: false, marked: 1 }) === null)
   const src = readFileSync(new URL('../playback.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const body = (head) => src.slice(src.indexOf(head), src.indexOf('\n    }\n', src.indexOf(head)))
-  check('playback.mjs #watch: noSdAction decides, with the right asked now', /this\.sdWait\.tick\(Date\.now\(\), running\)\) \{\n\s*const act = noSdAction\(\{ waitedMs: this\.sdWait\.ms, mayMain: askMain\(this\.allowMain\) \}\)\n\s*if \(act === 'switch'\) return this\.#switchToMain\(\)\n\s*if \(act === 'refuse'\) return this\.#refuseHd\(\)/.test(src))
+  check('playback.mjs #watch: noSdAction decides, with the right and the camera\'s HD-only mark asked now', /this\.sdWait\.tick\(Date\.now\(\), running\)\) \{\n\s*const act = noSdAction\(\{ waitedMs: this\.sdWait\.ms, mayMain: askMain\(this\.allowMain\), marked: hdOnly\.has\(this\.ch\) \}\)\n\s*if \(act === 'switch'\) return this\.#switchToMain\(\)\n\s*if \(act === 'refuse'\) return this\.#refuseHd\(\)/.test(src))
   const sw = body('async #switchToMain() {')
   const asked = sw.indexOf('if (!askMain(this.allowMain)) {')
   check('playback.mjs #switchToMain: asked again once the SD playback has stopped, before main is said, watched or opened', asked > sw.indexOf('StopPlayBack') && asked < sw.indexOf('this.onMain()') && asked < sw.indexOf("type: 'stream'") && asked < sw.indexOf('this.#open()') && /if \(!askMain\(this\.allowMain\)\) \{\n\s*this\.#refuseHd\(\)\n\s*return this\.#unregister\(\)/.test(sw))

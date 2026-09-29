@@ -22,7 +22,8 @@
 //                          {"type":"stream","stream":0} (switched to HD: this camera records no SD)
 //        A camera found to record no SD goes over to main only for a viewer who may see main
 //        (allowMain, asked then); anyone else gets {"type":"error"} and a 1008 "hd not allowed"
-//        close once no SD frame has come in 6 s of playing (hd-only.mjs noSdAction).
+//        close once no SD frame has come in 6 s of playing, on a camera marked HD only; on any other
+//        camera no frame is no footage there: {"type":"end"} after 8 s (hd-only.mjs noSdAction).
 // While the NVR is busy (recovering, or its calls are stuck or just came back late, or the SDK is
 // stuck on any NVR's call) the three GET routes answer 503 { error, retryAfterS } at once and new
 // playbacks fail with the same message, instead of queuing more SDK work for it. Playbacks already
@@ -724,10 +725,11 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       // no SD frame yet, counted only while the NVR really plays this session (hd-only.mjs SdWait: not
       // before it has started, not while it is paused or a RESUME waits in the lane): after
       // SD_FALLBACK_MS over to main for a viewer who may see main, asked now; anyone else is refused
-      // after SD_REFUSE_MS (noSdAction)
+      // after SD_REFUSE_MS on a camera marked HD only, and elsewhere gets "end" below, as for any
+      // stretch without footage (noSdAction)
       const running = this.openedAt > 0 && this.nvrRunning && !this.resuming && !this.paused
       if (!this.gotFrames && !this.mainStream && this.sdWait.tick(Date.now(), running)) {
-        const act = noSdAction({ waitedMs: this.sdWait.ms, mayMain: askMain(this.allowMain) })
+        const act = noSdAction({ waitedMs: this.sdWait.ms, mayMain: askMain(this.allowMain), marked: hdOnly.has(this.ch) })
         if (act === 'switch') return this.#switchToMain()
         if (act === 'refuse') return this.#refuseHd()
       }

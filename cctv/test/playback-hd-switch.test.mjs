@@ -1,7 +1,9 @@
 // The NVR playback session's switch to the main stream (playback.mjs PlaybackSession, hd-only.mjs):
 // a camera the NVR records in HD only is found by "no SD frame in 4 s of the NVR playing", and only a
 // viewer who may see main is switched, asked then and again once the SD playback has stopped; anyone
-// else is refused once no SD frame has come in 6 s of playing. The 4 s used to be counted from before
+// else is refused once no SD frame has come in 6 s of playing, but only on a camera marked HD only:
+// elsewhere no frame is no footage there, and the session says "end" after 8 s, as it always did for a
+// gap (a refusal is final on the camera wall's tile). The 4 s used to be counted from before
 // the session had started (openedAt 0 until the NVR answered) and through a pause at open, so a slow
 // NVR or the camera wall marked cameras HD-only for good. Fake NVRs whose lane answers each SDK job
 // without running it (as playback-busy.test.mjs): nothing reaches an NVR, but playback.mjs loads
@@ -86,7 +88,10 @@ const until = async (pred, ms) => {
   return pred()
 }
 
-// (M1) the open is slow (its SetPlayDataCallBack waits 1.5 s in the NVR's lane); no right to see main
+// (M1) the open is slow (its SetPlayDataCallBack waits 1.5 s in the NVR's lane); no right to see main,
+// on a camera nobody has seen to be HD only: no frame there is no footage in that stretch (the camera off
+// that day, a motion-only schedule, before the NVR's retention), so it ends as a recording does ("end",
+// 8 s without a frame), never refused: a refusal is final on the camera wall's tile
 {
   let asked = 0
   const nvr = fakeNvr('pb-slow', [true, 77], { job: 2, ms: 1500 })
@@ -98,27 +103,33 @@ const until = async (pred, ms) => {
   await until(() => ws.sent.some((m) => m.type === 'started'), 3000)
   const startedAt = Date.now()
   await sleep(5000)
-  check('... started, 5 s of playing without a frame: still waiting (nothing to switch to: SD_REFUSE_MS is 6 s)', ws.closedWith === null && !ws.sent.some((m) => m.type === 'stream'), types(ws))
-  await until(() => ws.closedWith !== null, 3000)
-  check('... 6 s of playing, no SD frame, no right to see main: {type:"error"}, then 1008 "hd not allowed"', ws.closedWith?.code === 1008 && ws.closedWith.reason === 'hd not allowed' && ws.sent.at(-1)?.type === 'error' && /No SD recording/.test(ws.sent.at(-1).message) && asked >= 1 && Date.now() - startedAt >= 5500, `${JSON.stringify(ws.closedWith)} ${types(ws)}`)
+  check('... started, 5 s of playing without a frame: still waiting (nothing to switch to)', ws.closedWith === null && !ws.sent.some((m) => m.type === 'stream'), types(ws))
+  await until(() => ws.closedWith !== null || ws.sent.some((m) => m.type === 'end'), 5000)
+  check('... a camera not marked HD only, no frame, no right to see main: {type:"end"} after 8 s without a frame (as for any gap), not a 1008 refusal', ws.closedWith === null && ws.sent.some((m) => m.type === 'end') && !ws.sent.some((m) => m.type === 'error') && Date.now() - startedAt >= 7500, `${JSON.stringify(ws.closedWith)} ${types(ws)} after ${Date.now() - startedAt} ms`)
+  await sleep(2000)
+  check('... and not refused after it either (10 s of playing)', ws.closedWith === null && !ws.sent.some((m) => m.type === 'error'), `${JSON.stringify(ws.closedWith)} ${types(ws)}`)
   check('... never switched to main, and the camera not marked HD-only', !ws.sent.some((m) => m.type === 'stream') && !marked('pb-slow', 0))
+  ws.close(1000)
 }
 
-// (M2) opened paused (the camera wall opens its tiles paused), played 5 s later
+// (M2) opened paused (the camera wall opens its tiles paused), played 5 s later; a camera marked HD only
+// (a viewer without the right is tried in SD, and refused after 6 s of playing: counted from the play)
 {
   let asked = 0
   const nvr = fakeNvr('pb-paused', [true, 78])
+  nvr.playback.markHdOnly(0)
   const ws = fakeWs()
   nvr.playback.connect(ws, url('pb-paused'), { main: false, allowMain: () => { asked++; return false } })
+  const atConnect = asked // (connect asks once: the camera is marked)
   ws.command({ pause: true })
   await until(() => ws.sent.some((m) => m.type === 'started'), 3000)
   await sleep(5000)
-  check('M2: paused from the start, 5 s: nothing decided (a paused NVR sends no frames)', ws.closedWith === null && asked === 0, types(ws))
+  check('M2: paused from the start, 5 s: nothing decided (a paused NVR sends no frames)', ws.closedWith === null && asked === atConnect && !ws.sent.some((m) => m.type === 'stream'), types(ws))
   ws.command({ pause: false })
   await sleep(5000)
   check('... played: 5 s later still waiting (the count started again at play)', ws.closedWith === null)
   await until(() => ws.closedWith !== null, 3000)
-  check('... then refused as above, after 6 s of playing', ws.closedWith?.reason === 'hd not allowed' && asked >= 1)
+  check('... then refused, after 6 s of playing: {type:"error"}, then 1008 "hd not allowed"', ws.closedWith?.code === 1008 && ws.closedWith.reason === 'hd not allowed' && ws.sent.at(-1)?.type === 'error' && /No SD recording/.test(ws.sent.at(-1).message) && asked > atConnect, `${JSON.stringify(ws.closedWith)} ${types(ws)}`)
 }
 
 // a viewer who may see main: switched, told, watched for it (onMain); marked only once main frames come
