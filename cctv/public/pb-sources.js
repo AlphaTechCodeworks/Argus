@@ -131,6 +131,34 @@ export function nvrQualityOptions({ nvrHd }) {
 }
 
 /**
+ * The camera wall's Quality menu from the chosen cameras' rights: "SD (NVR sub-streams)" when one of
+ * them may play the NVR's copy, "HD (server recordings)" when one may play the server's. The value is
+ * the current choice while it is offered, else the first offered (HD for a wall of HD-only cameras).
+ * With no camera chosen yet, both, as before.
+ * @param {Array<{ sd: boolean, hd: boolean }>} rights
+ * @param {'sd'|'hd'} current
+ * @returns {{ options: Array<[string, string]>, value: 'sd'|'hd' }}
+ */
+export function wallQualities(rights, current) {
+  const any = (k) => rights.length === 0 || rights.some((r) => r[k])
+  const options = [...(any('sd') ? [['sd', 'SD (NVR sub-streams)']] : []), ...(any('hd') ? [['hd', 'HD (server recordings)']] : [])]
+  const value = options.some(([v]) => v === current) ? current : (options[0]?.[0] ?? current)
+  return { options, value }
+}
+
+/**
+ * Where one wall tile's pictures come from. Playback HD only: always the server's recordings (the
+ * tile says so when there are none); Playback SD only: always the NVR's sub-stream; both: the wall's
+ * Quality, the server's only when it has this camera's recordings in a codec this browser plays.
+ * @returns {'server'|'nvr'}
+ */
+export function wallTileMode({ rights, quality, available, codec, h265 }) {
+  if (!rights.sd) return 'server'
+  if (quality === 'hd' && rights.hd && available && !(codec === 'h265' && !h265)) return 'server'
+  return 'nvr'
+}
+
+/**
  * Server or NVR playback for a day (plan R6): server when the timeline is available, the day has
  * server footage, the browser can decode its codec and the viewer has not chosen "SD (NVR)".
  * @param {{ timeline: object|null, h265: boolean, quality?: 'server'|'original'|'sd-nvr', rights?: object }} o

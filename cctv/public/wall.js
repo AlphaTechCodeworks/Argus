@@ -19,7 +19,7 @@
 // playback.js itself is deliberately not touched or imported: its state is the single-camera page's.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
 import { PLAYBACK_CLOCK } from './playout.js'
-import { describeSkew, mergeSources, recordedFrom } from './pb-sources.js'
+import { describeSkew, mergeSources, pbRights, recordedFrom, refusedMessage, wallQualities, wallTileMode } from './pb-sources.js'
 import { follow as followView, fmtClock, makeView, spanLabel, ticks, zoomAt } from './pb-view.js'
 import { allowedSpeeds, clampSpeed, shuttleLabel, shuttleRate } from './pb-transport.js'
 import {
@@ -179,6 +179,7 @@ class Tile {
   /** @param {{ nvr: string, ch: number, name: string, nvrName: string, site: string }} cam */
   constructor(cam) {
     Object.assign(this, cam)
+    this.rights ??= pbRights(null) // what this camera may be played from (/api/cameras?for=playback)
     this.key = `${cam.nvr}/${cam.ch}`
     this.skew = 0 // this NVR's clock - the server's (ms), from the timeline: no NVR call
     this.available = false // the server has an index of this camera's recordings
@@ -187,6 +188,7 @@ class Tile {
     this.position = null // the moment on screen, in SERVER time (never the NVR's)
     this.lastSeekAt = -Infinity
     this.error = null
+    this.refused = null // a 1008 refusal's words: final for this tile (status)
     this.undecodable = false
     this.ws = null
     this.shownKind = null
@@ -260,8 +262,7 @@ class Tile {
    * so only a few fit on screen at once — but they ask nothing of the NVR.
    */
   mode() {
-    if (state.quality === 'hd' && this.available && !(this.codec === 'h265' && !state.h265)) return 'server'
-    return 'nvr'
+    return wallTileMode({ rights: this.rights, quality: state.quality, available: this.available, codec: this.codec, h265: state.h265 })
   }
 
   /** The day's recorded stretches for this camera, from the server's index (one request, no NVR). */
@@ -272,6 +273,8 @@ class Tile {
       const tl = await api(`/api/playback/timeline?nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&from=${from}&to=${from + DAY}`)
       if (token !== dayToken) return
       this.available = tl.available === true
+      // Playback HD only: the server's recordings or nothing (the NVR's copy is not this viewer's)
+      if (!this.available && !this.rights.sd) this.error = 'No recordings of this camera on this server that you may play back.'
       if (!this.available) return
       this.skew = tl.skewMs ?? 0
       this.tzOffsetMs = tl.tzOffsetMs
@@ -293,6 +296,8 @@ class Tile {
 
   /** What this tile should be showing at the shared moment, and whether it can. */
   status(atMs) {
+    // a refusal (1008) stands for the tile's life: loadDay clears this.error every minute on today's wall
+    if (this.refused) return { kind: 'error', text: this.refused }
     if (this.error) return { kind: 'error', text: this.error }
     return tileState({
       available: this.available || this.mode() === 'nvr', // an NVR leg plays even without a server index
@@ -406,6 +411,13 @@ class Tile {
     sock.onclose = (e) => {
       if (this.ws !== sock) return
       this.ws = null
+      // refused (the camera's rights, the session): said on the tile, and final -- status() is then
+      // 'error', so the tile no longer asks; the refusal would only repeat
+      if (e.code === 1008) {
+        this.error = refusedMessage(e.code, e.reason) ?? 'The server refused this camera.'
+        this.refused = this.error
+        return
+      }
       if (this.position === null) this.blankOpens++ // it closed without ever showing anything
       // Two openings in a row that produced nothing at all is not a refusal, but asking again
       // straight away is just as wasteful: the same backoff applies, with its own explanation.
@@ -561,8 +573,31 @@ function setCameras(keys) {
   showPage()
 }
 
+/**
+ * The Quality menu offers what the chosen cameras' rights allow (pb-sources.js wallQualities); a choice
+ * no chosen camera allows any more moves to one that is, and the tiles reopen on it.
+ */
+function updateQualityChoices() {
+  const rights = state.cameras.map((key) => pbRights(state.all.find((c) => `${c.nvr}/${c.ch}` === key)))
+  const { options, value } = wallQualities(rights, state.quality)
+  const sig = options.map(([v]) => v).join()
+  if (qualitySel.dataset.sig !== sig) {
+    qualitySel.replaceChildren(...options.map(([v, label]) => new Option(label, v)))
+    qualitySel.dataset.sig = sig
+  }
+  qualitySel.value = value
+  if (value !== state.quality) {
+    state.quality = value
+    for (const t of state.tiles) {
+      t.close()
+      t.position = null
+    }
+  }
+}
+
 /** Builds the tiles for the cameras on this page (keeping the ones already up and playing). */
 function showPage() {
+  updateQualityChoices()
   const page = pageOf(state.cameras, state.layout, state.page)
   state.page = page.page
   const wanted = page.keys
@@ -575,7 +610,7 @@ function showPage() {
     if (existing) return existing
     const [nvr, ch] = [key.slice(0, key.lastIndexOf('/')), Number(key.slice(key.lastIndexOf('/') + 1))]
     const cam = state.all.find((c) => c.nvr === nvr && c.ch === ch)
-    return new Tile({ nvr, ch, name: cam?.name ?? `Channel ${ch + 1}`, nvrName: cam?.nvrName ?? nvr, site: cam?.site ?? '' })
+    return new Tile({ nvr, ch, name: cam?.name ?? `Channel ${ch + 1}`, nvrName: cam?.nvrName ?? nvr, site: cam?.site ?? '', rights: pbRights(cam) })
   })
   gridEl.replaceChildren(...state.tiles.map((t) => t.el))
   emptyEl.hidden = state.tiles.length > 0
@@ -1397,7 +1432,7 @@ $('logout').addEventListener('click', async () => {
   location.href = '/login.html'
 })
 
-const [me, cameras] = await Promise.all([api('/api/me'), api('/api/cameras')])
+const [me, cameras] = await Promise.all([api('/api/me'), api('/api/cameras?for=playback')])
 state.user = me.user
 state.all = cameras
 $('whoami').textContent = me.user

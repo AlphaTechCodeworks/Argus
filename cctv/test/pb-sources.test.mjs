@@ -39,6 +39,8 @@ import {
   shift,
   speedFor,
   stretchAt,
+  wallQualities,
+  wallTileMode,
   watchesStart
 } from '../public/pb-sources.js'
 
@@ -401,6 +403,27 @@ check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any
   check('  the NVR socket asks for main only with nvrHd', /stream=\$\{rightsNow\(\)\.nvrHd \? state\.stream : 1\}/.test(fn('open')))
   check('  {type:"stream"} says what plays and leaves the viewer\'s own choice alone', /state\.nvrMain = msg\.stream === 0/.test(fn('onStatus')) && !/state\.stream = msg\.stream/.test(fn('onStatus')))
   check('  without Playback SD: no NVR side, no going over to the NVR', /if \(!rightsNow\(\)\.sd\) return/.test(fn('loadNvrSide')) && /if \(!rightsNow\(\)\.sd \|\| !nvrFallback\.take\(sock\.cam\)\) return false/.test(fn('fallBackToNvr')))
+}
+
+// ---- the camera wall (stream rights) -----------------------------------------------------------------------
+{
+  const J = JSON.stringify
+  const SD = { sd: true, hd: false }
+  const HD = { sd: false, hd: true }
+  const BOTH = { sd: true, hd: true }
+  check('wallQualities: nothing chosen yet: both choices, as before', J(wallQualities([], 'sd').options.map(([v]) => v)) === J(['sd', 'hd']))
+  check('... only HD-only cameras chosen: HD alone, and chosen', J(wallQualities([HD, HD], 'sd')) === J({ options: [['hd', 'HD (server recordings)']], value: 'hd' }))
+  check('... only SD-only cameras: SD alone', J(wallQualities([SD], 'hd')) === J({ options: [['sd', 'SD (NVR sub-streams)']], value: 'sd' }))
+  check('... a mix: both, the choice kept', J(wallQualities([SD, HD], 'hd').options.map(([v]) => v)) === J(['sd', 'hd']) && wallQualities([SD, BOTH], 'hd').value === 'hd')
+  const tile = (o) => wallTileMode({ quality: 'sd', available: true, codec: 'h264', h265: true, ...o })
+  check('wallTileMode: Playback HD only: the server\'s recordings whatever the Quality', tile({ rights: HD }) === 'server' && tile({ rights: HD, available: false }) === 'server')
+  check('... Playback SD only: the NVR\'s sub-stream whatever the Quality', tile({ rights: SD, quality: 'hd' }) === 'nvr')
+  check('... both: the Quality decides; the server only with its recordings in a codec this browser plays (as before)', tile({ rights: BOTH, quality: 'hd' }) === 'server' && tile({ rights: BOTH }) === 'nvr' && tile({ rights: BOTH, quality: 'hd', codec: 'h265', h265: false }) === 'nvr' && tile({ rights: BOTH, quality: 'hd', available: false }) === 'nvr')
+  const wall = readFileSync(new URL('../public/wall.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  check('wall: its cameras from /api/cameras?for=playback', /api\('\/api\/cameras\?for=playback'\)/.test(wall))
+  check('wall: each tile knows its camera\'s rights and plays from what they allow', /rights: pbRights\(cam\)/.test(wall) && /return wallTileMode\(\{ rights: this\.rights, /.test(wall))
+  check('wall: a 1008 refusal is said on the tile, and final', /if \(e\.code === 1008\) \{\n\s*this\.error = refusedMessage\(e\.code, e\.reason\)/.test(wall))
+  check('wall: the Quality menu follows the chosen cameras\' rights', /wallQualities\(rights, state\.quality\)/.test(wall) && /function showPage\(\) \{\n\s*updateQualityChoices\(\)/.test(wall))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
