@@ -47,7 +47,7 @@
 
     <section class="se-section" data-tab="access" aria-labelledby="rights-title">
       <h2 id="rights-title">Rights</h2>
-      <p class="st-help">What each account may do, per site or per camera. Anything not listed here is refused. Change it with <b>Edit access</b> above.</p>
+      <p class="st-help">What each account may do, per site or per camera: Live, Live HD, Playback SD, Playback HD and Export. Anything not listed here is refused. Change it with <b>Edit access</b> above.</p>
       <p id="rightsNote" class="hp-note"></p>
       <table class="hp-table rights-table">
         <thead id="rightsHead"></thead>
@@ -97,7 +97,11 @@
             <select id="ac-copy"><option value="">choose someone</option></select>
           </label>
         </div>
-        <p class="st-help">A ticked site includes cameras added to it later; untick one camera and the rest stay ticked. <b>Playback</b> is the server's recordings and the NVR's own.</p>
+        <p class="st-help">A ticked site includes cameras added to it later; untick one camera and the rest stay ticked.
+          <b>Live</b> is the live grid, on the camera's sub-stream as the NVR is set. <b>Live HD</b> adds full screen at full quality (the main stream); without it full screen stays on the sub-stream. Live HD counts only where Live is ticked: ticking it ticks Live, unticking Live unticks it.
+          <b>Playback SD</b> plays the NVR's own recordings; <b>Playback HD</b> plays this server's own recordings at full quality. The NVR's recordings in HD need Playback SD together with Playback HD or Live HD.
+          Event pictures (Alarms) need either playback right on the camera; they are full size with Live HD or Playback HD, a smaller copy otherwise.
+          These limit what Argus shows, not what the network allows: anyone with the NVR's or the cameras' own passwords can reach them directly.</p>
         <div class="ac-tree-wrap">
           <table class="ac-tree">
             <thead id="ac-head"></thead>
@@ -107,6 +111,7 @@
         <fieldset class="ac-formats">
           <legend>Export formats</legend>
           <div id="ac-formats" class="ac-format-list"></div>
+          <p class="st-help">Exports are always the full-quality recording, whatever else is ticked.</p>
         </fieldset>
         <div id="ac-kept" class="ac-kept" hidden>
           <h3>Kept from before</h3>
