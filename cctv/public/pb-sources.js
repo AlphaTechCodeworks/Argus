@@ -110,20 +110,44 @@ export function gapAt(gaps, t) {
   return g ? (g[2] || 'not recorded') : null
 }
 
+// ---- what this viewer may play of a camera (stream rights) -------------------------------------------
+// /api/cameras?for=playback sends, per camera, sd (the NVR's copy: Playback SD), hd (the server's
+// recordings: Playback HD), nvrHd (the NVR's main stream: Playback SD with Live HD or Playback HD) and
+// legs (the server's gaps from the NVR). The page offers only what the server will play; the server
+// decides again every time.
+
+/** Everything, as before these flags: a camera from a server that sends none (an older release). */
+export const ALL_RIGHTS = Object.freeze({ sd: true, hd: true, nvrHd: true, legs: true })
+
+/** A camera's playback rights from its /api/cameras?for=playback entry. */
+export function pbRights(cam) {
+  if (!cam || typeof cam.sd !== 'boolean' || typeof cam.hd !== 'boolean') return ALL_RIGHTS
+  return { sd: cam.sd, hd: cam.hd, nvrHd: cam.sd && cam.nvrHd === true, legs: cam.sd && cam.hd && cam.legs === true }
+}
+
+/** NVR mode's quality menu: SD, and HD only for someone who may see the NVR's main stream. */
+export function nvrQualityOptions({ nvrHd }) {
+  return nvrHd ? [[1, 'SD (light)'], [0, 'HD']] : [[1, 'SD (light)']]
+}
+
 /**
  * Server or NVR playback for a day (plan R6): server when the timeline is available, the day has
  * server footage, the browser can decode its codec and the viewer has not chosen "SD (NVR)".
- * @param {{ timeline: object|null, h265: boolean, quality?: 'server'|'original'|'sd-nvr' }} o
- *   quality 'original': a remote viewer's "Original (server)" (serverQualityOptions)
- * @returns {{ mode: 'server'|'nvr', transcode?: boolean, original?: boolean, why: string }} why: a
- *   sentence for the viewer; transcode: the server will convert the H.265 recording to H.264 because
- *   this browser cannot decode it; original: ask the server for the recording itself (&original=1)
+ * @param {{ timeline: object|null, h265: boolean, quality?: 'server'|'original'|'sd-nvr', rights?: object }} o
+ *   quality 'original': a remote viewer's "Original (server)" (serverQualityOptions); rights: pbRights
+ *   of the camera (default: everything)
+ * @returns {{ mode: 'server'|'nvr'|'none', transcode?: boolean, original?: boolean, why: string }} why:
+ *   a sentence for the viewer; transcode: the server will convert the H.265 recording to H.264 because
+ *   this browser cannot decode it; original: ask the server for the recording itself (&original=1);
+ *   'none': no Playback SD and nothing on the server (never NVR mode without Playback SD)
  */
-export function pickMode({ timeline, h265, quality }) {
+export function pickMode({ timeline, h265, quality, rights = ALL_RIGHTS }) {
   const original = quality === 'original'
-  if (!timeline?.available) return { mode: 'nvr', why: 'Server recordings are not available for this camera.' }
-  if (quality === 'sd-nvr') return { mode: 'nvr', why: 'SD (NVR) chosen.' }
-  if (!timeline.ranges?.length) return { mode: 'nvr', why: 'The server has no recordings of this camera on this day.' }
+  // without Playback SD the NVR's copy is not this viewer's: a day without the server's footage has none
+  const none = (why) => ({ mode: 'none', why })
+  if (!timeline?.available) return rights.sd ? { mode: 'nvr', why: 'Server recordings are not available for this camera.' } : none('This camera has no recordings on this server that you may play back.')
+  if (quality === 'sd-nvr' && rights.sd) return { mode: 'nvr', why: 'SD (NVR) chosen.' }
+  if (!timeline.ranges?.length) return rights.sd ? { mode: 'nvr', why: 'The server has no recordings of this camera on this day.' } : none('The server has no recordings of this camera on this day.')
   if (timeline.codec === 'h265' && !h265) {
     // This browser has no H.265 decoder (on Windows that is the normal state of affairs, because
     // Chrome and Edge need a codec from the Microsoft Store that Windows does not ship). The server
@@ -147,14 +171,16 @@ export function pickMode({ timeline, h265, quality }) {
  * The quality menu with the server's recordings. On the local network "HD (server)" is the recording
  * itself, as before. A remote viewer gets the copy converted to fit the link by default, "HD
  * (server, light)", and can still choose the recording itself, "Original (server)".
- * @param {{ remote: boolean, nvrLabel?: string }} o nvrLabel: "SD (NVR)", or "HD (NVR)" for a camera
- *   the NVR records in HD only
+ * @param {{ remote: boolean, nvrLabel?: string, sd?: boolean }} o nvrLabel: "SD (NVR)", or "HD (NVR)"
+ *   for a camera the NVR records in HD only; sd: the viewer may play the NVR's copy (Playback SD);
+ *   without it "SD (NVR)" is not offered
  * @returns {Array<[string, string]>} [value, label]
  */
-export function serverQualityOptions({ remote, nvrLabel = 'SD (NVR)' }) {
-  return remote
+export function serverQualityOptions({ remote, nvrLabel = 'SD (NVR)', sd = true }) {
+  const options = remote
     ? [['server', 'HD (server, light)'], ['original', 'Original (server)'], ['sd-nvr', nvrLabel]]
     : [['server', 'HD (server)'], ['sd-nvr', nvrLabel]]
+  return sd ? options : options.filter(([v]) => v !== 'sd-nvr')
 }
 
 /** The server socket's own parameters: what this browser decodes, and whether the recording itself was chosen. */
@@ -233,6 +259,9 @@ export function refusedMessage(code, reason) {
   if (code !== 1008) return null
   if (reason === 'signed out') return 'You have been signed out. Sign in again to carry on.'
   if (reason === 'not allowed') return 'You are not allowed to play back this camera. An admin can give you access.'
+  // (the main stream asked for without the right, or no SD recording came: the server's own words say
+  // which, but its error and the close can arrive in either order, so this one covers both)
+  if (reason === 'hd not allowed') return 'Playing this from the NVR needs its HD stream here, which needs Playback HD or Live HD on this camera. An admin can give you either.'
   return null
 }
 

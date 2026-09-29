@@ -6,6 +6,7 @@
 //   node cctv/test/pb-sources.test.mjs
 import { readFileSync } from 'node:fs'
 import {
+  ALL_RIGHTS,
   CONVERTED_SCRUB_TIMEOUT_MS,
   LIVE_MARGIN_MS,
   NVR_REFUSAL_MAX_MS,
@@ -23,7 +24,9 @@ import {
   liveEdge,
   mergeSources,
   nextStretch,
+  nvrQualityOptions,
   nvrRetryDelay,
+  pbRights,
   pickMode,
   prerollUntil,
   qualityForCam,
@@ -368,6 +371,36 @@ check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any
   const loadNvrSide = fn('loadNvrSide')
   check('page: loadNvrSide asks nvrRetryDelay for its retry, not a flat 30 s', /nvrRetryDelay\(e, nvrRefusalMs\)/.test(loadNvrSide))
   check('  the backoff resets on a new camera/day (the token) and once the search succeeds', /nvrRefusalMs = null/.test(loadNvrSide) && (loadNvrSide.match(/nvrRefusalMs = null/g) ?? []).length === 2)
+}
+
+// ---- what this viewer may play of a camera (stream rights) ----------------------------------------------
+{
+  const J = JSON.stringify
+  const all = pbRights(undefined)
+  check('pbRights: a camera without flags (an older server) is everything, as before', all.sd && all.hd && all.nvrHd && all.legs)
+  const sdOnly = pbRights({ sd: true, hd: false, nvrHd: false, legs: false })
+  check('pbRights: the flags as sent', sdOnly.sd === true && sdOnly.hd === false && sdOnly.nvrHd === false && sdOnly.legs === false)
+  check('pbRights: NVR HD and legs never without SD, whatever is sent', pbRights({ sd: false, hd: true, nvrHd: true, legs: true }).nvrHd === false && pbRights({ sd: false, hd: true, nvrHd: true, legs: true }).legs === false)
+  check('nvrQualityOptions: HD only for someone who may see the NVR\'s main stream', J(nvrQualityOptions({ nvrHd: true })) === J([[1, 'SD (light)'], [0, 'HD']]) && J(nvrQualityOptions({ nvrHd: false })) === J([[1, 'SD (light)']]))
+  check('serverQualityOptions: no "SD (NVR)" without Playback SD', J(serverQualityOptions({ remote: false, sd: false })) === J([['server', 'HD (server)']]) && J(serverQualityOptions({ remote: true, sd: false }).map(([v]) => v)) === J(['server', 'original']))
+  const tl = { available: true, ranges: [[0, 10]], codec: 'h264' }
+  const HD_ONLY = { sd: false, hd: true, nvrHd: false, legs: false }
+  check('pickMode, Playback HD only: server playback as usual', pickMode({ timeline: tl, h265: true, quality: 'server', rights: HD_ONLY }).mode === 'server')
+  check('... "SD (NVR)" left over from another camera is ignored (the NVR\'s copy is not theirs)', pickMode({ timeline: tl, h265: true, quality: 'sd-nvr', rights: HD_ONLY }).mode === 'server')
+  const none = pickMode({ timeline: { available: true, ranges: [] }, h265: true, quality: 'server', rights: HD_ONLY })
+  check('... a day with no server footage: "none", saying why (never NVR mode)', none.mode === 'none' && /no recordings of this camera on this day/i.test(none.why), J(none))
+  check('... no server recordings at all: "none"', pickMode({ timeline: { available: false }, h265: true, quality: 'server', rights: HD_ONLY }).mode === 'none')
+  check('pickMode with Playback SD, or with no rights given: as before', pickMode({ timeline: { available: false }, h265: true, quality: 'server' }).mode === 'nvr' && pickMode({ timeline: tl, h265: true, quality: 'sd-nvr', rights: ALL_RIGHTS }).mode === 'nvr')
+  check('refusedMessage: "hd not allowed" says HD is needed here and who can give it (words for both refusals: main asked without the right, and no SD recording)', /HD stream/.test(refusedMessage(1008, 'hd not allowed') ?? '') && /Playback HD or Live HD/.test(refusedMessage(1008, 'hd not allowed') ?? ''))
+  // the page (no DOM-free half to run here): where these are used
+  const page = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const fn = (name) => page.slice(page.indexOf(`function ${name}(`), page.indexOf('\n}\n', page.indexOf(`function ${name}(`)))
+  check('page: its cameras from /api/cameras?for=playback, at load and every 30 s', /api\('\/api\/cameras\?for=playback'\)/.test(page) && /fetch\('\/api\/cameras\?for=playback'\)/.test(page))
+  check('  the day\'s mode is picked with this camera\'s rights (loadDay, start), and "none" is handled', (page.match(/rights: rightsNow\(\)/g) ?? []).length === 2 && /pick\.mode === 'none'/.test(fn('loadDay')))
+  check('  the menus come from the rights', /nvrQualityOptions\(\{ nvrHd: r\.nvrHd \}\)/.test(fn('updateModeUi')) && /serverQualityOptions\(\{ remote: state\.remote, sd: r\.sd \}\)/.test(fn('updateModeUi')))
+  check('  the NVR socket asks for main only with nvrHd', /stream=\$\{rightsNow\(\)\.nvrHd \? state\.stream : 1\}/.test(fn('open')))
+  check('  {type:"stream"} says what plays and leaves the viewer\'s own choice alone', /state\.nvrMain = msg\.stream === 0/.test(fn('onStatus')) && !/state\.stream = msg\.stream/.test(fn('onStatus')))
+  check('  without Playback SD: no NVR side, no going over to the NVR', /if \(!rightsNow\(\)\.sd\) return/.test(fn('loadNvrSide')) && /if \(!rightsNow\(\)\.sd \|\| !nvrFallback\.take\(sock\.cam\)\) return false/.test(fn('fallBackToNvr')))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

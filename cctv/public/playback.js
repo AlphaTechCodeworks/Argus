@@ -37,7 +37,9 @@ import {
   liveEdge,
   mergeSources,
   nextStretch,
+  nvrQualityOptions,
   nvrRetryDelay,
+  pbRights,
   pickMode,
   prerollUntil,
   qualityForCam,
@@ -157,6 +159,7 @@ const state = {
   paused: false,
   speed: 1,
   stream: 1,
+  nvrMain: false, // the NVR session said it plays its main stream ({type:'stream'}: a camera kept only in HD)
   h265: true, // this browser can decode H.265 (checked at start)
   // the window on the day (pb-view.js): absolute ms, always valid, always replaced rather than edited
   view: makeView({ dayStartMs: 0, dayEndMs: DAY, spanMs: DAY, minSpanMs: MIN_SPAN }),
@@ -181,6 +184,12 @@ const state = {
   stretches: [], // server mode: [{ s, e, src }] the server's ranges and the NVR-only stretches
   src: null // what plays in server mode: 'server' or 'nvr' (a stretch the server lacks)
 }
+
+// This viewer's playback cameras, each with what it may play (/api/cameras?for=playback: sd, hd,
+// nvrHd, legs; pb-sources.js pbRights), and the rights of the camera shown now. The page offers only
+// what the server will play; the server decides again every time.
+let playbackCams = []
+const rightsNow = () => pbRights(playbackCams.find((c) => c.nvr === state.nvr && c.ch === state.ch))
 
 let ws = null
 let showStats = false
@@ -333,8 +342,15 @@ async function loadDay(after, tzRetried = false) {
     state.tz = tl.tzOffsetMs
     return loadDay(after, true)
   }
-  const pick = pickMode({ timeline: tl, h265: state.h265, quality: qualityForCam(camKey(), state.quality, nvrFallback.used) })
+  const pick = pickMode({ timeline: tl, h265: state.h265, quality: qualityForCam(camKey(), state.quality, nvrFallback.used), rights: rightsNow() })
   lastPick = pick
+  if (pick.mode === 'none') {
+    // without Playback SD a day the server has nothing of has nothing to play (the NVR is not asked)
+    leaveServerMode()
+    showMessage(pick.why)
+    drawTimeline()
+    return after?.()
+  }
   if (pick.mode === 'server') {
     // Said once per day loaded: the picture is a conversion, not the recording itself, and a viewer
     // comparing it with the original later deserves to know that.
@@ -450,6 +466,9 @@ let nvrRefusalMs = null // pb-sources.js nvrRetryDelay's backoff so far; null be
  */
 async function loadNvrSide(token) {
   clearTimeout(nvrSideTimer)
+  // without Playback SD the NVR is not this viewer's to ask (its clock, days and recordings): the
+  // timeline's own time zone and skew are used, and there is no NVR-only stretch to draw
+  if (!rightsNow().sd) return
   if (token !== nvrRetryToken) {
     nvrRetryToken = token
     nvrRefusalMs = null // a different camera or day: an earlier refusal's backoff does not carry over
@@ -572,19 +591,28 @@ function updateModeUi() {
   // NVR's SD or HD as before
   // this camera's quality: the viewer's own choice, unless it fell back to the NVR on its own (pb-sources.js qualityForCam)
   const quality = qualityForCam(camKey(), state.quality, nvrFallback.used)
+  const r = rightsNow()
   const kind = state.avail && (server || quality === 'sd-nvr') ? (state.remote ? 'server-remote' : 'server') : 'nvr'
-  if (qualitySel.dataset.kind !== kind) {
-    if (kind !== 'nvr') setOptions(qualitySel, serverQualityOptions({ remote: state.remote }), server ? 'server' : 'sd-nvr')
-    else setOptions(qualitySel, [[1, 'SD (light)'], [0, 'HD']], state.stream)
+  // rebuilt when the camera's rights change too (another camera, or the list read again)
+  const sig = `${kind}|${r.sd}|${r.nvrHd}`
+  if (qualitySel.dataset.sig !== sig) {
+    if (kind !== 'nvr') setOptions(qualitySel, serverQualityOptions({ remote: state.remote, sd: r.sd }), server ? 'server' : 'sd-nvr')
+    else setOptions(qualitySel, nvrQualityOptions({ nvrHd: r.nvrHd }), r.nvrHd ? state.stream : 1)
     qualitySel.dataset.kind = kind
+    qualitySel.dataset.sig = sig
   }
+  // (NVR mode with no Playback SD is a day with nothing to play: nothing to choose)
+  qualitySel.disabled = kind === 'nvr' && !r.sd
   if (kind !== 'nvr') {
     qualitySel.value = !server ? 'sd-nvr' : quality === 'original' && state.remote ? 'original' : 'server'
     // a camera the NVR records in HD only plays HD for "SD (NVR)" ({type:'stream'})
-    const label = !server && state.stream === 0 ? 'HD (NVR)' : 'SD (NVR)'
+    const label = !server && state.nvrMain ? 'HD (NVR)' : 'SD (NVR)'
     const nvrOpt = [...qualitySel.options].find((o) => o.value === 'sd-nvr')
     if (nvrOpt && nvrOpt.textContent !== label) nvrOpt.textContent = label
   }
+  // motion search reads the NVR's copy: only with Playback SD
+  const search = document.getElementById('searchToggle')
+  if (search) search.hidden = !r.sd
   legendServer.hidden = !server
   const hint = server ? describeSkew(state.skew) : ''
   skewEl.textContent = hint
@@ -626,12 +654,13 @@ function seek(t) {
 }
 
 function open(start) {
+  state.nvrMain = false
   if (ws) {
     ws.onclose = null
     ws.close()
   }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=${state.stream}&start=${start}&h265=${state.h265 ? 1 : 0}`)
+  const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=${rightsNow().nvrHd ? state.stream : 1}&start=${start}&h265=${state.h265 ? 1 : 0}`)
   sock.binaryType = 'arraybuffer'
   sock.kind = 'nvr'
   sock.onopen = () => {
@@ -676,13 +705,16 @@ function closeSocket() {
 function onStatus(msg) {
   if (msg.type === 'error') showMessage(msg.message)
   if (msg.type === 'stream') {
-    // this camera records HD only; the server switched over
-    state.stream = msg.stream
+    // this camera records HD only; the server switched over (only for a viewer who may see main). What
+    // plays is shown; the viewer's own choice (state.stream) stays, so the next camera is not asked
+    // for main because this one is HD only
+    state.nvrMain = msg.stream === 0
     if (qualitySel.dataset.kind !== 'nvr') return updateModeUi() // ("SD (NVR)" chosen: relabelled)
-    const hd = qualitySel.options[1]
-    hd.disabled = false
-    hd.textContent = 'HD'
-    qualitySel.value = '0'
+    const hd = [...qualitySel.options].find((o) => o.value === '0')
+    if (hd) {
+      hd.disabled = false
+      qualitySel.value = '0'
+    }
   }
   if (msg.type === 'end') {
     // skip gaps between recordings automatically
@@ -755,7 +787,7 @@ function watchStart(sock, gen, target) {
     if (ws !== sock || sock.okGen >= gen) return
     const slow = `The server has not started playing after ${SERVER_START_TIMEOUT_MS / 1000} s`
     // this camera has had its one: say so, and leave the socket be in case the server gets there
-    if (!fallBackToNvr(sock, slow)) showMessage(`${slow}: its recordings may be unreachable. Choose "SD (NVR)" to play the NVR's copy.`)
+    if (!fallBackToNvr(sock, slow)) showMessage(rightsNow().sd ? `${slow}: its recordings may be unreachable. Choose "SD (NVR)" to play the NVR's copy.` : `${slow}: its recordings may be unreachable.`)
   }, SERVER_START_TIMEOUT_MS)
 }
 
@@ -774,7 +806,8 @@ function settleStart(sock) {
  * there after the NAS came back.
  */
 function fallBackToNvr(sock, why) {
-  if (!nvrFallback.take(sock.cam)) return false
+  // the NVR's copy only for someone who may play it (Playback SD); anyone else keeps the server's message
+  if (!rightsNow().sd || !nvrFallback.take(sock.cam)) return false
   if (ws === sock) closeSocket()
   else settleStart(sock)
   state.stream = 1
@@ -1978,6 +2011,8 @@ setInterval(() => {
 // keep today's timeline growing
 setInterval(async () => {
   if (state.mode === 'server') return refreshServer().catch(() => {})
+  // without Playback SD the NVR is not asked (its clock and recordings: a day with nothing to play)
+  if (!rightsNow().sd) return
   try {
     const clock = await api(`/api/playback/now?${nvrQ()}`)
     state.nvrNow = clock.now
@@ -2231,7 +2266,8 @@ if (!('VideoDecoder' in window)) {
 }
 
 updateModeUi()
-const [me, cameras] = await Promise.all([api('/api/me'), api('/api/cameras')])
+const [me, cameras] = await Promise.all([api('/api/me'), api('/api/cameras?for=playback')])
+playbackCams = cameras
 $('whoami').textContent = me.user
 if (me.admin) { const st = $('sitesTab'); if (st) st.hidden = false; const se = $('settingsTab'); if (se) se.hidden = false }
 // who this is, for deciding which bookmarks offer Edit and Delete (the server decides again itself)
@@ -2262,11 +2298,16 @@ const wanted = cameras.find((c) => c.nvr === params.get('nvr') && String(c.ch) =
 const first = wanted ?? cameras.find((c) => c.online) ?? cameras[0]
 if (first) fillCameraList(cameras, `${first.nvr}/${first.ch}`)
 setInterval(async () => {
-  const list = await fetch('/api/cameras').then((r) => (r.ok ? r.json() : null)).catch(() => null)
-  if (Array.isArray(list)) fillCameraList(list, cameraSel.value || null)
+  const list = await fetch('/api/cameras?for=playback').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+  if (!Array.isArray(list)) return
+  const was = JSON.stringify(rightsNow())
+  playbackCams = list
+  fillCameraList(list, cameraSel.value || null)
+  // this camera's rights changed (given or taken away): the menus follow at once
+  if (JSON.stringify(rightsNow()) !== was) updateModeUi()
 }, 30_000)
 if (!first) {
-  showMessage('No cameras yet. Add an NVR with: docker exec -it tvt-cctv node cctv/nvr.mjs add')
+  showMessage(me.admin ? 'No cameras yet. Add an NVR with: docker exec -it tvt-cctv node cctv/nvr.mjs add' : 'No cameras have been shared with you for playback yet. Ask an admin for access.')
   throw new Error('no cameras')
 }
 state.nvr = first.nvr
@@ -2286,7 +2327,7 @@ async function start() {
   }
   state.date = fmtDate(state.nvrNow)
   const tl = await fetchTimeline()
-  if (pickMode({ timeline: tl, h265: state.h265, quality: qualityForCam(camKey(), state.quality, nvrFallback.used) }).mode === 'server') {
+  if (pickMode({ timeline: tl, h265: state.h265, quality: qualityForCam(camKey(), state.quality, nvrFallback.used), rights: rightsNow() }).mode === 'server') {
     if (Number.isFinite(tl.tzOffsetMs)) state.tz = tl.tzOffsetMs
     state.nvrNow = tl.now
     state.date = fmtDate(state.nvrNow)
@@ -2299,6 +2340,13 @@ async function start() {
       const last = state.ranges.at(-1)
       if (last) seek(Math.min(state.nvrNow - START_BACK_SERVER_MS, last[1] - START_BACK_SERVER_MS))
     })
+  }
+  // without Playback SD there is no NVR side: the day says what the server has (pickMode 'none')
+  if (!rightsNow().sd) {
+    // (today shown in the date box and on the timeline, as the other two ways in do)
+    dateInput.value = state.date
+    viewWholeDay()
+    return loadDay(() => {})
   }
   const busy = await loadNvrInfo()
   // (while busy: today by this computer's clock, so the page works meanwhile)
