@@ -215,17 +215,69 @@ for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
 }
 {
   // A save is an HTTP request: it can only be handled when the event loop is free, which is not
-  // during runThinning's loop (synchronous file work). Between the jobs the loop is let go once, so a
-  // save that arrived meanwhile is in the settings before retention reads the switch.
-  _test.reset()
+  // during runThinning's loop (synchronous file work). A real one, then: a keep-alive connection
+  // (the admin's browser, from a worker thread, which has a loop of its own) POSTs Off 100 ms into a
+  // 400 ms synchronous "thinning run", and retention must read it. From both places the 5-minute
+  // chain can be in when thinning ends: a timer (today: housekeeping has no await), and an I/O
+  // callback (as soon as housekeeping or thinning waits on a helper process or the disk). The WIP of
+  // 2026-09-29 let the loop go once (one setImmediate): from an I/O callback that runs before the
+  // loop has looked at its sockets again, and retention read On (review 2026-09-29, measured).
+  const http = await import('node:http')
+  const { stat } = await import('node:fs')
+  const { Worker } = await import('node:worker_threads')
   let sw = 'on'
-  const retention = fakeJob('deleted')
-  const thinning = async (o) => {
-    setImmediate(() => (sw = 'off')) // the admin's POST, waiting for the loop
-    return fakeJob('thinned')(o)
+  const server = http.createServer((req, res) => {
+    let b = ''
+    req.on('data', (d) => (b += d))
+    req.on('end', () => {
+      if (req.method === 'POST') sw = JSON.parse(b).thinning // saveSettings is synchronous too
+      res.end('{}')
+    })
+  })
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const browser = new Worker(
+    `const { parentPort, workerData } = require('node:worker_threads')
+     const http = require('node:http')
+     const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+     const ask = (method, body) => new Promise((ok, bad) => {
+       const q = http.request({ host: '127.0.0.1', port: workerData.port, method, path: '/api/admin/settings', agent }, (res) => { res.resume(); res.on('end', ok) })
+       q.on('error', bad)
+       q.end(body)
+     })
+     parentPort.on('message', (m) => {
+       if (m === 'open') ask('GET').then(() => parentPort.postMessage('open'))
+       if (m === 'save') setTimeout(() => ask('POST', JSON.stringify({ thinning: 'off' })).then(() => parentPort.postMessage('saved')), 100)
+     })`,
+    { eval: true, workerData: { port: server.address().port } }
+  )
+  const heard = (what) => new Promise((r) => browser.on('message', (m) => m === what && r()))
+  const opened = heard('open')
+  browser.postMessage('open')
+  await opened
+  const busy = (ms) => {
+    const t = Date.now()
+    while (Date.now() - t < ms);
   }
-  await runStorageJobs({ mode: () => sw, index: INDEX, jobs: { thinning, retention }, args: () => ({}), clock: () => T0, log: () => {}, warn: () => {} })
-  check('a save waiting on the event loop while thinning ran is read before retention', retention.calls.length === 0 && lastRuns().retention.mode === 'off', JSON.stringify(lastRuns().retention))
+  for (const [where, start] of [
+    ['a timer', (go) => setTimeout(go, 10)],
+    ['an I/O callback', (go) => stat(new URL(import.meta.url), go)]
+  ]) {
+    _test.reset()
+    sw = 'on'
+    const retention = fakeJob('deleted')
+    const thinning = async (o) => {
+      browser.postMessage('save')
+      busy(400) // runThinning's synchronous file work
+      return fakeJob('thinned')(o)
+    }
+    const saved = heard('saved')
+    await new Promise((done) => start(() => runStorageJobs({ mode: () => sw, index: INDEX, jobs: { thinning, retention }, args: () => ({}), clock: () => T0, log: () => {}, warn: () => {} }).then(done)))
+    check(`a save POSTed while a synchronous thinning run held the loop is read before retention (chain resumed from ${where})`, retention.calls.length === 0 && lastRuns().retention.mode === 'off', JSON.stringify(lastRuns().retention))
+    await saved
+  }
+  await browser.terminate()
+  server.closeAllConnections()
+  await new Promise((r) => server.close(r))
 }
 {
   _test.reset()

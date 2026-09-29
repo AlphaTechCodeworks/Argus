@@ -120,6 +120,16 @@ function switchNow(mode) {
 }
 
 /**
+ * Resolves once the event loop has been round at least once and looked at its sockets: an admin's
+ * save that arrived while a synchronous job held the loop is then in the settings. One setImmediate
+ * is not that: from an I/O callback (the chain once housekeeping or thinning waits on a helper
+ * process or the disk) it runs before the loop polls again, and a real POST sent during a 400 ms
+ * block was still unread (review 2026-09-29, storage-jobs.test.mjs). A setImmediate queued from
+ * inside another runs in the next turn, after that turn's poll, whichever phase this started in.
+ */
+const letTheLoopTurn = () => new Promise((r) => setImmediate(() => setImmediate(r)))
+
+/**
  * Runs thinning, then retention, as the switch says, and remembers each.
  * @param {{ mode: string|(() => string), index: object|null, jobs: { thinning: Function, retention: Function },
  *           args: () => object, limit?: number|null, clock?: () => number,
@@ -144,11 +154,15 @@ export async function runStorageJobs({ mode, index, jobs, args, limit = null, cl
     // minutes (up to 2000 files read, rewritten, fsynced and read back over SMB), and an admin who
     // set Off or Dry run meanwhile was told "Saved: Off" while retention went on to delete up to
     // 2000 files in the same round. runThinning's file work is synchronous, so the save (an HTTP
-    // request) cannot even be handled until it is done: the event loop is let go once first, and a
-    // save that was waiting is in the settings before the switch is read.
+    // request) cannot even be handled until it is done: the event loop is let go round first, and a
+    // save that was waiting on a connection already open is in the settings before the switch is
+    // read. (A save on a brand-new connection needs more turns than that. While retention's file
+    // work is synchronous too, such a save is not answered "Saved" until retention has finished; once
+    // that work waits on a helper, saves are answered during it, and the job itself must then look
+    // at the switch between files, not only here.)
     let sw = m
     if (job !== JOBS[0]) {
-      await new Promise((r) => setImmediate(r))
+      await letTheLoopTurn()
       sw = switchNow(mode)
     }
     if (sw === 'off') {
