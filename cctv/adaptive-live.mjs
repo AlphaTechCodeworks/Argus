@@ -335,8 +335,12 @@ export class AdaptiveLive {
    *    taken). It used to close at once, and the tile waited for the camera's next keyframe with nothing
    *    on screen: up to 3.07 s, 1.68 s on average on a page of 16 converted tiles, the usual case (no slot
    *    was free at 3 of 29 Sep's steps down; the review of ef43e60);
-   *  - onto a stream that runs already (another viewer's): at once, and nothing until that stream's next
-   *    keyframe at or past what it had.
+   *  - onto a level's stream that runs already (another viewer's), from a conversion: it keeps that until
+   *    the other stream's next keyframe at or past what it has, and goes over as it goes out (#swap). It
+   *    went over at once, and a climb onto another viewer's stream held up to that stream's keyframe
+   *    interval (1.07 s in the review of ef43e60);
+   *  - onto one from the camera's own frames (its stream, or one passing them on): at once, and nothing
+   *    until that stream's next keyframe at or past what it had (#guard).
    * @param {{ down?: boolean }} [o] down: to send less (a step down; a tile that finds a slot at last)
    */
   #retarget(e, level, { down = false } = {}) {
@@ -361,38 +365,46 @@ export class AdaptiveLive {
     if (want === e.stream) return this.#cancelSwitch(e)
     if (e.switch?.to === want) return
     this.#cancelSwitch(e)
-    if (!e.stream || e.lastTs === null || (want !== e.source && !made)) {
+    // Onto a level's stream that runs already, from the camera's own frames (its stream, or one passing
+    // them on): at once. A conversion runs behind the camera, so none of its keyframes is past what the
+    // socket has while it stays; there it waits for the first past what it had at the move (#guard).
+    const raw = e.stream === e.source || e.stream?.passthrough
+    if (!e.stream || e.lastTs === null || (want !== e.source && !made && raw)) {
       this.#leaveStream(e)
       return this.#join(e, want)
     }
-    this.#switchTo(e, want, { waitMs: down && want !== e.source ? SWITCH_WAIT_MS : SWITCH_MAX_MS, level })
+    this.#switchTo(e, want, { waitMs: down && want !== e.source ? SWITCH_WAIT_MS : SWITCH_MAX_MS, level, made: Boolean(made) })
   }
 
   /**
    * A socket switches to `to` at its first picture (report 2.5 (a), verify-5), meanwhile on its stream
-   * as it was. Onto the camera's own stream: a tap on it watches for its next keyframe at or past what
-   * the socket has, and the socket goes over as that keyframe goes out (#swap), nothing replayed. Onto a
-   * level's stream made for it (PhoneStream fromNextKey): the socket goes over at the keyframe it starts
-   * from, when its own stream reaches it (#pass: on the camera's own stream that keyframe itself; from a
-   * conversion the first of its frames at or past it, as the new one starts). `to` null: no slot free for
-   * its new level's stream, and its own conversion hands its slot over at the camera's next keyframe
-   * (#handOver), the same tap watching for it; fps: the rate that stream is then made with. Past waitMs
-   * it goes over at once, and waits there.
+   * as it was. Onto a stream that runs already (the camera's own, or another viewer's level stream): a
+   * tap on it watches for its next keyframe at or past what the socket has, and the socket goes over as
+   * that keyframe goes out (#swap), nothing replayed; a level stream's keyframe behind it (a conversion
+   * that runs further behind the camera than the socket's own) will not catch up, and it goes over at
+   * once. Onto a level's stream made for it (`made`, PhoneStream fromNextKey): the socket goes over at the
+   * keyframe it starts from, when its own stream reaches it (#pass: on the camera's own stream that
+   * keyframe itself; from a conversion the first of its frames at or past it, as the new one starts).
+   * `to` null: no slot free for its new level's stream, and its own conversion hands its slot over at the
+   * camera's next keyframe (#handOver), the same tap watching for it; fps: the rate that stream is then
+   * made with. Past waitMs it goes over at once, and waits there.
    */
-  #switchTo(e, to, { waitMs, level, fps = 0 }) {
-    const sw = { to, at: this.now(), waitMs, level, fps, tap: null }
+  #switchTo(e, to, { waitMs, level, fps = 0, made = false }) {
+    // on: the stream the tap is on
+    const sw = { to, at: this.now(), waitMs, level, fps, tap: null, on: null }
     e.switch = sw
-    if (to !== e.source && to !== null) return
-    // (what the camera's stream replays to the tap as it joins is the past: only what comes after counts)
+    if (made) return
+    sw.on = to ?? e.source
+    // (what the stream replays to the tap as it joins is the past: only what comes after counts)
     let joining = true
     sw.tap = {
       OPEN: 1,
       readyState: 1,
       bufferedAmount: 0,
-      // Not a viewer: the socket it stands for is one already, through a conversion of this very stream.
-      // At a hand-over it stands in for one: that conversion closes before the new one opens, and the
-      // camera's stream is never left without a viewer for that moment (the worker told it is background:
-      // at a sub-stream limit, one a viewer's may displace; #swap).
+      // (on the camera's stream) Not a viewer: the socket it stands for is one already, through a
+      // conversion of that very stream. At a hand-over it stands in for one: that conversion closes before
+      // the new one opens, and the camera's stream is never left without a viewer for that moment (the
+      // worker told it is background: at a sub-stream limit, one a viewer's may displace; #swap).
       background: to !== null,
       send: (buf) => {
         if (joining || e.switch !== sw) return
@@ -400,16 +412,16 @@ export class AdaptiveLive {
         if (f?.isKey && f.ts >= e.lastTs) {
           if (to === null) this.#handOver(e, { atKey: true })
           else this.#swap(e)
-        } else if (this.now() - sw.at > sw.waitMs) this.#cutOver(e)
+        } else if ((f?.isKey && sw.on !== e.source) || this.now() - sw.at > sw.waitMs) this.#cutOver(e)
       }
     }
-    e.source.add(sw.tap)
+    sw.on.add(sw.tap)
     joining = false
   }
 
   /**
-   * The camera's keyframe going out now (the tap of #switchTo): the socket leaves its stream and joins
-   * the camera's own from this keyframe on. Added as the fan-out goes (HubStream.add replay: false), it is
+   * The keyframe of the stream it goes to going out now (the tap of #switchTo): the socket leaves its
+   * stream and joins that one from this keyframe on. Added as the fan-out goes (add replay: false), it is
    * reached by it: this keyframe is its first frame there, sent once. On before the tap and the old
    * conversion's own come off: the camera's stream is never left without a viewer for a moment, which
    * would tell the NVR worker it is background (at a sub-stream limit, one a viewer's may displace).
@@ -418,11 +430,11 @@ export class AdaptiveLive {
     const sw = e.switch
     const from = e.stream
     e.switch = null
-    e.stream = e.source
+    e.stream = sw.to
     this.#guard(e)
     e.ws.waitForKey = true
-    e.source.add(e.ws, { replay: false })
-    e.source.remove(sw.tap)
+    sw.to.add(e.ws, { replay: false })
+    sw.on.remove(sw.tap)
     this.#leaveStream(e, from)
   }
 
@@ -448,7 +460,7 @@ export class AdaptiveLive {
       e.ws.waitForKey = true
       to.add(e.ws, { replay: false })
     } else this.#join(e, to)
-    e.source.remove(sw.tap)
+    sw.on.remove(sw.tap)
   }
 
   /** A switch done at the new stream's start (#pass), or given up waiting for it: onto the new stream now. */
@@ -456,7 +468,7 @@ export class AdaptiveLive {
     const sw = e.switch
     if (sw.to === null) return this.#handOver(e, { atKey: false })
     e.switch = null
-    if (sw.tap) e.source.remove(sw.tap)
+    if (sw.tap) sw.on.remove(sw.tap)
     this.#leaveStream(e)
     // (a stream made for it and closed meanwhile: whatever the level has now)
     this.#join(e, sw.to.closed ? this.#streamFor(e, sw.level) : sw.to)
@@ -489,7 +501,7 @@ export class AdaptiveLive {
     const sw = e.switch
     if (!sw) return
     e.switch = null
-    if (sw.tap) e.source.remove(sw.tap)
+    if (sw.tap) sw.on.remove(sw.tap)
     if (sw.to && sw.to !== e.source && sw.to !== e.stream && sw.to.clients.size === 0 && !this.#awaited(sw.to)) sw.to.close()
   }
 

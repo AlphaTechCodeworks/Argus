@@ -1035,6 +1035,29 @@ const brief = (got, from, to) => got.filter((f) => f.at >= from && f.at <= to).m
   check('  then the camera\'s own stream from there, nothing replayed: nothing older, no wait; the other viewer\'s conversion runs on', s.back === 0 && s.gap <= 67 && mine().stream === t.stream && !c15.closed && r.entry(t).stream === c15, `${JSON.stringify(s)} ${brief(other.got, 15_900, 16_100)}`)
 }
 {
+  // A climb onto a level's stream another viewer runs already: it joined it at once, and nothing reached
+  // it until that stream's next keyframe past what it had, up to its keyframe interval (1.07 s in the
+  // review of ef43e60). From a conversion (its frames behind the camera's, as those of the one it goes
+  // to) it now keeps its own until that keyframe, and goes over as it goes out, nothing replayed.
+  const r = rig({ cams: [{ fps: 30, gopS: 3 }], pool: 4 })
+  const [t] = r.tiles
+  const other = r.socket()
+  r.live.attach('other', { ws: other, nvrId: 'n1', ch: 0, type: 1, source: t.stream })
+  const o = r.live.viewers.get('other')
+  r.down(5000, [t.ws, other]) // both to 15: one conversion of 15, theirs to share
+  r.down(9000, [t.ws]) // this one on to 8
+  for (let ms = 10_000; ms <= 28_000; ms += 1000) { r.to(ms); o.cleanSince = T + ms } // the other stays at 15
+  const c15 = [...o.sockets][0].stream
+  const c8 = r.entry(t).stream
+  r.to(29_000) // clean for 20 s: back to 15, where the other viewer's conversion runs
+  check('(a) a climb onto another viewer\'s running conversion: it keeps its own until that one\'s next keyframe', LEVELS[r.v.level].id === '15' && c15.fps === 15 && r.entry(t).stream === c8 && c8.fps === 8 && r.entry(t).switch?.to === c15, `${LEVELS[r.v.level].id} ${r.entry(t).stream?.fps}`)
+  r.to(33_000)
+  const s = seen(t.ws.got, 28_000)
+  const at = t.ws.got.find((f) => f.at > 29_000 && f.key)
+  check('  and goes over there, nothing replayed: nothing older, no wait longer than a frame at 8 and the lag; its own conversion closed',
+    s.back === 0 && s.gap <= 134 + 67 && r.entry(t).stream === c15 && c8.closed && !c15.closed && t.ws.got.filter((f) => f.at === at?.at).length === 1, `${JSON.stringify(s)} ${brief(t.ws.got, (at?.at ?? 30_000) - 200, (at?.at ?? 30_000) + 100)}`)
+}
+{
   // a socket closing while it waits to switch: the conversion made for it closes, and its slot is back
   const r = rig({ cams: [{ fps: 30, gopS: 4 }] })
   const [t] = r.tiles
