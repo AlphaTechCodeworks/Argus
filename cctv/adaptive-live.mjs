@@ -237,9 +237,10 @@ class Viewer {
     // once what was queued then has gone; opening: taken as its tiles open, for OPENING_MS
     this.grace = { from: now, marks: new Map(), opening: true }
     // its /live-mux page sockets (live-mux.mjs MuxChannel.page): what each had written at the last look,
-    // for how many looks in a row that has not grown, whether it ever has, and whether its being left
-    // out has been said (#dead)
-    this.pages = new Map() // page -> { written, still, wrote, said }
+    // for how many looks in a row that has not grown, whether it ever has, whether it had something to
+    // write at the last look (written since the one before, or something queued), for how many looks in
+    // a row it has written nothing though it had, and whether its being left out has been said (#dead)
+    this.pages = new Map() // page -> { written, still, wrote, busy, stuck, said }
     this.left = new Set() // level streams its closed sockets left with nobody on them (for their 10 s)
     this.sockets = new Set() // { ws, nvrId, ch, type, source, stream, sent, lastTs, switch, ... } (attach)
     this.sentAt = 0
@@ -840,17 +841,25 @@ export class AdaptiveLive {
     for (const e of v.sockets) if (e.ws.page && !seen.has(e.ws.page)) seen.set(e.ws.page, e)
     for (const [page, e] of seen) {
       const written = this.#written(e)
+      const queued = this.#queued(e)
       const was = v.pages.get(page)
-      if (!was) v.pages.set(page, { written, still: 0, wrote: written > 0, said: false })
-      else if (written !== was.written) Object.assign(was, { written, still: 0, wrote: true, said: false })
+      if (!was) {
+        v.pages.set(page, { written, still: 0, wrote: written > 0, busy: written > 0 || queued > 0, stuck: 0, said: false })
+        continue
+      }
+      // (stuck: nothing written since a look at which it had something to write)
+      const wrote = written !== was.written
+      if (wrote) Object.assign(was, { written, still: 0, wrote: true, said: false })
       else was.still++
+      was.stuck = !wrote && was.busy ? was.stuck + 1 : 0
+      was.busy = wrote || queued > 0
     }
     for (const page of v.pages.keys()) if (!seen.has(page)) v.pages.delete(page)
     for (const [page, e] of seen) {
       const p = v.pages.get(page)
       if (p.said || !this.#dead(v, e)) continue
       p.said = true
-      this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket of this browser has written nothing for ${(p.still * TICK_MS) / 1000} s while another of its sockets writes: its ${(this.#queued(e) / 1e6).toFixed(2)} MB queued left out (a page gone, its socket not closed yet, or a tab that stopped reading)`)
+      this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket of this browser has written nothing for ${(p.stuck * TICK_MS) / 1000} s while another of its sockets writes: its ${(this.#queued(e) / 1e6).toFixed(2)} MB queued left out (a page gone, its socket not closed yet, or a tab that stopped reading)`)
     }
   }
 
@@ -866,11 +875,15 @@ export class AdaptiveLive {
    * look its writes stop at, so at two the step down came first (a 6 MB path: full -> 15 at 32 s). Two
    * sockets of one browser share its link, and one that writes nothing while the other writes is not
    * being read. Both stopped: nothing tells a dead page from a link that stopped, and both count.
+   * Only while it has something queued, and has written none of what it had to write at the look
+   * before: one with nothing to send is idle (a tab whose cameras froze), and was counted dead and said
+   * so once a freeze ("its 0.00 MB queued left out"; the review of d5390d6); one idle until a frame came
+   * just as a look did is not stuck yet either.
    */
   #dead(v, e) {
     const page = e.ws.page
     const p = page && v.pages.get(page)
-    if (!p || p.still < 1) return false
+    if (!p || p.stuck < 1 || this.#queued(e) <= 0) return false
     for (const [other, q] of v.pages) if (other !== page && q.wrote && q.still === 0) return true
     return false
   }

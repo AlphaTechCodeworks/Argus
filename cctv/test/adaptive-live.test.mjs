@@ -622,6 +622,55 @@ function onPage(key, n = 2) {
   check('two page sockets of one browser, neither writing: read as a link that stopped (down at the second look, as one page is)', levels.join() === '0,1,1', levels.join())
 }
 {
+  // A page socket with nothing queued is idle, not dead: a tab whose cameras froze (nvr-2 freezes all its
+  // cameras for 11-32 s) writes nothing for as long as they send nothing, while another tab of the same
+  // browser writes. It was counted dead, and said so once a freeze ("its 0.00 MB queued left out"; the
+  // review of d5390d6). Dead only while it has something queued, and has written none of it since a look.
+  const clock = { now: T }
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => clock.now })
+  const a = fakePage()
+  const b = fakePage()
+  a.drainBps = b.drainBps = 625_000
+  live.attach('two-tabs', { ws: a.channel(), nvrId: 'n1', ch: 0, type: 1, source: fakeSource('cam0') })
+  live.attach('two-tabs', { ws: b.channel(), nvrId: 'n1', ch: 1, type: 1, source: fakeSource('cam1') })
+  clearInterval(live.timer)
+  const v = live.viewers.get('two-tabs')
+  const look = (aWrote, bWrote) => {
+    a.written += aWrote
+    b.written += bWrote
+    clock.now += TICK_MS
+    live.tick()
+  }
+  look(100_000, 100_000)
+  look(100_000, 100_000)
+  const said = () => logs.filter((l) => l.includes('has written nothing for'))
+  // a's cameras freeze: nothing to send, nothing queued, nothing written; b writes on
+  for (let i = 0; i < 4; i++) look(0, 100_000)
+  check('a page socket whose cameras froze (nothing queued, nothing written) beside another of the browser\'s that writes: not dead, nothing said', said().length === 0, said().join(' | '))
+  // b's own link backs up: its level line leaves nothing of a out
+  b.queued = 1_500_000
+  look(0, 100_000)
+  look(0, 100_000)
+  const step = logs.find((l) => l.includes('full -> 15'))
+  check('  ... the other\'s link backing up: down, and its level line leaves no dead page\'s queue out', v.level === 1 && step && !step.includes('dead page'), step)
+  b.queued = 0
+  // a's cameras come back: their first frame queued just as a look comes, written by the next
+  a.queued = 40_000
+  look(0, 100_000)
+  a.queued = 0
+  look(40_000, 100_000)
+  check('  ... its cameras back, a frame queued just as the look came (idle before it): not dead either', said().length === 0, said().join(' | '))
+  // a's page goes: what it has queued is never written
+  a.queued = 300_000
+  look(20_000, 100_000)
+  a.queued = 600_000
+  look(0, 100_000)
+  a.queued = 900_000
+  look(0, 100_000)
+  check('  ... a page that goes with 0.6 MB queued, nothing of it written since the look before: dead at once, said once', said().length === 1 && said()[0].includes('has written nothing for 2 s while another of its sockets writes: its 0.60 MB queued left out'), said().join(' | '))
+}
+{
   // A new page socket of a browser that has one already (a second tab; a reload or a network change
   // with the old socket still open) opens as a new viewer's page does: its tiles' replays go out
   // before its queue is read. A tile opening later on a page it had already has none (above).
