@@ -91,6 +91,14 @@ const check = (name, ok, extra = '') => {
   const phone = ffmpegArgs({ encoder: 'libx264', maxKbps: 500 }).join(' ')
   check('  a cap without bufSeconds keeps the 4 s buffer (phones, phone-live.mjs: unchanged)', phone.includes('-maxrate 500k -bufsize 2000k'), phone)
   check('  no cap: no rate options at all (unchanged)', !/-maxrate|-bufsize/.test(s))
+  // Keyframes only: x264 spends the cap as maxKbps / fps per picture, the fps taken from the input's
+  // timestamps, which the raw demuxer puts one camera frame apart. A keyframe run sends 2-8 pictures
+  // a second, so each got a 1x picture's share (15.6 KB at 20 fps) and came out blocky, with the
+  // link mostly idle. picturesPerS stamps them that many a second instead.
+  const keys = ffmpegArgs({ encoder: 'libx264', ...PLAYBACK_LIMITS, picturesPerS: 8 }).join(' ')
+  check('  picturesPerS: the pictures are stamped that many a second (-r, an input option: before -i)', keys.includes('-analyzeduration 0 -r 8 -f hevc -i pipe:0'), keys)
+  check('  and the cap is the same number, now per second of wall clock', keys.includes('-maxrate 2500k -bufsize 2500k'), keys)
+  check('  picturesPerS not given, or 0: the stream\'s own timestamps (unchanged)', !/ -r /.test(capped) && !/ -r /.test(ffmpegArgs({ encoder: 'libx264', ...PLAYBACK_LIMITS, picturesPerS: 0 }).join(' ')), capped)
 
   // -flags low_delay turns the H.265 decoder's frame threads off: one thread, 0.8-0.99x real time at
   // 4K (smoothness report, cause 2a). Playing forward it is dropped; one picture at a time (a scrub,
@@ -247,6 +255,16 @@ function harness(opts = {}) {
   const runs = h4.procs.map((p) => /low_delay/.test(p.args.join(' ')))
   check('  lowDelay as a function: asked at each start (a run playing forward, then a scrub)', J(runs) === J([false, true]), J(runs))
   h4.t.close()
+  // picturesPerS too: keyframes only, then playing forward again after a reset
+  let perS = 8
+  const h6 = harness({ ...PLAYBACK_LIMITS, picturesPerS: () => perS })
+  h6.t.push(1000, true, IDR)
+  h6.t.reset()
+  perS = 0
+  h6.t.push(2000, true, IDR)
+  const stamped = h6.procs.map((p) => p.args.join(' ').match(/ -r (\d+) /)?.[1] ?? null)
+  check('  picturesPerS as a function: asked at each start (keyframes only, then playing forward)', J(stamped) === J(['8', null]), J(stamped))
+  h6.t.close()
   const h5 = harness()
   h5.t.push(1000, true, IDR)
   check('  lowDelay not given: low_delay, as before', /low_delay/.test(h5.procs[0].args.join(' ')))

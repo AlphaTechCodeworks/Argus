@@ -986,10 +986,12 @@ for (const speed of [2, 4]) {
       resets: 0,
       closes: 0,
       low: [], // lowDelay as the session answers it at each push (the real one asks when ffmpeg starts)
+      perS: [], // picturesPerS likewise
       push: (ts, isKey, buf) => {
         x.pushed.push(ts)
         x.calls.push('push')
         x.low.push(typeof o.lowDelay === 'function' ? o.lowDelay() : o.lowDelay)
+        x.perS.push(typeof o.picturesPerS === 'function' ? o.picturesPerS() : o.picturesPerS)
         o.onFrame(ts, isKey, Buffer.concat([Buffer.from([0xaa]), buf.subarray(0, 4)]))
       },
       endPicture: () => x.calls.push('end'),
@@ -1048,6 +1050,9 @@ for (const speed of [2, 4]) {
     // smoothness report, cause 2a: low_delay turns the decoder's frame threads off (one thread,
     // slower than real time at 4K); frame threads hold pictures back until more arrive, which a scrub never sends
     check('  low_delay: not while playing forward at 1x, but for the scrub', xs[0].low.length >= 3 && xs[0].low.slice(0, -1).every((v) => v === false) && xs[0].low.at(-1) === true, J(xs[0].low))
+    // x264 spends its rate cap per picture by the input's timestamps: playing forward those are the
+    // camera's own; one picture at a time they say maxKeysPerS a second (below, at 2x)
+    check('  picturesPerS: 0 (the stream\'s own rate) at 1x, maxKeysPerS for the scrub', xs[0].perS.length >= 3 && xs[0].perS.slice(0, -1).every((v) => v === 0) && xs[0].perS.at(-1) === session.maxKeysPerS && session.maxKeysPerS === 8, J(xs[0].perS))
     session.close()
   }
   {
@@ -1118,6 +1123,12 @@ for (const speed of [2, 4]) {
     check('  at their media time (a keyframe a second at 2x: one every ~500 ms), not in a burst', gap > 350 && gap < 700, `${Math.round(gap)} ms`)
     check('  each keyframe is pushed and then ended at once', xs.length === 1 && J(xs[0].calls.slice(0, 6)) === J(['push', 'end', 'push', 'end', 'push', 'end']), xs[0]?.calls.join())
     check('  with low_delay (frame threads would hold keyframes back until more arrive)', xs[0].low.length >= 4 && xs[0].low.every((v) => v === true), J(xs[0].low))
+    // The rate cap is spent per picture by the input's timestamps, one camera frame apart: a keyframe
+    // got a 1x picture's share (15.6 KB at 20 fps and 2.5 Mbit/s) while 2-8 went out a second, and
+    // came out blocky. Stamped maxKeysPerS a second, the most the pacer sends, each gets that many's
+    // share and the cap still holds per second of wall clock.
+    check('  stamped maxKeysPerS (8) a second for the encoder, so the rate cap is shared by the pictures that really go', xs[0].perS.length >= 4 && xs[0].perS.every((v) => v === 8), J(xs[0].perS))
+    check('  (the cap itself is unchanged: PLAYBACK_LIMITS)', xs[0].opts.maxKbps === 2500 && xs[0].opts.bufSeconds === 1)
     session.close()
   }
   {
@@ -1141,6 +1152,8 @@ for (const speed of [2, 4]) {
     const n1 = ws.bins.length
     await until(() => ws.bins.slice(n1).filter((b) => !b.key).length >= 3, 3000)
     check('  back at 1x: every frame again', ws.bins.slice(n1).filter((b) => !b.key).length >= 3)
+    const modes = xs[0].perS.filter((v, i, a) => i === 0 || v !== a[i - 1]) // each run of one value, once
+    check('  picturesPerS by mode: 0 at 1x, 8 at 2x and 4x, 0 again back at 1x', J(modes) === J([0, 8, 0]), J(modes))
     session.close()
   }
   {

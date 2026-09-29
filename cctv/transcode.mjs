@@ -50,7 +50,8 @@ export const NICE = 10
  * viewer on a thin link: keyframes came out at 100-150 KB (a quarter of a second through the tunnel)
  * against 430-550 KB with 4 s. The price is sharpness, since the keyframe is what a still scene's
  * other pictures are built on: SSIM against the recording scaled to 1080p was 0.984 with 1 s, 0.987
- * with 2 s and 0.990 with 4 s, at the same 2.1-2.2 Mbit/s.
+ * with 2 s and 0.990 with 4 s, at the same 2.1-2.2 Mbit/s. A keyframes-only run is held to the same
+ * cap per second of wall clock, not per camera frame (picturesPerS, ffmpegArgs).
  */
 export const PLAYBACK_LIMITS = Object.freeze({ maxWidth: 1920, maxKbps: 2500, bufSeconds: 1 })
 /**
@@ -147,14 +148,25 @@ export const lightPool = new TranscodePool((() => { const n = Number(process.env
  * single-threaded: 4K converted below real time at full size, and at 1.2x within PLAYBACK_LIMITS
  * (smoothness report, cause 2a). So playback going forward passes false: DECODE_THREADS frame threads,
  * 2.2-2.3x, holding back one picture.
+ * picturesPerS (keyframes only; rec-playback asks its maxKeysPerS, 0 otherwise): stamp the pictures
+ * that many a second (-r, an input option). x264 spends maxKbps as maxKbps / fps per picture, with
+ * the fps from the input's timestamps, which the raw demuxer puts one camera frame apart. A keyframe
+ * run sends at most maxKeysPerS a second (2 at 2x with a keyframe a second), so each got a 1x
+ * picture's share (15.6 KB at 20 fps and 2.5 Mbit/s): blocky, with a tenth of the cap used at 2x.
+ * Stamped 8 a second, the cap holds per second of wall clock and each picture gets an eighth of it.
+ * On a clean 1080p keyframe run of 30 (median picture, PSNR): 17.4 KB and 40.8 dB capped per camera
+ * frame, 34.6 KB and 44.5 dB with no cap, 41.4 KB and 45.5 dB stamped 8 a second (at the same crf
+ * x264 gives a picture that stays up longer a little more). 0: the stream's own timestamps.
  * @param {{ encoder?: 'libx264'|'h264_vaapi', inCodec?: number, keepEvery?: number, maxWidth?: number,
- *   crf?: number, maxKbps?: number, bufSeconds?: number, lowDelay?: boolean }} o
+ *   crf?: number, maxKbps?: number, bufSeconds?: number, lowDelay?: boolean, picturesPerS?: number }} o
  */
-export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0, bufSeconds = 4, lowDelay = true } = {}) {
+export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0, bufSeconds = 4, lowDelay = true, picturesPerS = 0 } = {}) {
   // (-threads here is an input option: it is the decoder's; libx264 picks its own)
   const decode = lowDelay ? ['-flags', 'low_delay'] : ['-threads', String(DECODE_THREADS)]
   const head = ['-hide_banner', '-loglevel', 'error', '-nostdin', ...decode, '-probesize', '32', '-analyzeduration', '0']
-  const input = ['-f', inCodec === CODEC_H265 ? 'hevc' : 'h264', '-i', 'pipe:0', '-an']
+  // (-r before -i: new timestamps for the input, whatever the stream's own timing says)
+  const stamp = picturesPerS > 0 ? ['-r', String(picturesPerS)] : []
+  const input = [...stamp, '-f', inCodec === CODEC_H265 ? 'hevc' : 'h264', '-i', 'pipe:0', '-an']
   const tail = ['-fps_mode', 'passthrough', '-flush_packets', '1', '-f', 'h264', 'pipe:1']
   if (encoder === 'h264_vaapi') {
     // Decode and encode both on the GPU: the frame never comes back to main memory, which is the
@@ -350,8 +362,8 @@ export class Transcoder {
    *   onFail?: (err: Error) => void, onHardwareFailed?: () => void, log?: (line: string) => void,
    *   spawn?: Function, platform?: string, hasNice?: boolean, hasIonice?: boolean,
    *   setPriority?: Function, now?: () => number, setTimer?: Function, clearTimer?: Function,
-   *   flushIdleMs?: number, lowDelay?: boolean|(() => boolean) }} o
-   *   lowDelay: see ffmpegArgs; a function is asked each time an ffmpeg starts
+   *   flushIdleMs?: number, lowDelay?: boolean|(() => boolean), picturesPerS?: number|(() => number) }} o
+   *   lowDelay, picturesPerS: see ffmpegArgs; a function is asked each time an ffmpeg starts
    */
   constructor({
     inCodec = CODEC_H265,
@@ -361,6 +373,7 @@ export class Transcoder {
     maxKbps = 0,
     bufSeconds = 4,
     lowDelay = true,
+    picturesPerS = 0,
     encoder = keepEvery > 1 || maxWidth > 0 ? 'libx264' : encoderNow(),
     onFrame,
     onFail = () => {},
@@ -375,7 +388,7 @@ export class Transcoder {
     clearTimer = clearTimeout,
     flushIdleMs = FLUSH_IDLE_MS
   } = {}) {
-    Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, bufSeconds, lowDelay, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
+    Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, bufSeconds, lowDelay, picturesPerS, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
     this.proc = null
     this.closed = false
     this.times = [] // the times of the frames pushed in and not yet handed back, smallest first
@@ -393,7 +406,10 @@ export class Transcoder {
     // asked afresh for every run (each starts at a keyframe after a reset): one session plays forward,
     // scrubs and plays keyframes only in turn, and only playing forward goes without low_delay
     const lowDelay = typeof this.lowDelay === 'function' ? Boolean(this.lowDelay()) : this.lowDelay !== false
-    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth, crf: this.crf, maxKbps: this.maxKbps, bufSeconds: this.bufSeconds, lowDelay })
+    // (and so is the rate the pictures are stamped at: the cap's share per picture follows the run)
+    const perS = Number(typeof this.picturesPerS === 'function' ? this.picturesPerS() : this.picturesPerS)
+    const picturesPerS = Number.isFinite(perS) && perS > 0 ? perS : 0
+    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth, crf: this.crf, maxKbps: this.maxKbps, bufSeconds: this.bufSeconds, lowDelay, picturesPerS })
     const { bin, args: full } = niceWrap('ffmpeg', args, { platform: this.platform, hasNice: this.hasNice, hasIonice: this.hasIonice })
     const proc = this.spawn(bin, full, { stdio: ['pipe', 'pipe', 'pipe'] })
     this.proc = proc

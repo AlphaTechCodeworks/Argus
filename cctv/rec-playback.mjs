@@ -67,7 +67,8 @@
 //    again below resumeBelow; at most readAheadMs x |speed| of footage and maxQueueBytes are queued.
 //  - H.265 for a browser that cannot decode it (&h265=0 on the URL, transcode.mjs): the frames go
 //    through ffmpeg and H.264 goes out instead, in this same wire format and with the same times, so
-//    the page needs no new decoding path, at most 1920 wide and 2.5 Mbit/s (PLAYBACK_LIMITS). Only
+//    the page needs no new decoding path, at most 1920 wide and 2.5 Mbit/s (PLAYBACK_LIMITS; keyframes
+//    only, 2.5 Mbit/s of wall clock at maxKeysPerS pictures a second, not per camera frame). Only
 //    that parameter switches it on, so a browser that can decode H.265 always gets the recording
 //    itself. At most CCTV_TRANSCODE_MAX (2) of these run at
 //    once; over that the viewer is told plainly and the socket closes, rather than joining a queue.
@@ -605,6 +606,11 @@ export class ServerPlayback {
         // threads hold a picture back until the next arrives: a scrub's keyframe would never come
         // out, and each keyframe would wait for the next one (a second at 2x).
         lowDelay: () => this.#oneAtATime(),
+        // Asked each time too. One picture at a time is at most maxKeysPerS a second (the pacer), but
+        // x264 spends the rate cap as though a camera frame's time lay between pictures: each keyframe
+        // got a 1x picture's share (15.6 KB) and came out blocky while the link sat nearly idle.
+        // Stamped maxKeysPerS a second, the cap holds per second of wall clock and each gets its share.
+        picturesPerS: () => (this.#oneAtATime() ? this.maxKeysPerS : 0),
         onFrame: (ts, isKey, buf) => this.#sendConverted(ts, isKey, buf),
         onFail: (e) => this.#fail(new Error(`could not convert this H.265 recording (${e.message})`)),
         log: this.log

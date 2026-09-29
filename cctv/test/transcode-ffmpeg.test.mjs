@@ -11,10 +11,13 @@
 //     held back until the next arrives; the speed with and without it, for the record;
 //   - playback's limits (PLAYBACK_LIMITS): noisy 4K comes out 1920x1080, within the rate cap, and no
 //     picture bigger than the 1 s buffer;
+//   - keyframes only within PLAYBACK_LIMITS, stamped maxKeysPerS a second (picturesPerS): pictures
+//     no smaller than with no cap at all on a clean clip, and a grainy clip within the cap per
+//     second of wall clock at that rate;
 //   - the whole path: a recorded .h265 file, ServerPlayback with &h265=0, {scrub}: one converted
 //     frame on the socket after {type:'scrub'}, for each of two scrubs, each ffmpeg with low_delay;
 //     played at 1x (no low_delay, every picture) and at 2x (keyframes only, with low_delay, each out
-//     without waiting for the next).
+//     without waiting for the next, stamped 8 a second).
 // ffmpeg runs behind ionice and nice here exactly as in the service. Nothing reaches an NVR.
 //   node cctv/test/transcode-ffmpeg.test.mjs        (on the server copy)
 import { execFileSync, spawn } from 'node:child_process'
@@ -237,6 +240,71 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
   check('  (the same clip at full size is far bigger: the cap is what held it down)', full.frames.length === 20 && full.bytes > 3 * allowed, `${full.bytes} B`)
 }
 
+// ---- keyframes only within PLAYBACK_LIMITS: the cap per second of wall clock ----------------------------
+// x264 spends the rate cap as maxKbps / fps per picture, the fps taken from the input's timestamps,
+// which the raw demuxer puts one camera frame apart (20 fps here, from the H.265 stream's own timing).
+// A keyframe run (reverse, 8x-32x, and 2x-4x while converting) sends at most maxKeysPerS pictures a
+// second, so each got a 1x picture's share, 15.6 KB, while the link sat mostly idle: blockier
+// pictures in exactly the modes used to scan for an event. Stamped 8 a second (picturesPerS, what
+// rec-playback asks for such a run), each gets an eighth of a second's share.
+{
+  const FPS = 20
+  const KEYS = 30
+  const PER_S = 8 // rec-playback's maxKeysPerS
+  // what a keyframe run pushes: one keyframe per second of footage, stamped at the camera's 20 fps.
+  // Only those pictures are encoded (the frames between would never be read), from ffmpeg's busier
+  // test pattern; grain makes every picture expensive.
+  const keyRun = (grain) => {
+    const clip = execFileSync('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `testsrc2=size=1920x1080:rate=${FPS}`,
+      '-vf', [grain ? `noise=alls=${grain}:allf=t` : '', `select=not(mod(n\\,${FPS})),setpts=N/${FPS}/TB`].filter(Boolean).join(','),
+      '-frames:v', String(KEYS), '-r', String(FPS), '-c:v', 'libx265', '-preset', 'ultrafast',
+      '-x265-params', 'log-level=error:keyint=1:min-keyint=1:scenecut=0:open-gop=0:bframes=0:wpp=0',
+      '-pix_fmt', 'yuv420p', '-f', 'hevc', 'pipe:1'
+    ], { maxBuffer: 256 * 1024 * 1024 })
+    return splitUnits(clip, CODEC.h265).units.map((u) => ({ isKey: u.isKey, buf: clip.subarray(u.start, u.end) }))
+  }
+  const median = (a) => [...a].sort((x, y) => x - y)[a.length >> 1] ?? 0
+  const run = async (keys, opts) => {
+    const { t, frames, fails } = converter(CODEC_H265, { lowDelay: true, ...opts })
+    for (let i = 0; i < keys.length; i++) {
+      t.push(T0 + i * 1000, true, keys[i].buf)
+      t.endPicture() // as rec-playback's #deliver does for each one
+      await sleep(25)
+    }
+    await until(() => frames.length >= keys.length, 60_000)
+    t.close()
+    const sizes = frames.map((f) => f.buf.length)
+    // the last ten: the buffer's head start (it begins 90% full) is spent by then
+    const sum = (a) => a.reduce((s, n) => s + n, 0)
+    return { frames, fails, bytes: sum(sizes), tail: median(sizes.slice(-10)), tailMean: sum(sizes.slice(-10)) / 10 }
+  }
+  const kb = (n) => `${(n / 1024).toFixed(1)} KB`
+
+  const clean = keyRun(0)
+  const free = await run(clean, { maxWidth: PLAYBACK_LIMITS.maxWidth })
+  const before = await run(clean, { ...PLAYBACK_LIMITS })
+  const keyed = await run(clean, { ...PLAYBACK_LIMITS, picturesPerS: PER_S })
+  info(`a clean keyframe run of ${KEYS} (1080p, a keyframe a second at 20 fps), last ten pictures' median: ${kb(free.tail)} with no cap, ${kb(before.tail)} capped per camera frame, ${kb(keyed.tail)} stamped ${PER_S} a second`)
+  check(`keyframes only, stamped ${PER_S} a second: every keyframe comes out, each with its own time`, clean.length === KEYS && clean.every((k) => k.isKey) && keyed.frames.length === KEYS && keyed.frames.every((f, i) => f.ts === T0 + i * 1000) && keyed.fails.length === 0, `${keyed.frames.length} out`)
+  const p = keyed.frames.length ? probe(Buffer.concat(keyed.frames.map((f) => f.buf))) : {}
+  check('  and they decode, 1920x1080', p.codec_name === 'h264' && p.width === '1920' && p.height === '1080' && p.nb_read_frames === String(KEYS), J(p))
+  check('  (capped per camera frame, as before, the clean clip\'s pictures were squeezed: well under the uncapped size)', before.tail < 0.7 * free.tail, `${kb(before.tail)} vs ${kb(free.tail)}`)
+  check('  a clean clip\'s pictures are no smaller than with no cap at all', keyed.tail >= free.tail, `${kb(keyed.tail)} vs ${kb(free.tail)}`)
+
+  const grainy = keyRun(20)
+  const gFree = await run(grainy, { maxWidth: PLAYBACK_LIMITS.maxWidth })
+  const gKeyed = await run(grainy, { ...PLAYBACK_LIMITS, picturesPerS: PER_S })
+  const bufBytes = (PLAYBACK_LIMITS.maxKbps * 1000 * PLAYBACK_LIMITS.bufSeconds) / 8
+  // the run takes KEYS / PER_S seconds of wall clock at most pictures a second: the cap over that
+  // time plus one full buffer (10% for x264's rounding)
+  const allowed = 1.1 * ((PLAYBACK_LIMITS.maxKbps * 1000 * KEYS) / PER_S / 8 + bufBytes)
+  const mbit = (bytesPerPicture) => `${((bytesPerPicture * 8 * PER_S) / 1e6).toFixed(2)} Mbit/s`
+  info(`a grainy keyframe run of ${KEYS}: ${kb(gFree.bytes)} with no cap, ${kb(gKeyed.bytes)} stamped ${PER_S} a second; at ${PER_S} a second that is ${mbit(gKeyed.bytes / KEYS)} over the run (the first picture from the buffer's head start), ${mbit(gKeyed.tailMean)} over the last ten`)
+  check(`  a grainy clip at ${PER_S} a second stays within the cap per second of wall clock`, gKeyed.frames.length === KEYS && gKeyed.bytes <= allowed, `${gKeyed.bytes} B, allowed ${Math.round(allowed)} B`)
+  check('  (with no cap it would not: the cap is what held it)', gFree.frames.length === KEYS && gFree.bytes > 2 * allowed, `${gFree.bytes} B`)
+}
+
 // ---- the whole path: a recorded .h265 file, ServerPlayback, {scrub} --------------------------------------
 {
   const ROOT = mkdtempSync(join(tmpdir(), 'cctv-xcode-ffmpeg-rec-'))
@@ -307,6 +375,7 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
   const f2 = after(2) ?? []
   check('a second scrub (the drag goes on): exactly one converted keyframe for gen 2, at its time', Boolean(s2) && f2.length === 1 && f2[0].bin.codec === 0 && f2[0].bin.key && Math.abs(f2[0].bin.tsMs - s2.at) < 0.001, `${J(s2)}, ${f2.length} frames`)
   check('  each scrub ran its own ffmpeg, with low_delay (frame threads would hold its keyframe back)', spawned.length === 2 && spawned.every((a) => a.includes('-flags low_delay') && !a.includes('-threads')), spawned.join(' | '))
+  check('  and stamped 8 a second (one picture at a time): its one picture still comes out, above', spawned.length === 2 && spawned.every((a) => a.includes(' -r 8 -f hevc -i pipe:0')), spawned.join(' | '))
   session.close()
   check('close: the conversion is closed and its ffmpeg killed', session.xcode === null && xc?.running === false)
 
@@ -340,6 +409,7 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
     const bins = sock.bins
     check('playing converted footage at 1x: every picture but the last one or two, converted, each at its own time, in order', bins.length >= units.length - DECODE_THREADS && bins.every((b, i) => b.codec === 0 && Math.abs(b.tsMs - (T0 + i * 100)) < 1) && bins[0].key, `${bins.length} of ${units.length}: ${bins.slice(0, 3).map((b) => b.tsMs - T0).join()}`)
     check(`  its ffmpeg ran without low_delay, on ${DECODE_THREADS} decoder threads`, spawned.length === 1 && !spawned[0].includes('low_delay') && spawned[0].includes(`-threads ${DECODE_THREADS} `), spawned.join(' | '))
+    check('  with the recording\'s own timestamps (no -r)', spawned.length === 1 && !spawned[0].includes(' -r '), spawned.join(' | '))
     const p = bins.length ? probe(Buffer.concat(bins.map((b) => b.buf))) : {}
     check('  and it decodes: 1280x720 H.264, every picture sent', p.codec_name === 'h264' && p.width === '1280' && p.height === '720' && Number(p.nb_read_frames) === bins.length, J(p))
     s.close()
@@ -360,6 +430,7 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
     // held until the next keyframe it would have come 500 ms later: after a fresh ffmpeg's ~300 ms, about 800 ms
     check('  not held for the next keyframe: the first one out within 650 ms of the start', first < 650, `${Math.round(first)} ms`)
     check('  its ffmpeg ran with low_delay', spawned.length >= 1 && spawned[0].includes('-flags low_delay'), spawned.join(' | '))
+    check('  its pictures stamped maxKeysPerS (8) a second, so the rate cap is shared by the pictures that really go', spawned.length >= 1 && spawned[0].includes(' -r 8 -f hevc -i pipe:0'), spawned.join(' | '))
     s.close()
   }
   IDX.close()
