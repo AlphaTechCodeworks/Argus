@@ -936,9 +936,12 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
 // /live-mux on a server of its own: a page sends it nothing over MAX_MESSAGE_BYTES, and ws refuses a
 // bigger message (1009) from its header, before reading it.
 const muxWss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES })
-// ping every 15 s; a socket that misses a pong is terminated (backpressure.mjs)
+// ping every 15 s; a socket that misses a pong is terminated (backpressure.mjs). A page socket only
+// when it has also written nothing for 30 s: its ping waits behind the video already queued on it,
+// and through the tunnel that backlog can take longer than 15 s to go (stutter report 2.10)
+const pageSockets = new WeakMap() // /live-mux socket -> its serveMux handle
 keepAlive(wss)
-keepAlive(muxWss)
+keepAlive(muxWss, { quiet: (ws) => pageSockets.get(ws)?.quiet() ?? true })
 // Every open video socket and mux channel is asked again while it is open (access-watch.mjs): soon
 // after rights or accounts are saved or a session is signed out, and every SWEEP_MS. A camera taken
 // away, an account removed or a sign-out ends what is already showing, not only the next one.
@@ -954,9 +957,11 @@ const onConnection = (ws, req) => {
   meterSocket(ws, req.socket.remoteAddress)
   // every live tile of a page on this one socket (live-mux.mjs)
   if (url.pathname === '/live-mux') {
-    serveMux(ws, {
+    pageSockets.set(ws, serveMux(ws, {
       // the session again on every "sub", as the upgrade checked it
       session: () => currentUser(req),
+      // for the log line of its close: remote (the tunnel, the tailnet) or not, as live-attach.mjs decides
+      who: isRemoteAddress(req.socket.remoteAddress) ? 'remote' : 'local',
       attach: (channel, sub, user) => {
         const nvr = nvrs.get(sub.nvr)
         if (!nvr) return channel.close(1013, 'unknown NVR')
@@ -965,7 +970,7 @@ const onConnection = (ws, req) => {
         const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
         attachLive(channel, req, { nvr, who, ch: sub.ch, streamType: sub.stream, clientH265: sub.h265, phone15: sub.fps === 15 })
       }
-    })
+    }))
     return
   }
   const nvr = nvrs.get(url.searchParams.get('nvr') ?? '')

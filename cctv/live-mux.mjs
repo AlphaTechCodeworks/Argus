@@ -65,6 +65,17 @@ export const MAX_MALFORMED = 20
 // of latency (about 3 s at 20 Mbit/s for the cap, a tenth of that on the local network).
 export const SOCKET_SOFT_BYTES = 2 * 1024 * 1024
 export const SOCKET_CAP_BYTES = 8 * 1024 * 1024
+// How fast the page's socket drains: the bytes ws finished writing (its send callbacks) per second of
+// the time it had something queued, over about the last DRAIN_WINDOW_MS. The queued bytes alone say
+// nothing about how long they take to go: 256 KB is 0.05 s on the local network and 0.4 s through a
+// 5 Mbit/s tunnel (verify-1, 2026-09-29). Busy time only: a socket idle half the time is not a slow
+// one. ws calls back once the kernel has taken the bytes, so a short burst into an empty kernel
+// buffer reads much faster than the link; less than DRAIN_MIN_BUSY_MS of busy time is too little to
+// say (null). Under a backlog, the only time it matters, the kernel's buffer is full and the rate is
+// the link's.
+export const DRAIN_WINDOW_MS = 4000
+const DRAIN_MIN_BUSY_MS = 200
+const DRAIN_MARK_MS = 250
 const MAX_ID = 2147483647
 const ID_BYTES = 4
 const OPEN = 1 // ws readyState
@@ -93,6 +104,59 @@ function subFields({ nvr, ch, stream, fps, h265 }) {
   if (fps != null && typeof fps !== 'number') return null
   if (h265 != null && ![0, 1, false, true].includes(h265)) return null
   return { nvr, ch, stream, fps: fps ?? null, h265: h265 === 1 || h265 === true }
+}
+
+/**
+ * The drain rate of one socket (see DRAIN_WINDOW_MS): add(n) when bytes are handed to ws, done(n, ok)
+ * from its send callback (ok false: called back with an error, the socket gone); bps() is the rate in
+ * bytes a second, or null; written and lost count every byte done.
+ */
+function drainMeter(now) {
+  let queued = 0
+  let written = 0 // bytes written, ever
+  let lost = 0 // bytes ws gave up on (the socket died with them queued)
+  let busy = 0 // ms with something queued, ever, up to busyFrom
+  let busyFrom = null // since when something has been queued (null: nothing is)
+  // what had been written and how long it had been busy, every DRAIN_MARK_MS or so (taken on each
+  // event, after it); the first one is the last at or before the window's start
+  const marks = []
+  const busyAt = (t) => busy + (busyFrom === null ? 0 : t - busyFrom)
+  const mark = (t) => {
+    if (!marks.length || t - marks.at(-1).at >= DRAIN_MARK_MS) marks.push({ at: t, written, busy: busyAt(t) })
+    while (marks.length > 1 && marks[1].at <= t - DRAIN_WINDOW_MS) marks.shift()
+  }
+  return {
+    add(n) {
+      const t = now()
+      if (queued === 0) busyFrom = t
+      queued += n
+      mark(t)
+    },
+    done(n, ok = true) {
+      const t = now()
+      if (ok) written += n
+      else lost += n
+      queued -= n
+      if (queued <= 0 && busyFrom !== null) {
+        busy += t - busyFrom
+        busyFrom = null
+        queued = 0
+      }
+      mark(t)
+    },
+    bps() {
+      const t = now()
+      mark(t)
+      const b = busyAt(t) - marks[0].busy
+      return b >= DRAIN_MIN_BUSY_MS ? ((written - marks[0].written) * 1000) / b : null
+    },
+    get written() {
+      return written
+    },
+    get lost() {
+      return lost
+    }
+  }
 }
 
 /** A token bucket: `size` at once, then `perSecond`. take() is false when it is empty. */
@@ -158,6 +222,16 @@ class MuxChannel {
     return this.#mux.queued
   }
 
+  /** How fast the page's socket drains, in bytes a second (see DRAIN_WINDOW_MS), or null: for adaptive-live's log. */
+  get drainBps() {
+    return this.#mux.drain.bps()
+  }
+
+  /** The bytes the page's socket has written, ever (the same meter): adaptive-live's grace after a level change. */
+  get writtenBytes() {
+    return this.#mux.drain.written
+  }
+
   // A new channel's GOP replay (gop-replay.mjs) queues behind whatever the page's socket already
   // holds, and every channel subscribed after it queues behind the replay: 64 subs in one go put
   // ~10 MB of replays in front of the last tile's keyframe. A replay goes whole while it fits in
@@ -181,15 +255,17 @@ class MuxChannel {
     if (mux.queued === 0) mux.progressAt = mux.now()
     this.#queued += n
     mux.queued += n
+    mux.drain.add(n)
     // two fragments of one message, back to back (nothing else can come between them): the id, then
     // the frame as it is. A copy with the id in front cost an allocation and a copy of every frame
     // for every viewer, and held a copy per channel in the queue.
     mux.ws.send(this.#idBuf, { binary: true, fin: false })
-    mux.ws.send(data, { binary: true, fin: true }, () => {
-      // written (or the socket gone): no longer queued
+    mux.ws.send(data, { binary: true, fin: true }, (err) => {
+      // written (or the socket gone: an error): no longer queued
       this.#queued -= n
       mux.queued -= n
       mux.progressAt = mux.now()
+      mux.drain.done(n, !err)
     })
   }
 
@@ -254,20 +330,25 @@ class MuxChannel {
  * Serves one /live-mux socket.
  * @param {object} ws the page's socket (ws)
  * @param {{ attach: (channel: MuxChannel, sub: { nvr: string, ch: number, stream: 0|1, fps: number|null, h265: boolean }, user: string) => void,
- *   session: () => string|null, now?: () => number, log?: (line: string) => void }} o
+ *   session: () => string|null, now?: () => number, log?: (line: string) => void, who?: string }} o
  *   attach: what the /live path does with a socket (live-attach.mjs), refusing with channel.close(code, reason);
- *   session: the signed-in user of the upgrade request now, or null
- * @returns {{ channels: Map<number, MuxChannel>, queued: () => number }} the open channels and the
- *   bytes queued on the socket, for tests and diagnostics
+ *   session: the signed-in user of the upgrade request now, or null; who: "remote" or "local", for the log
+ * @returns {{ channels: Map<number, MuxChannel>, queued: () => number, quiet: () => boolean }} the open
+ *   channels and the bytes queued on the socket, for tests and diagnostics; quiet: whether it has written
+ *   nothing for STUCK_MS (nothing to write, or a peer that stopped reading), for its keep-alive
  */
-export function serveMux(ws, { attach, session, now = Date.now, log = (line) => console.log(line) }) {
+export function serveMux(ws, { attach, session, now = Date.now, log = (line) => console.log(line), who = '' }) {
   const channels = new Map() // id -> MuxChannel
   const subs = bucket(SUB_BURST, SUBS_PER_S, now)
   const messages = bucket(MESSAGE_BURST, MESSAGES_PER_S, now)
+  const openedAt = now()
   let malformed = 0
   let done = false
+  let cause = null // why this side ended it, for the close's log line
+  let channelsAtEnd = null // how many tiles it carried when it ended
 
   const endAll = () => {
+    channelsAtEnd ??= channels.size
     for (const c of [...channels.values()]) c.end()
   }
   const mux = {
@@ -277,12 +358,14 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
     now,
     queued: 0, // bytes of frames handed to ws and not written yet: every channel's, ended ones' too
     progressAt: now(), // when ws last wrote some of them (or the queue last started from empty)
+    drain: drainMeter(now), // how fast it writes them (DRAIN_WINDOW_MS)
     stalled: () => mux.queued > 0 && now() - mux.progressAt > STUCK_MS,
     sendText: (msg) => {
       if (ws.readyState === OPEN) ws.send(JSON.stringify(msg))
     },
     terminate: () => {
       done = true
+      cause ??= `nothing written for ${STUCK_MS / 1000} s`
       endAll()
       ws.terminate()
     }
@@ -290,6 +373,7 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
   const shut = (code, reason) => {
     if (done) return
     done = true
+    cause ??= `closed by the server: ${reason}`
     log(`[live-mux] closing a page's socket: ${reason}`)
     endAll()
     ws.close(code, reason)
@@ -330,12 +414,35 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
       channel.close(1011, 'server error')
     }
   })
-  ws.on('close', () => {
+  // Every close is logged, once: its code and reason, why (the keep-alive, backpressure.mjs, marks
+  // the sockets it cuts), how many tiles it carried, and how far behind it was: the bytes it never
+  // wrote, whether still queued or already called back with an error (ws does that to the queued
+  // sends of a socket that died, perhaps before its 'close'). On 29 Sep a remote page was forgotten
+  // and restarted at full twice, and nothing said whether its socket had been cut or by what
+  // (stutter report 2.10). One line per page, never per frame.
+  let logged = false
+  ws.on('close', (code, reason) => {
     done = true
     endAll()
+    if (logged) return
+    logged = true
+    const secs = (now() - openedAt) / 1000
+    const why = String(reason ?? '')
+    const because = ws.closeCause ?? cause
+    const bps = mux.drain.bps()
+    const unwritten = mux.queued + mux.drain.lost
+    const mb = (n) => (n / 1e6).toFixed(2)
+    const mbit = (perS) => ((perS * 8) / 1e6).toFixed(1)
+    // no rate: nothing queued in the window, or a burst queued too lately to measure (not "idle")
+    const draining = bps !== null ? `draining at ${mbit(bps)} Mbit/s` : unwritten > 0 ? 'draining: not measured yet' : 'draining: idle'
+    log(`[live-mux] a ${who ? `${who} ` : ''}page's socket closed after ${Math.round(secs)} s: code ${code}${why ? ` "${why}"` : ''}${because ? ` (${because})` : ''}; ` +
+      `${channelsAtEnd} channels, ${mb(unwritten)} MB never written, ${draining}; ` +
+      `${mb(mux.drain.written)} MB written in all (${mbit(secs > 0 ? mux.drain.written / secs : 0)} Mbit/s on average)`)
   })
   // a frame ws cannot read (bad UTF-8, a bad opcode, over maxPayload) closes the socket by itself;
   // with no listener the 'error' it emits would be thrown, and take the whole process down
   ws.on('error', () => {})
-  return { channels, queued: () => mux.queued }
+  // (not mux.stalled(), which needs bytes queued: a pong can also be late behind bytes written a
+  // moment ago, still in the kernel's buffer or on the wire, and a socket idle that long owes nothing)
+  return { channels, queued: () => mux.queued, quiet: () => now() - mux.progressAt > STUCK_MS }
 }

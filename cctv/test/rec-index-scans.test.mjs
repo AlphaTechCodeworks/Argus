@@ -13,9 +13,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { CAMERA_SQL, MAX_SEGMENT_MS, openRecIndex } from '../rec-index.mjs'
+import { CAMERA_SQL, LOCATION_SQL, MAX_SEGMENT_MS, openRecIndex } from '../rec-index.mjs'
 
 let failures = 0
+const J = (v) => JSON.stringify(v)
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
 
 const M = MAX_SEGMENT_MS
@@ -180,6 +181,60 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   empty.close()
 }
 
+// ---- one storage location: locationUse() and oldest(n, { loc }) --------------------------------------
+// locationUse('ram-spool') runs every 30 s on the main thread (nvrs.mjs watchSpool, ram-spool.mjs), and
+// read every row of the index to find the spool's few (or none): 40 ms on production's 377,000 rows.
+// The old answers come from the same SQL with the new index kept out of it (NOT INDEXED: the full scan
+// it was). Everything above is on L1; here an overflow drive, the RAM spool and rows with no location.
+{
+  const add = (loc, i, bytes) => index.addSegment({ nvr: 'n9', ch: i % 3, path: `/rec/${loc}/${i}.h264`, startMs: T0 + between(0, 3 * 24 * 60) * MIN, endMs: T0 + 4 * 24 * 60 * MIN, bytes, keyframes: 1, loc })
+  for (let i = 0; i < 300; i++) add('L2', i, between(1, 5_000_000))
+  for (let i = 0; i < 40; i++) add('ram-spool', i, between(100_000, 900_000))
+  for (let i = 0; i < 3; i++) add(null, i, 7)
+  const oldUse = old.prepare('SELECT COALESCE(SUM(bytes), 0) AS b, COUNT(*) AS n FROM segments NOT INDEXED WHERE loc = ?')
+  const oldOldest = old.prepare('SELECT path FROM segments NOT INDEXED WHERE loc = ? ORDER BY start_ms, rowid LIMIT ?')
+  const bad = []
+  for (const loc of ['L1', 'L2', 'ram-spool', 'nowhere', 'null']) {
+    const want = oldUse.get(loc)
+    const got = index.locationUse(loc)
+    if (got.bytes !== Number(want.b) || got.segments !== Number(want.n)) bad.push(`${loc}: ${J(got)} vs ${want.b}/${want.n}`)
+    for (const limit of [1, 50, 100_000]) {
+      const w = oldOldest.all(loc, limit).map((r) => r.path)
+      const g = index.oldest(limit, { loc }).map((r) => r.path)
+      if (g.join() !== w.join()) bad.push(`${loc} oldest ${limit}: ${g.length} vs ${w.length}`)
+    }
+  }
+  check('locationUse and oldest on one location give what reading every row gave', bad.length === 0, bad.join('; ') || `L1 ${index.locationUse('L1').segments}, L2 ${index.locationUse('L2').segments}, spool ${index.locationUse('ram-spool').segments} rows`)
+  check('... the spool\'s bytes, and none for a location without rows', index.locationUse('ram-spool').segments === 40 && index.locationUse('nowhere').bytes === 0 && index.locationUse('nowhere').segments === 0)
+
+  // plans: both a search of segments_loc, oldest on one location in start_ms order (an index on loc
+  // alone, or on (loc, bytes), made the main drive's oldest(50) sort its 377,000 rows: 0.3-1.3 s here)
+  const planOf = (sql, ...p) => old.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...p).map((r) => r.detail).join(' | ')
+  const use = planOf(LOCATION_SQL.locBytes, 'L1')
+  check('locationUse is a search of segments_loc (loc=?), never a scan', /^SEARCH segments USING INDEX segments_loc \(loc=\?\)$/.test(use), use)
+  const oldest = planOf(LOCATION_SQL.oldestAt, 'L1', 50)
+  check('oldest on one location is a search of segments_loc in start_ms order (no sort)', /^SEARCH segments USING INDEX segments_loc \(loc=\?\)$/.test(oldest), oldest)
+  const ofCam = planOf(LOCATION_SQL.oldestOf, 'n1', 0, 'L1', 50)
+  check('one camera\'s oldest on one location still searches segments_cam, with no sort', /^SEARCH segments USING INDEX segments_cam \(nvr=\? AND ch=\?\)$/.test(ofCam), ofCam)
+}
+
+// ---- an index written before segments_loc gains it when it is opened ----------------------------------
+{
+  const f = join(ROOT, 'before-loc.db')
+  const pre = new DatabaseSync(f)
+  pre.exec(`CREATE TABLE segments (path TEXT PRIMARY KEY, nvr TEXT NOT NULL, ch INTEGER NOT NULL, start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL, bytes INTEGER NOT NULL, keyframes INTEGER NOT NULL, loc TEXT);
+    CREATE INDEX segments_cam ON segments (nvr, ch, start_ms);`)
+  pre.prepare("INSERT INTO segments VALUES ('/a/1.h264', 'a', 0, 1000, 61000, 500, 1, 'ram-spool'), ('/a/2.h264', 'a', 0, 61000, 121000, 700, 1, 'L1')").run()
+  pre.close()
+  const ix = openRecIndex(f)
+  const raw = new DatabaseSync(f)
+  const have = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'segments_loc'").get()
+  raw.close()
+  check('an existing index gains segments_loc (loc, start_ms) at open, rows kept', /\(loc, start_ms\)/.test(have?.sql ?? '') && J(ix.locationUse('ram-spool')) === J({ bytes: 500, segments: 1 }) && ix.locationUse('L1').bytes === 700, have?.sql ?? 'no segments_loc')
+  ix.close()
+}
+
 // ---- every rewritten statement searches an index, bounded where a bound is the point ---------------
 // (The old statements were searches too -- "segments_cam (nvr=? AND ch=?)" -- which is exactly how
 // they came to read every row of a camera: the plan must show the bound on start_ms, and the
@@ -229,11 +284,13 @@ index.close()
   const lastEndBefore = raw.prepare('SELECT MAX(end_ms) AS e FROM segments WHERE nvr = ? AND ch = ? AND start_ms < ?')
   const olderThan = raw.prepare('SELECT path FROM segments WHERE nvr = ? AND ch = ? AND end_ms < ? ORDER BY start_ms LIMIT ?')
   const distinct = raw.prepare('SELECT DISTINCT nvr, ch FROM segments ORDER BY nvr, ch')
+  const locUse = raw.prepare('SELECT COALESCE(SUM(bytes), 0) AS b, COUNT(*) AS n FROM segments NOT INDEXED WHERE loc = ?')
   const pairs = [
     ['lastSegmentEnd', () => lastEnd.get('big', 0), () => ix.lastSegmentEnd('big', 0)],
     ['lastSegmentEnd before a time', () => lastEndBefore.get('big', 0, T0 + 99_000 * MIN), () => ix.lastSegmentEnd('big', 0, T0 + 99_000 * MIN)],
     ['olderThan with nothing that old', () => olderThan.all('big', 0, T0, 200), () => ix.olderThan('big', 0, T0, 200)],
-    ['cameras', () => distinct.all(), () => ix.cameras()]
+    ['cameras', () => distinct.all(), () => ix.cameras()],
+    ['locationUse of an empty RAM spool', () => locUse.get('ram-spool'), () => ix.locationUse('ram-spool')]
   ]
   for (const [name, before, after] of pairs) {
     const b = time(before)

@@ -330,13 +330,19 @@ export class LiveStream {
       .catch(() => {})
   }
 
-  add(ws) {
+  /**
+   * @param {{ replay?: boolean }} [o] replay false: nothing is replayed, and the socket starts where
+   *   its waitForKey says (as stream-hub.mjs HubStream.add: a socket adaptive-live.mjs moves here at
+   *   this stream's keyframe)
+   */
+  add(ws, { replay = true } = {}) {
     clearTimeout(this.stopTimer)
     this.stopTimer = null
     idleStops.get(this.nvr.id)?.cancel(this) // wanted again: it plays on, no stop
     this.clients.add(ws)
     // the recorder's tap: a start of this stream waiting in the pacer goes now; a viewer's: ahead of warm-ups
     if (this.state === 'starting') pacers.get(this.nvr.id)?.kick()
+    if (!replay) return
     // replay the current GOP so the picture appears without waiting for the next keyframe
     if (this.gop.length > 0) replayGop(this.gop, ws)
     else {

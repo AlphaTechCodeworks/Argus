@@ -5,7 +5,8 @@
 // only moves in deliberate steps, so frames keep the camera's own even cadence
 // even though the network delivers them in bursts:
 //   - a frame decoded after its display time  -> "late"; if that keeps happening
-//     the delay grows (buffer absorbs bigger bursts; playback takes it up a few ms a frame)
+//     the delay grows (buffer absorbs bigger bursts; playback takes it up a few ms a frame;
+//     a page through the tunnel grows it by each late frame's lateness at once, REMOTE_CLOCK)
 //   - a steady link for a while               -> the delay shrinks a little
 //   - playback far behind the newest frame    -> jump to the live edge
 //     (e.g. the backlog an NVR sends when a stream starts)
@@ -39,7 +40,10 @@ export const PLAYOUT_DEFAULTS = {
   slewMax: 0.01, // the anchor moves at most this share of real time (1%)
   slewDeadMs: 5, // smaller drift errors are left alone
   growSlew: 0, // 0: a grown buffer moves the anchor at once; else each frame takes this share of its spacing
-  catchUpMs: 2000 // after a slow-down (setRate), frames arriving this long are checked for being too far ahead
+  catchUpMs: 2000, // after a slow-down (setRate), frames arriving this long are checked for being too far ahead
+  stretchLate: false, // a late frame grows the buffer by its lateness at once (REMOTE_CLOCK)
+  stretchMarginMs: 30, // ... and this much more
+  shrinkWindowMs: 0 // > 0: shrink towards the largest lateness of this long, shrinkMs every adapt() (REMOTE_CLOCK)
 }
 
 /**
@@ -55,6 +59,35 @@ export const PLAYOUT_DEFAULTS = {
  * (smoothness report, minor items). Live keeps the step, as it always had.
  */
 export const PLAYBACK_CLOCK = { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 1000, lateForMs: 0, growSlew: 0.1 }
+
+/**
+ * Live on a page opened through the Cloudflare tunnel or the tailnet (viewer.js; stutter report 2.4
+ * with verify-4's corrections, 29 Sep). The page's one socket through the tunnel stalls now and then
+ * for longer than live's buffer can hold (350 ms, growing to 800 at most): another tile's keyframe
+ * ahead of it (634 KB takes 0.8-1.5 s at 3.3-6 Mbit/s), a lost packet (0.6% of the bytes are sent
+ * again). Each stall froze the picture and then jumped ahead, and live's buffer grows only 40 ms a
+ * second, and only after two late frames in one. The replay of a 1.2 s stall every 20 s: 97% of
+ * frames shown, 3 freezes a minute; with this profile 100% and one freeze, the first
+ * (test/live-replay.test.mjs).
+ *
+ *  - stretchLate: a frame that comes late grows the buffer by its lateness and 30 ms at once. The
+ *    picture is standing still waiting for it anyway, so nothing visible moves: that frame and the
+ *    ones after it play at the camera's cadence instead of jumping ahead, and the next stall as long
+ *    is ridden out. Up to 2 s. Not in the warm-up after a (re)start: the lateness there is the
+ *    start-up replay, not the link.
+ *  - shrinkWindowMs: once a minute has passed with no frame that needed as much, the buffer comes
+ *    down 10 ms a second (live: 10 ms every 10 s) towards the largest lateness of that minute and
+ *    30 ms. 10 ms at once is less than a frame at 30 fps, so no frame is skipped on the way down.
+ *    With live's shrink a page opened over a busy link (50% for 6 s) still held 1.7 s five minutes
+ *    later in verify-4's replay; this way it is back to 150 ms by then.
+ *  - Past 2 s late for a second the clock re-syncs on the late frames as live does, and starts from
+ *    350 ms again: the link cannot carry the stream (the controller's business), and re-anchoring on
+ *    a 2 s buffer held the picture for 2 s each time.
+ * Starts at live's 350 ms and may come down to 150 ms: verify-4 found the report's 800/500 added half
+ * a second on a clean tunnel for nothing. The player holds up to 2 s of decoded frames with it
+ * (player.js REMOTE_QUEUED_FRAMES).
+ */
+export const REMOTE_CLOCK = { startDelayMs: 350, minDelayMs: 150, maxDelayMs: 2000, stretchLate: true, shrinkWindowMs: 60_000 }
 
 export class PlayoutClock {
   constructor(options = {}) {
@@ -72,6 +105,7 @@ export class PlayoutClock {
     this.late = 0 // late frames since the last adapt()
     this.lateTotal = 0
     this.resyncs = 0
+    this.stretches = 0 // late frames the buffer grew for (stretchLate)
     this.warmupUntil = 0
     this.steadySince = null
     this.growLeft = 0 // growth adapt() decided that the anchor has still to take up (growSlew)
@@ -89,6 +123,11 @@ export class PlayoutClock {
     this.winMin = Infinity // earliest arrival offset (now - ts / rate) in this window
     this.slewLeft = 0 // anchor correction still to apply
     this.lastAdapt = null
+    // shrinkWindowMs: the delay each frame needed (see schedule), the most of each second so far, and
+    // since when they are counted (after the warm-up: a window is only whole a window after that)
+    this.needMax = -Infinity
+    this.needs = [] // { at, need } per adapt(), the last shrinkWindowMs
+    this.needFrom = null
   }
 
   #reanchor(tsMs, now) {
@@ -130,6 +169,8 @@ export class PlayoutClock {
       // far behind: after about a second of this, start again from these frames
       this.lateSince ??= now
       if (now - this.lateSince >= o.lateForMs) {
+        // (a stretched buffer that could not hold it starts again from its start: see REMOTE_CLOCK)
+        if (o.stretchLate) this.delay = Math.min(this.delay, o.startDelayMs)
         this.#reanchor(tsMs, now)
         this.lastTs = tsMs
         this.lastNow = now
@@ -138,6 +179,24 @@ export class PlayoutClock {
       }
     } else {
       this.lateSince = null
+    }
+    // stretchLate: the picture is standing still waiting for this frame; the buffer grows by its
+    // lateness (and a margin) now, so it and the frames after it keep their cadence (REMOTE_CLOCK)
+    if (o.stretchLate && at + this.growLeft < now && now > this.warmupUntil) {
+      const s = Math.min(Math.ceil(now - at + o.stretchMarginMs), o.maxDelayMs - this.delay)
+      if (s > 0) {
+        this.delay += s
+        this.#shift(s)
+        at += s
+        this.steadySince = now
+        this.stretches++
+      }
+    }
+    // shrinkWindowMs: the delay that would have had this frame just on time. A stretch or a shrink
+    // moves the delay and the anchor together, so it stays what the link did, whatever they were
+    if (o.shrinkWindowMs && now > this.warmupUntil) {
+      this.needFrom ??= now
+      this.needMax = Math.max(this.needMax, this.delay - (at - now))
     }
     // (a frame the growth still under way will cover is not late again: it would grow twice)
     if (at + this.growLeft < now && now > this.warmupUntil) {
@@ -271,10 +330,22 @@ export class PlayoutClock {
   adapt(now) {
     const o = this.opts
     if (this.anchor === null) return
+    if (o.shrinkWindowMs && this.needFrom !== null) {
+      this.needs.push({ at: now, need: this.needMax })
+      this.needMax = -Infinity
+      while (this.needs[0].at <= now - o.shrinkWindowMs) this.needs.shift()
+    }
     let step = 0
     if (this.late > 1) {
       step = Math.min(o.growMs, o.maxDelayMs - this.delay)
       this.steadySince = now
+    } else if (o.shrinkWindowMs) {
+      // a whole window counted: down by shrinkMs towards what its latest frame needed, and the margin
+      if (this.needFrom !== null && now - this.needFrom >= o.shrinkWindowMs) {
+        const need = this.needs.reduce((a, n) => Math.max(a, n.need), -Infinity)
+        const target = Math.max(o.minDelayMs, Math.ceil(need + o.stretchMarginMs))
+        if (this.delay > target) step = -Math.min(o.shrinkMs, this.delay - target)
+      }
     } else if (now - this.steadySince > o.steadyMs) {
       step = -Math.min(o.shrinkMs, this.delay - o.minDelayMs)
       this.steadySince = now

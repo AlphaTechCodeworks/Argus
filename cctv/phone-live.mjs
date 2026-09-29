@@ -24,7 +24,7 @@ const HEADER_SIZE = 16 // sdk.mjs encodeFrame: key flag, codec, size, time (us);
 const MAX_GOP_FRAMES = 200
 const STOP_DELAY_MS = 10_000
 /** Frames looked at to learn the stream's frame rate before converting. */
-const RATE_SAMPLES = 12
+export const RATE_SAMPLES = 12
 
 /** The cap, from the environment; a bad or missing value means 16. */
 export function maxPhoneStreams(env = process.env) {
@@ -44,6 +44,19 @@ export function isPhoneRequest(headers = {}) {
 export function keepEveryFor(srcFps, target = PHONE_FPS) {
   if (!(srcFps > 0)) return 1
   return Math.max(1, Math.round(srcFps / target))
+}
+
+/**
+ * The keyframe interval, in pictures out, for a keyframe every `seconds` of the stream going out:
+ * srcFps over the frames kept (keepEvery). ffmpeg's -g counts pictures, so the 50 it was given
+ * (transcode.mjs GOP_FRAMES) was 3.3 s at 15 fps, 6.3 s at 8 and 12.5 s at 4, and a tile that lost
+ * a frame waited that long for its next picture (backpressure.mjs; stutter report 2.7). At least 1
+ * (a trickle of one picture every few seconds is all keyframes); 0 when the rate is not known, which
+ * leaves the converter's own interval.
+ */
+export function gopFor(srcFps, keepEvery = 1, seconds = 2) {
+  if (!(srcFps > 0) || !(keepEvery >= 1)) return 0
+  return Math.max(1, Math.round((seconds * srcFps) / keepEvery))
 }
 
 /** The stream's frame rate from capture times (ms), or 0 when there is not enough to say. */
@@ -73,29 +86,87 @@ export function encodeFrame(payload, isKey, codec, tsMs) {
 export class PhoneStream {
   /**
    * @param {{ source: { add: Function, remove: Function }, type: number, slot: { release: Function },
-   *   makeTranscoder?: Function, onEmpty?: Function, log?: Function, stopDelayMs?: number }} o
+   *   makeTranscoder?: Function, onEmpty?: Function, log?: Function, stopDelayMs?: number, camera?: string,
+   *   fps?: number, crf?: number, subKbps?: number, mainKbps?: number, maxWidth?: number,
+   *   bufSeconds?: number, lowDelay?: boolean, keySeconds?: number, h264Only?: boolean, learnMs?: number,
+   *   slowFps?: number }} o
+   *   camera: the camera as the log names it, the NVR and the channel from 1 ("nvr-2/5")
+   *   fps: the rate to thin to, 0 for every frame (a remote viewer's level full: H.265 converted for
+   *   a browser that cannot play it, nothing thinned); maxWidth: a main stream's, scaled down to it
+   *   bufSeconds, lowDelay: the converter's (transcode.mjs ffmpegArgs); not given, its own (4 s, low_delay)
+   *   keySeconds: a keyframe every that many seconds of the stream going out (gopFor); 0, not given:
+   *   the converter's own 50 pictures
+   *   h264Only: everyone on this stream plays H.264 only, so H.265 is converted even with nothing to
+   *   thin; not given (a phone, a level shared with browsers that play H.265): a sub-stream with nothing
+   *   to thin is sent as it is, whatever its codec
+   *   learnMs: the frame rate is decided after RATE_SAMPLES frames or this much of their capture time,
+   *   whichever comes first, and until then a sub-stream's H.264 goes out as it comes (a remote
+   *   viewer's: see #onSource); 0, not given (a phone): 12 frames, and nothing sent until then
+   *   slowFps: a source slower than this is converted picture by picture: low_delay, and each picture
+   *   ended as it goes in (a remote viewer's: a camera that trickles); 0, not given: as lowDelay says
+   *   fromNextKey: made for sockets a level change moves off a picture (adaptive-live.mjs): converted
+   *   from the camera's next keyframe as it comes, not the one held from the replay as it joined (older
+   *   than what they have on screen); startTs then says which keyframe that is, or, while the camera's
+   *   own frames it passed on as it learnt go on up to it, the last of theirs (where a socket joining
+   *   meanwhile starts). Its ffmpeg starts at that keyframe, as every conversion's at its first: started
+   *   ahead, the first picture came 0 ms (a sub, 30 fps) and 12 ms (1080p H.265 at 20) sooner, of 85
+   *   and 169 ms (the server, 29 Sep)
+   *   wholeReplay: the camera's GOP so far is replayed to it whole as it joins, whatever its size (a remote
+   *   viewer's, which learns its rate from it); not given (a phone): cut to its keyframe past 1.5 MB, as
+   *   for any viewer (gop-replay.mjs)
+   *   srcFps: the source's frame rate, when the caller knows it already: decided on it at the first
+   *   frame, nothing learnt (adaptive-live.mjs #handOver makes a stream inside the camera's keyframe's
+   *   fan-out, and with fromNextKey it converts from that very keyframe); 0, not given: learnt
+   *   onRate: told the frame rate once it is decided (adaptive-live.mjs remembers it)
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, background = false }) {
-    // fps / crf / kbps: the level this stream is thinned to (adaptive-live.mjs picks one per viewer)
-    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps })
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, background = false, camera = '?' }) {
+    // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
+    // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps / fromNextKey / srcFps: how its
+    // conversion runs and starts (a phone on the local network gives none: the converter's own, as always)
+    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs, slowFps, fromNextKey, srcFps, onRate })
+    // Every line names its camera. On 29 Sep they named none, and the 15-24 conversions a remote
+    // viewer's level change started at once could only be matched to cameras by their timing
+    // (stutter report 2.10).
+    this.who = `[phone-live] ${camera}${background ? ' (stand-in)' : ''}:`
     this.clients = new Set()
     this.gop = []
     this.samples = []
     this.held = null // frames since the last keyframe, while the frame rate is being learned
+    this.heldLive = false // ... that keyframe came as the camera sent it, not in the replay as it joined
+    this.ownTs = null // capture time of the last of the camera's own frames it sent on as they came (learnMs)
+    this.awaitKey = false // converting from the camera's next keyframe (fromNextKey)
+    // capture time of the keyframe its first picture out is (or will be, once converted): a socket a
+    // level change moves here switches at it (adaptive-live.mjs)
+    this.startTs = null
     this.xcode = null
+    this.eachPicture = false // each picture ended as it goes in (slowFps)
     this.passthrough = false
     this.closed = false
     this.stopTimer = null
     // what the normal stream sees: one more viewer, which never falls behind
     // (background: only a stand-in, live-attach.mjs: the NVR worker joins a main that plays for it, never starts one)
     this.tap = { OPEN: 1, readyState: 1, bufferedAmount: 0, background, send: (buf) => this.#onSource(buf) }
+    // A main's GOP so far over 1.5 MB is replayed as its keyframe alone, the rest from the next keyframe
+    // on (gop-replay.mjs), and a remote viewer's stream learnt its rate from those two keyframes, 2 s
+    // apart: 0.5 fps, a 25-30 fps main converted one picture at a time, each a keyframe, under a level's
+    // cap (the review of ef43e60). This replay never goes over the network: whole.
+    if (wholeReplay) this.tap.replayMaxBytes = Infinity
+    // (what the normal stream replays as the tap joins is learnt from, never sent on as it comes: #onSource)
+    this.joining = true
     source.add(this.tap)
+    this.joining = false
   }
 
-  add(ws) {
+  /**
+   * @param {{ replay?: boolean }} [o] replay false: nothing is replayed, and the socket starts where its
+   *   waitForKey says (a socket adaptive-live.mjs moves here at this stream's keyframe, from inside its
+   *   fan-out: it takes that keyframe as it goes out, once; as stream-hub.mjs HubStream.add)
+   */
+  add(ws, { replay = true } = {}) {
     clearTimeout(this.stopTimer)
     this.stopTimer = null
     this.clients.add(ws)
+    if (!replay) return
     if (this.gop.length > 0) replayGop(this.gop, ws)
     else ws.waitForKey = true
   }
@@ -114,45 +185,130 @@ export class PhoneStream {
     if (this.closed || !(buf instanceof Uint8Array) || buf.length <= HEADER_SIZE) return
     if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf.buffer, buf.byteOffset, buf.length)
     const f = parseFrame(buf)
-    if (this.passthrough) return this.#fanOut(buf, f.isKey)
+    if (this.passthrough) {
+      if (f.isKey && !this.joining) this.startTs ??= f.ts
+      return this.#fanOut(buf, f.isKey)
+    }
     if (!this.xcode) {
       // Learn the frame rate from the frames at hand, keeping them from the last keyframe on: the
       // normal stream replays its current GOP to a new viewer, so this is usually over at once and
       // the conversion starts from that keyframe instead of waiting seconds for the next one.
-      if (f.isKey) this.held = []
+      if (f.isKey) {
+        this.held = []
+        this.heldLive = !this.joining
+      }
       if (this.held) this.held.push(f)
-      if (this.samples.length < RATE_SAMPLES) {
+      // A remote viewer's stream (learnMs) decides after a second of capture time when that comes
+      // before 12 frames: a camera trickling at 0.8 fps was 15 s learning its 12, and nothing went out
+      // meanwhile. On 29 Sep a step down left two trickling tiles with nothing new for 14 s (04:08:08.8
+      // -> 04:08:22.9), and a full-size main showed nothing from its conversion for 13 s (04:03:55.9 ->
+      // 04:04:09.2) (stutter report 2.9). At 12 fps and up the 12 frames still come first.
+      // (a rate given, srcFps: nothing to learn)
+      const known = this.srcFps > 0
+      const timed = this.learnMs > 0 && this.samples.length > 0 && f.ts - this.samples[0] >= this.learnMs
+      if (!known && this.samples.length < RATE_SAMPLES && !timed) {
         this.samples.push(f.ts)
+        // ...and meanwhile a sub-stream's H.264 goes out as it comes, as the camera's own stream would:
+        // one at or under the level's rate (every trickle) is sent as it is once decided anyway. Not a
+        // main, which a level always scales down (nvr-2/10's keyframe alone was 634 KB on 29 Sep: what
+        // the level is there to spare the link), nor H.265, which the browser may not play. Nor what
+        // the normal stream replays as this stream joins: a socket moved here by a level change was
+        // shown it already, and a step down moved 11 pass-through tiles at once (04:18:05) on a link
+        // that was backed up -- sent again, that is up to a sub-stream's GOP (99-195 KB) per tile.
+        if (this.learnMs > 0 && !this.joining && this.type !== 0 && f.codec === CODEC_H264) this.#own(buf, f)
         return
       }
-      const fps = frameRate(this.samples)
-      const keepEvery = keepEveryFor(fps, this.fps)
-      if (keepEvery === 1 && this.type !== 0) {
+      // the 12 frames; or those of the first second, with this one that ends it
+      const fps = known ? this.srcFps : frameRate(this.samples.length < RATE_SAMPLES ? [...this.samples, f.ts] : this.samples)
+      this.onRate(fps)
+      const keepEvery = this.fps > 0 ? keepEveryFor(fps, this.fps) : 1
+      if (keepEvery === 1 && this.type !== 0 && !(this.h264Only && f.codec === CODEC_H265)) {
         this.held = null
         // already 15 fps or less and small: converting would only cost CPU and picture
         this.passthrough = true
         this.slot.release() // costs nothing: the slot is for streams that cost a core
-        this.log(`[phone-live] a sub stream at ${fps.toFixed(1)} fps: sent as it is`)
+        this.log(`${this.who} a sub stream at ${fps.toFixed(1)} fps: sent as it is`)
+        if (f.isKey && !this.joining) this.startTs ??= f.ts
         return this.#fanOut(buf, f.isKey)
       }
+      const held = this.held ?? []
+      this.held = null
+      // Made for sockets a level change moves off a picture (fromNextKey): the keyframe held from the
+      // replay as it joined is older than what they have on screen, by up to a keyframe interval, and so
+      // is one it has already sent on as it came while learning. Converted from there, their picture
+      // stepped back (1.4 s in the stutter investigation's replay) and ffmpeg first caught up through
+      // seconds they had seen: at a step down, 14-20 such catch-ups at once (29 Sep 04:08:08; stutter
+      // report 2.5, verify-5). From the camera's next keyframe instead.
+      const next = this.fromNextKey && (!this.heldLive || (this.ownTs !== null && held[0] && held[0].ts <= this.ownTs))
+      // The camera's own frames sent while learning are not for anyone joining from now on: a socket
+      // that joins waits for the conversion's first keyframe, as it always did. Unless they go on up to
+      // the keyframe it converts from (next): then a socket that joins meanwhile is where startTs says,
+      // their last keyframe, and it was sent the deltas alone, nothing it could show for a keyframe
+      // interval (keyframes under 1 s apart, or a trickle; the review of ef43e60).
+      if (!next) this.gop = []
+      // A slow source is converted picture by picture. ffmpeg's parser holds a picture until the next
+      // one begins, and the second decoder thread (lowDelay false) one more: measured through the real
+      // ffmpeg on the server (29 Sep), an H.265 main at 0.8 fps came out 2.7 s after each frame, its
+      // first picture 3.9 s after its first keyframe. With low_delay and an end to each picture as it
+      // goes in (Transcoder.endPicture): 0.2 s, and 1.5 s. One decoder thread is plenty at that rate:
+      // it converts 4K H.265 at 24 pictures a second here (transcode.mjs DECODE_THREADS).
+      this.eachPicture = this.slowFps > 0 && fps > 0 && fps < this.slowFps
       this.xcode = this.makeTranscoder({
         inCodec: f.codec === CODEC_H265 ? CODEC_H265 : CODEC_H264,
         keepEvery,
-        maxWidth: this.type === 0 ? PHONE_MAX_WIDTH : 0,
+        maxWidth: this.type === 0 ? this.maxWidth : 0,
         // a phone's small screen: lighter than the original, not heavier (crf 26 came out bigger)
         crf: this.crf,
         maxKbps: this.type === 0 ? this.mainKbps : this.subKbps,
+        bufSeconds: this.bufSeconds,
+        lowDelay: this.eachPicture || this.lowDelay,
+        gop: this.keySeconds > 0 ? gopFor(fps, keepEvery, this.keySeconds) : 0,
         onFrame: (ts, isKey, out) => this.#onConverted(ts, isKey, out),
-        onFail: (e) => this.log(`[phone-live] conversion failed: ${e.message}`),
-        log: this.log
+        onFail: (e) => this.log(`${this.who} conversion failed: ${e.message}`),
+        // its own lines ("[transcode] conversion ended after N frames", the hardware encoder given
+        // up) name the camera as well: a level change ends 15-24 conversions at once
+        log: (line) => this.log(`${this.who} ${line}`)
       })
-      this.log(`[phone-live] converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps to about ${this.fps}: keeping 1 in ${keepEvery}`)
-      const held = this.held ?? []
-      this.held = null
-      for (const h of held) this.xcode.push(h.ts, h.isKey, h.payload)
+      const what = this.fps > 0 ? `to about ${this.fps}: keeping 1 in ${keepEvery}` : 'to H.264, every frame kept'
+      this.log(`${this.who} converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps ${what}${this.eachPicture ? ', each picture out as it comes' : ''}`)
+      if (next) {
+        this.awaitKey = true
+        return this.#awaiting(buf, f)
+      }
+      if (held[0]?.isKey) this.startTs ??= held[0].ts
+      for (const h of held) this.#push(h)
       if (held.at(-1) === f) return
     }
+    if (this.awaitKey) {
+      if (!f.isKey || this.joining) return this.#awaiting(buf, f)
+      this.awaitKey = false
+      this.startTs ??= f.ts
+    }
+    this.#push(f)
+  }
+
+  /**
+   * A frame before the camera's next keyframe, the conversion waiting for it (fromNextKey): not
+   * converted. The camera's own frames it was sending on as they came while it learnt go on up to it,
+   * so its sockets keep a moving picture until the converted one takes over.
+   */
+  #awaiting(buf, f) {
+    if (this.ownTs !== null && !this.joining) this.#own(buf, f)
+  }
+
+  /**
+   * One of the camera's own frames sent on as it came (learnMs; see #onSource). A socket joining now
+   * starts at the last of their keyframes (the GOP it is replayed), and startTs says so.
+   */
+  #own(buf, f) {
+    if (f.isKey) this.startTs = f.ts
+    this.ownTs = f.ts
+    this.#fanOut(buf, f.isKey)
+  }
+
+  #push(f) {
     this.xcode.push(f.ts, f.isKey, f.payload)
+    if (this.eachPicture) this.xcode.endPicture?.()
   }
 
   #onConverted(ts, isKey, out) {
@@ -191,14 +347,14 @@ export class PhoneLive {
 
   /**
    * Attaches a phone's socket to the thinned stream, or returns false when the cap is reached (the
-   * caller then attaches it to the normal stream).
+   * caller then attaches it to the normal stream). camera: the camera as the log names it ("nvr-2/5").
    */
-  attach(key, source, type, ws, { background = false } = {}) {
+  attach(key, source, type, ws, { background = false, camera } = {}) {
     let s = this.streams.get(key)
     if (!s || s.closed) {
       const slot = this.pool.acquire()
       if (!slot) return false
-      s = new PhoneStream({ source, type, slot, background, makeTranscoder: this.makeTranscoder, log: this.log, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source, type, slot, background, camera, makeTranscoder: this.makeTranscoder, log: this.log, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
     }
     s.add(ws)

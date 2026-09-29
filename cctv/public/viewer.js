@@ -1,14 +1,17 @@
 // Camera grid: each tile streams one camera over WebSocket into a VideoPlayer.
-import { isPhone, maxLiveFps } from './device.js'
+import { isLocalHost, isPhone, maxLiveFps } from './device.js'
 import { attachZoom } from './pinch-zoom.js'
 import { diffCameras, shownCameras, visibleCameras } from './grid-diff.js'
 import { enableGridDrag } from './grid-drag.js'
+import { activeTrace, downloadTrace, startTrace, stopTrace } from './frame-trace.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
 import { ImagePanel } from './image-panel.js'
 import { LinesPanel } from './lines-panel.js'
 import { muxState, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
+import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
+import { REMOTE_CLOCK } from './playout.js'
 // ?pacing=off draws frames as soon as they decode (for before/after comparison)
 const PACING = new URLSearchParams(location.search).get('pacing') !== 'off'
 // Every tile's stream on one connection (live-mux.js): the browser opens WebSockets one at a time,
@@ -32,7 +35,15 @@ const resetBtn = document.getElementById('resetOrder')
 const orderNoteEl = document.getElementById('orderNote')
 // "Smooth": a bigger playout buffer absorbs uneven delivery (more delay, steadier motion)
 const SMOOTH_CLOCK = { startDelayMs: 400, minDelayMs: 300, maxDelayMs: 1200 }
-const clockOptions = () => (smoothBox.checked ? SMOOTH_CLOCK : undefined)
+// A page opened through the Cloudflare tunnel or the tailnet, not on a local address (device.js): its
+// one socket stalls now and then for longer than live's buffer holds, and each stall froze every tile
+// and then jumped ahead. Its tiles get the buffer that grows with the stalls, up to 2 s, and room for
+// that many decoded frames (playout.js REMOTE_CLOCK, player.js REMOTE_QUEUED_FRAMES; stutter report
+// 2.4, 29 Sep); with Smooth it starts and stays at least as big as Smooth's. A page on the local
+// network keeps live's own clock, or Smooth, exactly as before.
+const REMOTE_PAGE = !isLocalHost()
+const REMOTE_SMOOTH_CLOCK = { ...REMOTE_CLOCK, startDelayMs: SMOOTH_CLOCK.startDelayMs, minDelayMs: SMOOTH_CLOCK.minDelayMs }
+const clockOptions = () => (REMOTE_PAGE ? (smoothBox.checked ? REMOTE_SMOOTH_CLOCK : REMOTE_CLOCK) : smoothBox.checked ? SMOOTH_CLOCK : undefined)
 // cameras whose main stream this browser could not play: full screen stays on the sub stream, for a
 // while. Not for the whole session any more: the server now converts H.265 for phones and remote
 // viewers, and a phone that once failed (before it did) was kept on the blurry sub-stream for good.
@@ -55,7 +66,9 @@ let overlayZoom = null // the full-size view's zoom (pinch-zoom.js), while it is
 let single = null // key (nvr/ch) of the camera shown full-size, or null for the grid
 const camKey = (cam) => `${cam.nvr}/${cam.ch}`
 let tiles = []
-let showStats = false
+// each tile's counters (press D); ?stats=1 in the address shows them from the start, for a phone,
+// which has no D key
+let showStats = new URLSearchParams(location.search).get('stats') === '1'
 let isAdmin = false
 
 // picture settings of the camera shown full-size (admins); measures the stream on screen
@@ -413,6 +426,10 @@ function osdForTile(cam) {
 const tileOptions = (cam) => ({
   pacing: PACING,
   clock: clockOptions(),
+  maxQueuedFrames: REMOTE_PAGE ? REMOTE_QUEUED_FRAMES : undefined,
+  // a level change (or a reconnect) that sends a tile an older picture than it showed: held, not shown
+  // (player.js REMOTE_NO_REWIND_MS; stutter report 2.5). A local page has no levels, and stays as it was
+  noRewindMs: REMOTE_PAGE ? REMOTE_NO_REWIND_MS : undefined,
   statsVisible: () => showStats,
   onDisconnect: () => {
     checkSession()
@@ -462,7 +479,9 @@ function nativeFullButton(tile) {
     if (video.dataset.from !== cv.dataset.fsid) {
       cv.dataset.fsid ||= String(Math.random())
       video.dataset.from = cv.dataset.fsid
-      video.srcObject = cv.captureStream(15)
+      // no frame rate: each picture the tile paints becomes the video's next frame. At 15 the video
+      // sampled the canvas every 67 ms, and a 20 fps camera judders again (stutter report 2.8)
+      video.srcObject = cv.captureStream()
       video.play().catch(() => {})
     }
     return true
@@ -1004,8 +1023,61 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'd' || e.key === 'D') {
     showStats = !showStats
     grid.classList.toggle('show-stats', showStats)
+    showTraceBtn()
   }
 })
+
+// The frame trace (frame-trace.js), behind the D overlay: for 2 minutes, every frame of every tile
+// as it arrives, then a JSON file to download, which test/live-replay.mjs replays through the player
+// (stutter report, 2026-09-29, Task 0). Its button shows only with the overlay, or while a trace
+// runs; nothing is recorded until it is pressed.
+const traceBtn = document.createElement('button')
+traceBtn.type = 'button'
+traceBtn.title = 'Records when each frame of every tile arrives, for 2 minutes, then saves it as a file (for diagnosing stutter)'
+document.querySelector('header .controls')?.append(traceBtn)
+let traceTimer = null
+let traceSaved = '' // what the last trace was saved as
+function showTraceBtn() {
+  const t = activeTrace()
+  traceBtn.hidden = !showStats && !t
+  traceBtn.textContent = t
+    ? `● Trace: ${Math.ceil((t.durationMs - t.elapsedMs) / 1000)} s left, ${t.frames} frames (stop)`
+    : traceSaved || 'Record trace (2 min)'
+}
+traceBtn.addEventListener('click', () => {
+  if (activeTrace()) {
+    stopTrace() // saved at once, as at the end
+    return
+  }
+  traceSaved = ''
+  startTrace({
+    // what the page was, to read the trace by
+    page: {
+      host: location.host,
+      userAgent: navigator.userAgent,
+      layout: layoutSelect.value,
+      gridPage: page + 1,
+      single,
+      smooth: smoothBox.checked,
+      remote: REMOTE_PAGE, // (the tiles' playout clock: REMOTE_CLOCK, else live's own)
+      pacing: PACING,
+      maxFps: maxLiveFps(),
+      mux: !liveMuxOff,
+      screen: `${screen.width}x${screen.height}@${window.devicePixelRatio}`,
+      tiles: tiles.length
+    },
+    onDone: (trace) => {
+      clearInterval(traceTimer)
+      traceTimer = null
+      const { name, bytes } = downloadTrace(trace)
+      traceSaved = `Saved ${name} (${(bytes / 1e6).toFixed(1)} MB): record again`
+      showTraceBtn()
+    }
+  })
+  traceTimer = setInterval(showTraceBtn, 1000)
+  showTraceBtn()
+})
+showTraceBtn()
 
 // no video while the tab is hidden: saves CPU, GPU and NVR bandwidth
 let hiddenTimer
