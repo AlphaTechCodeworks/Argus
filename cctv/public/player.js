@@ -22,6 +22,18 @@ import { pictureSize, videoInfo } from './sps.js'
 const MAX_QUEUED_FRAMES = 45
 const MAX_PAUSED_FRAMES = 90 // frames that may arrive after a pause request reaches the NVR
 const MAX_DECODE_QUEUE = 12
+// Live (arrivalClock): a queue past MAX_DECODE_QUEUE is a decoder that cannot keep up only when the
+// oldest frame in it has waited there this long past its display time. Chrome's hardware decoder hands
+// the page a few pictures at a time (6 at 2560x1440 on the viewing PC) and decodes nothing more until
+// one is shown, so the frames the playout buffer holds beyond that wait in its queue, and after a hiccup
+// so does the burst of frames held back: on time, just waiting their turn. Dropping them all to the next
+// keyframe froze the picture until it came, 2 s on a camera and more on a converted stream (stutter
+// report 2.2, 29 Sep).
+const BEHIND_MS = 250
+const HARD_DECODE_QUEUE = 150 // ... and at most this many wait whatever the clock says (memory)
+// Live: a frame is timed as if it came this much later, about what decoding it takes, so one that comes
+// just before its display time, too late to be decoded for it, counts as late (and the buffer grows)
+const ARRIVAL_MARGIN_MS = 12
 // while a preroll is being skipped (skipUntil) its burst may wait to be decoded, up to this many
 // frames (about a keyframe interval of 12 s at 25 fps), instead of MAX_DECODE_QUEUE and MAX_HELD
 const MAX_PREROLL_FRAMES = 300
@@ -117,9 +129,13 @@ function track(player) {
 export class VideoPlayer {
   /**
    * @param {HTMLCanvasElement} canvas
-   * @param {{ pacing?: boolean, clock?: object, onUnsupported?: (codecId: number) => void, onFrame?: (tsMs: number) => void, onPoster?: (tsMs: number) => void }} [options]
+   * @param {{ pacing?: boolean, clock?: object, arrivalClock?: boolean, onUnsupported?: (codecId: number) => void, onFrame?: (tsMs: number) => void, onPoster?: (tsMs: number) => void }} [options]
    *   pacing: false draws frames as soon as they decode (for comparison only)
    *   clock: PlayoutClock options (playback uses a larger buffer than live)
+   *   arrivalClock: live -- each frame is timed on the playout clock as it arrives rather than once
+   *     decoded (push), and a long decode queue drops to the next keyframe only when it is really
+   *     behind (#decode). Playback and the wall keep the clock as it was: with it, playback held a
+   *     frame 67 ms at a 4x -> 1x change (verify-2, 29 Sep)
    *   onFrame: called with the capture time of each frame as it is shown
    *   onPoster: called when a preroll's keyframe is drawn as a poster (skipUntil; onFrame is not)
    *   maxFps: draw at most this many frames a second (a phone gains nothing above 15); the frames
@@ -137,6 +153,8 @@ export class VideoPlayer {
     this.minDrawGapMs = options.maxFps > 0 ? 1000 / options.maxFps - 4 : 0 // -4: one display refresh of slack
     this.lastDrawAt = 0
     this.clock = new PlayoutClock(options.clock)
+    this.arrivalClock = options.arrivalClock === true && this.pacing // (without pacing there is no clock)
+    this.fed = [] // arrivalClock: { ts (µs), at } of each frame handed to the decoder and not back yet, oldest first
     this.paused = false
     this.decoder = null
     this.config = null // the config the decoder was set up with (seekReset sets it up again with it)
@@ -187,6 +205,15 @@ export class VideoPlayer {
       } catch (e) {
         console.warn('onChunk', e)
       }
+    }
+    // Live: each frame is timed as it arrives. Timed once decoded, a frame that had waited for the
+    // decoder to get a picture back looked late, and to the drift slew like a camera clock running fast:
+    // on a perfectly even local stream (2560x1440 at 30 fps, a decoder holding 6 pictures) the picture
+    // moved 10 ms a second later, the frames piled up in the decoder with it, and every 20-60 s the
+    // player dropped to the next keyframe (verify-2, 29 Sep). These are the frames #onDecoded would time:
+    // not while paused, not stills, not a preroll being skipped.
+    if (this.arrivalClock && !this.paused && !this.stills && (this.skipTs === null || chunk.timestampUs / 1000 >= this.skipTs)) {
+      this.clock.schedule(chunk.timestampUs / 1000, performance.now() + ARRIVAL_MARGIN_MS)
     }
     // each frame as it arrives, before it waits for the decoder: after a playback slow-down the clock
     // keeps the frames still coming at the old speed from piling up there (PlayoutClock.arrived; it
@@ -273,12 +300,31 @@ export class VideoPlayer {
     // decoder can't keep up: skip to the next keyframe rather than fall behind (frames held
     // during set-up are a known, bounded backlog; so is a preroll being skipped, sent at once)
     const limit = this.skipTs !== null ? MAX_PREROLL_FRAMES : MAX_DECODE_QUEUE + (backlog ? MAX_HELD : 0)
-    if (this.decoder.decodeQueueSize > limit && !isKey) {
+    if (this.decoder.decodeQueueSize > limit && !isKey && this.#behind()) {
       this.needKey = true
       this.stats.dropped++
       return
     }
+    if (this.arrivalClock) this.fed.push({ ts: timestampUs, at: performance.now() })
     this.decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: timestampUs, data }))
+  }
+
+  /**
+   * Whether a decoder with a long queue is really behind. Timed once decoded (playback, the wall), the
+   * queue's length is all there is to go on. Live has each frame's display time from its arrival: behind
+   * is the oldest frame still in the decoder more than BEHIND_MS past it -- counted from when it was
+   * handed over if that was later, since a frame that came late (the burst after a hiccup longer than
+   * the buffer, a start-up replay older than the buffer) was not kept waiting by the decoder. Counted
+   * from the display time alone (verify-2's rule), a 1.0 s hiccup against the 350 ms buffer still
+   * dropped to the keyframe, and so did a tile opening 1 s after one, still for 1.2 s where it had been
+   * 0.5 s; this way the late frames are decoded, passed over by present(), and the picture carries on
+   * (the replay, 29 Sep: a 1.2 s stall every 20 s 90.7% of frames shown -> 97.3%, never worse elsewhere).
+   */
+  #behind() {
+    if (!this.arrivalClock || this.decoder.decodeQueueSize > HARD_DECODE_QUEUE) return true
+    const oldest = this.fed[0]
+    if (!oldest || this.clock.anchor === null) return false
+    return Math.max(this.clock.presentAt(oldest.ts / 1000), oldest.at) < performance.now() - BEHIND_MS
   }
 
   async #configure(codecId, data, size) {
@@ -314,6 +360,9 @@ export class VideoPlayer {
       frame.close()
       return
     }
+    // out of the decoder: this frame, and any fed before it that never came back (no B-frames: the
+    // decoder hands frames back in the order it took them)
+    while (this.fed.length && this.fed[0].ts <= frame.timestamp) this.fed.shift()
     // position in the keyframe interval (the decoder keeps timestamps; there are no B-frames)
     if (this.keyTsSet.has(frame.timestamp)) {
       this.sinceKey = 0
@@ -350,7 +399,7 @@ export class VideoPlayer {
       this.onFrame?.(ts)
       return
     }
-    if (!this.paused) this.clock.schedule(ts, performance.now())
+    if (!this.paused && !this.arrivalClock) this.clock.schedule(ts, performance.now()) // (live: timed as it arrived, push)
     // The first picture after a (re)start is painted the moment it is decoded rather than after
     // the playout delay (350 ms, more with Smooth): the camera appears at once, and the frames
     // after it still play out through the buffer that evens out the NVRs' bursts. (A camera opened
@@ -712,6 +761,7 @@ export class VideoPlayer {
     this.skipTs = null
     this.posterShown = false
     this.seekSeq++
+    this.fed = [] // (the decoder's reset below discards them)
     if (this.gop) this.#gopEnd('stream restarted')
     // the position in the keyframe interval starts again at the next keyframe
     this.sinceKey = null
@@ -764,6 +814,7 @@ export class VideoPlayer {
   #closeDecoder() {
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.decoder = null
+    this.fed = [] // (a closed decoder hands nothing back)
     this.codecId = null
     this.sinceKey = null
     this.lastKeyTs = null
