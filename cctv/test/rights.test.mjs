@@ -788,6 +788,29 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   quiet(() => R.loadRights())
   check('... and the next try (the file changed): still Live HD for nobody, upgraded and audited', disk().version === 2 && R.rightsOf('jo').grants['live-hd'].length === 0 && R.rightsOf('sam').grants['live-hd'].length === 0 && systemRows().length === rows + 1, systemRows().at(-1)?.detail)
   rmSync(UNREADABLE, { recursive: true, force: true })
+
+  // more than 8 names: the audit row (cut at 500 characters) names 8 "and N more"; the console, which has no
+  // cap, names every account, so whoever re-grants Live HD has the whole list
+  const many = Array.from({ length: 11 }, (_, i) => `v${String(i + 1).padStart(2, '0')}`)
+  auth.saveUsers({ boss: { hash: 'x', role: 'admin' }, ...Object.fromEntries(many.map((n) => [n, { hash: 'x', role: 'viewer' }])) })
+  const manyV1 = J({ version: 1, users: Object.fromEntries(many.map((n) => [n, { grants: { live: ['n1'], 'playback-nvr': ['n1'] } }])) })
+  const all = many.join(', ')
+  const first8 = `${many.slice(0, 8).join(', ')} and 3 more`
+  writeFileSync(R.RIGHTS_SHADOW, 'not json')
+  writeFileSync(R.RIGHTS_FILE, manyV1)
+  said.length = 0
+  quiet(() => R.loadRights())
+  let d = systemRows().at(-1)?.detail ?? ''
+  check('11 accounts, shadow unusable: the audit row names 8 of them "and 3 more"', d.includes(`11 account(s) with Live have none now (${first8})`), d)
+  check('... the console names all 11 (whom to re-grant Live HD), in every clause', said.some((l) => l.includes(`11 account(s) with Live have none now (${all})`) && l.includes(`11 account(s) (${all}) have Playback SD`)), said.join(' | '))
+  rmSync(UNREADABLE, { recursive: true, force: true })
+  rmSync(R.RIGHTS_SHADOW, { force: true })
+  writeFileSync(R.RIGHTS_FILE, manyV1)
+  said.length = 0
+  quiet(() => R.loadRights())
+  d = systemRows().at(-1)?.detail ?? ''
+  check('11 accounts, no shadow: the audit row names 8 "and 3 more", the console all 11', d.includes(`Live HD given wherever Live was granted for 11 account(s) (${first8})`) && said.some((l) => l.includes(`Live HD given wherever Live was granted for 11 account(s) (${all})`)), `${d} || ${said.join(' | ')}`)
+  rmSync(R.RIGHTS_SHADOW, { force: true })
 }
 
 // ---- the shadow never holds Live HD that rights.json has not got (written first, cut to old and new) --------

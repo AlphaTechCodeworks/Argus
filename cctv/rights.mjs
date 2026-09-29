@@ -322,24 +322,30 @@ function upgradeToV2(users, text, from, raw = {}, said = from) {
     return store
   }
   // rights.json is rewritten: from here nothing may throw, or the audit row of what was done is lost
-  let detail
-  try {
+  /** What was done, naming accounts with `names` (the audit row's cut list, or every name). */
+  const summary = (names) => {
     const lines = []
     // first, so the audit row's 500-character cap never cuts it; the names last, for the same reason
-    if (bad !== null) lines.push(`rights.v2.json could not be used (${String(bad).slice(0, 80)}) and a copy of it is kept as rights.v2.json.unreadable, so Live HD was given to nobody; re-grant it in the access editor (Users & audit, Edit access) to whoever should have it: ${withheld.length ? `${withheld.length} account(s) with Live have none now (${someNames(withheld)})` : 'no account but an admin has Live'}`)
-    if (kept.length) lines.push(`Live HD kept as the file had it (cut to Live) for ${kept.length} account(s) (${someNames(kept)})`)
-    if (copied.length) lines.push(`Live HD given wherever Live was granted for ${copied.length} account(s) (${someNames(copied)})`)
-    if (restored.length) lines.push(`Live HD restored from rights.v2.json (written ${new Date(shadow.writtenAt).toISOString()}) for ${restored.length} account(s) (${someNames(restored)})`)
+    if (bad !== null) lines.push(`rights.v2.json could not be used (${String(bad).slice(0, 80)}) and a copy of it is kept as rights.v2.json.unreadable, so Live HD was given to nobody; re-grant it in the access editor (Users & audit, Edit access) to whoever should have it: ${withheld.length ? `${withheld.length} account(s) with Live have none now (${names(withheld)})` : 'no account but an admin has Live'}`)
+    if (kept.length) lines.push(`Live HD kept as the file had it (cut to Live) for ${kept.length} account(s) (${names(kept)})`)
+    if (copied.length) lines.push(`Live HD given wherever Live was granted for ${copied.length} account(s) (${names(copied)})`)
+    if (restored.length) lines.push(`Live HD restored from rights.v2.json (written ${new Date(shadow.writtenAt).toISOString()}) for ${restored.length} account(s) (${names(restored)})`)
     if (!lines.length) lines.push('no account had rights stored')
-    if (sdOnly.length) lines.push(`${sdOnly.length} account(s) (${someNames(sdOnly)}) have Playback SD on cameras without Live HD or Playback HD: there the NVR's recordings and event pictures are now SD only`)
+    if (sdOnly.length) lines.push(`${sdOnly.length} account(s) (${names(sdOnly)}) have Playback SD on cameras without Live HD or Playback HD: there the NVR's recordings and event pictures are now SD only`)
     // (a missing version is an ordinary version 1 file; a string or a fraction is worth saying)
     const version = said === undefined || said === from ? '' : ` (the file said version ${String(JSON.stringify(said)).slice(0, 20)})`
-    detail = `rights.json upgraded from version ${from}${version} to ${VERSION}: ${lines.join('; ')}; the stored playback, export and admin rights are unchanged; the old file is kept as rights.v1.json`
+    return `rights.json upgraded from version ${from}${version} to ${VERSION}: ${lines.join('; ')}; the stored playback, export and admin rights are unchanged; the old file is kept as rights.v1.json`
+  }
+  let detail
+  let line // the console's: it has no 500-character cap, so every account is named (whom to re-grant Live HD)
+  try {
+    detail = summary(someNames)
+    line = summary((list) => list.join(', '))
   } catch (e) {
-    detail = `rights.json upgraded from version ${from} to ${VERSION} (its summary failed: ${e.message}); the old file is kept as rights.v1.json`
+    detail = line = `rights.json upgraded from version ${from} to ${VERSION} (its summary failed: ${e.message}); the old file is kept as rights.v1.json`
   }
   try {
-    ;(bad !== null ? console.warn : console.log)(`[rights] ${detail}`)
+    ;(bad !== null ? console.warn : console.log)(`[rights] ${line}`)
   } catch {}
   audit(DATA_DIR, { user: 'system', action: 'rights-change', target: '*', detail }) // (never throws)
   return store
