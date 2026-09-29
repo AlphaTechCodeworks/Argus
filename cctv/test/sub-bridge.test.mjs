@@ -244,8 +244,8 @@ const socket = () => {
   // Each keyframe only while the viewer's page keeps up: less than RESUME_BELOW queued on its socket --
   // for a channel of a /live-mux page, the whole page's queue, which every tile waits behind. Keyframes
   // alone are still about half of these mains (nvr-2/10: 634 KB of a 1279 KB GOP every 2 s, 2.6 Mbit/s),
-  // and under the stand-in's own cap (4 MB of its own) three of them backed the 03:55 page up 4.9 MB
-  // over 5 Mbit/s, its tiles 7.2 s behind (a replay of it, as in live-mux-server.test.mjs).
+  // and under the stand-in's own cap (4 MB of its own) three of them backed the 03:55 page up 5.06 MB
+  // over 5 Mbit/s, its tiles 7.4 s behind (live-mux-server.test.mjs replays it).
   const sub = new FakeStream()
   const main = new FakeStream()
   const ws = socket()

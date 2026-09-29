@@ -24,7 +24,7 @@
 // replayed at once by the worker -- for 9-27 s into a 3.5-6.5 Mbit/s tunnel, and no level thins a
 // stand-in (stutter report 2.6, verify-6). Keyframes alone are still about half of such a main (634
 // KB of /10's 1279 KB GOP every 2 s: 2.6 Mbit/s): under the gate's cap (4 MB of the stand-in's own)
-// they still backed that page up 4.9 MB, its tiles 7.2 s behind, in a replay of it (t8 scratch). A
+// they still backed that page up 5.06 MB, its tiles 7.4 s behind (live-mux-server.test.mjs). A
 // keyframe that waits for the page's queue takes only the room the page leaves: that page replayed
 // over 5 Mbit/s (live-mux-server.test.mjs), 0.98 MB queued at most and no tile's frame 1.3 s behind,
 // against 4.58 MB and 7 s with every frame. A held tile stays a picture that moves on at every

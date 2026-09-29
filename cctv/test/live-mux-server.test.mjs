@@ -990,14 +990,15 @@ const fanOut = (c, buf, isKey, type, now) => {
    * camera's own stream (the level controller is adaptive-live.test's).
    * @param {string} addr the viewer's address: 127.0.0.1 through the tunnel, else the local network
    * @param {{ subs: { ch: number, cam: object }[], mains: { [ch: number]: [number, number, number, number] },
-   *   held?: number[], durMs: number }} page mains: a stand-in's main as [Mbit/s, keyframe KB, GOP KB,
-   *   running since (ms, before the page opened: where in its GOP it is)], 20 fps; held: sub-streams
-   *   held at the NVR's limit
+   *   held?: number[], durMs: number, keysOnly?: boolean }} page mains: a stand-in's main as [Mbit/s,
+   *   keyframe KB, GOP KB, running since (ms, before the page opened: where in its GOP it is)], 20 fps;
+   *   held: sub-streams held at the NVR's limit; keysOnly: the mains' keyframes alone reach the stand-ins
+   *   (with a local address: keyframes only, under nothing but the stand-in's own gate)
    * @returns {{ maxQueue: number, subWaitMs: number, standIn: number, pictures: Map<number, { at: number, key: boolean }[]>, logs: string[] }}
    *   maxQueue: the most the page's socket had queued; subWaitMs: the longest a sub-stream's frame
    *   waited on it; standIn: the stand-ins' bytes; pictures: per channel, when its stand-in's frames went
    */
-  const playPage = (addr, { subs: tiles, mains: measured, held = [], durMs }) => {
+  const playPage = (addr, { subs: tiles, mains: measured, held = [], durMs, keysOnly = false }) => {
     const hub = new StreamHub('nvr-2', () => {}, { stopDelayMs: { 0: 5, 1: 5 } })
     const nvr = { id: 'nvr-2', liveOnline: true, getStream: (ch, type) => hub.getStream(ch, type), subHeld: (ch) => held.includes(ch), subFull: () => false }
     const adaptiveLive = { attach(key, { ws, source }) { source.add(ws); ws.on('close', () => source.remove(ws)) } }
@@ -1017,8 +1018,9 @@ const fanOut = (c, buf, isKey, type, now) => {
         if (s.type === 0 && !s.stream.wanted) continue
         if (s.type === 0 && !s.replayed) {
           s.replayed = true
-          for (let m = s.lastKey; m < n; m++) s.stream.onFrame(tagged(m === s.lastKey, true, m === s.lastKey ? s.cam.key : s.cam.delta), m === s.lastKey)
+          for (let m = s.lastKey; m < (keysOnly ? Math.min(n, s.lastKey + 1) : n); m++) s.stream.onFrame(tagged(m === s.lastKey, true, m === s.lastKey ? s.cam.key : s.cam.delta), m === s.lastKey)
         }
+        if (s.type === 0 && keysOnly && !key) continue
         s.stream.onFrame(tagged(key, s.type === 0, key ? s.cam.key : s.cam.delta), key)
       }
     }
@@ -1088,6 +1090,13 @@ const fanOut = (c, buf, isKey, type, now) => {
   const after = playPage('127.0.0.1', p0355) // through the tunnel
   console.log(`INFO  the 03:55 page open over 5 Mbit/s, ${said(after, before)}`)
   check('the 03:55 page with every stand-in frame (as on 29 Sep): the page backs up over 4 MB, its tiles over 6 s behind', before.maxQueue > 4e6 && before.subWaitMs > 6000, said(after, before))
+  // Keyframes alone are still about half of these mains (/10: 634 KB of its 1279 KB GOP every 2 s, 2.6
+  // Mbit/s). Keyframes only, under nothing but the stand-in's own gate (its 4 MB cap; verify-6's fix as
+  // it stood): as bad as every frame. Hence a remote viewer's waits for the page's room (sub-bridge.mjs).
+  const gated = playPage('192.168.1.20', { ...p0355, keysOnly: true })
+  const gatedSaid = `${mb(gated.maxQueue)} MB queued at most, sub frames waiting up to ${gated.subWaitMs} ms, ${mb(gated.standIn)} MB of stand-ins`
+  console.log(`INFO  ... keyframes only under the stand-in's own cap: ${gatedSaid}`)
+  check('... keyframes only, under the stand-in\'s own 4 MB cap: still over 4 MB queued, its tiles over 6 s behind', gated.maxQueue > 4e6 && gated.subWaitMs > 6000, gatedSaid)
   // a stand-in's keyframe goes into a page with less than RESUME_BELOW queued: at most that and the
   // biggest keyframe (634 KB), with the frames the page's tiles send meanwhile
   check('... a remote viewer\'s: under 1.1 MB queued, and no tile\'s frame waits 2 s', after.maxQueue < 1.1e6 && after.subWaitMs < 2000, said(after, before))
