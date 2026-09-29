@@ -6,7 +6,8 @@
 // local network gets the cameras' own streams, untouched, as before.
 //
 // Each remote viewer (one browser: its sockets grouped by session) sits on one LEVEL:
-//   full   the camera's own stream, as on the local network
+//   full   the camera's own stream, as on the local network (H.265 for a browser that cannot play it:
+//          converted, every frame kept, at most 1920 wide)
 //   15     15 fps, re-encoded lighter (phone-live.mjs PhoneStream)
 //   8      8 fps, lighter still
 //   4      4 fps, the least that still shows movement
@@ -20,16 +21,32 @@
 // cameras being watched remotely, not the number of people watching. Conversions have their own cap
 // (phone-live.mjs maxPhoneStreams); a viewer who cannot get a slot gets the camera's own stream.
 import { PhoneStream, maxPhoneStreams } from './phone-live.mjs'
-import { TranscodePool } from './transcode.mjs'
+import { PLAYBACK_LIMITS, TranscodePool } from './transcode.mjs'
 
 export const LEVELS = Object.freeze([
-  { id: 'full' },
+  // The camera's own stream; its settings are for an H.265 camera and a browser that cannot play it
+  // (#converts). That used to go through level 15's: a 30 fps camera played at 15 fps and 1280 wide
+  // in the full-size view on a clean link ('converting a main stream at 30.0 fps to about 15: keeping
+  // 1 in 2' while at full, 29 Sep 03:56:59). Now every frame (fps 0), at most 1920 wide and 2.5 Mbit/s,
+  // as playback converts for the same PC (transcode.mjs PLAYBACK_LIMITS), at level 15's quality.
+  { id: 'full', fps: 0, crf: 25, subKbps: 700, mainKbps: PLAYBACK_LIMITS.maxKbps, maxWidth: PLAYBACK_LIMITS.maxWidth },
   // Quality first, then frame rate: a sharp picture at 15 fps beats a blocky one at 30, and the
   // first rounds (crf 30-34, 100-300 kbit/s) came out grainy and blocky, worst on the first frames.
   { id: '15', fps: 15, crf: 25, subKbps: 700, mainKbps: 2500 },
   { id: '8', fps: 8, crf: 27, subKbps: 450, mainKbps: 1500 },
   { id: '4', fps: 4, crf: 29, subKbps: 280, mainKbps: 900 }
 ])
+/**
+ * How every level's conversion runs (stutter report 2.7). They used the phones' defaults: a 4 s encoder
+ * buffer, a single-threaded H.265 decoder (low_delay) and a keyframe every 50 pictures. Measured on
+ * nvr-2/20 (4K H.265, 20 fps) at level 15's size (1280 wide): keyframes 191/213 KB and 1.64-1.82x real
+ * time; with a 1 s buffer and two decoder threads 151/157 KB and 2.94x, the price one picture held
+ * back in the decoder (a source frame's time: 50 ms at 20 fps, more on a camera that trickles). A
+ * keyframe burst is what backs a tunnel link up, and a conversion behind real time is a picture that
+ * falls behind. 50 pictures was 3.3 s at 15 fps, 6.3 s at 8 and 12.5 s at 4 to wait for a picture
+ * after a drop (backpressure.mjs); now 2 s of what the stream sends, at every level.
+ */
+export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2 })
 export const TICK_MS = 2000
 /** A socket with this much waiting to go out is a link that is not keeping up. */
 export const PRESSURE_BYTES = 256 * 1024
@@ -101,25 +118,32 @@ export class AdaptiveLive {
     this.timer = null
   }
 
-  /** The level a socket's stream is converted at on this level: 0 for the camera's own stream. */
-  #wanted(entry, level) {
-    // the camera's own stream where this device can play it: H.264 always; H.265 only for a device
-    // that said it can (&h265=1) -- half the data of H.264 for the same picture. Otherwise an H.265
-    // camera is converted at the next level, never sent raw to a laptop that would show black.
-    return level === 0 && entry.source.gop?.[0]?.[1] === 1 && !entry.clientH265 ? 1 : level
+  /** Whether a socket's camera sends H.265, as its stream's keyframe says. */
+  #h265(entry) {
+    return entry.source.gop?.[0]?.[1] === 1
   }
 
-  /** Where a socket's frames come from at this level: a shared thinned stream, or the camera's own. */
+  /** Whether a socket's frames go through a conversion on this level. */
+  #converts(entry, level) {
+    // the camera's own stream where this device can play it: H.264 always; H.265 only for a device
+    // that said it can (&h265=1) -- half the data of H.264 for the same picture. Otherwise an H.265
+    // camera is converted at full too (every frame kept), never sent raw to a laptop that would show black.
+    return level > 0 || (this.#h265(entry) && !entry.clientH265)
+  }
+
+  /** Where a socket's frames come from at this level: a shared converted stream, or the camera's own. */
   #streamFor(entry, level) {
-    level = this.#wanted(entry, level)
-    if (level === 0) return entry.source
-    const key = `${entry.nvrId}/${entry.ch}/${entry.type}@${LEVELS[level].id}`
+    if (!this.#converts(entry, level)) return entry.source
+    const L = LEVELS[level]
+    const key = `${entry.nvrId}/${entry.ch}/${entry.type}@${L.id}`
     let s = this.streams.get(key)
     if (!s || s.closed) {
       const slot = this.pool.acquire()
       if (!slot) return entry.source // no room for another conversion: the camera's own stream
-      const L = LEVELS[level]
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      // level full is only ever for browsers that cannot play H.265 (#converts), so an H.265 stream
+      // there is converted even with nothing to thin (h264Only); the other levels are shared with
+      // browsers that can
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
     }
     return s
@@ -163,7 +187,7 @@ export class AdaptiveLive {
       next.add(e.ws)
     }
     // ...and what the move got: the tiles that wanted a conversion and found no free slot
-    const raw = [...v.sockets].filter((e) => this.#wanted(e, level) > 0 && e.stream === e.source).length
+    const raw = [...v.sockets].filter((e) => this.#converts(e, level) && e.stream === e.source).length
     this.log(`[adaptive] ${v.key.slice(0, 8)}: ${from} -> ${LEVELS[level].id} (${why}; ${v.sockets.size} camera${v.sockets.size === 1 ? '' : 's'}; ${link}; ${raw} on the raw stream for want of a conversion slot, ${this.pool.max - this.pool.active} of ${this.pool.max} free)`)
   }
 

@@ -207,7 +207,8 @@ export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEver
     '-c:v', 'libx264', '-preset', PRESET, '-crf', String(crf), '-tune', 'zerolatency', '-bf', '0', '-g', g, '-pix_fmt', 'yuv420p',
     // Phones: a buffer of 4 s at the cap, so the keyframe (many times a normal frame) can be sent
     // whole and sharp, instead of being squeezed to the cap and arriving as blocks. Playback asks for
-    // 1 s (PLAYBACK_LIMITS): there the burst itself is what stalls a viewer on a thin link.
+    // 1 s (PLAYBACK_LIMITS), and so does a remote viewer's live conversion (adaptive-live.mjs
+    // REMOTE_CONVERSION): there the burst itself is what stalls a viewer on a thin link.
     ...(maxKbps > 0 ? ['-maxrate', `${maxKbps}k`, '-bufsize', `${Math.round(maxKbps * bufSeconds)}k`] : []),
     ...tail
   ]

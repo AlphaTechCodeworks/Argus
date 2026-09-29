@@ -1,7 +1,8 @@
 // Tests for the remote viewers' frame-rate levels (adaptive-live.mjs), with fake streams: no ffmpeg.
 //   node cctv/test/adaptive-live.test.mjs
 import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, SETTLE_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
-import { TranscodePool } from '../transcode.mjs'
+import { encodeFrame } from '../phone-live.mjs'
+import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -177,5 +178,82 @@ function fakeWs() {
   clearInterval(live.timer)
 }
 
+// ---- conversions for a PC through the tunnel (stutter report 2.7) ----
+// A converter that hands back every frame it keeps, and the frames a source sends its viewers.
+function converters() {
+  const made = []
+  const make = (o) => {
+    const x = { o, n: 0, push(ts, k) { if (this.n++ % o.keepEvery === 0) o.onFrame(ts, k, Buffer.from([1])) }, close() { this.closed = true } }
+    made.push(x)
+    return x
+  }
+  return { made, make }
+}
+const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
+  for (let i = from; i < from + n; i++) for (const v of [...src.viewers]) v.send(encodeFrame(Buffer.from([0, 0, 1, 1]), i % 12 === 0, codec, (i * 1000) / fps))
+}
+{
+  // Level full, an H.265 main for a browser without H.265: it went through level 15's settings (a 30 fps
+  // camera kept 1 in 2 at 1280 wide, "converting a main stream at 30.0 fps to about 15" while at full,
+  // 03:56:59). Now every frame, at most 1920 wide, 2.5 Mbit/s with a 1 s buffer and two decoder threads
+  // (playback's settings, transcode.mjs PLAYBACK_LIMITS), a keyframe every 2 s.
+  const { made, make } = converters()
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: make, log: (l) => logs.push(l), budgetBps: 1e9 })
+  const src = fakeSource('h265 main')
+  src.gop = [encodeFrame(Buffer.from([0, 0, 1, 1]), true, 1, 0)]
+  const ws = fakeWs()
+  live.attach('pc', { ws, nvrId: 'nvr-2', ch: 19, type: 0, source: src })
+  send(src, 24)
+  const o = made[0]?.o ?? {}
+  check('level full, an H.265 main for a PC: its own conversion, every frame kept (not level 15\'s 1 in 2)', live.streams.has('nvr-2/19/0@full') && made.length === 1 && o.keepEvery === 1, `${[...live.streams.keys()]} keep ${o.keepEvery}`)
+  const a = made[0] ? ffmpegArgs(o).join(' ') : ''
+  check('  playback\'s settings: at most 1920 wide, 2.5 Mbit/s with a 1 s buffer, two decoder threads; a keyframe every 2 s (60 pictures at 30 fps)', !a.includes('select') && a.includes('-vf scale=min(1920\\,iw):-2') && a.includes('-maxrate 2500k -bufsize 2500k') && a.includes('-threads 2') && !a.includes('low_delay') && / -g 60 /.test(a), a)
+  check('  every frame from its first keyframe reaches the browser, as H.264', ws.got.length === 12 && ws.got.every((b) => b[1] === 0), `${ws.got.length} frames`)
+  check('  the log says so', logs.includes('[phone-live] nvr-2/20: converting a main stream at 30.0 fps to H.264, every frame kept'), logs.join(' | '))
+  check('LEVELS: full carries the settings its H.265 conversion uses', LEVELS[0].id === 'full' && LEVELS[0].fps === 0 && LEVELS[0].maxWidth === 1920 && LEVELS[0].mainKbps === 2500 && LEVELS[0].crf === 25 && LEVELS[0].subKbps === 700, JSON.stringify(LEVELS[0]))
+  clearInterval(live.timer)
+}
+{
+  // Every level converts with a 1 s buffer, two decoder threads and a keyframe every 2 s of what it
+  // sends: -g 50 counted pictures, 4.2 s at 12 fps, 6.3 at 8 and 12.5 at 4 to wait after a drop.
+  let now = T
+  const { made, make } = converters()
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: make, log: () => {}, budgetBps: 1e9, now: () => now })
+  const src = fakeSource('24 fps sub')
+  src.gop = [encodeFrame(Buffer.from([0, 0, 1, 1]), true, 0, 0)]
+  const ws = fakeWs()
+  live.attach('steps', { ws, nvrId: 'n1', ch: 1, type: 1, source: src })
+  ws.bufferedAmount = 1e6
+  const seen = []
+  for (const id of ['15', '8', '4']) {
+    now += SETTLE_MS
+    live.tick()
+    send(src, 13, { fps: 24, codec: 0, from: 12 })
+    const x = made.at(-1)
+    const a = x ? ffmpegArgs(x.o).join(' ') : ''
+    seen.push({ id: LEVELS[live.viewers.get('steps').level].id, keep: x?.o.keepEvery, buf: a.match(/-bufsize (\d+k)/)?.[1], threads: /-threads 2 /.test(a) && !/low_delay/.test(a), g: a.match(/ -g (\d+) /)?.[1] })
+  }
+  check('levels 15, 8, 4 on a 24 fps sub: 1 in 2, 3, 6; the buffer 1 s of each cap; two decoder threads; a keyframe every 24, 16, 8 pictures (2 s each)',
+    JSON.stringify(seen) === JSON.stringify([{ id: '15', keep: 2, buf: '700k', threads: true, g: '24' }, { id: '8', keep: 3, buf: '450k', threads: true, g: '16' }, { id: '4', keep: 6, buf: '280k', threads: true, g: '8' }]), JSON.stringify(seen))
+  clearInterval(live.timer)
+}
+{
+  // An H.265 main at full, then the link backs up: its socket moves to level 15's own conversion (1 in 2)
+  let now = T
+  const { made, make } = converters()
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: make, log: () => {}, budgetBps: 1e9, now: () => now })
+  const src = fakeSource('h265 main')
+  src.gop = [encodeFrame(Buffer.from([0, 0, 1, 1]), true, 1, 0)]
+  const ws = fakeWs()
+  live.attach('down', { ws, nvrId: 'n1', ch: 4, type: 0, source: src })
+  send(src, 13)
+  ws.bufferedAmount = 1e6
+  now += SETTLE_MS
+  live.tick()
+  send(src, 13, { from: 12 })
+  check('an H.265 main stepped down from full: onto level 15\'s conversion, 1 in 2 of 30 fps', live.streams.has('n1/4/0@15') && made.length === 2 && made[1].o.keepEvery === 2 && made[1].o.maxWidth === 1280, `${[...live.streams.keys()]} ${made.map((x) => x.o.keepEvery)}`)
+  clearInterval(live.timer)
+}
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
