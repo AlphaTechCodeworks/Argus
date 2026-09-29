@@ -18,7 +18,8 @@
 //
 // The rules, from 2026-09-26 and verify-6 (6a):
 //  - no answer within the answer time (SHARE_ANSWER_MS by default: the time ONE file call may take;
-//    the helper reports each one that comes back, and that restarts the clock) -> the share is "not
+//    the helper reports each one that comes back, and that restarts the clock; the health check keeps
+//    its budget for the whole check, `whole`) -> the share is "not
 //    answering": every call in flight fails, the helper gets SIGKILL, and the share is announced
 //    stuck (storage.mjs marks it down at once, and the outside watcher remounts it: healthz shares);
 //  - SIGKILL does not end a process inside a call on a stale share. Until the old helper has really
@@ -91,7 +92,9 @@ function answer(h, child, m) {
   const c = h.calls.get(m.n)
   if (!c) return
   if (m.progress) {
-    // one more file call came back: the share is slow perhaps, but not stuck
+    // one more file call came back: the share is slow perhaps, but not stuck (a call timed as a
+    // whole, the health check, keeps its clock)
+    if (c.whole) return
     clearTimeout(c.timer)
     c.lastAt = Date.now()
     c.timer = setTimeout(() => noAnswer(h, c), c.timeoutMs)
@@ -148,9 +151,11 @@ function ended(h, child, code, signal, err) {
  * it fails with .code 'ESHARESTUCK' ("share not answering") when a file call does not come back within
  * timeoutMs, or at once while the location's last helper is still stuck; 'ESHAREGONE' when the helper
  * ended by itself; else the helper's own code when it refused (EOUTSIDE, EMARKER, EBADOP, ...).
+ * whole: timeoutMs is for the whole call, not for each file call in it (the health check's rule
+ * since 2026-09-26, which the outside watcher's remount goes by).
  * @returns {Promise<any>}
  */
-export function shareCall(loc, op, args = {}, { timeoutMs = answerMs } = {}) {
+export function shareCall(loc, op, args = {}, { timeoutMs = answerMs, whole = false } = {}) {
   if (typeof loc?.id !== 'string' || typeof loc?.path !== 'string' || !isAbsolute(loc.path)) return Promise.reject(new TypeError('a location needs an id and a full path'))
   const h = helperFor(loc)
   if (h.stuck) return Promise.reject(fail('ESHARESTUCK', `share not answering: a ${LABEL[h.stuck.op] ?? h.stuck.op} has been stuck for ${Math.round((Date.now() - h.stuck.since) / 1000)} s`))
@@ -163,7 +168,7 @@ export function shareCall(loc, op, args = {}, { timeoutMs = answerMs } = {}) {
     }
   }
   return new Promise((resolveCall, rejectCall) => {
-    const c = { n: ++seq, op, timeoutMs, lastAt: Date.now(), timer: null, resolve: resolveCall, reject: rejectCall }
+    const c = { n: ++seq, op, timeoutMs, whole, lastAt: Date.now(), timer: null, resolve: resolveCall, reject: rejectCall }
     c.timer = setTimeout(() => noAnswer(h, c), timeoutMs)
     h.calls.set(c.n, c)
     const child = h.child

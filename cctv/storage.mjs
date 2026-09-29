@@ -44,9 +44,13 @@ const netHealth = new Map() // id -> last health
 
 const downHealth = (reason) => ({ ok: false, reason, marker: false, writable: false, freeBytes: 0, totalBytes: 0, writeMBps: null })
 
-/** Checks one share from its helper. Always resolves, within the answer time (3 times it with the write-speed test). */
+/**
+ * Checks one share from its helper. Always resolves, within the answer time (3 times it with the
+ * write-speed test) for the check as a whole, as before the helper: a share that takes seconds a call
+ * is not one to record to, and the outside watcher remounts one "not answering".
+ */
 async function probeShare(loc, floor, speed) {
-  const ask = () => shareCall(loc, 'probe', { floor, speed }, { timeoutMs: shareAnswerMs() * (speed ? 3 : 1) })
+  const ask = () => shareCall(loc, 'probe', { floor, speed }, { timeoutMs: shareAnswerMs() * (speed ? 3 : 1), whole: true })
   try {
     return await ask()
   } catch (e) {

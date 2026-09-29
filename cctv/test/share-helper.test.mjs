@@ -472,18 +472,31 @@ _test.setHelper(null)
   }
   kids[1].emit('message', { n, ok: true, result: { freeBytes: 3, totalBytes: 4 } })
   check('progress every 200 ms for 800 ms with an answer time of 300 ms: answered, not stuck', (await settle(slow)).v?.totalBytes === 4)
+  // the health check keeps its budget for the whole check, as before the helper: a share that takes
+  // 8 s a call is not a healthy one, and the outside watcher goes by this answer
+  const t2 = Date.now()
+  const whole = shareCall(loc, 'probe', { floor: 0 }, { whole: true }).then((v) => ({ v, at: Date.now() }), (e) => ({ e, at: Date.now() }))
+  const nw = kids[1].sent.at(-1).n
+  for (let i = 0; i < 3; i++) {
+    await sleep(150)
+    kids[1].emit('message', { n: nw, progress: true })
+  }
+  const w = await whole
+  check('whole: progress does not restart the clock (the check as a whole gets the answer time)', w.e?.code === 'ESHARESTUCK' && w.at - t2 < 440, `${w.e?.code} after ${w.at - t2} ms`)
+  kids[1].emit('exit', null, 'SIGKILL')
   // a helper that ends by itself (a crash, or killed from outside): its calls fail, the next starts anew
   const inFlight = settle(shareCall(loc, 'statfs'))
-  kids[1].emit('exit', 1, null)
+  check('(a new helper for it)', kids.length === 3)
+  kids[2].emit('exit', 1, null)
   const lost = await inFlight
   check('a helper that ends by itself: its calls fail as "stopped", not "not answering"', lost.e?.code === 'ESHAREGONE' && !/not answering/.test(lost.e.message), lost.e?.message)
   const fourth = shareCall(loc, 'statfs')
-  check('...and the next call starts a new one', kids.length === 3)
-  kids[2].emit('message', { n: kids[2].sent[0].n, ok: true, result: { freeBytes: 5, totalBytes: 6 } })
+  check('...and the next call starts a new one', kids.length === 4)
+  kids[3].emit('message', { n: kids[3].sent[0].n, ok: true, result: { freeBytes: 5, totalBytes: 6 } })
   check('...which answers', (await fourth).totalBytes === 6)
   // an answer to an op that failed in the helper
   const failing = settle(shareCall(loc, 'stat', { paths: [] }))
-  kids[2].emit('message', { n: kids[2].sent.at(-1).n, ok: false, error: { message: 'EMARKER: no', code: 'EMARKER' } })
+  kids[3].emit('message', { n: kids[3].sent.at(-1).n, ok: false, error: { message: 'EMARKER: no', code: 'EMARKER' } })
   const f = await failing
   check("a call the helper refused: rejected with the helper's code", f.e?.code === 'EMARKER' && f.e.message === 'EMARKER: no')
   _test.setFork(null)

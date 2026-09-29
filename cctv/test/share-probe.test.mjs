@@ -233,10 +233,33 @@ await checkHealth() // a helper of the hanging kind, answering while the share s
 }
 calls._test.setHelper(null)
 
-// a helper that cannot be killed (stuck in the kernel): the share stays down, "stuck for N s", and no
-// second helper is started after it (the one-stuck-check rule of 2026-09-26)
 {
   const EventEmitter = (await import('node:events')).EventEmitter
+  // a helper that goes on reporting file calls (every 200 ms) but never finishes the check: the check
+  // as a whole still gets the answer time, as before the helper
+  const slowKid = new EventEmitter()
+  slowKid.pid = 800000
+  slowKid.connected = true
+  slowKid.send = (m, cb) => {
+    cb?.(null)
+    const iv = setInterval(() => slowKid.emit('message', { n: m.n, progress: true }), 200)
+    slowKid.once('exit', () => clearInterval(iv))
+    return true
+  }
+  slowKid.kill = () => setImmediate(() => slowKid.emit('exit', null, 'SIGKILL'))
+  slowKid.unref = () => {}
+  slowKid.disconnect = () => {}
+  calls._test.setFork(() => slowKid)
+  calls.stopShareHelpers()
+  const t0 = Date.now()
+  await checkHealth()
+  const took = Date.now() - t0
+  const hs = listLocations().find((l) => l.id === 'loc-good').health
+  check('a check whose file calls go on coming back but never ends: down within the answer time', hs.reason === 'share not answering' && took < 1500, `${hs.reason} after ${took} ms`)
+  await until(() => calls.shareStuckFor(loc) === null)
+
+  // a helper that cannot be killed (stuck in the kernel): the share stays down, "stuck for N s", and
+  // no second helper is started after it (the one-stuck-check rule of 2026-09-26)
   const kids = []
   calls._test.setFork(() => {
     const c = new EventEmitter()
@@ -250,7 +273,7 @@ calls._test.setHelper(null)
     kids.push(c)
     return c
   })
-  calls.stopShareHelpers()
+
   await checkHealth()
   await sleep(1100)
   await checkHealth()
