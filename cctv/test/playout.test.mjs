@@ -698,6 +698,29 @@ const stalled = ({ durMs = 120_000, stalls = [], stallMs = 1200 } = {}) => {
     check(`remote profile, ${name}: no more skipped than live, re-synced only at an outage or a clock step, paced at the end, within 150-2000 ms`, r.skipped <= live.skipped && r.clock.resyncs === (resyncs[name] ?? 0) && paced && r.clock.delay >= 150 && r.clock.delay <= 2000, `skipped ${r.skipped} (live ${live.skipped}), resyncs ${r.clock.resyncs} (live ${live.clock.resyncs}), delay ${r.clock.delay}`)
   }
 }
+{
+  // The Live page chooses: viewer.js's own lines, from SMOOTH_CLOCK to clockOptions, run for a page on
+  // a local address and one through the tunnel (device.js isLocalHost), with Smooth off and on
+  const { readFileSync } = await import('node:fs')
+  const { isLocalHost } = await import('../public/device.js')
+  const viewer = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8')
+  const lines = viewer.match(/\nconst SMOOTH_CLOCK = [\s\S]*?\nconst clockOptions = [^\n]*\n/)?.[0] ?? ''
+  const choose = (host, smooth) => {
+    try {
+      return new Function('isLocalHost', 'smoothBox', 'REMOTE_CLOCK', `${lines}\nreturn clockOptions()`)(() => isLocalHost(host), { checked: smooth }, REMOTE_CLOCK)
+    } catch (e) {
+      return e.message
+    }
+  }
+  check('Live page on a local address: live\'s own clock, or Smooth, as before', choose('192.168.1.232', false) === undefined && JSON.stringify(choose('192.168.1.232', true)) === '{"startDelayMs":400,"minDelayMs":300,"maxDelayMs":1200}', `${JSON.stringify(choose('192.168.1.232', false))} ${JSON.stringify(choose('192.168.1.232', true))}`)
+  const far = choose('cctv.jfl.gripe', false)
+  const farSmooth = choose('cctv.jfl.gripe', true)
+  check('... through the tunnel: the remote clock', far === REMOTE_CLOCK, JSON.stringify(far))
+  check('... with Smooth: the remote clock, starting and staying at least as big as Smooth (400, 300)', farSmooth?.stretchLate === true && farSmooth.maxDelayMs === 2000 && farSmooth.shrinkWindowMs === REMOTE_CLOCK.shrinkWindowMs && farSmooth.startDelayMs === 400 && farSmooth.minDelayMs === 300, JSON.stringify(farSmooth))
+  const tileOptions = viewer.match(/\nconst tileOptions = \(cam\) => \(\{[\s\S]*?\n\}\)\n/)?.[0] ?? ''
+  check('... and its tiles keep up to 2 s of decoded frames (player.js REMOTE_QUEUED_FRAMES); a local page\'s the player\'s own', /\n {2}clock: clockOptions\(\),\n/.test(tileOptions) && /\n {2}maxQueuedFrames: REMOTE_PAGE \? REMOTE_QUEUED_FRAMES : undefined,?\n/.test(tileOptions) && /\nconst REMOTE_PAGE = !isLocalHost\(\)\n/.test(viewer))
+  check('... what viewer.js uses for it is imported from where it is made', /import \{[^}]*\bisLocalHost\b[^}]*\} from '\.\/device\.js'/.test(viewer) && /import \{[^}]*\bREMOTE_CLOCK\b[^}]*\} from '\.\/playout\.js'/.test(viewer) && /import \{[^}]*\bREMOTE_QUEUED_FRAMES\b[^}]*\} from '\.\/player\.js'/.test(viewer))
+}
 
 console.log(failures ?`\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

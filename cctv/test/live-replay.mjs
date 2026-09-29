@@ -32,7 +32,8 @@
 //   node cctv/test/live-replay.mjs [trace.json ...] [--player path/to/player.js] [--pool N]
 //     [--decode-ms N] [--in-flight N] [--clock '{"startDelayMs":350}'] [--max-fps 15]
 //     [--player-options '{"arrivalClock":false}'] [--remote]
-//   --remote: as a page through the tunnel plays it (REMOTE_LIVE); --clock and --player-options go over it
+//   --remote: as a page through the tunnel plays it (REMOTE_LIVE; a trace recorded on such a page says
+//     page.remote: true); --clock and --player-options go over it
 //   node cctv/test/live-replay.mjs --write-fixtures   (makes the fixtures again from FIXTURES)
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'

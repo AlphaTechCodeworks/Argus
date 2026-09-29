@@ -1,5 +1,5 @@
 // Camera grid: each tile streams one camera over WebSocket into a VideoPlayer.
-import { isPhone, maxLiveFps } from './device.js'
+import { isLocalHost, isPhone, maxLiveFps } from './device.js'
 import { attachZoom } from './pinch-zoom.js'
 import { diffCameras, shownCameras, visibleCameras } from './grid-diff.js'
 import { enableGridDrag } from './grid-drag.js'
@@ -10,6 +10,8 @@ import { LinesPanel } from './lines-panel.js'
 import { muxState, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
+import { REMOTE_QUEUED_FRAMES } from './player.js'
+import { REMOTE_CLOCK } from './playout.js'
 // ?pacing=off draws frames as soon as they decode (for before/after comparison)
 const PACING = new URLSearchParams(location.search).get('pacing') !== 'off'
 // Every tile's stream on one connection (live-mux.js): the browser opens WebSockets one at a time,
@@ -33,7 +35,15 @@ const resetBtn = document.getElementById('resetOrder')
 const orderNoteEl = document.getElementById('orderNote')
 // "Smooth": a bigger playout buffer absorbs uneven delivery (more delay, steadier motion)
 const SMOOTH_CLOCK = { startDelayMs: 400, minDelayMs: 300, maxDelayMs: 1200 }
-const clockOptions = () => (smoothBox.checked ? SMOOTH_CLOCK : undefined)
+// A page opened through the Cloudflare tunnel or the tailnet, not on a local address (device.js): its
+// one socket stalls now and then for longer than live's buffer holds, and each stall froze every tile
+// and then jumped ahead. Its tiles get the buffer that grows with the stalls, up to 2 s, and room for
+// that many decoded frames (playout.js REMOTE_CLOCK, player.js REMOTE_QUEUED_FRAMES; stutter report
+// 2.4, 29 Sep); with Smooth it starts and stays at least as big as Smooth's. A page on the local
+// network keeps live's own clock, or Smooth, exactly as before.
+const REMOTE_PAGE = !isLocalHost()
+const REMOTE_SMOOTH_CLOCK = { ...REMOTE_CLOCK, startDelayMs: SMOOTH_CLOCK.startDelayMs, minDelayMs: SMOOTH_CLOCK.minDelayMs }
+const clockOptions = () => (REMOTE_PAGE ? (smoothBox.checked ? REMOTE_SMOOTH_CLOCK : REMOTE_CLOCK) : smoothBox.checked ? SMOOTH_CLOCK : undefined)
 // cameras whose main stream this browser could not play: full screen stays on the sub stream, for a
 // while. Not for the whole session any more: the server now converts H.265 for phones and remote
 // viewers, and a phone that once failed (before it did) was kept on the blurry sub-stream for good.
@@ -416,6 +426,7 @@ function osdForTile(cam) {
 const tileOptions = (cam) => ({
   pacing: PACING,
   clock: clockOptions(),
+  maxQueuedFrames: REMOTE_PAGE ? REMOTE_QUEUED_FRAMES : undefined,
   statsVisible: () => showStats,
   onDisconnect: () => {
     checkSession()
@@ -1043,6 +1054,7 @@ traceBtn.addEventListener('click', () => {
       gridPage: page + 1,
       single,
       smooth: smoothBox.checked,
+      remote: REMOTE_PAGE, // (the tiles' playout clock: REMOTE_CLOCK, else live's own)
       pacing: PACING,
       maxFps: maxLiveFps(),
       mux: !liveMuxOff,
