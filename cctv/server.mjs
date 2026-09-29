@@ -132,7 +132,8 @@ import { handleSnapshot, sweepSnapshots } from './event-snapshot.mjs'
 import { handleAlarms } from './alarms.mjs'
 import { handleLineAlert } from './line-actions.mjs'
 import { handleOsd } from './osd.mjs'
-import { runRetention, runThinning } from './thinning.mjs'
+import { MAX_SEGMENTS_PER_RUN, runRetention, runThinning } from './thinning.mjs'
+import { runStorageJobs } from './storage-jobs.mjs'
 import { detectEncoder } from './transcode.mjs'
 import { httpsOptions } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
@@ -166,25 +167,20 @@ startWatchdog()
  * The first dry run on 2026-09-25 came back zero for both, because nothing recorded so far is old
  * enough to have reached any threshold; the interesting numbers arrive as footage ages, and are
  * worth seeing before the jobs are armed rather than after.
+ *
+ * The switch is Settings > Storage since 2026-09-29 (off / dry run / on, audited); storage-jobs.mjs
+ * keeps what each job last did for that page and writes a summary line at most once an hour, so a
+ * quiet journal can no longer mean either "found nothing" or "never ran".
  */
-async function thinAndRetain() {
-  const mode = getSettings().storage?.thinning ?? 'dry-run'
-  if (mode === 'off') return
-  const dryRun = mode !== 'on'
+function thinAndRetain() {
   const index = recIndex()
-  if (!index) return
-  const say = (what, r) => {
-    const n = (r.thinned ?? r.deleted ?? []).length
-    if (!n && !r.warnings?.length) return
-    console.log(`[${what}]${dryRun ? ' (dry run, nothing touched)' : ''} ${n} segments, ${(r.freedBytes / 1e9).toFixed(2)} GB${r.skipped?.length ? `, ${r.skipped.length} skipped` : ''}`)
-    for (const w of r.warnings ?? []) console.warn(`[${what}] ${w}`)
-  }
-  try {
-    say('thinning', await runThinning({ index, settings: getSettings(), dryRun, protectedRanges, present: markerMatches }))
-    say('retention', await runRetention({ index, settings: getSettings(), dryRun, protectedRanges, present: markerMatches }))
-  } catch (e) {
-    console.warn(`[thinning] did not run: ${e.message}`)
-  }
+  return runStorageJobs({
+    mode: getSettings().storage?.thinning,
+    index,
+    jobs: { thinning: runThinning, retention: runRetention },
+    args: () => ({ index, settings: getSettings(), protectedRanges, present: markerMatches }),
+    limit: MAX_SEGMENTS_PER_RUN
+  })
 }
 
 // server recording (CCTV_LIVE_WORKER=on only): retention and low-space deletion every 5 minutes

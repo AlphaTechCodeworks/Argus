@@ -8,9 +8,11 @@
 //     thumbnails: 'off' | '1m' | '5m',
 //     publicUrl: 'https://cctv.jfl.gripe',  // where Argus is reached from outside: the phone alert's
 //                                           // link to an event (line-actions.mjs eventLink); '' = none
-//     storage: { locations: [...], netshares: [...], lowFreePct, floorFreePct } }
+//     storage: { locations: [...], netshares: [...], lowFreePct, floorFreePct, thinning } }
 //                                           // locations: see storage.mjs; netshares: see netshares.mjs
 //                                           // (a netshare never holds a password: only root has it)
+//                                           // thinning: 'off' | 'dry-run' | 'on', the switch in front of
+//                                           // time-lapse and retention (storage-jobs.mjs, thinning.mjs)
 //
 // The file is written as a temp file + rename (never half-written), mode 0600.
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
@@ -29,6 +31,11 @@ export const AFTER = ['timelapse', 'keep', 'delete']
 export const STREAMS = ['auto', 'main', 'sub']
 export const RECENT_MINUTES = [0, 1, 2, 5, 10, 15, 20]
 export const THUMBNAILS = ['off', '1m', '5m']
+// The switch in front of the two jobs that rewrite and delete footage (storage-jobs.mjs). Dry run
+// is the default and what anything unreadable falls back to: they work out what they would do and
+// touch nothing. Only an admin changes it, through /api/admin/settings, and each change is audited
+// with what it was and what it became.
+export const THINNING = ['off', 'dry-run', 'on']
 export const MAX_RETENTION_DAYS = 366
 
 export const DEFAULTS = Object.freeze({
@@ -44,7 +51,7 @@ export const DEFAULTS = Object.freeze({
   // The address people reach Argus at from outside the site, without a trailing slash. A phone
   // alert links to its event there (line-actions.mjs eventLink); '' leaves the link out.
   publicUrl: 'https://cctv.jfl.gripe',
-  storage: { locations: [], netshares: [], lowFreePct: 15, floorFreePct: 5 },
+  storage: { locations: [], netshares: [], lowFreePct: 15, floorFreePct: 5, thinning: 'dry-run' },
   alerts: {
     ntfy: { url: 'https://ntfy.sh', topic: '' },
     email: { host: '', port: 587, secure: false, user: '', pass: '', from: '', to: [] },
@@ -183,6 +190,7 @@ function validate(s) {
   if (s.storage.floorFreePct >= s.storage.lowFreePct) throw new HttpError(400, 'the hard floor must be below the low-space threshold')
   if (!Array.isArray(s.storage.locations)) throw new HttpError(400, 'storage.locations must be a list')
   if (!Array.isArray(s.storage.netshares)) throw new HttpError(400, 'storage.netshares must be a list')
+  oneOf('storage.thinning', THINNING)(s.storage.thinning)
   if (isPlainObject(s.backfill)) for (const [k, f] of Object.entries(BACKFILL_FIELDS)) f(s.backfill[k])
   // An empty window (both ends the same) would mean "never", which is what `enabled: false` is
   // for; saying it plainly avoids a job that silently never runs.
@@ -233,6 +241,11 @@ function fromFile(j) {
     if (Number.isInteger(low) && Number.isInteger(floor) && floor >= 1 && floor < low && low <= 50) Object.assign(s.storage, { lowFreePct: low, floorFreePct: floor })
     if (Array.isArray(j.storage.locations)) s.storage.locations = j.storage.locations.filter(isPlainObject)
     if (Array.isArray(j.storage.netshares)) s.storage.netshares = j.storage.netshares.filter(isPlainObject)
+    // Anything but the three words is a dry run: a hand-edited typo must never arm the jobs.
+    if ('thinning' in j.storage) {
+      if (THINNING.includes(j.storage.thinning)) s.storage.thinning = j.storage.thinning
+      else console.warn(`[settings] storage.thinning ${JSON.stringify(j.storage.thinning)} is not off, dry-run or on: running as a dry run`)
+    }
   }
   // Alerts are read back field by field through the same validators, so one bad value in the file
   // costs only that field rather than the whole section.
@@ -331,6 +344,7 @@ export function saveSettings(patch, user, { internal = false } = {}) {
   needObject(patch, 'settings')
   knownKeys(patch, Object.keys(DEFAULTS), '')
   const next = getSettings()
+  const thinningWas = next.storage.thinning
   if ('recording' in patch) {
     const r = needObject(patch.recording, 'recording')
     knownKeys(r, ['defaults', 'cameras', 'nvrs'], 'recording.')
@@ -384,7 +398,8 @@ export function saveSettings(patch, user, { internal = false } = {}) {
   if ('publicUrl' in patch) next.publicUrl = publicUrl(patch.publicUrl)
   if ('storage' in patch) {
     const st = needObject(patch.storage, 'storage')
-    knownKeys(st, internal ? ['locations', 'netshares', 'lowFreePct', 'floorFreePct'] : ['lowFreePct', 'floorFreePct'], 'storage.')
+    // thinning only through the audited path (an admin on /api/admin/settings), never storage.mjs's
+    knownKeys(st, internal ? ['locations', 'netshares', 'lowFreePct', 'floorFreePct'] : ['lowFreePct', 'floorFreePct', 'thinning'], 'storage.')
     Object.assign(next.storage, st)
   }
   if ('alerts' in patch) {
@@ -428,12 +443,17 @@ export function saveSettings(patch, user, { internal = false } = {}) {
   }
   validate(next)
   write(next)
-  console.log(`[settings] saved by ${user ?? '?'}: ${Object.keys(patch).join(', ')}`)
+  // The switch is the one value an audit row does name (the exception to the rule below): whether
+  // footage could be rewritten and deleted, and who said so, is what somebody will ask once it has
+  // been, and it is no secret.
+  const words = (m) => (m === 'dry-run' ? 'dry run' : m)
+  const switched = next.storage.thinning !== thinningWas ? `; time-lapse and retention switched from ${words(thinningWas)} to ${words(next.storage.thinning)}` : ''
+  console.log(`[settings] saved by ${user ?? '?'}: ${Object.keys(patch).join(', ')}${switched}`)
   // Only the top-level keys that changed, never the values: alerts.email.pass would otherwise be
   // written to a file kept for a year. Which settings were touched, by whom and when is the
   // question an audit is for; the new value is already in settings.json.
   // audit() never throws, so a broken audit file cannot stop settings being saved.
-  if (!internal) audit(DATA_DIR, { user, action: 'settings-change', target: Object.keys(patch).join(' '), detail: `changed ${Object.keys(patch).join(', ')}` })
+  if (!internal) audit(DATA_DIR, { user, action: 'settings-change', target: Object.keys(patch).join(' '), detail: `changed ${Object.keys(patch).join(', ')}${switched}` })
   for (const cb of listeners) {
     try {
       cb(getSettings())

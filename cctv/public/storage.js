@@ -102,6 +102,84 @@ export function renderStorage(data, { alertDays = 7 } = {}) {
   return { locations, warnings: d.warnings ?? [], totals, empty: locations.length === 0 }
 }
 
+// ---- time-lapse and retention: the switch and what the jobs last did ----------------------------
+// /api/storage `jobs` (storage-report.mjs jobsReport): { mode, defaults, camerasOwnDays, thinning,
+// retention }, the last two being each job's last run (storage-jobs.mjs) or null.
+
+/** The switch's three positions, in the owner's words (2026-09-29). */
+export const THINNING_CHOICES = [
+  { value: 'dry-run', text: 'Dry run — shows what it would do, changes nothing' },
+  { value: 'on', text: 'On — converts and deletes as set' },
+  { value: 'off', text: 'Off' }
+]
+
+const count = (n) => n.toLocaleString('en-GB')
+const cams = (n) => (n === 1 ? '1 camera has days of its own' : `${count(n)} cameras have days of their own`)
+
+/** "Full video for 7 days, then time-lapse (one picture every 10 s) until day 30, then deleted." */
+function planText(jobs) {
+  const d = jobs.defaults ?? {}
+  if (!Number.isFinite(d.fullDays) || !Number.isFinite(d.retentionDays)) return NOT_AVAILABLE
+  const main =
+    d.after === 'timelapse' && d.fullDays < d.retentionDays
+      ? `Full video for ${days(d.fullDays)}, then time-lapse (one picture every ${d.timelapseS} s) until day ${d.retentionDays}, then deleted.`
+      : `Everything kept for ${days(d.retentionDays)}, then deleted.`
+  return jobs.camerasOwnDays ? `${main} ${cams(jobs.camerasOwnDays)} (Settings › Recording).` : main
+}
+
+/** "16:05", or "1 Oct 16:05" when it was not in the last day. */
+function when(ms, now) {
+  const d = new Date(ms)
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+  return now - ms < 86_400_000 ? time : `${d.getDate()} ${d.toLocaleString('en-GB', { month: 'short' })} ${time}`
+}
+
+/** One job's line: "Last run 16:05 (dry run): would convert 1,240 files, freeing 310 GB". */
+function runLine(job, r, now) {
+  const label = job === 'thinning' ? 'Time-lapse' : 'Retention'
+  if (!r) return { job, label, text: 'not run yet since the server started (it runs every 5 minutes while the server records)', state: '', warnings: [] }
+  if (r.mode === 'off') return { job, label, text: `Switched off: not run (checked ${when(r.at, now)})`, state: '', warnings: [] }
+  const head = `Last run ${when(r.at, now)}${r.dryRun ? ' (dry run)' : ''}`
+  if (r.error) return { job, label, text: `${head} failed: ${r.error}`, state: 'bad', warnings: [] }
+  const thin = job === 'thinning'
+  let text = r.segments
+    ? `${head}: ${thin ? (r.dryRun ? 'would convert' : 'converted') : r.dryRun ? 'would delete' : 'deleted'} ${count(r.segments)} ${r.segments === 1 ? 'file' : 'files'}, ${r.dryRun ? 'freeing' : 'freed'} ${bytes(r.bytes)}`
+    : `${head}: nothing to ${thin ? 'convert' : 'delete'} yet`
+  if (r.reachedLimit) text += r.dryRun ? ' — the most one run looks at, so there is more' : ' — the most one run takes on; the rest follows in the next runs'
+  if (r.skipped) text += ` · ${count(r.skipped)} skipped${r.skippedWhy?.length ? ` (${r.skippedWhy.map((s) => `${s.why} ${count(s.n)}`).join(', ')})` : ''}`
+  const warnings = [...(r.warnings ?? [])]
+  if (r.warningCount > warnings.length) warnings.push(`and ${count(r.warningCount - warnings.length)} more (the server log has them all)`)
+  // Without the bookmarks the job cannot tell a bookmarked stretch from the rest (thinning.mjs).
+  if (r.protection === 'none') warnings.unshift('Bookmarks could not be read: nothing was treated as bookmarked or exported.')
+  return { job, label, text, state: r.protection === 'none' ? 'bad' : warnings.length ? 'warn' : '', warnings }
+}
+
+/**
+ * @param {object|undefined} jobs /api/storage `jobs`
+ * @returns {{ mode: string|null, plan: string, lines: object[] }}
+ */
+export function jobsView(jobs, { now = Date.now() } = {}) {
+  if (!jobs) {
+    // an older server: say nothing we do not know
+    const none = (job, label) => ({ job, label, text: NOT_AVAILABLE, state: '', warnings: [] })
+    return { mode: null, plan: NOT_AVAILABLE, lines: [none('thinning', 'Time-lapse'), none('retention', 'Retention')] }
+  }
+  return { mode: jobs.mode ?? 'dry-run', plan: planText(jobs), lines: [runLine('thinning', jobs.thinning, now), runLine('retention', jobs.retention, now)] }
+}
+
+/** The question asked before the switch goes to On: what it will do, in so many words. */
+export function switchOnWarning(jobs) {
+  const d = jobs?.defaults ?? {}
+  const full = Number.isFinite(d.fullDays) ? `older than ${days(d.fullDays)}` : 'older than its full-video days'
+  const total = Number.isFinite(d.retentionDays) ? `older than ${days(d.retentionDays)}` : 'older than its total days'
+  const what =
+    d.after === 'timelapse'
+      ? `Footage ${full} (the full-video days) will be rewritten to time-lapse, one picture every ${d.timelapseS ?? '?'} s, and footage ${total} (the total days) deleted, for good.`
+      : `Footage ${total} (the total days) will be deleted, for good.`
+  const own = jobs?.camerasOwnDays ? `\n\n${cams(jobs.camerasOwnDays)} (Settings › Recording) and ${jobs.camerasOwnDays === 1 ? 'follows' : 'follow'} those.` : ''
+  return `Switch time-lapse and retention ON?\n\n${what} Neither can be undone.\n\nBookmarked and exported stretches are kept.${own}`
+}
+
 // ---- painting ------------------------------------------------------------------------------------
 // Nothing above this line touches the DOM.
 
@@ -164,7 +242,83 @@ if (typeof document !== 'undefined') {
     )
   }
 
-  const load = () => fetch('/api/storage').then((x) => x.json()).then(paint).catch(() => {})
+  // ---- the time-lapse and retention switch --------------------------------------------------------
+  let jobs = null // the last /api/storage `jobs`
+  let picked = null // a choice clicked but not saved yet: the minute's repaint must not undo it
+  const say = (text, bad = false) => {
+    const m = document.getElementById('sj-msg')
+    m.textContent = text
+    m.className = bad ? 'st-error' : 'st-meta'
+  }
+
+  function paintJobs(data) {
+    const form = document.getElementById('sj-form')
+    if (!form) return
+    jobs = data?.jobs ?? null
+    const v = jobsView(jobs)
+    document.getElementById('sj-plan').textContent = v.plan
+    const box = document.getElementById('sj-choices')
+    if (!box.querySelector('input')) {
+      for (const c of THINNING_CHOICES) {
+        const input = el('input', { type: 'radio', name: 'sj-mode', value: c.value })
+        input.addEventListener('change', () => (picked = input.value))
+        const label = el('label')
+        label.append(input, c.text)
+        box.append(label)
+      }
+    }
+    const show = picked ?? v.mode
+    for (const r of box.querySelectorAll('input')) r.checked = r.value === show
+    form.querySelector('button[type="submit"]').disabled = v.mode === null
+    document.getElementById('sj-runs').replaceChildren(
+      ...v.lines.map((l) => {
+        const li = el('li')
+        li.append(el('strong', { textContent: `${l.label}: ` }), el('span', { textContent: l.text, className: l.state }))
+        if (l.warnings.length) {
+          const list = el('ul')
+          list.append(...l.warnings.map((w) => el('li', { textContent: w })))
+          li.append(list)
+        }
+        return li
+      })
+    )
+  }
+
+  document.getElementById('sj-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const now = jobs?.mode
+    const want = document.querySelector('input[name="sj-mode"]:checked')?.value
+    if (!want || !now) return
+    if (want === now) {
+      picked = null
+      return say('No change')
+    }
+    // On is the one that destroys footage: say exactly what it will do, and take no for an answer.
+    if (want === 'on' && !confirm(switchOnWarning(jobs))) {
+      picked = null
+      paintJobs({ jobs })
+      return say('Not changed')
+    }
+    try {
+      const res = await fetch('/api/admin/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ storage: { thinning: want } }) })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`)
+      picked = null
+      say(`Saved: ${THINNING_CHOICES.find((c) => c.value === body.settings?.storage?.thinning)?.text ?? want}`)
+      load()
+    } catch (err) {
+      say(err.message, true)
+    }
+  })
+
+  const load = () =>
+    fetch('/api/storage')
+      .then((x) => x.json())
+      .then((data) => {
+        paint(data)
+        paintJobs(data)
+      })
+      .catch(() => {})
   load()
   setInterval(load, 60_000)
 }

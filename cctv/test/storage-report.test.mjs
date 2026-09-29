@@ -185,6 +185,39 @@ check('cycling unknown (no footage indexed there) still alerts only on a confide
   check('admins get the report', s200 === 200 && Array.isArray(body.locations) && Array.isArray(body.warnings), JSON.stringify(body).slice(0, 120))
 }
 
+// ---- the time-lapse and retention switch, and what the jobs last did (storage-jobs.mjs) ---------------
+{
+  const json = async () => ({})
+  const { runStorageJobs, _test: jobs } = await import('../storage-jobs.mjs')
+  jobs.reset()
+  const withSwitch = (thinning, cameras = {}) => {
+    const s = settings([L1], cameras)
+    if (thinning !== undefined) s.storage.thinning = thinning
+    return s
+  }
+  // n1/3 keeps its own full days; n1/4 only records differently, which is not "days of its own"
+  setStorageContext({ index: null, dataDir: data, settingsOf: () => withSwitch('on', { 'n1/3': { fullDays: 14 }, 'n1/4': { mode: 'off' } }) })
+  let [, body] = await handleStorage('GET', '/api/storage', json, 'boss')
+  check('the report carries the switch as set', body.jobs?.mode === 'on', JSON.stringify(body.jobs))
+  check('...the days the jobs work from', body.jobs.defaults.fullDays === 30 && body.jobs.defaults.retentionDays === 180 && body.jobs.defaults.timelapseS === 10 && body.jobs.defaults.after === 'timelapse', JSON.stringify(body.jobs.defaults))
+  check('...how many cameras have days of their own', body.jobs.camerasOwnDays === 1, body.jobs.camerasOwnDays)
+  check('...and no last run before there has been one', body.jobs.thinning === null && body.jobs.retention === null)
+  await runStorageJobs({
+    mode: 'dry-run',
+    index: {},
+    jobs: { thinning: async () => ({ thinned: [{}, {}], skipped: [], warnings: [], freedBytes: 2e9 }), retention: async () => ({ deleted: [], skipped: [], warnings: [], freedBytes: 0 }) },
+    args: () => ({}),
+    log: () => {},
+    warn: () => {}
+  })
+  ;[, body] = await handleStorage('GET', '/api/storage', json, 'boss')
+  check('after a run the report carries what each job did', body.jobs.thinning?.segments === 2 && body.jobs.thinning.mode === 'dry-run' && body.jobs.retention?.segments === 0, JSON.stringify(body.jobs))
+  setStorageContext({ index: null, dataDir: data, settingsOf: () => withSwitch(undefined) })
+  ;[, body] = await handleStorage('GET', '/api/storage', json, 'boss')
+  check('settings without the switch read as dry run', body.jobs.mode === 'dry-run')
+  jobs.reset()
+}
+
 // ---- the page's pure render ------------------------------------------------------------------------
 check('bytes: null is words, not a zero', bytes(null) === NOT_AVAILABLE && bytes(undefined) === NOT_AVAILABLE && bytes(Number.NaN) === NOT_AVAILABLE)
 check('bytes: a figure', bytes(1_400_000_000) === '1.4 GB' && bytes(0) === '0 B', bytes(1_400_000_000))
@@ -230,11 +263,61 @@ check('days: null is words', days(null) === NOT_AVAILABLE && days(3) === '3 days
 check('render: nothing configured is not a crash', renderStorage({}).empty === true && renderStorage(null).empty === true)
 check('render: a camera whose days we cannot say gets no colour', renderStorage({ locations: [{ id: 'L', path: '/p', mounted: true, usedBytes: 1, freeBytes: 1, totalBytes: 2, usedPct: 50, freePct: 50, cameras: [{ camera: 'c', daysKept: null, targetDays: null, meetsTarget: null }] }] }).locations[0].cameras[0].state === '')
 
+// ---- the switch and the last runs, as the page says them ---------------------------------------------
+{
+  const { jobsView, switchOnWarning, THINNING_CHOICES } = await import('../public/storage.js')
+  const at = Date.UTC(2026, 9, 2, 20, 5, 0)
+  const hhmm = new Date(at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+  const run = (o) => ({ job: 'thinning', mode: 'dry-run', dryRun: true, at, tookMs: 900, segments: 0, bytes: 0, skipped: 0, skippedWhy: [], warnings: [], warningCount: 0, limit: 2000, reachedLimit: false, protection: 'ranges', error: null, ...o })
+  const base = { mode: 'dry-run', defaults: { after: 'timelapse', fullDays: 7, timelapseS: 10, retentionDays: 30 }, camerasOwnDays: 0, thinning: null, retention: null }
+  const view = (o, now = at + 60_000) => jobsView({ ...base, ...o }, { now })
+
+  check('the three choices, in the owner\'s words', THINNING_CHOICES.map((c) => c.value).join() === 'dry-run,on,off' &&
+    /Dry run — shows what it would do, changes nothing/.test(THINNING_CHOICES[0].text) && /On — converts and deletes as set/.test(THINNING_CHOICES[1].text) && THINNING_CHOICES[2].text === 'Off', JSON.stringify(THINNING_CHOICES))
+  check('the plan in plain words', view({}).plan === 'Full video for 7 days, then time-lapse (one picture every 10 s) until day 30, then deleted.', view({}).plan)
+  check('the plan says when cameras have days of their own', /2 cameras have days of their own/.test(view({ camerasOwnDays: 2 }).plan) && /1 camera has days of its own/.test(view({ camerasOwnDays: 1 }).plan))
+  check('the plan for "keep everything" does not promise a time-lapse', view({ defaults: { ...base.defaults, after: 'keep' } }).plan === 'Everything kept for 30 days, then deleted.', view({ defaults: { ...base.defaults, after: 'keep' } }).plan)
+  check('before a run: says it has not run yet', view({}).lines.every((l) => /not run yet/.test(l.text)) && view({}).lines.map((l) => l.label).join() === 'Time-lapse,Retention')
+
+  const v1 = view({ thinning: run({ segments: 1240, bytes: 310e9 }), retention: run({ job: 'retention', segments: 12, bytes: 3.1e9 }) })
+  check('dry run, the owner\'s example line', v1.lines[0].text === `Last run ${hhmm} (dry run): would convert 1,240 files, freeing 310 GB`, v1.lines[0].text)
+  check('dry run, retention', v1.lines[1].text === `Last run ${hhmm} (dry run): would delete 12 files, freeing 3.1 GB`, v1.lines[1].text)
+  const v2 = view({ mode: 'on', thinning: run({ mode: 'on', dryRun: false, segments: 1240, bytes: 310e9 }) })
+  check('on: what it did', v2.lines[0].text === `Last run ${hhmm}: converted 1,240 files, freed 310 GB`, v2.lines[0].text)
+  const v3 = view({ thinning: run({}), retention: run({ job: 'retention' }) })
+  check('dry run that found nothing says so', v3.lines[0].text === `Last run ${hhmm} (dry run): nothing to convert yet` && v3.lines[1].text === `Last run ${hhmm} (dry run): nothing to delete yet`, JSON.stringify(v3.lines.map((l) => l.text)))
+  const v4 = view({ thinning: run({ segments: 5, bytes: 1e9, skipped: 7, skippedWhy: [{ why: 'already thin', n: 3 }, { why: 'bookmarked or exported', n: 2 }, { why: 'no index rows', n: 1 }] }) })
+  check('skipped files are counted with the reasons', /· 7 skipped \(already thin 3, bookmarked or exported 2, no index rows 1\)$/.test(v4.lines[0].text), v4.lines[0].text)
+  const v5 = view({ thinning: run({ segments: 2000, bytes: 5e11, reachedLimit: true }) })
+  check('a run that hit the per-run limit says there is more', /most one run/.test(v5.lines[0].text), v5.lines[0].text)
+  const v6 = view({ thinning: run({ error: 'database is locked' }) })
+  check('a failed run is red and says why', v6.lines[0].state === 'bad' && /failed: database is locked/.test(v6.lines[0].text), v6.lines[0].text)
+  const v7 = view({ mode: 'off', thinning: run({ mode: 'off', segments: null, bytes: null, skipped: null }) })
+  check('switched off: says it is not running', /switched off/i.test(v7.lines[0].text) && !/would/.test(v7.lines[0].text), v7.lines[0].text)
+  const v8 = view({ thinning: run({ warnings: ['w1', 'w2'], warningCount: 4 }) })
+  check('warnings listed, with how many more there were', v8.lines[0].warnings.join('|') === 'w1|w2|and 2 more (the server log has them all)' && v8.lines[0].state === 'warn', JSON.stringify(v8.lines[0]))
+  const v9 = view({ thinning: run({ protection: 'none' }) })
+  check('a run that could not see the bookmarks is red and says so', v9.lines[0].state === 'bad' && v9.lines[0].warnings.some((w) => /bookmark/i.test(w)), JSON.stringify(v9.lines[0]))
+  const v10 = view({ thinning: run({}) }, at + 3 * 86_400_000)
+  check('a last run more than a day ago gives the day too', /^Last run \d{1,2} [A-Z][a-z]{2} \d\d:\d\d/.test(v10.lines[0].text), v10.lines[0].text)
+  check('an older server without the switch: nothing invented', jobsView(undefined).mode === null && jobsView(undefined).lines.every((l) => l.text === NOT_AVAILABLE))
+
+  const w = switchOnWarning({ ...base, camerasOwnDays: 2 })
+  check('the confirm names the full-video days and the rewrite to time-lapse', /older than 7 days/.test(w) && /rewritten to time-lapse/.test(w) && /one picture every 10 s/.test(w), w)
+  check('the confirm names the total days and deletion for good', /older than 30 days/.test(w) && /deleted/.test(w) && /for good/.test(w), w)
+  check('the confirm says bookmarked and exported stretches are kept', /Bookmarked and exported stretches are kept/.test(w), w)
+  check('the confirm mentions cameras with days of their own', /2 cameras/.test(w), w)
+  const wk = switchOnWarning({ ...base, defaults: { ...base.defaults, after: 'keep' } })
+  check('with "keep everything" the confirm promises no time-lapse, only deletion', !/time-lapse/.test(wk.replace(/^Switch time-lapse and retention ON\?/, '')) && /older than 30 days/.test(wk) && /for good/.test(wk), wk)
+}
+
 // ---- the page's files ---------------------------------------------------------------------------
 {
   // (Storage is a tab of Settings now; storage.html only sends old links there)
   const html = readFileSync(new URL('../public/settings.html', import.meta.url), 'utf8')
   check('the page loads storage.js and has the ids it paints into', /storage\.js/.test(html) && ['sr-locations', 'sr-warnings', 'sr-totals'].every((id) => html.includes(`id="${id}"`)))
+  const tl = html.match(/<section[^>]*data-tab="storage"[^>]*aria-labelledby="sj-title"[\s\S]*?<\/section>/)?.[0] ?? ''
+  check('Settings > Storage has the time-lapse and retention switch, its plan and its last runs', ['sj-title', 'sj-form', 'sj-choices', 'sj-plan', 'sj-runs', 'sj-msg'].every((id) => tl.includes(`id="${id}"`)), tl.slice(0, 200))
 }
 
 rmSync(data, { recursive: true, force: true })

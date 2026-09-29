@@ -39,7 +39,8 @@ import { markerPresent } from './storage-report.mjs'
 const currentSettings = async () => (await import('./settings.mjs')).getSettings()
 
 const DAY = 86_400_000
-const MAX_SEGMENTS_PER_RUN = 2000
+/** The most files one run of either job takes on; the next run, 5 minutes later, goes on. */
+export const MAX_SEGMENTS_PER_RUN = 2000
 const BATCH = 500
 /** A segment bigger than this is not rewritten in one buffer. One minute of 4K is far under it. */
 export const MAX_SEGMENT_BYTES = 512 * 1024 * 1024
@@ -439,7 +440,8 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
       if (batch.length < BATCH) break
     }
   }
-  if (out.thinned.length) console.log(`[thinning] ${dryRun ? 'would thin' : 'thinned'} ${out.thinned.length} segment${out.thinned.length === 1 ? '' : 's'}, ${(out.freedBytes / 1e6).toFixed(1)} MB`)
+  // No line of its own here: storage-jobs.mjs writes one summary for the run (every run that changed
+  // footage; in dry run at most once an hour, where a line every 5 minutes said the same thing).
   return out
 }
 
@@ -573,7 +575,8 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
       }
     }
   }
-  if (out.deleted.length) console.log(`[retention] ${dryRun ? 'would delete' : 'deleted'} ${out.deleted.length} segment${out.deleted.length === 1 ? '' : 's'}`)
+  // No line of its own here: storage-jobs.mjs writes one summary for the run (every run that changed
+  // footage; in dry run at most once an hour, where a line every 5 minutes said the same thing).
   return out
 }
 

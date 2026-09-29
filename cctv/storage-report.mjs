@@ -5,7 +5,8 @@
 //     -> { now, locations: [...], cameras: [...], warnings: [] }
 //   forecast(samples, opts) -> { bytesPerDay, daysToFull, confident, reason }
 //   driveFullCandidates(report, opts) -> alert candidates for alerts.mjs to adopt
-//   handleStorage(method, pathname, readJson, user) -> [status, body] | null
+//   handleStorage(method, pathname, readJson, user) -> [status, body] | null   (the report + jobs)
+//   jobsReport(settings) -> the time-lapse and retention switch and each job's last run
 //
 // The one rule that shapes all of it: never invent a figure. A location we could not stat, a
 // camera with one day of history, a drive whose free space is going up and down rather than
@@ -14,6 +15,7 @@
 import { mkdirSync, readFileSync, renameSync, statfsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isAdmin } from './auth.mjs'
+import { lastRuns } from './storage-jobs.mjs'
 
 // The caller may hand us a plain user name or the { user, admin } the newer routes pass around.
 // Taking only one of the two is how a route ends up refusing everybody: isAdmin() given an object
@@ -322,6 +324,29 @@ export function driveFullCandidates(report, { days = ALERT_DAYS } = {}) {
   return out
 }
 
+// ---- the time-lapse and retention jobs ---------------------------------------------------------
+
+// The recording fields that decide what the two jobs do to a camera's footage. A camera that only
+// records differently (mode, stream) still follows the default days.
+const DAY_FIELDS = ['fullDays', 'after', 'timelapseS', 'retentionDays']
+
+/**
+ * What Settings > Storage shows next to the switch: how it is set (storage.thinning, dry run when
+ * missing, as server.mjs reads it), the days the jobs work from, and each job's last run
+ * (storage-jobs.mjs; null until the first one since the server started).
+ */
+export function jobsReport(settings) {
+  const d = settings?.recording?.defaults ?? {}
+  const runs = lastRuns()
+  return {
+    mode: settings?.storage?.thinning ?? 'dry-run',
+    defaults: { after: d.after ?? null, fullDays: d.fullDays ?? null, timelapseS: d.timelapseS ?? null, retentionDays: d.retentionDays ?? null },
+    camerasOwnDays: Object.values(settings?.recording?.cameras ?? {}).filter((o) => DAY_FIELDS.some((k) => o && k in o)).length,
+    thinning: runs.thinning,
+    retention: runs.retention
+  }
+}
+
 // ---- the route ---------------------------------------------------------------------------------
 // The index lives in server.mjs; it hands it over once at startup rather than this module
 // reaching into it.
@@ -344,7 +369,8 @@ export function setStorageContext({ index = null, dataDir = null, settingsOf = n
 }
 
 /**
- * GET /api/storage -> the report (admins only: it names every location and every camera).
+ * GET /api/storage -> the report plus `jobs` (jobsReport). Admins only: it names every location and
+ * every camera.
  * @returns {Promise<[number, object]|null>} null when the path is not ours
  */
 export async function handleStorage(method, pathname, _readJson, user) {
@@ -361,7 +387,7 @@ export async function handleStorage(method, pathname, _readJson, user) {
   } catch (e) {
     console.warn(`[storage-report] sample not taken: ${e.message}`)
   }
-  return [200, buildStorageReport({ settings, index: indexRef(), history })]
+  return [200, { ...buildStorageReport({ settings, index: indexRef(), history }), jobs: jobsReport(settings) }]
 }
 
 export const _test = { HISTORY_FILE }

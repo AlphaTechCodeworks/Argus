@@ -4,6 +4,8 @@
 //   GET  /api/admin/settings   -> { settings, choices, memory }   memory: the RAM each "recent footage
 //                              in RAM" choice needs (rec-cache.mjs estimateRecentRam), or null
 //   POST /api/admin/settings   { partial settings, see settings.mjs } -> { settings }
+//                              (storage.thinning, the time-lapse and retention switch, is set here
+//                              too: Settings > Storage, storage.js; audited by settings.mjs)
 //   GET  /api/admin/storage    -> { locations (with health), lowFreePct, floorFreePct, types, roles }
 //   POST /api/admin/storage    { action: 'add', path, type, role, limitGB?, sameDisk? } -> { location }
 //                              { action: 'set', id, role?, limitGB? } -> { location }
@@ -21,13 +23,13 @@
 import { isAdmin } from './auth.mjs'
 import { errorAnswer } from './nvr-xml.mjs'
 import { KINDS } from './alerts.mjs'
-import { AFTER, MAX_RETENTION_DAYS, MODES, RECENT_MINUTES, THUMBNAILS, getSettings, saveSettings } from './settings.mjs'
+import { AFTER, MAX_RETENTION_DAYS, MODES, RECENT_MINUTES, THINNING, THUMBNAILS, getSettings, saveSettings } from './settings.mjs'
 import { currentJob, listDisks, prepareDisk } from './disks.mjs'
 import { BASE as NET_BASE, PROTOS as NET_PROTOS, currentJob as netJob, listShares, runShareJob } from './netshares.mjs'
 import { listFolders, makeFolder } from './folders.mjs'
 import { ROLES, TYPES, addLocation, listLocations, removeLocation, updateLocation } from './storage.mjs'
 
-const CHOICES = { modes: MODES, after: AFTER, recentMinutes: RECENT_MINUTES, thumbnails: THUMBNAILS, maxRetentionDays: MAX_RETENTION_DAYS, alertKinds: KINDS }
+const CHOICES = { modes: MODES, after: AFTER, recentMinutes: RECENT_MINUTES, thumbnails: THUMBNAILS, thinning: THINNING, maxRetentionDays: MAX_RETENTION_DAYS, alertKinds: KINDS }
 
 /**
  * The settings as the page may see them: the mail password is write-only, so it leaves here as
