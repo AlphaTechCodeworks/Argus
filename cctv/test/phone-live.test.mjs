@@ -1,6 +1,7 @@
 // Tests live video thinned for phones (phone-live.mjs), with a fake converter: no ffmpeg needed.
 //   node cctv/test/phone-live.test.mjs
 import { PhoneLive, PhoneStream, encodeFrame, frameRate, gopFor, isPhoneRequest, keepEveryFor, parseFrame } from '../phone-live.mjs'
+import { HubStream } from '../stream-hub.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
 
 let failures = 0
@@ -269,6 +270,54 @@ const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, s
     learnt.out.filter((o) => !o.converted).map((o) => o.ts).join() === '400,450,500,550,600,650,700,750' && learnt.out.filter((o) => o.converted)[0]?.ts === 800 && learnt.out.filter((o) => o.converted)[0].key && learnt.s.startTs === 400, show({ out: learnt.out.slice(0, 12), logs: learnt.logs }))
   const pass = feed({ fps: 15, ...REMOTE, fromNextKey: true }, { fps: 20, keyEvery: 40, replay: 20, n: 42 })
   check('fromNextKey, sent as it is: its first keyframe out is the camera\'s next one (startTs)', pass.s.passthrough && pass.s.startTs === 2000 && pass.out[0]?.ts === 2000 && pass.out[0].key, show(pass))
+}
+
+// ---- a stream made at the camera's keyframe, its rate known (adaptive-live.mjs #handOver) ----
+// No conversion slot free at a step down: a tile keeps its own conversion to the camera's next keyframe,
+// and there that one closes and the new level's stream is made, from inside the keyframe's fan-out, with
+// the slot it gave back. The rate is known already (the camera stream's GOP, the conversion it leaves):
+// learnt again, the stream took the keyframe it was made at as its first sample, sent the camera's own
+// frames on while it learnt, and converted from the keyframe after, a keyframe interval later.
+{
+  const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 10_000 } }
+  /** A 20 fps sub (a keyframe every 2 s) on the real fan-out; at its keyframe at 2 s a stream of level 8 is made, and a socket put on it. */
+  const handOver = (extra) => {
+    const src = new HubStream(hub, 0, 1)
+    src.add(fakeWs())
+    const frame = (i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i % 40 === 0, 0, i * 50)
+    for (let i = 0; i < 30; i++) src.onFrame(frame(i), i % 40 === 0)
+    const xs = []
+    const logs = []
+    const out = []
+    const rates = []
+    let s = null
+    src.add({
+      OPEN: 1, readyState: 1, bufferedAmount: 0,
+      send: (b) => {
+        const f = parseFrame(b)
+        if (s || !f.isKey || f.ts !== 2000) return
+        s = new PhoneStream({
+          source: src, type: 1, slot: { release() {} }, camera: 'n1/1', log: (l) => logs.push(l), fps: 8, crf: 27, subKbps: 450, ...REMOTE, fromNextKey: true, onRate: (r) => rates.push(r), ...extra,
+          makeTranscoder: (o) => {
+            const x = { o, pushed: [], push(ts, k) { this.pushed.push(ts); if ((this.pushed.length - 1) % o.keepEvery === 0) o.onFrame(ts, k, Buffer.from([1])) }, close() {} }
+            xs.push(x)
+            return x
+          }
+        })
+        const ws = fakeWs()
+        ws.send = (m) => { const g = parseFrame(m); out.push({ ts: g.ts, key: g.isKey, converted: g.payload.length === 1 }) }
+        s.add(ws)
+      }
+    })
+    for (let i = 30; i < 70; i++) src.onFrame(frame(i), i % 40 === 0)
+    return { s, xs, logs, out, rates }
+  }
+  const known = handOver({ srcFps: 20 })
+  check('srcFps: made in the camera keyframe\'s fan-out, it decides at once on the rate it is given, nothing learnt', known.logs.length === 1 && known.logs[0] === '[phone-live] n1/1: converting a sub stream at 20.0 fps to about 8: keeping 1 in 3' && known.rates.join() === '20', JSON.stringify(known.logs))
+  check('  and converts from that very keyframe: its first picture out is that keyframe (startTs), and none of the camera\'s own frames goes out',
+    known.xs[0]?.pushed[0] === 2000 && known.out[0]?.key && known.out[0].ts === 2000 && known.out.every((o) => o.converted) && known.s.startTs === 2000, JSON.stringify(known.out.slice(0, 4)))
+  const learnt = handOver({})
+  check('  (not given: learnt again from there, the camera\'s own frames sent on meanwhile, converted only from the keyframe after)', learnt.xs.every((x) => x.pushed.length === 0) && learnt.out.length > 0 && learnt.out.every((o) => !o.converted), JSON.stringify(learnt.out.slice(0, 3)))
 }
 
 // ---- a trickle's conversion: each picture out as it goes in ----
