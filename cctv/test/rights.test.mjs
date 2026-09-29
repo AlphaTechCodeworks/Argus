@@ -620,5 +620,28 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   rmSync(R.RIGHTS_SHADOW, { recursive: true, force: true })
 }
 
+// ---- the camera lists the pages read (liveCameras, playbackCameras) ----------------------------------------
+{
+  auth.saveUsers({ boss: { hash: 'x', role: 'admin' }, jo: { hash: 'x', role: 'viewer' } })
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 2, users: {} }))
+  const CAMS = [{ nvr: 'n1', ch: 0, name: 'A' }, { nvr: 'n1', ch: 1, name: 'B' }, { nvr: 'n2', ch: 0, name: 'C' }]
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1/0'], 'playback-nvr': ['n1/1', 'n2'], 'playback-server': ['n2/0'] } })
+  const live = R.liveCameras(VIEWER, CAMS)
+  check('liveCameras: only the cameras with Live, their own fields kept', J(live.map((c) => c.name)) === J(['A', 'B']) && live[0].nvr === 'n1' && live[0].ch === 0)
+  check('... hd where Live HD is; playback where either playback right is', live[0].hd === true && live[1].hd === false && live[0].playback === false && live[1].playback === true, J(live))
+  const pb = R.playbackCameras(VIEWER, CAMS)
+  check('playbackCameras: only cameras with a playback right', J(pb.map((c) => c.name)) === J(['B', 'C']))
+  check('... Playback SD only: sd; no hd, no NVR HD (no Live HD there), no legs', J([pb[0].sd, pb[0].hd, pb[0].nvrHd, pb[0].legs]) === J([true, false, false, false]))
+  check('... SD and HD: every flag (Playback HD may see main; legs need both)', J([pb[1].sd, pb[1].hd, pb[1].nvrHd, pb[1].legs]) === J([true, true, true, true]))
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1'], 'playback-nvr': ['n1'] } })
+  check('... SD with Live HD there: NVR HD', R.playbackCameras(VIEWER, CAMS)[0].nvrHd === true)
+  check('an admin: every camera, every flag', R.liveCameras(ADMIN, CAMS).every((c) => c.hd && c.playback) && R.liveCameras(ADMIN, CAMS).length === 3 && R.playbackCameras(ADMIN, CAMS).every((c) => c.sd && c.hd && c.nvrHd && c.legs))
+  check('no session: nothing', R.liveCameras(null, CAMS).length === 0 && R.playbackCameras(null, CAMS).length === 0)
+  const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  check('server.mjs: /api/cameras through liveCameras, ?for=playback through playbackCameras', /pathname === '\/api\/cameras'\) return sendJson\(res, 200, url\.searchParams\.get\('for'\) === 'playback' \? playbackCameras\(who, allCameras\(\{ live: true \}\)\) : liveCameras\(who, allCameras\(\{ live: true \}\)\)\)/.test(src))
+  const rsrc = readFileSync(new URL('../rights.mjs', import.meta.url), 'utf8')
+  check('an admin\'s lists are made without asking can() per camera (as the old route did)', /export function liveCameras\(who, cams\) \{[^}]*?if \(who\?\.admin === true\) return cams\.map/.test(rsrc) && /export function playbackCameras\(who, cams\) \{\s*if \(who\?\.admin === true\) return cams\.map/.test(rsrc))
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

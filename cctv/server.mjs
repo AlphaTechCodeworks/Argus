@@ -121,7 +121,7 @@ import { probeTarget, tcpReachable } from './probe.mjs'
 import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
-import { can, canPlayAnyOn, handleRights, mayHd, onRightsSaved, sitesFor } from './rights.mjs'
+import { can, canPlayAnyOn, handleRights, liveCameras, mayHd, onRightsSaved, playbackCameras, sitesFor } from './rights.mjs'
 import { streamParam } from './stream-param.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
@@ -868,8 +868,10 @@ const handleRequest = async (req, res) => {
   // an admin sees every NVR in full; anyone else only the sites they hold a grant on, by site, name
   // and status (rights.mjs sitesFor): never an NVR's address, P2P serial, model or serial number
   if (pathname === '/api/sites') return sendJson(res, 200, sitesFor(who, [...nvrs.values()].map((n) => n.info())))
-  // only the cameras this user may watch live (rights.mjs; an admin sees all)
-  if (pathname === '/api/cameras') return sendJson(res, 200, who.admin ? allCameras({ live: true }) : allCameras({ live: true }).filter((c) => can(who, 'live', { nvr: c.nvr, ch: c.ch })))
+  // the cameras this user may watch live, each with what it allows (rights.mjs liveCameras: hd, playback);
+  // ?for=playback: the ones they may play back instead (playbackCameras: sd, hd, nvrHd, legs). An admin
+  // gets every camera with everything allowed.
+  if (pathname === '/api/cameras') return sendJson(res, 200, url.searchParams.get('for') === 'playback' ? playbackCameras(who, allCameras({ live: true })) : liveCameras(who, allCameras({ live: true })))
   // a map shows where cameras are and what they cover: only the sites and cameras this user may see
   // (maps.mjs mapsFor; a site is visible when one of its NVRs' cameras is)
   const siteVisible = (site) => [...nvrs.values()].some((n) => n.site === site && n.channels.some((c) => canSee(n.id, c.ch)))

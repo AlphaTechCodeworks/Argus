@@ -634,6 +634,47 @@ export function intersectTargets(a, b) {
 }
 
 /**
+ * GET /api/cameras for one user: the cameras they may watch live, each with `hd` (Live HD there: full
+ * screen at full quality) and `playback` (either playback right there: the full-size view's Recordings
+ * link). An admin gets every camera with everything allowed. The pages use these only to not offer
+ * what the server would refuse; every stream asks can() again.
+ * @param {object} who the session's user
+ * @param {Array<{ nvr: string, ch: number }>} cams nvrs.mjs allCameras()
+ */
+export function liveCameras(who, cams) {
+  // an admin (the session says so, as server.mjs built it): everything, without asking can() four
+  // times a camera, each a look at the rights file (file-cache.mjs), every 30 s per open page
+  if (who?.admin === true) return cams.map((c) => ({ ...c, hd: true, playback: true }))
+  const out = []
+  for (const c of cams) {
+    const t = { nvr: c.nvr, ch: c.ch }
+    if (!can(who, 'live', t)) continue
+    out.push({ ...c, hd: can(who, 'live-hd', t), playback: can(who, 'playback-nvr', t) || can(who, 'playback-server', t) })
+  }
+  return out
+}
+
+/**
+ * GET /api/cameras?for=playback: the cameras they may play back (either right), each with sd (the NVR's
+ * copy: Playback SD), hd (the server's recordings: Playback HD), nvrHd (the NVR's main stream: SD and a
+ * right to see main, as rec-playback.mjs asks) and legs (the server's gaps filled from the NVR: both).
+ * @param {object} who the session's user
+ * @param {Array<{ nvr: string, ch: number }>} cams nvrs.mjs allCameras()
+ */
+export function playbackCameras(who, cams) {
+  if (who?.admin === true) return cams.map((c) => ({ ...c, sd: true, hd: true, nvrHd: true, legs: true }))
+  const out = []
+  for (const c of cams) {
+    const t = { nvr: c.nvr, ch: c.ch }
+    const sd = can(who, 'playback-nvr', t)
+    const hd = can(who, 'playback-server', t)
+    if (!sd && !hd) continue
+    out.push({ ...c, sd, hd, nvrHd: sd && (hd || can(who, 'live-hd', t)), legs: sd && hd })
+  }
+  return out
+}
+
+/**
  * May this person play back anything at all on this NVR? /api/playback/now and /dates answer for the
  * whole NVR (its clock and time zone, the days it holds recordings) and each ask costs an SDK call
  * to it, so they are for someone who may play back at least one of its cameras, not for everyone
