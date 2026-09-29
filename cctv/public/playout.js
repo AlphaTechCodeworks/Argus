@@ -5,7 +5,7 @@
 // only moves in deliberate steps, so frames keep the camera's own even cadence
 // even though the network delivers them in bursts:
 //   - a frame decoded after its display time  -> "late"; if that keeps happening
-//     the delay grows (buffer absorbs bigger bursts)
+//     the delay grows (buffer absorbs bigger bursts; playback takes it up a few ms a frame)
 //   - a steady link for a while               -> the delay shrinks a little
 //   - playback far behind the newest frame    -> jump to the live edge
 //     (e.g. the backlog an NVR sends when a stream starts)
@@ -35,7 +35,8 @@ export const PLAYOUT_DEFAULTS = {
   holeStepMs: 40, // after such a re-anchor the next frame is shown at least this long after the previous one
   slewWindowMs: 5000, // drift is measured on the earliest arrival in windows this long
   slewMax: 0.01, // the anchor moves at most this share of real time (1%)
-  slewDeadMs: 5 // smaller drift errors are left alone
+  slewDeadMs: 5, // smaller drift errors are left alone
+  growSlew: 0 // 0: a grown buffer moves the anchor at once; else each frame takes this share of its spacing
 }
 
 /**
@@ -45,8 +46,12 @@ export const PLAYOUT_DEFAULTS = {
  * stall was. Waiting lateForMs to be sure showed those frames as they landed for a second and then
  * froze again for a buffer's length: two freezes for one stall. Live keeps the default, where a late
  * run is often the NVR catching up and passes by itself.
+ *
+ * A grown buffer reaches the picture a few ms a frame (growSlew 10%: 4 ms a frame at 25 fps, the
+ * 40 ms step in 0.4 s) instead of every frame waiting 40 ms longer at once, a hitch each time
+ * (smoothness report, minor items). Live keeps the step, as it always had.
  */
-export const PLAYBACK_CLOCK = { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 1000, lateForMs: 0 }
+export const PLAYBACK_CLOCK = { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 1000, lateForMs: 0, growSlew: 0.1 }
 
 export class PlayoutClock {
   constructor(options = {}) {
@@ -65,6 +70,7 @@ export class PlayoutClock {
     this.resyncs = 0
     this.warmupUntil = 0
     this.steadySince = null
+    this.growLeft = 0 // growth adapt() decided that the anchor has still to take up (growSlew)
     this.#track()
   }
 
@@ -97,6 +103,13 @@ export class PlayoutClock {
       this.queuedUntil = now + lead // until then, being further ahead than the delay is expected
       this.resyncs++
     }
+    if (this.growLeft > 0 && this.lastTs !== null) {
+      // a grown buffer, a little per frame: each frame takes up growSlew of its own spacing (10%:
+      // 4 ms at 25 fps), so the picture runs a little slow for a moment instead of holding a frame
+      const s = Math.min(this.growLeft, (Math.max(0, tsMs - this.lastTs) / this.rate) * o.growSlew)
+      this.growLeft -= s
+      this.#shift(s)
+    }
     this.lastTs = tsMs
     this.lastNow = now
     let at = tsMs / this.rate + this.anchor
@@ -121,7 +134,8 @@ export class PlayoutClock {
     } else {
       this.lateSince = null
     }
-    if (at < now && now > this.warmupUntil) {
+    // (a frame the growth still under way will cover is not late again: it would grow twice)
+    if (at + this.growLeft < now && now > this.warmupUntil) {
       this.late++
       this.lateTotal++
     }
@@ -157,13 +171,35 @@ export class PlayoutClock {
     this.anchor = now - tsMs / this.rate + leadMs
     this.warmupUntil = now + this.opts.warmupMs
     this.steadySince = now
+    this.growLeft = 0 // (the new anchor has the whole delay)
     this.#track()
   }
 
+  /**
+   * Playback speed. The frame shown next (tsMs, the oldest buffered) keeps its display time and the
+   * ones after it follow at the new rate, so the buffer keeps as many frames as it had. It used to
+   * put that frame a whole buffer later: the picture held for the buffer's length at every change,
+   * and at 2x and 4x the buffer then held two or four times the decoded frames -- more than a
+   * hardware decoder hands out (6 at 2560x1440 on the viewing PC), so it stalled and the player
+   * skipped to the next keyframe, 2-4 s on (smoothness report cause 5). The frames the server sends
+   * at the old speed while the change reaches it are simply shown as they come.
+   */
   setRate(rate, tsMs, now) {
+    if (this.anchor === null || tsMs === undefined) {
+      this.rate = rate // nothing buffered: the next frame anchors the clock
+      return
+    }
+    const at = this.presentAt(tsMs)
+    const growLeft = this.growLeft
     this.rate = rate
-    // keep the buffer: the NVR needs a moment before it delivers at the new speed
-    if (this.anchor !== null && tsMs !== undefined) this.anchorAt(tsMs, now, this.delay)
+    this.anchorAt(tsMs, now, at - now)
+    this.growLeft = growLeft // (a growth under way carries on)
+  }
+
+  // a deliberate move of the anchor: the drift reference moves with it, so it is not taken for drift
+  #shift(ms) {
+    this.anchor += ms
+    if (this.ref !== null) this.ref += ms
   }
 
   /** Call about once a second: grows the buffer after late frames, trims it when steady, slews drift. */
@@ -179,8 +215,10 @@ export class PlayoutClock {
       this.steadySince = now
     }
     this.delay += step
-    this.anchor += step
-    if (this.ref !== null) this.ref += step // a deliberate change, not drift
+    // live moves the picture by the whole step at once; playback's growSlew lets schedule() take a
+    // growth up frame by frame (a shrink is 10 ms, under a frame: at once everywhere)
+    if (step > 0 && o.growSlew > 0) this.growLeft += step
+    else this.#shift(step)
     this.late = 0
     // slew toward the drift-free anchor: at most slewMax of the time since the last call
     const dt = this.lastAdapt === null ? 1000 : Math.min(now - this.lastAdapt, 2000)

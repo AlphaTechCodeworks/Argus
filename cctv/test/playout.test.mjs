@@ -170,16 +170,83 @@ for (const drift of [0.0049, -0.0049]) {
   check(`drift ${sign}0.49%: buffer stays within limits`, r.clock.delay >= 150 && r.clock.delay <= 800, `delay ${r.clock.delay}, last shown at ${Math.round(lastWait.now)}`)
 }
 
-// ---- rate change (playback 2x) still works; pause/resume re-anchors ------------------------------
+// ---- rate change (playback 2x) keeps the buffered frames' display times; pause/resume re-anchors ----
+// (smoothness report cause 5, fix a.) A speed change used to put the next buffered frame a whole
+// buffer later: the picture held for the buffer's length at every change, and at 2x and 4x the
+// buffer then held two or four times the decoded frames, more than a hardware decoder hands out
+// (playout-speed.test.mjs replays what that did).
 {
   const c = new PlayoutClock()
   c.schedule(0, 0)
-  c.setRate(2, 1000, 100)
-  const at = c.schedule(2000, 600)
-  check('rate 2: a frame 1 s of video later is due 0.5 s later', Math.abs(at - (100 + c.delay + 500)) < 1, `at ${at}`)
+  const next = c.schedule(FRAME_MS, FRAME_MS) // still buffered when the speed changes
+  c.setRate(2, FRAME_MS, 100)
+  check('rate 2: the next buffered frame keeps its display time', Math.abs(c.presentAt(FRAME_MS) - next) < 1e-6, `${c.presentAt(FRAME_MS).toFixed(1)} vs ${next.toFixed(1)}`)
+  const at = c.schedule(FRAME_MS + 1000, 600)
+  check('rate 2: a frame 1 s of video after it is due 0.5 s after it', Math.abs(at - (next + 500)) < 1e-6, `at ${at.toFixed(1)}, next ${next.toFixed(1)}`)
   c.anchorAt(5000, 60_000)
   const at2 = c.schedule(5000 + FRAME_MS * 2, 60_000 + 40)
   check('after anchorAt (resume after a long pause): no outage re-sync', c.resyncs === 0 && at2 > 60_000, `resyncs ${c.resyncs}`)
+}
+{
+  // 25 fps with the playback buffer: 1x, then 4x, then back to 1x. Each change keeps the next frame
+  // where it was and plays the rest at the new speed from it, with no pause and nothing re-synced
+  const c = new PlayoutClock(PLAYBACK_CLOCK)
+  for (let i = 0; i < 100; i++) c.schedule(i * 40, 1000 + i * 40) // 4 s at 1x: frame i due at 1300 + 40i
+  const now = 1000 + 99 * 40 + 5 // frames 93-99 are buffered, 93 is next
+  const before = [93, 94, 99].map((i) => c.presentAt(i * 40))
+  c.setRate(4, 93 * 40, now)
+  const after = [93, 94, 99].map((i) => c.presentAt(i * 40))
+  check('1x to 4x: the next frame keeps its time, the ones after it come 4x as fast', Math.abs(after[0] - before[0]) < 1e-6 && Math.abs(after[1] - after[0] - 10) < 1e-6 && Math.abs(after[2] - after[0] - 60) < 1e-6, `${after.map((a) => (a - now).toFixed(1)).join(', ')} ms from now`)
+  c.setRate(1, 96 * 40, now + 30)
+  check('4x back to 1x: the same the other way', Math.abs(c.presentAt(96 * 40) - after[0] - 30) < 1e-6 && Math.abs(c.presentAt(97 * 40) - c.presentAt(96 * 40) - 40) < 1e-6)
+  const due = c.presentAt(96 * 40) - (now + 30)
+  check('  no re-sync, and the next frame is due in 55 ms as it was (the old change put it 300 ms away)', c.resyncs === 0 && Math.abs(due - 55) < 1e-6, `next due in ${due.toFixed(1)} ms`)
+  // nothing buffered, or no clock yet: only the rate changes (the next frame anchors as before)
+  const e = new PlayoutClock(PLAYBACK_CLOCK)
+  e.setRate(2, undefined, 500)
+  check('setRate with no clock yet: just the rate', e.rate === 2 && e.anchor === null)
+  const a = c.anchor
+  c.setRate(2, undefined, now + 100)
+  check('setRate with nothing buffered: just the rate', c.rate === 2 && c.anchor === a)
+}
+
+// ---- playback: a bigger buffer reaches the picture a few ms a frame, not 40 ms at once ---------------
+// (smoothness report, minor items.) adapt() grows the buffer by growMs after late frames. Live moves the
+// anchor all at once: every frame waits 40 ms longer from that moment, a hitch of a frame. Playback
+// spreads it: each frame scheduled moves the anchor by growSlew of its own spacing (10%: 4 ms at
+// 25 fps), so the picture runs 10% slow for 0.4 s instead.
+{
+  // 25 fps, on time, except that at 4 s the link holds frame 75 for 420 ms and the ones behind it come
+  // in a burst after it: frames 75 and 76 are late (and 77 with the smaller playback buffer). The adapt()
+  // at 5 s grows the buffer
+  const run = (options) => {
+    const c = new PlayoutClock(options)
+    const ts = (i) => i * 40
+    const at = (i) => (i >= 75 && i < 84 ? Math.max(1000 + 75 * 40 + 420, 1000 + i * 40) + (i - 75) * 0.1 : 1000 + i * 40)
+    let nextAdapt = 1000
+    for (let i = 0; i < 100; i++) {
+      for (; nextAdapt <= at(i); nextAdapt += 1000) c.adapt(nextAdapt)
+      c.schedule(ts(i), at(i))
+    }
+    const probe = ts(130) // a frame further on: where it will be shown
+    const was = c.presentAt(probe)
+    const delay0 = c.delay
+    c.adapt(nextAdapt) // 5 s
+    const jump = c.presentAt(probe) - was
+    const moves = []
+    for (let i = 100; i < 115; i++) {
+      const p = c.presentAt(probe)
+      c.schedule(ts(i), at(i))
+      moves.push(c.presentAt(probe) - p)
+    }
+    return { grew: c.delay - delay0, jump, moves, total: c.presentAt(probe) - was, late: c.lateTotal }
+  }
+  const pb = run(PLAYBACK_CLOCK)
+  const live = run()
+  check('the late frames grow the playback buffer by 40 ms', pb.grew === 40, `grew ${pb.grew}, late ${pb.late}`)
+  check('  playback: the picture does not move when it grows', pb.jump === 0, `moved ${pb.jump} ms at once`)
+  check('  playback: it moves 4 ms a frame (10% of 40 ms), and all 40 ms within 10 frames', pb.moves.every((m) => m <= 4 + 1e-9) && Math.abs(pb.moves.slice(0, 10).reduce((a, b) => a + b, 0) - 40) < 1e-6 && Math.abs(pb.total - 40) < 1e-6, pb.moves.map((m) => m.toFixed(1)).join(' '))
+  check('  live: 40 ms at once, as before', live.grew === 40 && live.jump === 40 && live.moves.every((m) => m === 0), `jump ${live.jump}, then ${live.moves.join(' ')}`)
 }
 
 // ---- server: an 11 s outage is not restarted as a stall (live.mjs; the live worker uses the same) --
@@ -244,6 +311,10 @@ for (const drift of [0.0049, -0.0049]) {
   check('live keeps a second before it re-anchors', PLAYOUT_DEFAULTS.lateForMs === 1000)
   check('the playback page and the camera wall use the playback clock', /clock: PLAYBACK_CLOCK/.test(page('playback.js')) && /clock: PLAYBACK_CLOCK/.test(page('wall.js')))
   check('no live page uses it or sets lateForMs', ['viewer.js', 'live-tile.js', 'player.js'].every((f) => !/PLAYBACK_CLOCK|lateForMs/.test(page(f))))
+  // the speed changes: setRate is playback's alone, and so is the gradual growth
+  const livePages = ['viewer.js', 'live-tile.js', 'map.js', 'motion-tune.js']
+  check('the playback clock grows its buffer gradually; live grows it at once, as before', PLAYBACK_CLOCK.growSlew === 0.1 && PLAYOUT_DEFAULTS.growSlew === 0)
+  check('no live page sets growSlew or changes the rate (setRate)', [...livePages, 'player.js'].every((f) => !/growSlew/.test(page(f))) && livePages.every((f) => !/setRate\(/.test(page(f))))
 }
 
 // ---- live: the clock's behaviour, pinned -------------------------------------------------------------

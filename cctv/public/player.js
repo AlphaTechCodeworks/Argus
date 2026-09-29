@@ -395,7 +395,7 @@ export class VideoPlayer {
     else this.clock.anchor = null
   }
 
-  /** Playback speed; the next buffered frame is shown immediately at the new rate. */
+  /** Playback speed; the next buffered frame keeps its display time, the ones after it follow at the new rate. */
   setRate(rate) {
     const next = this.queue[0]?.ts
     this.clock.setRate(rate, next, performance.now())
