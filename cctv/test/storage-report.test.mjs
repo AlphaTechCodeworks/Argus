@@ -160,13 +160,16 @@ const seg = (nvr, ch, ageDays, loc = 'L1') => ({ nvr, ch, loc, path: `/srv/rec/$
 
 // ---- each location's space limit and own marks (the owner's 12,000 GB of the NAS, 2026-09-29) ----------
 {
-  const NAS = { ...L2, role: 'main', limitGB: 12_000, lowFreePct: 7, floorFreePct: 4 }
+  const NAS = { ...L2, role: 'main', limitGB: 12_000, limitSetAt: '2026-09-29T12:00:00.000Z', lowFreePct: 7, floorFreePct: 4 }
   const index = { ...fakeIndex([seg('n1', 0, 3, 'L2')]), locationUse: (loc) => ({ bytes: loc === 'L2' ? 5_512e9 : 0, segments: 1 }) }
   const alarms = [{ id: 'L2', path: NAS.path, kind: 'limit-blocked', text: `${NAS.path}: over its 12,000 GB limit (12,100.0 GB held), but everything left there is from the newest 24 h: kept.` }]
   const r = buildStorageReport({ settings: settings([L1, NAS]), index, history: {}, now: NOW, freeOf: () => ({ freeBytes: 7.7e12, totalBytes: 16.63e12 }), present: () => true, alarms })
   const nas = r.locations.find((l) => l.id === 'L2')
   check('a location\'s own marks are its row\'s (the report\'s defaults stay the settings\')', nas.lowFreePct === 7 && nas.floorFreePct === 4 && r.locations[0].lowFreePct === 15 && r.lowFreePct === 15, JSON.stringify({ low: nas.lowFreePct, floor: nas.floorFreePct }))
   check('Argus\'s bytes there (the index\'s count) and the limit in bytes (1 GB = 1,000,000,000 bytes)', nas.argusBytes === 5_512e9 && nas.limitBytes === 12_000e9 && r.locations[0].limitBytes === null, JSON.stringify({ a: nas.argusBytes, l: nas.limitBytes }))
+  check('... enforced: saved through this code (limitSetAt)', nas.limitEnforced === true && r.locations[0].limitEnforced === false, JSON.stringify({ nas: nas.limitEnforced, l1: r.locations[0].limitEnforced }))
+  const old = buildStorageReport({ settings: settings([{ ...L1, limitGB: 500 }]), index, history: {}, now: NOW, freeOf: () => ({ freeBytes: 7.7e11, totalBytes: 1e12 }), present: () => true }).locations[0]
+  check('a limit saved before it was enforced (no limitSetAt): shown, not enforced', old.limitBytes === 500e9 && old.limitEnforced === false, JSON.stringify({ l: old.limitBytes, e: old.limitEnforced }))
   check('housekeeping\'s alarm for the location is in the warnings and on its row', r.warnings.some((w) => /newest 24 h/.test(w)) && nas.alarms.length === 1, JSON.stringify(r.warnings))
 }
 
@@ -275,11 +278,14 @@ check('days: null is words', days(null) === NOT_AVAILABLE && days(3) === '3 days
 {
   // Argus's recordings against the location's space limit (1 GB = 1,000,000,000 bytes), and that it is enforced
   const { limitCell, LIMIT_TEXT } = await import('../public/storage.js')
-  const at = (argusBytes, limitBytes) => renderStorage({ locations: [{ id: 'L2', path: '/srv/cctv-net/nas', type: 'network', role: 'main', mounted: true, usedBytes: 8.9e12, freeBytes: 7.73e12, totalBytes: 16.63e12, usedPct: 53.5, freePct: 46.5, lowFreePct: 7, floorFreePct: 4, argusBytes, limitBytes, cameras: [] }] }).locations[0]
+  const at = (argusBytes, limitBytes, limitEnforced = true) => renderStorage({ locations: [{ id: 'L2', path: '/srv/cctv-net/nas', type: 'network', role: 'main', mounted: true, usedBytes: 8.9e12, freeBytes: 7.73e12, totalBytes: 16.63e12, usedPct: 53.5, freePct: 46.5, lowFreePct: 7, floorFreePct: 4, argusBytes, limitBytes, limitEnforced, cameras: [] }] }).locations[0]
   const l = at(5_512e9, 12_000e9)
   check('render: Argus\'s recordings against the limit, in whole GB, enforced', l.limit.value === '5,512 GB' && l.limit.note === 'of the 12,000 GB limit (enforced), 46 %' && l.limit.state === 'ok', JSON.stringify(l.limit))
   check('render: ... near the limit (95 %) a warning, over it bad', at(11_500e9, 12_000e9).limit.state === 'warn' && at(12_100e9, 12_000e9).limit.state === 'bad')
   check('render: ... the line that says it is enforced and how, with what a GB is', l.limitText === LIMIT_TEXT && /enforced/.test(LIMIT_TEXT) && /newest 24 hours/.test(LIMIT_TEXT) && /bookmarked/.test(LIMIT_TEXT) && /1 GB = 1,000,000,000 bytes/.test(LIMIT_TEXT), l.limitText)
+  check('render: the enforcing line says how much one clean-up takes at most (review of p2-delete)', /every 5 minutes/.test(LIMIT_TEXT) && /240 GB/.test(LIMIT_TEXT) && !/within 5 minutes/.test(LIMIT_TEXT), LIMIT_TEXT)
+  const notYet = at(5_512e9, 12_000e9, false)
+  check('render: a limit saved before it was enforced: shown as not enforced, how to enforce it, and no enforcing line', /not enforced/.test(notYet.limit.note) && /save/i.test(notYet.limit.note) && notYet.limit.state === 'ok' && notYet.limitText === '', JSON.stringify(notYet.limit))
   const none = at(5_512e9, null)
   check('render: no limit set: the figure, and no enforcement line', none.limit.value === '5,512 GB' && /no space limit/.test(none.limit.note) && none.limitText === '', JSON.stringify(none.limit))
   check('render: Argus\'s bytes not known: words, not 0', limitCell({ argusBytes: null, limitBytes: 12_000e9 }).value === NOT_AVAILABLE)
@@ -293,8 +299,17 @@ check('days: null is words', days(null) === NOT_AVAILABLE && days(3) === '3 days
   const e1 = locationEdit(nas, { limitGB: '12000', lowFreePct: '7', floorFreePct: '' })
   check('edit: what is sent (empty is the default / no limit)', JSON.stringify(e1.body) === JSON.stringify({ action: 'set', id: 'nas-1', limitGB: 12000, lowFreePct: 7, floorFreePct: null }) && !e1.error, JSON.stringify(e1))
   check('edit: a new limit is asked about first: enforced, what goes and what never does, for good', /12,000 GB/.test(e1.ask) && /enforced/.test(e1.ask) && /oldest/.test(e1.ask) && /newest 24 hours/.test(e1.ask) && /bookmarked/.test(e1.ask) && /cannot be brought back/.test(e1.ask) && /1 GB = 1,000,000,000 bytes/.test(e1.ask), e1.ask)
-  const set = { ...nas, limitGB: 12000 }
+  const set = { ...nas, limitGB: 12000, limitEnforced: true }
   check('edit: a lower limit is asked about; a higher one, the same one, or none is not', !!locationEdit(set, { limitGB: '11000' }).ask && !locationEdit(set, { limitGB: '13000' }).ask && !locationEdit(set, { limitGB: '12000' }).ask && !locationEdit(set, { limitGB: '' }).ask)
+  // a card saved for its marks sends no limit when the limit is as it was (the server would otherwise
+  // check it against a share's size, unknown while it is unmounted: review of p2-delete)
+  const enforced = { ...set, limitEnforced: true }
+  const same = locationEdit(enforced, { limitGB: '12000', lowFreePct: '7', floorFreePct: '' })
+  check('edit: the limit as it was is not sent, nor asked about; the marks are', !('limitGB' in same.body) && !same.ask && same.body.lowFreePct === 7, JSON.stringify(same))
+  check('edit: a changed limit is sent', locationEdit(enforced, { limitGB: '13000' }).body.limitGB === 13000 && locationEdit(enforced, { limitGB: '' }).body.limitGB === null)
+  const notYet = locationEdit({ ...set, limitEnforced: false }, { limitGB: '12000' })
+  check('edit: a limit saved before it was enforced, saved as it is: sent, and asked about (it starts deleting)', notYet.body.limitGB === 12000 && /enforced/.test(notYet.ask ?? ''), JSON.stringify(notYet))
+  check('edit: the question says how much one clean-up takes at most', /every 5 minutes/.test(e1.ask) && /240 GB/.test(e1.ask) && !/within 5 minutes/.test(e1.ask), e1.ask)
   check('edit: a limit that is not a positive number is refused on the page', /positive/.test(locationEdit(nas, { limitGB: '-3' }).error ?? '') && /positive/.test(locationEdit(nas, { limitGB: 'lots' }).error ?? ''))
   check('edit: marks that are not whole numbers 1-50 refused on the page', /whole number/.test(locationEdit(nas, { lowFreePct: '7.5' }).error ?? '') && /whole number/.test(locationEdit(nas, { floorFreePct: '0' }).error ?? ''))
 }

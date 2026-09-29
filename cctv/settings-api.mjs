@@ -10,7 +10,8 @@
 //   POST /api/admin/storage    { action: 'add', path, type, role, limitGB?, sameDisk? } -> { location }
 //                              { action: 'set', id, role?, limitGB?, lowFreePct?, floorFreePct? } -> { location }
 //                              (limitGB: GB of 1,000,000,000 bytes, at most the drive's size, ENFORCED by
-//                              housekeeping.mjs; the marks: the location's own, null for the default)
+//                              housekeeping.mjs once saved here, limitSetAt; one sent unchanged is not
+//                              checked again; the marks: the location's own, null for the default)
 //                              { action: 'remove', id } -> { id }   (files and marker stay)
 //   GET  /api/admin/storage/folders?path= -> { path, parent, folders } (read-only), see folders.mjs
 //   POST /api/admin/storage/folders { path, name } -> { path }   "New folder" inside path

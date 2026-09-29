@@ -7,7 +7,9 @@
 //               limitGB: number|null, lowFreePct?, floorFreePct?, sameDisk?: true, added, addedBy }
 //     limitGB: the most Argus's recordings may take there (as the index counts them), in GB of
 //       1,000,000,000 bytes, at most the drive's or share's size; ENFORCED by housekeeping.mjs since
-//       2026-09-29 (the owner's 12,000 GB of the shared NAS)
+//       2026-09-29 (the owner's 12,000 GB of the shared NAS), once saved here: limitSetAt (an ISO time)
+//       says so (location-health.mjs spaceLimit). A limit the old page saved (a note, no question, no
+//       size check) has none, and is not enforced until saved again.
 //     lowFreePct / floorFreePct: its own free-space marks, else storage.lowFreePct / floorFreePct
 //       (location-health.mjs freeMarks)
 //   <path>/.cctv-recordings: { id, created }   (the marker)
@@ -18,7 +20,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { MARKER, _setStatfs, freeMarks, freePercent, healthOf, markerId, probeWriteSpeed, sizeOfFolder } from './location-health.mjs'
+import { MARKER, _setStatfs, freeMarks, freePercent, healthOf, markerId, probeWriteSpeed, sizeOfFolder, spaceLimit } from './location-health.mjs'
 import { HttpError, isPlainObject } from './nvr-xml.mjs'
 import { cameraRecording, getSettings, saveSettings } from './settings.mjs'
 import { SHARE_ANSWER_MS, keepShareHelpers, onShareStuck, shareAnswerMs, shareCall, shareHelperExits } from './share-calls.mjs'
@@ -120,6 +122,9 @@ const withHealth = (loc, s) => ({
   type: loc.type,
   role: loc.role,
   limitGB: loc.limitGB ?? null,
+  // whether housekeeping enforces it (saved here since 2026-09-29), and since when
+  limitEnforced: spaceLimit(loc).enforced,
+  limitSetAt: spaceLimit(loc).enforced ? loc.limitSetAt : null,
   // its own marks, null where the default applies
   lowFreePct: loc.lowFreePct ?? null,
   floorFreePct: loc.floorFreePct ?? null,
@@ -227,7 +232,7 @@ export function addLocation({ path, type, role, limitGB = null, sameDisk = false
   limitGB = cleanLimit(limitGB, () => (type === 'network' ? null : sizeOfFolder(path)))
   const id = existing ?? `loc-${randomBytes(4).toString('hex')}`
   if (!existing) writeFileSync(join(path, MARKER), `${JSON.stringify({ id, created: new Date().toISOString() })}\n`, { flag: 'wx' })
-  const loc = { id, path, type, role, limitGB, ...(sameAsSystem ? { sameDisk: true } : {}), added: new Date().toISOString(), addedBy: user ?? '?' }
+  const loc = { id, path, type, role, limitGB, ...(limitGB ? { limitSetAt: new Date().toISOString() } : {}), ...(sameAsSystem ? { sameDisk: true } : {}), added: new Date().toISOString(), addedBy: user ?? '?' }
   saveLocations([...s.storage.locations, loc], user)
   if (type === 'network') checkHealth().catch(() => {}) // its health is not known until checked
   console.log(`[storage] ${user} added ${id} at ${path} (${type}, ${role})${sameAsSystem ? ' on the system disk' : ''}${limitGB ? `, limit ${limitGB} GB` : ''}`)
@@ -241,7 +246,21 @@ export function updateLocation(id, fields, user) {
   const loc = s.storage.locations.find((l) => l.id === id)
   if (!loc) throw new HttpError(404, 'No such location')
   if ('role' in fields) loc.role = cleanRole(fields.role)
-  if ('limitGB' in fields) loc.limitGB = cleanLimit(fields.limitGB, () => sizeOf(loc))
+  if ('limitGB' in fields) {
+    // The limit as it was, already enforced, is not checked again: a card saved for its marks alone (or
+    // an older page) sends it too, and a share's size is not known while it is unmounted or before its
+    // first check after a restart, which made the marks unsaveable then (review of p2-delete). Anything
+    // else is checked, and stamped as enforced from now: a new or changed limit, or one the old page
+    // saved as a note.
+    const v = fields.limitGB === '' || fields.limitGB === undefined ? null : fields.limitGB
+    const had = spaceLimit(loc)
+    const same = v === (loc.limitGB ?? null) && (v === null || had.enforced)
+    if (!same) {
+      loc.limitGB = cleanLimit(v, () => sizeOf(loc))
+      if (loc.limitGB === null) delete loc.limitSetAt
+      else loc.limitSetAt = new Date().toISOString()
+    }
+  }
   if ('lowFreePct' in fields || 'floorFreePct' in fields) {
     const m = withMarks(loc, fields, s)
     for (const k of ['lowFreePct', 'floorFreePct']) {
@@ -251,7 +270,7 @@ export function updateLocation(id, fields, user) {
   }
   saveLocations(s.storage.locations, user)
   const marks = freeMarks(s, loc)
-  console.log(`[storage] ${user} changed ${id}: role ${loc.role}, limit ${loc.limitGB ? `${loc.limitGB} GB (enforced)` : 'none'}, low mark ${marks.lowFreePct}%${loc.lowFreePct ? '' : ' (default)'}, floor ${marks.floorFreePct}%${loc.floorFreePct ? '' : ' (default)'}`)
+  console.log(`[storage] ${user} changed ${id}: role ${loc.role}, limit ${loc.limitGB ? `${loc.limitGB} GB (${spaceLimit(loc).enforced ? 'enforced' : 'not enforced: saved before limits were'})` : 'none'}, low mark ${marks.lowFreePct}%${loc.lowFreePct ? '' : ' (default)'}, floor ${marks.floorFreePct}%${loc.floorFreePct ? '' : ' (default)'}`)
   return withHealth(loc, s)
 }
 

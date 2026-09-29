@@ -178,6 +178,23 @@ check('limit at add: more than the drive holds refused too', status(() => addLoc
   _test.setShareHealth('nas-1', { ok: true, reason: '', marker: true, writable: true, freeBytes: 7.7e12, totalBytes: 16.63e12, writeMBps: null })
   check('limit on a share of 16,630 GB: 12,000 GB allowed (the owner\'s)', updateLocation('nas-1', { limitGB: 12000 }, 'boss').limitGB === 12000)
   check('... 17,000 GB refused', /16,630 GB/.test(why(() => updateLocation('nas-1', { limitGB: 17000 }, 'boss'))), why(() => updateLocation('nas-1', { limitGB: 17000 }, 'boss')))
+  // enforced once saved here (limitSetAt): the old page saved limits as notes, with no question and no
+  // size check, and one saved then must not start deleting at the first run after the deploy
+  check('a limit saved here is enforced (stamped limitSetAt), and listed as enforced', typeof getSettings().storage.locations.find((l) => l.id === 'nas-1').limitSetAt === 'string' && byId('nas-1').limitEnforced === true, JSON.stringify(byId('nas-1')))
+  // a card saved for its marks alone sends its limit unchanged, or an older page does: with the share's
+  // size not known (unmounted, or not checked since a restart) that must not fail (review of p2-delete)
+  _test.setShareHealth('nas-1', null)
+  const marksOnly = updateLocation('nas-1', { limitGB: 12000, lowFreePct: 7 }, 'boss')
+  check('the limit as it was, the share\'s size not known: saved (the marks), no size check', marksOnly.lowFreePct === 7 && marksOnly.limitGB === 12000 && marksOnly.limitEnforced === true, JSON.stringify(marksOnly))
+  check('... a changed limit still needs the size', /not known/.test(why(() => updateLocation('nas-1', { limitGB: 11000 }, 'boss'))))
+  // a limit from before (no limitSetAt), as the old page saved it
+  saveSettings({ storage: { locations: getSettings().storage.locations.map((l) => (l.id === 'nas-1' ? { ...l, limitGB: 9000, limitSetAt: undefined } : l)) } }, 'boss', { internal: true })
+  check('a limit saved before limits were enforced: listed as not enforced', byId('nas-1').limitGB === 9000 && byId('nas-1').limitEnforced === false, JSON.stringify(byId('nas-1')))
+  check('... saved as it is, the size not known: refused (enforcing it is a new limit)', /not known/.test(why(() => updateLocation('nas-1', { limitGB: 9000 }, 'boss'))))
+  _test.setShareHealth('nas-1', { ok: true, reason: '', marker: true, writable: true, freeBytes: 7.7e12, totalBytes: 16.63e12, writeMBps: null })
+  check('... saved as it is, the size known: enforced from now', updateLocation('nas-1', { limitGB: 9000 }, 'boss').limitEnforced === true)
+  check('no limit: not enforced, and no stamp left', updateLocation('nas-1', { limitGB: null }, 'boss').limitEnforced === false && !('limitSetAt' in getSettings().storage.locations.find((l) => l.id === 'nas-1')))
+  updateLocation('nas-1', { limitGB: 12000 }, 'boss')
 
   // each location's own free-space marks (the owner's NAS: a low mark near 7 % so 12 TB is usable)
   const set = updateLocation('nas-1', { lowFreePct: 7, floorFreePct: 4 }, 'boss')

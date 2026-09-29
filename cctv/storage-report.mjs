@@ -15,7 +15,7 @@
 import { mkdirSync, readFileSync, renameSync, statfsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isAdmin } from './auth.mjs'
-import { freeMarks } from './location-health.mjs'
+import { freeMarks, spaceLimit } from './location-health.mjs'
 import { lastRuns } from './storage-jobs.mjs'
 
 // The caller may hand us a plain user name or the { user, admin } the newer routes pass around.
@@ -179,8 +179,8 @@ const roundDays = (ms) => (Number.isFinite(ms) ? Math.round((ms / DAY) * 10) / 1
  * Each location's row carries its own free-space marks (location-health.mjs freeMarks), what Argus's
  * recordings take there as the index counts them (argusBytes: the index's totals, one row read) against
  * its space limit (limitBytes, 1 GB = 1,000,000,000 bytes; enforced by housekeeping.mjs since
- * 2026-09-29), and housekeeping's alarms about it (`alarms`: its housekeepingAlarms(), handed in so this
- * module does not load the jobs).
+ * 2026-09-29 once saved through storage.mjs: limitEnforced), and housekeeping's alarms about it
+ * (`alarms`: its housekeepingAlarms(), handed in so this module does not load the jobs).
  *
  * @param {{ settings?: object, index: object|null, history?: object, now?: number,
  *           freeOf?: (loc) => {freeBytes,totalBytes}, present?: (loc) => boolean,
@@ -234,7 +234,9 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
       type: loc.type,
       role: loc.role,
       limitGB: loc.limitGB ?? null,
-      limitBytes: Number(loc.limitGB) > 0 ? Number(loc.limitGB) * 1e9 : null,
+      limitBytes: spaceLimit(loc).bytes,
+      // only a limit saved through storage.mjs since 2026-09-29 is enforced (location-health.mjs spaceLimit)
+      limitEnforced: spaceLimit(loc).enforced,
       argusBytes,
       mounted: false,
       usedBytes: null,

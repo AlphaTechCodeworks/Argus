@@ -57,15 +57,25 @@ export function forecastCell(f, { alertDays = 7 } = {}) {
 /** Whole GB of 1,000,000,000 bytes, as a space limit is set: "5,512 GB". */
 export const wholeGB = (b) => `${Math.round(b / 1e9).toLocaleString('en-GB')} GB`
 
-/** Under a location with a space limit: that it is enforced, and how (housekeeping.mjs, 2026-09-29). */
-export const LIMIT_TEXT =
-  "The space limit is enforced: when Argus's recordings here go over it, the oldest are deleted down to it within 5 minutes, footage past its full-video days first; never the newest 24 hours, nor bookmarked or exported stretches. 1 GB = 1,000,000,000 bytes."
+/**
+ * How quickly the limit takes footage away: one clean-up every 5 minutes, at most 20,000 files each
+ * (housekeeping.mjs MAX_DELETES, about 240 GB of the site's 12 MB files), so a limit far below what Argus
+ * holds takes several (review of p2-delete, 2026-09-29: "within 5 minutes" said otherwise).
+ */
+const LIMIT_PACE = 'from the next clean-up (every 5 minutes, at most about 240 GB each)'
 
-/** Argus's recordings on a location (as the index counts them) against its space limit. */
+/** Under a location with a space limit: that it is enforced, and how (housekeeping.mjs, 2026-09-29). */
+export const LIMIT_TEXT = `The space limit is enforced: when Argus's recordings here go over it, the oldest are deleted down to it ${LIMIT_PACE}, footage past its full-video days first; never the newest 24 hours, nor bookmarked or exported stretches. 1 GB = 1,000,000,000 bytes.`
+
+/**
+ * Argus's recordings on a location (as the index counts them) against its space limit. A limit saved
+ * before the limit was enforced (limitEnforced false: the old page saved it as a note) is shown as such.
+ */
 export function limitCell(l) {
   const held = Number.isFinite(l?.argusBytes) ? l.argusBytes : null
   const limit = Number.isFinite(l?.limitBytes) && l.limitBytes > 0 ? l.limitBytes : null
   if (!limit) return { value: held === null ? NOT_AVAILABLE : wholeGB(held), state: 'ok', note: 'no space limit set' }
+  if (l.limitEnforced === false) return { value: held === null ? NOT_AVAILABLE : wholeGB(held), state: 'ok', note: `a ${wholeGB(limit)} limit saved before limits were enforced: not enforced until it is saved again on its card (Settings › Storage)` }
   if (held === null) return { value: NOT_AVAILABLE, state: 'ok', note: `of the ${wholeGB(limit)} limit (enforced)` }
   const pct = (held / limit) * 100
   return { value: wholeGB(held), state: held > limit ? 'bad' : pct >= 95 ? 'warn' : 'ok', note: `of the ${wholeGB(limit)} limit (enforced), ${Math.round(pct)} %` }
@@ -73,7 +83,11 @@ export function limitCell(l) {
 
 /**
  * Settings > Storage, a location's card: what saving its limit and own marks sends, and the question
- * asked first when the limit is new or lower (it is enforced: footage over it goes within 5 minutes).
+ * asked first when the limit starts to be enforced or is lowered (footage over it goes from the next
+ * clean-up). The limit is sent only when it changed, or to enforce one saved before limits were
+ * (loc.limitEnforced false): the server checks a limit it is sent against the share's size, which is not
+ * known while the share is unmounted, and a card saved for its marks alone must not fail on that (review
+ * of p2-delete, 2026-09-29).
  * form: the inputs' text; empty is no limit / the default mark. The server checks everything again.
  * @returns {{ body: object|null, ask: string|null, error: string|null }}
  */
@@ -88,10 +102,14 @@ export function locationEdit(loc, form) {
     if (v !== null && !(Number.isInteger(v) && v >= 1 && v <= 50)) return { body: null, ask: null, error: `${name} must be a whole number from 1 to 50 (% free), or empty for the default.` }
     marks[k] = v
   }
-  const body = { action: 'set', id: loc.id, limitGB, ...marks }
-  const lower = limitGB !== null && !(Number(loc.limitGB) > 0 && limitGB >= Number(loc.limitGB))
-  const ask = lower
-    ? `Limit Argus's recordings on ${loc.path} to ${limitGB.toLocaleString('en-GB')} GB?\n\nThe limit is enforced: if Argus holds more than that there, its oldest footage is deleted within 5 minutes, down to the limit (footage past its full-video days first; never the newest 24 hours, nor bookmarked or exported stretches). Deleted footage cannot be brought back.\n\n1 GB = 1,000,000,000 bytes.`
+  const had = Number(loc.limitGB) > 0 ? Number(loc.limitGB) : null
+  const enforced = loc.limitEnforced === true
+  const send = limitGB !== had || (limitGB !== null && !enforced)
+  const body = { action: 'set', id: loc.id, ...(send ? { limitGB } : {}), ...marks }
+  // asked when it starts deleting: a limit new, lower, or not enforced before
+  const starts = send && limitGB !== null && (!enforced || had === null || limitGB < had)
+  const ask = starts
+    ? `Limit Argus's recordings on ${loc.path} to ${limitGB.toLocaleString('en-GB')} GB?\n\nThe limit is enforced: if Argus holds more than that there, its oldest footage is deleted down to the limit ${LIMIT_PACE}. Footage past its full-video days goes first; never the newest 24 hours, nor bookmarked or exported stretches. Deleted footage cannot be brought back.\n\n1 GB = 1,000,000,000 bytes.`
     : null
   return { body, ask, error: null }
 }
@@ -132,7 +150,7 @@ export function renderStorage(data, { alertDays = 7 } = {}) {
       forecast: forecastCell(l.forecast, { alertDays }),
       recycling: l.cycling === true ? 'yes — oldest footage is being overwritten as designed' : l.cycling === false ? 'not yet' : NOT_AVAILABLE,
       limit: limitCell(l),
-      limitText: Number.isFinite(l.limitBytes) && l.limitBytes > 0 ? LIMIT_TEXT : '',
+      limitText: Number.isFinite(l.limitBytes) && l.limitBytes > 0 && l.limitEnforced !== false ? LIMIT_TEXT : '',
       cameras: (l.cameras ?? []).map(cameraRow)
     }
   })

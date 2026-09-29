@@ -276,7 +276,8 @@ function locationForm(l) {
       locNote = { id: l.id, text: step.error, bad: true }
       return renderLocations()
     }
-    // a new or lower limit can delete footage within 5 minutes: said in so many words, and a no is taken
+    // a limit that starts to be enforced, or a lower one, can delete footage from the next clean-up: said
+    // in so many words, and a no is taken
     if (step.ask && !confirm(step.ask)) {
       locNote = { id: l.id, text: 'Not changed', bad: false }
       return renderLocations()
@@ -312,7 +313,7 @@ function renderLocations() {
         'article',
         { className: 'st-card' },
         el('div', { className: 'st-card-head' }, el('h3', { textContent: l.path }), el('span', { className: `st-status ${h.ok ? 'st-online' : 'st-offline'}`, textContent: h.ok ? 'OK' : 'Not usable' })),
-        el('p', { className: 'st-meta', textContent: `${l.type} · ${l.id}${l.limitGB ? ` · limit ${l.limitGB.toLocaleString('en-GB')} GB, enforced` : ''}` }),
+        el('p', { className: 'st-meta', textContent: `${l.type} · ${l.id}${l.limitGB ? ` · limit ${l.limitGB.toLocaleString('en-GB')} GB, ${l.limitEnforced ? 'enforced' : 'not enforced (saved before limits were): Save it below to enforce it'}` : ''}` }),
         h.totalBytes ? el('p', { className: 'st-meta', textContent: `${gb(h.freeBytes)} free of ${gb(h.totalBytes)} (${pct}%)${h.writeMBps ? ` · writes ${h.writeMBps} MB/s` : ''}` }) : null,
         h.ok ? null : el('p', { className: 'st-error-text', textContent: h.reason }),
         l.sameDisk ? el('p', { className: 'st-warn-text', textContent: 'On the system disk: recordings could fill it.' }) : null,
@@ -338,6 +339,12 @@ $('l-type').addEventListener('change', () => ($('l-same-row').hidden = $('l-type
 $('addLoc').addEventListener('submit', async (e) => {
   e.preventDefault()
   const limit = $('l-limit').value
+  // a limit is enforced from the start: asked as on a card (a folder with a marker may hold footage)
+  if (limit !== '') {
+    const step = locationEdit({ id: null, path: $('l-path').value.trim(), limitGB: null, limitEnforced: false }, { limitGB: limit })
+    if (step.error) return say('l-msg', step.error, true)
+    if (step.ask && !confirm(step.ask)) return say('l-msg', 'Not added')
+  }
   await locAction({
     action: 'add',
     path: $('l-path').value.trim(),
