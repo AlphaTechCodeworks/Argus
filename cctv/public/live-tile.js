@@ -93,10 +93,12 @@ export class LiveTile {
    * @param {{ nvr: string, ch: number }} cam
    * @param {number} streamType
    * @param {number} startDelayMs tiles open slightly staggered so a big grid doesn't hit the NVR all at once
-   * @param {{ pacing?: boolean, clock?: object, maxQueuedFrames?: number, statsVisible?: () => boolean, onDisconnect?: () => void,
+   * @param {{ pacing?: boolean, clock?: object, maxQueuedFrames?: number, noRewindMs?: number, statsVisible?: () => boolean, onDisconnect?: () => void,
    *   onFirstFrame?: () => void, onUnsupported?: (codecId: number) => void }} [opts]
    *   clock: PlayoutClock options (the "Smooth" setting; a page through the tunnel's REMOTE_CLOCK);
    *   maxQueuedFrames: decoded frames the player keeps (the tunnel's bigger buffer: viewer.js);
+   *   noRewindMs: no frame shown at or before one shown already, within this (a page through the
+   *   tunnel: player.js REMOTE_NO_REWIND_MS);
    *   onFirstFrame: the first frame is on screen;
    *   recording: tells the dot whether the server is also recording this camera (red rather than
    *   green); leave it out where that is not known. onUnsupported: replaces the built-in handling (main -> sub fallback, message) when the
@@ -133,6 +135,7 @@ export class LiveTile {
       arrivalClock: true,
       clock: opts.clock,
       maxQueuedFrames: opts.maxQueuedFrames,
+      noRewindMs: opts.noRewindMs,
       maxFps: opts.maxFps,
       onUnsupported: (codecId) => (opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)),
       onFrame: () => {
@@ -276,7 +279,8 @@ export class LiveTile {
         `decoded ${s.coded} · visible ${s.visible} · canvas ${this.player?.canvas?.width ?? '?'}×${this.player?.canvas?.height ?? '?'}`,
         `${s.fps} fps · jitter ${s.jitterMs} ms`,
         `buffer ${s.delayMs} ms · ${s.kbps} kbps`,
-        `dropped ${s.dropped} · late ${s.late} · resync ${s.resyncs}`
+        // (older: frames held back for being at or before one shown, on a page through the tunnel)
+        `dropped ${s.dropped} · late ${s.late} · resync ${s.resyncs}${s.older ? ` · older ${s.older}` : ''}`
       ].join('\n')
     }
     // Once a second, which is exactly the resolution of the clock being shown.

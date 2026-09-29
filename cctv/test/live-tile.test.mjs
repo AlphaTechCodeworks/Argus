@@ -70,9 +70,11 @@ check('a live tile\'s player times frames as they arrive (arrivalClock)', t.play
 {
   const { REMOTE_QUEUED_FRAMES } = await import('../public/player.js')
   const { REMOTE_CLOCK } = await import('../public/playout.js')
-  const far = new LiveTile(tileEl, { nvr: 'n1', ch: 3 }, 1, 0, { now: () => now, clock: REMOTE_CLOCK, maxQueuedFrames: REMOTE_QUEUED_FRAMES })
+  const { REMOTE_NO_REWIND_MS } = await import('../public/player.js')
+  const far = new LiveTile(tileEl, { nvr: 'n1', ch: 3 }, 1, 0, { now: () => now, clock: REMOTE_CLOCK, maxQueuedFrames: REMOTE_QUEUED_FRAMES, noRewindMs: REMOTE_NO_REWIND_MS })
   check('a tile given the remote profile passes its clock and its decoded-frame limit to its player', far.player.clock.opts.stretchLate === true && far.player.maxQueued === REMOTE_QUEUED_FRAMES && REMOTE_QUEUED_FRAMES === 75, `${far.player.maxQueued}`)
-  check('... a tile without it keeps the player\'s own (45)', t.player.maxQueued === 45 && t.player.clock.opts.stretchLate === false)
+  check('... and its window for never showing an older frame (stutter report 2.5)', far.player.noRewindMs === REMOTE_NO_REWIND_MS, `${far.player.noRewindMs}`)
+  check('... a tile without it keeps the player\'s own (45, every frame shown in its turn)', t.player.maxQueued === 45 && t.player.clock.opts.stretchLate === false && t.player.noRewindMs === 0)
   clearInterval(far.statusTimer)
   clearTimeout(far.retry)
   far.close()

@@ -10,7 +10,7 @@ import { LinesPanel } from './lines-panel.js'
 import { muxState, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
-import { REMOTE_QUEUED_FRAMES } from './player.js'
+import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
 // ?pacing=off draws frames as soon as they decode (for before/after comparison)
 const PACING = new URLSearchParams(location.search).get('pacing') !== 'off'
@@ -427,6 +427,9 @@ const tileOptions = (cam) => ({
   pacing: PACING,
   clock: clockOptions(),
   maxQueuedFrames: REMOTE_PAGE ? REMOTE_QUEUED_FRAMES : undefined,
+  // a level change (or a reconnect) that sends a tile an older picture than it showed: held, not shown
+  // (player.js REMOTE_NO_REWIND_MS; stutter report 2.5). A local page has no levels, and stays as it was
+  noRewindMs: REMOTE_PAGE ? REMOTE_NO_REWIND_MS : undefined,
   statsVisible: () => showStats,
   onDisconnect: () => {
     checkSession()

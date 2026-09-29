@@ -38,17 +38,18 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { REMOTE_CLOCK } from '../public/playout.js'
-import { REMOTE_QUEUED_FRAMES } from '../public/player.js'
+import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from '../public/player.js'
 
 export const REPO_PLAYER = new URL('../public/player.js', import.meta.url).href
 export const FIXTURE_DIR = new URL('./fixtures/live-replay/', import.meta.url)
 const TRACE_FORMAT = 'argus-frame-trace' // public/frame-trace.js
 /**
  * What a page opened through the tunnel or the tailnet gives its tiles (viewer.js, device.js
- * isLocalHost): the remote playout clock and room for 2 s of decoded frames. Spread into play() or
- * playTile() to replay a trace as such a page plays it; a local page's is the default (nothing).
+ * isLocalHost): the remote playout clock, room for 2 s of decoded frames, and no frame shown older than
+ * one already shown (player.js REMOTE_NO_REWIND_MS). Spread into play() or playTile() to replay a trace
+ * as such a page plays it; a local page's is the default (nothing).
  */
-export const REMOTE_LIVE = Object.freeze({ clock: REMOTE_CLOCK, playerOptions: Object.freeze({ maxQueuedFrames: REMOTE_QUEUED_FRAMES }) })
+export const REMOTE_LIVE = Object.freeze({ clock: REMOTE_CLOCK, playerOptions: Object.freeze({ maxQueuedFrames: REMOTE_QUEUED_FRAMES, noRewindMs: REMOTE_NO_REWIND_MS }) })
 const TS0 = 1_700_000_000_000 // capture times handed to the player are epoch ms, as the camera's are
 const REFRESH_MS = 1000 / 60
 const STEP_MS = 0.5

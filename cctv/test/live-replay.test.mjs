@@ -210,6 +210,9 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
   }
   const pin = (r, shown, freezes, lat) => Math.abs(r.shownPct - shown) <= 0.1 && Math.abs(r.freezesPerMin - freezes) <= 0.1 && Math.abs(r.medLatencyMs - lat) <= 50
   check('remote profile: the player keeps 2 s of decoded frames at 30 fps and 15 spare (75), not the usual 45', REMOTE_LIVE.playerOptions.maxQueuedFrames === 75 && REMOTE_LIVE.clock === REMOTE_CLOCK)
+  // ...and never shows a frame at or before one it has shown (report 2.5 (c); test/player-rewind.test.mjs)
+  const sw = await remote('switch', 0)
+  check('remote profile: a level change onto a new conversion whose keyframe is 1.5 s older: never steps back, held 0.75 s instead [back 1.4 s, 6 resyncs]', sw.backwards === 0 && sw.maxBackMs === 0 && sw.resyncs === 0 && sw.maxStillMs === 750, brief(sw))
   const page = (f) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8')
   check('... playback and the wall keep theirs: no remote clock, no decoded-frame limit of their own', ['playback.js', 'wall.js'].every((f) => !/REMOTE_|maxQueuedFrames|stretchLate|shrinkWindowMs/.test(page(f))))
   for (const decoder of [{}, { inFlight: 5 }]) {

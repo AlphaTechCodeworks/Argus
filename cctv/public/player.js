@@ -28,6 +28,19 @@ const MAX_QUEUED_FRAMES = 45
  * pages keep 45.
  */
 export const REMOTE_QUEUED_FRAMES = Math.ceil((REMOTE_CLOCK.maxDelayMs / 1000) * 30) + 15
+/**
+ * A live tile on a page through the tunnel (viewer.js) never shows a frame at or before the newest one
+ * it has shown, within this long of it (noRewindMs). A remote viewer's level change put its tiles on a
+ * stream whose first picture was older than what was on screen, and the picture jumped back: 0.8-1.4 s
+ * in the stutter investigation's replay, 0-2.4 s by where the keyframe fell (stutter report 2.5 (c),
+ * verify-5). The server no longer sends a moved tile anything older (adaptive-live.mjs); what still comes
+ * older -- a reconnect's replay from the camera's last keyframe, a new stream's own frames sent while it
+ * learnt its rate -- is decoded, as the frames after it need it, and not shown: the picture holds until
+ * the stream is past it. 15 s, verify-5's least: at -g 50 a level-4 stream stepped back up to 13 s; its
+ * keyframes are 2 s apart now, the cameras' own 2-4 s. Further back is a camera clock set back, a new
+ * time line, and is shown as it comes (a clock set back less than this holds the picture that long).
+ */
+export const REMOTE_NO_REWIND_MS = 15_000
 const MAX_PAUSED_FRAMES = 90 // frames that may arrive after a pause request reaches the NVR
 const MAX_DECODE_QUEUE = 12
 // Live (arrivalClock): a queue past MAX_DECODE_QUEUE is a decoder that cannot keep up only when the
@@ -146,6 +159,9 @@ export class VideoPlayer {
    *     frame 67 ms at a 4x -> 1x change (verify-2, 29 Sep)
    *   maxQueuedFrames: decoded frames kept waiting for display, at most (45; a page through the
    *     tunnel keeps REMOTE_QUEUED_FRAMES for its bigger buffer)
+   *   noRewindMs: live on a page through the tunnel (REMOTE_NO_REWIND_MS) -- a frame at or before the
+   *     newest one timed or shown, by less than this, is decoded (the frames after it need it) but not
+   *     timed on the playout clock nor shown; 0, not given: every frame shown in its turn, as always
    *   onFrame: called with the capture time of each frame as it is shown
    *   onPoster: called when a preroll's keyframe is drawn as a poster (skipUntil; onFrame is not)
    *   maxFps: the frame rate worth drawing here (a phone gains little above 15), held in the video's
@@ -173,6 +189,11 @@ export class VideoPlayer {
     this.clock = new PlayoutClock(options.clock)
     this.maxQueued = options.maxQueuedFrames ?? MAX_QUEUED_FRAMES
     this.arrivalClock = options.arrivalClock === true && this.pacing // (without pacing there is no clock)
+    // noRewindMs: capture times (ms) of the newest frame timed as it arrived, and of the newest queued
+    // to be shown (or drawn); kept across reset(), as a reconnect's replay starts before what was shown
+    this.noRewindMs = options.noRewindMs > 0 ? options.noRewindMs : 0
+    this.newestIn = null
+    this.newestOut = null
     this.fed = [] // arrivalClock: { ts (µs), at } of each frame handed to the decoder and not back yet, oldest first
     this.paused = false
     this.decoder = null
@@ -189,7 +210,8 @@ export class VideoPlayer {
     this.codecId = null
     this.size = null // picture size the decoder was set up for (from the SPS)
     this.closed = false
-    this.stats = { fps: 0, jitterMs: 0, delayMs: 0, dropped: 0, late: 0, resyncs: 0, kbps: 0, width: 0, height: 0, codec: '', hw: '', coded: '', visible: '' }
+    // older: frames decoded and not shown for being at or before one already shown (noRewindMs)
+    this.stats = { fps: 0, jitterMs: 0, delayMs: 0, dropped: 0, late: 0, resyncs: 0, older: 0, kbps: 0, width: 0, height: 0, codec: '', hw: '', coded: '', visible: '' }
     this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0 }
     this.grabs = [] // callers waiting for the next frame shown, at full size (grab())
     this.onChunk = null // (chunk) => void: sees every encoded frame as it arrives (set while the picture panel is open)
@@ -230,8 +252,11 @@ export class VideoPlayer {
     // on a perfectly even local stream (2560x1440 at 30 fps, a decoder holding 6 pictures) the picture
     // moved 10 ms a second later, the frames piled up in the decoder with it, and every 20-60 s the
     // player dropped to the next keyframe (verify-2, 29 Sep). These are the frames #onDecoded would time:
-    // not while paused, not stills, not a preroll being skipped.
-    if (this.arrivalClock && !this.paused && !this.stills && (this.skipTs === null || chunk.timestampUs / 1000 >= this.skipTs)) {
+    // not while paused, not stills, not a preroll being skipped, not one older than what it has timed
+    // (noRewindMs: late by seconds to the clock, which would have stretched the buffer for them).
+    const older = this.#older(chunk.timestampUs / 1000, this.newestIn)
+    if (this.noRewindMs && !older) this.newestIn = chunk.timestampUs / 1000
+    if (this.arrivalClock && !older && !this.paused && !this.stills && (this.skipTs === null || chunk.timestampUs / 1000 >= this.skipTs)) {
       this.clock.schedule(chunk.timestampUs / 1000, performance.now() + ARRIVAL_MARGIN_MS)
     }
     // each frame as it arrives, before it waits for the decoder: after a playback slow-down the clock
@@ -240,6 +265,15 @@ export class VideoPlayer {
     if (!this.paused) this.clock.arrived(chunk.timestampUs / 1000, performance.now())
     if (this.configuring) return this.#hold(chunk)
     return this.#feed(chunk)
+  }
+
+  /**
+   * Whether a frame (capture time in ms) is at or before `newest` by less than noRewindMs: older than
+   * what this player has already timed or shown, so not to be shown (a replay). Further back is a camera
+   * clock set back, shown as it comes.
+   */
+  #older(ts, newest) {
+    return this.noRewindMs > 0 && newest !== null && ts <= newest && ts > newest - this.noRewindMs
   }
 
   #noteKey(ts) {
@@ -415,6 +449,14 @@ export class VideoPlayer {
       }
       this.skipTs = null
     }
+    // noRewindMs: decoded, for the frames after it, but at or before one already queued or shown, so
+    // not shown: the picture holds where it is instead of stepping back (see REMOTE_NO_REWIND_MS)
+    if (this.#older(ts, this.newestOut)) {
+      this.stats.older++
+      frame.close()
+      return
+    }
+    if (this.noRewindMs) this.newestOut = ts
     if (!this.pacing || this.stills) {
       this.#draw(frame, performance.now())
       this.onFrame?.(ts)
@@ -787,6 +829,9 @@ export class VideoPlayer {
     this.posterShown = false
     this.seekSeq++
     this.fed = [] // (the decoder's reset below discards them)
+    // a seek goes where it is told, back too (noRewindMs is live's; playback does not set it anyway)
+    this.newestIn = null
+    this.newestOut = null
     if (this.gop) this.#gopEnd('stream restarted')
     // the position in the keyframe interval starts again at the next keyframe
     this.sinceKey = null
