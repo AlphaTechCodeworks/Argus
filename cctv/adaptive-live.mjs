@@ -24,8 +24,13 @@
 // Viewers on the same level share one conversion per camera, so the cost follows the number of
 // cameras being watched remotely, not the number of people watching. Conversions have their own cap
 // (phone-live.mjs maxPhoneStreams); a viewer who cannot get a slot gets the camera's own stream.
+//
+// A level change moves a tile without a freeze or a jump back (#retarget): it keeps its picture until
+// the new stream has one, and goes over at the camera's next keyframe, where the new level's stream
+// starts; it is never sent a frame older than one it has had. A sub-stream a level would only pass
+// through stays on the camera's own stream (#passes).
 import { PhoneStream, RATE_SAMPLES, keepEveryFor, maxPhoneStreams } from './phone-live.mjs'
-import { PLAYBACK_LIMITS, TranscodePool } from './transcode.mjs'
+import { CODEC_H265, PLAYBACK_LIMITS, TranscodePool } from './transcode.mjs'
 
 export const LEVELS = Object.freeze([
   // The camera's own stream; its settings are for an H.265 camera and a browser that cannot play it
@@ -109,6 +114,23 @@ export const CLIMB_RESET_MS = 5 * 60_000
 export const REMEMBER_MS = 15_000
 /** A level change is given this long to show its effect before another. */
 export const SETTLE_MS = 4000
+/**
+ * A socket moved at a step down stays on its stream for the camera's next keyframe, where its new
+ * level's stream starts, at most this long (verify-5: about 2.5 s): the link is backed up, and what it
+ * waits on is the heavier stream. Then it goes over and waits on the new one (#switchTo).
+ */
+export const SWITCH_WAIT_MS = 2500
+/**
+ * ...and at a climb, or onto the camera's own stream, at most this long: a camera stream with no
+ * keyframe for 10 s has stalled (they come every 2-4 s here).
+ */
+export const SWITCH_MAX_MS = 10_000
+/**
+ * A socket moved at once (onto a stream that runs already, or when its own stream had to close first
+ * for its slot) is sent nothing older than the last frame it had, nothing until a keyframe at or past
+ * it (#pass): at most this long, as a camera clock set back would hold it for ever.
+ */
+export const GUARD_MS = 5000
 
 /** The uplink budget for all remote viewers together, in bytes per second. */
 export function wanBudgetBps(env = process.env) {
@@ -188,7 +210,7 @@ class Viewer {
     // once what was queued then has gone; opening: taken as its tiles open, for OPENING_MS
     this.grace = { from: now, marks: new Map(), opening: true }
     this.left = new Set() // level streams its closed sockets left with nobody on them (for their 10 s)
-    this.sockets = new Set() // { ws, nvrId, ch, type, source, stream, sent }
+    this.sockets = new Set() // { ws, nvrId, ch, type, source, stream, sent, lastTs, switch, ... } (attach)
     this.sentAt = 0
     this.sentBytes = 0
     this.bps = 0
@@ -196,6 +218,8 @@ class Viewer {
 }
 
 export class AdaptiveLive {
+  #made = null // the stream #streamFor made last, if it made one
+
   constructor({ pool = new TranscodePool(maxPhoneStreams()), makeTranscoder, log = (l) => console.log(l), budgetBps = wanBudgetBps(), now = () => Date.now() } = {}) {
     Object.assign(this, { pool, makeTranscoder, log, budgetBps, now })
     this.viewers = new Map() // key -> Viewer
@@ -259,39 +283,202 @@ export class AdaptiveLive {
     return this.rates.get(key) ?? 0
   }
 
-  /** Where a socket's frames come from at this level: a shared converted stream, or the camera's own. */
+  /** A level's shared stream of a socket's camera stream, as this.streams holds it. */
+  #keyFor(entry, level) {
+    return `${entry.nvrId}/${entry.ch}/${entry.type}@${LEVELS[level].id}`
+  }
+
+  /**
+   * Where a socket's frames come from at this level: a shared converted stream, or the camera's own.
+   * One it had to make is left in #made (null: none), for #retarget.
+   */
   #streamFor(entry, level) {
+    this.#made = null
     if (!this.#converts(entry, level)) return entry.source
     const L = LEVELS[level]
-    const key = `${entry.nvrId}/${entry.ch}/${entry.type}@${L.id}`
+    const key = this.#keyFor(entry, level)
     let s = this.streams.get(key)
     if (!s || s.closed) {
       const slot = this.pool.acquire()
       if (!slot) return entry.source // no room for another conversion: the camera's own stream
       // level full is only ever for browsers that cannot play H.265 (#converts), so an H.265 stream
       // there is converted even with nothing to thin (h264Only); the other levels are shared with
-      // browsers that can
-      // (the rate it learns is remembered for this camera stream: #passes)
+      // browsers that can. Made for a socket with a picture, it starts at the camera's next keyframe,
+      // where that socket switches to it (fromNextKey, #switchTo); the rate it learns is remembered
+      // for this camera stream (#passes).
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
+      this.#made = s
     }
     return s
   }
 
-  /** Puts a socket on the stream it should have at this level, if it is not on it already. */
-  #retarget(e, level) {
-    const want = this.#streamFor(e, level)
-    if (want === e.stream) return
-    e.stream?.remove(e.ws)
-    e.stream = want
-    want.add(e.ws)
+  /**
+   * Puts a socket on the stream it should have at this level, if it is not on it already (or on its way).
+   *
+   * Every move used to take the socket off its stream before the new one had a picture, and the new
+   * one's first picture was older than what it had: a new conversion started from the keyframe it held,
+   * a running stream replayed its GOP. The tile held, then jumped back: 0.8-1.4 s in the stutter
+   * investigation's replay, 0-2.4 s by where the keyframe fell (verify-5), at every one of 29 Sep's 15
+   * level changes. Now a socket is never sent a frame older than one it has had (#pass), and:
+   *  - with nothing on screen yet (no frame it can show), it moves at once;
+   *  - onto the camera's own stream (a climb to full, a sub a level passes through, no slot free): it
+   *    keeps its stream until the camera's next keyframe and goes over there, nothing replayed (#switchTo);
+   *  - onto a level's stream made for it (it starts at the camera's next keyframe, fromNextKey): it keeps
+   *    its stream until then too -- at a step down for at most SWITCH_WAIT_MS, the link being backed up;
+   *  - no slot free for that stream while its own conversion holds one: that one closes, the new one
+   *    takes its slot, and it moves at once (verify-1: a slot given back before it is taken). It then
+   *    waits for the new one's first keyframe, the camera's next;
+   *  - onto a stream that runs already (another viewer's): at once, and nothing until that stream's next
+   *    keyframe at or past what it had.
+   * @param {{ down?: boolean }} [o] down: to send less (a step down; a tile that finds a slot at last)
+   */
+  #retarget(e, level, { down = false } = {}) {
+    let want = this.#streamFor(e, level)
+    let made = this.#made
+    // no slot for its level's stream while its own conversion holds one: that one gives its slot up
+    if (want === e.source && e.stream && e.stream !== e.source && this.#converts(e, level)) {
+      this.#cancelSwitch(e)
+      this.#leaveStream(e)
+      want = this.#streamFor(e, level)
+      made = this.#made
+    }
+    if (want === e.stream) return this.#cancelSwitch(e)
+    if (e.switch?.to === want) return
+    this.#cancelSwitch(e)
+    if (!e.stream || e.lastTs === null || (want !== e.source && !made)) {
+      this.#leaveStream(e)
+      return this.#join(e, want)
+    }
+    this.#switchTo(e, want, { waitMs: down && want !== e.source ? SWITCH_WAIT_MS : SWITCH_MAX_MS, level })
+  }
+
+  /**
+   * A socket switches to `to` at its first picture (report 2.5 (a), verify-5), meanwhile on its stream
+   * as it was. Onto the camera's own stream: a tap on it watches for its next keyframe at or past what
+   * the socket has, and the socket goes over as that keyframe goes out (#swap), nothing replayed. Onto a
+   * level's stream made for it (PhoneStream fromNextKey, its converter already running): the socket
+   * goes over at the keyframe it starts from, when its own stream reaches it (#pass: on the camera's own
+   * stream that keyframe itself; from a conversion the first of its frames at or past it, as the new one
+   * starts). Past waitMs it goes over at once, and waits there.
+   */
+  #switchTo(e, to, { waitMs, level }) {
+    const sw = { to, at: this.now(), waitMs, level, tap: null }
+    e.switch = sw
+    if (to !== e.source) return
+    // (what the camera's stream replays to the tap as it joins is the past: only what comes after counts)
+    let joining = true
+    sw.tap = {
+      OPEN: 1,
+      readyState: 1,
+      bufferedAmount: 0,
+      background: true, // not a viewer: the socket it stands for is one already
+      send: (buf) => {
+        if (joining || e.switch !== sw) return
+        const f = header(buf)
+        if (f?.isKey && f.ts >= e.lastTs) this.#swap(e)
+        else if (this.now() - sw.at > sw.waitMs) this.#cutOver(e)
+      }
+    }
+    e.source.add(sw.tap)
+    joining = false
+  }
+
+  /**
+   * The camera's keyframe going out now (the tap of #switchTo): the socket leaves its stream and joins
+   * the camera's own from this keyframe on. Added as the fan-out goes (HubStream.add replay: false), it is
+   * reached by it: this keyframe is its first frame there, sent once.
+   */
+  #swap(e) {
+    const sw = e.switch
+    e.switch = null
+    e.source.remove(sw.tap)
+    this.#leaveStream(e)
+    e.stream = e.source
+    this.#guard(e)
+    e.ws.waitForKey = true
+    e.source.add(e.ws, { replay: false })
+  }
+
+  /** A switch done at the new stream's start (#pass), or given up waiting for it: onto the new stream now. */
+  #cutOver(e) {
+    const sw = e.switch
+    e.switch = null
+    if (sw.tap) e.source.remove(sw.tap)
+    this.#leaveStream(e)
+    // (a stream made for it and closed meanwhile: whatever the level has now)
+    this.#join(e, sw.to.closed ? this.#streamFor(e, sw.level) : sw.to)
+  }
+
+  /** Onto a stream now, with its replay; nothing older than what it had goes out (#guard). */
+  #join(e, to) {
+    e.stream = to
+    this.#guard(e)
+    to.add(e.ws)
+  }
+
+  /** From now on nothing older than the last frame the socket had, up to a keyframe at or past it (#pass). */
+  #guard(e) {
+    if (e.lastTs === null) return
+    e.after = e.lastTs
+    e.afterAt = this.now()
+  }
+
+  /** Off its stream; a level's stream left with nobody on it or on the way to it closes there and then (its slot). */
+  #leaveStream(e) {
+    const s = e.stream
+    e.stream = null
+    if (!s) return
+    s.remove(e.ws)
+    if (s !== e.source && s.clients.size === 0 && !this.#awaited(s)) s.close()
+  }
+
+  /** A switch that will not happen (another move, the socket closed): a stream made for it that nobody is on or waits for closes. */
+  #cancelSwitch(e) {
+    const sw = e.switch
+    if (!sw) return
+    e.switch = null
+    if (sw.tap) e.source.remove(sw.tap)
+    if (sw.to !== e.source && sw.to !== e.stream && sw.to.clients.size === 0 && !this.#awaited(sw.to)) sw.to.close()
+  }
+
+  /** Whether a socket waits to switch to this stream. */
+  #awaited(s) {
+    for (const v of this.viewers.values()) for (const e of v.sockets) if (e.switch?.to === s) return true
+    return false
+  }
+
+  /**
+   * Whether a frame goes to a socket (its ws.send). A switch waiting for the new stream's start goes
+   * over here when the socket's stream reaches it (#switchTo), the frame not sent: on the camera's own
+   * stream (or one sending it as it is) its next keyframe, where the new one starts; from a conversion,
+   * its first frame at or past that keyframe. After a move nothing older than the last frame it had
+   * goes, up to a keyframe at or past it (#guard): a stream that runs already replays its GOP from
+   * before, a conversion that was made at once starts at the camera's next keyframe. For at most
+   * GUARD_MS: a camera clock set back would hold it for ever.
+   */
+  #pass(e, f) {
+    const now = this.now()
+    const sw = e.switch
+    if (sw && !sw.tap) {
+      const own = e.stream === e.source || e.stream.passthrough // (the camera's own frames, its keyframes)
+      const at = own ? f.isKey && f.ts >= e.lastTs : sw.to.startTs !== null && f.ts >= sw.to.startTs
+      if (at || now - sw.at > sw.waitMs) {
+        this.#cutOver(e)
+        return false
+      }
+    }
+    if (e.after === null) return true
+    if (!f.isKey || (f.ts < e.after && now - e.afterAt < GUARD_MS)) return false
+    e.after = null
+    return true
   }
 
   /** How many of a viewer's tiles want a conversion at its level and are on the camera's own stream for want of a slot. */
   #raw(v) {
     let n = 0
-    for (const e of v.sockets) if (this.#converts(e, v.level) && e.stream === e.source) n++
+    for (const e of v.sockets) if (this.#converts(e, v.level) && e.stream === e.source && !e.switch) n++
     return n
   }
 
@@ -305,23 +492,31 @@ export class AdaptiveLive {
     const now = this.now()
     let v = this.viewers.get(viewerKey)
     if (!v) this.viewers.set(viewerKey, (v = this.#arrive(viewerKey, now)))
-    const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null, sent: 0 }
+    // lastTs: capture time of the last frame it was sent that its browser can show (#retarget); after /
+    // afterAt: nothing older than this goes to it, since then (#guard); switch: a move waiting for the
+    // new stream's first picture (#switchTo); passAt: whether its level sends it as it is (#passes)
+    const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null }
+    // Every frame to this socket, the replay as it joins too: a move waiting to switch goes over at the
+    // new stream's start, and nothing older than it had goes after one (#pass). Then the bytes, for the
+    // uplink budget and the Health page, and for what a plain /live socket has written (#written).
+    const send = ws.send.bind(ws)
+    ws.send = (data, ...rest) => {
+      const f = header(data)
+      if (f && !this.#pass(entry, f)) return
+      const n = data?.length ?? data?.byteLength ?? 0
+      v.sentBytes += n
+      entry.sent += n
+      if (f && (f.codec !== CODEC_H265 || clientH265)) entry.lastTs = f.ts
+      return send(data, ...rest)
+    }
     entry.stream = this.#streamFor(entry, v.level)
     entry.stream.add(ws)
     v.sockets.add(entry)
     // a page opening: what its tiles queue as they open (their replays, and a stand-in's before them:
     // live-attach.mjs) is its own start-up
     if (v.grace?.opening && now - v.grace.from < OPENING_MS) v.grace.marks = this.#marks(v)
-    // bytes sent to this viewer, for the uplink budget and the Health page; and to this socket, for
-    // what a plain /live socket has written (#written)
-    const send = ws.send.bind(ws)
-    ws.send = (data, ...rest) => {
-      const n = data?.length ?? data?.byteLength ?? 0
-      v.sentBytes += n
-      entry.sent += n
-      return send(data, ...rest)
-    }
     ws.on?.('close', () => {
+      this.#cancelSwitch(entry)
       const s = entry.stream
       s.remove(ws)
       v.sockets.delete(entry)
@@ -355,6 +550,7 @@ export class AdaptiveLive {
 
   #move(v, level, why) {
     const from = LEVELS[v.level].id
+    const down = level > v.level
     const link = this.#link(v) // what made it move, before the move changes it
     v.level = level
     // Two passes: every socket off its level stream, each stream left with nobody on it closed there
@@ -364,16 +560,24 @@ export class AdaptiveLive {
     // free and left 12 tiles on the camera's own stream, and at 4 all 16 -- more to send, not less, so
     // the next step followed (no conversion started for 16 tiles at 03:55:28, 04:08:13, 04:08:17; verify-1).
     // With them go the streams its closed tiles left at this level, waiting out their 10 s.
+    // Not off it: a socket already on this level's stream, and one with a picture, which keeps it until
+    // the new one has its first (#retarget). A conversion kept so holds its slot for that while, at most
+    // one keyframe interval: so the tiles that need a slot of their own go onto the new level first, and
+    // those still on a conversion after them -- one that finds none free gives its own up for the new one
+    // (#retarget), as the first pass did. A switch the last move left waiting is dropped first.
     const left = new Set(v.left)
     v.left.clear()
     for (const e of v.sockets) {
-      if (e.stream === e.source) continue
+      this.#cancelSwitch(e)
+      if (e.stream === e.source || e.stream === this.streams.get(this.#keyFor(e, level)) || e.lastTs !== null) continue
       e.stream.remove(e.ws)
       left.add(e.stream)
       e.stream = null
     }
-    for (const s of left) if (s.clients.size === 0) s.close()
-    for (const e of v.sockets) this.#retarget(e, level)
+    for (const s of left) if (s.clients.size === 0 && !this.#awaited(s)) s.close()
+    const holding = new Set([...v.sockets].filter((e) => e.stream && e.stream !== e.source && !e.stream.passthrough))
+    for (const e of v.sockets) if (!holding.has(e)) this.#retarget(e, level, { down })
+    for (const e of holding) this.#retarget(e, level, { down })
     // what is queued now, the new streams' first pictures behind what was there, goes out first
     v.grace = { from: this.now(), marks: this.#marks(v), opening: false }
     v.stayedAt = null
@@ -381,9 +585,13 @@ export class AdaptiveLive {
     this.log(`[adaptive] ${v.key.slice(0, 8)}: ${from} -> ${LEVELS[level].id} (${why}; ${this.#state(v, link)})`)
   }
 
-  /** The end of a level line: its cameras, its link (#link), and its tiles on the raw stream for want of a slot. */
+  /**
+   * The end of a level line: its cameras, its link (#link), its tiles on the raw stream for want of a
+   * slot, and those that keep their picture until the new stream's first (#switchTo), when there are any.
+   */
   #state(v, link) {
-    return `${v.sockets.size} camera${v.sockets.size === 1 ? '' : 's'}; ${link}; ${this.#raw(v)} on the raw stream for want of a conversion slot, ${this.pool.max - this.pool.active} of ${this.pool.max} free`
+    const waiting = [...v.sockets].filter((e) => e.switch).length
+    return `${v.sockets.size} camera${v.sockets.size === 1 ? '' : 's'}; ${link}; ${this.#raw(v)} on the raw stream for want of a conversion slot, ${this.pool.max - this.pool.active} of ${this.pool.max} free${waiting ? `; ${waiting} switching at the camera's next keyframe` : ''}`
   }
 
   /**
@@ -481,6 +689,9 @@ export class AdaptiveLive {
     // over the budget: the one taking most goes down first
     const heaviest = total > this.budgetBps ? [...this.viewers.values()].sort((a, b) => b.bps - a.bps)[0] : null
     for (const v of this.viewers.values()) {
+      // a switch still waiting past its time (its stream sent nothing to go over on: held over its cap,
+      // or the camera stalled): over now (#switchTo)
+      for (const e of v.sockets) if (e.switch && now - e.switch.at > e.switch.waitMs) this.#cutOver(e)
       // overSince: backpressure.mjs gateSend sets it while the socket is over its cap (and clears it
       // once it drains). waitForKey is not used: a move sets it on purpose. A /live-mux channel's own
       // bufferedAmount is only its part of the page's socket: the whole socket's queue
@@ -500,7 +711,8 @@ export class AdaptiveLive {
         // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
         // Below full, a tile left on the camera's own stream for want of a slot tries again: one may
         // have come free since. It stayed raw for as long as the page stayed on that level (verify-1).
-        for (const e of v.sockets) if (v.level === 0 || e.stream === e.source) this.#retarget(e, v.level)
+        // (Going there is sending less, as a step down: SWITCH_WAIT_MS.)
+        for (const e of v.sockets) if (v.level === 0 || e.stream === e.source) this.#retarget(e, v.level, { down: v.level > 0 })
         if (n.stays && v.stayedAt !== v.level) {
           v.stayedAt = v.level
           this.log(`[adaptive] ${v.key.slice(0, 8)}: stays at ${LEVELS[v.level].id}, a level lower would find no conversion slot either (${n.stays}; ${this.#state(v, this.#link(v))})`)

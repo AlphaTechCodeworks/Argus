@@ -1,9 +1,10 @@
 // Tests for the remote viewers' frame-rate levels (adaptive-live.mjs), with fake streams: no ffmpeg.
 //   node cctv/test/adaptive-live.test.mjs
-import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, TICK_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
+import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, SWITCH_WAIT_MS, TICK_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
 import { encodeFrame, parseFrame } from '../phone-live.mjs'
 import { HubStream } from '../stream-hub.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
+import { play } from './live-replay.mjs'
 import { camera, openPage } from './remote-page.mjs'
 
 let failures = 0
@@ -73,6 +74,12 @@ function gopSource(fps, n = 20) {
 }
 /** A link that cannot keep up, as plainly as it shows: each socket held over its cap for 3 s at this look. */
 const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 3000 }
+/**
+ * A tile on the camera's own stream for want of a conversion slot. Not one waiting there for its new
+ * level's stream to have a picture (a switch: its slot is taken; these streams never send the keyframe
+ * it waits for, and it goes over SWITCH_WAIT_MS after the step).
+ */
+const isRaw = (e) => e.stream === e.source && !e.switch
 {
   let now = T
   const logs = []
@@ -240,7 +247,7 @@ const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 30
     return ws
   })
   const v = live.viewers.get('slots')
-  const raw = () => [...v.sockets].filter((e) => e.stream === e.source).length
+  const raw = () => [...v.sockets].filter(isRaw).length
   const seen = {}
   for (let i = 0; i < 10 && v.level < 3; i++) {
     now += 2000
@@ -265,7 +272,7 @@ const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 30
   now += SETTLE_MS
   heldAt(socks, now)
   live.tick()
-  const raw = () => [...v.sockets].filter((e) => e.stream === e.source).length
+  const raw = () => [...v.sockets].filter(isRaw).length
   check('one slot for two tiles at 15: one converted, one on the camera\'s own stream', LEVELS[v.level].id === '15' && raw() === 1, `level ${LEVELS[v.level].id}, ${raw()} raw`)
   for (const ws of socks) ws.overSince = null
   phone.release()
@@ -310,7 +317,9 @@ const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 30
     heldAt(socks, now)
     live.tick()
   }
-  check('a page stepped down to 4: its two tiles on conversions', LEVELS[live.viewers.get('6d4bf842cafe').level].id === '4' && pool.active === 2)
+  // (each keeps its conversion at 8 until 4's has a picture: these streams never send the keyframe for it)
+  const at4 = [...live.viewers.get('6d4bf842cafe').sockets].every((e) => (e.switch?.to ?? e.stream).fps === 4)
+  check('a page stepped down to 4: its two tiles on their way to conversions, keeping the ones they had meanwhile', LEVELS[live.viewers.get('6d4bf842cafe').level].id === '4' && at4 && pool.active === 4, `${pool.active} slots`)
   for (const ws of socks) ws.handlers.close()
   check('every socket of it closes: forgotten, and the slots of the level it left given back at once (not 10 s later)', live.viewers.size === 0 && pool.active === 0, `${pool.active} slots`)
   now += 14_000
@@ -342,11 +351,11 @@ const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 30
   socks[2].handlers.close()
   const late = fakeWs()
   live.attach('left', { ws: late, nvrId: 'n1', ch: 7, type: 1, source: gopSource(30) })
-  check('at 8, a tile closed and another opened: no slot for the new one while the closed one\'s stream stays', LEVELS[v.level].id === '8' && pool.active === 3 && [...v.sockets].filter((e) => e.stream === e.source).length === 1)
+  check('at 8, a tile closed and another opened: no slot for the new one while the closed one\'s stream stays', LEVELS[v.level].id === '8' && pool.active === 3 && [...v.sockets].filter(isRaw).length === 1)
   now += SETTLE_MS
   heldAt([socks[0], socks[1], late], now)
   live.tick()
-  check('... down to 4: that stream closed with the others, a slot for every tile', LEVELS[v.level].id === '4' && [...v.sockets].every((e) => e.stream !== e.source), `${pool.active} slots, ${[...v.sockets].filter((e) => e.stream === e.source).length} raw`)
+  check('... down to 4: that stream closed with the others, a slot for every tile', LEVELS[v.level].id === '4' && [...v.sockets].every((e) => !isRaw(e)), `${pool.active} slots, ${[...v.sockets].filter(isRaw).length} raw`)
   clearInterval(live.timer)
 }
 
@@ -550,10 +559,22 @@ function onPage(key, n = 2) {
   check('the 03:55 page open over 5 Mbit/s: no step down in 60 s (it stepped full -> 15 at 4 s, 1.48 MB queued, 2.4 s)', open.downs.length === 0, open.downs.join(' | '))
   const slow = openPage({ tiles, linkMbps: 3, durMs: 60_000 })
   check('... the same page on 3 Mbit/s, less than its 4 Mbit/s: it still steps down', slow.downs.length > 0, slow.lines.join(' | '))
-  // on 4 Mbit/s full is just too much: each climb back to it fails 4 s later. It tried every 24 s.
-  const edge = openPage({ tiles, linkMbps: 4, durMs: 250_000 })
+  // on 3.8 Mbit/s full is too much: each climb back to it fails 12-14 s later. It tried every 24 s.
+  const edge = openPage({ tiles, linkMbps: 3.8, durMs: 350_000 })
   const climbs = edge.lines.filter((l) => l.includes('-> full')).map((l) => l.match(/\(clean for (\d+) s;/)?.[1])
-  check('... on 4 Mbit/s, where full fails each time: 20, 40, 80, 80 s clean before each climb back', climbs.join() === '20,40,80,80', edge.lines.join(' | '))
+  check('... on 3.8 Mbit/s, where full fails each time: 20, 40, 80, 80 s clean before each climb back', climbs.join() === '20,40,80,80', edge.lines.join(' | '))
+  // On 4 Mbit/s, just too much, each climb failed 4 s later on its own burst: every tile moved back to
+  // the camera's own stream was sent its GOP again. Moved at the camera's next keyframe with nothing
+  // replayed (report 2.5), full holds there for over 40 s each time, and no climb counts as failed.
+  const just = openPage({ tiles, linkMbps: 4, durMs: 250_000 })
+  const held = []
+  let upAt = null
+  for (const l of just.lines) {
+    const t = Number.parseFloat(l)
+    if (l.includes('-> full')) upAt = t
+    else if (upAt !== null && l.includes('full -> 15')) held.push(t - upAt)
+  }
+  check('... on 4 Mbit/s, just too much: full holds over 30 s after each climb (it failed 4 s after, on the climb\'s own burst)', held.length >= 2 && held.every((s) => s > 30), `${held.join(', ')} s | ${just.lines.join(' | ')}`)
 }
 {
   // A real overload: 16 sub tiles of 0.5 Mbit/s (25 fps) into a 2 Mbit/s link, four times what it carries
@@ -727,8 +748,9 @@ function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
   const made = []
   const makeTranscoder = (o) => {
     const x = {
-      o, closed: false, inputs: 0, outs: 0, pending: [],
+      o, closed: false, inputs: 0, outs: 0, pending: [], firstIn: null,
       push(ts) {
+        this.firstIn ??= ts
         const i = this.inputs++
         if (i % o.keepEvery === 0) this.pending.push({ i, ts })
         while (this.pending.length && this.pending[0].i <= i - lag) {
@@ -744,12 +766,12 @@ function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
   }
   const live = new AdaptiveLive({ pool: new TranscodePool(pool), makeTranscoder, log: (l) => logs.push(`${((now - T) / 1000).toFixed(2)} ${l}`), budgetBps: 1e9, now: () => now })
   const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
-  const tiles = cams.map((c, ch) => {
-    const stream = new HubStream(hub, ch, c.type ?? 1)
+  const recorder = () => {
     const ws = { ...fakeWs(), overSince: null }
     ws.send = (b) => { const f = parseFrame(b); ws.got.push({ at: now - T, ts: f.ts, key: f.isKey, converted: f.payload.length === 3 }) }
-    return { ...c, ch, stream, ws, next: 0, every: 1000 / c.fps, keyEvery: Math.max(1, Math.round((c.gopS ?? 2) * c.fps)) }
-  })
+    return ws
+  }
+  const tiles = cams.map((c, ch) => ({ ...c, ch, stream: new HubStream(hub, ch, c.type ?? 1), ws: recorder(), next: 0, every: 1000 / c.fps, keyEvery: Math.max(1, Math.round((c.gopS ?? 2) * c.fps)) }))
   // (capture times in ms from T, as the camera's clock; a tile's `every` may be changed as it runs)
   const frames = (upTo) => {
     for (const t of tiles) {
@@ -762,17 +784,18 @@ function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
       }
     }
   }
+  let pressed = []
   /** Runs to `ms`, a millisecond at a time: the cameras' frames, then the controller's looks. */
   const to = (ms) => {
     for (let at = now - T + 1; at <= ms; at++) {
       now = T + at
       frames(at)
       if (at > 0 && (at - phase) % TICK_MS === 0) {
-        // the look `down` asked for: every tile held over its cap for 3 s, as plainly as a link shows it
-        const press = at === pressAt
-        if (press) for (const t of tiles) t.ws.overSince = now - 3000
+        // the look `down` asked for: its sockets held over their cap for 3 s, as plainly as a link shows it
+        const press = at === pressAt ? pressed : []
+        for (const ws of press) ws.overSince = now - 3000
         live.tick()
-        if (press) for (const t of tiles) t.ws.overSince = null
+        for (const ws of press) ws.overSince = null
       }
     }
   }
@@ -781,13 +804,14 @@ function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
   clearInterval(live.timer)
   const v = live.viewers.get(key)
   const entry = (t) => [...v.sockets].find((e) => e.ws === t.ws)
-  /** Runs to the first look at or after `ms`, which finds the link backed up: one level down. */
-  const down = (ms) => {
+  /** Runs to the first look at or after `ms`, which finds the link backed up (these sockets'): one level down. */
+  const down = (ms, socks = tiles.map((t) => t.ws)) => {
     pressAt = ms + ((((phase - ms) % TICK_MS) + TICK_MS) % TICK_MS)
+    pressed = socks
     to(pressAt)
     return pressAt
   }
-  return { live, v, tiles, logs, made, to, down, entry }
+  return { live, v, tiles, logs, made, to, down, entry, socket: recorder }
 }
 /** A socket's frames: whether any was older than one before it, and the longest wait between two, from `from` ms on. */
 const seen = (got, from = 0) => {
@@ -800,6 +824,8 @@ const seen = (got, from = 0) => {
   }
   return { back, gap, n: g.length }
 }
+/** A socket's frames from `from` to `to` ms, for a failure's message: at:capture time, k keyframe, c converted. */
+const brief = (got, from, to) => got.filter((f) => f.at >= from && f.at <= to).map((f) => `${f.at}:${Math.round(f.ts)}${f.key ? 'k' : ''}${f.converted ? 'c' : ''}`).join(' ')
 {
   // (b) A grid sub-stream at or under a level's rate is sent as it is there, but it was put on a
   // stream of that level all the same: it lost the picture it had until the camera's next keyframe,
@@ -821,8 +847,12 @@ const seen = (got, from = 0) => {
   const r = rig({ cams: [{ fps: 20 }], phase: 0 })
   const [t] = r.tiles
   r.down(6000)
-  check('the rate not known yet: a level\'s stream learns it, as before', LEVELS[r.v.level].id === '15' && r.entry(t).stream !== t.stream && r.live.streams.has('n1/0/1@15'), `${LEVELS[r.v.level].id} ${[...r.live.streams.keys()]}`)
+  check('the rate not known yet: a level\'s stream learns it, as before (the socket on its way there)', LEVELS[r.v.level].id === '15' && r.entry(t).switch?.to === r.live.streams.get('n1/0/1@15'), `${LEVELS[r.v.level].id} ${[...r.live.streams.keys()]}`)
   r.down(10_000)
+  r.to(12_500)
+  const s = seen(t.ws.got, 5000)
+  check('(a) ... stepped down from the stream that sent it as it was: kept until the camera\'s next keyframe (12 s), where 8\'s conversion starts: nothing older, no wait longer than a frame and the converter\'s lag (2 frames)',
+    s.back === 0 && s.gap <= 151 && r.entry(t).stream.fps === 8 && r.made.at(-1)?.firstIn === 12_000, `${JSON.stringify(s)} ${brief(t.ws.got, 11_900, 12_200)}`)
   r.to(40_000) // clean for 20 s: back up to 15, again at a look just as a keyframe comes
   check('... and the next time it is known: back at 15 the sub is on the camera\'s own stream, no stream of 15 made', LEVELS[r.v.level].id === '15' && r.entry(t).stream === t.stream && !r.live.streams.has('n1/0/1@15'), `${LEVELS[r.v.level].id} ${[...r.live.streams.keys()]}`)
 }
@@ -834,6 +864,145 @@ const seen = (got, from = 0) => {
   t.every = 1000 / 30 // the camera now reads 30 fps, which 15 would convert
   r.to(11_000)
   check('(b) decided for the level: the looks after it, reading another rate, leave it where it is', LEVELS[r.v.level].id === '15' && r.entry(t).stream === t.stream && r.live.streams.size === 0, `${[...r.live.streams.keys()]}`)
+}
+// (a) Every move took the socket off its stream before the new one had a picture, and the new one's
+// first picture was older than what it had: a conversion started from the keyframe it held, a running
+// stream replayed its GOP. A hold, then a jump back (0.8-1.4 s in the replay; verify-5: 0-2.4 s). Now a
+// moved socket is never sent a frame older than one it has had, and waits no longer than the new
+// stream's first keyframe; the moves that can, make it before they break it.
+{
+  // A 30 fps sub (keyframes every 2 s, at 4, 6, 8 s ...), a converter that holds 2 frames back (67 ms)
+  const r = rig({ cams: [{ fps: 30 }] })
+  const [t] = r.tiles
+  const x = () => r.made.at(-1)
+  // full -> 15 at 5 s: from the camera's own stream onto a new conversion (1 in 2)
+  r.down(5000)
+  const b15 = r.entry(t).switch?.to ?? r.entry(t).stream
+  r.to(6200)
+  const raw = t.ws.got.filter((f) => f.at >= 5000 && !f.converted)
+  check('(a) a step down from the camera\'s own stream: it keeps that stream up to its next keyframe (6 s), none of it from there on',
+    raw.length === 30 && raw.at(-1).ts < 6000 && Math.round(raw[0].ts) === 5000, brief(t.ws.got, 4900, 6200))
+  check('  the new level\'s conversion starts from that keyframe, not the one it held (4 s): nothing it has shown converted again', x()?.firstIn === 6000 && r.entry(t).stream === b15 && b15.fps === 15, `first in ${x()?.firstIn}`)
+  let s = seen(t.ws.got, 4000)
+  check('  its first picture is that keyframe, converted, 2 frames later: nothing older than it had, and no wait longer than that', s.back === 0 && s.gap <= 101 && t.ws.got.find((f) => f.converted)?.ts === 6000 && t.ws.got.find((f) => f.converted).key, `${JSON.stringify(s)} ${brief(t.ws.got, 5950, 6150)}`)
+  // 15 -> 8 at 9 s: from a conversion onto a new one, a slot free for it (no slot: below)
+  r.down(9000)
+  check('(a) a step down from a conversion, a slot free: it keeps the old one meanwhile', r.entry(t).stream === b15 && r.entry(t).switch?.to.fps === 8, `${[...r.live.streams.keys()]}`)
+  r.to(10_500)
+  s = seen(t.ws.got, 8000)
+  check('  and goes over at the new one\'s first picture (the camera\'s keyframe at 10 s), the old one closed then: nothing older, no wait longer than a frame of the new level (133 ms)',
+    s.back === 0 && s.gap <= 134 && x()?.firstIn === 10_000 && r.entry(t).stream.fps === 8 && b15.closed && r.live.streams.size === 1, `${JSON.stringify(s)} ${brief(t.ws.got, 9900, 10_300)}`)
+  // 8 -> 15 at 29 s (clean for 20 s): a climb onto a new conversion, a slot free. It keeps the old one
+  // until the new one has its first picture: the frame rate changes, and nothing else
+  const b8 = r.entry(t).stream
+  r.to(29_000)
+  check('(a) a climb onto a new conversion: it stays on the old one meanwhile', LEVELS[r.v.level].id === '15' && r.entry(t).stream === b8 && r.entry(t).switch?.to.fps === 15, LEVELS[r.v.level].id)
+  r.to(31_000)
+  s = seen(t.ws.got, 28_000)
+  check('  and goes over at the new one\'s first picture (the camera\'s keyframe at 30 s): nothing older, no wait longer than a frame of the old one (133 ms)',
+    s.back === 0 && s.gap <= 134 && r.entry(t).stream.fps === 15 && b8.closed && x()?.firstIn === 30_000, `${JSON.stringify(s)} ${brief(t.ws.got, 29_850, 30_150)}`)
+  // 15 -> full at 49 s: onto the camera's own stream, at its next keyframe, with nothing replayed
+  const c15 = r.entry(t).stream
+  r.to(49_000)
+  check('(a) a climb onto the camera\'s own stream: it stays on its conversion until that stream\'s next keyframe', r.v.level === 0 && r.entry(t).stream === c15 && r.entry(t).switch?.to === t.stream, String(r.v.level))
+  r.to(51_000)
+  s = seen(t.ws.got, 48_000)
+  const k50 = t.ws.got.find((f) => f.key && f.ts === 50_000)
+  const at50 = t.ws.got.filter((f) => f.at === k50?.at)
+  check('  and goes over there (50 s), nothing replayed: nothing older, no wait, at most the conversion\'s last picture and that keyframe at once',
+    s.back === 0 && s.gap <= 67 && r.entry(t).stream === t.stream && c15.closed && r.live.streams.size === 0 && at50.length <= 2 && at50.at(-1)?.ts === 50_000 && !at50.at(-1).converted, `${JSON.stringify(s)} ${brief(t.ws.got, 49_900, 50_100)}`)
+}
+{
+  // A step down waits at most SWITCH_WAIT_MS on the camera's stream for its keyframe: the link is
+  // backed up. A camera with a keyframe every 4 s (nvr1 31 LCL Cage), stepped down 3 s before the next.
+  const r = rig({ cams: [{ fps: 30, gopS: 4 }] })
+  const [t] = r.tiles
+  r.down(7000) // keyframes at 6, 10 s
+  r.to(10_500)
+  const raw = t.ws.got.filter((f) => f.at >= 7000 && !f.converted)
+  const s = seen(t.ws.got, 6000)
+  check(`(a) a step down on a camera whose next keyframe is 3 s off: it leaves the camera's stream after ${SWITCH_WAIT_MS / 1000} s, and waits for that keyframe converted: nothing older`,
+    raw.at(-1)?.at <= 7000 + SWITCH_WAIT_MS + 34 && raw.at(-1).at >= 7000 + SWITCH_WAIT_MS - 34 && s.back === 0 && t.ws.got.find((f) => f.converted)?.ts === 10_000, `${JSON.stringify(s)} ${brief(t.ws.got, 9400, 10_100)}`)
+}
+{
+  // no slot for the new level's stream while the old one holds the only one: the old one gives it up
+  // first (verify-1), and the socket waits for the new one's first keyframe
+  const r = rig({ cams: [{ fps: 30 }], pool: 1 })
+  const [t] = r.tiles
+  r.down(5000)
+  const b15 = r.entry(t).switch?.to
+  r.down(9000)
+  check('(a) a step down with no slot free: off its conversion at once, which closes there and then; the new one has its slot', b15?.closed && r.entry(t).stream.fps === 8 && !r.entry(t).switch && r.live.streams.size === 1, `${[...r.live.streams.keys()]}`)
+  r.to(10_500)
+  const s8 = seen(t.ws.got, 8000)
+  check('  it converts from the camera\'s next keyframe (10 s): the first picture there, nothing older, no wait longer than that keyframe\'s (1 s), the converter\'s lag and a frame',
+    s8.back === 0 && s8.gap <= 1000 + 101 && r.made.at(-1)?.firstIn === 10_000 && t.ws.got.filter((f) => f.at > 9000)[0]?.ts === 10_000, `${JSON.stringify(s8)} ${brief(t.ws.got, 8900, 10_100)}`)
+  r.to(29_000) // 8 -> 15
+  const s = seen(t.ws.got, 28_000)
+  check('(a) a climb with no slot free: the old conversion closes first, the new one takes its slot; nothing older than it had',
+    r.entry(t).stream.fps === 15 && r.live.streams.size === 1 && s.back === 0, `${JSON.stringify(s)} ${[...r.live.streams.keys()]}`)
+  r.to(31_000)
+  const after = seen(t.ws.got, 28_000)
+  check('  its first picture there: the camera\'s next keyframe (30 s), converted', after.back === 0 && t.ws.got.filter((f) => f.at > 29_000)[0]?.ts === 30_000 && after.gap <= 1000 + 101, `${JSON.stringify(after)} ${brief(t.ws.got, 28_900, 30_100)}`)
+}
+{
+  // onto a stream that runs already (another viewer's, at the level this one steps down to): its GOP
+  // replay is older than what the socket has; it is sent nothing until that stream's next keyframe
+  const r = rig({ cams: [{ fps: 30 }] })
+  const [t] = r.tiles
+  r.down(5000) // the first viewer: at 15, on its conversion from 6 s
+  const other = r.socket()
+  r.live.attach('other', { ws: other, nvrId: 'n1', ch: 0, type: 1, source: t.stream })
+  r.down(11_000, [other]) // the second viewer, on the camera's own stream, down to 15: the first one's conversion
+  const s = seen(other.got, 10_000)
+  const first = other.got.find((f) => f.converted)
+  check('(a) onto another viewer\'s running conversion: nothing older than it had (not its replay), from that stream\'s next keyframe on',
+    s.back === 0 && [...r.live.viewers.get('other').sockets][0].stream === r.entry(t).stream && (r.to(14_000), seen(other.got, 10_000).back === 0) && other.got.find((f) => f.converted)?.key, `${JSON.stringify(seen(other.got, 10_000))} ${brief(other.got, 10_900, 12_200)} ${first?.ts}`)
+}
+{
+  // a socket closing while it waits to switch: the conversion made for it closes, and its slot is back
+  const r = rig({ cams: [{ fps: 30, gopS: 4 }] })
+  const [t] = r.tiles
+  r.down(7000)
+  const waiting = r.entry(t).switch?.to
+  r.to(8000)
+  t.ws.handlers.close()
+  check('(a) a socket closing while it waits to switch: the conversion made for it closed, the slot back', waiting && waiting.closed && r.live.pool.active === 0 && r.live.streams.size === 0, `${r.live.pool.active} slots`)
+}
+{
+  // a level change while a climb's switch still waits (a camera with a keyframe every 6 s): back down
+  // to the level it came from, it stays on the stream it never left
+  const r = rig({ cams: [{ fps: 30, gopS: 6 }] })
+  const [t] = r.tiles
+  r.down(5000) // keyframes at 0, 6, 12 ... s: onto 15's conversion at 6 s
+  r.to(25_000) // clean for 20 s: back to full, waiting for the keyframe at 30 s
+  const c15 = r.entry(t).stream
+  check('(a) a climb waiting for a keyframe 5 s off', r.v.level === 0 && r.entry(t).switch?.to === t.stream && c15.fps === 15)
+  r.down(29_000)
+  r.to(31_000)
+  const s = seen(t.ws.got, 24_000)
+  check('  then stepped back down to 15: it stays on the conversion it never left, the switch dropped, the picture as it was', LEVELS[r.v.level].id === '15' && r.entry(t).stream === c15 && !c15.closed && !r.entry(t).switch && s.back === 0 && s.gap <= 67, `${JSON.stringify(s)}`)
+}
+{
+  // The replay of a switch (report Task 6): what a tile is sent through every level change, full to 4
+  // and back, played through the Live page's real player (test/live-replay.mjs), as a local page's (no
+  // help from the browser). The picture never steps back: the stutter investigation's replay had 0.8-1.4 s
+  // at each change, and the code before this change, on this very replay, 50-333 ms back and a still of
+  // up to 733 ms. Every switch is made before it is broken here (slots free): no still longer than a
+  // frame at 4 fps (240-267 ms).
+  const r = rig({ cams: [{ fps: 30 }, { fps: 20 }, { fps: 25, type: 0 }] })
+  r.down(5000)
+  r.down(9000)
+  r.down(13_000)
+  r.to(80_000) // climbs back at 33, 53 and 73 s
+  const levels = r.logs.filter((l) => l.includes('[adaptive]')).map((l) => l.match(/: (\S+ -> \S+) /)?.[1]).join(', ')
+  check('the replay of a switch: full -> 15 -> 8 -> 4 and back up to full', levels === 'full -> 15, 15 -> 8, 8 -> 4, 4 -> 8, 8 -> 15, 15 -> full', levels)
+  for (const t of r.tiles) {
+    const got = seen(t.ws.got, 1000)
+    const p = await play(t.ws.got.map((f) => ({ at: f.at, ts: f.ts, isKey: f.key })), { fps: t.fps, decoder: { pool: 16, decodeMs: 3 } })
+    check(`  a ${t.fps} fps ${t.type === 0 ? 'main' : 'sub'}: never a frame older than one it had; played, the picture never steps back, the longest still ${p.maxStillMs} ms`,
+      got.back === 0 && p.backwards === 0 && p.maxBackMs === 0 && p.maxStillMs <= 267 + 17, `${JSON.stringify(got)} ${JSON.stringify({ back: p.maxBackMs, still: p.maxStillMs, resyncs: p.resyncs })}`)
+  }
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
