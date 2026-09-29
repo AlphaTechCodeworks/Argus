@@ -129,6 +129,19 @@ it where it applies. Each is the code as committed (ledger: "Fix round after the
   review). An SD copy bears its picture's time and is served only while that picture is there; a
   picture is read through one handle whose time must be the one looked at (S1).
 
+### After the merge with live-smooth (2026-09-29)
+
+- **M1. A remote main is asked again at every move between streams.** live-smooth's level changes
+  put a remote full-size view's main on other streams at the camera's keyframes: another viewer's
+  conversion of that main, level full's (at most 2, else level 15's until one is free), the camera's
+  own. Each is main-stream pictures handed out again, so adaptive-live asks first (`mayMain` from
+  live-attach.mjs: Live and Live HD from the session and the account's role now, as the access watch
+  asks), when the move is decided and again when it goes over (up to 10 s later). A no: not moved,
+  nothing more sent, the socket closed 1008 with the watch's reason ('hd not allowed' when only Live
+  HD went). A sub-stream's streams never carry the main and are not asked (L5). A remote viewer's
+  stand-in is the main's keyframes only, inside L3's Live HD branch, and its end line says
+  "Live HD was taken away" when its handle is closed.
+
 ## 1. The rights model
 
 ### 1.1 Actions
@@ -195,7 +208,7 @@ One row per surface found by the four maps and the review. "Refusal" is what the
 | L2 | Tracking of live sockets and channels | live-attach.mjs:63 | n/a | `actions: streamType === 1 ? ['live'] : ['live', 'live-hd']` | the sweep closes 1008 `'hd not allowed'` when only Live HD failed, `'not allowed'` when Live failed (section 2.5) |
 | L3 | Sub-bridge stand-in (cold, held or refused sub; local, phone and remote) | live-attach.mjs:73-77, sub-bridge.mjs:30-76 | main on a sub socket (a full-resolution keyframe even for 2 s) | `can(who,'live-hd',{nvr,ch})`. **With it:** as today, plus the bridge is tracked as a handle `{readyState:1, on:(e,f)=>ws.on(e,f), close}` with `['live','live-hd']`, whose `close` ends the bridge (`bridge.end('rights')`) and starts the wait notices on the socket or channel, which stays on its sub-stream (D11). **Without it:** no `nvr.getStream(ch, 0)` at all (in non-worker mode that call starts a LivePlay; in worker mode it creates a HubStream), no `bridgeSub`; the viewer is sent wait notices (section 4.1) until its sub-stream's first frame | no picture until the sub comes; wait notices |
 | L4 | Phone stand-in conversion `<nvr>/<ch>/0/standin` | live-attach.mjs:32-38 | main converted, 1280 wide | reached only through L3's HD branch | as L3 |
-| L5 | Phone thinned stream and adaptive (remote) conversions | live-attach.mjs:80-90, adaptive-live.mjs:105-121, phone-live.mjs:196-207 | the requested type, converted | keys include the stream type: covered by L1. The remote viewer's stand-in is L3 (it happens before adaptive attach) | as L1/L3 |
+| L5 | Phone thinned stream and adaptive (remote) conversions | live-attach.mjs:80-90, adaptive-live.mjs:105-121, phone-live.mjs:196-207 | the requested type, converted | keys include the stream type: covered by L1. The remote viewer's stand-in is L3 (it happens before adaptive attach). After the merge with live-smooth (M1): a remote main moved to another stream at a level change asks Live and Live HD again first | as L1/L3; M1: closed 1008 with the access watch's reason |
 | L6 | Warm-ups | server.mjs:1020-1032 | sub, no viewer | none needed | n/a |
 | L7 | Worker, hub, sub-cap | nvr-worker.mjs, stream-hub.mjs, sub-cap.mjs | scheduling only | none (no user known there); `subHeld`/`subFull` (nvrs.mjs:667-674) feed the wait notice | n/a |
 

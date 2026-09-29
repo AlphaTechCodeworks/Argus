@@ -46,7 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the upgrade then gives Live HD to nobody (admins keep everything), naming in its audit row the
   accounts to give it back to; a row that already has a Live HD list keeps it, cut to its Live. A
   rights.json from a newer release is never rewritten. Taking Live HD away ends a full-quality stream
-  already playing; the page drops to the sub-stream. `/api/cameras`
+  already playing; the page drops to the sub-stream, and a remote full-size view is asked again
+  each time its quality level moves it to another stream (closed, as the sweep would, when the
+  answer is no). A remote viewer's stand-in (the main's keyframes) needs Live HD too. `/api/cameras`
   says per camera what the viewer may do (`hd`, `playback`; `?for=playback`: `sd`, `hd`, `nvrHd`,
   `legs`), and the pages offer only that.
 
