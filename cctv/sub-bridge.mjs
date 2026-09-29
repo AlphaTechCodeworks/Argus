@@ -23,18 +23,19 @@
 // streams -- nvr-2/10 at 5.18 Mbit/s, /17 at 3.99, /21 at 2.25, each GOP so far (up to 1.3 MB)
 // replayed at once by the worker -- for 9-27 s into a 3.5-6.5 Mbit/s tunnel, and no level thins a
 // stand-in (stutter report 2.6, verify-6). Keyframes alone are still about half of such a main (634
-// KB of /10's 1279 KB GOP every 2 s: 2.6 Mbit/s), and the gate's cap (4 MB of the stand-in's own)
-// would let them fill the page anyway; a keyframe that waits for the page's queue takes only the
-// room the page leaves. That page replayed over 5 Mbit/s (live-mux-server.test.mjs): 0.98 MB queued
-// at most and no tile's frame 1.3 s behind, against 4.58 MB and 7 s with every frame. A held tile
-// stays a picture that moves on at every keyframe while its page has room (a main like /21's on a
-// page of 15 sub-streams: one every 2.45 s) instead of going black (value4u holds 14-16 sub-streams
-// for minutes; verify-6: with no stand-in they would show a still that long). Several stand-ins on a
-// full link take turns as its room comes, by where their keyframes fall: in that replay /17's kept
-// coming just after /10's had taken it, and its first picture waited 10 s, for its own sub-stream.
-// Once the sub-stream runs, nothing more: its keyframe, which a fan-out holds back while this
-// socket still has the last one queued, is next (with every frame, /17's stand-in outlived its
-// sub-stream's start by 22 s there). A local viewer's stand-in is the main stream as it is, as before.
+// KB of /10's 1279 KB GOP every 2 s: 2.6 Mbit/s): under the gate's cap (4 MB of the stand-in's own)
+// they still backed that page up 4.9 MB, its tiles 7.2 s behind, in a replay of it (t8 scratch). A
+// keyframe that waits for the page's queue takes only the room the page leaves: that page replayed
+// over 5 Mbit/s (live-mux-server.test.mjs), 0.98 MB queued at most and no tile's frame 1.3 s behind,
+// against 4.58 MB and 7 s with every frame. A held tile stays a picture that moves on at every
+// keyframe while its page has room (a main like /21's on a page of 15 sub-streams: one every 2.45 s)
+// instead of going black (value4u holds 14-16 sub-streams for minutes; verify-6: with no stand-in
+// they would show a still that long). Several stand-ins on a full link take turns as its room
+// comes, by where their keyframes fall: in that replay /17's kept coming just after /10's had taken
+// it, and its first picture waited 10 s, for its own sub-stream. Once the sub-stream runs, nothing
+// more: its keyframe, which a fan-out holds back while this socket still has the last one queued,
+// is next (with every frame, /17's stand-in outlived its sub-stream's start by 22 s there). A local
+// viewer's stand-in is the main stream as it is, as before.
 import { CAP_BYTES, RESUME_BELOW, gateSend } from './backpressure.mjs'
 
 export const CODEC_H265 = 1 // sdk.mjs frame header byte 1 (transcode.mjs CODEC_H265)
