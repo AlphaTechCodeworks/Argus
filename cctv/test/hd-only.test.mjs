@@ -5,7 +5,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { HD_ONLY_RETEST_MS, SD_FALLBACK_MS, SdWait, hdOnlyStore } from '../hd-only.mjs'
+import { HD_ONLY_RETEST_MS, SD_FALLBACK_MS, SD_REFUSE_MS, SdWait, hdOnlyStore, noSdAction } from '../hd-only.mjs'
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -77,6 +77,22 @@ check('4 s for an SD picture, a week before a mark is tried again', SD_FALLBACK_
   check('playback.mjs: ... nor while the main stream opens after a switch', /this\.markOnFrames = true\n\s*this\.openedAt = 0\b/.test(src))
   check('playback.mjs: the first SD frame clears a mark, the first main frame after a switch sets it', /if \(!this\.mainStream\) hdOnly\.unmark\(this\.ch\)\n\s*else if \(this\.markOnFrames\) \{/.test(src))
   check('playback.mjs: a switch alone marks nothing', !/markHdOnly\(this\.ch\)/.test(src) && /this\.markOnFrames = true/.test(src))
+}
+
+// ---- no SD frame, for a viewer who may or may not see main (stream rights) --------------------------------
+{
+  check('SD_REFUSE_MS: longer than the switch, shorter than the "end of recording" notice (IDLE_END_MS, 8 s)', SD_REFUSE_MS === 6000 && SD_REFUSE_MS > SD_FALLBACK_MS && SD_REFUSE_MS < 8000)
+  check('noSdAction: wait on under 4 s of playing, whoever it is', noSdAction({ waitedMs: 3999, mayMain: true }) === null && noSdAction({ waitedMs: 3999, mayMain: false }) === null)
+  check('... then over to main for a viewer who may see main', noSdAction({ waitedMs: 4000, mayMain: true }) === 'switch')
+  check('... anyone else waits longer (nothing to switch to), then is refused', noSdAction({ waitedMs: 5999, mayMain: false }) === null && noSdAction({ waitedMs: 6000, mayMain: false }) === 'refuse')
+  const src = readFileSync(new URL('../playback.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const body = (head) => src.slice(src.indexOf(head), src.indexOf('\n    }\n', src.indexOf(head)))
+  check('playback.mjs #watch: noSdAction decides, with the right asked now', /this\.sdWait\.tick\(Date\.now\(\), running\)\) \{\n\s*const act = noSdAction\(\{ waitedMs: this\.sdWait\.ms, mayMain: askMain\(this\.allowMain\) \}\)\n\s*if \(act === 'switch'\) return this\.#switchToMain\(\)\n\s*if \(act === 'refuse'\) return this\.#refuseHd\(\)/.test(src))
+  const sw = body('async #switchToMain() {')
+  const asked = sw.indexOf('if (!askMain(this.allowMain)) {')
+  check('playback.mjs #switchToMain: asked again once the SD playback has stopped, before main is said, watched or opened', asked > sw.indexOf('StopPlayBack') && asked < sw.indexOf('this.onMain()') && asked < sw.indexOf("type: 'stream'") && asked < sw.indexOf('this.#open()') && /if \(!askMain\(this\.allowMain\)\) \{\n\s*this\.#refuseHd\(\)\n\s*return this\.#unregister\(\)/.test(sw))
+  check('playback.mjs connect: a camera marked HD only goes to main at once only for a viewer who may see main (anyone else is tried in SD)', /const asMain = main \|\| \(hdOnly\.has\(ch\) && askMain\(allowMain\)\)/.test(src))
+  check('playback.mjs: the stream is never read from the URL (the caller decides)', !/searchParams\.get\('stream'\)/.test(src))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

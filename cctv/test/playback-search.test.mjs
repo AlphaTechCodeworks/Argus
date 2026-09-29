@@ -271,7 +271,7 @@ const tagInFlight = (id, fn) => sdk.sdkStats().calls.find((c) => c.nvr === id &&
   const open = async () => {
     const ws = fakeWs()
     o.jobs.length = 0
-    o.playback.connect(ws, new URL(`ws://x/playback?nvr=open&ch=0&stream=0&start=${Date.now() - H}`))
+    o.playback.connect(ws, new URL(`ws://x/playback?nvr=open&ch=0&stream=0&start=${Date.now() - H}`), { main: true, allowMain: () => true })
     await sleep(60)
     const jobs = [...o.jobs]
     const started = ws.sent.some((m) => m.type === 'started')

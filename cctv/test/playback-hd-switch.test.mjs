@@ -1,9 +1,12 @@
 // The NVR playback session's switch to the main stream (playback.mjs PlaybackSession, hd-only.mjs):
-// a camera the NVR records in HD only is found by "no SD frame in 4 s of the NVR playing". The 4 s
-// used to be counted from before the session had started (openedAt 0 until the NVR answered) and
-// through a pause at open, so a slow NVR or the camera wall marked cameras HD-only for good. Fake
-// NVRs whose lane answers each SDK job without running it (as playback-busy.test.mjs): nothing
-// reaches an NVR, but playback.mjs loads koffi, so this runs on the server copy.
+// a camera the NVR records in HD only is found by "no SD frame in 4 s of the NVR playing", and only a
+// viewer who may see main is switched, asked then and again once the SD playback has stopped; anyone
+// else is refused once no SD frame has come in 6 s of playing. The 4 s used to be counted from before
+// the session had started (openedAt 0 until the NVR answered) and through a pause at open, so a slow
+// NVR or the camera wall marked cameras HD-only for good. Fake NVRs whose lane answers each SDK job
+// without running it (as playback-busy.test.mjs): nothing reaches an NVR, but playback.mjs loads
+// koffi, so this runs on the server copy. A frame is handed to a session as the NVR would, through the
+// SDK's playback route (frame(), below): an SD frame clears a mark, the first main frame sets it.
 //   node cctv/test/playback-hd-switch.test.mjs        (on the server copy)
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -83,38 +86,65 @@ const until = async (pred, ms) => {
   return pred()
 }
 
-// (M1) the open is slow (its SetPlayDataCallBack waits 1.5 s in the NVR's lane)
+// (M1) the open is slow (its SetPlayDataCallBack waits 1.5 s in the NVR's lane); no right to see main
 {
+  let asked = 0
   const nvr = fakeNvr('pb-slow', [true, 77], { job: 2, ms: 1500 })
   const ws = fakeWs()
-  nvr.playback.connect(ws, url('pb-slow'))
+  const r = nvr.playback.connect(ws, url('pb-slow'), { main: false, allowMain: () => { asked++; return false } })
+  check('connect: the sub-stream, as asked', r?.main === false)
   await sleep(1200)
-  check('M1: while the open waits in the NVR lane (500 ms ticks go by), nothing is decided', ws.sent.length === 0 && ws.closedWith === null, types(ws))
+  check('M1: while the open waits in the NVR lane (500 ms ticks go by), nothing is decided, nobody asked', ws.sent.length === 0 && ws.closedWith === null && asked === 0, types(ws))
   await until(() => ws.sent.some((m) => m.type === 'started'), 3000)
   const startedAt = Date.now()
-  await sleep(3000)
-  check('... started, and 3 s of playing without a frame: still waiting', ws.closedWith === null && !ws.sent.some((m) => m.type === 'stream'), types(ws))
-  await until(() => ws.sent.some((m) => m.type === 'stream'), 3000)
-  check('... 4 s of playing, no SD frame: over to main ({type:"stream", stream:0})', ws.sent.some((m) => m.type === 'stream' && m.stream === 0) && Date.now() - startedAt >= 3500, types(ws))
-  check('... not marked HD-only: no main frame has come (a switch alone proves nothing)', !marked('pb-slow', 0))
-  ws.close(1000)
+  await sleep(5000)
+  check('... started, 5 s of playing without a frame: still waiting (nothing to switch to: SD_REFUSE_MS is 6 s)', ws.closedWith === null && !ws.sent.some((m) => m.type === 'stream'), types(ws))
+  await until(() => ws.closedWith !== null, 3000)
+  check('... 6 s of playing, no SD frame, no right to see main: {type:"error"}, then 1008 "hd not allowed"', ws.closedWith?.code === 1008 && ws.closedWith.reason === 'hd not allowed' && ws.sent.at(-1)?.type === 'error' && /No SD recording/.test(ws.sent.at(-1).message) && asked >= 1 && Date.now() - startedAt >= 5500, `${JSON.stringify(ws.closedWith)} ${types(ws)}`)
+  check('... never switched to main, and the camera not marked HD-only', !ws.sent.some((m) => m.type === 'stream') && !marked('pb-slow', 0))
 }
 
 // (M2) opened paused (the camera wall opens its tiles paused), played 5 s later
 {
+  let asked = 0
   const nvr = fakeNvr('pb-paused', [true, 78])
   const ws = fakeWs()
-  nvr.playback.connect(ws, url('pb-paused'))
+  nvr.playback.connect(ws, url('pb-paused'), { main: false, allowMain: () => { asked++; return false } })
   ws.command({ pause: true })
   await until(() => ws.sent.some((m) => m.type === 'started'), 3000)
   await sleep(5000)
-  check('M2: paused from the start, 5 s: nothing decided (a paused NVR sends no frames)', ws.closedWith === null && !ws.sent.some((m) => m.type === 'stream'), types(ws))
+  check('M2: paused from the start, 5 s: nothing decided (a paused NVR sends no frames)', ws.closedWith === null && asked === 0, types(ws))
   ws.command({ pause: false })
-  await sleep(3000)
-  check('... played: 3 s later still waiting (the count started again at play)', !ws.sent.some((m) => m.type === 'stream'))
-  await until(() => ws.sent.some((m) => m.type === 'stream'), 3000)
-  check('... then over to main, after 4 s of playing', ws.sent.some((m) => m.type === 'stream'))
+  await sleep(5000)
+  check('... played: 5 s later still waiting (the count started again at play)', ws.closedWith === null)
+  await until(() => ws.closedWith !== null, 3000)
+  check('... then refused as above, after 6 s of playing', ws.closedWith?.reason === 'hd not allowed' && asked >= 1)
+}
+
+// a viewer who may see main: switched, told, watched for it (onMain); marked only once main frames come
+{
+  let asked = 0
+  let told = 0
+  const nvr = fakeNvr('pb-hd', [true, 79, true, true, true, 80, true])
+  const ws = fakeWs()
+  nvr.playback.connect(ws, url('pb-hd'), { main: false, allowMain: () => { asked++; return true }, onMain: () => told++ })
+  await until(() => ws.sent.some((m) => m.type === 'stream'), 8000)
+  check('allowed: no SD in 4 s of playing, so over to main: {type:"stream", stream:0}', ws.sent.some((m) => m.type === 'stream' && m.stream === 0) && ws.closedWith === null, types(ws))
+  check('... asked when the 4 s ran out, and again once the SD playback had stopped', asked === 2, String(asked))
+  check('... the caller is told (the server watches it for the main-stream rights at once, and audits it)', told === 1)
+  check('... not marked HD-only yet: no main frame has come (a slow NVR is no proof)', !marked('pb-hd', 0))
   ws.close(1000)
+}
+
+// allowed when the 4 s ran out, the right gone while the NVR stopped the SD playback: refused, never main
+{
+  let asked = 0
+  let told = 0
+  const nvr = fakeNvr('pb-gone', [true, 82])
+  const ws = fakeWs()
+  nvr.playback.connect(ws, url('pb-gone'), { main: false, allowMain: () => ++asked === 1, onMain: () => told++ })
+  await until(() => ws.closedWith !== null, 8000)
+  check('the right taken away during the switch: {type:"error"}, 1008 "hd not allowed", no {type:"stream"}, nothing watched for main', ws.closedWith?.reason === 'hd not allowed' && ws.sent.at(-1)?.type === 'error' && !ws.sent.some((m) => m.type === 'stream') && asked === 2 && told === 0, `${JSON.stringify(ws.closedWith)} ${types(ws)} asked ${asked}`)
 }
 
 // (M1, a slower open) the login waits 9 s, then SetPlayDataCallBack 1.5 s: longer than IDLE_END_MS (8 s),
@@ -122,7 +152,7 @@ const until = async (pred, ms) => {
 {
   const nvr = fakeNvr('pb-login', [true, 86], { job: 2, ms: 1500 }, { acquireMs: 9000 })
   const ws = fakeWs()
-  nvr.playback.connect(ws, url('pb-login'))
+  nvr.playback.connect(ws, url('pb-login'), { main: false, allowMain: () => true })
   await until(() => ws.sent.some((m) => m.type === 'started'), 14_000)
   check('M1, a 9 s login and a slow SetPlayDataCallBack: nothing but "started" (no "end", no "stream") before it', ws.sent[0]?.type === 'started' && ws.closedWith === null, types(ws))
   ws.close(1000)
@@ -133,7 +163,7 @@ const until = async (pred, ms) => {
 {
   const nvr = fakeNvr('pb-reopen', [true, 87, true, true, true, 88], { job: 6, ms: 5000 })
   const ws = fakeWs()
-  nvr.playback.connect(ws, url('pb-reopen'))
+  nvr.playback.connect(ws, url('pb-reopen'), { main: false, allowMain: () => true })
   await until(() => ws.sent.some((m) => m.type === 'stream'), 8000)
   await until(() => ws.sent.filter((m) => m.type === 'started').length === 2, 8000)
   check('the main stream re-opening slowly after the switch: no "end" before it has started', types(ws) === 'started,stream,started', types(ws))
@@ -147,7 +177,7 @@ const until = async (pred, ms) => {
 {
   const nvr = fakeNvr('pb-heal', [true, 89])
   const ws = fakeWs()
-  nvr.playback.connect(ws, url('pb-heal'))
+  nvr.playback.connect(ws, url('pb-heal'), { main: false, allowMain: () => true })
   await until(() => ws.sent.some((m) => m.type === 'started'), 3000)
   nvr.playback.markHdOnly(0)
   const was = marked('pb-heal', 0)
@@ -160,7 +190,7 @@ const until = async (pred, ms) => {
 {
   const nvr = fakeNvr('pb-midpause', [true, 90])
   const ws = fakeWs()
-  nvr.playback.connect(ws, url('pb-midpause'))
+  nvr.playback.connect(ws, url('pb-midpause'), { main: false, allowMain: () => true })
   await until(() => ws.sent.some((m) => m.type === 'started'), 3000)
   await sleep(3000)
   ws.command({ pause: true })
@@ -180,7 +210,7 @@ const until = async (pred, ms) => {
 {
   const nvr = fakeNvr('pb-resume', [true, 91], { job: 4, ms: 9000 })
   const ws = fakeWs()
-  nvr.playback.connect(ws, url('pb-resume'))
+  nvr.playback.connect(ws, url('pb-resume'), { main: false, allowMain: () => true })
   ws.command({ pause: true })
   await until(() => ws.sent.some((m) => m.type === 'started'), 3000)
   await sleep(1000)
@@ -193,14 +223,25 @@ const until = async (pred, ms) => {
   ws.close(1000)
 }
 
-// a camera the NVR is known to record in HD only (marked through the store, with its time)
+// a camera the NVR is known to record in HD only
 {
   const nvr = fakeNvr('pb-known', [true, 81])
   nvr.playback.markHdOnly(0)
+  const ok = fakeWs()
+  const r = nvr.playback.connect(ok, url('pb-known'), { main: false, allowMain: () => true })
+  check('known HD-only, a viewer who may see main: main at once, and said ({type:"stream"})', r?.main === true && ok.sent[0]?.type === 'stream')
+  ok.close(1000)
+  const bad = fakeWs()
+  check('connect without a decision (no main flag) is refused "bad parameters"', nvr.playback.connect(bad, url('pb-known')) === null && bad.closedWith?.reason === 'bad parameters')
+}
+{
+  const nvr = fakeNvr('pb-known-sd', [true, 83])
+  nvr.playback.markHdOnly(0)
   const ws = fakeWs()
-  nvr.playback.connect(ws, url('pb-known'))
-  check('known HD-only: main at once, and said ({type:"stream"})', ws.sent[0]?.type === 'stream' && ws.sent[0].stream === 0 && marked('pb-known', 0))
-  ws.close(1000)
+  const r = nvr.playback.connect(ws, url('pb-known-sd'), { main: false, allowMain: () => false })
+  check('known HD-only, no right to see main: tried in SD all the same (a mark can be wrong; an SD frame clears it)', r?.main === false && ws.closedWith === null && !ws.sent.some((m) => m.type === 'stream'), types(ws))
+  await until(() => ws.closedWith !== null, 12_000)
+  check('... no SD frame in 6 s of playing: refused with words, 1008 "hd not allowed"; the mark stays', ws.closedWith?.reason === 'hd not allowed' && ws.sent.at(-1)?.type === 'error' && nvr.playback.isHdOnly(0), `${JSON.stringify(ws.closedWith)} ${types(ws)}`)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

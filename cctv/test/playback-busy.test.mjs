@@ -72,7 +72,7 @@ const fakeWs = () => {
   ws.command = (obj) => ws.handlers.message(Buffer.from(JSON.stringify(obj)), false)
   return ws
 }
-const openPlayback = (nvr, ws) => nvr.playback.connect(ws, new URL(`ws://x/playback?nvr=${nvr.id}&ch=0&stream=0&start=${Date.now() - 3_600_000}`))
+const openPlayback = (nvr, ws) => nvr.playback.connect(ws, new URL(`ws://x/playback?nvr=${nvr.id}&ch=0&stream=0&start=${Date.now() - 3_600_000}`), { main: true, allowMain: () => true })
 
 // ---- GetDeviceTime is ordinary work
 {

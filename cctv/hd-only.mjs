@@ -103,3 +103,23 @@ export function hdOnlyStore({ file, nvrId, now = Date.now, retestMs = HD_ONLY_RE
     }
   }
 }
+
+// ---- a viewer who may not see main (stream rights) ----------------------------------------------------
+
+/**
+ * How long a session that asked for SD waits for an SD frame when its viewer may not see main: longer
+ * than the switch (there is nothing to switch to, and a busy NVR can be slow with the first frame),
+ * shorter than playback.mjs's IDLE_END_MS (8 s), which would tell the page the recording had ended.
+ */
+export const SD_REFUSE_MS = 6000
+
+/**
+ * What a session that asked for SD does while no SD frame has come (playback.mjs #watch).
+ * @param {{ waitedMs: number, mayMain: boolean }} o waitedMs: SdWait.ms, the NVR's playing time so
+ *   far; mayMain: this viewer may see main pictures of the camera, asked now
+ * @returns {null|'switch'|'refuse'} null: wait on; 'switch': over to main; 'refuse': end the session
+ */
+export function noSdAction({ waitedMs, mayMain }) {
+  if (mayMain) return waitedMs >= SD_FALLBACK_MS ? 'switch' : null
+  return waitedMs >= SD_REFUSE_MS ? 'refuse' : null
+}
