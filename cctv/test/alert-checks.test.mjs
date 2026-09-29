@@ -153,6 +153,47 @@ const fakeSender = (sent = [], pending = {}) => ({
   a.stop()
 }
 
+// --- health() reuses a recent snapshot ------------------------------------------------------------
+// Building one reads every camera's last recording from the index on the main thread, which also
+// paces every playback. The banner on every page asks every 30 s and the Health page every 2 s; each
+// used to build a snapshot of its own, and one built by the 30 s check was never shared with them.
+{
+  let t = T0
+  let builds = 0
+  let name = 'Cashier Front'
+  const a = startAlerts(deps({
+    autoStart: false,
+    now: () => t,
+    sender: fakeSender(),
+    listCameras: () => { builds++; return [{ nvrId: 'nvr1', ch: 0, name, online: true, recording: true, lastSegmentMs: t }] }
+  }))
+  a.tick()
+  check('the alert check builds a snapshot', builds === 1, String(builds))
+  t += 1000
+  a.health()
+  check('a poll a second after the check uses the check\'s snapshot', builds === 1, String(builds))
+  t += 3000
+  a.health()
+  check('... and four seconds after it', builds === 1, String(builds))
+  t += 1000
+  name = 'Till'
+  const h = a.health()
+  check('five seconds after it, the poll builds a fresh one', builds === 2 && h.cameras[0].name === 'Till', `${builds} ${h.cameras[0]?.name}`)
+  // the Health page, open for a minute (every 2 s), with a banner on another page (every 30 s)
+  const before = builds
+  for (let i = 1; i <= 30; i++) {
+    t += 2000
+    a.health()
+    if (i % 15 === 0) a.health()
+  }
+  const polled = builds - before
+  check('a minute of polls every 2 s builds one snapshot per 5-6 s, not one per poll', polled >= 10 && polled <= 12, `${polled} built for 32 polls`)
+  name = 'Door'
+  t += 5000
+  check('what the page shows is never more than 5 s old', a.health().cameras[0].name === 'Door')
+  a.stop()
+}
+
 // --- the test button -----------------------------------------------------------------------------
 {
   const asked = []

@@ -17,10 +17,14 @@
 //    Today the file being written counts as recorded up to the live edge (pb-sources.js liveEdge:
 //    the timeline's now plus the time since, less 1 s); later times are not recorded yet, as in
 //    NVR mode, and a scrub stops at the edge.
+//    A remote viewer (the tunnel or the tailnet; the server decides and says so with {type:'fit'})
+//    is sent a copy converted to fit the link, "HD (server, light)"; "Original (server)" asks for
+//    the recording itself (&original=1, pb-sources.js serverQualityOptions).
 //  - nvr: the NVR's playback exactly as before (NVR clock, no src parameter, speeds 1-8, SD/HD).
 // Switching between them (quality "SD (NVR)", or a camera or day in the other mode) converts the
 // position by the NVR's clock skew.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { PLAYBACK_CLOCK } from './playout.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
   NvrFallback,
@@ -28,6 +32,7 @@ import {
   ScrubThrottle,
   convertTime,
   describeSkew,
+  fitChange,
   gapAt,
   liveEdge,
   mergeSources,
@@ -40,6 +45,8 @@ import {
   refusedMessage,
   scrubTimeoutMs,
   serverFailed,
+  serverQualityOptions,
+  serverSocketQuery,
   shift,
   speedFor,
   watchesStart
@@ -160,7 +167,11 @@ const state = {
   // ---- playback from the server's recordings ----
   mode: 'nvr', // 'server' | 'nvr' for the camera and day shown
   avail: false, // the server has recordings of this camera (the timeline is available)
-  quality: 'server', // with avail: 'server' (HD from the server) or 'sd-nvr' (the viewer chose the NVR's SD)
+  // with avail: 'server' (HD from the server), 'original' (a remote viewer chose the recording itself
+  // over the copy made to fit the link) or 'sd-nvr' (the viewer chose the NVR's SD)
+  quality: 'server',
+  remote: false, // the server converts this viewer's playback to fit a remote link ({type:'fit'} came)
+  fit: null, // what the server last said of that: 'on', 'busy', 'fits' or 'original' (pb-sources.js fitChange)
   skew: 0, // the NVR's clock - the server's (ms)
   firstMs: null, // the camera's oldest server recording
   gaps: [], // server mode: recorder gaps [[start, end, reason]]
@@ -185,7 +196,7 @@ let drag = null // { x, startMs, moved, box } while the timeline is being panned
 const boxSeek = new WeakMap()
 
 const player = new VideoPlayer(videoEl.querySelector('canvas'), {
-  clock: { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 1000 },
+  clock: PLAYBACK_CLOCK,
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
     noteStart()
@@ -556,20 +567,23 @@ moreBtn.addEventListener('click', () => {
 function updateModeUi() {
   const server = state.mode === 'server'
   renderSpeeds()
-  // quality: with server recordings "HD (server)" or "SD (NVR)"; otherwise the NVR's SD or HD as before
+  // quality: with server recordings "HD (server)" or "SD (NVR)", and for a remote viewer "HD (server,
+  // light)", "Original (server)" or "SD (NVR)" (pb-sources.js serverQualityOptions); otherwise the
+  // NVR's SD or HD as before
   // this camera's quality: the viewer's own choice, unless it fell back to the NVR on its own (pb-sources.js qualityForCam)
   const quality = qualityForCam(camKey(), state.quality, nvrFallback.used)
-  const kind = state.avail && (server || quality === 'sd-nvr') ? 'server' : 'nvr'
+  const kind = state.avail && (server || quality === 'sd-nvr') ? (state.remote ? 'server-remote' : 'server') : 'nvr'
   if (qualitySel.dataset.kind !== kind) {
-    if (kind === 'server') setOptions(qualitySel, [['server', 'HD (server)'], ['sd-nvr', 'SD (NVR)']], server ? 'server' : 'sd-nvr')
+    if (kind !== 'nvr') setOptions(qualitySel, serverQualityOptions({ remote: state.remote }), server ? 'server' : 'sd-nvr')
     else setOptions(qualitySel, [[1, 'SD (light)'], [0, 'HD']], state.stream)
     qualitySel.dataset.kind = kind
   }
-  if (kind === 'server') {
-    qualitySel.value = server ? 'server' : 'sd-nvr'
+  if (kind !== 'nvr') {
+    qualitySel.value = !server ? 'sd-nvr' : quality === 'original' && state.remote ? 'original' : 'server'
     // a camera the NVR records in HD only plays HD for "SD (NVR)" ({type:'stream'})
     const label = !server && state.stream === 0 ? 'HD (NVR)' : 'SD (NVR)'
-    if (qualitySel.options[1].textContent !== label) qualitySel.options[1].textContent = label
+    const nvrOpt = [...qualitySel.options].find((o) => o.value === 'sd-nvr')
+    if (nvrOpt && nvrOpt.textContent !== label) nvrOpt.textContent = label
   }
   legendServer.hidden = !server
   const hint = server ? describeSkew(state.skew) : ''
@@ -664,7 +678,7 @@ function onStatus(msg) {
   if (msg.type === 'stream') {
     // this camera records HD only; the server switched over
     state.stream = msg.stream
-    if (qualitySel.dataset.kind === 'server') return updateModeUi() // ("SD (NVR)" chosen: relabelled)
+    if (qualitySel.dataset.kind !== 'nvr') return updateModeUi() // ("SD (NVR)" chosen: relabelled)
     const hd = qualitySel.options[1]
     hd.disabled = false
     hd.textContent = 'HD'
@@ -705,7 +719,9 @@ function serverSeek(t) {
   if (state.speed > 0) player.setStills(false)
   player.resume()
   player.setRate(rateOf(state.speed))
-  const sock = ws?.kind === 'server' && ws.cam === camKey() && ws.readyState <= WebSocket.OPEN ? ws : null
+  // (only a socket that asked for the same: "HD (server, light)" and "Original (server)" differ in
+  // what the server was told when it opened)
+  const sock = ws?.kind === 'server' && ws.cam === camKey() && ws.original === Boolean(lastPick?.original) && ws.readyState <= WebSocket.OPEN ? ws : null
   if (!sock) openServer(target)
   else {
     const cmd = { seek: Math.round(target), gen: ++sock.gen }
@@ -772,13 +788,16 @@ function openServer(start) {
   closeSocket()
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   // server footage is the main stream (stream=0); all times are the server's clock
-  // h265 tells the server what this browser can decode. It is the only thing that lets the server
-  // convert an H.265 recording to H.264 (transcode.mjs), so a browser that can decode H.265 always
-  // gets the recording exactly as the camera made it.
-  const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=0&start=${Math.round(start)}&src=auto&h265=${state.h265 ? 1 : 0}`)
+  // h265 tells the server what this browser can decode. It is the only thing on the local network
+  // that lets the server convert an H.265 recording to H.264 (transcode.mjs), so a browser there that
+  // can decode H.265 always gets the recording exactly as the camera made it. A remote viewer's
+  // playback is converted to fit the link unless "Original (server)" was chosen (original=1).
+  const original = Boolean(lastPick?.original)
+  const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=0&start=${Math.round(start)}&src=auto&${serverSocketQuery({ h265: state.h265, original })}`)
   sock.binaryType = 'arraybuffer'
   sock.kind = 'server'
   sock.cam = camKey()
+  sock.original = original
   sock.gen = 0 // the generation asked for last (the start is 0)
   sock.okGen = -1 // the generation whose frames are shown (announced by started or scrub)
   sock.pending = null
@@ -854,6 +873,18 @@ function onServerStatus(sock, msg) {
     case 'notice':
       showNotice(msg.message)
       return
+    case 'fit': {
+      // Only a remote viewer is told this (rec-playback.mjs): converted to fit the link, sent the
+      // original for want of a free conversion or because it fits already, or the original as
+      // chosen. The menu then offers "Original (server)"; the notice says what changed, once.
+      const change = fitChange(state.fit, msg)
+      const learned = !state.remote
+      state.remote = true
+      state.fit = change.fit
+      if (change.notice) showNotice(change.notice)
+      if (learned) updateModeUi()
+      return
+    }
     case 'end':
       settleStart(sock) // (nothing to play there is an answer too)
       return onServerEnd(msg)
@@ -896,9 +927,10 @@ const throttle = new ScrubThrottle(
     sock.send(JSON.stringify({ scrub: Math.round(t), gen }))
     return gen
   },
-  // longer when the server converts this browser's H.265 scrubs: each picture takes 600-830 ms, and
-  // a scrub sent before it is out kills its ffmpeg (asked at each send: state.h265 is known later)
-  { now: () => performance.now(), timeoutMs: () => scrubTimeoutMs(state.h265) }
+  // longer when the server converts this browser's H.265 scrubs, or every scrub of a remote viewer's:
+  // each picture takes 600-830 ms at 4K, and a scrub sent before it is out kills its ffmpeg (asked at
+  // each send: state.h265 and state.fit are known later)
+  { now: () => performance.now(), timeoutMs: () => scrubTimeoutMs(state.h265, state.fit === 'on') }
 )
 
 function togglePause() {
@@ -1795,15 +1827,17 @@ $('shortcutsClose').addEventListener('click', () => shortcutsDlg.close())
 
 qualitySel.addEventListener('change', () => {
   const v = qualitySel.value
-  if (v === 'server' || v === 'sd-nvr') {
-    // server recordings (HD) or the NVR's SD: the other mode, at the same moment. The viewer's own
-    // choice for this camera, so an earlier NAS-outage fallback (fallBackToNvr) no longer overrides it
+  if (v === 'server' || v === 'original' || v === 'sd-nvr') {
+    // server recordings (HD; for a remote viewer the light copy or the original) or the NVR's SD: the
+    // other mode or socket, at the same moment (serverSeek opens a new socket when the original was
+    // or was not asked for). The viewer's own choice for this camera, so an earlier NAS-outage
+    // fallback (fallBackToNvr) no longer overrides it
     nvrFallback.clear(camKey())
     state.quality = v
     if (v === 'sd-nvr') state.stream = 1
     return reloadKeepingPosition().then(() => {
-      // HD (server) chosen, but this day plays from the NVR after all (no server footage, H.265)
-      if (v === 'server' && state.mode !== 'server' && lastPick) showNotice(lastPick.why)
+      // HD or Original (server) chosen, but this day plays from the NVR after all (no server footage, H.265)
+      if (v !== 'sd-nvr' && state.mode !== 'server' && lastPick) showNotice(lastPick.why)
     })
   }
   state.stream = Number(v)

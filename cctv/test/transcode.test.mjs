@@ -10,8 +10,10 @@ import { EventEmitter } from 'node:events'
 import {
   CODEC_H264,
   CODEC_H265,
+  DECODE_THREADS,
   DEFAULT_MAX,
   NICE,
+  PLAYBACK_LIMITS,
   RENDER_NODE,
   TranscodePool,
   Transcoder,
@@ -29,6 +31,7 @@ import {
 } from '../transcode.mjs'
 
 let failures = 0
+const J = (v) => JSON.stringify(v)
 const check = (name, ok, extra = '') => {
   if (!ok) failures++
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? `  (${extra})` : ''}`)
@@ -64,6 +67,18 @@ const check = (name, ok, extra = '') => {
   check('  releasing twice does not invent a free slot', p.active === 1, `active ${p.active}`)
   const none = new TranscodePool(0)
   check('  a cap of 0 turns the feature off', none.acquire() === null)
+
+  // keepFree: a conversion that has an alternative (a remote viewer's playback fitted to the tunnel,
+  // rec-playback.mjs) leaves that many slots for the ones that have none (H.265 for a browser without it)
+  const q = new TranscodePool(2)
+  const opt = q.acquire({ keepFree: 1 })
+  check('pool, keepFree 1: a slot while two are free', Boolean(opt) && q.active === 1)
+  check('  not the last one', q.acquire({ keepFree: 1 }) === null && q.active === 1)
+  const need = q.acquire()
+  check('  which is still there for a conversion that must have it', Boolean(need) && q.active === 2)
+  opt?.release()
+  need?.release()
+  check('  a cap of 1 has no slot to spare', new TranscodePool(1).acquire({ keepFree: 1 }) === null)
 }
 
 // ---- ffmpeg arguments -------------------------------------------------------------------------
@@ -78,6 +93,32 @@ const check = (name, ok, extra = '') => {
   check('  never -fflags nobuffer: the first keyframe is decoded, not dropped by the probe', !/nobuffer/.test(s) && !/nobuffer/.test(ffmpegArgs({ encoder: 'h264_vaapi' }).join(' ')) && !/nobuffer/.test(ffmpegArgs({ keepEvery: 2, maxWidth: 1280 }).join(' ')), s)
   check('  no audio is ever produced', s.includes('-an'))
   check('  an H.264 recording would be fed in as h264 (never reached, but not wrong)', ffmpegArgs({ inCodec: CODEC_H264 }).join(' ').includes('-f h264 -i pipe:0'))
+
+  // Playback's size and rate cap (smoothness report, cause 2b): a 4K H.265 recording converted at full
+  // size ran at 0.79-0.99x real time and came out at ~9 Mbit/s, more than the tunnel carries.
+  check('PLAYBACK_LIMITS: playback converts at most 1920 wide, at most 2.5 Mbit/s, with a 1 s buffer', PLAYBACK_LIMITS.maxWidth === 1920 && PLAYBACK_LIMITS.maxKbps === 2500 && PLAYBACK_LIMITS.bufSeconds === 1 && Object.isFrozen(PLAYBACK_LIMITS), JSON.stringify(PLAYBACK_LIMITS))
+  const capped = ffmpegArgs({ encoder: 'libx264', ...PLAYBACK_LIMITS }).join(' ')
+  check('  scaled down to 1920 wide (never up), the height kept in proportion', capped.includes('-vf scale=min(1920\\,iw):-2'), capped)
+  check('  the rate capped at 2500k with a buffer of 1 s at the cap: a keyframe cannot burst past what a tunnel carries', capped.includes('-maxrate 2500k -bufsize 2500k'), capped)
+  const phone = ffmpegArgs({ encoder: 'libx264', maxKbps: 500 }).join(' ')
+  check('  a cap without bufSeconds keeps the 4 s buffer (phones, phone-live.mjs: unchanged)', phone.includes('-maxrate 500k -bufsize 2000k'), phone)
+  check('  no cap: no rate options at all (unchanged)', !/-maxrate|-bufsize/.test(s))
+  // Keyframes only: x264 spends the cap as maxKbps / fps per picture, the fps taken from the input's
+  // timestamps, which the raw demuxer puts one camera frame apart. A keyframe run sends 2-8 pictures
+  // a second, so each got a 1x picture's share (15.6 KB at 20 fps) and came out blocky, with the
+  // link mostly idle. picturesPerS stamps them that many a second instead.
+  const keys = ffmpegArgs({ encoder: 'libx264', ...PLAYBACK_LIMITS, picturesPerS: 8 }).join(' ')
+  check('  picturesPerS: the pictures are stamped that many a second (-r, an input option: before -i)', keys.includes('-analyzeduration 0 -r 8 -f hevc -i pipe:0'), keys)
+  check('  and the cap is the same number, now per second of wall clock', keys.includes('-maxrate 2500k -bufsize 2500k'), keys)
+  check('  picturesPerS not given, or 0: the stream\'s own timestamps (unchanged)', !/ -r /.test(capped) && !/ -r /.test(ffmpegArgs({ encoder: 'libx264', ...PLAYBACK_LIMITS, picturesPerS: 0 }).join(' ')), capped)
+
+  // -flags low_delay turns the H.265 decoder's frame threads off: one thread, 0.8-0.99x real time at
+  // 4K (smoothness report, cause 2a). Playing forward it is dropped; one picture at a time (a scrub,
+  // keyframes only) keeps it, since frame threads hold pictures back until more arrive.
+  check('  low_delay by default (scrubs, keyframes, phones and NVR playback unchanged), no thread count', /-nostdin -flags low_delay -probesize 32/.test(s) && !/-threads/.test(s), s)
+  const played = ffmpegArgs({ encoder: 'libx264', lowDelay: false }).join(' ')
+  check(`  lowDelay false: no low_delay, and ${DECODE_THREADS} decoder threads (an input option: before -i)`, !/low_delay/.test(played) && played.includes(`-nostdin -threads ${DECODE_THREADS} -probesize 32 -analyzeduration 0 -f hevc -i pipe:0`), played)
+  check('  two decoder threads: each holds back one picture at most', DECODE_THREADS === 2)
 
   const hw = ffmpegArgs({ encoder: 'h264_vaapi' }).join(' ')
   check('  hardware: h264_vaapi on the render node, decode and encode both on the GPU', /-c:v h264_vaapi/.test(hw) && hw.includes(RENDER_NODE) && /-hwaccel vaapi/.test(hw) && /-hwaccel_output_format vaapi/.test(hw), hw)
@@ -208,6 +249,38 @@ function harness(opts = {}) {
   h2.procs[0].stdout.emit('data', Buffer.concat([IDR, P, P]))
   h2.fireIdle()
   check('  times are handed back in time order, so reordering cannot shuffle the picture', h2.frames.map((f) => f.ts).join() === '5000,5040,5080', h2.frames.map((f) => f.ts).join())
+
+  const h3 = harness({ ...PLAYBACK_LIMITS })
+  h3.t.push(1000, true, IDR)
+  const a = h3.procs[0]?.args.join(' ') ?? ''
+  check('  the limits it is given reach ffmpeg (size, rate and buffer)', a.includes('scale=min(1920\\,iw):-2') && a.includes('-maxrate 2500k -bufsize 2500k'), a)
+  h3.t.close()
+
+  // lowDelay may be a function: asked each time an ffmpeg starts (a run starts at a keyframe after
+  // every reset), because one session plays forward, scrubs and plays keyframes in turn
+  let still = false
+  const h4 = harness({ lowDelay: () => still })
+  h4.t.push(1000, true, IDR)
+  h4.t.reset()
+  still = true
+  h4.t.push(2000, true, IDR)
+  const runs = h4.procs.map((p) => /low_delay/.test(p.args.join(' ')))
+  check('  lowDelay as a function: asked at each start (a run playing forward, then a scrub)', J(runs) === J([false, true]), J(runs))
+  h4.t.close()
+  // picturesPerS too: keyframes only, then playing forward again after a reset
+  let perS = 8
+  const h6 = harness({ ...PLAYBACK_LIMITS, picturesPerS: () => perS })
+  h6.t.push(1000, true, IDR)
+  h6.t.reset()
+  perS = 0
+  h6.t.push(2000, true, IDR)
+  const stamped = h6.procs.map((p) => p.args.join(' ').match(/ -r (\d+) /)?.[1] ?? null)
+  check('  picturesPerS as a function: asked at each start (keyframes only, then playing forward)', J(stamped) === J(['8', null]), J(stamped))
+  h6.t.close()
+  const h5 = harness()
+  h5.t.push(1000, true, IDR)
+  check('  lowDelay not given: low_delay, as before', /low_delay/.test(h5.procs[0].args.join(' ')))
+  h5.t.close()
 }
 
 // ---- ending a picture: a scrub's single keyframe ------------------------------------------------

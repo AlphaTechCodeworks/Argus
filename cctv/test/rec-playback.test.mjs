@@ -85,20 +85,26 @@ const h264 = {
   key: (rnd, len = 3000) => Buffer.concat([nal(true, [0x67, 0x64], rnd, 12), nal(false, [0x68], rnd, 4), nal(false, [0x65, 0x88], rnd, len)]),
   p: (rnd, len = 600) => nal(true, [0x41, 0x9a], rnd, len)
 }
+// H.265 the same way (2-byte NAL headers): VPS, SPS, PPS, then an IDR slice; a TRAIL_R slice. The byte
+// after a slice's header has its top bit set: first_slice_segment_in_pic_flag, a new picture.
+const h265 = {
+  key: (rnd, len = 3000) => Buffer.concat([nal(true, [0x40, 0x01], rnd, 12), nal(false, [0x42, 0x01], rnd, 12), nal(false, [0x44, 0x01], rnd, 4), nal(false, [0x26, 0x01, 0x80], rnd, len)]),
+  p: (rnd, len = 600) => nal(true, [0x02, 0x01, 0x80], rnd, len)
+}
 
 /**
  * n frames at 25 fps from t0, a key every `gop`. Arrival stamps as the recorder makes them: the NVR
  * sends in bursts (every 200-300 ms), so a frame's stamp is the first burst at or after its capture
  * time: key times jitter by up to 300 ms and never go back.
  */
-function makeFrames(rnd, t0, n, { gop = 50 } = {}) {
+function makeFrames(rnd, t0, n, { gop = 50, codec = h264 } = {}) {
   const out = []
   let burst = t0
   for (let i = 0; i < n; i++) {
     const cap = t0 + i * 40
     while (burst < cap) burst += 200 + Math.floor(rnd() * 101)
     const isKey = i % gop === 0
-    out.push({ buf: isKey ? h264.key(rnd, 1500 + Math.floor(rnd() * 2000)) : h264.p(rnd, 150 + Math.floor(rnd() * 700)), isKey, ts: burst })
+    out.push({ buf: isKey ? codec.key(rnd, 1500 + Math.floor(rnd() * 2000)) : codec.p(rnd, 150 + Math.floor(rnd() * 700)), isKey, ts: burst })
   }
   return out
 }
@@ -242,13 +248,14 @@ const ADMIN = { user: 'admin', admin: true }
 const logs = []
 const N = fakeNvr()
 /** Opens a /playback socket through connectPlayback. */
-function open(ch, start, { nvr = N, index = IDX, who = ADMIN, src = 'auto', stream = 0, legs = null, allowed, allowedNvr, opts = {}, chParam, extra = '' } = {}) {
+function open(ch, start, { nvr = N, index = IDX, who = ADMIN, src = 'auto', stream = 0, legs = null, allowed, allowedNvr, opts = {}, chParam, extra = '', remote } = {}) {
   const ws = fakeWs()
   const url = new URL(`ws://x/playback?nvr=${nvr.id}&ch=${chParam ?? ch}&stream=${stream}&start=${start}${src ? `&src=${src}` : ''}${extra}`)
   ws.t0 = performance.now()
   const args = { nvr, ws, url, who, index, legs, opts: { log: (l) => logs.push(l), ...opts } }
   if (allowed) args.allowed = allowed
   if (allowedNvr) args.allowedNvr = allowedNvr
+  if (remote !== undefined) args.remote = remote // (server.mjs: isRemoteAddress of the socket)
   const session = rp.connectPlayback(args)
   return { ws, url, session }
 }
@@ -1021,13 +1028,21 @@ for (const speed of [2, 4]) {
   /** A Transcoder stand-in: records what it was given and hands each frame straight back as H.264. */
   const fakeXcode = (rec) => (o) => {
     const x = {
+      opts: o, // what the session asked of the conversion
       pushed: [],
       calls: [], // 'push' and 'end' in the order they came
       resets: 0,
       closes: 0,
+      low: [], // lowDelay as the session answers it at each push (the real one asks when ffmpeg starts)
+      perS: [], // picturesPerS likewise
+      inCodec: o.inCodec, // what the real one reads when its ffmpeg starts (the session may change it)
+      codecs: [], // inCodec at each push
       push: (ts, isKey, buf) => {
         x.pushed.push(ts)
         x.calls.push('push')
+        x.codecs.push(x.inCodec)
+        x.low.push(typeof o.lowDelay === 'function' ? o.lowDelay() : o.lowDelay)
+        x.perS.push(typeof o.picturesPerS === 'function' ? o.picturesPerS() : o.picturesPerS)
         o.onFrame(ts, isKey, Buffer.concat([Buffer.from([0xaa]), buf.subarray(0, 4)]))
       },
       endPicture: () => x.calls.push('end'),
@@ -1047,6 +1062,10 @@ for (const speed of [2, 4]) {
     check('a browser that cannot decode H.265 is sent H.264', ws.bins.length >= 2 && ws.bins.every((b) => b.codec === 0), `${ws.bins.length} frames, codecs ${[...new Set(ws.bins.map((b) => b.codec))].join()}`)
     check('  every frame keeps the time it was recorded at', ws.bins.every((b, i) => Math.abs(b.tsMs - xs[0].pushed[i]) < 0.001), )
     check('  exactly one conversion was started, holding one slot under the cap', xs.length === 1 && released.length === 0)
+    // smoothness report, cause 2b: at full size a 4K conversion ran slower than real time and made
+    // ~9 Mbit/s; capped, it keeps ahead and fits a tunnel
+    const o = xs[0].opts
+    check('  it converts at most 1920 wide and 2.5 Mbit/s, with a 1 s buffer (transcode.mjs PLAYBACK_LIMITS)', o.maxWidth === 1920 && o.maxKbps === 2500 && o.bufSeconds === 1, J({ maxWidth: o.maxWidth, maxKbps: o.maxKbps, bufSeconds: o.bufSeconds }))
     const n = xs[0].resets
     session.close()
     await sleep(20)
@@ -1079,6 +1098,12 @@ for (const speed of [2, 4]) {
     await sleep(50)
     const sc = ws.texts.find((t) => t.type === 'scrub' && t.gen === 1)
     check('a converted scrub: its keyframe is pushed, then the picture is ended, once', J(xs[0].calls.slice(before)) === J(['push', 'end']) && xs[0].pushed.at(-1) === sc?.at, `${xs[0].calls.slice(before).join()} at ${sc?.at}`)
+    // smoothness report, cause 2a: low_delay turns the decoder's frame threads off (one thread,
+    // slower than real time at 4K); frame threads hold pictures back until more arrive, which a scrub never sends
+    check('  low_delay: not while playing forward at 1x, but for the scrub', xs[0].low.length >= 3 && xs[0].low.slice(0, -1).every((v) => v === false) && xs[0].low.at(-1) === true, J(xs[0].low))
+    // x264 spends its rate cap per picture by the input's timestamps: playing forward those are the
+    // camera's own; one picture at a time they say maxKeysPerS a second (below, at 2x)
+    check('  picturesPerS: 0 (the stream\'s own rate) at 1x, maxKeysPerS for the scrub', xs[0].perS.length >= 3 && xs[0].perS.slice(0, -1).every((v) => v === 0) && xs[0].perS.at(-1) === session.maxKeysPerS && session.maxKeysPerS === 8, J(xs[0].perS))
     session.close()
   }
   {
@@ -1104,6 +1129,414 @@ for (const speed of [2, 4]) {
     check('over the cap: an honest message, no frames and no ffmpeg', Boolean(err) && /already converting/.test(err.message) && ws.bins.length === 0 && xs.length === 0, err?.message)
     check('  the socket is closed, and not with the code that means "the NVR is busy"', ws.closedWith === 1011, String(ws.closedWith))
   }
+
+  // ---- 2x and 4x while converting: keyframes only (smoothness report, cause 2c) ----
+  // The conversion keeps up with 1x and not much more, so at 2x and 4x every frame meant half of
+  // them or fewer arriving, in stutters. Keyframes only is a steady slideshow instead, and each one
+  // is ended at once: nothing follows it for up to a second, and ffmpeg would hold it until then.
+  // camera 10: 8 s of H.265 at 25 fps, a keyframe every second; camera 11: 4 s of H.264, then 4 s of H.265
+  const T10 = Date.UTC(2026, 8, 24, 15, 0, 10)
+  const cam10 = await recordGroups(10, [makeFrames(prng(12), T10, 200, { gop: 25, codec: h265 })], 'h265')
+  const exp10 = await readBack(cam10.segs)
+  const keys10 = exp10.filter((f) => f.isKey)
+  check('h265 footage (camera 10): 200 H.265 pictures read back, a keyframe every 25', exp10.length === 200 && keys10.length === 8, `${exp10.length} frames, ${keys10.length} keys`)
+  const T11 = Date.UTC(2026, 8, 24, 16, 0, 10)
+  const all11 = makeFrames(prng(13), T11, 200, { gop: 25 })
+  const cam11a = await recordGroups(11, [all11.slice(0, 100)], 'h264')
+  const cam11b = await recordGroups(11, [all11.slice(100).map((f) => ({ ...f, buf: f.isKey ? h265.key(prng(f.ts)) : h265.p(prng(f.ts)) }))], 'h265')
+  const exp11a = await readBack(cam11a.segs)
+  const exp11b = await readBack(cam11b.segs)
+  check('mixed footage (camera 11): an H.264 file, then an H.265 one straight after it', exp11a.length === 100 && exp11b.length === 100 && /\.h264$/.test(cam11a.segs[0].path) && /\.h265$/.test(cam11b.segs[0].path), `${exp11a.length} ${exp11b.length}`)
+
+  const converted = (b) => b.codec === 0 && b.buf[0] === 0xaa // (the stand-in marks what it converted)
+  const freePool = () => ({ active: 0, acquire: () => ({ release: () => {} }) })
+  /** '' when bins are consecutive keyframes of keys (the list the footage has), else what is wrong. */
+  const keySeq = (bins, keys) => {
+    const at = keys.findIndex((k) => Math.abs(k.ts - bins[0]?.tsMs) < 0.001)
+    if (at < 0) return `the first frame (${bins[0]?.tsMs}) is not a keyframe of the footage`
+    for (let j = 0; j < bins.length; j++) if (Math.abs(bins[j].tsMs - keys[at + j]?.ts) >= 0.001) return `frame ${j} is not keyframe ${at + j}`
+    return ''
+  }
+  const medianGap = (bins) => {
+    const g = bins.slice(1).map((b, i) => b.at - bins[i].at).sort((a, b) => a - b)
+    return g[g.length >> 1] ?? 0
+  }
+  {
+    // the page sends its speed as soon as the socket opens: at 2x from the first frame on
+    const xs = []
+    const { ws, session } = open(10, T10 + 100, { extra: '&h265=0', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    ws.command({ speed: 2 })
+    await until(() => ws.bins.length >= 4, 4000)
+    const bins = ws.bins.slice()
+    check('converting at 2x from the start: keyframes only, every one converted', bins.length >= 4 && bins.every((b) => b.key && converted(b)), `${bins.length} frames, ${bins.filter((b) => !b.key).length} not keys`)
+    check('  consecutive keyframes of the footage, none skipped', keySeq(bins, keys10) === '', keySeq(bins, keys10))
+    const gap = medianGap(bins)
+    check('  at their media time (a keyframe a second at 2x: one every ~500 ms), not in a burst', gap > 350 && gap < 700, `${Math.round(gap)} ms`)
+    check('  each keyframe is pushed and then ended at once', xs.length === 1 && J(xs[0].calls.slice(0, 6)) === J(['push', 'end', 'push', 'end', 'push', 'end']), xs[0]?.calls.join())
+    check('  with low_delay (frame threads would hold keyframes back until more arrive)', xs[0].low.length >= 4 && xs[0].low.every((v) => v === true), J(xs[0].low))
+    // The rate cap is spent per picture by the input's timestamps, one camera frame apart: a keyframe
+    // got a 1x picture's share (15.6 KB at 20 fps and 2.5 Mbit/s) while 2-8 went out a second, and
+    // came out blocky. Stamped maxKeysPerS a second, the most the pacer sends, each gets that many's
+    // share and the cap still holds per second of wall clock.
+    check('  stamped maxKeysPerS (8) a second for the encoder, so the rate cap is shared by the pictures that really go', xs[0].perS.length >= 4 && xs[0].perS.every((v) => v === 8), J(xs[0].perS))
+    check('  (the cap itself is unchanged: PLAYBACK_LIMITS)', xs[0].opts.maxKbps === 2500 && xs[0].opts.bufSeconds === 1)
+    session.close()
+  }
+  {
+    // 1x plays every frame; 2x switches to keyframes (the conversion reset); 4x too; back at 1x, every frame again
+    const xs = []
+    const { ws, session } = open(10, T10 + 100, { extra: '&h265=0', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.filter((b) => !b.key).length >= 3, 3000)
+    check('converting at 1x: every frame (no change there)', ws.bins.some((b) => !b.key) && ws.bins.every(converted) && !xs[0].calls.includes('end'), `${ws.bins.length} frames`)
+    const r0 = xs[0].resets
+    ws.command({ speed: 2 })
+    const n2 = ws.bins.length
+    await until(() => ws.bins.length >= n2 + 3, 3000)
+    const at2 = ws.bins.slice(n2)
+    check('  1x to 2x: the conversion is reset once, then keyframes only', xs[0].resets === r0 + 1 && at2.length >= 3 && at2.every((b) => b.key && converted(b)) && keySeq(at2, keys10) === '', `${xs[0].resets - r0} resets, ${at2.length} frames: ${keySeq(at2, keys10)}`)
+    ws.command({ speed: 4 })
+    const n4 = ws.bins.length
+    await until(() => ws.bins.length >= n4 + 2, 3000)
+    const at4 = ws.bins.slice(n4)
+    check('  4x: keyframes only', at4.length >= 2 && at4.every((b) => b.key && converted(b)), `${at4.length} frames`)
+    ws.command({ speed: 1 })
+    const n1 = ws.bins.length
+    await until(() => ws.bins.slice(n1).filter((b) => !b.key).length >= 3, 3000)
+    check('  back at 1x: every frame again', ws.bins.slice(n1).filter((b) => !b.key).length >= 3)
+    const modes = xs[0].perS.filter((v, i, a) => i === 0 || v !== a[i - 1]) // each run of one value, once
+    check('  picturesPerS by mode: 0 at 1x, 8 at 2x and 4x, 0 again back at 1x', J(modes) === J([0, 8, 0]), J(modes))
+    session.close()
+  }
+  {
+    // nobody converting: 2x is every frame, as before
+    const xs = []
+    const h = open(10, T10 + 100, { extra: '&h265=1', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    h.ws.command({ speed: 2 })
+    await until(() => h.ws.bins.filter((b) => !b.key).length >= 5, 3000)
+    check('2x on H.265 for a browser that decodes it: every frame, untouched (unchanged)', h.ws.bins.filter((b) => !b.key).length >= 5 && h.ws.bins.every((b) => b.codec === 1) && xs.length === 0)
+    h.session.close()
+    const c = open(0, T0 + 1000, { extra: '&h265=0', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    c.ws.command({ speed: 2 })
+    await until(() => c.ws.bins.filter((b) => !b.key).length >= 5, 3000)
+    check('  and 2x on an H.264 recording for a browser that cannot decode H.265: every frame (nothing to convert)', c.ws.bins.filter((b) => !b.key).length >= 5 && c.ws.bins.every((b) => b.codec === 0 && !converted(b)) && xs.length === 0)
+    c.session.close()
+  }
+  {
+    // an H.265 file after H.264 ones, at 2x: the H.264 frames already read play out at their time,
+    // every one of them; from the H.265 file on, keyframes only
+    const xs = []
+    const { ws, session } = open(11, T11 + 100, { extra: '&h265=0', opts: { pool: freePool(), makeTranscoder: fakeXcode(xs) } })
+    ws.command({ speed: 2 })
+    const bStart = exp11b[0].ts
+    await until(() => ws.bins.filter((b) => b.tsMs >= bStart).length >= 3, 6000)
+    const a = ws.bins.filter((b) => b.tsMs < bStart)
+    const b = ws.bins.filter((b) => b.tsMs >= bStart)
+    const aExp = exp11a.filter((f) => f.ts >= a[0]?.tsMs)
+    check('H.264 then H.265 at 2x: the H.264 frames go out untouched, every one', a.length > 0 && a.every((f) => !converted(f)) && a.length === aExp.length && seqCheck(a, aExp, usMap(aExp)) === '', `${a.length}/${aExp.length} ${seqCheck(a, aExp, usMap(aExp))}`)
+    check('  at their media time, not held to the keyframe rate', a.length < 2 || a.at(-1).at - a[0].at < (a.at(-1).tsMs - a[0].tsMs) / 2 + 500, `${Math.round(a.at(-1)?.at - a[0]?.at)} ms for ${Math.round(a.at(-1)?.tsMs - a[0]?.tsMs)} ms of footage`)
+    check('  then the H.265 file: keyframes only, converted, from its first one', b.length >= 3 && b.every((f) => f.key && converted(f)) && keySeq(b, exp11b.filter((f) => f.isKey)) === '' && Math.abs(b[0].tsMs - bStart) < 0.001, keySeq(b, exp11b.filter((f) => f.isKey)))
+    check('  time never goes back', ws.bins.every((f, i) => i === 0 || f.tsMs > ws.bins[i - 1].tsMs))
+    session.close()
+  }
+
+  // ---- a remote viewer: the capped conversion, whatever the codec (smoothness report, cause 3) ----
+  // One tunnel connection carried 3.5-6.5 Mbit/s, and a 4.2 Mbit/s main stream through it froze 22
+  // times a minute. A viewer who is remote by live view's own rule (adaptive-live.mjs
+  // isRemoteAddress: the Cloudflare tunnel arrives from 127.0.0.1, the tailnet from 100.64.0.0/10;
+  // server.mjs passes it as `remote`) plays through the conversion within PLAYBACK_LIMITS (1920 wide,
+  // 2.5 Mbit/s) while one of its slots is free, and gets the recording itself when both are taken.
+  // The viewer can ask for the recording itself (&original=1). The local network is unchanged.
+  // Only a recording over the cap is converted (fitAboveKbps, PLAYBACK_LIMITS.maxKbps by default):
+  // the synthetic footage here records at about 0.1 Mbit/s, so the tests of the conversion itself
+  // set fitAboveKbps: 0 (every recording over it).
+  const { TranscodePool } = await import('../transcode.mjs')
+  const fitMsgs = (ws) => ws.texts.filter((t) => t.type === 'fit')
+  /** The binary frames sent after {type:'started', gen}. */
+  const binsAfterStart = (ws, gen) => {
+    const i = ws.log.findIndex((e) => e.text?.type === 'started' && e.text.gen === gen)
+    return i < 0 ? [] : ws.log.slice(i + 1).filter((e) => e.bin).map((e) => e.bin)
+  }
+  {
+    const xs = []
+    const pool = new TranscodePool(2)
+    const { ws, session } = open(0, T0 + 1000, { remote: true, opts: { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.filter((b) => !b.key).length >= 5, 3000)
+    check('remote: an H.264 recording goes through the conversion, every frame of it', ws.bins.filter((b) => !b.key).length >= 5 && ws.bins.every(converted), `${ws.bins.length} frames, ${ws.bins.filter((b) => !converted(b)).length} not converted`)
+    const o = xs[0]?.opts ?? {}
+    check('  one conversion, within PLAYBACK_LIMITS (1920 wide, 2.5 Mbit/s, a 1 s buffer)', xs.length === 1 && o.maxWidth === 1920 && o.maxKbps === 2500 && o.bufSeconds === 1, J({ n: xs.length, maxWidth: o.maxWidth, maxKbps: o.maxKbps, bufSeconds: o.bufSeconds }))
+    check('  the converter is told the recording is H.264', o.inCodec === 0 && xs[0].codecs.length > 0 && xs[0].codecs.every((c) => c === 0), `${o.inCodec} ${J([...new Set(xs[0]?.codecs)])}`)
+    check('  every frame keeps the time it was recorded at', xs.length === 1 && ws.bins.every((b, i) => Math.abs(b.tsMs - xs[0].pushed[i]) < 0.001))
+    check('  it holds one slot of the pool', pool.active === 1, String(pool.active))
+    check('  the page is told, before the first frame: {type:"fit", on:true}', J(fitMsgs(ws)) === J([{ type: 'fit', on: true }]) && ws.log.findIndex((e) => e.text?.type === 'fit') < ws.log.findIndex((e) => e.bin), J(fitMsgs(ws)))
+    session.close()
+    check('  close gives the slot back', pool.active === 0 && xs[0]?.closes === 1, `${pool.active} ${xs[0]?.closes}`)
+  }
+  {
+    // A recording already within the cap is sent as it is: converted, a 2.2 Mbit/s camera came out at
+    // 2.15 Mbit/s with a busier second than before (3.74 against 3.35 Mbit), for a slot and 0.74 of a
+    // core; half the H.264 cameras record under 0.75 Mbit/s. The rate is the index's: the file's bytes
+    // over its span, in kbit/s.
+    const seg = IDX.at(NVR_ID, 0, T0 + 1000)
+    const kbps = (seg.bytes * 8) / (seg.endMs - seg.startMs)
+    const xs = []
+    const pool = new TranscodePool(2)
+    const a = open(0, T0 + 1000, { remote: true, opts: { pool, makeTranscoder: fakeXcode(xs) } })
+    const b = open(0, T0 + 1000, { remote: true, opts: { fitAboveKbps: Math.ceil(kbps), pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => [a, b].every((l) => l.ws.bins.filter((f) => !f.key).length >= 5), 3000)
+    check(`remote, a recording within the cap (camera 0 records ${Math.round(kbps)} kbit/s): sent as it is, no slot taken`, kbps > 50 && kbps < 2500 && [a, b].every((l) => l.ws.bins.filter((f) => !f.key).length >= 5 && !l.ws.bins.some(converted)) && xs.length === 0 && pool.active === 0, `${xs.length} conversions, pool ${pool.active}`)
+    check('  the page is told: {type:"fit", on:false, fits:true}', [a, b].every((l) => J(fitMsgs(l.ws)) === J([{ type: 'fit', on: false, fits: true }])), J(fitMsgs(a.ws)))
+    a.session.close()
+    b.session.close()
+    const c = open(0, T0 + 1000, { remote: true, opts: { fitAboveKbps: Math.floor(kbps) - 1, pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => c.ws.bins.filter((f) => !f.key).length >= 5, 3000)
+    check('  just over the threshold: converted', c.ws.bins.filter((f) => !f.key).length >= 5 && c.ws.bins.every(converted) && xs.length === 1, `${c.ws.bins.filter(converted).length}/${c.ws.bins.length}`)
+    c.session.close()
+
+    // The speed counts: at 2x-4x every frame goes at 2-4 times the rate, and reverse and 8x-32x send
+    // up to maxKeysPerS keyframes a second, which a 1x rate says nothing about.
+    const xs2 = []
+    const d = open(0, T0 + 1000, { remote: true, opts: { fitAboveKbps: Math.ceil(kbps * 1.5), pool, makeTranscoder: fakeXcode(xs2) } })
+    await until(() => d.ws.bins.filter((f) => !f.key).length >= 5, 3000)
+    check('  within the cap at 1x: sent as it is', fitMsgs(d.ws).length === 1 && fitMsgs(d.ws)[0].fits === true && !d.ws.bins.some(converted), J(fitMsgs(d.ws)))
+    d.ws.command({ speed: 2 })
+    const n = d.ws.bins.length
+    await until(() => d.ws.bins.length >= n + 2 && d.ws.bins.slice(n).some(converted), 4000)
+    await sleep(100)
+    const later = d.ws.bins.slice(n).filter((f) => f.tsMs > (d.ws.bins[n - 1]?.tsMs ?? 0))
+    const firstConv = later.findIndex(converted)
+    check('  2x takes it over the cap: it restarts at the position, converted (keyframes only, 2x while converting)', J(fitMsgs(d.ws).at(-1)) === J({ type: 'fit', on: true }) && firstConv >= 0 && later.slice(firstConv).every((f) => f.key && converted(f)) && xs2.length === 1, `${J(fitMsgs(d.ws))} ${later.map((f) => (converted(f) ? 'C' : 'r') + (f.key ? 'K' : '')).join(' ')}`)
+    check('  time never goes back', d.ws.bins.every((f, i) => i === 0 || f.tsMs > d.ws.bins[i - 1].tsMs))
+    d.session.close()
+    const e = open(0, T0 + 1000, { remote: true, opts: { fitAboveKbps: Math.ceil(kbps * 5), pool, makeTranscoder: fakeXcode(xs2) } })
+    await until(() => e.ws.bins.filter((f) => !f.key).length >= 3, 3000)
+    e.ws.command({ speed: 4 })
+    const m = e.ws.bins.length
+    await until(() => e.ws.bins.slice(m).filter((f) => !f.key).length >= 5, 3000)
+    check('  4x still within it: every frame, as it is, no restart', e.ws.bins.slice(m).filter((f) => !f.key).length >= 5 && !e.ws.bins.some(converted) && fitMsgs(e.ws).length === 1 && xs2.length === 1)
+    e.session.close()
+    const f = open(0, T0 + 60_000, { remote: true, opts: { pool, makeTranscoder: fakeXcode(xs2) } })
+    f.ws.command({ speed: -1 })
+    await until(() => f.ws.bins.length >= 2, 6000)
+    check('  reverse (keyframes, up to 8 a second): converted, whatever the 1x rate', f.ws.bins.length >= 2 && f.ws.bins.every((b) => b.key && converted(b)) && J(fitMsgs(f.ws).at(-1)) === J({ type: 'fit', on: true }), `${J(fitMsgs(f.ws))} ${f.ws.bins.length}`)
+    f.session.close()
+  }
+  {
+    // The slot is taken at the first file, before any frame reaches a converter: a session closed in
+    // between (the viewer moved on at once) must still give it back, or the pool shrinks for good.
+    const xs = []
+    const pool = new TranscodePool(2)
+    const { ws, session } = open(0, T0 + 1000, { remote: true, opts: { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) } })
+    const send = ws.send
+    ws.send = (m) => {
+      send(m)
+      if (typeof m === 'string' && JSON.parse(m).type === 'fit') session.close()
+    }
+    await until(() => session.closed, 2000)
+    await sleep(50)
+    check('remote, closed after taking its slot and before any frame was converted: the slot is given back', session.closed && fitMsgs(ws).length === 1 && xs.length === 0 && pool.active === 0, `closed ${session.closed}, ${xs.length} conversions, pool ${pool.active}`)
+  }
+  {
+    // Closed while its first file is still being opened (a camera, a day or a quality switched at
+    // once, the tab closed; the .idx takes longer while the NAS is slow): close() has run with no
+    // slot to give back and never runs again, so the file that finishes opening after it must not
+    // take one. Two such leaks emptied the process-wide pool until a restart: every H.265
+    // conversion refused from then on, here and in NVR playback.
+    const xs = []
+    const pool = new TranscodePool(2)
+    const opts = { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) }
+    const gone = []
+    for (let i = 0; i < 3; i++) {
+      const l = open(0, T0 + 1000, { remote: true, opts })
+      l.session.close() // at once: the first file is still opening
+      gone.push(l)
+    }
+    const s = open(0, T0 + 1000, { remote: true, opts })
+    s.ws.close(1001) // the socket's own close event, as the tab going away
+    gone.push(s)
+    await sleep(200)
+    check('remote, closed while its first file was still opening: no slot taken after the close', pool.active === 0 && xs.length === 0, `pool ${pool.active}, ${xs.length} conversions`)
+    check('  and nothing decided for a closed session (no {type:"fit"})', gone.every((l) => fitMsgs(l.ws).length === 0), J(gone.map((l) => fitMsgs(l.ws))))
+    // the pool still has both slots: two viewers after it convert
+    const live = [open(0, T0 + 1000, { remote: true, opts }), open(10, T10 + 100, { extra: '&h265=0', opts })]
+    await until(() => live.every((l) => l.ws.bins.filter((b) => !b.key).length >= 3), 3000)
+    check('  the pool is whole: a remote viewer and an H.265 conversion after it both play converted', live.every((l) => l.ws.bins.filter((b) => !b.key).length >= 3 && l.ws.bins.every(converted)) && pool.active === 2, `pool ${pool.active}`)
+    for (const l of live) l.session.close()
+  }
+  {
+    // A remote viewer's conversion is optional (the recording itself still plays, if not as smoothly);
+    // H.265 for a browser without it has nothing else to play, here or in NVR playback (playback.mjs),
+    // and both come out of the same process-wide pool. So a remote viewer never takes the last free
+    // slot: two remote viewers over the cap must not turn the site PC's H.265 playback into a refusal.
+    const xs = []
+    const pool = new TranscodePool(2)
+    const opts = { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) }
+    const r1 = open(0, T0 + 1000, { remote: true, opts })
+    await until(() => fitMsgs(r1.ws).length > 0, 2000)
+    const r2 = open(0, T0 + 1000, { remote: true, opts })
+    await until(() => fitMsgs(r2.ws).length > 0, 2000)
+    const site = open(10, T10 + 100, { extra: '&h265=0', opts })
+    const plays = (l) => l.ws.bins.filter((b) => !b.key).length >= 5
+    await until(() => [r1, r2, site].every(plays) || site.ws.texts.some((t) => t.type === 'error'), 3000)
+    check('two remote viewers over the cap, then a browser without H.265 on an H.265 recording: all three play', [r1, r2, site].every(plays) && [r1, r2, site].every((l) => l.ws.readyState === 1 && !l.ws.texts.some((t) => t.type === 'error')), J(site.ws.texts.filter((t) => t.type === 'error')))
+    check('  the first remote viewer is converted', J(fitMsgs(r1.ws)) === J([{ type: 'fit', on: true }]) && r1.ws.bins.every(converted), J(fitMsgs(r1.ws)))
+    check('  the second is left the recording itself: the last slot is not for a conversion that has an alternative', J(fitMsgs(r2.ws)) === J([{ type: 'fit', on: false, busy: true }]) && !r2.ws.bins.some(converted), J(fitMsgs(r2.ws)))
+    check('  the H.265 one takes that slot: converted', site.ws.bins.every(converted) && pool.active === 2, `pool ${pool.active}`)
+    for (const l of [r1, r2, site]) l.session.close()
+    check('  every slot given back', pool.active === 0, String(pool.active))
+
+    // a remote viewer who needs the conversion anyway (H.265, a browser without it) may take the last one
+    const held = pool.acquire()
+    const h = open(10, T10 + 100, { remote: true, extra: '&h265=0', opts })
+    await until(() => plays(h), 3000)
+    check('  a remote viewer on H.265 its browser cannot decode may take the last slot: converted, "on"', plays(h) && h.ws.bins.every(converted) && J(fitMsgs(h.ws)) === J([{ type: 'fit', on: true }]) && pool.active === 2, `${J(fitMsgs(h.ws))}, pool ${pool.active}`)
+    h.session.close()
+    held.release()
+  }
+  {
+    // A remote viewer on H.265 it cannot decode, no slot at the start: the recording itself where it
+    // can play it. A slot the H.265 then takes serves the whole session from the next jump, and the
+    // page is told when that happens.
+    const xs = []
+    const pool = new TranscodePool(2)
+    const held = [pool.acquire(), pool.acquire()]
+    const { ws, session } = open(11, T11 + 100, { remote: true, extra: '&h265=0', opts: { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.length >= 5, 3000)
+    held[0].release() // free before the H.265 file comes
+    const bStart = exp11b[0].ts
+    await until(() => ws.bins.filter((b) => b.tsMs >= bStart).length >= 3, 8000)
+    const a = ws.bins.filter((b) => b.tsMs < bStart)
+    const b = ws.bins.filter((b) => b.tsMs >= bStart)
+    check('remote, no slot at the start, H.264 then H.265 for a browser without it: the H.264 file untouched, the H.265 one converted', a.length >= 5 && !a.some(converted) && b.length >= 3 && b.every(converted), `${a.filter(converted).length}/${a.length} ${b.filter(converted).length}/${b.length}`)
+    check('  (still "busy" for the page: this run does not switch the H.264 over)', J(fitMsgs(ws)) === J([{ type: 'fit', on: false, busy: true }]), J(fitMsgs(ws)))
+    ws.command({ seek: T11 + 500, gen: 1 })
+    await until(() => binsAfterStart(ws, 1).length >= 5, 3000)
+    const after = binsAfterStart(ws, 1)
+    check('  the next jump: the slot it holds converts everything, and the page is told', after.length >= 5 && after.every(converted) && J(fitMsgs(ws).at(-1)) === J({ type: 'fit', on: true }) && pool.active === 2, `${after.filter(converted).length}/${after.length}, ${J(fitMsgs(ws))}, pool ${pool.active}`)
+    session.close()
+    held[1].release()
+    check('  close gives its slot back', pool.active === 0, String(pool.active))
+  }
+  {
+    // converting, 2x and 4x are keyframes only (cause 2c): at 2x the cap would be spent on twice the
+    // footage a second, and every frame of it would be twice the tunnel's share
+    const xs = []
+    const { ws, session } = open(0, T0 + 1000, { remote: true, opts: { fitAboveKbps: 0, pool: new TranscodePool(2), makeTranscoder: fakeXcode(xs) } })
+    ws.command({ speed: 2 })
+    await until(() => ws.bins.length >= 3, 6000)
+    check('remote at 2x: keyframes only, converted, one at a time', ws.bins.length >= 3 && ws.bins.every((b) => b.key && converted(b)) && xs.length === 1 && J(xs[0].calls.slice(0, 4)) === J(['push', 'end', 'push', 'end']), `${ws.bins.length} frames, ${xs[0]?.calls.slice(0, 6).join()}`)
+    session.close()
+  }
+  {
+    // a browser that decodes H.265 is sent H.264 all the same: the conversion is what caps the rate
+    const xs = []
+    const pool = new TranscodePool(2)
+    const { ws, session } = open(10, T10 + 100, { remote: true, extra: '&h265=1', opts: { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.filter((b) => !b.key).length >= 5, 3000)
+    check('remote: an H.265 recording for a browser that decodes H.265 is converted too', ws.bins.filter((b) => !b.key).length >= 5 && ws.bins.every(converted) && xs.length === 1 && xs[0].opts.inCodec === 1, `${ws.bins.length} frames, inCodec ${xs[0]?.opts.inCodec}`)
+    session.close()
+  }
+  {
+    const xs = []
+    const pool = new TranscodePool(2)
+    const lan = [
+      open(0, T0 + 1000, { remote: false, opts: { pool, makeTranscoder: fakeXcode(xs) } }),
+      open(10, T10 + 100, { remote: false, extra: '&h265=1', opts: { pool, makeTranscoder: fakeXcode(xs) } }),
+      open(0, T0 + 1000, { opts: { pool, makeTranscoder: fakeXcode(xs) } }) // (not said: the local network)
+    ]
+    await until(() => lan.every((l) => l.ws.bins.filter((b) => !b.key).length >= 5), 3000)
+    check('the local network: the recording itself, untouched, H.264 and H.265 alike', lan.every((l) => l.ws.bins.filter((b) => !b.key).length >= 5 && !l.ws.bins.some(converted)) && lan[0].ws.bins.every((b) => b.codec === 0) && lan[1].ws.bins.every((b) => b.codec === 1))
+    check('  no conversion, no slot taken, no {type:"fit"}', xs.length === 0 && pool.active === 0 && lan.every((l) => fitMsgs(l.ws).length === 0), `${xs.length} ${pool.active}`)
+    for (const l of lan) l.session.close()
+  }
+  {
+    // both slots taken (two other conversions running): the recording itself rather than a refusal
+    const xs = []
+    const lines = []
+    const pool = new TranscodePool(2)
+    const held = [pool.acquire(), pool.acquire()]
+    const { ws, session } = open(0, T0 + 1000, { remote: true, opts: { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs), log: (l) => lines.push(l) } })
+    await until(() => ws.bins.filter((b) => !b.key).length >= 5, 3000)
+    check('remote, both slots busy: the recording itself, untouched, and playback goes on', ws.bins.filter((b) => !b.key).length >= 5 && !ws.bins.some(converted) && ws.bins.every((b) => b.codec === 0) && xs.length === 0 && ws.readyState === 1 && !ws.texts.some((t) => t.type === 'error'), `${ws.bins.length} frames, ${xs.length} conversions`)
+    check('  the page is told: {type:"fit", on:false, busy:true}', J(fitMsgs(ws)) === J([{ type: 'fit', on: false, busy: true }]), J(fitMsgs(ws)))
+    check('  and it is logged', lines.some((l) => /remote viewer/.test(l) && /original/.test(l)), lines.join(' | '))
+    // a slot comes free while it plays: no switch in the middle of a run (the converter would start
+    // on the next keyframe and drop the frames before it)
+    held[0].release()
+    const n = ws.bins.length
+    await until(() => ws.bins.length >= n + 10, 3000)
+    check('  a slot freed while it plays: it stays on the recording itself until the next jump', ws.bins.length >= n + 10 && !ws.bins.some(converted) && xs.length === 0 && pool.active === 1)
+    // that slot is the last free one, kept for a conversion with no alternative (H.265 for a browser
+    // without it): the next seek still sends the recording itself
+    ws.command({ seek: T0 + 30_000, gen: 1 })
+    await until(() => binsAfterStart(ws, 1).filter((b) => !b.key).length >= 5, 3000)
+    const kept = binsAfterStart(ws, 1)
+    check('  the next seek, one slot free: the last one is left alone, still the recording itself', kept.filter((b) => !b.key).length >= 5 && !kept.some(converted) && xs.length === 0 && pool.active === 1 && J(fitMsgs(ws).at(-1)) === J({ type: 'fit', on: false, busy: true }), `${kept.filter(converted).length}/${kept.length} converted, pool ${pool.active}, ${J(fitMsgs(ws))}`)
+    held[1].release()
+    ws.command({ seek: T0 + 40_000, gen: 2 })
+    await until(() => binsAfterStart(ws, 2).filter((b) => !b.key).length >= 5, 3000)
+    const after = binsAfterStart(ws, 2)
+    check('  both free: the next seek takes one, converted from there', after.filter((b) => !b.key).length >= 5 && after.every(converted) && xs.length === 1 && pool.active === 1, `${after.length} frames, ${after.filter((b) => !converted(b)).length} not converted, pool ${pool.active}`)
+    check('  and the page is told so', J(fitMsgs(ws).at(-1)) === J({ type: 'fit', on: true }), J(fitMsgs(ws)))
+    const other = pool.acquire()
+    session.close()
+    check('  close gives back only its own slot', pool.active === 1, String(pool.active))
+    other.release()
+  }
+  {
+    // H.265 for a browser that cannot decode it has no recording-itself to fall back to: refused as before
+    const xs = []
+    const pool = new TranscodePool(2)
+    const held = [pool.acquire(), pool.acquire()]
+    const { ws } = open(10, T10 + 100, { remote: true, extra: '&h265=0', opts: { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.texts.some((t) => t.type === 'error'), 2000)
+    const err = ws.texts.find((t) => t.type === 'error')
+    check('remote, busy, H.265 the browser cannot decode: the converter-full refusal, as for the local network', Boolean(err) && /already converting/.test(err.message) && ws.bins.length === 0 && xs.length === 0 && ws.closedWith === 1011, err?.message)
+    for (const h of held) h.release()
+  }
+  {
+    // the viewer chose the recording itself ("Original (server)" on the page: &original=1)
+    const xs = []
+    const pool = new TranscodePool(2)
+    const acquire = pool.acquire.bind(pool)
+    let asked = 0
+    pool.acquire = () => (asked++, acquire())
+    const a = open(0, T0 + 1000, { remote: true, extra: '&original=1', opts: { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) } })
+    const b = open(10, T10 + 100, { remote: true, extra: '&h265=1&original=1', opts: { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => [a, b].every((l) => l.ws.bins.filter((f) => !f.key).length >= 5), 3000)
+    check('remote, the original chosen (&original=1): the recording itself, untouched, H.264 and H.265 alike', [a, b].every((l) => l.ws.bins.filter((f) => !f.key).length >= 5 && !l.ws.bins.some(converted)) && a.ws.bins.every((f) => f.codec === 0) && b.ws.bins.every((f) => f.codec === 1))
+    check('  no conversion, and the pool is not even asked', xs.length === 0 && asked === 0 && pool.active === 0, `${xs.length} ${asked}`)
+    check('  the page is told: {type:"fit", on:false, original:true}', [a, b].every((l) => J(fitMsgs(l.ws)) === J([{ type: 'fit', on: false, original: true }])), J(fitMsgs(a.ws)))
+    a.session.close()
+    b.session.close()
+    // a browser that cannot decode H.265 cannot be sent the original of an H.265 recording
+    const c = open(10, T10 + 100, { remote: true, extra: '&h265=0&original=1', opts: { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => c.ws.bins.length >= 3, 3000)
+    check('  (an H.265 recording for a browser that cannot decode it is still converted)', c.ws.bins.length >= 3 && c.ws.bins.every(converted) && xs.length === 1)
+    c.session.close()
+  }
+  {
+    // an H.264 file, then an H.265 one straight after it: one converter, switched at the file boundary
+    const xs = []
+    const { ws, session } = open(11, T11 + 100, { remote: true, extra: '&h265=1', opts: { fitAboveKbps: 0, pool: new TranscodePool(2), makeTranscoder: fakeXcode(xs) } })
+    const bStart = exp11b[0].ts
+    await until(() => ws.bins.filter((b) => b.tsMs >= bStart && !b.key).length >= 5, 8000)
+    const x = xs[0]
+    const firstB = x ? x.pushed.findIndex((ts) => ts >= bStart) : -1
+    check('remote, H.264 then H.265: every frame of both files converted, by one converter', xs.length === 1 && ws.bins.every(converted) && ws.bins.some((b) => b.tsMs < bStart) && ws.bins.filter((b) => b.tsMs >= bStart && !b.key).length >= 5, `${xs.length} conversions, ${ws.bins.length} frames`)
+    check('  told H.264 for the first file and H.265 from the second file\'s first frame, restarted once there', firstB > 0 && x.codecs.slice(0, firstB).every((c) => c === 0) && x.codecs.slice(firstB).every((c) => c === 1) && x.resets === 1, `switch at push ${firstB}, ${x?.resets} resets`)
+    check('  time never goes back', ws.bins.every((f, i) => i === 0 || f.tsMs > ws.bins[i - 1].tsMs))
+    session.close()
+  }
+}
+
+// server.mjs decides who is remote exactly as live view does (live-attach.mjs): by the socket's own
+// address, where the Cloudflare tunnel (cloudflared on this machine) arrives from 127.0.0.1
+{
+  const { isRemoteAddress } = await import('../adaptive-live.mjs')
+  check('isRemoteAddress: the tunnel (127.0.0.1, ::1, ::ffff:127.0.0.1) and the tailnet are remote, the LAN is not', isRemoteAddress('127.0.0.1') && isRemoteAddress('::1') && isRemoteAddress('::ffff:127.0.0.1') && isRemoteAddress('100.101.2.3') && !isRemoteAddress('192.168.1.50') && !isRemoteAddress('::ffff:192.168.1.50'))
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  check('server.mjs: /playback is given remote from the socket\'s address, by live view\'s rule', /connectPlayback\(\{[^}]*remote: isRemoteAddress\(req\.socket\.remoteAddress\)[^}]*\}\)/.test(src) && /import \{[^}]*isRemoteAddress[^}]*\} from '\.\/adaptive-live\.mjs'/.test(src))
 }
 
 check('the NVR was never called', N.calls === 0 && N.connects.length === 0)

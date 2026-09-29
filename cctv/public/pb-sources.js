@@ -113,11 +113,14 @@ export function gapAt(gaps, t) {
 /**
  * Server or NVR playback for a day (plan R6): server when the timeline is available, the day has
  * server footage, the browser can decode its codec and the viewer has not chosen "SD (NVR)".
- * @param {{ timeline: object|null, h265: boolean, quality?: 'server'|'sd-nvr' }} o
- * @returns {{ mode: 'server'|'nvr', transcode?: boolean, why: string }} why: a sentence for the viewer;
- *   transcode: the server will convert the H.265 recording to H.264 because this browser cannot decode it
+ * @param {{ timeline: object|null, h265: boolean, quality?: 'server'|'original'|'sd-nvr' }} o
+ *   quality 'original': a remote viewer's "Original (server)" (serverQualityOptions)
+ * @returns {{ mode: 'server'|'nvr', transcode?: boolean, original?: boolean, why: string }} why: a
+ *   sentence for the viewer; transcode: the server will convert the H.265 recording to H.264 because
+ *   this browser cannot decode it; original: ask the server for the recording itself (&original=1)
  */
 export function pickMode({ timeline, h265, quality }) {
+  const original = quality === 'original'
   if (!timeline?.available) return { mode: 'nvr', why: 'Server recordings are not available for this camera.' }
   if (quality === 'sd-nvr') return { mode: 'nvr', why: 'SD (NVR) chosen.' }
   if (!timeline.ranges?.length) return { mode: 'nvr', why: 'The server has no recordings of this camera on this day.' }
@@ -128,9 +131,52 @@ export function pickMode({ timeline, h265, quality }) {
     // falling back to the NVR's SD stream instead would throw the detail away. The socket says
     // &h265=0 and the server does the rest (transcode.mjs); if it is too busy to convert, it says
     // so and the viewer can still pick "SD (NVR)" by hand.
-    return { mode: 'server', transcode: true, why: 'This recording is H.265, which this browser cannot decode: the server is converting it to H.264 as it plays.' }
+    return { mode: 'server', transcode: true, original, why: 'This recording is H.265, which this browser cannot decode: the server is converting it to H.264 as it plays.' }
   }
-  return { mode: 'server', transcode: false, why: 'Server recordings.' }
+  return { mode: 'server', transcode: false, original, why: 'Server recordings.' }
+}
+
+// ---- a remote viewer: the recording converted to fit the link, or the recording itself -------------------
+// Through the Cloudflare tunnel one connection carried 3.5-6.5 Mbit/s, and a 4.2 Mbit/s main stream
+// froze 22 times a minute (smoothness report, cause 3). The server converts a remote viewer's
+// playback to at most 1920 wide and 2.5 Mbit/s while it has a conversion free, and tells the page
+// ({type:'fit'}, rec-playback.mjs); who is remote is the server's call (the socket's address), so
+// the page learns it from that message.
+
+/**
+ * The quality menu with the server's recordings. On the local network "HD (server)" is the recording
+ * itself, as before. A remote viewer gets the copy converted to fit the link by default, "HD
+ * (server, light)", and can still choose the recording itself, "Original (server)".
+ * @param {{ remote: boolean, nvrLabel?: string }} o nvrLabel: "SD (NVR)", or "HD (NVR)" for a camera
+ *   the NVR records in HD only
+ * @returns {Array<[string, string]>} [value, label]
+ */
+export function serverQualityOptions({ remote, nvrLabel = 'SD (NVR)' }) {
+  return remote
+    ? [['server', 'HD (server, light)'], ['original', 'Original (server)'], ['sd-nvr', nvrLabel]]
+    : [['server', 'HD (server)'], ['sd-nvr', nvrLabel]]
+}
+
+/** The server socket's own parameters: what this browser decodes, and whether the recording itself was chosen. */
+export function serverSocketQuery({ h265, original = false }) {
+  return `h265=${h265 ? 1 : 0}${original ? '&original=1' : ''}`
+}
+
+/**
+ * The page's note of a {type:'fit'} message: 'on' (converted to fit the link), 'busy' (no
+ * conversion free: the recording itself, until the next jump), 'fits' (the recording is within the
+ * cap already: sent as it is) or 'original' (the viewer chose it); and what to tell the viewer, only
+ * when that changes (the server says it again at every seek).
+ * @param {'on'|'busy'|'fits'|'original'|null} prev
+ * @param {{ on?: boolean, busy?: boolean, fits?: boolean }} msg
+ * @returns {{ fit: 'on'|'busy'|'fits'|'original', notice: string|null }}
+ */
+export function fitChange(prev, msg) {
+  const fit = msg?.on ? 'on' : msg?.busy ? 'busy' : msg?.fits ? 'fits' : 'original'
+  let notice = null
+  if (fit === 'on' && prev !== 'on') notice = 'Playing a lighter copy made to fit a remote connection. Choose "Original (server)" for the recording itself.'
+  if (fit === 'busy' && prev !== 'busy') notice = 'The server is converting as many playbacks as it can, so this plays the original recording, which may stutter on a slow connection.'
+  return { fit, notice }
 }
 
 // ---- the NVR refusing a search: backing off --------------------------------------------------------
@@ -250,9 +296,11 @@ export const CONVERTED_SCRUB_TIMEOUT_MS = 1500
  * converted), else 300 ms. Keyed on the browser, not on the day's codec (the newest file's): a
  * camera switched away from H.265 during the day still has converted footage before the switch. An
  * H.264 scrub is answered by its frame within milliseconds whatever this is, so it stays fast.
+ * fitted: the server converts every frame for this remote viewer ({type:'fit', on:true}), so every
+ * scrub is an ffmpeg start and a whole keyframe: 1500 ms too.
  */
-export function scrubTimeoutMs(h265) {
-  return h265 === false ? CONVERTED_SCRUB_TIMEOUT_MS : SCRUB_TIMEOUT_MS
+export function scrubTimeoutMs(h265, fitted = false) {
+  return h265 === false || fitted ? CONVERTED_SCRUB_TIMEOUT_MS : SCRUB_TIMEOUT_MS
 }
 
 /**

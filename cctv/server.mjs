@@ -94,7 +94,7 @@ import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
 import { PhoneLive } from './phone-live.mjs'
-import { AdaptiveLive } from './adaptive-live.mjs'
+import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher } from './live-attach.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
@@ -254,7 +254,7 @@ const locationState = () =>
 const lastSegmentMs = (nvrId, ch) => {
   const index = recIndex()
   if (!index) return null
-  const closed = index.lastEnds(nvrId, ch).segEnd
+  const closed = index.lastSegmentEnd(nvrId, ch)
   const open = index.openOf(nvrId, ch)?.startMs ?? null
   return closed === null && open === null ? null : Math.max(closed ?? 0, open ?? 0)
 }
@@ -983,7 +983,9 @@ const onConnection = (ws, req) => {
     // sessions only (server playback runs without the NVR), see rec-playback.mjs. Either playback
     // right opens the socket; connectPlayback asks the right of the source it serves.
     if (!can(who, 'playback-server', target) && !can(who, 'playback-nvr', target)) return ws.close(1008, 'not allowed')
-    const session = connectPlayback({ nvr, ws, url, who, index: recIndex() })
+    // remote by live view's rule (live-attach.mjs): the socket's own address, where the Cloudflare
+    // tunnel arrives from 127.0.0.1. Its server playback is converted to fit the tunnel.
+    const session = connectPlayback({ nvr, ws, url, who, index: recIndex(), remote: isRemoteAddress(req.socket.remoteAddress) })
     // ...and for as long as it is open, the rights of what it plays (access-watch.mjs): the NVR's
     // recordings, or the server's and, when its gaps are filled from the NVR, the NVR's as well. A
     // socket connectPlayback refused is closing already and is not tracked.

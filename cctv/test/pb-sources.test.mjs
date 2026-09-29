@@ -18,6 +18,7 @@ import {
   ScrubThrottle,
   convertTime,
   describeSkew,
+  fitChange,
   gapAt,
   liveEdge,
   mergeSources,
@@ -30,6 +31,8 @@ import {
   refusedMessage,
   scrubTimeoutMs,
   serverFailed,
+  serverQualityOptions,
+  serverSocketQuery,
   shift,
   speedFor,
   stretchAt,
@@ -136,6 +139,49 @@ const text = (list) => list.map((x) => `${x.src} ${x.s}-${x.e}`).join(', ')
   check('  H.265 on a browser with H.265 -> server, no conversion', m(tl({ codec: 'h265' }), { h265: true }).mode === 'server' && m(tl({ codec: 'h265' }), { h265: true }).transcode === false)
   check('  quality sd-nvr -> nvr', m(tl(), { quality: 'sd-nvr' }).mode === 'nvr')
   check('  otherwise -> server', m(tl()).mode === 'server' && m(tl(), { quality: undefined }).mode === 'server')
+  // a remote viewer's "Original (server)": the server's recordings, the recording itself (&original=1)
+  check('  quality original -> server, original', m(tl(), { quality: 'original' }).mode === 'server' && m(tl(), { quality: 'original' }).original === true)
+  check('  (server, HD (server) and nothing chosen are not original)', m(tl()).original === false && m(tl(), { quality: undefined }).original === false)
+  check('  original H.265 on a browser without H.265 is still converted (it cannot play the recording itself)', m(tl({ codec: 'h265' }), { h265: false, quality: 'original' }).transcode === true)
+}
+
+// ---- a remote viewer: the capped conversion, or the recording itself (smoothness report, cause 3) ---------
+// Through the tunnel the server converts playback to fit the link (rec-playback.mjs, {type:'fit'});
+// the viewer can still choose the recording itself.
+{
+  const lan = serverQualityOptions({ remote: false })
+  check('serverQualityOptions: the local network keeps "HD (server)" and "SD (NVR)", as before', JSON.stringify(lan) === JSON.stringify([['server', 'HD (server)'], ['sd-nvr', 'SD (NVR)']]), JSON.stringify(lan))
+  const far = serverQualityOptions({ remote: true })
+  check('  a remote viewer: the light copy, the recording itself ("Original (server)") and the NVR', JSON.stringify(far.map((o) => o[0])) === JSON.stringify(['server', 'original', 'sd-nvr']) && /light/.test(far[0][1]) && /Original/.test(far[1][1]), JSON.stringify(far))
+  check('  the NVR\'s label as given (HD (NVR) for a camera it records in HD only)', serverQualityOptions({ remote: true, nvrLabel: 'HD (NVR)' }).at(-1)[1] === 'HD (NVR)' && serverQualityOptions({ remote: false, nvrLabel: 'HD (NVR)' }).at(-1)[1] === 'HD (NVR)')
+  check('serverSocketQuery: h265 as before; &original=1 only when chosen', serverSocketQuery({ h265: true, original: false }) === 'h265=1' && serverSocketQuery({ h265: false }) === 'h265=0' && serverSocketQuery({ h265: true, original: true }) === 'h265=1&original=1', serverSocketQuery({ h265: true, original: true }))
+  const on = fitChange(null, { type: 'fit', on: true })
+  check('fitChange: converted to fit ("on"), said once with how to get the original', on.fit === 'on' && /Original \(server\)/.test(on.notice ?? ''), JSON.stringify(on))
+  check('  not said again while it stays so', fitChange('on', { type: 'fit', on: true }).notice === null)
+  const busy = fitChange('on', { type: 'fit', on: false, busy: true })
+  check('  no conversion free: "busy", said, and why the picture may stutter', busy.fit === 'busy' && /original/i.test(busy.notice ?? '') && /stutter/.test(busy.notice ?? ''), JSON.stringify(busy))
+  check('  not said again at every seek while still busy', fitChange('busy', { type: 'fit', on: false, busy: true }).notice === null)
+  check('  a slot at the next jump: "on" again, said', fitChange('busy', { type: 'fit', on: true }).fit === 'on' && fitChange('busy', { type: 'fit', on: true }).notice !== null)
+  const orig = fitChange('on', { type: 'fit', on: false, original: true })
+  check('  the original chosen: "original", nothing to say (the viewer chose it)', orig.fit === 'original' && orig.notice === null, JSON.stringify(orig))
+  const fits = fitChange(null, { type: 'fit', on: false, fits: true })
+  check('  a recording within the cap, sent as it is: "fits", nothing to say (nothing was taken away)', fits.fit === 'fits' && fits.notice === null && fitChange('busy', { type: 'fit', on: false, fits: true }).notice === null, JSON.stringify(fits))
+  check('scrubTimeoutMs: a remote viewer\'s converted scrubs wait as long as H.265 ones (each is an ffmpeg start and a whole keyframe)', scrubTimeoutMs(true, true) === CONVERTED_SCRUB_TIMEOUT_MS && scrubTimeoutMs(true, false) === SCRUB_TIMEOUT_MS && scrubTimeoutMs(false, false) === CONVERTED_SCRUB_TIMEOUT_MS)
+
+  // the page (no DOM-free half to run here): where these are used
+  const page = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const fn = (name) => page.slice(page.indexOf(`function ${name}(`), page.indexOf('\n}\n', page.indexOf(`function ${name}(`)))
+  check('page: the server socket asks for the original when the day\'s pick says so, and remembers it', /serverSocketQuery\(\{ h265: state\.h265, original \}\)/.test(fn('openServer')) && /const original = Boolean\(lastPick\?\.original\)/.test(fn('openServer')) && /sock\.original = original/.test(fn('openServer')))
+  check('  a seek reuses the open socket only if it asked for the same (switching HD/Original opens a new one)', /ws\.original === Boolean\(lastPick\?\.original\)/.test(fn('serverSeek')))
+  check('  {type:"fit"} learns the viewer is remote, keeps the state, says fitChange\'s notice, redraws the menu', /case 'fit':/.test(fn('onServerStatus')) && /fitChange\(state\.fit, msg\)/.test(fn('onServerStatus')) && /state\.remote = true/.test(fn('onServerStatus')) && /updateModeUi\(\)/.test(fn('onServerStatus').slice(fn('onServerStatus').indexOf("case 'fit':"))))
+  check('  the menu comes from serverQualityOptions, with the remote choices once the server has said so', /serverQualityOptions\(\{ remote: state\.remote/.test(fn('updateModeUi')))
+  check('  choosing "Original (server)" reloads in server mode like the other server/NVR choices', /v === 'original'/.test(page.slice(page.indexOf("qualitySel.addEventListener('change'"))))
+  check('  the scrub throttle waits longer while the server converts to fit', /scrubTimeoutMs\(state\.h265, state\.fit === 'on'\)/.test(page))
+  // The camera wall opens a server playback per tile: fitted, its first two tiles would take both of
+  // the server's conversions for as long as the wall stays open (a single camera needing one, on the
+  // site's own H.265-less PC, refused meanwhile) and the rest would get the recording itself anyway.
+  const wall = readFileSync(new URL('../public/wall.js', import.meta.url), 'utf8')
+  check('the camera wall asks every server tile for the recording itself (&original=1), as before this change', /server \? '&src=auto&original=1' : ''/.test(wall))
 }
 
 // ---- the NVR refusing a search: backing off (dc9e296) ---------------------------------------------------

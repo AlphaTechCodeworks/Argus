@@ -104,9 +104,9 @@ const settings = (locs = [L1], cameras = {}) => ({ recording: { defaults: DEFAUL
 const fakeIndex = (segs) => ({
   cameras: () => [...new Map(segs.map((s) => [`${s.nvr}/${s.ch}`, { nvr: s.nvr, ch: s.ch }])).values()],
   first: (nvr, ch) => segs.filter((s) => s.nvr === nvr && s.ch === ch).sort((a, b) => a.startMs - b.startMs)[0] ?? null,
-  lastEnds: (nvr, ch) => {
+  lastSegmentEnd: (nvr, ch) => {
     const mine = segs.filter((s) => s.nvr === nvr && s.ch === ch)
-    return { segEnd: mine.length ? Math.max(...mine.map((s) => s.endMs)) : null, gapEnd: null }
+    return mine.length ? Math.max(...mine.map((s) => s.endMs)) : null
   },
   oldestOf: (nvr, ch, loc, limit) => segs.filter((s) => s.nvr === nvr && s.ch === ch && s.loc === loc).sort((a, b) => a.startMs - b.startMs).slice(0, limit)
 })

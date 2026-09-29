@@ -186,9 +186,8 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
     for (const { nvr, ch } of index.cameras()) {
       const rec = camRec(settings, nvr, ch)
       const first = index.first(nvr, ch)
-      const ends = index.lastEnds(nvr, ch)
       const oldestMs = first?.startMs ?? null
-      const newestMs = ends?.segEnd ?? null
+      const newestMs = index.lastSegmentEnd(nvr, ch) ?? null
       // Days kept is measured from the oldest footage to now, not to the newest: a camera that
       // stopped recording a week ago still only holds what it holds.
       const daysKept = Number.isFinite(oldestMs) ? roundDays(now - oldestMs) : null

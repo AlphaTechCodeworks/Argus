@@ -20,8 +20,15 @@ export const JOIN_MS = 2000
  * Longer than any segment (a file rolls over at the first keyframe after each minute; recovered
  * files are capped at 5 min): bounds the lookups to the rows just before t, so a time in a gap
  * does not scan a camera's whole history.
+ *
+ * Nothing enforces it, though: the writer only rolls over on a keyframe, so a camera that sent no
+ * keyframe for an hour would write a longer file. The playback lookups would then miss the start of
+ * that one file; lastSegmentEnd() must not be wrong about the camera's newest footage, so it also
+ * asks segments_long (below), which holds exactly the rows longer than this.
  */
 export const MAX_SEGMENT_MS = 60 * 60_000
+/** A row longer than MAX_SEGMENT_MS. The same text in the partial index and the query, or SQLite will not use the index. */
+const LONG_ROW = `end_ms - start_ms > ${MAX_SEGMENT_MS}`
 /**
  * An open file this far past its start is no longer growing (its writer failed, the NVR went
  * offline and sends nothing): it counts only up to startMs + OPEN_MAX_MS, not up to now.
@@ -34,6 +41,10 @@ CREATE TABLE IF NOT EXISTS segments (
   end_ms INTEGER NOT NULL, bytes INTEGER NOT NULL, keyframes INTEGER NOT NULL, loc TEXT);
 CREATE INDEX IF NOT EXISTS segments_cam ON segments (nvr, ch, start_ms);
 CREATE INDEX IF NOT EXISTS segments_start ON segments (start_ms);
+-- Only the rows longer than MAX_SEGMENT_MS (lastSegmentEnd): empty while every file is shorter, as
+-- they are meant to be, so it costs nothing to keep. Building it on an index that predates it reads
+-- every row once, at the first start with this code.
+CREATE INDEX IF NOT EXISTS segments_long ON segments (nvr, ch, end_ms) WHERE ${LONG_ROW};
 CREATE TABLE IF NOT EXISTS gaps (
   id INTEGER PRIMARY KEY, nvr TEXT NOT NULL, ch INTEGER NOT NULL, from_ms INTEGER NOT NULL,
   to_ms INTEGER NOT NULL, reason TEXT);
@@ -113,6 +124,36 @@ const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, ke
 const BF_COLS = 'id, nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason, kind, state, attempts, last_try_ms AS lastTryMs, last_error AS lastError, filled_ms AS filledMs, note, first_seen_ms AS firstSeenMs'
 /** Fields of a backfill ledger row a job may change, and the column each one is stored in. */
 const BF_SET = { state: 'state', attempts: 'attempts', lastTryMs: 'last_try_ms', lastError: 'last_error', filledMs: 'filled_ms', note: 'note', reason: 'reason', kind: 'kind', toMs: 'to_ms' }
+/**
+ * The lookups that run for every camera on a timer: the Health snapshot (lastSegmentEnd, cameras;
+ * every 30 s and on every /api/health poll) and housekeeping and thinning (olderThan, cameras; every
+ * 5 min). They run on the main thread, which also paces every playback, so each must be an index
+ * search, never a read of every row: MAX(end_ms) over a camera (segments_cam has no end_ms) took
+ * 640 ms for the site's 87 cameras on a 3-day index, twice per snapshot, and playback froze for it
+ * every 15-30 s. Kept here as text so rec-index-scans.test.mjs can check each one's query plan.
+ */
+export const CAMERA_SQL = {
+  // lastSegmentEnd(): the newest start, then the latest end among the rows that started within
+  // MAX_SEGMENT_MS of it, then the latest end of the rows longer than that (see lastSegmentEnd())
+  newestStart: 'SELECT MAX(start_ms) AS s FROM segments WHERE nvr = ? AND ch = ? AND start_ms < ?',
+  endSince: 'SELECT MAX(end_ms) AS e FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms < ?',
+  longEnd: `SELECT MAX(end_ms) AS e FROM segments INDEXED BY segments_long WHERE nvr = ? AND ch = ? AND start_ms < ? AND ${LONG_ROW}`,
+  // olderThan(): a row that ended before the cutoff started before it, so start_ms bounds the walk
+  // of segments_cam. Without it, a camera with nothing that old (every camera until the index is
+  // older than its retention, and every camera again once a pass has deleted what was) read every
+  // one of its rows: 600 ms for 87 cameras on a 3-day index, three times every 5 minutes. A row that
+  // ends before it starts (never written on purpose) now waits until its start passes the cutoff:
+  // this only ever deletes less, never more.
+  olderThan: `SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms < ? AND end_ms < ? ORDER BY start_ms LIMIT ?`,
+  // cameras(): one index seek per camera (a skip scan of segments_cam) instead of SELECT DISTINCT,
+  // which reads every entry of the index (26 ms on 3 days, and the site keeps 183)
+  firstNvr: 'SELECT MIN(nvr) AS nvr FROM segments',
+  nextNvr: 'SELECT MIN(nvr) AS nvr FROM segments WHERE nvr > ?',
+  firstCh: 'SELECT MIN(ch) AS ch FROM segments WHERE nvr = ?',
+  nextCh: 'SELECT MIN(ch) AS ch FROM segments WHERE nvr = ? AND ch > ?'
+}
+/** lastSegmentEnd() without a bound: later than any start. */
+const NO_BOUND = Number.MAX_SAFE_INTEGER
 const plain = (r) => ({ ...r }) // node:sqlite rows have a null prototype
 const one = (r) => (r === undefined ? null : plain(r))
 const camKey = (nvr, ch) => `${nvr}/${Number(ch)}`
@@ -154,13 +195,16 @@ export function openRecIndex(file) {
     oldest: db.prepare(`SELECT ${SEG_COLS} FROM segments ORDER BY start_ms LIMIT ?`),
     oldestAt: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE loc = ? ORDER BY start_ms LIMIT ?`),
     oldestOf: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND loc = ? ORDER BY start_ms LIMIT ?`),
-    olderThan: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND end_ms < ? ORDER BY start_ms LIMIT ?`),
+    olderThan: db.prepare(CAMERA_SQL.olderThan),
     remove: db.prepare('DELETE FROM segments WHERE path = ?'),
     // ram-spool.mjs: a segment copied from memory to a drive keeps its row, with its new place
     moveSeg: db.prepare('UPDATE segments SET path = ?, loc = ? WHERE path = ?'),
     locBytes: db.prepare('SELECT COALESCE(SUM(bytes), 0) AS b, COUNT(*) AS n FROM segments WHERE loc = ?'),
     has: db.prepare('SELECT 1 AS one FROM segments WHERE path = ?'),
-    cameras: db.prepare('SELECT DISTINCT nvr, ch FROM segments ORDER BY nvr, ch'),
+    firstNvr: db.prepare(CAMERA_SQL.firstNvr),
+    nextNvr: db.prepare(CAMERA_SQL.nextNvr),
+    firstCh: db.prepare(CAMERA_SQL.firstCh),
+    nextCh: db.prepare(CAMERA_SQL.nextCh),
     oldGaps: db.prepare('DELETE FROM gaps WHERE to_ms < ?'),
     // playback lookups: all served by segments_cam (nvr, ch, start_ms)
     at: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms <= ? AND start_ms >= ? AND end_ms >= ? ORDER BY start_ms DESC LIMIT 1`),
@@ -170,12 +214,35 @@ export function openRecIndex(file) {
     newest: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? ORDER BY start_ms DESC LIMIT 1`),
     recent: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? ORDER BY start_ms DESC LIMIT ?`),
     window: db.prepare('SELECT path, start_ms AS s, end_ms AS e FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? AND end_ms >= ? ORDER BY start_ms'),
-    lastEnd: db.prepare('SELECT MAX(end_ms) AS e FROM segments WHERE nvr = ? AND ch = ?'),
-    lastGapEnd: db.prepare('SELECT MAX(to_ms) AS e FROM gaps WHERE nvr = ? AND ch = ?'),
-    // ... of the rows that started before a time (served by segments_cam / gaps_cam): what the
-    // service or a worker left before it went down, not what the new one has written since
+    newestStart: db.prepare(CAMERA_SQL.newestStart),
+    endSince: db.prepare(CAMERA_SQL.endSince),
+    longEnd: db.prepare(CAMERA_SQL.longEnd),
+    // every row of the camera: only when lastSegmentEnd()'s shortcut cannot be trusted (see there)
     lastEndBefore: db.prepare('SELECT MAX(end_ms) AS e FROM segments WHERE nvr = ? AND ch = ? AND start_ms < ?'),
+    lastGapEnd: db.prepare('SELECT MAX(to_ms) AS e FROM gaps WHERE nvr = ? AND ch = ?'),
+    // ... of the rows that started before a time (served by gaps_cam): what the service or a worker
+    // left before it went down, not what the new one has written since
     lastGapEndBefore: db.prepare('SELECT MAX(to_ms) AS e FROM gaps WHERE nvr = ? AND ch = ? AND from_ms < ?')
+  }
+  /**
+   * The latest end_ms of one camera's rows that started before `before`: the end of its newest
+   * footage. MAX(end_ms) over the camera straight out reads every one of its rows; this asks the
+   * index three times instead, and is exact:
+   *   S = the newest start. If the rows that started within MAX_SEGMENT_MS of S end at S or later
+   *   (the newest file ends after it starts, as every file should), then any row that ends later
+   *   still either started within MAX_SEGMENT_MS of S too, or is longer than MAX_SEGMENT_MS (a row
+   *   that started earlier and is no longer than that has ended before S). The first are the window,
+   *   the second are segments_long; the answer is the later of the two.
+   * If the window ends before S (the newest file ends before it starts: a clock stepped back), that
+   * reasoning fails, and every row of the camera is read as before. No such row is in the site's index.
+   */
+  const lastSegmentEnd = (nvr, ch, before) => {
+    const s = q.newestStart.get(nvr, ch, before).s
+    if (s === null) return null
+    const inWindow = q.endSince.get(nvr, ch, s - MAX_SEGMENT_MS, before).e
+    if (inWindow < s) return q.lastEndBefore.get(nvr, ch, before).e
+    const long = q.longEnd.get(nvr, ch, before).e
+    return long !== null && long > inWindow ? long : inWindow
   }
   /** camera key -> the file its writer has open: { nvr, ch, path, startMs, loc } (memory only) */
   const opens = new Map()
@@ -248,23 +315,42 @@ export function openRecIndex(file) {
     /** One camera's oldest segments on one location. */
     oldestOf: (nvr, ch, loc, limit) => q.oldestOf.all(String(nvr), Number(ch), loc, limit).map(plain),
     /** One camera's segments that ended before ms (oldest first). */
-    olderThan: (nvr, ch, ms, limit) => q.olderThan.all(String(nvr), Number(ch), ms, limit).map(plain),
+    olderThan: (nvr, ch, ms, limit) => q.olderThan.all(String(nvr), Number(ch), ms, ms, limit).map(plain),
     /** Whether a segment file has a row. */
     has: (path) => q.has.get(String(path)) !== undefined,
     remove(path) {
       q.remove.run(String(path))
     },
-    cameras: () => q.cameras.all().map(plain),
+    /** Every camera with a row, as { nvr, ch }, ordered by nvr then ch. */
+    cameras() {
+      const out = []
+      for (let nvr = q.firstNvr.get().nvr; nvr !== null; nvr = q.nextNvr.get(nvr).nvr) {
+        for (let ch = q.firstCh.get(nvr).ch; ch !== null; ch = q.nextCh.get(nvr, ch).ch) out.push({ nvr, ch })
+      }
+      return out
+    },
     /** One camera's newest `limit` segments, newest first (rec-cache.mjs: its bytes per minute). */
     recentOf: (nvr, ch, limit) => q.recent.all(String(nvr), Number(ch), Math.max(0, Math.floor(Number(limit) || 0))).map(plain),
     /**
-     * The end of one camera's newest recording and of its newest gap row: { segEnd, gapEnd } (null
-     * when none). beforeMs: only rows that started before it count.
+     * The end of one camera's newest recording (null when none): the Health snapshot's "last
+     * recorded", for every camera every time. beforeMs: only rows that started before it count.
      */
-    lastEnds: (nvr, ch, beforeMs = null) =>
-      Number.isFinite(beforeMs)
-        ? { segEnd: q.lastEndBefore.get(String(nvr), Number(ch), beforeMs)?.e ?? null, gapEnd: q.lastGapEndBefore.get(String(nvr), Number(ch), beforeMs)?.e ?? null }
-        : { segEnd: q.lastEnd.get(String(nvr), Number(ch))?.e ?? null, gapEnd: q.lastGapEnd.get(String(nvr), Number(ch))?.e ?? null },
+    lastSegmentEnd: (nvr, ch, beforeMs = null) => lastSegmentEnd(String(nvr), Number(ch), Number.isFinite(beforeMs) ? beforeMs : NO_BOUND),
+    /**
+     * The end of one camera's newest recording and of its newest gap row: { segEnd, gapEnd } (null
+     * when none). beforeMs: only rows that started before it count. For the downtime rows at a start
+     * (rec-recover.mjs); what only needs segEnd asks lastSegmentEnd(), because MAX(to_ms) reads every
+     * gap row of the camera (23 ms for 87 cameras on a 3-day index, and gap rows are kept as long as footage).
+     */
+    lastEnds: (nvr, ch, beforeMs = null) => {
+      const n = String(nvr)
+      const c = Number(ch)
+      const bounded = Number.isFinite(beforeMs)
+      return {
+        segEnd: lastSegmentEnd(n, c, bounded ? beforeMs : NO_BOUND),
+        gapEnd: (bounded ? q.lastGapEndBefore.get(n, c, beforeMs) : q.lastGapEnd.get(n, c))?.e ?? null
+      }
+    },
     forgetGapsBefore(ms) {
       q.oldGaps.run(ms)
     },

@@ -136,7 +136,7 @@ export function memAvailableBytes(readMeminfo = () => readFileSync('/proc/meminf
  * (sum(bytes) / sum(endMs - startMs) * 60000). A recording camera without segments yet is counted
  * in `cameras` but not in `measured` or the figures.
  * The cameras looked at: `list` ({ nvr, ch }: the NVRs' cameras) when given, else the index's
- * cameras (index.cameras(): a scan of the whole index; fine for tests and small indexes), plus
+ * cameras (index.cameras(): an index search, under a millisecond on the site), plus
  * every camera with a per-camera setting.
  * @param {{ index: object|null, settings?: object, readMeminfo?: () => string, choices?: number[], list?: {nvr, ch}[]|null }} opts
  * @returns {{ perMinuteBytes: number, byMinutes: Record<number, number>, cameras: number, measured: number, memAvailableBytes: number|null }}
