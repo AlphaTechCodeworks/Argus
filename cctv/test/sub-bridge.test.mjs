@@ -278,11 +278,15 @@ const socket = () => {
   const sub = new FakeStream()
   const main = new FakeStream()
   const ws = socket()
-  const b = bridgeSub(ws, { sub, main, clientH265: true, remote: true })
+  const logs = []
+  const b = bridgeSub(ws, { sub, main, clientH265: true, remote: true, log: (l) => logs.push(l), now: () => 0 })
   main.frame(frame('m-k1', true), true)
   sub.frame(frame('s-k', true), true) // running (not sent here: this socket is not its viewer in this test)
   main.frame(frame('m-k2', true), true)
   check('remote: once the sub-stream runs, no more of the main: its own keyframe is next', ws.got.join() === 'm-k1' && b.active(), ws.got.join())
+  ws.send(frame('s-k', true))
+  // "held back" is what its page had no room for: this one waited for nothing but its own stream
+  check('... its end line: a keyframe left out once the sub-stream ran is not one held back', logs.at(-1) === 'stand-in ended after 0.0 s (the sub-stream came): 1 keyframe, 0.00 MB sent, 0 held back, 1 left out once the sub-stream ran', logs.at(-1))
 }
 {
   // A /live-mux page's socket drains at a rate it measures (live-mux.mjs drainBps), and the level

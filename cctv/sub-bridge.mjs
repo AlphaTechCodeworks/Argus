@@ -96,13 +96,14 @@ export function bridgeSub(ws, { sub, main, clientH265, remote = false, cap = CAP
   let sent = 0
   let bytes = 0
   let heldBack = 0 // frames its own gate kept off a link that had too much queued (remote: keyframes its page had no room for)
+  let leftOut = 0 // remote: keyframes not sent once the sub-stream ran (its own keyframe is next: no congestion)
   const what = remote ? 'keyframe' : 'frame'
   // a remote viewer's page has room for a keyframe of `size` bytes: its whole queue, every tile's, goes
   // within ROOM_S with it at the rate its socket drains; a rate not measured yet (live-mux.mjs drainBps
   // null: idle, or a burst queued just now), or a /live socket, which has none: less than RESUME_BELOW
-  // queued. And its sub-stream not running yet.
+  // queued
   const room = (size) => {
-    if (ws.readyState !== (ws.OPEN ?? 1) || sub.gop.length > 0) return false
+    if (ws.readyState !== (ws.OPEN ?? 1)) return false
     const queued = ws.sharedBufferedAmount ?? ws.bufferedAmount ?? 0
     const bps = ws.drainBps
     return bps == null ? queued < RESUME_BELOW : queued + size <= bps * ROOM_S
@@ -123,8 +124,9 @@ export function bridgeSub(ws, { sub, main, clientH265, remote = false, cap = CAP
     // us -- adaptive-live.mjs counts the bytes it sends -- and putting ours back would drop theirs)
     main.remove(tap)
     const after = `stand-in ended after ${((now() - startedAt) / 1000).toFixed(1)} s`
-    if (!sent) log(`${after}, having sent nothing (${ENDED[why]})${heldBack ? `: ${heldBack} held back` : ''}`, why)
-    else log(`${after} (${ENDED[why]}): ${sent} ${what}${sent === 1 ? '' : 's'}, ${(bytes / 1e6).toFixed(2)} MB sent, ${heldBack} held back`, why)
+    const late = leftOut ? `, ${leftOut} left out once the sub-stream ran` : ''
+    if (!sent) log(`${after}, having sent nothing (${ENDED[why]})${heldBack || leftOut ? `: ${heldBack} held back${late}` : ''}`, why)
+    else log(`${after} (${ENDED[why]}): ${sent} ${what}${sent === 1 ? '' : 's'}, ${(bytes / 1e6).toFixed(2)} MB sent, ${heldBack} held back${late}`, why)
   }
   const tap = {
     OPEN: 1,
@@ -136,8 +138,13 @@ export function bridgeSub(ws, { sub, main, clientH265, remote = false, cap = CAP
       // a browser that cannot play H.265 gets nothing from here (it waits for its own stream)
       if (buf[1] === CODEC_H265 && !clientH265) return end('h265')
       const isKey = (buf[0] & 1) === 1
-      // a remote viewer: nothing between keyframes (the worker's replay of the GOP so far included)
+      // a remote viewer: nothing between keyframes (the worker's replay of the GOP so far included),
+      // and nothing once its sub-stream runs
       if (remote && !isKey) return
+      if (remote && sub.gop.length > 0) {
+        leftOut++
+        return
+      }
       if (remote ? room(buf.length) : gateSend(gate, isKey, { cap })) {
         if (!sent) log(`stand-in started: the main stream${remote ? '\'s keyframes' : ''} until the sub-stream's first frame`)
         sent++

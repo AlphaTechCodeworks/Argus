@@ -1113,7 +1113,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   const shows = [9, 16, 20].map((ch) => shown(after, ch, p0355.subs.findIndex((t) => t.ch === ch) * 15, cold[coldCh.indexOf(ch)] * 1000))
   const [s10, s17, s21] = shows
   check('... its stand-ins: keyframes that fit the page\'s room: /21\'s one a GOP (2.45 s) from 3.2 s, /17\'s none, /10\'s first alone, as its tile asked', shows.every((s) => s.keys) && s21.n >= 8 && s21.first < 3500 && s21.apart <= 2450 && s17.n === 0 && s10.n === 1 && s10.first === 0, JSON.stringify(shows))
-  check('... its log lines say keyframes', after.logs.some((l) => /^\[sub-bridge\] nvr-2\/10, remote viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): \d+ keyframes?, [\d.]+ MB sent, \d+ held back$/.test(l)), after.logs.join(' | '))
+  check('... its log lines say keyframes', after.logs.some((l) => /^\[sub-bridge\] nvr-2\/10, remote viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): \d+ keyframes?, [\d.]+ MB sent, \d+ held back(, \d+ left out once the sub-stream ran)?$/.test(l)), after.logs.join(' | '))
   // (With every frame all three showed at once, 7 s behind like every tile of the page. With keyframes
   // let through while the page had less than RESUME_BELOW queued, /10's came at least every 4 s, but
   // they stepped the whole page down in about half the phases of its keyframes: adaptive-live.test.mjs.
