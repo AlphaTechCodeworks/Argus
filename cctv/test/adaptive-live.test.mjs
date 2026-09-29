@@ -1,6 +1,6 @@
 // Tests for the remote viewers' frame-rate levels (adaptive-live.mjs), with fake streams: no ffmpeg.
 //   node cctv/test/adaptive-live.test.mjs
-import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
+import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, TICK_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
 import { encodeFrame } from '../phone-live.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
 
@@ -158,7 +158,8 @@ function fakeWs() {
   ws[2].overSince = null
   now += CLIMB_AFTER_MS
   live.tick()
-  check('a climb logs the same, with an idle link', logs.at(-1) === '[adaptive] link: 15 -> full (clean for 20 s; 3 cameras; 0.00 MB queued, draining: idle; 0 on the raw stream for want of a conversion slot, 0 of 1 free)', logs.at(-1))
+  // (the level it left gives its slot back there and then: 1 of 1 free)
+  check('a climb logs the same, with an idle link', logs.at(-1) === '[adaptive] link: 15 -> full (clean for 20 s; 3 cameras; 0.00 MB queued, draining: idle; 0 on the raw stream for want of a conversion slot, 1 of 1 free)', logs.at(-1))
   // a burst queued just before the look: too little busy time yet to say how fast it drains, which
   // is not "idle" with megabytes queued (review of 29 Sep)
   page.sharedBufferedAmount = 1_900_000
@@ -175,6 +176,85 @@ function fakeWs() {
   now += SETTLE_MS
   live.tick()
   check('... a plain /live socket: its queue, no drain rate', logs.some((l) => l.startsWith('[adaptive] solo: full -> 15 (video backing up on its link; 1 camera; 0.30 MB queued; ')), logs.join(' | '))
+  clearInterval(live.timer)
+}
+
+// ---- conversion slots at a level change (verify-1) ----
+// A camera stream as the fan-out has it: a new viewer (or a level's stream joining it) is sent its GOP.
+function gopSource(fps, n = 20) {
+  const gop = fps > 0 ? Array.from({ length: n }, (_, i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i === 0, 0, (i * 1000) / fps)) : []
+  return { gop, viewers: new Set(), add(ws) { this.viewers.add(ws); for (const f of gop) ws.send(f) }, remove(ws) { this.viewers.delete(ws) } }
+}
+/** Held over its cap for 3 s at every look: pressure, whatever else the rules say. */
+const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 3000 }
+{
+  // verify-1's replay of the 03:55 page: 16 sub tiles, 4 at 20.6 fps (sent as they are at 15), 6 at
+  // 30 fps (converted at every level) and 6 cold (a level's stream for them keeps its slot while it
+  // waits for frames), and pressure at every look. The new level's streams took their slots before the
+  // old level's gave theirs back, 10 s later: 12 of the 16 were left on the camera's own stream at 8,
+  // and all 16 at 4 -- more to send, not less.
+  let now = T
+  const pool = new TranscodePool(16)
+  const live = new AdaptiveLive({ pool, makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9, now: () => now })
+  const fps = [...Array(4).fill(20.6), ...Array(6).fill(30), ...Array(6).fill(0)]
+  const socks = fps.map((f, i) => {
+    const ws = fakeWs()
+    live.attach('slots', { ws, nvrId: 'nvr-2', ch: i, type: 1, source: gopSource(f) })
+    return ws
+  })
+  const v = live.viewers.get('slots')
+  const raw = () => [...v.sockets].filter((e) => e.stream === e.source).length
+  const seen = {}
+  for (let i = 0; i < 10 && v.level < 3; i++) {
+    now += 2000
+    heldAt(socks, now)
+    live.tick()
+    seen[LEVELS[v.level].id] = `${raw()} raw, ${pool.active} slots`
+  }
+  check('16 tiles stepped down to 8 and to 4: none left on the camera\'s own stream for want of a slot (were 12 and 16)',
+    v.level === 3 && seen['8'].startsWith('0 raw') && seen['4'].startsWith('0 raw'), JSON.stringify(seen))
+  clearInterval(live.timer)
+}
+{
+  // A tile left on the camera's own stream for want of a slot stayed there for as long as the page
+  // stayed on that level: only a level change looked again (verify-1). Now every look does.
+  let now = T
+  const pool = new TranscodePool(2)
+  const live = new AdaptiveLive({ pool, makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9, now: () => now })
+  const phone = pool.acquire() // a phone's conversion holds one of the two
+  const socks = [fakeWs(), fakeWs()]
+  socks.forEach((ws, i) => live.attach('retry', { ws, nvrId: 'n1', ch: i, type: 1, source: gopSource(30) }))
+  const v = live.viewers.get('retry')
+  now += SETTLE_MS
+  heldAt(socks, now)
+  live.tick()
+  const raw = () => [...v.sockets].filter((e) => e.stream === e.source).length
+  check('one slot for two tiles at 15: one converted, one on the camera\'s own stream', LEVELS[v.level].id === '15' && raw() === 1, `level ${LEVELS[v.level].id}, ${raw()} raw`)
+  for (const ws of socks) ws.overSince = null
+  phone.release()
+  now += TICK_MS
+  live.tick()
+  check('... the phone lets its slot go: the next look puts that tile on its conversion', LEVELS[v.level].id === '15' && raw() === 0, `${raw()} raw`)
+  clearInterval(live.timer)
+}
+{
+  // More than half the tiles on the camera's own stream for want of a slot: a level lower finds no
+  // more slots and thins none of them, and only moves the rest again. It stays, and says so once.
+  let now = T
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(1), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => now })
+  const socks = [fakeWs(), fakeWs(), fakeWs()]
+  socks.forEach((ws, i) => live.attach('starved', { ws, nvrId: 'n1', ch: i, type: 1, source: gopSource(30) }))
+  const v = live.viewers.get('starved')
+  for (let i = 0; i < 6; i++) {
+    now += TICK_MS
+    heldAt(socks, now)
+    live.tick()
+  }
+  const stays = logs.filter((l) => l.startsWith('[adaptive] starved: stays at 15'))
+  check('2 of 3 tiles on the raw stream at 15: no step to 8 under pressure', LEVELS[v.level].id === '15', logs.join(' | '))
+  check('... said once, with why and the tiles on the raw stream',
+    stays.length === 1 && /^\[adaptive\] starved: stays at 15, a level lower would find no conversion slot either \(.+; 3 cameras; 0\.00 MB queued, 3 held over their cap; 2 on the raw stream for want of a conversion slot, 0 of 1 free\)$/.test(stays[0]), logs.join(' | '))
   clearInterval(live.timer)
 }
 

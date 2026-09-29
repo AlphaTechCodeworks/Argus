@@ -85,14 +85,19 @@ export const startLevel = () => 0
 /**
  * The next level for one viewer, from what its sockets showed this tick. Pure: the tests drive it.
  * @param {{ level: number, changedAt: number, cleanSince: number }} v
- * @param {{ pressure: boolean, now: number, overBudget?: boolean }} o
- * @returns {{ level: number, changedAt: number, cleanSince: number, why?: string }}
+ * @param {{ pressure: boolean, now: number, overBudget?: boolean, starved?: boolean }} o
+ *   starved: more than half its tiles are on the camera's own stream for want of a conversion slot,
+ *   which a level lower would not find either
+ * @returns {{ level: number, changedAt: number, cleanSince: number, why?: string, stays?: string }}
+ *   stays: why it would have gone down, when starved kept it where it is
  */
-export function nextLevel(v, { pressure, now, overBudget = false }) {
+export function nextLevel(v, { pressure, now, overBudget = false, starved = false }) {
   const settled = now - v.changedAt >= SETTLE_MS
   const worst = LEVELS.length - 1
   if ((pressure || overBudget) && settled && v.level < worst) {
-    return { level: v.level + 1, changedAt: now, cleanSince: now, why: pressure ? 'video backing up on its link' : 'the uplink budget is used up' }
+    const why = pressure ? 'video backing up on its link' : 'the uplink budget is used up'
+    if (starved) return { ...v, cleanSince: pressure ? now : v.cleanSince, stays: why }
+    return { level: v.level + 1, changedAt: now, cleanSince: now, why }
   }
   if (pressure) return { ...v, cleanSince: now }
   if (v.level > 0 && settled && now - v.cleanSince >= CLIMB_AFTER_MS && !overBudget) {
@@ -108,6 +113,7 @@ class Viewer {
     this.level = startLevel()
     this.changedAt = now
     this.cleanSince = now
+    this.stayedAt = null // the level it last said it stays at for want of conversion slots (said once a level)
     this.sockets = new Set() // { ws, nvrId, ch, type, source, stream }
     this.sentAt = 0
     this.sentBytes = 0
@@ -161,6 +167,22 @@ export class AdaptiveLive {
     return s
   }
 
+  /** Puts a socket on the stream it should have at this level, if it is not on it already. */
+  #retarget(e, level) {
+    const want = this.#streamFor(e, level)
+    if (want === e.stream) return
+    e.stream?.remove(e.ws)
+    e.stream = want
+    want.add(e.ws)
+  }
+
+  /** How many of a viewer's tiles want a conversion at its level and are on the camera's own stream for want of a slot. */
+  #raw(v) {
+    let n = 0
+    for (const e of v.sockets) if (this.#converts(e, v.level) && e.stream === e.source) n++
+    return n
+  }
+
   /**
    * Takes a remote viewer's /live socket.
    * @param {string} viewerKey one per browser (the session), so all its tiles move together
@@ -193,16 +215,29 @@ export class AdaptiveLive {
     const from = LEVELS[v.level].id
     const link = this.#link(v) // what made it move, before the move changes it
     v.level = level
+    // Two passes: every socket off its level stream, each stream left with nobody on it closed there
+    // and then, and only then every socket onto the new level. In one pass the new level's streams took
+    // their slots before the old level's had given theirs back, and a stream left empty kept its slot
+    // for its 10 s (phone-live.mjs STOP_DELAY_MS) anyway: a 16-tile page stepping 15 -> 8 found 4 slots
+    // free and left 12 tiles on the camera's own stream, and at 4 all 16 -- more to send, not less, so
+    // the next step followed (no conversion started for 16 tiles at 03:55:28, 04:08:13, 04:08:17; verify-1).
+    const left = new Set()
     for (const e of v.sockets) {
-      const next = this.#streamFor(e, level)
-      if (next === e.stream) continue
+      if (e.stream === e.source) continue
       e.stream.remove(e.ws)
-      e.stream = next
-      next.add(e.ws)
+      left.add(e.stream)
+      e.stream = null
     }
+    for (const s of left) if (s.clients.size === 0) s.close()
+    for (const e of v.sockets) this.#retarget(e, level)
+    v.stayedAt = null
     // ...and what the move got: the tiles that wanted a conversion and found no free slot
-    const raw = [...v.sockets].filter((e) => this.#converts(e, level) && e.stream === e.source).length
-    this.log(`[adaptive] ${v.key.slice(0, 8)}: ${from} -> ${LEVELS[level].id} (${why}; ${v.sockets.size} camera${v.sockets.size === 1 ? '' : 's'}; ${link}; ${raw} on the raw stream for want of a conversion slot, ${this.pool.max - this.pool.active} of ${this.pool.max} free)`)
+    this.log(`[adaptive] ${v.key.slice(0, 8)}: ${from} -> ${LEVELS[level].id} (${why}; ${this.#state(v, link)})`)
+  }
+
+  /** The end of a level line: its cameras, its link (#link), and its tiles on the raw stream for want of a slot. */
+  #state(v, link) {
+    return `${v.sockets.size} camera${v.sockets.size === 1 ? '' : 's'}; ${link}; ${this.#raw(v)} on the raw stream for want of a conversion slot, ${this.pool.max - this.pool.active} of ${this.pool.max} free`
   }
 
   /**
@@ -249,22 +284,24 @@ export class AdaptiveLive {
       // bufferedAmount is only its part of the page's socket: the whole socket's queue
       // (sharedBufferedAmount) is what every tile of the page waits behind.
       const pressure = [...v.sockets].some((e) => (e.ws.sharedBufferedAmount ?? e.ws.bufferedAmount ?? 0) > PRESSURE_BYTES || e.ws.overSince != null)
-      const n = nextLevel(v, { pressure, now, overBudget: v === heaviest })
+      // more than half its tiles already on the camera's own stream for want of a slot: a level lower
+      // would find no more slots than this one and thin none of them (verify-1)
+      const n = nextLevel(v, { pressure, now, overBudget: v === heaviest, starved: this.#raw(v) * 2 > v.sockets.size })
       if (n.level !== v.level) this.#move(v, n.level, n.why)
-      // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
-      // without the HEVC codec (#streamFor converts it). A camera found to be H.265 only after its
-      // socket was attached (no keyframe then, and no codec the NVR had seen) moves to its conversion
-      // here -- that socket alone -- and one whose keyframe shows H.264 after all moves back to its
-      // own stream. This used to move the whole viewer to 15 fps: every tile of the browser went through
-      // a conversion because one full-screen main stream was H.265 (slow starts, 15 fps, the
-      // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
-      else if (v.level === 0) {
-        for (const e of v.sockets) {
-          const want = this.#streamFor(e, 0)
-          if (want === e.stream) continue
-          e.stream.remove(e.ws)
-          e.stream = want
-          want.add(e.ws)
+      else {
+        // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
+        // without the HEVC codec (#streamFor converts it). A camera found to be H.265 only after its
+        // socket was attached (no keyframe then, and no codec the NVR had seen) moves to its conversion
+        // here -- that socket alone -- and one whose keyframe shows H.264 after all moves back to its
+        // own stream. This used to move the whole viewer to 15 fps: every tile of the browser went through
+        // a conversion because one full-screen main stream was H.265 (slow starts, 15 fps, the
+        // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
+        // Below full, a tile left on the camera's own stream for want of a slot tries again: one may
+        // have come free since. It stayed raw for as long as the page stayed on that level (verify-1).
+        for (const e of v.sockets) if (v.level === 0 || e.stream === e.source) this.#retarget(e, v.level)
+        if (n.stays && v.stayedAt !== v.level) {
+          v.stayedAt = v.level
+          this.log(`[adaptive] ${v.key.slice(0, 8)}: stays at ${LEVELS[v.level].id}, a level lower would find no conversion slot either (${n.stays}; ${this.#state(v, this.#link(v))})`)
         }
       }
       v.changedAt = n.changedAt
