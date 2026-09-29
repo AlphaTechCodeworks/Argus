@@ -1,6 +1,6 @@
 // Tests for the remote viewers' frame-rate levels (adaptive-live.mjs), with fake streams: no ffmpeg.
 //   node cctv/test/adaptive-live.test.mjs
-import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, SETTLE_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
+import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
 import { encodeFrame } from '../phone-live.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
 
@@ -286,6 +286,30 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   changed.gop = [encodeFrame(Buffer.from([0, 0, 1, 1]), true, 0, 0)]
   live.tick()
   check('  its keyframe says H.264 after all: the next tick puts it on the camera\'s own stream', changed.viewers.has(w5) && !live.streams.get('n1/7/0@full')?.clients.has(w5))
+  clearInterval(live.timer)
+}
+{
+  // A camera that trickles (0.8 fps, every frame a keyframe: nvr-2's wharf cameras on 29 Sep). A level's
+  // new stream of it learnt its rate from 12 frames and sent nothing for 15 s: at 04:08:08.8 a step
+  // down left two such tiles with nothing new until 04:08:22.9 (stutter report 2.9). A remote viewer's
+  // streams decide within 1 s of capture time, a sub-stream's frames going out as they come meanwhile.
+  let now = T
+  const { made, make } = converters()
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: make, log: (l) => logs.push(l), budgetBps: 1e9, now: () => now })
+  const src = fakeSource('trickling sub')
+  const ws = fakeWs()
+  live.attach('trickle', { ws, nvrId: 'nvr-2', ch: 30, type: 1, source: src })
+  ws.bufferedAmount = 1e6
+  now += SETTLE_MS
+  live.tick() // full -> 15: onto a new stream of its own
+  ws.bufferedAmount = 0
+  const frame = (i) => { for (const v of [...src.viewers]) v.send(encodeFrame(Buffer.from([0, 0, 1, 1]), true, 0, i * 1250)) }
+  check('REMOTE_CONVERSION: a remote viewer\'s stream decides its rate within 1 s of capture time', REMOTE_CONVERSION.learnMs === 1000, JSON.stringify(REMOTE_CONVERSION))
+  frame(0)
+  check('a remote viewer stepped down on a sub-stream trickling at 0.8 fps: its next frame goes out as it comes', LEVELS[live.viewers.get('trickle').level].id === '15' && ws.got.length === 1, `${ws.got.length} sent`)
+  frame(1)
+  check('  its rate decided at the second frame (1.25 s), not the 13th (15 s): sent as it is', logs.includes('[phone-live] nvr-2/31: a sub stream at 0.8 fps: sent as it is') && ws.got.length === 2 && made.length === 0, logs.join(' | '))
   clearInterval(live.timer)
 }
 

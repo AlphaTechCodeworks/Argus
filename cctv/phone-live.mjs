@@ -98,12 +98,15 @@ export class PhoneStream {
    *   h264Only: everyone on this stream plays H.264 only, so H.265 is converted even with nothing to
    *   thin; not given (a phone, a level shared with browsers that play H.265): a sub-stream with nothing
    *   to thin is sent as it is, whatever its codec
+   *   learnMs: the frame rate is decided after RATE_SAMPLES frames or this much of their capture time,
+   *   whichever comes first, and until then a sub-stream's H.264 goes out as it comes (a remote
+   *   viewer's: see #onSource); 0, not given (a phone): 12 frames, and nothing sent until then
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, background = false, camera = '?' }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, background = false, camera = '?' }) {
     // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
-    // viewer); bufSeconds / lowDelay / keySeconds: how its conversion runs (a phone on the local network
-    // gives none: the converter's own, as always)
-    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, bufSeconds, lowDelay, keySeconds, h264Only })
+    // viewer); bufSeconds / lowDelay / keySeconds / learnMs: how its conversion runs and starts (a phone
+    // on the local network gives none: the converter's own, as always)
+    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs })
     // Every line names its camera. On 29 Sep they named none, and the 15-24 conversions a remote
     // viewer's level change started at once could only be matched to cameras by their timing
     // (stutter report 2.10).
@@ -119,7 +122,10 @@ export class PhoneStream {
     // what the normal stream sees: one more viewer, which never falls behind
     // (background: only a stand-in, live-attach.mjs: the NVR worker joins a main that plays for it, never starts one)
     this.tap = { OPEN: 1, readyState: 1, bufferedAmount: 0, background, send: (buf) => this.#onSource(buf) }
+    // (what the normal stream replays as the tap joins is learnt from, never sent on as it comes: #onSource)
+    this.joining = true
     source.add(this.tap)
+    this.joining = false
   }
 
   add(ws) {
@@ -151,11 +157,26 @@ export class PhoneStream {
       // the conversion starts from that keyframe instead of waiting seconds for the next one.
       if (f.isKey) this.held = []
       if (this.held) this.held.push(f)
-      if (this.samples.length < RATE_SAMPLES) {
+      // A remote viewer's stream (learnMs) decides after a second of capture time when that comes
+      // before 12 frames: a camera trickling at 0.8 fps was 15 s learning its 12, and nothing went out
+      // meanwhile. On 29 Sep a step down left two trickling tiles with nothing new for 14 s (04:08:08.8
+      // -> 04:08:22.9), and a full-size main showed nothing from its conversion for 13 s (04:03:55.9 ->
+      // 04:04:09.2) (stutter report 2.9). At 12 fps and up the 12 frames still come first.
+      const timed = this.learnMs > 0 && this.samples.length > 0 && f.ts - this.samples[0] >= this.learnMs
+      if (this.samples.length < RATE_SAMPLES && !timed) {
         this.samples.push(f.ts)
+        // ...and meanwhile a sub-stream's H.264 goes out as it comes, as the camera's own stream would:
+        // one at or under the level's rate (every trickle) is sent as it is once decided anyway. Not a
+        // main, which a level always scales down (nvr-2/10's keyframe alone was 634 KB on 29 Sep: what
+        // the level is there to spare the link), nor H.265, which the browser may not play. Nor what
+        // the normal stream replays as this stream joins: a socket moved here by a level change was
+        // shown it already, and a step down moved 11 pass-through tiles at once (04:18:05) on a link
+        // that was backed up -- sent again, that is up to a sub-stream's GOP (99-195 KB) per tile.
+        if (this.learnMs > 0 && !this.joining && this.type !== 0 && f.codec === CODEC_H264) this.#fanOut(buf, f.isKey)
         return
       }
-      const fps = frameRate(this.samples)
+      // the 12 frames; or those of the first second, with this one that ends it
+      const fps = frameRate(this.samples.length < RATE_SAMPLES ? [...this.samples, f.ts] : this.samples)
       const keepEvery = this.fps > 0 ? keepEveryFor(fps, this.fps) : 1
       if (keepEvery === 1 && this.type !== 0 && !(this.h264Only && f.codec === CODEC_H265)) {
         this.held = null
@@ -165,6 +186,9 @@ export class PhoneStream {
         this.log(`${this.who} a sub stream at ${fps.toFixed(1)} fps: sent as it is`)
         return this.#fanOut(buf, f.isKey)
       }
+      // the camera's own frames sent while learning are not for anyone joining from now on: a socket
+      // that joins waits for the conversion's first keyframe, as it always did
+      this.gop = []
       this.xcode = this.makeTranscoder({
         inCodec: f.codec === CODEC_H265 ? CODEC_H265 : CODEC_H264,
         keepEvery,

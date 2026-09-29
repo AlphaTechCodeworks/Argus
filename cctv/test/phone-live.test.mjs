@@ -116,6 +116,8 @@ const makeTranscoder = (o) => {
 }
 
 // ---- what a remote viewer's level asks of its stream (adaptive-live.mjs) ----
+// (REMOTE_CONVERSION there: how every level's conversion runs, and how soon it starts)
+const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000 }
 {
   /** One PhoneStream fed `n` frames at `fps` (a keyframe every 12), with a fake converter. */
   const run = (opts, { type = 0, codec = 1, fps = 30, n = 24 } = {}) => {
@@ -136,7 +138,6 @@ const makeTranscoder = (o) => {
     for (let i = 0; i < n; i++) src.emit(encodeFrame(Buffer.from([0, 0, 1, 1]), i % 12 === 0, codec, (i * 1000) / fps))
     return { s, xs, logs, ws, slot, args: xs[0] ? ffmpegArgs(xs[0].o).join(' ') : '' }
   }
-  const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2 }
 
   // level full for a browser without H.265: every frame, at most 1920 wide, playback's buffer and threads
   const full = run({ fps: 0, crf: 25, mainKbps: 2500, maxWidth: 1920, h264Only: true, ...REMOTE })
@@ -162,6 +163,87 @@ const makeTranscoder = (o) => {
   check('level 8 on a 24 fps sub: 1 in 3, a keyframe every 16 pictures (2 s at 8)', l8.xs[0]?.o.keepEvery === 3 && l8.args.includes('-maxrate 450k -bufsize 450k') && / -g 16 /.test(l8.args), l8.args)
   const l4 = run({ fps: 4, crf: 29, mainKbps: 900, ...REMOTE }, { fps: 24 })
   check('level 4 on a 24 fps main: 1 in 6, a keyframe every 8 pictures (2 s at 4), not every 50 (12.5 s)', l4.xs[0]?.o.keepEvery === 6 && l4.args.includes('-maxrate 900k -bufsize 900k') && / -g 8 /.test(l4.args), l4.args)
+}
+
+// ---- a camera that trickles: its picture at once (stutter report 2.9) ----
+// A new stream learnt its frame rate from 12 frames and sent nothing meanwhile: 15 s at 0.8 fps. On 29
+// Sep a level change left two trickling tiles with nothing new for 14 s (04:08:08.8 -> 04:08:22.9), and
+// a full-size main showed nothing from its conversion for 13 s (04:03:55.9 -> 04:04:09.2). A remote
+// viewer's stream (learnMs) decides after 12 frames or 1 s of capture time, whichever comes first, and
+// meanwhile a sub-stream's H.264 goes out as it comes.
+{
+  /**
+   * One PhoneStream on a camera sending `fps` (a keyframe every `keyEvery` frames), one socket on it,
+   * fed `n` frames. `replay`: the camera's stream was running, and replays that many frames (from its
+   * last keyframe) to the stream as it joins -- a level change; 0: a cold stream, the socket there
+   * before its first frame. Each thing sent is timed by the capture time (ms) of the frame being handed
+   * over then (at the join: the last one replayed).
+   */
+  const feed = (opts, { type = 1, codec = 0, fps = 0.8, keyEvery = 1, replay = 0, n = 8 } = {}) => {
+    const frame = (i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i % keyEvery === 0, codec, (i * 1000) / fps)
+    const gop = Array.from({ length: replay }, (_, i) => frame(i))
+    const src = fakeSource()
+    src.add = function (ws) { this.viewers.add(ws); for (const m of gop) ws.send(m) }
+    let at = replay ? ((replay - 1) * 1000) / fps : 0
+    const out = []
+    const logs = []
+    const xs = []
+    const s = new PhoneStream({
+      source: src, type, slot: { release() {} }, camera: 'n1/1', log: (l) => logs.push({ at, l }), ...opts,
+      makeTranscoder: (o) => {
+        const x = { o, pushed: 0, push(ts, k) { if (this.pushed++ % o.keepEvery === 0) o.onFrame(ts, k, Buffer.from([1])) }, close() {} }
+        xs.push(x)
+        return x
+      }
+    })
+    const ws = fakeWs()
+    // the fake converter's pictures are 1 byte, the camera's own 4
+    ws.send = (b) => { const f = parseFrame(b); out.push({ at, ts: f.ts, key: f.isKey, codec: f.codec, converted: f.payload.length === 1 }) }
+    s.add(ws)
+    for (let i = replay; i < replay + n; i++) {
+      at = (i * 1000) / fps
+      src.emit(frame(i))
+    }
+    return { s, out, logs, xs }
+  }
+  const show = (r) => JSON.stringify({ out: r.out.slice(0, 4), logs: r.logs })
+
+  // a sub-stream, cold (a tile opened while stepped down): level 15
+  const sub = feed({ fps: 15, ...REMOTE })
+  check('a remote viewer\'s sub-stream trickling at 0.8 fps: its first keyframe goes out as it comes, within 1.3 s (was 15 s: 12 frames first)', sub.out.length > 0 && sub.out[0].at <= 1300 && sub.out[0].ts === 0, show(sub))
+  check('  its rate decided at the second frame (1 s of capture time), 0.8 fps: sent as it is', sub.logs.length === 1 && sub.logs[0].at === 1250 && sub.logs[0].l === '[phone-live] n1/1: a sub stream at 0.8 fps: sent as it is', show(sub))
+  check('  every frame goes out once, in order, as it came', sub.out.length === 8 && sub.out.every((o, i) => o.ts === i * 1250 && o.at === o.ts && !o.converted), show(sub))
+
+  // a main is scaled down on a level, so it is always converted: none of its own frames goes out
+  const main = feed({ fps: 15, ...REMOTE }, { type: 0 })
+  check('a remote viewer\'s H.264 main trickling at 0.8 fps (level 15): converted from the second frame, its first picture 1.25 s after the first keyframe (was 15 s)', main.out.length > 0 && main.out[0].at <= 1300 && main.out[0].converted && main.logs[0]?.l === '[phone-live] n1/1: converting a main stream at 0.8 fps to about 15: keeping 1 in 1', show(main))
+  check('  the main\'s own frames never go out as they are (a level is there to send less than the main)', main.out.length > 0 && main.out.every((o) => o.converted), show(main))
+  // an H.265 main at level full, for a PC that cannot play it: 29 Sep 04:03:55.9, nothing for 13 s
+  const h265 = feed({ fps: 0, maxWidth: 1920, h264Only: true, ...REMOTE }, { type: 0, codec: 1 })
+  check('an H.265 main trickling at 0.8 fps at level full: converted from the second frame, 1.25 s after the first keyframe, never sent as H.265', h265.out.length > 0 && h265.out[0].at <= 1300 && h265.out.every((o) => o.converted && o.codec === 0), show(h265))
+
+  // the camera's stream was running: it replays its last keyframe to the stream as it joins
+  const moved = feed({ fps: 15, ...REMOTE }, { replay: 1 })
+  check('a running trickle (a level change): the frame after the join goes out as it comes, 1.25 s after it, the rate decided then', moved.out[0]?.at === 1250 && moved.out[0].ts === 1250 && moved.logs[0]?.at === 1250, show(moved))
+  check('  the keyframe replayed at the join is only learnt from, not sent on (a socket moved here has it)', moved.out.length > 0 && moved.out.every((o) => o.ts >= 1250), show(moved))
+  // ...which matters on a fast one: a step down moved 11 pass-through tiles at once on a link already
+  // backed up (29 Sep 04:18:05); sent again, that would be up to a sub-stream's GOP each
+  const fast = feed({ fps: 15, ...REMOTE }, { fps: 20, keyEvery: 40, replay: 20, n: 30 })
+  check('a running 20 fps sub: decided at the join on the 12 frames replayed (as before), none of them sent again', fast.logs[0]?.at === 950 && fast.logs[0].l === '[phone-live] n1/1: a sub stream at 20.0 fps: sent as it is' && fast.out.length > 0 && fast.out.every((o) => o.ts > 950), show(fast))
+
+  // 1 s comes first below 12 fps; 12 frames above
+  const five = feed({ fps: 4, crf: 29, subKbps: 280, ...REMOTE }, { fps: 5, keyEvery: 10, n: 14 })
+  check('a 5 fps sub: decided at 1 s of capture time (its 6th frame), at 5.0 fps', five.logs[0]?.at === 1000 && five.logs[0].l === '[phone-live] n1/1: a sub stream at 5.0 fps: sent as it is', show(five))
+  const twenty = feed({ fps: 8, crf: 27, subKbps: 450, ...REMOTE }, { fps: 20, keyEvery: 40, n: 30 })
+  check('a 20 fps sub at level 8: still decided on 12 frames (at 0.6 s), 1 in 3', twenty.logs[0]?.at === 600 && twenty.logs[0].l === '[phone-live] n1/1: converting a sub stream at 20.0 fps to about 8: keeping 1 in 3' && twenty.xs[0]?.o.keepEvery === 3, show(twenty))
+  check('  its own frames went out while it learnt, then only converted ones, from the keyframe it learnt from', twenty.out.slice(0, 12).every((o, i) => !o.converted && o.ts === i * 50) && twenty.out.slice(12).every((o) => o.converted) && twenty.out[12]?.key && twenty.out[12].ts === 0, show({ out: twenty.out.slice(10, 14), logs: twenty.logs }))
+  const late = fakeWs()
+  twenty.s.add(late)
+  check('  a socket joining after that is sent the converted pictures only, never the camera\'s own', late.got.length > 0 && late.got.every((b) => parseFrame(b).payload.length === 1), `${late.got.length} sent`)
+
+  // a phone on the local network is not a remote viewer: as before, by the local-network rule
+  const phone = feed({}, { n: 14 })
+  check('a phone on the local network: as before, nothing sent until 12 frames have been seen (15 s at 0.8 fps)', phone.out[0]?.at === 15000 && phone.logs[0]?.at === 15000, show(phone))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

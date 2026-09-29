@@ -45,8 +45,11 @@ export const LEVELS = Object.freeze([
  * keyframe burst is what backs a tunnel link up, and a conversion behind real time is a picture that
  * falls behind. 50 pictures was 3.3 s at 15 fps, 6.3 s at 8 and 12.5 s at 4 to wait for a picture
  * after a drop (backpressure.mjs); now 2 s of what the stream sends, at every level.
+ * And how soon it starts: a new stream learnt its frame rate from 12 frames and sent nothing until
+ * then, 15 s on a camera trickling at 0.8 fps (report 2.9). Now 12 frames or 1 s of their capture time,
+ * whichever comes first, a sub-stream's own H.264 going out as it comes meanwhile (PhoneStream learnMs).
  */
-export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2 })
+export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000 })
 export const TICK_MS = 2000
 /** A socket with this much waiting to go out is a link that is not keeping up. */
 export const PRESSURE_BYTES = 256 * 1024
