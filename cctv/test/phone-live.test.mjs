@@ -94,6 +94,10 @@ const makeTranscoder = (o) => {
   check('a failed conversion names its camera', logs.some((l) => l === '[phone-live] nvr-2/1: conversion failed: ffmpeg exited'), logs.join(' | '))
   check('a stand-in\'s conversion says it is one', logs.some((l) => l.startsWith('[phone-live] value4u/10 (stand-in): converting a main stream')), logs.join(' | '))
   check('every [phone-live] line names a camera', logs.length === 4 && logs.every((l) => /^\[phone-live\] [\w-]+\/\d+( \(stand-in\))?: /.test(l)), logs.join(' | '))
+  // ...and so do the converter's own lines (transcode.mjs: a conversion that ended, the hardware
+  // encoder given up): a level change ends 15-24 at once, which a camera-less line cannot be matched to
+  made[0].o.log('[transcode] conversion ended after 812 frames (ffmpeg exited with 1)')
+  check('the converter\'s lines name its camera too', logs.at(-1) === '[phone-live] nvr-2/1: [transcode] conversion ended after 812 frames (ffmpeg exited with 1)', logs.at(-1))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

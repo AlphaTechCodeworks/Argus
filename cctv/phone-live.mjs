@@ -149,7 +149,9 @@ export class PhoneStream {
         maxKbps: this.type === 0 ? this.mainKbps : this.subKbps,
         onFrame: (ts, isKey, out) => this.#onConverted(ts, isKey, out),
         onFail: (e) => this.log(`${this.who} conversion failed: ${e.message}`),
-        log: this.log
+        // its own lines ("[transcode] conversion ended after N frames", the hardware encoder given
+        // up) name the camera as well: a level change ends 15-24 conversions at once
+        log: (line) => this.log(`${this.who} ${line}`)
       })
       this.log(`${this.who} converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps to about ${this.fps}: keeping 1 in ${keepEvery}`)
       const held = this.held ?? []
