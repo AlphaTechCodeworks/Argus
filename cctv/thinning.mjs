@@ -29,9 +29,13 @@
 // would delete evidence.
 import { closeSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, statfsSync, unlinkSync, writeSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
-import { CODEC, splitUnits } from './rec-reader.mjs'
 import { parseIdx } from './segment-writer.mjs'
 import { markerPresent } from './storage-report.mjs'
+import { THIN_SUFFIX as suffix, buildThinned, checkThinned, codecOf, planThin, thinNames as names } from './thin-file.mjs'
+
+// planThin, buildThinned and the check of a rewrite are in thin-file.mjs since 2026-09-29, so that the
+// share helper can load them without the server's modules; planThin is still exported from here
+export { planThin }
 
 // settings.mjs (and storage.mjs) reach sdk.mjs -> koffi through nvr-xml.mjs, and this module has
 // to be testable on a laptop with no SDK, so the settings are loaded at run time only when the
@@ -48,7 +52,6 @@ export const MAX_SEGMENT_BYTES = 512 * 1024 * 1024
 export const PROTECT_MARGIN_MS = 60_000
 
 const camRec = (settings, nvr, ch) => ({ ...settings.recording.defaults, ...(settings.recording.cameras?.[`${nvr}/${ch}`] ?? {}) })
-const codecOf = (path) => (/\.h265$/i.test(String(path)) ? CODEC.h265 : CODEC.h264)
 const defaultFreeOf = (loc) => {
   const s = statfsSync(loc.path)
   return { freeBytes: Number(s.bavail) * Number(s.bsize), totalBytes: Number(s.blocks) * Number(s.bsize) }
@@ -131,17 +134,6 @@ function mountedSet(locs, present, warn) {
 
 // ---- thinning one file ------------------------------------------------------------------------
 
-const suffix = { newSeg: '.thin-new', newIdx: '.idx.thin-new', oldSeg: '.thin-old', oldIdx: '.idx.thin-old', journal: '.thin-journal' }
-const names = (p) => ({
-  seg: p,
-  idx: `${p}.idx`,
-  newSeg: p + suffix.newSeg,
-  newIdx: p + suffix.newIdx,
-  oldSeg: p + suffix.oldSeg,
-  oldIdx: p + suffix.oldIdx,
-  journal: p + suffix.journal
-})
-
 const unlinkQuiet = (f) => {
   try {
     unlinkSync(f)
@@ -161,61 +153,12 @@ function writeFsync(file, buf) {
 }
 
 /**
- * Which keyframes of one segment survive, given a per-camera cursor of the last kept time so the
- * spacing holds across file boundaries too.
- * @returns {{ keep: {start:number,end:number,tsMs:number}[], units: number, cursor: number }}
- */
-export function planThin(buf, idxRows, { codec, timelapseS, cursor = -Infinity }) {
-  const keyOffsets = new Set(idxRows.map((r) => r.offset))
-  const { units } = splitUnits(buf, codec, { final: true, keyOffsets, base: 0 })
-  const tsOf = new Map(idxRows.map((r) => [r.offset, r.tsMs]))
-  const stepMs = Math.max(1, Math.round(timelapseS * 1000))
-  const keep = []
-  let cur = cursor
-  for (const u of units) {
-    if (!u.isKey || !tsOf.has(u.start)) continue
-    const ts = tsOf.get(u.start)
-    if (!Number.isFinite(ts)) continue
-    if (cur !== -Infinity && ts - cur < stepMs) continue
-    keep.push({ start: u.start, end: u.end, tsMs: ts })
-    cur = ts
-  }
-  return { keep, units: units.length, cursor: cur }
-}
-
-/** Builds the new segment bytes and its .idx from a plan. */
-function buildThinned(buf, keep) {
-  const parts = keep.map((k) => buf.subarray(k.start, k.end))
-  const out = Buffer.concat(parts)
-  const idx = Buffer.alloc(keep.length * 16)
-  let off = 0
-  for (let i = 0; i < keep.length; i++) {
-    idx.writeBigUInt64LE(BigInt(off), i * 16)
-    idx.writeBigInt64LE(BigInt(Math.round(keep[i].tsMs)), i * 16 + 8)
-    off += parts[i].length
-  }
-  return { bytes: out, idx }
-}
-
-/**
  * Reads the pair back off the disk and checks it really is what we meant to write: right size,
  * one .idx row per unit, every row at a unit start, every unit a keyframe, times increasing.
  * Throws when it is not, and then the original is still untouched.
  */
 export function verifyThinned(segFile, idxFile, expect) {
-  const buf = readFileSync(segFile)
-  const rows = parseIdx(readFileSync(idxFile))
-  if (buf.length !== expect.bytes) throw new Error(`${segFile}: ${buf.length} bytes on disk, expected ${expect.bytes}`)
-  if (rows.length !== expect.keyframes) throw new Error(`${segFile}: ${rows.length} index rows, expected ${expect.keyframes}`)
-  const keyOffsets = new Set(rows.map((r) => r.offset))
-  const { units } = splitUnits(buf, expect.codec, { final: true, keyOffsets, base: 0 })
-  if (units.length !== rows.length) throw new Error(`${segFile}: ${units.length} frames for ${rows.length} index rows`)
-  for (let i = 0; i < units.length; i++) {
-    if (!units[i].isKey) throw new Error(`${segFile}: frame ${i} is not a keyframe`)
-    if (!keyOffsets.has(units[i].start)) throw new Error(`${segFile}: frame ${i} does not start at an index offset`)
-    if (i > 0 && rows[i].tsMs <= rows[i - 1].tsMs) throw new Error(`${segFile}: index times do not increase at row ${i}`)
-  }
-  return { bytes: buf.length, keyframes: rows.length, startMs: rows[0]?.tsMs ?? null, endMs: rows.at(-1)?.tsMs ?? null }
+  return checkThinned(segFile, readFileSync(segFile), parseIdx(readFileSync(idxFile)), expect)
 }
 
 /**

@@ -1,6 +1,6 @@
 // How healthy a storage location is, read straight off the disk. Synchronous, so it is only ever
-// called directly for local drives; network shares are checked through location-probe.mjs in a
-// process of its own (see storage.mjs).
+// called directly for local drives; network shares are checked by their helper, a process of their
+// own, with share-ops.mjs's asynchronous copy of the same steps (see share-calls.mjs).
 import { randomBytes } from 'node:crypto'
 import { closeSync, fsyncSync, openSync, readFileSync, statSync, statfsSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { join } from 'node:path'

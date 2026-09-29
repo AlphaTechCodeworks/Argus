@@ -10,20 +10,20 @@
 //
 // Recording goes to the camera's own location when healthy, else a healthy main one, else a
 // healthy overflow one (archive locations are for moving old footage to, later).
-import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { MARKER, _setStatfs, freePercent, healthOf, markerId, probeWriteSpeed } from './location-health.mjs'
 import { HttpError, isPlainObject } from './nvr-xml.mjs'
 import { cameraRecording, getSettings, saveSettings } from './settings.mjs'
+import { SHARE_ANSWER_MS, keepShareHelpers, onShareStuck, shareAnswerMs, shareCall } from './share-calls.mjs'
 
 export { MARKER, freePercent, probeWriteSpeed }
+// the file calls the deletion and time-lapse jobs make on a share go through its helper too
+export { SHARE_ANSWER_MS, shareCall }
 export const TYPES = ['internal', 'usb', 'network']
 export const ROLES = ['main', 'overflow', 'archive']
 const CHECK_EVERY_MS = 30_000
-/** How long a network share gets to answer its check before it is called down. */
-export const SHARE_ANSWER_MS = 10_000
 
 // replaceable for the offline tests
 let devOf = (p) => statSync(p).dev
@@ -34,45 +34,45 @@ const writeMBps = new Map() // id -> last write-speed probe (MB/s)
 //
 // A share whose SMB session has gone stale takes any file call made on it and never gives it back,
 // and the process that made it cannot even be killed. On 2026-09-26 that froze the whole server
-// twice. So this process never makes a file call on a share to learn its health: a child process
-// (location-probe.mjs) does, with SHARE_ANSWER_MS to answer, and what it last said is the share's
-// health. A child that does not answer leaves the share marked down, and no second child is sent
-// after it while the first is still stuck.
+// twice. So this process never makes a file call on a share: the share's helper does (share-calls.mjs,
+// a process of its own started once and kept, since 2026-09-29 instead of a fork of this server every
+// 30 s), and what its last check said is the share's health. A helper that does not answer leaves the
+// share marked down, and no call goes to that share while it is still stuck; one that has exited is
+// replaced by the next check.
 
-let PROBE = join(import.meta.dirname, 'location-probe.mjs')
 const netHealth = new Map() // id -> last health
-const stuck = new Map() // id -> { since } while a probe has not come back
 
 const downHealth = (reason) => ({ ok: false, reason, marker: false, writable: false, freeBytes: 0, totalBytes: 0, writeMBps: null })
 
-/** Checks one share from a child process. Always resolves, within SHARE_ANSWER_MS. */
-function probeShare(loc, floor, speed) {
-  const prev = stuck.get(loc.id)
-  if (prev) return Promise.resolve(downHealth(`share not answering: a check has been stuck for ${Math.round((Date.now() - prev.since) / 1000)} s`))
-  return new Promise((done) => {
-    let settled = false
-    const finish = (h) => {
-      if (!settled) {
-        settled = true
-        done(h)
+/** Checks one share from its helper. Always resolves, within the answer time (3 times it with the write-speed test). */
+async function probeShare(loc, floor, speed) {
+  const ask = () => shareCall(loc, 'probe', { floor, speed }, { timeoutMs: shareAnswerMs() * (speed ? 3 : 1) })
+  try {
+    return await ask()
+  } catch (e) {
+    if (e.code === 'ESHARESTUCK') return downHealth(e.message)
+    // a helper that ended by itself (a crash, the kernel's OOM killer) says nothing about the share:
+    // asked once more, of a new one, rather than calling the share down for 30 s
+    if (e.code === 'ESHAREGONE') {
+      try {
+        return await ask()
+      } catch (e2) {
+        return downHealth(e2.code === 'ESHARESTUCK' ? e2.message : `share check failed: ${e2.message}`)
       }
     }
-    const since = Date.now()
-    stuck.set(loc.id, { since })
-    const child = execFile(process.execPath, [PROBE, JSON.stringify({ id: loc.id, path: loc.path }), String(floor), speed ? 'speed' : ''], { timeout: SHARE_ANSWER_MS * (speed ? 3 : 1), killSignal: 'SIGKILL' }, (err, out) => {
-      stuck.delete(loc.id)
-      try {
-        if (err) throw err
-        finish(JSON.parse(String(out).trim()))
-      } catch (e) {
-        finish(downHealth(err?.killed ? 'share not answering' : `share check failed: ${e.message}`))
-      }
-    })
-    child.unref()
-    // the child may be stuck where even SIGKILL cannot reach it: do not wait for it to exit
-    setTimeout(() => finish(downHealth('share not answering')), SHARE_ANSWER_MS * (speed ? 3 : 1) + 500).unref()
-  })
+    return downHealth(`share check failed: ${e.message}`)
+  }
 }
+
+// Any other call on a share that gets no answer (a deletion, a rewrite: Tasks 3-4) says the same as a
+// check that gets none: the share is marked down now, and recording told, not at the next check.
+onShareStuck((loc, op) => {
+  if (op === 'probe') return // its check answers for itself
+  const l = getSettings().storage.locations.find((x) => x.id === loc.id && x.type === 'network')
+  if (!l) return
+  netHealth.set(l.id, { ...downHealth('share not answering'), writeMBps: netHealth.get(l.id)?.writeMBps ?? null })
+  tellListeners(listLocations())
+})
 
 /** Health of any location: a share's comes from its last check, never from the share itself. */
 function locationHealth(loc, floor) {
@@ -220,12 +220,31 @@ export function onChange(cb) {
   return () => listeners.delete(cb)
 }
 
+/** Tells the listeners when any location's ok / reason changed since they were last told. */
+function tellListeners(list) {
+  const summary = JSON.stringify(list.map((l) => [l.id, l.health.ok, l.health.reason]))
+  if (summary === lastSummary) return
+  const first = lastSummary === ''
+  lastSummary = summary
+  for (const l of list) if (!l.health.ok && !first) console.warn(`[storage] ${l.id} (${l.path}) not usable: ${l.health.reason}`)
+  for (const cb of listeners) {
+    try {
+      cb(list)
+    } catch (e) {
+      console.warn(`[storage] listener failed: ${e.message}`)
+    }
+  }
+}
+
 /** Checks every location now (with probe: also measures write speed) and tells listeners of changes. */
 export async function checkHealth({ probe = false } = {}) {
   const s = getSettings()
   const floor = s.storage.floorFreePct
-  // shares all at once, each in its own process; a stuck one costs SHARE_ANSWER_MS, not the server
-  await Promise.all(s.storage.locations.filter((l) => l.type === 'network').map(async (l) => {
+  // a location taken off the list: its helper goes (any type: the jobs may use one for a drive too)
+  keepShareHelpers(s.storage.locations)
+  const shares = s.storage.locations.filter((l) => l.type === 'network')
+  // shares all at once, each by its own helper; a stuck one costs the answer time, not the server
+  await Promise.all(shares.map(async (l) => {
     const h = await probeShare(l, floor, probe)
     if (h.writeMBps == null) h.writeMBps = netHealth.get(l.id)?.writeMBps ?? null
     netHealth.set(l.id, h)
@@ -241,19 +260,7 @@ export async function checkHealth({ probe = false } = {}) {
     }
   }
   const list = listLocations()
-  const summary = JSON.stringify(list.map((l) => [l.id, l.health.ok, l.health.reason]))
-  if (summary !== lastSummary) {
-    const first = lastSummary === ''
-    lastSummary = summary
-    for (const l of list) if (!l.health.ok && !first) console.warn(`[storage] ${l.id} (${l.path}) not usable: ${l.health.reason}`)
-    for (const cb of listeners) {
-      try {
-        cb(list)
-      } catch (e) {
-        console.warn(`[storage] listener failed: ${e.message}`)
-      }
-    }
-  }
+  tellListeners(list)
   return list
 }
 
@@ -285,8 +292,5 @@ export const _test = {
     if (h) netHealth.set(id, h)
     else netHealth.delete(id)
   },
-  probeShare,
-  setProbe(p) {
-    PROBE = p
-  }
+  probeShare
 }
