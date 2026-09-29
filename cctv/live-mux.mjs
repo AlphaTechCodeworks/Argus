@@ -333,8 +333,9 @@ class MuxChannel {
  *   session: () => string|null, now?: () => number, log?: (line: string) => void, who?: string }} o
  *   attach: what the /live path does with a socket (live-attach.mjs), refusing with channel.close(code, reason);
  *   session: the signed-in user of the upgrade request now, or null; who: "remote" or "local", for the log
- * @returns {{ channels: Map<number, MuxChannel>, queued: () => number }} the open channels and the
- *   bytes queued on the socket, for tests and diagnostics
+ * @returns {{ channels: Map<number, MuxChannel>, queued: () => number, quiet: () => boolean }} the open
+ *   channels and the bytes queued on the socket, for tests and diagnostics; quiet: whether it has written
+ *   nothing for STUCK_MS (nothing to write, or a peer that stopped reading), for its keep-alive
  */
 export function serveMux(ws, { attach, session, now = Date.now, log = (line) => console.log(line), who = '' }) {
   const channels = new Map() // id -> MuxChannel
@@ -441,5 +442,7 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
   // a frame ws cannot read (bad UTF-8, a bad opcode, over maxPayload) closes the socket by itself;
   // with no listener the 'error' it emits would be thrown, and take the whole process down
   ws.on('error', () => {})
-  return { channels, queued: () => mux.queued }
+  // (not mux.stalled(), which needs bytes queued: a pong can also be late behind bytes written a
+  // moment ago, still in the kernel's buffer or on the wire, and a socket idle that long owes nothing)
+  return { channels, queued: () => mux.queued, quiet: () => now() - mux.progressAt > STUCK_MS }
 }

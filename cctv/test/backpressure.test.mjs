@@ -146,6 +146,84 @@ const fakeWs = (buffered = 0) => ({
   ka.stop?.()
 }
 
+// ---- keepAlive on /live-mux page sockets (live-mux.mjs serveMux): the ping queues behind everything
+// already sent, so a page far behind on the tunnel answers it late. One still writing its backlog is
+// waited for; one that has written nothing for 30 s is cut (stutter report 2.10: 7-11 MB behind at
+// 4-6 Mbit/s is past the 15 s ping).
+{
+  const { serveMux } = await import('../live-mux.mjs')
+  /** The page's socket as serveMux uses it: each message stays queued until drain() writes it. */
+  const pageWs = () => ({
+    OPEN: 1,
+    readyState: 1,
+    handlers: {},
+    queue: [], // send callbacks of the messages not written yet, oldest first
+    pings: 0,
+    terminated: 0,
+    on(ev, fn) { (this.handlers[ev] ??= []).push(fn); return this },
+    emit(ev, ...a) { for (const fn of this.handlers[ev] ?? []) fn(...a) },
+    send(d, opts, cb) { if (cb) this.queue.push(cb) },
+    drain(n) { while (n-- > 0 && this.queue.length) this.queue.shift()() },
+    ping() { this.pings++ },
+    terminate() { this.terminated++; this.readyState = 3 }
+  })
+  const T0 = 5_000_000
+  let now = T0
+  const at = (s) => (now = T0 + s * 1000)
+  /** A page socket served by serveMux with one tile, and keepAlive over it as server.mjs sets it up. */
+  const page = () => {
+    const ws = pageWs()
+    let channel = null
+    const mux = serveMux(ws, { attach: (c) => (channel = c), session: () => 'u', now: () => now, log: () => {} })
+    ws.emit('message', Buffer.from(JSON.stringify({ op: 'sub', id: 1, nvr: 'n', ch: 0, stream: 1 })), false)
+    const timers = []
+    const wss = { clients: new Set([ws]), on(ev, fn) { if (ev === 'connection') this.conn = fn } }
+    keepAlive(wss, { intervalMs: PING_MS, setInterval: (fn) => (timers.push(fn), { unref() {} }), quiet: () => mux.quiet() })
+    wss.conn(ws)
+    return { ws, mux, channel, round: () => timers[0]() }
+  }
+  {
+    // 9 MB behind (nine 1 MB frames) on a link writing 0.5 MB a second (4 Mbit/s): 18 s to drain
+    at(0)
+    const { ws, mux, channel, round } = page()
+    for (let i = 0; i < 9; i++) channel.send(Buffer.alloc(1_000_000))
+    check('page socket: 9 MB queued', mux.queued() > 9_000_000, String(mux.queued()))
+    round() // pings: the ping goes out behind the 9 MB
+    for (let s = 2; s <= 14; s += 2) { at(s); ws.drain(1) }
+    at(15)
+    round() // no pong yet: it is still behind the last 2 MB
+    check('page socket 9 MB behind but draining: not cut by a pong late behind its backlog', ws.terminated === 0 && ws.closeCause === undefined, `terminated ${ws.terminated}, ${ws.closeCause}`)
+    check('... and not pinged again meanwhile (the pong it owes will come)', ws.pings === 1, `${ws.pings} pings`)
+    at(16); ws.drain(1)
+    at(18); ws.drain(1)
+    ws.emit('pong') // the ping has reached the page
+    at(30)
+    round()
+    check('... once its pong comes it is pinged as any socket is', ws.terminated === 0 && ws.pings === 2, `terminated ${ws.terminated}, ${ws.pings} pings`)
+  }
+  {
+    // 9 MB behind, and the page stops reading at once (a frozen tab, a dead link): nothing is written
+    at(0)
+    const { ws, channel, round } = page()
+    for (let i = 0; i < 9; i++) channel.send(Buffer.alloc(1_000_000))
+    round()
+    at(15); round()
+    at(30); round()
+    check('page socket stalled with 9 MB queued: not cut before 30 s without progress', ws.terminated === 0, `terminated ${ws.terminated}`)
+    at(45); round()
+    check('page socket that wrote nothing for 30 s (and missed its pong): cut', ws.terminated === 1, `terminated ${ws.terminated}`)
+    check('... and marked so for the close\'s log line', ws.closeCause === `keep-alive: no answer to the last ping, and nothing written for ${STUCK_MS / 1000} s`, String(ws.closeCause))
+  }
+  {
+    // nothing to send for a minute, then no pong: a dead peer with nothing queued is cut at once, as before
+    at(0)
+    const { ws, round } = page()
+    at(60); round()
+    at(75); round()
+    check('idle page socket (nothing written for 30 s) that misses its pong: cut at that round', ws.terminated === 1, `terminated ${ws.terminated}`)
+  }
+}
+
 // ---- wiring
 {
   const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')
@@ -157,6 +235,7 @@ const fakeWs = (buffered = 0) => ({
   check('worker tap has its own cap and is never closed', /capBytes/.test(worker) && /stuckMs: 0|stuckMs = 0|stuckMs:\s*0/.test(worker))
   const server = src('server.mjs')
   check('server pings /live sockets', /keepAlive\(wss/.test(server))
+  check('server pings /live-mux page sockets with their progress (quiet: a pong late behind a backlog is waited for)', /keepAlive\(muxWss, \{ quiet: \(ws\) => pageSockets\.get\(ws\)\?\.quiet\(\) \?\? true \}\)/.test(server) && /pageSockets\.set\(ws, serveMux\(ws, \{/.test(server))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
