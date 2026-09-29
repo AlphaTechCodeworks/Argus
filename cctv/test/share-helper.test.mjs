@@ -8,11 +8,11 @@
 // their NAS file work. No SDK: runs on any PC; the one Linux-only case says so and is skipped elsewhere.
 import { EventEmitter } from 'node:events'
 import { execFile, fork } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, get } from 'node:http'
 import { createConnection, createServer as createTcpServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const { shareCall, SHARE_ANSWER_MS, onShareStuck, shareStuckFor, keepShareHelpers, stopShareHelpers, _test } = await import('../share-calls.mjs')
@@ -313,6 +313,117 @@ check('the answer time is still 10 s', SHARE_ANSWER_MS === 10_000)
   check('thin with the marker gone: refused, untouched', noMarker.e?.code === 'EMARKER' && readFileSync(b).equals(bBefore))
 }
 
+// ---- a swap that did not finish is never committed, and its original never swept up ----------------
+// Review of p1-helper (2026-09-29): thinCommit trusted that the swap had finished. After one that
+// stopped half way (a rename that failed, or the helper lost just after `seg -> .thin-old`), a
+// thinCommit (a caller's bug, or a commit sent again) deleted the journal and then the original, and
+// left the rewrite only as .thin-new; the next thinRecover, finding no journal, swept that up too:
+// nothing of the footage left. In thinning.mjs the swap and the commit are one synchronous call, so
+// this could not happen there; over the helper they are separate calls.
+{
+  const loc = location('unfinished', 'LU')
+  const dir = join(loc.path, 'n1', '0', '2026-09-22', '07')
+  const snapshot = () => readdirSync(dir).sort().map((f) => `${f}:${readFileSync(join(dir, f)).toString('base64')}`).join('|')
+  const namesOf = (p) => readdirSync(dir).filter((f) => f.startsWith(basename(p))).sort().join()
+  let k = 0
+  /** A segment with its rewrite written and checked beside it (thin, swap false), not swapped in. */
+  async function ready() {
+    const p = join(dir, `${String(k).padStart(2, '0')}.h264`)
+    makeSegment(p, T0 + 3_600_000 + k++ * 60_000)
+    const orig = { seg: readFileSync(p), idx: readFileSync(`${p}.idx`) }
+    const r = await shareCall(loc, 'thin', { path: p, timelapseS: 10, cursor: null, maxBytes: 1e9, swap: false })
+    if (r.outcome !== 'thinned') throw new Error(`setup: ${JSON.stringify(r)}`)
+    return { p, orig, name: basename(p), journal: () => writeFileSync(`${p}.thin-journal`, `${JSON.stringify({ path: p })}\n`) }
+  }
+  const isOriginal = (s) => readFileSync(s.p).equals(s.orig.seg) && readFileSync(`${s.p}.idx`).equals(s.orig.idx)
+  const unfinished = /^EBADARG: the swap did not finish: thinRecover puts the original back/
+
+  {
+    // the swap's first steps and no more: the journal, then the original set aside
+    const s = await ready()
+    s.journal()
+    renameSync(s.p, `${s.p}.thin-old`)
+    renameSync(`${s.p}.idx`, `${s.p}.idx.thin-old`)
+    const snap = snapshot()
+    const c = await settle(shareCall(loc, 'thinCommit', { path: s.p }))
+    check('thinCommit after a swap that stopped with the original set aside: refused, nothing touched', c.e?.code === 'EBADARG' && unfinished.test(c.e.message) && snapshot() === snap, c.e?.message ?? JSON.stringify(c.v))
+    const rb = await shareCall(loc, 'thinRecover', { paths: [s.p] })
+    check('...and thinRecover then puts the original back byte for byte, with nothing else left', rb.rolledBack.join() === s.p && isOriginal(s) && namesOf(s.p) === `${s.name},${s.name}.idx`, `${JSON.stringify(rb)} ${namesOf(s.p)}`)
+  }
+  {
+    // stopped one rename short: the rewrite in place, its .idx not yet
+    const s = await ready()
+    s.journal()
+    renameSync(s.p, `${s.p}.thin-old`)
+    renameSync(`${s.p}.idx`, `${s.p}.idx.thin-old`)
+    renameSync(`${s.p}.thin-new`, s.p)
+    const snap = snapshot()
+    const c = await settle(shareCall(loc, 'thinCommit', { path: s.p }))
+    check('thinCommit after a swap one rename short of the end: refused, nothing touched', c.e?.code === 'EBADARG' && unfinished.test(c.e.message) && snapshot() === snap, c.e?.message ?? JSON.stringify(c.v))
+    const rb = await shareCall(loc, 'thinRecover', { paths: [s.p] })
+    check('...and thinRecover puts the original back byte for byte', rb.rolledBack.join() === s.p && isOriginal(s) && namesOf(s.p) === `${s.name},${s.name}.idx`, `${JSON.stringify(rb)} ${namesOf(s.p)}`)
+  }
+  {
+    // a roll-back that stopped half way: the original segment back, its .idx still beside it
+    const s = await ready()
+    s.journal()
+    renameSync(s.p, `${s.p}.thin-old`)
+    renameSync(`${s.p}.idx`, `${s.p}.idx.thin-old`)
+    renameSync(`${s.p}.thin-new`, s.p)
+    renameSync(`${s.p}.idx.thin-new`, `${s.p}.idx`)
+    renameSync(`${s.p}.thin-old`, s.p)
+    const snap = snapshot()
+    const c = await settle(shareCall(loc, 'thinCommit', { path: s.p }))
+    check('thinCommit during a roll-back that stopped half way: refused, nothing touched', c.e?.code === 'EBADARG' && unfinished.test(c.e.message) && snapshot() === snap, c.e?.message ?? JSON.stringify(c.v))
+    const rb = await shareCall(loc, 'thinRecover', { paths: [s.p] })
+    check('...and thinRecover finishes the roll-back: the original pair, byte for byte', rb.rolledBack.join() === s.p && isOriginal(s) && namesOf(s.p) === `${s.name},${s.name}.idx`, `${JSON.stringify(rb)} ${namesOf(s.p)}`)
+  }
+  {
+    // nothing swapped at all (thin with swap false, then a commit by mistake)
+    const s = await ready()
+    const snap = snapshot()
+    const c = await settle(shareCall(loc, 'thinCommit', { path: s.p }))
+    check('thinCommit with no swap made: refused, the original and the rewrite waiting both untouched', c.e?.code === 'EBADARG' && /no swap waiting to be committed/.test(c.e.message) && snapshot() === snap, c.e?.message ?? JSON.stringify(c.v))
+  }
+  {
+    // a commit sent twice: the second finds nothing to commit and touches nothing
+    const s = await ready()
+    await shareCall(loc, 'thinSwap', { path: s.p })
+    await shareCall(loc, 'thinCommit', { path: s.p })
+    const snap = snapshot()
+    const c = await settle(shareCall(loc, 'thinCommit', { path: s.p }))
+    check('thinCommit sent again after it committed: refused, the rewrite kept as it is', c.e?.code === 'EBADARG' && snapshot() === snap && namesOf(s.p) === `${s.name},${s.name}.idx`, c.e?.message ?? JSON.stringify(c.v))
+  }
+  {
+    // no journal, the segment and its .idx not there, the original beside them: a swap that did not
+    // finish and whose journal went (the old thinCommit did exactly this)
+    const s = await ready()
+    renameSync(s.p, `${s.p}.thin-old`)
+    renameSync(`${s.p}.idx`, `${s.p}.idx.thin-old`)
+    const rb = await shareCall(loc, 'thinRecover', { paths: [s.p] })
+    check('thinRecover with no journal and the original set aside: put back byte for byte, not swept up', rb.rolledBack.join() === s.p && rb.sweptUp.length === 0 && isOriginal(s) && namesOf(s.p) === `${s.name},${s.name}.idx`, `${JSON.stringify(rb)} ${namesOf(s.p)}`)
+  }
+  {
+    // no journal, the segment gone and only its rewrite beside it: that may be all that is left
+    const s = await ready()
+    rmSync(s.p)
+    rmSync(`${s.p}.idx`)
+    const snap = snapshot()
+    const rb = await shareCall(loc, 'thinRecover', { paths: [s.p] })
+    check('thinRecover with the segment gone and only a rewrite beside it: left as it is, and said', rb.left?.join() === s.p && rb.sweptUp.length === 0 && snapshot() === snap, `${JSON.stringify(rb)} ${namesOf(s.p)}`)
+  }
+  {
+    // the same with its journal: nothing to roll back to, so the journal stays too
+    const s = await ready()
+    s.journal()
+    rmSync(s.p)
+    rmSync(`${s.p}.idx`)
+    const snap = snapshot()
+    const rb = await shareCall(loc, 'thinRecover', { paths: [s.p] })
+    check('...and with its journal: left as it is, journal and all', rb.left?.join() === s.p && rb.rolledBack.length === 0 && snapshot() === snap, `${JSON.stringify(rb)} ${namesOf(s.p)}`)
+  }
+}
+
 // ---- a share that stops answering ------------------------------------------------------------------
 // The helper below is the real one, with its file calls made to hang on any path holding "HANG" while
 // the flag file exists (like a stale SMB session: the call never comes back), or to take 300 ms on a
@@ -418,6 +529,36 @@ _test.setAnswerMs(1000)
   writeFileSync(join(slow.path, MARKER), markerText)
   check('the marker gone during a batch: what was deleted says so', mid.v?.[0]?.ok === true && !existsSync(kept), JSON.stringify(mid.v ?? mid.e?.message))
   check('...and "not there" after that is not taken for deleted', mid.v?.[1]?.ok === false && mid.v[1].error === 'EMARKER' && mid.v?.[2]?.ok === false, JSON.stringify(mid.v))
+
+  // One helper makes every call on its share, so a check that runs out of its whole-check budget on a
+  // share that is slow but answering takes a rewrite in flight down with it (review of p1-helper,
+  // 2026-09-29): the swap fails as "not answering" though its own calls were answering, and is left
+  // wherever the kill found it. thinRecover then puts the original back, byte for byte.
+  {
+    const p = join(slow.path, 'n1', '0', '2026-09-22', '08', '00.h264')
+    makeSegment(p, T0 + 7_200_000)
+    const orig = { seg: readFileSync(p), idx: readFileSync(`${p}.idx`) }
+    const stuckOps = []
+    const offStuck = onShareStuck((l, op) => stuckOps.push(op))
+    const made = await settle(shareCall(slow, 'thin', { path: p, timelapseS: 10, cursor: null, maxBytes: 1e9, swap: false }))
+    const pid = _test.pidOf(slow)
+    const swap = settle(shareCall(slow, 'thinSwap', { path: p }))
+    await until(() => existsSync(`${p}.thin-journal`), 5000) // the swap has begun
+    const chk = await settle(shareCall(slow, 'probe', { floor: 0 }, { timeoutMs: 400, whole: true }))
+    const sw = await swap
+    await until(() => shareStuckFor(slow) === null && !alive(pid), 5000)
+    const leftAt = readdirSync(dirname(p)).sort().join()
+    check('a check out of its time in the middle of a swap: the swap fails with it, as not answering', made.v?.outcome === 'thinned' && chk.e?.code === 'ESHARESTUCK' && sw.e?.code === 'ESHARESTUCK' && stuckOps.join() === 'probe' && /thin-journal/.test(leftAt), `${made.e?.message ?? ''} ${chk.e?.code} / ${sw.e?.code ?? JSON.stringify(sw.v)}; stuck: ${stuckOps}; left: ${leftAt}`)
+    const rb = await settle(shareCall(slow, 'thinRecover', { paths: [p] }))
+    check('...and thinRecover puts the original back, byte for byte', rb.v?.rolledBack.join() === p && readFileSync(p).equals(orig.seg) && readFileSync(`${p}.idx`).equals(orig.idx) && readdirSync(dirname(p)).sort().join() === '00.h264,00.h264.idx', `${JSON.stringify(rb.v ?? rb.e?.message)}; was ${leftAt}`)
+    // every file call of the rewrite reports back: at 300 ms a call and an answer time of 1 s, a whole
+    // rewrite, swap and commit are slow, not stuck (before, thinSwap's three checks for files and the
+    // journal's open went unreported, and it was called stuck on its own)
+    const full = await settle(shareCall(slow, 'thin', { path: p, timelapseS: 10, cursor: null, maxBytes: 1e9 }))
+    const com = await settle(shareCall(slow, 'thinCommit', { path: p }))
+    check('on a share taking 300 ms a file call: a rewrite, its swap and its commit are not called stuck', full.v?.swapped === true && com.v?.committed === true && stuckOps.join() === 'probe' && readdirSync(dirname(p)).sort().join() === '00.h264,00.h264.idx', `${full.e?.message ?? JSON.stringify(full.v)} ${com.e?.message ?? ''}; stuck: ${stuckOps}`)
+    offStuck()
+  }
 }
 _test.setAnswerMs(SHARE_ANSWER_MS)
 _test.setHelper(null)

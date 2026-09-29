@@ -17,7 +17,7 @@
 //    updates the index stays on the server, between 'thin' (or 'thinSwap') and 'thinCommit'.
 import { randomBytes } from 'node:crypto'
 import * as fsp from 'node:fs/promises'
-import { dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { MARKER, freePercent } from './location-health.mjs'
 import { parseIdx } from './segment-writer.mjs'
 import { buildThinned, checkThinned, codecOf, planThin, thinNames } from './thin-file.mjs'
@@ -66,25 +66,33 @@ export function makeShareOps({ id, root: rootIn }) {
     tick()
     if (m !== id) throw refuse('EMARKER', m ? `${root} holds the marker of another location (${m}): nothing touched` : `${root} has no marker (not mounted?): nothing touched`)
   }
-  const unlinkQuiet = async (f) => {
+  // tick (when given) after the call comes back, as after every file call of an op: the server's clock
+  // is per file call. Before, thinSwap made four file calls in a row unreported, and in a test at 300 ms
+  // a call with 1 s to answer it was called stuck on its own (review of p1-helper, 2026-09-29).
+  const unlinkQuiet = async (f, tick) => {
     try {
       await fsp.unlink(f)
       return true
     } catch (e) {
       if (e.code !== 'ENOENT') throw e
       return false
+    } finally {
+      tick?.()
     }
   }
-  const exists = async (f) => {
+  const exists = async (f, tick) => {
     try {
       await fsp.stat(f)
       return true
     } catch {
       return false
+    } finally {
+      tick?.()
     }
   }
   async function readWhole(file, tick) {
     const fh = await fsp.open(file, 'r')
+    tick()
     try {
       const { size } = await fh.stat()
       tick()
@@ -99,10 +107,12 @@ export function makeShareOps({ id, root: rootIn }) {
       return off === size ? buf : buf.subarray(0, off)
     } finally {
       await fh.close()
+      tick()
     }
   }
   async function writeFsync(file, buf, tick) {
     const fh = await fsp.open(file, 'w')
+    tick()
     try {
       for (let off = 0; off < buf.length; ) {
         const { bytesWritten } = await fh.write(buf, off, Math.min(CHUNK, buf.length - off))
@@ -113,6 +123,7 @@ export function makeShareOps({ id, root: rootIn }) {
       tick()
     } finally {
       await fh.close()
+      tick()
     }
   }
 
@@ -156,12 +167,15 @@ export function makeShareOps({ id, root: rootIn }) {
   /** thinning.mjs swapIn steps 1-3: journal (fsynced), original aside, rewrite in its place. */
   async function swapIn(n, tick) {
     await writeFsync(n.journal, Buffer.from(`${JSON.stringify({ path: n.seg, at: new Date().toISOString() })}\n`), tick)
-    await fsp.rename(n.seg, n.oldSeg)
-    await fsp.rename(n.idx, n.oldIdx)
-    tick()
-    await fsp.rename(n.newSeg, n.seg)
-    await fsp.rename(n.newIdx, n.idx)
-    tick()
+    for (const [from, to] of [
+      [n.seg, n.oldSeg],
+      [n.idx, n.oldIdx],
+      [n.newSeg, n.seg],
+      [n.newIdx, n.idx]
+    ]) {
+      await fsp.rename(from, to)
+      tick()
+    }
   }
 
   return {
@@ -356,7 +370,7 @@ export function makeShareOps({ id, root: rootIn }) {
       if (!(Number(maxBytes) > 0)) throw refuse('EBADARG', 'maxBytes must be a positive number')
       await needMarker(tick)
       const n = thinNames(r)
-      if (await exists(n.journal)) return { outcome: 'skipped', why: 'a rewrite of it was left half done: thinRecover first' }
+      if (await exists(n.journal, tick)) return { outcome: 'skipped', why: 'a rewrite of it was left half done: thinRecover first' }
       let buf
       let rows
       try {
@@ -387,8 +401,8 @@ export function makeShareOps({ id, root: rootIn }) {
         await writeFsync(n.newIdx, built.idx, tick)
         v = checkThinned(n.newSeg, await readWhole(n.newSeg, tick), parseIdx(await readWhole(n.newIdx, tick)), { bytes: built.bytes.length, keyframes: plan.keep.length, codec })
       } catch (e) {
-        await unlinkQuiet(n.newSeg).catch(() => {})
-        await unlinkQuiet(n.newIdx).catch(() => {})
+        await unlinkQuiet(n.newSeg, tick).catch(() => {})
+        await unlinkQuiet(n.newIdx, tick).catch(() => {})
         return { outcome: 'failed', why: `rewrite failed: ${e.message}; the original is untouched` }
       }
       const row = { outcome: 'thinned', swapped: false, wasBytes: buf.length, bytes: v.bytes, keyframes: v.keyframes, droppedKeyframes: rows.length - plan.keep.length, cursor: plan.cursor, startMs: v.startMs, endMs: v.endMs }
@@ -405,23 +419,43 @@ export function makeShareOps({ id, root: rootIn }) {
       const n = thinNames(r)
       // swapped already and not committed: a second swap would move the rewrite over the original
       // kept beside it, and there would be no footage left to roll back to
-      if (await exists(n.journal)) throw refuse('EBADARG', `${path} was swapped already and not committed: thinCommit, or thinRecover to put the original back`)
-      if (!(await exists(n.newSeg)) || !(await exists(n.newIdx))) throw refuse('EBADARG', `${path} has no rewrite waiting to be swapped in`)
+      if (await exists(n.journal, tick)) throw refuse('EBADARG', `${path} was swapped already and not committed: thinCommit, or thinRecover to put the original back`)
+      if (!(await exists(n.newSeg, tick)) || !(await exists(n.newIdx, tick))) throw refuse('EBADARG', `${path} has no rewrite waiting to be swapped in`)
       await swapIn(n, tick)
       return { swapped: true }
     },
 
-    /** After the index row is updated: the journal goes (the commit point), then the original. */
+    /**
+     * After the index row is updated: the journal goes (the commit point), then the original. Only
+     * after a swap that finished: the journal there, the rewrite in place of the segment and its .idx,
+     * the original pair beside them, and no .thin-new left. Anything else is refused with nothing
+     * touched. In thinning.mjs the swap and the commit are one synchronous call; over the helper they
+     * are two, and a commit after a swap that stopped half way (a rename that failed, or the helper
+     * lost just after `seg -> .thin-old`) deleted the original and left the rewrite only as .thin-new,
+     * which the next thinRecover swept up too (review of p1-helper, 2026-09-29).
+     */
     async thinCommit({ path } = {}, tick) {
       const r = changeable(path)
       if (!r) throw refuse('EOUTSIDE', `${path} is outside ${root}`)
       await needMarker(tick)
       const n = thinNames(r)
+      if (!(await exists(n.journal, tick))) throw refuse('EBADARG', `${path} has no swap waiting to be committed (no journal): nothing touched`)
+      const wrong = []
+      for (const [f, want] of [
+        [n.seg, true],
+        [n.idx, true],
+        [n.oldSeg, true],
+        [n.oldIdx, true],
+        [n.newSeg, false],
+        [n.newIdx, false]
+      ]) {
+        if ((await exists(f, tick)) !== want) wrong.push(want ? `no ${basename(f)}` : `${basename(f)} still there`)
+      }
+      if (wrong.length) throw refuse('EBADARG', `the swap did not finish: thinRecover puts the original back (${path}: ${wrong.join(', ')}); nothing touched`)
       await fsp.unlink(n.journal)
       tick()
-      await unlinkQuiet(n.oldSeg)
-      await unlinkQuiet(n.oldIdx)
-      tick()
+      await unlinkQuiet(n.oldSeg, tick)
+      await unlinkQuiet(n.oldIdx, tick)
       return { committed: true }
     },
 
@@ -431,22 +465,26 @@ export function makeShareOps({ id, root: rootIn }) {
       if (!r) throw refuse('EOUTSIDE', `${path} is outside ${root}`)
       await needMarker(tick)
       const n = thinNames(r)
-      if (await exists(n.journal)) throw refuse('EBADARG', `${path} was already swapped: thinRecover puts the original back`)
-      await unlinkQuiet(n.newSeg)
-      await unlinkQuiet(n.newIdx)
-      tick()
+      if (await exists(n.journal, tick)) throw refuse('EBADARG', `${path} was already swapped: thinRecover puts the original back`)
+      await unlinkQuiet(n.newSeg, tick)
+      await unlinkQuiet(n.newIdx, tick)
       return { aborted: true }
     },
 
     /**
      * thinning.mjs recoverThinning for the given segments (the ones a lost helper had in hand): with
      * a journal the rewrite did not commit, so the original is put back and the rewrite thrown away;
-     * without one, leftovers beside the file are litter and go.
+     * without one, leftovers beside the file are litter and go -- but only while the segment and its
+     * .idx are both there. With either missing, what is beside them may be all that is left of that
+     * footage (review of p1-helper, 2026-09-29): an original set aside (.thin-old) is put back, as
+     * with a journal, even when the journal has gone; with nothing to put back, the files are left as
+     * they are, journal and all, and the path is listed in `left` for a person to look at.
+     * @returns {Promise<{ rolledBack: string[], sweptUp: string[], left: string[], refused: string[] }>}
      */
     async thinRecover({ paths } = {}, tick) {
       list(paths, 'paths')
       await needMarker(tick)
-      const out = { rolledBack: [], sweptUp: [], refused: [] }
+      const out = { rolledBack: [], sweptUp: [], left: [], refused: [] }
       for (const p of paths) {
         const r = changeable(p)
         if (!r) {
@@ -454,23 +492,31 @@ export function makeShareOps({ id, root: rootIn }) {
           continue
         }
         const n = thinNames(r)
-        if (await exists(n.journal)) {
+        const whole = async () => (await exists(n.seg, tick)) && (await exists(n.idx, tick))
+        const journal = await exists(n.journal, tick)
+        if (journal || !(await whole())) {
+          let moved = false
           for (const [from, to] of [
             [n.oldSeg, n.seg],
             [n.oldIdx, n.idx]
           ]) {
-            if (await exists(from)) await fsp.rename(from, to)
-            tick()
+            if (await exists(from, tick)) {
+              await fsp.rename(from, to)
+              tick()
+              moved = true
+            }
           }
-          await unlinkQuiet(n.newSeg)
-          await unlinkQuiet(n.newIdx)
-          await unlinkQuiet(n.journal)
-          tick()
-          out.rolledBack.push(p)
+          if (!(await whole())) {
+            if (journal || (await exists(n.newSeg, tick)) || (await exists(n.newIdx, tick))) out.left.push(p)
+            continue
+          }
+          await unlinkQuiet(n.newSeg, tick)
+          await unlinkQuiet(n.newIdx, tick)
+          await unlinkQuiet(n.journal, tick)
+          if (journal || moved) out.rolledBack.push(p)
         } else {
           let any = false
-          for (const f of [n.oldSeg, n.oldIdx, n.newSeg, n.newIdx]) any = (await unlinkQuiet(f)) || any
-          tick()
+          for (const f of [n.oldSeg, n.oldIdx, n.newSeg, n.newIdx]) any = (await unlinkQuiet(f, tick)) || any
           if (any) out.sweptUp.push(p)
         }
       }
