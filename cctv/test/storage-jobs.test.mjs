@@ -125,6 +125,38 @@ for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
   check('on: the log says what it did, not what it would do', r.logs.some((l) => /^\[thinning\] converted 12 files/.test(l)) && r.logs.some((l) => /^\[retention\] deleted 5 files/.test(l)) && !r.logs.some((l) => /would/.test(l)), JSON.stringify(r.logs))
 }
 
+// ---- thinning off the main thread (perf report Task 4, 2026-09-29): the run as it now answers ----------------
+{
+  // the dry run from the index: a count and bytes rather than a list of every file, an estimate, the backlog,
+  // and skips counted by files (one entry for a location with 900 files on it)
+  _test.reset()
+  const answer = { dryRun: true, files: 12_345, bytes: 148e9, freedBytes: 132.5e9, estimate: { thinBytes: 15.5e9, low: 13.3e9, high: 17.4e9, note: 'an estimate from the index: ...' }, backlog: { files: 12_345, bytes: 148e9, oldestMs: T0 - 5 * 3_600_000, lagMs: 5 * 3_600_000, perHourBytes: null }, thinned: [], skipped: [{ path: '900 files', why: '/srv/x is not mounted', files: 900 }, { path: 'a to b', why: 'bookmarked or exported' }], warnings: [], protection: 'ranges' }
+  const thinning = async () => answer
+  const r = await run('dry-run', { thinning })
+  const t = r.runs.thinning
+  check('dry run from the index: its files and bytes, and the estimate kept with its range', t.segments === 12_345 && t.bytes === 132.5e9 && t.fullBytes === 148e9 && t.estimate?.thinBytes === 15.5e9 && t.estimate.low === 13.3e9 && t.estimate.high === 17.4e9 && t.reachedLimit === false, JSON.stringify(t))
+  check('... skips counted by the files they stand for', t.skipped === 901 && t.skippedWhy[0].why === '/srv/x is not mounted' && t.skippedWhy[0].n === 900, JSON.stringify(t.skippedWhy))
+  check('... what waits is kept for the page', t.backlog?.files === 12_345 && t.backlog.lagMs === 5 * 3_600_000, JSON.stringify(t.backlog))
+  check('the log says it is an estimate, with the range', r.logs.some((l) => /^\[thinning\] dry run, nothing touched: would convert 12,345 files \(148\.00 GB of full video\) to time-lapse, freeing about 132\.50 GB \(an estimate from the index: 130\.60-134\.70 GB\)/.test(l)), JSON.stringify(r.logs))
+}
+{
+  // on: what it converted, what still waits, why it stopped early; a round that did not work says why
+  _test.reset()
+  const answer = { dryRun: false, files: 812, bytes: 9.7e9, freedBytes: 8.6e9, estimate: null, backlog: { files: 12_345, bytes: 148e9, oldestMs: T0, lagMs: 3_600_000, perHourBytes: 6e10 }, after: { files: 11_533, bytes: 138e9 }, decision: { work: true, night: true, why: 'night hours' }, stopped: 'the recorder reported "disk too slow" at 2026-10-02 17:03 UTC (n1/4): no more files this round, so recording keeps the disk', pace: { mbps: 40, atOnce: 3, text: '40 MB/s, 3 files at a time; nights 20:00-06:00 site time' }, thinned: files(812), skipped: [], warnings: [], protection: 'ranges' }
+  const r = await run('on', { thinning: async () => answer })
+  const t = r.runs.thinning
+  check('on: converted, what still waits, why it stopped, the pace', t.segments === 812 && t.after?.files === 11_533 && /disk too slow/.test(t.stopped) && t.decision?.why === 'night hours' && /40 MB\/s/.test(t.pace ?? ''), JSON.stringify(t))
+  check('... and the log says so', r.logs.some((l) => /^\[thinning\] converted 812 files to time-lapse, freed 8\.60 GB; 11,533 files \(138\.00 GB\) still waiting; stopped early: the recorder reported "disk too slow"/.test(l)), JSON.stringify(r.logs))
+  _test.reset()
+  const idle = { ...answer, files: 0, bytes: 0, freedBytes: 0, thinned: [], stopped: null, after: { files: 40, bytes: 4.8e8 }, decision: { work: false, night: false, why: 'waiting for the night (20:00-06:00 site time): it can convert the 0 GB waiting and what is recorded until then' } }
+  const q = await run('on', { thinning: async () => idle })
+  check('on, a round that waits for the night: its line says why', q.logs.some((l) => /^\[thinning\] on: nothing converted this round: waiting for the night .*; 40 files \(0\.48 GB\) waiting/.test(l)), JSON.stringify(q.logs))
+  _test.reset()
+  const late = { ...answer, stopped: "this round's 4 minutes were up (the rest waits for the next round)" }
+  const z = await run('on', { thinning: async () => late })
+  check('... the end of a round\'s minutes is not news in the log', z.logs.some((l) => /^\[thinning\] converted 812 files/.test(l) && !/stopped early/.test(l)), JSON.stringify(z.logs))
+}
+
 // ---- a job that throws ----------------------------------------------------------------------------------
 {
   _test.reset()
@@ -319,7 +351,7 @@ for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
 {
   const { readFileSync } = await import('node:fs')
   const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-  const body = server.match(/\nfunction thinAndRetain\(\) \{\n[\s\S]*?\n\}\n/)?.[0] ?? ''
+  const body = server.match(/\nfunction thinAndRetain\(.*?\) \{\n[\s\S]*?\n\}\n/)?.[0] ?? ''
   check('server.mjs has thinAndRetain calling runStorageJobs', /runStorageJobs\(\{/.test(body), body ? '' : 'no thinAndRetain found')
   check('...the switch read from settings.storage.thinning, each time it is asked', /\bmode: \(\) => getSettings\(\)\.storage\?\.thinning,/.test(body), body.match(/mode:[^\n]*/)?.[0])
   check('...the real jobs', /jobs: \{ thinning: runThinning, retention: runRetention \}/.test(body), body.match(/jobs:[^\n]*/)?.[0])
@@ -327,6 +359,15 @@ for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
   check('...the bookmarks asked (protectedRanges) and the location markers checked (present: markerMatches)', /\bprotectedRanges\b/.test(args) && /\bpresent: markerMatches\b/.test(args) && /\bsettings: getSettings\(\)/.test(args) && /\bindex\b/.test(args), args)
   check('...protectedRanges from bookmarks.mjs, markerMatches from storage.mjs, the jobs from thinning.mjs',
     /import \{[^}]*\bprotectedRanges\b[^}]*\} from '\.\/bookmarks\.mjs'/.test(server) && /import \{[^}]*\bmarkerMatches\b[^}]*\} from '\.\/storage\.mjs'/.test(server) && /import \{[^}]*\brunRetention, runThinning\b[^}]*\} from '\.\/thinning\.mjs'/.test(server))
+  // thinning converts for at most RUN_MS of each 5-minute round, counted from the round's start (before
+  // housekeeping), so a long housekeeping shortens it and the next round is never pushed back (Task 4)
+  check('...thinning\'s deadline: the round\'s start plus thin-pace.mjs RUN_MS', /\bdeadline: roundStart \+ THIN_RUN_MS\b/.test(args) && /function thinAndRetain\(roundStart = Date\.now\(\)\)/.test(body) && /import \{ RUN_MS as THIN_RUN_MS \} from '\.\/thin-pace\.mjs'/.test(server), args)
+  const tick = server.match(/setInterval\(\(\) => \{\n\s+if \(busy\) return[\s\S]*?\}, 5 \* 60_000\)/)?.[0] ?? ''
+  check('...the round\'s start taken before housekeeping, handed to thinAndRetain', /const roundStart = Date\.now\(\)\n\s+runHousekeeping\(/.test(tick) && /thinAndRetain\(roundStart\)/.test(tick), tick.slice(0, 300))
+  // "disk too slow" from the recorders reaches thin-pace.mjs (nvrs.mjs loads the SDK: its source is read here)
+  const nvrs = readFileSync(new URL('../nvrs.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const onRec = nvrs.match(/const onRecording = \(m\) => \{\n[\s\S]*?\n\}\n/)?.[0] ?? ''
+  check('nvrs.mjs hands every recorder gap to thin-pace.mjs noteRecorderGap (thinning stands back on "disk too slow")', /if \(m\.t === 'recgap'\) \{[\s\S]*?noteRecorderGap\(m\)/.test(onRec) && /import \{ noteRecorderGap \} from '\.\/thin-pace\.mjs'/.test(nvrs), onRec.slice(0, 400))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

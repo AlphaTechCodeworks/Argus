@@ -217,6 +217,7 @@ check('cycling unknown (no footage indexed there) still alerts only on a confide
   check('...the days the jobs work from', body.jobs.defaults.fullDays === 30 && body.jobs.defaults.retentionDays === 180 && body.jobs.defaults.timelapseS === 10 && body.jobs.defaults.after === 'timelapse', JSON.stringify(body.jobs.defaults))
   check('...how many cameras have days of their own', body.jobs.camerasOwnDays === 1, body.jobs.camerasOwnDays)
   check('...and no last run before there has been one', body.jobs.thinning === null && body.jobs.retention === null)
+  check('...and how fast and when time-lapse is written (thin-pace.mjs)', body.jobs.pace === '40 MB/s, 3 files at a time; nights 20:00-06:00 site time', body.jobs.pace)
   await runStorageJobs({
     mode: 'dry-run',
     index: {},
@@ -356,6 +357,21 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   check('no bookmarks asked but nothing in play: no alarm', v9b.lines[0].state === '' && v9b.lines[0].warnings.length === 0, JSON.stringify(v9b.lines[0]))
   const v9c = view({ thinning: run({ protection: 'unread', error: 'the bookmarks could not be read, so it stopped before touching anything', warnings: ['bookmarks could not be read (bookmarks table locked): nothing thinned this run'], warningCount: 1 }) })
   check('bookmarks unreadable: says it stopped, with the reason, and no "nothing was treated as bookmarked"', /failed: the bookmarks could not be read/.test(v9c.lines[0].text) && v9c.lines[0].warnings.some((w) => /table locked/.test(w)) && !v9c.lines[0].warnings.some((w) => /nothing was treated/.test(w)), JSON.stringify(v9c.lines[0]))
+  // thinning off the main thread (perf report Task 4, 2026-09-29): the dry run's figures are an estimate from
+  // the index; with the switch On, what still waits, why a round did not convert, why it stopped early
+  const e1 = view({ thinning: run({ segments: 12_345, bytes: 132.5e9, fullBytes: 148e9, estimate: { thinBytes: 15.5e9, low: 13.3e9, high: 17.4e9 }, backlog: { files: 12_345, bytes: 148e9, lagMs: 5 * 3_600_000 } }) })
+  check('dry run from the index: the full video it would convert, and what it frees as an estimate with its range', e1.lines[0].text === `Last run ${hhmm} (dry run): would convert 12,345 files (148 GB of full video), freeing about 133 GB (an estimate from the index: 131-135 GB) · the oldest 5.0 h past its full-video days`, e1.lines[0].text)
+  const onRun = (o) => run({ mode: 'on', dryRun: false, pace: '40 MB/s, 3 files at a time; nights 20:00-06:00 site time', ...o })
+  const e2 = view({ mode: 'on', thinning: onRun({ segments: 812, bytes: 8.6e9, fullBytes: 9.7e9, after: { files: 11_533, bytes: 138e9 }, backlog: { files: 12_345, bytes: 148e9, lagMs: 3_600_000 }, decision: { work: true, night: true, why: 'night hours' } }) })
+  check('on: converted, and what still waits', e2.lines[0].text === `Last run ${hhmm}: converted 812 files, freed 8.6 GB · still waiting: 11,533 files, 138 GB`, e2.lines[0].text)
+  const e3 = view({ mode: 'on', thinning: onRun({ after: { files: 40, bytes: 4.8e8 }, backlog: { files: 40, bytes: 4.8e8, lagMs: 3_600_000 }, decision: { work: false, night: false, why: 'waiting for the night (20:00-06:00 site time): it can convert the 0 GB waiting and what is recorded until then' } }) })
+  check('on, a round that did not convert: says why, and what waits', e3.lines[0].text === `Last run ${hhmm}: nothing converted: waiting for the night (20:00-06:00 site time): it can convert the 0 GB waiting and what is recorded until then · waiting: 40 files, 480 MB`, e3.lines[0].text)
+  const e4 = view({ mode: 'on', thinning: onRun({ segments: 3, bytes: 3e7, after: { files: 9, bytes: 1e8 }, stopped: 'the recorder reported "disk too slow" at 2026-10-02 20:03 UTC (n1/4): no more files this round, so recording keeps the disk' }) })
+  check('on, stopped early for the recorder: said, in amber', /· stopped early: the recorder reported "disk too slow"/.test(e4.lines[0].text) && e4.lines[0].state === 'warn', JSON.stringify(e4.lines[0]))
+  const e5 = view({ mode: 'on', thinning: onRun({ segments: 3, bytes: 3e7, after: { files: 9, bytes: 1e8 }, stopped: "this round's 4 minutes were up (the rest waits for the next round)" }) })
+  check('... but not the end of a round\'s minutes, which is how a round ends', !/stopped/.test(e5.lines[0].text) && e5.lines[0].state === '', e5.lines[0].text)
+  const e6 = view({ mode: 'on', pace: '40 MB/s, 3 files at a time; nights 20:00-06:00 site time' })
+  check('the plan says how fast and when it converts', /Time-lapse is written at 40 MB\/s, 3 files at a time; nights 20:00-06:00 site time first\.$/.test(e6.plan), e6.plan)
   const v10 = view({ thinning: run({}) }, at + 3 * 86_400_000)
   check('a last run more than a day ago gives the day too', /^Last run \d{1,2} [A-Z][a-z]{2} \d\d:\d\d/.test(v10.lines[0].text), v10.lines[0].text)
   check('an older server without the switch: nothing invented', jobsView(undefined).mode === null && jobsView(undefined).lines.every((l) => l.text === NOT_AVAILABLE))

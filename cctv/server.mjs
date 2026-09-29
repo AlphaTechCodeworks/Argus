@@ -134,6 +134,7 @@ import { handleLineAlert } from './line-actions.mjs'
 import { handleOsd } from './osd.mjs'
 import { MAX_SEGMENTS_PER_RUN, runRetention, runThinning } from './thinning.mjs'
 import { runStorageJobs } from './storage-jobs.mjs'
+import { RUN_MS as THIN_RUN_MS } from './thin-pace.mjs'
 import { detectEncoder } from './transcode.mjs'
 import { httpsOptions } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
@@ -182,7 +183,7 @@ startMemoryLog({
  * keeps what each job last did for that page and writes a summary line at most once an hour, so a
  * quiet journal can no longer mean either "found nothing" or "never ran".
  */
-function thinAndRetain() {
+function thinAndRetain(roundStart = Date.now()) {
   const index = recIndex()
   return runStorageJobs({
     // a function: read again before each job, so Off or Dry run set during a long thinning run holds
@@ -190,7 +191,10 @@ function thinAndRetain() {
     mode: () => getSettings().storage?.thinning,
     index,
     jobs: { thinning: runThinning, retention: runRetention },
-    args: () => ({ index, settings: getSettings(), protectedRanges, present: markerMatches }),
+    // deadline: thinning converts for at most RUN_MS (4 minutes) from the start of this 5-minute round,
+    // housekeeping's time included, so the round (and the next housekeeping) is never pushed back
+    // (thin-pace.mjs; perf report Task 4)
+    args: () => ({ index, settings: getSettings(), protectedRanges, present: markerMatches, deadline: roundStart + THIN_RUN_MS }),
     limit: MAX_SEGMENTS_PER_RUN
   })
 }
@@ -203,9 +207,10 @@ if (LIVE_WORKER) {
   setInterval(() => {
     if (busy) return
     busy = true
+    const roundStart = Date.now()
     runHousekeeping({ index: recIndex(), protectedRanges, present: markerMatches })
       .then(() => pruneAudit(auth.DATA_DIR)) // a year of audit is kept; older rows go with the rest
-      .then(() => thinAndRetain())
+      .then(() => thinAndRetain(roundStart))
       // pictures of events that are gone (event-snapshot.mjs; it never throws)
       .then(() => sweepSnapshots())
       .catch((e) => console.warn(`[housekeeping] failed: ${e.message}`))

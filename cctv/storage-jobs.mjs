@@ -45,21 +45,36 @@ const plural = (k, one, many) => `${n(k)} ${k === 1 ? one : many}`
 function record(job, mode, result, { at, tookMs = null, limit = null, error = null }) {
   const list = result ? (job === 'thinning' ? result.thinned : result.deleted) ?? [] : null
   const skipped = result?.skipped ?? null
+  // Since 2026-09-29 thinning's dry run counts from the index (`files`, no list of every file), and a
+  // skip can stand for many files (`files`: "900 files on a drive that is not mounted", one entry).
+  const files = result && Number.isFinite(result.files) ? result.files : list ? list.length : null
+  const weight = (s) => (Number.isFinite(s?.files) && s.files > 0 ? s.files : 1)
   const why = new Map()
-  for (const s of skipped ?? []) why.set(s.why, (why.get(s.why) ?? 0) + 1)
+  for (const s of skipped ?? []) why.set(s.why, (why.get(s.why) ?? 0) + weight(s))
   const warnings = result?.warnings ?? []
   // 'unread': asking the bookmarks threw and the job stopped before any file. That is a run that
   // did not happen, not one that found "nothing to convert" (its own warning has the reason).
   if (!error && result?.protection === 'unread') error = 'the bookmarks could not be read, so it stopped before touching anything'
+  const est = result?.estimate
   return {
     job,
     mode,
     dryRun: mode !== 'on',
     at,
     tookMs,
-    segments: list ? list.length : null,
+    segments: files,
     bytes: result ? Number(result.freedBytes) || 0 : null,
-    skipped: skipped ? skipped.length : null,
+    // thinning since 2026-09-29: the full video's own bytes (converted, or that would be); the dry run's
+    // time-lapse estimate with its range (so `bytes` is "about"); what still waits; why a round did not
+    // work, or stopped early; the pace
+    fullBytes: Number.isFinite(result?.bytes) ? result.bytes : null,
+    estimate: est ? { thinBytes: est.thinBytes, low: est.low, high: est.high, note: est.note ?? null } : null,
+    backlog: result?.backlog ? { files: result.backlog.files, bytes: result.backlog.bytes, oldestMs: result.backlog.oldestMs ?? null, lagMs: result.backlog.lagMs ?? null } : null,
+    after: result?.after ? { files: result.after.files, bytes: result.after.bytes } : null,
+    decision: result?.decision ? { work: Boolean(result.decision.work), night: Boolean(result.decision.night), why: String(result.decision.why ?? '') } : null,
+    stopped: result?.stopped ?? null,
+    pace: result?.pace?.text ?? null,
+    skipped: skipped ? skipped.reduce((a, s) => a + weight(s), 0) : null,
     skippedWhy: [...why].sort((a, b) => b[1] - a[1]).slice(0, MAX_REASONS).map(([w, k]) => ({ why: w, n: k })),
     warnings: warnings.slice(0, MAX_WARNINGS).map(String),
     warningCount: warnings.length,
@@ -71,7 +86,7 @@ function record(job, mode, result, { at, tookMs = null, limit = null, error = nu
     // The alarm: files were (or, in dry run, would have been) taken on with nobody asked which of
     // them are bookmarked. 'none' alone is not it: an empty index says 'none' too, having had
     // nothing to ask about, and was a red line and an hourly warning for nothing (review 2026-09-29).
-    unprotected: result?.protection === 'none' && (list?.length > 0 || skipped?.length > 0),
+    unprotected: result?.protection === 'none' && (files > 0 || skipped?.length > 0),
     error
   }
 }
@@ -86,12 +101,24 @@ export function summaryLine(r) {
     .filter(Boolean)
     .join(', ')
   const tail = extra ? `; ${extra}` : ''
-  if (!r.segments) return `${tag} ${how}: nothing to ${r.job === 'thinning' ? 'convert' : 'delete'}${tail}`
+  const waiting = r.after ? `${plural(r.after.files, 'file', 'files')} (${gb(r.after.bytes)})` : null
+  if (!r.segments) {
+    // a round with the switch On that did not convert says why (waiting for the night, disk too slow)
+    if (r.job === 'thinning' && !r.dryRun && r.decision && !r.decision.work && r.after?.files) return `${tag} on: nothing converted this round: ${r.decision.why}; ${waiting} waiting${tail}`
+    return `${tag} ${how}: nothing to ${r.job === 'thinning' ? 'convert' : 'delete'}${tail}`
+  }
   const verb = r.job === 'thinning' ? (r.dryRun ? 'would convert' : 'converted') : r.dryRun ? 'would delete' : 'deleted'
-  const what = `${verb} ${plural(r.segments, 'file', 'files')}${r.job === 'thinning' && !r.dryRun ? ' to time-lapse' : ''}, ${r.dryRun ? 'freeing' : 'freed'} ${gb(r.bytes)}`
+  // the dry run's time-lapse size is worked out from the index, not measured: "about", with its range
+  const est = r.job === 'thinning' && r.dryRun && r.estimate && Number.isFinite(r.fullBytes)
+  const full = est ? ` (${gb(r.fullBytes)} of full video) to time-lapse` : r.job === 'thinning' && !r.dryRun ? ' to time-lapse' : ''
+  const freed = est ? `freeing about ${gb(r.bytes)} (an estimate from the index: ${gb(r.fullBytes - r.estimate.high).replace(' GB', '')}-${gb(r.fullBytes - r.estimate.low)})` : `${r.dryRun ? 'freeing' : 'freed'} ${gb(r.bytes)}`
+  const what = `${verb} ${plural(r.segments, 'file', 'files')}${full}, ${freed}`
   const more = r.reachedLimit ? ' (the most one run takes on: there is more)' : ''
+  // on: what still waits, and why a round stopped before its minutes were up (not news when they were)
+  const left = r.job === 'thinning' && !r.dryRun && r.after ? `; ${waiting} still waiting` : ''
+  const early = r.job === 'thinning' && !r.dryRun && r.stopped && !/^this round's/.test(r.stopped) ? `; stopped early: ${r.stopped}` : ''
   // "[thinning] converted 12 files ..." rather than "[thinning] on: converted ...": what was done is the news
-  return `${tag} ${r.dryRun ? `${how}: ` : ''}${what}${more}${tail}`
+  return `${tag} ${r.dryRun ? `${how}: ` : ''}${what}${more}${left}${early}${tail}`
 }
 
 /** Keeps the run and writes its line if the rules at the top say so. */
@@ -151,14 +178,13 @@ export async function runStorageJobs({ mode, index, jobs, args, limit = null, cl
   }
   for (const job of JOBS) {
     // Read again before each job (review 2026-09-29): with the switch On a thinning run can take
-    // minutes (up to 2000 files read, rewritten, fsynced and read back over SMB), and an admin who
-    // set Off or Dry run meanwhile was told "Saved: Off" while retention went on to delete up to
-    // 2000 files in the same round. runThinning's file work is synchronous, so the save (an HTTP
-    // request) cannot even be handled until it is done: the event loop is let go round first, and a
-    // save that was waiting on a connection already open is in the settings before the switch is
-    // read. (A save on a brand-new connection needs more turns than that. Retention's file work waits
-    // on the locations' helpers since 2026-09-29, so saves are answered during it, and it asks armed()
-    // before each batch of files as well: thinning.mjs runRetention.)
+    // minutes (up to 4 of each 5-minute round since 2026-09-29), and an admin who set Off or Dry run
+    // meanwhile was told "Saved: Off" while retention went on to delete up to 2000 files in the same
+    // round. The event loop is let go round first, so a save that was waiting on a connection already
+    // open is in the settings before the switch is read. (A save on a brand-new connection needs more
+    // turns than that. Both jobs' file work waits on the locations' helpers since 2026-09-29, so saves
+    // are answered during it, and both ask armed() as they go: retention before each batch of files,
+    // thinning before each file and again just before each swap: thinning.mjs.)
     let sw = m
     if (job !== JOBS[0]) {
       await letTheLoopTurn()

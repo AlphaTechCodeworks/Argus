@@ -186,8 +186,19 @@ function planText(jobs) {
     d.after === 'timelapse' && d.fullDays < d.retentionDays
       ? `Full video for ${days(d.fullDays)}, then time-lapse (one picture every ${d.timelapseS} s) until day ${d.retentionDays}, then deleted.`
       : `Everything kept for ${days(d.retentionDays)}, then deleted.`
-  return jobs.camerasOwnDays ? `${main} ${cams(jobs.camerasOwnDays)} (Settings › Recording).` : main
+  const withCams = jobs.camerasOwnDays ? `${main} ${cams(jobs.camerasOwnDays)} (Settings › Recording).` : main
+  // how fast and when (thin-pace.mjs, 2026-09-29): the server says it, the page does not guess it
+  return jobs.pace && d.after === 'timelapse' && d.fullDays < d.retentionDays ? `${withCams} Time-lapse is written at ${jobs.pace} first.` : withCams
 }
+
+/** "131-135 GB" (one unit when both have it), else "930 MB-1.1 GB". */
+function range(lo, hi) {
+  const a = bytes(lo)
+  const b = bytes(hi)
+  const unit = (s) => s.split(' ')[1]
+  return unit(a) === unit(b) ? `${a.split(' ')[0]}-${b}` : `${a}-${b}`
+}
+const hoursPast = (ms) => `${(ms / 3_600_000).toFixed(1)} h`
 
 /** "16:05", or "1 Oct 16:05" when it was not in the last day. */
 function when(ms, now) {
@@ -205,9 +216,22 @@ function runLine(job, r, now) {
   // the job's own warnings go with it: for unreadable bookmarks they hold the reason
   if (r.error) return { job, label, text: `${head} failed: ${r.error}`, state: 'bad', warnings: [...(r.warnings ?? [])] }
   const thin = job === 'thinning'
+  const files = (n) => `${count(n)} ${n === 1 ? 'file' : 'files'}`
+  // thinning's dry run is worked out from the index since 2026-09-29 (no file is read): the size of the
+  // time-lapse, and so what it frees, is an estimate, said with its range
+  const est = thin && r.dryRun && r.estimate && Number.isFinite(r.fullBytes)
   let text = r.segments
-    ? `${head}: ${thin ? (r.dryRun ? 'would convert' : 'converted') : r.dryRun ? 'would delete' : 'deleted'} ${count(r.segments)} ${r.segments === 1 ? 'file' : 'files'}, ${r.dryRun ? 'freeing' : 'freed'} ${bytes(r.bytes)}`
-    : `${head}: nothing to ${thin ? 'convert' : 'delete'} yet`
+    ? est
+      ? `${head}: would convert ${files(r.segments)} (${bytes(r.fullBytes)} of full video), freeing about ${bytes(r.bytes)} (an estimate from the index: ${range(r.fullBytes - r.estimate.high, r.fullBytes - r.estimate.low)})`
+      : `${head}: ${thin ? (r.dryRun ? 'would convert' : 'converted') : r.dryRun ? 'would delete' : 'deleted'} ${files(r.segments)}, ${r.dryRun ? 'freeing' : 'freed'} ${bytes(r.bytes)}`
+    : thin && !r.dryRun && r.decision && !r.decision.work && r.after?.files
+      ? `${head}: nothing converted: ${r.decision.why}`
+      : `${head}: nothing to ${thin ? 'convert' : 'delete'} yet`
+  if (est && Number.isFinite(r.backlog?.lagMs) && r.backlog.lagMs > 0) text += ` · the oldest ${hoursPast(r.backlog.lagMs)} past its full-video days`
+  // with the switch On: what still waits, and why a round stopped before its minutes were up
+  if (thin && !r.dryRun && r.after?.files) text += ` · ${r.segments ? 'still waiting' : 'waiting'}: ${files(r.after.files)}, ${bytes(r.after.bytes)}`
+  const early = thin && !r.dryRun && r.stopped && !/^this round's/.test(r.stopped) ? r.stopped : null
+  if (early) text += ` · stopped early: ${early}`
   if (r.reachedLimit) text += r.dryRun ? ' — the most one run looks at, so there is more' : ' — the most one run takes on; the rest follows in the next runs'
   if (r.skipped) text += ` · ${count(r.skipped)} skipped${r.skippedWhy?.length ? ` (${r.skippedWhy.map((s) => `${s.why} ${count(s.n)}`).join(', ')})` : ''}`
   const warnings = [...(r.warnings ?? [])]
@@ -215,7 +239,7 @@ function runLine(job, r, now) {
   // Files in play and nobody asked which are bookmarked (storage-jobs.mjs `unprotected`); an empty
   // index also has nobody asked, and is no alarm.
   if (r.unprotected) warnings.unshift('Bookmarks could not be read: nothing was treated as bookmarked or exported.')
-  return { job, label, text, state: r.unprotected ? 'bad' : warnings.length ? 'warn' : '', warnings }
+  return { job, label, text, state: r.unprotected ? 'bad' : warnings.length || early ? 'warn' : '', warnings }
 }
 
 /**
