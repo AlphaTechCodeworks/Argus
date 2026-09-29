@@ -774,13 +774,18 @@ const firstB2 = exp2.find((f) => f.seg === cam2.segs[1].path)
   ws.command({ speed: 4 })
   await until(() => ws.bins.filter(isNvr).length >= 20, 5000)
   ws.command({ speed: 16 })
-  await until(() => ws.texts.some((m) => m.type === 'source' && m.src === 'server'), 5000)
-  await until(() => ws.log.slice(ws.log.findIndex((e) => e.text?.src === 'server')).some((e) => e.bin), 3000)
+  // The leg is the fake NVR's 450 frames of the 90 s hole, one per setInterval(4 ms) tick: 1.9 s on
+  // Linux, 7.5 s on Windows (16 ms timer ticks), so the wait is the 10 s of the 90 s gap test above.
+  // The first keyframe goes out a millisecond or two after source server (the new mode reads it from
+  // disk), so the wait is for a frame after that message: the opening {type:'started'} is src server
+  // too, and waiting on "src server" alone returned at once and looked in between (1 run in 5-10).
+  const srvAt = () => ws.log.findIndex((e) => e.text?.type === 'source' && e.text.src === 'server')
+  await until(() => srvAt() > 0 && ws.log.slice(srvAt() + 1).some((e) => e.bin), 10_000)
   const c = nvr.connects[0]
-  const iSrv = ws.log.findIndex((e) => e.text?.type === 'source' && e.text.src === 'server')
-  const first = ws.log.slice(iSrv + 1).find((e) => e.bin)?.bin
+  const iSrv = srvAt()
+  const first = iSrv > 0 ? ws.log.slice(iSrv + 1).find((e) => e.bin) : null
   check('16x during a leg: the NVR session gets 8x; the leg plays to the next file', J(c?.commands) === J([{ speed: 4 }, { speed: 8 }]) && iSrv > 0 && c.closed, J(c?.commands))
-  check('... then keyframes from the next file (keyframe mode), nothing from the NVR after source server', first?.key && !isNvr(first) && first.us === firstB2.us && ws.log.slice(iSrv).every((e) => !e.bin || !isNvr(e.bin)) && increasing(ws.bins), `${first?.tsMs - firstB2.ts}`)
+  check('... then keyframes from the next file (keyframe mode), nothing from the NVR after source server', first?.bin.key && !isNvr(first.bin) && first.bin.us === firstB2.us && ws.log.slice(iSrv).every((e) => !e.bin || !isNvr(e.bin)) && increasing(ws.bins), first ? `${first.bin.tsMs - firstB2.ts} ms from its first keyframe, ${(first.at - ws.log[iSrv].at).toFixed(1)} ms after source server` : `no frame after source server (${iSrv < 0 ? 'none' : `log ${iSrv}`})`)
   ws.close(1000)
 }
 {
