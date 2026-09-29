@@ -88,7 +88,8 @@ export class PhoneStream {
    * @param {{ source: { add: Function, remove: Function }, type: number, slot: { release: Function },
    *   makeTranscoder?: Function, onEmpty?: Function, log?: Function, stopDelayMs?: number, camera?: string,
    *   fps?: number, crf?: number, subKbps?: number, mainKbps?: number, maxWidth?: number,
-   *   bufSeconds?: number, lowDelay?: boolean, keySeconds?: number, h264Only?: boolean }} o
+   *   bufSeconds?: number, lowDelay?: boolean, keySeconds?: number, h264Only?: boolean, learnMs?: number,
+   *   slowFps?: number }} o
    *   camera: the camera as the log names it, the NVR and the channel from 1 ("nvr-2/5")
    *   fps: the rate to thin to, 0 for every frame (a remote viewer's level full: H.265 converted for
    *   a browser that cannot play it, nothing thinned); maxWidth: a main stream's, scaled down to it
@@ -101,12 +102,14 @@ export class PhoneStream {
    *   learnMs: the frame rate is decided after RATE_SAMPLES frames or this much of their capture time,
    *   whichever comes first, and until then a sub-stream's H.264 goes out as it comes (a remote
    *   viewer's: see #onSource); 0, not given (a phone): 12 frames, and nothing sent until then
+   *   slowFps: a source slower than this is converted picture by picture: low_delay, and each picture
+   *   ended as it goes in (a remote viewer's: a camera that trickles); 0, not given: as lowDelay says
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, background = false, camera = '?' }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, background = false, camera = '?' }) {
     // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
-    // viewer); bufSeconds / lowDelay / keySeconds / learnMs: how its conversion runs and starts (a phone
-    // on the local network gives none: the converter's own, as always)
-    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs })
+    // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps: how its conversion runs and starts
+    // (a phone on the local network gives none: the converter's own, as always)
+    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs, slowFps })
     // Every line names its camera. On 29 Sep they named none, and the 15-24 conversions a remote
     // viewer's level change started at once could only be matched to cameras by their timing
     // (stutter report 2.10).
@@ -116,6 +119,7 @@ export class PhoneStream {
     this.samples = []
     this.held = null // frames since the last keyframe, while the frame rate is being learned
     this.xcode = null
+    this.eachPicture = false // each picture ended as it goes in (slowFps)
     this.passthrough = false
     this.closed = false
     this.stopTimer = null
@@ -189,6 +193,13 @@ export class PhoneStream {
       // the camera's own frames sent while learning are not for anyone joining from now on: a socket
       // that joins waits for the conversion's first keyframe, as it always did
       this.gop = []
+      // A slow source is converted picture by picture. ffmpeg's parser holds a picture until the next
+      // one begins, and the second decoder thread (lowDelay false) one more: measured through the real
+      // ffmpeg on the server (29 Sep), an H.265 main at 0.8 fps came out 2.7 s after each frame, its
+      // first picture 3.9 s after its first keyframe. With low_delay and an end to each picture as it
+      // goes in (Transcoder.endPicture): 0.2 s, and 1.5 s. One decoder thread is plenty at that rate:
+      // it converts 4K H.265 at 24 pictures a second here (transcode.mjs DECODE_THREADS).
+      this.eachPicture = this.slowFps > 0 && fps > 0 && fps < this.slowFps
       this.xcode = this.makeTranscoder({
         inCodec: f.codec === CODEC_H265 ? CODEC_H265 : CODEC_H264,
         keepEvery,
@@ -197,7 +208,7 @@ export class PhoneStream {
         crf: this.crf,
         maxKbps: this.type === 0 ? this.mainKbps : this.subKbps,
         bufSeconds: this.bufSeconds,
-        lowDelay: this.lowDelay,
+        lowDelay: this.eachPicture || this.lowDelay,
         gop: this.keySeconds > 0 ? gopFor(fps, keepEvery, this.keySeconds) : 0,
         onFrame: (ts, isKey, out) => this.#onConverted(ts, isKey, out),
         onFail: (e) => this.log(`${this.who} conversion failed: ${e.message}`),
@@ -206,13 +217,18 @@ export class PhoneStream {
         log: (line) => this.log(`${this.who} ${line}`)
       })
       const what = this.fps > 0 ? `to about ${this.fps}: keeping 1 in ${keepEvery}` : 'to H.264, every frame kept'
-      this.log(`${this.who} converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps ${what}`)
+      this.log(`${this.who} converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps ${what}${this.eachPicture ? ', each picture out as it comes' : ''}`)
       const held = this.held ?? []
       this.held = null
-      for (const h of held) this.xcode.push(h.ts, h.isKey, h.payload)
+      for (const h of held) this.#push(h)
       if (held.at(-1) === f) return
     }
+    this.#push(f)
+  }
+
+  #push(f) {
     this.xcode.push(f.ts, f.isKey, f.payload)
+    if (this.eachPicture) this.xcode.endPicture?.()
   }
 
   #onConverted(ts, isKey, out) {

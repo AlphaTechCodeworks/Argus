@@ -48,8 +48,10 @@ export const LEVELS = Object.freeze([
  * And how soon it starts: a new stream learnt its frame rate from 12 frames and sent nothing until
  * then, 15 s on a camera trickling at 0.8 fps (report 2.9). Now 12 frames or 1 s of their capture time,
  * whichever comes first, a sub-stream's own H.264 going out as it comes meanwhile (PhoneStream learnMs).
+ * A source under 10 fps is then converted picture by picture (slowFps): the two decoder threads and
+ * ffmpeg's parser held two pictures back, 2.7 s each at 0.8 fps, where one thread has time to spare.
  */
-export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000 })
+export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10 })
 export const TICK_MS = 2000
 /** A socket with this much waiting to go out is a link that is not keeping up. */
 export const PRESSURE_BYTES = 256 * 1024

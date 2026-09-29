@@ -312,6 +312,17 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   check('  its rate decided at the second frame (1.25 s), not the 13th (15 s): sent as it is', logs.includes('[phone-live] nvr-2/31: a sub stream at 0.8 fps: sent as it is') && ws.got.length === 2 && made.length === 0, logs.join(' | '))
   clearInterval(live.timer)
 }
+{
+  // ...and a trickle that is converted lets each picture out as it goes in: ffmpeg held two back, 2.7 s
+  // each at 0.8 fps (measured through the real ffmpeg, 29 Sep). Under 10 fps: low_delay, each picture ended.
+  const { made, make } = converters()
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: make, log: () => {}, budgetBps: 1e9 })
+  const src = fakeSource('trickling h265 main')
+  live.attach('slow', { ws: fakeWs(), nvrId: 'nvr-2', ch: 0, type: 0, source: src, codec: 'h265' })
+  for (const i of [0, 1]) for (const v of [...src.viewers]) v.send(encodeFrame(Buffer.from([0, 0, 1, 1]), true, 1, i * 1250))
+  check('REMOTE_CONVERSION: a source under 10 fps is converted picture by picture', REMOTE_CONVERSION.slowFps === 10 && made.length === 1 && made[0].o.lowDelay === true, JSON.stringify(REMOTE_CONVERSION))
+  clearInterval(live.timer)
+}
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

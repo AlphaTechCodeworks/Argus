@@ -117,7 +117,7 @@ const makeTranscoder = (o) => {
 
 // ---- what a remote viewer's level asks of its stream (adaptive-live.mjs) ----
 // (REMOTE_CONVERSION there: how every level's conversion runs, and how soon it starts)
-const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000 }
+const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10 }
 {
   /** One PhoneStream fed `n` frames at `fps` (a keyframe every 12), with a fake converter. */
   const run = (opts, { type = 0, codec = 1, fps = 30, n = 24 } = {}) => {
@@ -216,7 +216,7 @@ const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000 }
 
   // a main is scaled down on a level, so it is always converted: none of its own frames goes out
   const main = feed({ fps: 15, ...REMOTE }, { type: 0 })
-  check('a remote viewer\'s H.264 main trickling at 0.8 fps (level 15): converted from the second frame, its first picture 1.25 s after the first keyframe (was 15 s)', main.out.length > 0 && main.out[0].at <= 1300 && main.out[0].converted && main.logs[0]?.l === '[phone-live] n1/1: converting a main stream at 0.8 fps to about 15: keeping 1 in 1', show(main))
+  check('a remote viewer\'s H.264 main trickling at 0.8 fps (level 15): converted from the second frame, its first picture 1.25 s after the first keyframe (was 15 s)', main.out.length > 0 && main.out[0].at <= 1300 && main.out[0].converted && main.logs[0]?.l === '[phone-live] n1/1: converting a main stream at 0.8 fps to about 15: keeping 1 in 1, each picture out as it comes', show(main))
   check('  the main\'s own frames never go out as they are (a level is there to send less than the main)', main.out.length > 0 && main.out.every((o) => o.converted), show(main))
   // an H.265 main at level full, for a PC that cannot play it: 29 Sep 04:03:55.9, nothing for 13 s
   const h265 = feed({ fps: 0, maxWidth: 1920, h264Only: true, ...REMOTE }, { type: 0, codec: 1 })
@@ -244,6 +244,45 @@ const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000 }
   // a phone on the local network is not a remote viewer: as before, by the local-network rule
   const phone = feed({}, { n: 14 })
   check('a phone on the local network: as before, nothing sent until 12 frames have been seen (15 s at 0.8 fps)', phone.out[0]?.at === 15000 && phone.logs[0]?.at === 15000, show(phone))
+}
+
+// ---- a trickle's conversion: each picture out as it goes in ----
+// ffmpeg's parser holds a picture until the next one begins, and a second decoder thread one more
+// (transcode.mjs): measured through the real ffmpeg on the server (29 Sep), a remote PC's conversion
+// of an H.265 main at 0.8 fps put out its first picture 3.9 s after the first keyframe and every
+// picture 2.7 s after it came. Under slowFps a remote viewer's conversion runs with low_delay (one
+// decoder thread, plenty at that rate) and ends each picture as it goes in (Transcoder.endPicture):
+// 1.5 s and 0.2 s.
+{
+  /** A PhoneStream fed `n` frames at `fps`, every one a keyframe, through a fake converter that notes its calls. */
+  const slow = (opts, { type = 0, codec = 1, fps = 0.8, n = 6 } = {}) => {
+    const src = fakeSource()
+    const calls = []
+    const xs = []
+    const logs = []
+    const s = new PhoneStream({
+      source: src, type, slot: { release() {} }, camera: 'n1/1', log: (l) => logs.push(l), ...opts,
+      makeTranscoder: (o) => {
+        const x = { o, push(ts) { calls.push(`push ${ts}`); o.onFrame(ts, true, Buffer.from([1])) }, endPicture() { calls.push('end') }, close() {} }
+        xs.push(x)
+        return x
+      }
+    })
+    s.add(fakeWs())
+    for (let i = 0; i < n; i++) src.emit(encodeFrame(Buffer.from([0, 0, 1, 1]), true, codec, (i * 1000) / fps))
+    return { calls, o: xs[0]?.o ?? {}, args: xs[0] ? ffmpegArgs(xs[0].o).join(' ') : '', logs }
+  }
+  const full = { fps: 0, maxWidth: 1920, h264Only: true, ...REMOTE }
+  const h265 = slow(full)
+  check('a remote PC\'s H.265 main at 0.8 fps (level full): converted with low_delay, no decoder threads to hold a picture back', h265.o.lowDelay === true && h265.args.includes('-flags low_delay') && !h265.args.includes('-threads'), h265.args)
+  check('  each picture ended as it goes in, so the parser lets it go at once', h265.calls.join(', ') === 'push 1250, end, push 2500, end, push 3750, end, push 5000, end, push 6250, end', h265.calls.join(', '))
+  check('  the log says so', h265.logs[0] === '[phone-live] n1/1: converting a main stream at 0.8 fps to H.264, every frame kept, each picture out as it comes', h265.logs.join(' | '))
+  const l15 = slow({ fps: 15, ...REMOTE }, { codec: 0, fps: 5, n: 8 })
+  check('a 5 fps H.264 main at level 15: the same (the 1 s of learning, then each picture ended)', l15.o.lowDelay === true && l15.calls.filter((c) => c === 'end').length === l15.calls.filter((c) => c.startsWith('push')).length && l15.calls.length > 0, l15.calls.join(', '))
+  const fast = slow(full, { fps: 20, n: 20 })
+  check('a 20 fps H.265 main at full: two decoder threads and nothing ended, as before (their speed is what 20 fps needs)', fast.o.lowDelay === false && fast.args.includes('-threads 2') && !fast.calls.includes('end') && fast.calls.length > 0, `${fast.args} | ${fast.calls.slice(0, 4)}`)
+  const phone = slow({}, { n: 14 })
+  check('a phone on the local network: its conversion as before (the converter\'s own low_delay, nothing ended)', phone.o.lowDelay === undefined && !phone.calls.includes('end') && phone.calls.length > 0, phone.calls.slice(0, 4).join(', '))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
