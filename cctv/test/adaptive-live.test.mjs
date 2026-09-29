@@ -1086,6 +1086,25 @@ const brief = (got, from, to) => got.filter((f) => f.at >= from && f.at <= to).m
   check('(a) a socket closing while it waits to switch: the conversion made for it closed, the slot back', waiting && waiting.closed && r.live.pool.active === 0 && r.live.streams.size === 0, `${r.live.pool.active} slots`)
 }
 {
+  // A stream made for one viewer's switch, another viewer on it meanwhile, who then leaves: its last
+  // socket gone, the streams it left behind were closed, this one too, from under the switch waiting for
+  // it (the review of ef43e60). That tile then waited out its switch, and a fresh stream's first keyframe.
+  const r = rig({ cams: [{ fps: 30 }] })
+  const [t] = r.tiles
+  const other = r.socket()
+  r.live.attach('other', { ws: other, nvrId: 'n1', ch: 0, type: 1, source: t.stream })
+  r.down(7000, [t.ws, other]) // both to 15: the first moved makes 15's stream and waits for the camera's keyframe at 8 s; the other joins it
+  const c15 = r.entry(t).switch?.to
+  const mine = [...r.live.viewers.get('other').sockets][0]
+  check('a stream of 15 made for one viewer\'s switch, and another viewer on it', c15 && mine.stream === c15, `${mine.stream === c15}`)
+  r.to(7500)
+  other.handlers.close()
+  check('  the other viewer leaves: the stream stays for the switch waiting for it', !c15.closed && r.entry(t).switch?.to === c15, `${c15.closed}`)
+  r.to(9000)
+  const s = seen(t.ws.got, 6000)
+  check('  which goes over to it at the camera\'s keyframe (8 s), as it would have: nothing older, no wait longer than the lag', r.entry(t).stream === c15 && !c15.closed && s.back === 0 && s.gap <= 101, `${JSON.stringify(s)} ${brief(t.ws.got, 7900, 8200)}`)
+}
+{
   // a level change while a climb's switch still waits (a camera with a keyframe every 6 s): back down
   // to the level it came from, it stays on the stream it never left
   const r = rig({ cams: [{ fps: 30, gopS: 6 }] })

@@ -617,7 +617,8 @@ export class AdaptiveLive {
     // It comes back one level above, if at all: the streams its sockets left at this level would keep
     // their conversion slots for their 10 s (phone-live.mjs STOP_DELAY_MS), and the level it comes back
     // to needs them. (At full they are its H.265 conversions, the same when it comes back: they stay.)
-    if (v.level > 0) for (const s of v.left) if (s.clients.size === 0) s.close()
+    // Not one another viewer's tile waits to switch to: made for that one, it would go from under it.
+    if (v.level > 0) for (const s of v.left) if (s.clients.size === 0 && !this.#awaited(s)) s.close()
     v.left.clear()
   }
 
