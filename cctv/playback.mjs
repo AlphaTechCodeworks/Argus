@@ -438,6 +438,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       this.throttled = false // by us, because the viewer's connection is backed up
       this.buffered = false // by us, because the pacing buffer is full
       this.nvrRunning = true
+      this.resuming = 0 // RESUMEs asked for that the NVR has not taken yet (#updateNvr)
       this.queue = [] // { ts, msg } waiting for their release time
       this.anchor = null // { wall, media }: media time `media` is released at wall time `wall`
       this.speed = 1
@@ -652,13 +653,19 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       const run = !this.paused && !this.throttled && !this.buffered
       if (run === this.nvrRunning) return
       this.nvrRunning = run
-      if (run) {
-        this.lastFrameAt = Date.now()
-        // playing again before any frame came (opened paused, then played): the 4 s for an SD
-        // picture start again, rather than having run out while nothing could come
-        if (!this.gotFrames) this.sdWait.restart()
+      if (!run) return this.#control(PLAYCTRL.PAUSE)
+      // the NVR plays again once it has taken the RESUME, which can wait its turn in the NVR's lane (the
+      // camera wall resumes every tile at once): until then #watch counts nothing as playing
+      this.resuming++
+      try {
+        await this.#control(PLAYCTRL.RESUME)
+      } finally {
+        this.resuming--
       }
-      await this.#control(run ? PLAYCTRL.RESUME : PLAYCTRL.PAUSE)
+      this.lastFrameAt = Date.now()
+      // playing again before any frame came (opened paused, then played): the 4 s for an SD
+      // picture start again, rather than having run out while nothing could come
+      if (!this.gotFrames) this.sdWait.restart()
     }
 
     async #control(code, value = 0) {
@@ -694,8 +701,8 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
     async #watch() {
       if (this.closed || this.handle <= 0) return
       // no SD frame after 4 s of the NVR really playing this session (hd-only.mjs SdWait: not before it
-      // has started, not while it is paused): this camera records HD only
-      const running = this.openedAt > 0 && this.nvrRunning && !this.paused
+      // has started, not while it is paused or a RESUME waits in the lane): this camera records HD only
+      const running = this.openedAt > 0 && this.nvrRunning && !this.resuming && !this.paused
       if (!this.gotFrames && !this.mainStream && this.sdWait.tick(Date.now(), running)) return this.#switchToMain()
       // flow control: pause the NVR while the viewer's connection is backed up
       const queued = this.ws.bufferedAmount
@@ -706,7 +713,9 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
         this.throttled = false
         await this.#updateNvr()
       }
-      if (this.nvrRunning && this.queue.length === 0 && Date.now() - this.lastFrameAt > IDLE_END_MS) {
+      // judged only while the NVR really plays: not before the session (or its main stream, after a
+      // switch) has started, which can take longer than 8 s on a busy NVR, nor while a RESUME waits
+      if (this.openedAt > 0 && this.nvrRunning && !this.resuming && this.queue.length === 0 && Date.now() - this.lastFrameAt > IDLE_END_MS) {
         this.send({ type: 'end' })
         this.lastFrameAt = Date.now()
       }
@@ -719,6 +728,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       this.mainStream = true
       // marked HD-only once main frames have come (#onFrame): a switch alone proves nothing
       this.markOnFrames = true
+      this.openedAt = 0 // not started again until the main stream is open (#watch judges nothing before)
       this.sdWait.restart()
       playFrames.release(old)
       await op(() => call(StopPlayBack, old), PRIORITY.HIGH).catch(() => {})

@@ -2,7 +2,7 @@
 // counted only while the NVR is really playing, and the list of them, which a slow NVR must not be
 // able to fill for good. Temp folder only; pure (no SDK), so it runs anywhere.
 //   node cctv/test/hd-only.test.mjs
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HD_ONLY_RETEST_MS, SD_FALLBACK_MS, SdWait, hdOnlyStore } from '../hd-only.mjs'
@@ -57,13 +57,24 @@ check('4 s for an SD picture, a week before a mark is tried again', SD_FALLBACK_
   const bad = hdOnlyStore({ file: join(dir, 'no-such-dir', 'x.json'), nvrId: 'n1', now: () => t, log: (l) => logs.push(l) })
   bad.mark(4)
   check('a file that cannot be written: kept in memory, said once, no throw', bad.has(4) && logs.length === 1)
+  // the server's clock stepped back: a mark dated after "now" would otherwise be trusted for longer than a week
+  writeFileSync(file, JSON.stringify({ n1: { 6: t + 60_000 } }))
+  check('a mark dated in the future (the clock was stepped back) is not trusted: tried in SD again', !hdOnlyStore({ file, nvrId: 'n1', now: () => t }).has(6))
+  const step = hdOnlyStore({ file: join(dir, 'step.json'), nvrId: 'n1', now: () => t })
+  step.mark(8)
+  t -= 5000
+  check('... nor one made just before the clock went back', !step.has(8))
+  rmSync(dir, { recursive: true, force: true })
 }
 
 // ---- playback.mjs uses it (read as text: playback.mjs loads the SDK, which this PC cannot) ---------------
 {
   const src = readFileSync(new URL('../playback.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-  check('playback.mjs: the wait counts only while the NVR plays the started session', /const running = this\.openedAt > 0 && this\.nvrRunning && !this\.paused\n\s*if \(!this\.gotFrames && !this\.mainStream && this\.sdWait\.tick\(Date\.now\(\), running\)\)/.test(src))
+  check('playback.mjs: the wait counts only while the NVR plays the started session', /const running = this\.openedAt > 0 && this\.nvrRunning && !this\.resuming && !this\.paused\n\s*if \(!this\.gotFrames && !this\.mainStream && this\.sdWait\.tick\(Date\.now\(\), running\)\)/.test(src))
   check('playback.mjs: ... from zero again when played again before any frame', /if \(!this\.gotFrames\) this\.sdWait\.restart\(\)/.test(src))
+  check('playback.mjs: ... counted from when the NVR took the RESUME (it can wait its turn in the lane), not from when it was asked', /this\.resuming\+\+\n\s*try \{\n\s*await this\.#control\(PLAYCTRL\.RESUME\)\n\s*\} finally \{\n\s*this\.resuming--\n\s*\}\n\s*this\.lastFrameAt = Date\.now\(\)\n(\s*\/\/.*\n)*\s*if \(!this\.gotFrames\) this\.sdWait\.restart\(\)/.test(src))
+  check('playback.mjs: "end" (no frame for 8 s) is judged only once the session has started and the NVR plays it', /if \(this\.openedAt > 0 && this\.nvrRunning && !this\.resuming && this\.queue\.length === 0 && Date\.now\(\) - this\.lastFrameAt > IDLE_END_MS\)/.test(src))
+  check('playback.mjs: ... nor while the main stream opens after a switch', /this\.markOnFrames = true\n\s*this\.openedAt = 0\b/.test(src))
   check('playback.mjs: the first SD frame clears a mark, the first main frame after a switch sets it', /if \(!this\.mainStream\) hdOnly\.unmark\(this\.ch\)\n\s*else if \(this\.markOnFrames\) \{/.test(src))
   check('playback.mjs: a switch alone marks nothing', !/markHdOnly\(this\.ch\)/.test(src) && /this\.markOnFrames = true/.test(src))
 }

@@ -31,7 +31,7 @@ export class SdWait {
 
   /**
    * Every watch tick (playback.mjs, 500 ms). running: the session has started, the viewer has not
-   * paused it and the NVR is playing it.
+   * paused it and the NVR is playing it (it has taken the last RESUME, not merely been asked).
    * @returns {boolean} the limit is reached with no SD frame
    */
   tick(now, running) {
@@ -84,8 +84,14 @@ export function hdOnlyStore({ file, nvrId, now = Date.now, retestMs = HD_ONLY_RE
     }
   }
   return {
-    /** Recorded in HD only, as last seen, and not so long ago that it is time to try SD again. */
-    has: (ch) => marks.has(ch) && now() - marks.get(ch) < retestMs,
+    /**
+     * Recorded in HD only, as last seen, and not so long ago that it is time to try SD again. A mark
+     * dated after now (the server's clock was stepped back) is not trusted: it could last for weeks.
+     */
+    has: (ch) => {
+      const age = now() - marks.get(ch) // NaN when not marked
+      return age >= 0 && age < retestMs
+    },
     /** Main frames came where SD did not: HD only, as of now. */
     mark(ch) {
       marks.set(ch, now())
