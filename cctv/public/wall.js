@@ -386,7 +386,11 @@ class Tile {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     // stream=1 is the camera's sub-stream (SD); server footage is always the main stream
     // h265: tells the server this browser cannot play H.265, so it converts (NVR sub-streams too)
-    const q = `nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${server ? 0 : 1}&start=${start}${server ? '&src=auto' : ''}&h265=${state.h265 ? 1 : 0}`
+    // original=1: the recording itself, also for a remote viewer (rec-playback.mjs converts a remote
+    // viewer's playback to fit the link while one of its two conversions is free). A wall's first two
+    // tiles would take both for as long as it stayed open, refusing a single camera that needs one,
+    // and every other tile would get the recording itself anyway.
+    const q = `nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&stream=${server ? 0 : 1}&start=${start}${server ? '&src=auto&original=1' : ''}&h265=${state.h265 ? 1 : 0}`
     const sock = new WebSocket(`${proto}://${location.host}/playback?${q}`)
     sock.binaryType = 'arraybuffer'
     sock.onopen = () => {
