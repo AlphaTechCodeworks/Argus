@@ -959,6 +959,8 @@ const onConnection = (ws, req) => {
     serveMux(ws, {
       // the session again on every "sub", as the upgrade checked it
       session: () => currentUser(req),
+      // for the log line of its close: remote (the tunnel, the tailnet) or not, as live-attach.mjs decides
+      who: isRemoteAddress(req.socket.remoteAddress) ? 'remote' : 'local',
       attach: (channel, sub, user) => {
         const nvr = nvrs.get(sub.nvr)
         if (!nvr) return channel.close(1013, 'unknown NVR')

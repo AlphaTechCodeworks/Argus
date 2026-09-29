@@ -43,7 +43,10 @@ export function gateSend(ws, isKey, { cap, resume = RESUME_BELOW, stuckMs = STUC
 
 /**
  * Pings every socket of wss every intervalMs; a socket that did not answer the previous ping
- * (dead peer, cable pulled: TCP alone never notices) is terminated.
+ * (dead peer, cable pulled: TCP alone never notices) is terminated, and marked so (closeCause):
+ * live-mux.mjs logs a page socket's close with it, since a 1006 alone reads the same as the tunnel
+ * dropping the connection. (The ping queues behind everything already sent, so a page socket far
+ * enough behind may be cut by this: stutter report 2.10.)
  * @returns {{ stop: () => void }}
  */
 export function keepAlive(wss, { intervalMs = PING_MS, setInterval: every = setInterval } = {}) {
@@ -54,6 +57,7 @@ export function keepAlive(wss, { intervalMs = PING_MS, setInterval: every = setI
   const timer = every(() => {
     for (const ws of wss.clients) {
       if (ws.isAlive === false) {
+        ws.closeCause = 'keep-alive: no answer to the last ping'
         ws.terminate()
         continue
       }

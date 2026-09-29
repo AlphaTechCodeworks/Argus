@@ -8,8 +8,8 @@ import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { WebSocket, WebSocketServer } from 'ws'
 import {
-  MAX_CHANNELS, MAX_MALFORMED, MAX_MESSAGE_BYTES, MESSAGE_BURST, MESSAGES_PER_S, SOCKET_CAP_BYTES, SOCKET_SOFT_BYTES,
-  SUB_BURST, SUBS_PER_S, serveMux
+  DRAIN_WINDOW_MS, MAX_CHANNELS, MAX_MALFORMED, MAX_MESSAGE_BYTES, MESSAGE_BURST, MESSAGES_PER_S, SOCKET_CAP_BYTES,
+  SOCKET_SOFT_BYTES, SUB_BURST, SUBS_PER_S, serveMux
 } from '../live-mux.mjs'
 import { StreamHub } from '../stream-hub.mjs'
 import { CAP_BYTES, STUCK_MS, gateSend } from '../backpressure.mjs'
@@ -98,7 +98,7 @@ class FakeSocket {
 }
 
 /** A mux on a fake socket; attach records each channel (or does what the test says). */
-function setup({ attach } = {}) {
+function setup({ attach, who } = {}) {
   const ws = new FakeSocket()
   const state = { user: 'ann', t: 0 }
   const attached = []
@@ -107,7 +107,8 @@ function setup({ attach } = {}) {
     session: () => state.user,
     attach: attach ?? ((channel, sub, user) => attached.push({ channel, sub, user })),
     now: () => state.t,
-    log: (l) => logs.push(l)
+    log: (l) => logs.push(l),
+    who
   })
   return { ws, mux, state, attached, logs }
 }
@@ -409,6 +410,79 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('the socket closing: the channel reads as closed and sends nothing', c.readyState === 3 && ws.sent.length === 0)
 }
 
+// ---- every close of a page's socket is logged: its code and reason, why, and what was still queued.
+// On 29 Sep a remote page was forgotten and restarted at full twice, and nothing said whether its
+// socket had been cut, by what, or how far behind it was (stutter report 2.10) ----
+{
+  const { ws, state, attached, logs } = setup({ who: 'remote' })
+  for (const id of [1, 2, 3]) ws.msg(sub(id))
+  attached[0].channel.send(frame(false, 1, 999_996)) // 1 MB with its id
+  state.t = 4000
+  ws.drain()
+  attached[0].channel.send(frame(false, 1, 1_999_996))
+  state.t = 812_000
+  ws.readyState = 3
+  ws.emit('close', 1001, Buffer.from('going away'))
+  check('a page\'s socket closing is logged: remote or local, how long it was open, code and reason, channels, still queued, drain rate, bytes written',
+    logs.at(-1) === '[live-mux] a remote page\'s socket closed after 812 s: code 1001 "going away"; 3 channels, 2.00 MB still queued, draining at 0.0 Mbit/s; 1.00 MB written in all (0.0 Mbit/s on average)', logs.at(-1))
+  ws.emit('close', 1006)
+  check('... once', logs.filter((l) => l.includes('socket closed')).length === 1)
+}
+{
+  // the keep-alive (backpressure.mjs) cut it: the line says so, not just 1006
+  const { ws, logs } = setup({ who: 'remote' })
+  ws.msg(sub(1))
+  ws.closeCause = 'keep-alive: no answer to the last ping'
+  ws.readyState = 3
+  ws.emit('close', 1006, Buffer.alloc(0))
+  check('... cut by the keep-alive: the line says so', /: code 1006 \(keep-alive: no answer to the last ping\); 1 channels, 0\.00 MB still queued, draining: idle;/.test(logs.at(-1)), logs.at(-1))
+}
+{
+  // closed by the server itself (too many requests, bad messages, signed out): the reason it gave
+  const { ws, logs } = setup()
+  ws.msg(sub(1))
+  ws.msg({ op: 'sub', id: 2, nvr: 'n1', ch: 3, stream: 1 })
+  for (let i = 0; i <= MAX_MALFORMED; i++) ws.msg('not json')
+  ws.emit('close', 1008, Buffer.from('bad messages'))
+  check('... closed by the server: the reason it gave, and the channels it had then', /^\[live-mux\] a page's socket closed after 0 s: code 1008 "bad messages" \(closed by the server: bad messages\); 2 channels,/.test(logs.at(-1)), logs.at(-1))
+}
+
+// ---- the page's socket's drain rate: bytes written a second while it had something queued, from
+// ws's write callbacks, over the last DRAIN_WINDOW_MS (adaptive-live logs it at every level change;
+// verify-1: queued bytes alone say nothing about how long they take to go) ----
+{
+  const { ws, state, attached } = setup()
+  ws.msg(sub(1))
+  const c = attached[0].channel
+  check('drainBps: nothing queued yet, so no rate (null)', c.drainBps === null, String(c.drainBps))
+  for (let i = 0; i < 4; i++) c.send(frame(false, 1, 99_996)) // 100 KB each with its id
+  for (let i = 1; i <= 4; i++) {
+    state.t = i * 250
+    ws.drain(1)
+  }
+  check('4 x 100 KB written over the 1 s they were queued: 400 KB/s', Math.round(c.drainBps) === 400_000, String(c.drainBps))
+  state.t = 3000
+  check('... idle since: still the rate it drained at while it had something to write', Math.round(c.drainBps) === 400_000, String(c.drainBps))
+  state.t = 1000 + DRAIN_WINDOW_MS + 1
+  check('... nothing queued for a whole window: no rate', c.drainBps === null, String(c.drainBps))
+  // a slower stretch, queued throughout: the window holds only it
+  const t0 = state.t
+  for (let i = 0; i < 12; i++) c.send(frame(false, 1, 99_996))
+  for (let i = 1; i <= 8; i++) {
+    state.t = t0 + i * 1000
+    ws.drain(1)
+  }
+  check('a backlog written at 100 KB a second: the rate over the last window is that', Math.abs(c.drainBps - 100_000) < 2000, String(c.drainBps))
+  check('... the same on every channel of the page', (ws.msg(sub(2)), attached[1].channel.drainBps === c.drainBps))
+  // a burst written within a few ms (into the kernel's buffer, not over the link): too short to say
+  const { ws: ws2, state: st2, attached: at2 } = setup()
+  ws2.msg(sub(1))
+  at2[0].channel.send(frame(true, 1, 600_000))
+  st2.t = 20
+  ws2.drain()
+  check('... 600 KB gone in 20 ms: too little busy time to call it a rate (null)', at2[0].channel.drainBps === null, String(at2[0].channel.drainBps))
+}
+
 // ---- bufferedAmount: each channel's own part of the socket's queue ----
 {
   const { ws, mux, attached } = setup()
@@ -582,7 +656,7 @@ const fanOut = (c, buf, isKey, type, now) => {
 
 // ---- terminate: the whole socket, every channel ----
 {
-  const { ws, mux, state, attached } = setup()
+  const { ws, mux, state, attached, logs } = setup()
   for (const id of [1, 2]) ws.msg(sub(id))
   const counts = attached.map((a) => closeCounter(a.channel))
   attached[0].channel.send(frame(true, 1, 1000))
@@ -593,6 +667,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   await tick()
   await tick()
   check('... their handlers run once, also after the socket\'s own close', counts.every((n) => n.v === 1))
+  check('... and the close is logged as that, with the channels it had', /: code 1006 \(nothing written for 30 s\); 2 channels, 0\.00 MB still queued, draining at 0\.0 Mbit\/s;/.test(logs.at(-1)), logs.at(-1))
 }
 
 // ---- in the real pipeline: HubStream, gateSend, sub-bridge ----
@@ -806,6 +881,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('/live-mux is served right after meterSocket, before the NVR lookup', /meterSocket\(ws, [^)]*\)\n[\s\S]*?if \(url\.pathname === '\/live-mux'\) \{\n\s*serveMux\(ws,/.test(conn) && conn.indexOf("'/live-mux'") < conn.indexOf('nvrs.get('))
   check('/live and every mux channel go through the same attachLive (live-attach.mjs)', (src.match(/attachLive\((ws|channel), req,/g) ?? []).length === 2 && /const attachLive = liveAttacher\(\{ can, currentUser, adaptiveLive, phoneLive, track: watch\.track \}\)/.test(src) && !/function attachLive/.test(src))
   check('the session is checked again for each sub', /session: \(\) => currentUser\(req\)/.test(src))
+  check('the page socket\'s close is logged as remote or local, by the rule live-attach uses', /serveMux\(ws, \{[\s\S]{0,400}?who: isRemoteAddress\(req\.socket\.remoteAddress\) \? 'remote' : 'local'/.test(src))
 }
 
 // ---- over a real ws socket ----

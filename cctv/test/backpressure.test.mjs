@@ -140,6 +140,9 @@ const fakeWs = (buffered = 0) => ({
   handlers.get(ok)() // pong from ok only
   timers[0].fn()
   check('keepAlive: a socket without a pong is terminated', dead.terminated === 1 && ok.terminated === 0 && ok.pings === 2)
+  // ...and marked as cut by it: live-mux.mjs logs every page socket's close with its cause, and a
+  // 1006 alone reads the same as the tunnel dropping it (stutter report 2.10)
+  check('keepAlive: ... and marked as cut by it (closeCause, for the close\'s log line)', dead.closeCause === 'keep-alive: no answer to the last ping' && ok.closeCause === undefined, String(dead.closeCause))
   ka.stop?.()
 }
 
