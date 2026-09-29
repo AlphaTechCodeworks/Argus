@@ -684,6 +684,12 @@ hk.reset()
     check('... and says so once per stretch, not once per row', runs.every((x) => x.skipped <= CAMS), runs.map((x) => x.skipped).join())
     check('... the main thread\'s longest busy stretch well under 50 ms, each run', runs.every((x) => x.busy < 50), runs.map((x) => x.busy.toFixed(1)).join(', '))
   }
+  // the databases of this block are 50-100 MB a run: not left in the temp folder (they were, 1.8 GB of
+  // them by 2026-09-29)
+  try {
+    rmSync(bigDir, { recursive: true, force: true, maxRetries: 5 })
+    rmSync(root, { recursive: true, force: true, maxRetries: 5 })
+  } catch {}
 }
 
 // ---- server.mjs hands housekeeping the bookmarks and the marker check ------------------------------------
