@@ -3,6 +3,7 @@
 import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, TICK_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
 import { encodeFrame } from '../phone-live.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
+import { camera, openPage } from './remote-page.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -37,6 +38,13 @@ function fakeSource(name) {
 function fakeWs() {
   return { OPEN: 1, readyState: 1, bufferedAmount: 0, got: [], handlers: {}, send(b) { this.got.push(b) }, on(e, f) { this.handlers[e] = f } }
 }
+// A camera stream as the fan-out has it: a new viewer (or a level's stream joining it) is sent its GOP.
+function gopSource(fps, n = 20) {
+  const gop = fps > 0 ? Array.from({ length: n }, (_, i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i === 0, 0, (i * 1000) / fps)) : []
+  return { gop, viewers: new Set(), add(ws) { this.viewers.add(ws); for (const f of gop) ws.send(f) }, remove(ws) { this.viewers.delete(ws) } }
+}
+/** A link that cannot keep up, as plainly as it shows: each socket held over its cap for 3 s at this look. */
+const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 3000 }
 {
   let now = T
   const logs = []
@@ -46,14 +54,15 @@ function fakeWs() {
   live.attach('session-a', { ws, nvrId: 'n1', ch: 0, type: 1, source: src })
   const v = live.viewers.get('session-a')
   check('a remote viewer starts on the camera own stream (no wait for a conversion)', LEVELS[v.level].id === 'full' && src.viewers.has(ws))
-  ws.bufferedAmount = 1e6
   now += SETTLE_MS
+  heldAt([ws], now)
   live.tick()
   check('its link backing up: onto the shared 15 fps stream', LEVELS[v.level].id === '15' && !src.viewers.has(ws) && live.streams.size === 1, logs.at(-1))
   now += SETTLE_MS
+  heldAt([ws], now)
   live.tick()
   check('still backing up: 8 fps', LEVELS[v.level].id === '8')
-  ws.bufferedAmount = 0
+  ws.overSince = null
   now += CLIMB_AFTER_MS
   live.tick()
   check('clean for 20 s: back up to 15', LEVELS[v.level].id === '15')
@@ -147,9 +156,11 @@ function fakeWs() {
   const ws = [channel(), channel(), channel()]
   ws.forEach((w, i) => live.attach('link', { ws: w, nvrId: 'nvr-2', ch: i, type: 1, source: fakeSource(`cam${i}`) }))
   page.sharedBufferedAmount = 1_900_000
-  page.drainBps = 600_000 // 4.8 Mbit/s
-  ws[2].overSince = T
-  now += SETTLE_MS
+  page.drainBps = 600_000 // 4.8 Mbit/s: 3.2 s to go, at this look and the next
+  now += TICK_MS
+  live.tick()
+  now += TICK_MS
+  ws[2].overSince = now - 1000 // held over its cap for a second
   live.tick()
   check('a step down logs the queue, its drain rate and how long it takes, those held over their cap, and the tiles left raw for want of a slot',
     logs.at(-1) === '[adaptive] link: full -> 15 (video backing up on its link; 3 cameras; 1.90 MB queued, draining at 4.8 Mbit/s (3.2 s), 1 held over its cap; 2 on the raw stream for want of a conversion slot, 0 of 1 free)', logs.at(-1))
@@ -161,32 +172,30 @@ function fakeWs() {
   // (the level it left gives its slot back there and then: 1 of 1 free)
   check('a climb logs the same, with an idle link', logs.at(-1) === '[adaptive] link: 15 -> full (clean for 20 s; 3 cameras; 0.00 MB queued, draining: idle; 0 on the raw stream for want of a conversion slot, 1 of 1 free)', logs.at(-1))
   // a burst queued just before the look: too little busy time yet to say how fast it drains, which
-  // is not "idle" with megabytes queued (review of 29 Sep)
+  // is not "idle" with megabytes queued (review of 29 Sep); the step is a tile's, held over its cap
   page.sharedBufferedAmount = 1_900_000
   now += SETTLE_MS
+  heldAt([ws[2]], now)
   live.tick()
-  check('... megabytes queued, no rate yet: "not measured yet", not "idle"', logs.at(-1).includes('; 1.90 MB queued, draining: not measured yet;'), logs.at(-1))
+  check('... megabytes queued, no rate yet: "not measured yet", not "idle"', logs.at(-1).includes('; 1.90 MB queued, draining: not measured yet,'), logs.at(-1))
   page.sharedBufferedAmount = 0
+  ws[2].overSince = null
   now += CLIMB_AFTER_MS
   live.tick()
   // a viewer on plain /live sockets (no page socket to measure): the queue, and no rate
   const solo = fakeWs()
   live.attach('solo', { ws: solo, nvrId: 'n1', ch: 9, type: 1, source: fakeSource('cam9') })
+  solo.send(Buffer.alloc(300_000)) // a frame, handed to the socket and not written yet
   solo.bufferedAmount = 300_000
-  now += SETTLE_MS
+  now += TICK_MS
+  live.tick()
+  now += TICK_MS
   live.tick()
   check('... a plain /live socket: its queue, no drain rate', logs.some((l) => l.startsWith('[adaptive] solo: full -> 15 (video backing up on its link; 1 camera; 0.30 MB queued; ')), logs.join(' | '))
   clearInterval(live.timer)
 }
 
 // ---- conversion slots at a level change (verify-1) ----
-// A camera stream as the fan-out has it: a new viewer (or a level's stream joining it) is sent its GOP.
-function gopSource(fps, n = 20) {
-  const gop = fps > 0 ? Array.from({ length: n }, (_, i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i === 0, 0, (i * 1000) / fps)) : []
-  return { gop, viewers: new Set(), add(ws) { this.viewers.add(ws); for (const f of gop) ws.send(f) }, remove(ws) { this.viewers.delete(ws) } }
-}
-/** Held over its cap for 3 s at every look: pressure, whatever else the rules say. */
-const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 3000 }
 {
   // verify-1's replay of the 03:55 page: 16 sub tiles, 4 at 20.6 fps (sent as they are at 15), 6 at
   // 30 fps (converted at every level) and 6 cold (a level's stream for them keeps its slot while it
@@ -258,6 +267,215 @@ const heldAt = (socks, now) => { for (const ws of socks) ws.overSince = now - 30
   clearInterval(live.timer)
 }
 
+// ---- pressure: what a page has queued against how fast its socket drains (stutter report 2.1) ----
+// It was any queue over 256 KB at one look, and on 29 Sep all 12 steps down said "video backing up": a
+// page opening or a level change queues more than that by itself, and it was still going out at the
+// next look, so the next step followed (full to 4 fps in 10 s, three times).
+/** A page's /live-mux socket as its channels show it: the whole queue, its drain rate, what it has written. */
+function fakePage() {
+  const page = { queued: 0, drainBps: null, written: 0 }
+  page.channel = () => ({ ...fakeWs(), overSince: null, get sharedBufferedAmount() { return page.queued }, get drainBps() { return page.drainBps }, get writtenBytes() { return page.written } })
+  return page
+}
+/** A viewer on a fake page of n tiles, looked at twice: past its opening (nothing queued then) and settled. */
+function onPage(key, n = 2) {
+  const clock = { now: T }
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => clock.now })
+  const page = fakePage()
+  const socks = Array.from({ length: n }, (_, i) => {
+    const ws = page.channel()
+    live.attach(key, { ws, nvrId: 'n1', ch: i, type: 1, source: fakeSource(`cam${i}`) })
+    return ws
+  })
+  clearInterval(live.timer)
+  const look = () => {
+    clock.now += TICK_MS
+    live.tick()
+  }
+  look()
+  look()
+  return { live, page, socks, logs, look, clock, v: live.viewers.get(key) }
+}
+{
+  const { page, look, v, logs } = onPage('slow')
+  page.queued = 1_500_000
+  page.drainBps = 625_000 // 5 Mbit/s: 2.4 s to go
+  look()
+  check('a queue of 2.4 s at one look: not yet', v.level === 0, logs.at(-1))
+  page.queued = 400_000 // 0.6 s
+  look()
+  check('... 0.6 s at the next: the look before no longer counts', v.level === 0)
+  page.queued = 1_500_000
+  look()
+  check('... over a second again: one look', v.level === 0)
+  look()
+  check('... and at the next: two looks in a row, one level down', v.level === 1 && logs.at(-1).includes('full -> 15 (video backing up on its link; 2 cameras; 1.50 MB queued, draining at 5.0 Mbit/s (2.4 s);'), logs.at(-1))
+}
+{
+  const { page, look, v, logs } = onPage('fast')
+  page.queued = 300_000
+  page.drainBps = 12_500_000 // 100 Mbit/s: 0.02 s
+  look()
+  look()
+  look()
+  check('300 KB queued on a link that writes it in 0.02 s, three looks: not pressure (it was, over 256 KB)', v.level === 0, logs.at(-1))
+  page.queued = 1_500_000
+  page.drainBps = null // queued too lately to say how fast it goes
+  look()
+  look()
+  check('... 1.5 MB with no rate measured yet: not read as over', v.level === 0, logs.at(-1))
+  page.drainBps = 0 // busy, and nothing written: a link that stopped
+  look()
+  look()
+  check('... busy and nothing written: over, and down at the second look', v.level === 1, logs.at(-1))
+}
+{
+  const { socks, look, v, logs, clock } = onPage('held')
+  socks[0].overSince = clock.now + TICK_MS - 1500
+  look()
+  check('a tile held over its cap for 1.5 s: not yet', v.level === 0, logs.at(-1))
+  look()
+  check('... for 3.5 s: down at once, no second look needed (a frozen tile; verify-1)', v.level === 1 && logs.at(-1).includes('full -> 15 (a tile held over its cap for more than 2 s; 2 cameras;'), logs.at(-1))
+}
+{
+  // a plain /live socket has no drain meter: its queue over 256 KB stands for over a second, two looks too
+  let now = T
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9, now: () => now })
+  const ws = fakeWs()
+  ws.send = function (b) { this.bufferedAmount += b.length } // queued until written
+  live.attach('plain', { ws, nvrId: 'n1', ch: 0, type: 1, source: fakeSource('cam') })
+  const v = live.viewers.get('plain')
+  now += 2 * TICK_MS
+  live.tick()
+  ws.send(Buffer.alloc(300_000))
+  now += TICK_MS
+  live.tick()
+  check('a plain /live socket, 300 KB queued: one look, not yet', v.level === 0)
+  now += TICK_MS
+  live.tick()
+  check('... two: down', v.level === 1)
+  clearInterval(live.timer)
+}
+
+// ---- what a page opening or a level change queues by itself goes out first (verify-1) ----
+{
+  // The page opens: its tiles' replays (and a stand-in's) are queued as each one is attached, 2.1 MB
+  // in all, 3.4 s of a 5 Mbit/s link.
+  let now = T
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => now })
+  const page = fakePage()
+  page.drainBps = 625_000
+  for (let i = 0; i < 3; i++) {
+    page.queued += 700_000
+    live.attach('opening', { ws: page.channel(), nvrId: 'n1', ch: i, type: 1, source: fakeSource(`cam${i}`) })
+  }
+  const v = live.viewers.get('opening')
+  for (let i = 0; i < 3; i++) {
+    now += TICK_MS
+    live.tick()
+  }
+  check('a page opening with 2.1 MB of its own replays queued (3.4 s): not read at 2, 4 or 6 s while they go out', v.level === 0, logs.at(-1))
+  page.written = 2_100_000 // gone; behind them, 1.4 s of what the cameras sent meanwhile
+  page.queued = 900_000
+  now += TICK_MS
+  live.tick()
+  check('... once they have gone the queue is read: one look over a second', v.level === 0)
+  now += TICK_MS
+  live.tick()
+  check('... two: down', v.level === 1, logs.at(-1))
+  clearInterval(live.timer)
+}
+{
+  // ...and for 8 s at most: an opening's replays that do not go out at all are the link's doing
+  let now = T
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9, now: () => now })
+  const page = fakePage()
+  page.drainBps = 0
+  page.queued = 2_100_000
+  live.attach('stuck', { ws: page.channel(), nvrId: 'n1', ch: 0, type: 1, source: fakeSource('cam') })
+  const v = live.viewers.get('stuck')
+  const levels = []
+  for (let i = 0; i < 5; i++) {
+    now += TICK_MS
+    live.tick()
+    levels.push(v.level)
+  }
+  check('... nothing of them written: not read before 8 s, then two looks (8 and 10 s): down at 10 s', levels.join() === '0,0,0,0,1', levels.join())
+  clearInterval(live.timer)
+}
+{
+  // After a level change: what was queued just after it (the new streams' first keyframes behind what
+  // was already there) goes out before the queue is read again. A tile held over its cap is not hidden.
+  const { page, socks, look, v, logs, clock } = onPage('moved', 3)
+  page.queued = 1_500_000
+  page.drainBps = 625_000
+  look()
+  look()
+  check('two looks over a second: down to 15', v.level === 1, logs.at(-1))
+  page.queued = 1_800_000 // not written yet: what was queued at the move, and more
+  look()
+  look()
+  check('... 1.5 MB queued at the move not gone yet: 2.9 s queued at two settled looks, no second step', v.level === 1, logs.at(-1))
+  page.written = 1_500_000 // gone
+  page.queued = 1_000_000 // 1.6 s of what level 15 sends: still too much
+  look()
+  check('... once gone: read again, one look', v.level === 1)
+  look()
+  check('... two: down to 8', v.level === 2, logs.at(-1))
+  socks[0].overSince = clock.now + 2 * TICK_MS - 3000
+  look()
+  look()
+  check('... in the next level change\'s grace, a tile held over its cap for 3 s: down at the first settled look', v.level === 3, logs.at(-1))
+}
+{
+  // Only a page opening or a level change: a tile opening later has no grace of its own. Under a real
+  // overload tiles with no picture for 8 s reconnect (live-tile.js), and a grace for each would never
+  // let the queue be read (verify-1).
+  const { page, look, v, live, logs } = onPage('later')
+  page.drainBps = 625_000
+  page.queued = 1_500_000 // its replay: 2.4 s
+  live.attach('later', { ws: page.channel(), nvrId: 'n1', ch: 9, type: 1, source: fakeSource('cam9') })
+  look()
+  check('a tile opening later with 1.5 MB of replay: read at once, one look', v.level === 0, logs.at(-1))
+  look()
+  check('... two: down', v.level === 1, logs.at(-1))
+}
+
+// ---- replays of a page over a link of a set rate (remote-page.mjs: the real mux, fan-out and stand-ins) ----
+{
+  // The 03:55 page open on 29 Sep (stutter report Task 4): 16 nvr-2 sub tiles on one socket over a
+  // 5 Mbit/s link. 5 sub-streams already running (their GOP replayed at once) and 11 cold, starting when
+  // the journal has them start (1.05 to 29.32 s after the page opened); for the H.264 mains of three of
+  // those (cams 10, 17, 21) the stand-in's replay: keyframes of 634, 499 and 243 KB, GOPs of 1279, 950
+  // and 690 KB (ev-remote, verify-6), 2.6 MB at once. Each sub 250 kbit/s at 18-30 fps, a keyframe every
+  // 2 s: 4 Mbit/s once all 16 run, which the link carries with a fifth to spare, as the tunnel carried
+  // the page at full for 11 minutes that night. Left out: the stand-ins' frames after their replay,
+  // 2-5 Mbit/s each for up to 27 s, more than this link carries at any level (a level cannot thin a
+  // stand-in; verify-6: that is the stand-ins' question, report 2.6).
+  const cold = [1.05, 2.16, 3.35, 4.72, 6.51, 8.58, 10.27, 12.25, 24.38, 27.13, 29.32]
+  const coldCh = [2, 3, 4, 6, 7, 9, 16, 18, 19, 20, 21] // cams 3, 4, 5, 7, 8, 10, 17, 19, 20, 21, 22
+  const warmCh = [0, 1, 5, 17, 22] // cams 1, 2, 6, 18, 23
+  const fps = [20.6, 20.6, 30, 30, 18.3, 20.6, 30, 25.4, 30, 30, 20, 20, 25.4, 27.5, 30, 20]
+  const standIn = { 9: [634, 1279], 16: [499, 950], 20: [243, 690] }
+  const tiles = [
+    ...warmCh.map((ch, i) => ({ ch, cam: camera({ fps: fps[i], kbps: 250, from: -5000 - i * 413 }) })),
+    ...coldCh.map((ch, i) => ({ ch, cam: camera({ fps: fps[5 + i], kbps: 250, from: cold[i] * 1000 }), standIn: standIn[ch] }))
+  ]
+  const open = openPage({ tiles, linkMbps: 5, durMs: 60_000 })
+  check('the 03:55 page open over 5 Mbit/s: no step down in 60 s (it stepped full -> 15 at 4 s, 1.48 MB queued, 2.4 s)', open.downs.length === 0, open.downs.join(' | '))
+  const slow = openPage({ tiles, linkMbps: 3, durMs: 60_000 })
+  check('... the same page on 3 Mbit/s, less than its 4 Mbit/s: it still steps down', slow.downs.length > 0, slow.lines.join(' | '))
+}
+{
+  // A real overload: 16 sub tiles of 0.5 Mbit/s (25 fps) into a 2 Mbit/s link, four times what it carries
+  const tiles = Array.from({ length: 16 }, (_, i) => ({ ch: i, cam: camera({ fps: 25, kbps: 500, from: -3000 - i * 137 }) }))
+  const r = openPage({ tiles, linkMbps: 2, durMs: 12_000 })
+  const first = Number.parseFloat(r.downs[0] ?? 'NaN')
+  check('a real overload, 16 x 0.5 Mbit/s into 2 Mbit/s: the first step down within 6 s', first <= 6, r.lines.join(' | '))
+}
+
 // ---- conversions for a PC through the tunnel (stutter report 2.7) ----
 // A converter that hands back every frame it keeps, and the frames a source sends its viewers.
 function converters() {
@@ -304,10 +522,10 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   src.gop = [encodeFrame(Buffer.from([0, 0, 1, 1]), true, 0, 0)]
   const ws = fakeWs()
   live.attach('steps', { ws, nvrId: 'n1', ch: 1, type: 1, source: src })
-  ws.bufferedAmount = 1e6
   const seen = []
   for (const id of ['15', '8', '4']) {
     now += SETTLE_MS
+    heldAt([ws], now)
     live.tick()
     send(src, 13, { fps: 24, codec: 0, from: 12 })
     const x = made.at(-1)
@@ -328,8 +546,8 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   const ws = fakeWs()
   live.attach('down', { ws, nvrId: 'n1', ch: 4, type: 0, source: src })
   send(src, 13)
-  ws.bufferedAmount = 1e6
   now += SETTLE_MS
+  heldAt([ws], now)
   live.tick()
   send(src, 13, { from: 12 })
   check('an H.265 main stepped down from full: onto level 15\'s conversion, 1 in 2 of 30 fps', live.streams.has('n1/4/0@15') && made.length === 2 && made[1].o.keepEvery === 2 && made[1].o.maxWidth === 1280, `${[...live.streams.keys()]} ${made.map((x) => x.o.keepEvery)}`)
@@ -380,10 +598,10 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   const src = fakeSource('trickling sub')
   const ws = fakeWs()
   live.attach('trickle', { ws, nvrId: 'nvr-2', ch: 30, type: 1, source: src })
-  ws.bufferedAmount = 1e6
   now += SETTLE_MS
+  heldAt([ws], now)
   live.tick() // full -> 15: onto a new stream of its own
-  ws.bufferedAmount = 0
+  ws.overSince = null
   const frame = (i) => { for (const v of [...src.viewers]) v.send(encodeFrame(Buffer.from([0, 0, 1, 1]), true, 0, i * 1250)) }
   check('REMOTE_CONVERSION: a remote viewer\'s stream decides its rate within 1 s of capture time', REMOTE_CONVERSION.learnMs === 1000, JSON.stringify(REMOTE_CONVERSION))
   frame(0)

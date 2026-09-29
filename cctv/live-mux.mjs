@@ -227,6 +227,11 @@ class MuxChannel {
     return this.#mux.drain.bps()
   }
 
+  /** The bytes the page's socket has written, ever (the same meter): adaptive-live's grace after a level change. */
+  get writtenBytes() {
+    return this.#mux.drain.written
+  }
+
   // A new channel's GOP replay (gop-replay.mjs) queues behind whatever the page's socket already
   // holds, and every channel subscribed after it queues behind the replay: 64 subs in one go put
   // ~10 MB of replays in front of the last tile's keyframe. A replay goes whole while it fits in

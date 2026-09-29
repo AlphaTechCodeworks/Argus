@@ -11,9 +11,12 @@
 //   15     15 fps, re-encoded lighter (phone-live.mjs PhoneStream)
 //   8      8 fps, lighter still
 //   4      4 fps, the least that still shows movement
-// Every 2 s the controller looks at each viewer's sockets. Video piling up on any of them (the
-// socket's send buffer over PRESSURE_BYTES, or the send gate holding it back as over its cap) means that viewer's link cannot keep up: it goes down a level at once. Twenty seconds
-// with nothing piling up and it goes back up one. On top of that, when all remote viewers together
+// Every 2 s the controller looks at each viewer's sockets. Video piling up means that viewer's link
+// cannot keep up, and it goes down a level: what its page has queued takes more than QUEUE_S to go at
+// the rate the socket drains, on two looks in a row, or a tile has been held back over its cap for
+// more than HELD_MS. What a page opening or a level change queues by itself (every tile's replay, the
+// first keyframes) is let go out first (GRACE_MS). Twenty seconds with nothing piling up and it goes
+// back up one. On top of that, when all remote viewers together
 // send more than the uplink budget (CCTV_WAN_BUDGET_MBPS, 20 by default), the viewer taking the most
 // is stepped down first: one person on a good link must not starve everyone else.
 //
@@ -53,8 +56,36 @@ export const LEVELS = Object.freeze([
  */
 export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10 })
 export const TICK_MS = 2000
-/** A socket with this much waiting to go out is a link that is not keeping up. */
+/**
+ * A link that is not keeping up: what its page has queued takes longer than QUEUE_S to go at the rate
+ * the page's socket drains (live-mux.mjs drainBps), on PRESSURE_LOOKS looks in a row. It was any queue
+ * over 256 KB at one look, and on 29 Sep all 12 steps down said "video backing up": a page opening or
+ * a level change queues more than that by itself (each tile's replay of up to 1.5 MB, 14-20 new
+ * conversions' first keyframes within 90 ms), still going out at the next look 4 s later, so the next
+ * step followed, and the one after: full to 4 fps in 10 s, three times (03:55:18-:28, 04:08:08-:17,
+ * 04:18:05-:31; stutter report 2.1). And 256 KB is 0.05 s on the local network but 0.4 s through a
+ * 5 Mbit/s tunnel: bytes say nothing without the rate they go at.
+ */
+export const QUEUE_S = 1
+export const PRESSURE_LOOKS = 2
+/** A plain /live socket has no drain meter (only a page's /live-mux socket has one): this much queued on it is over. */
 export const PRESSURE_BYTES = 256 * 1024
+/**
+ * A tile held back over its cap for longer than this (backpressure.mjs gateSend: nothing more until its
+ * next keyframe, a frozen picture) is pressure at once, in a grace too: a queue that saws around the
+ * gate may never read over QUEUE_S twice in a row (verify-1).
+ */
+export const HELD_MS = 2000
+/**
+ * After a page opening or a level change, what its sockets had queued is its own start-up (the
+ * replays, the new streams' first keyframes), not the link's doing: the queue is not read until those
+ * bytes have gone, and for at most GRACE_MS. A page opening is what its tiles queue in its first
+ * OPENING_MS (they open 15 ms apart, viewer.js: a 26-tile grid within 0.4 s). Only those two: a tile
+ * opening or closing later does not start one. Under a real overload a tile with no picture for 8 s
+ * reconnects (live-tile.js), and a grace for each would never let the queue be read (verify-1).
+ */
+export const GRACE_MS = 8000
+export const OPENING_MS = 1000
 /** Clean for this long before a viewer is tried one level up. */
 export const CLIMB_AFTER_MS = 20_000
 /** A level change is given this long to show its effect before another. */
@@ -85,9 +116,9 @@ export const startLevel = () => 0
 /**
  * The next level for one viewer, from what its sockets showed this tick. Pure: the tests drive it.
  * @param {{ level: number, changedAt: number, cleanSince: number }} v
- * @param {{ pressure: boolean, now: number, overBudget?: boolean, starved?: boolean }} o
- *   starved: more than half its tiles are on the camera's own stream for want of a conversion slot,
- *   which a level lower would not find either
+ * @param {{ pressure: boolean|string|null, now: number, overBudget?: boolean, starved?: boolean }} o
+ *   pressure: true, or why (for the log); starved: more than half its tiles are on the camera's own
+ *   stream for want of a conversion slot, which a level lower would not find either
  * @returns {{ level: number, changedAt: number, cleanSince: number, why?: string, stays?: string }}
  *   stays: why it would have gone down, when starved kept it where it is
  */
@@ -95,7 +126,7 @@ export function nextLevel(v, { pressure, now, overBudget = false, starved = fals
   const settled = now - v.changedAt >= SETTLE_MS
   const worst = LEVELS.length - 1
   if ((pressure || overBudget) && settled && v.level < worst) {
-    const why = pressure ? 'video backing up on its link' : 'the uplink budget is used up'
+    const why = !pressure ? 'the uplink budget is used up' : typeof pressure === 'string' ? pressure : 'video backing up on its link'
     if (starved) return { ...v, cleanSince: pressure ? now : v.cleanSince, stays: why }
     return { level: v.level + 1, changedAt: now, cleanSince: now, why }
   }
@@ -114,7 +145,11 @@ class Viewer {
     this.changedAt = now
     this.cleanSince = now
     this.stayedAt = null // the level it last said it stays at for want of conversion slots (said once a level)
-    this.sockets = new Set() // { ws, nvrId, ch, type, source, stream }
+    this.overLooks = 0 // looks in a row with its queue over QUEUE_S
+    // its own start-up going out (GRACE_MS): marks, per socket, the bytes its link will have written
+    // once what was queued then has gone; opening: taken as its tiles open, for OPENING_MS
+    this.grace = { from: now, marks: new Map(), opening: true }
+    this.sockets = new Set() // { ws, nvrId, ch, type, source, stream, sent }
     this.sentAt = 0
     this.sentBytes = 0
     this.bps = 0
@@ -193,14 +228,20 @@ export class AdaptiveLive {
     const now = this.now()
     let v = this.viewers.get(viewerKey)
     if (!v) this.viewers.set(viewerKey, (v = new Viewer(viewerKey, now)))
-    const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null }
+    const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null, sent: 0 }
     entry.stream = this.#streamFor(entry, v.level)
     entry.stream.add(ws)
     v.sockets.add(entry)
-    // bytes sent to this viewer, for the uplink budget and the Health page
+    // a page opening: what its tiles queue as they open (their replays, and a stand-in's before them:
+    // live-attach.mjs) is its own start-up
+    if (v.grace?.opening && now - v.grace.from < OPENING_MS) v.grace.marks = this.#marks(v)
+    // bytes sent to this viewer, for the uplink budget and the Health page; and to this socket, for
+    // what a plain /live socket has written (#written)
     const send = ws.send.bind(ws)
     ws.send = (data, ...rest) => {
-      v.sentBytes += data?.length ?? data?.byteLength ?? 0
+      const n = data?.length ?? data?.byteLength ?? 0
+      v.sentBytes += n
+      entry.sent += n
       return send(data, ...rest)
     }
     ws.on?.('close', () => {
@@ -230,6 +271,8 @@ export class AdaptiveLive {
     }
     for (const s of left) if (s.clients.size === 0) s.close()
     for (const e of v.sockets) this.#retarget(e, level)
+    // what is queued now, the new streams' first pictures behind what was there, goes out first
+    v.grace = { from: this.now(), marks: this.#marks(v), opening: false }
     v.stayedAt = null
     // ...and what the move got: the tiles that wanted a conversion and found no free slot
     this.log(`[adaptive] ${v.key.slice(0, 8)}: ${from} -> ${LEVELS[level].id} (${why}; ${this.#state(v, link)})`)
@@ -265,6 +308,61 @@ export class AdaptiveLive {
     return text
   }
 
+  /** What a socket's link has queued: for a /live-mux channel the page's whole socket, which every tile waits behind. */
+  #queued(e) {
+    return e.ws.sharedBufferedAmount ?? e.ws.bufferedAmount ?? 0
+  }
+
+  /**
+   * What a socket's link has written, ever: the page socket's meter (live-mux.mjs writtenBytes), or for
+   * a plain /live socket what it was handed through here less what still waits (only differences count).
+   */
+  #written(e) {
+    return typeof e.ws.writtenBytes === 'number' ? e.ws.writtenBytes : e.sent - (e.ws.bufferedAmount ?? 0)
+  }
+
+  /** Per socket, the bytes its link will have written once what it has queued now has gone out. */
+  #marks(v) {
+    return new Map([...v.sockets].map((e) => [e, this.#written(e) + this.#queued(e)]))
+  }
+
+  /** Whether a socket's queue takes longer than QUEUE_S to go (a plain /live socket: is over PRESSURE_BYTES). */
+  #over(e) {
+    const q = this.#queued(e)
+    if (q <= 0) return false
+    if (!('drainBps' in e.ws)) return q > PRESSURE_BYTES
+    // null: queued too lately to say how fast it goes (a burst just now); 0: busy and nothing written
+    const bps = e.ws.drainBps
+    return bps != null && q > bps * QUEUE_S
+  }
+
+  /**
+   * Whether a viewer's own start-up is still going out (GRACE_MS): what its sockets had queued when its
+   * page opened or its level last changed, not all written yet. Counted in bytes written, not read off
+   * the queue: behind a burst the queue holds what the cameras sent meanwhile, and on a link near its
+   * rate that takes many seconds more to come down than the burst itself does to go.
+   */
+  #inGrace(v, now) {
+    const g = v.grace
+    if (!g) return false
+    if (g.opening && now - g.from < OPENING_MS) return true
+    g.opening = false
+    if (now - g.from < GRACE_MS) for (const [e, mark] of g.marks) if (v.sockets.has(e) && this.#written(e) < mark) return true
+    v.grace = null
+    return false
+  }
+
+  /** This look's pressure on a viewer's link: why, or null (QUEUE_S, PRESSURE_LOOKS, HELD_MS, GRACE_MS). */
+  #pressure(v, now) {
+    let held = 0
+    for (const e of v.sockets) if (e.ws.overSince != null && now - e.ws.overSince > HELD_MS) held++
+    const over = !this.#inGrace(v, now) && [...v.sockets].some((e) => this.#over(e))
+    v.overLooks = over ? v.overLooks + 1 : 0
+    if (v.overLooks >= PRESSURE_LOOKS) return 'video backing up on its link'
+    if (held) return `${held === 1 ? 'a tile' : `${held} tiles`} held over ${held === 1 ? 'its' : 'their'} cap for more than ${HELD_MS / 1000} s`
+    return null
+  }
+
   /** One look at every remote viewer. */
   tick() {
     const now = this.now()
@@ -283,7 +381,7 @@ export class AdaptiveLive {
       // once it drains). waitForKey is not used: a move sets it on purpose. A /live-mux channel's own
       // bufferedAmount is only its part of the page's socket: the whole socket's queue
       // (sharedBufferedAmount) is what every tile of the page waits behind.
-      const pressure = [...v.sockets].some((e) => (e.ws.sharedBufferedAmount ?? e.ws.bufferedAmount ?? 0) > PRESSURE_BYTES || e.ws.overSince != null)
+      const pressure = this.#pressure(v, now)
       // more than half its tiles already on the camera's own stream for want of a slot: a level lower
       // would find no more slots than this one and thin none of them (verify-1)
       const n = nextLevel(v, { pressure, now, overBudget: v === heaviest, starved: this.#raw(v) * 2 > v.sockets.size })

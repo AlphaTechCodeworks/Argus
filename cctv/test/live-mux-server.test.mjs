@@ -486,6 +486,7 @@ const fanOut = (c, buf, isKey, type, now) => {
     ws.drain(1)
   }
   check('4 x 100 KB written over the 1 s they were queued: 400 KB/s', Math.round(c.drainBps) === 400_000, String(c.drainBps))
+  check('writtenBytes: every byte the page\'s socket has written, ever (adaptive-live\'s grace after a level change)', c.writtenBytes === 400_000, String(c.writtenBytes))
   state.t = 3000
   check('... idle since: still the rate it drained at while it had something to write', Math.round(c.drainBps) === 400_000, String(c.drainBps))
   state.t = 1000 + DRAIN_WINDOW_MS + 1
@@ -526,23 +527,32 @@ const fanOut = (c, buf, isKey, type, now) => {
 }
 {
   // A remote page in the full-size view over an 8x8 grid: 64 sub channels and the main, 65 on one
-  // socket, all going through adaptive-live. The main queues 300 KB: the page's link is not keeping
-  // up. An even share (300 KB / 65) was under the pressure mark until 65 x 256 KB were queued.
-  let t = 0
-  const live = new AdaptiveLive({ pool: new TranscodePool(4), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e12, now: () => t })
+  // socket, all going through adaptive-live. The main queues 1 MB on a page whose socket writes 100 KB
+  // a second: the page's link is not keeping up. An even share (1 MB / 65) was under the pressure
+  // mark until 65 x 256 KB were queued; now every channel reads the whole socket's queue, and how long
+  // it takes to go at the rate the socket drains.
+  let state = null
+  const live = new AdaptiveLive({ pool: new TranscodePool(4), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e12, now: () => state.t })
   const src = { gop: [], viewers: new Set(), add(w) { this.viewers.add(w); w.waitForKey = true }, remove(w) { this.viewers.delete(w) } }
-  const { ws, attached } = setup({ attach: (channel, s) => { attached.push({ channel, sub: s }); live.attach('page', { ws: channel, nvrId: 'n1', ch: s.ch, type: s.stream, source: src }) } })
+  const page = setup({ attach: (channel, s) => { attached.push({ channel, sub: s }); live.attach('page', { ws: channel, nvrId: 'n1', ch: s.ch, type: s.stream, source: src }) } })
+  const { ws, attached } = page
+  state = page.state
   for (let i = 0; i < 64; i++) ws.msg(sub(i + 1, { ch: i }))
   ws.msg(sub(100, { ch: 5, stream: 0 }))
   const main = attached.at(-1).channel
-  t = SETTLE_MS + 1
+  state.t = SETTLE_MS + 1
   live.tick()
   check('adaptive-live: 65 channels of one page are one viewer, on the camera\'s own stream while nothing is queued', live.viewers.get('page')?.sockets.size === 65 && live.viewers.get('page').level === 0)
-  main.send(frame(true, 1, 300_000))
-  check('... the main queues 300 KB: over the pressure mark for every channel of the page', 300_000 > PRESSURE_BYTES && attached.every((a) => a.channel.sharedBufferedAmount > PRESSURE_BYTES))
-  t += SETTLE_MS + 1
+  for (let i = 0; i < 10; i++) main.send(frame(i === 0, 1, 99_996))
+  state.t += 1000
+  ws.drain(1) // 100 KB in the second since: 900 KB to go, 9 s
+  check('... the main queues 1 MB: every channel of the page reads the whole socket\'s queue, and its drain rate', attached.every((a) => a.channel.sharedBufferedAmount === 900_000 && Math.round(a.channel.drainBps) === 100_000) && 900_000 > PRESSURE_BYTES)
   live.tick()
-  check('... and the next tick steps the page down a level', live.viewers.get('page').level === 1, `level ${live.viewers.get('page').level}`)
+  check('... over a second to go at one look: not yet', live.viewers.get('page').level === 0)
+  state.t += 2000
+  ws.drain(2)
+  live.tick()
+  check('... and at the next (7 s to go): the page steps down a level', live.viewers.get('page').level === 1, `level ${live.viewers.get('page').level}`)
   ws.drain()
   for (const a of attached) a.channel.close()
   await tick()
