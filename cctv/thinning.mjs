@@ -27,14 +27,33 @@
 // feature-detected: no module, no export, we skip nothing and carry on. If it is there but
 // throws, the run STOPS instead, because then we do not know what is protected and guessing
 // would delete evidence.
-import { closeSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
+//
+// Off the main thread since 2026-09-29 (perf report R1 / Task 4 and its check verify-1). runThinning
+// read, parsed and rewrote every candidate synchronously in the server, dry run too: about 0.31 s a 12
+// MB file over SMB, up to 2,000 files a run, so ~10 minutes of frozen live video, pages and alarms in
+// every 5, and the outside watcher would have remounted the share and restarted the service up to 3
+// times an hour. And it never got past each camera's oldest 500 files: a rewritten file kept its place
+// among the oldest, and every run read all of them again. Now:
+//  - the dry run is worked out from the index alone (files, bytes, and an estimate of the time-lapse
+//    left, labelled as one): no file is opened, whatever the switch;
+//  - a real rewrite is the share helper's (share-ops.mjs thin, thinSwap, thinCommit, in a process of
+//    its own), three files at a time at a set pace (thin-pace.mjs), nights first; the main thread
+//    decides, checks each file again just before its swap, and updates the index row;
+//  - each row says whether it was rewritten (rec-index.mjs THIN), and the walk reads only rows still
+//    full video, so a file is never read twice and each run goes on where the last stopped;
+//  - a rewrite in flight is in the index (thin_inflight) until its commit: a helper killed, a share
+//    that hangs or a server that stops is put right by the helper's thinRecover (the journal rolls it
+//    back), at once or at the next run, before anything else touches that file.
+import { readdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { freeMarks } from './location-health.mjs'
+import { THIN } from './rec-index.mjs'
 import { afterStretch, checkFreeRose, firstUnprotected, freeingStalled, makeDeleter, makePacer } from './segment-delete.mjs'
-import { parseIdx } from './segment-writer.mjs'
 import { shareCall } from './share-calls.mjs'
+import { siteMinutesOfDay } from './site-time.mjs'
 import { markerPresent } from './storage-report.mjs'
-import { THIN_SUFFIX as suffix, buildThinned, checkThinned, codecOf, planThin, thinNames as names } from './thin-file.mjs'
+import { RUN_MS, SLOW_HOLD_MS, decideRun, describePace, lastDiskTooSlow, makeBucket, thinPace } from './thin-pace.mjs'
+import { THIN_SUFFIX as suffix, planThin, thinNames as names } from './thin-file.mjs'
 
 // planThin, buildThinned and the check of a rewrite are in thin-file.mjs since 2026-09-29, so that the
 // share helper can load them without the server's modules; planThin is still exported from here
@@ -162,7 +181,28 @@ function mountedSet(locs, present, warn) {
   return here
 }
 
-// ---- thinning one file ------------------------------------------------------------------------
+// ---- the journalled swap ----------------------------------------------------------------------
+/*
+ * A rewrite takes the original's place so that a crash at ANY instant leaves either the whole
+ * original or the whole new pair on disk, never a mixture and never nothing:
+ *
+ *   0. the rewrite is in flight in the index (thin_inflight: the file as it was)   main thread
+ *   1. the new pair written beside it (.thin-new), fsynced, read back, checked     helper: thin
+ *      -- the main thread checks again: the switch, the bookmarks, the row --
+ *   2. journal written + fsynced          <- from here on, a crash means "roll back"
+ *   3. seg -> seg.thin-old, idx -> idx.thin-old; seg.thin-new -> seg, idx.thin-new -> idx
+ *                                                                                  helper: thinSwap
+ *   4. the index row is updated (time-lapse, the new size; thin_inflight too)      main thread
+ *   5. journal deleted                    <- the commit point
+ *   6. the .thin-old pair is deleted                                               helper: thinCommit
+ *   7. no longer in flight                                                         main thread
+ *
+ * Until 2026-09-29 the same steps ran synchronously on the main thread (swapIn). Now any failure
+ * or lost helper between 1 and 6 is put right by the helper's thinRecover (share-ops.mjs), which
+ * rolls back whenever it finds the journal and sweeps up stray .thin-old / .thin-new files when it
+ * does not, as recoverThinning() below does; the row is then made to match the file on disk (the
+ * original's size and keyframes from step 0, or the rewrite's from step 4).
+ */
 
 const unlinkQuiet = (f) => {
   try {
@@ -172,55 +212,11 @@ const unlinkQuiet = (f) => {
   }
 }
 
-function writeFsync(file, buf) {
-  const fd = openSync(file, 'w')
-  try {
-    writeSync(fd, buf, 0, buf.length)
-    fsyncSync(fd)
-  } finally {
-    closeSync(fd)
-  }
-}
-
 /**
- * Reads the pair back off the disk and checks it really is what we meant to write: right size,
- * one .idx row per unit, every row at a unit start, every unit a keyframe, times increasing.
- * Throws when it is not, and then the original is still untouched.
- */
-export function verifyThinned(segFile, idxFile, expect) {
-  return checkThinned(segFile, readFileSync(segFile), parseIdx(readFileSync(idxFile)), expect)
-}
-
-/**
- * Puts the new pair in place of the old one so that a crash at ANY instant leaves either the
- * whole original or the whole new pair on disk, never a mixture and never nothing:
- *
- *   1. journal written + fsynced          <- from here on, a crash means "roll back"
- *   2. seg -> seg.thin-old, idx -> idx.thin-old
- *   3. seg.thin-new -> seg, idx.thin-new -> idx
- *   4. the index row is updated
- *   5. journal deleted                    <- the commit point
- *   6. the .thin-old pair is deleted
- *
- * recoverThinning() rolls back whenever it finds a journal (steps 1-4 did not all finish) and
- * sweeps up stray .thin-old / .thin-new files when it does not (committed, step 6 interrupted).
- */
-function swapIn(p, updateIndex) {
-  const n = names(p)
-  writeFsync(n.journal, Buffer.from(`${JSON.stringify({ path: p, at: new Date().toISOString() })}\n`))
-  renameSync(n.seg, n.oldSeg)
-  renameSync(n.idx, n.oldIdx)
-  renameSync(n.newSeg, n.seg)
-  renameSync(n.newIdx, n.idx)
-  updateIndex()
-  unlinkSync(n.journal)
-  unlinkQuiet(n.oldSeg)
-  unlinkQuiet(n.oldIdx)
-}
-
-/**
- * Undoes or sweeps up after an interrupted rewrite under `root`. Safe to run at any time; run it
- * at startup before the jobs.
+ * Undoes or sweeps up after an interrupted rewrite under `root`, walking the whole folder with
+ * synchronous calls: a tool for a drive looked at by hand, NEVER for the server on a share (a stale
+ * share hangs the caller). The server puts its own rewrites right through the share helper
+ * (share-ops.mjs thinRecover, from thin_inflight: runThinning), by the same rules.
  * @returns {{ rolledBack: string[], sweptUp: string[] }}
  */
 export function recoverThinning(roots, { dryRun = false } = {}) {
@@ -289,31 +285,159 @@ export function recoverThinning(roots, { dryRun = false } = {}) {
 // ---- the thinning job ---------------------------------------------------------------------------
 
 /**
+ * The dry run's estimate of the time-lapse a rewrite leaves, and so of what it frees. From the index
+ * alone: each file's bytes weighted by the share of its keyframes one per timelapseS keeps
+ * (rec-index.mjs THIN_SQL.fullSummary), times the share of a file's bytes that its keyframes are. That
+ * last share is in neither the index nor the .idx (which says where a keyframe starts, not how long it
+ * is), so it comes from the audit's real files (29 Sep 2026, production VM): 13 files read from the NAS,
+ * the time-lapse copy 8.7 % (R1, 5 files) and 11.1 % (verify-1, 8 files) of the originals with about 6
+ * of each file's 30 keyframes kept, so keyframes are 43-56 % of a file's bytes (2.8-16 % per file kept:
+ * one file alone can be far off, a day of them is not). An estimate, and the page and the log say so;
+ * the real runs report what they really freed.
+ */
+export const KEYFRAME_SHARE = Object.freeze({ low: 0.43, mid: 0.5, high: 0.56 })
+/** Rows asked of the index at a time by the real run's walk (every camera's, oldest first). */
+const LOOK = 100
+/** Files noted in flight (thin_inflight) with the one about to go: the next ones read, in the same transaction. */
+const NOTE_AHEAD = 5
+/** Footage waiting longer than this past its full-video days is "falling behind": a warning, on the page too. */
+export const BEHIND_MS = DAY
+/** A rewrite the helper answered "skipped" for, that no later run could do otherwise: the row is marked THIN.kept. */
+const LEFT_AS_IT_IS = /^(already thin|nothing to keep|no index rows|cannot be parsed|larger than)|ENOENT/
+
+const gbs = (b) => `${(b / 1e9).toFixed(1)} GB`
+const utc = (ms) => `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+const hoursText = (ms) => `${(ms / 3_600_000).toFixed(1)} h`
+
+// Across runs, in memory: each camera's last kept keyframe, so the time-lapse spacing carries from one
+// file to the next as it did within one synchronous run (a restart costs at most one extra keyframe a
+// camera), and when the log last said the job was falling behind.
+const lastKept = new Map() // "nvr/ch" -> { endMs, cursor }
+let behindSaidAt = -Infinity
+let paceSaid = ''
+
+/**
+ * A group's full-video rows past its cutoff (the cameras with one cutoff and interval: usually all of
+ * them), oldest first across the cameras, read LOOK at a time from segments_full (rewritten rows are not
+ * in it). take() gives the oldest row of a camera not busy, so each camera's files go in their order.
+ */
+class FullStream {
+  constructor(index, group) {
+    this.index = index
+    this.g = group
+    this.buf = [] // rows read and not taken yet, oldest first
+    this.from = Number.MIN_SAFE_INTEGER // where the next look starts
+    this.atFrom = new Set() // rows already read that start exactly there
+    this.done = false
+  }
+  /** Reads the next LOOK rows; false when there are none. */
+  more() {
+    if (this.done) return false
+    const raw = this.index.fullOlderThan(this.g.cams, this.g.cutoff, LOOK, this.from)
+    const rows = raw.filter((r) => !(r.startMs === this.from && this.atFrom.has(r.path)))
+    // (a full look made only of rows read before at one start -- more than LOOK files starting in the same
+    // millisecond, never written on purpose -- ends the walk: it only ever converts less)
+    if (!rows.length) {
+      this.done = true
+      return false
+    }
+    for (const r of rows) {
+      if (r.startMs !== this.from) this.atFrom = new Set()
+      this.from = r.startMs
+      this.atFrom.add(r.path)
+      this.buf.push(r)
+    }
+    return true
+  }
+  /** The oldest row read of a camera not in `busy`, reading on while the rows read are all busy ones. */
+  first(busy) {
+    for (;;) {
+      const r = this.buf.find((x) => !busy.has(`${x.nvr}/${x.ch}`))
+      if (r) return r
+      // as many rows read as three looks and every one of a busy camera: wait for one to be free
+      if (this.buf.length >= 3 * LOOK || !this.more()) return null
+    }
+  }
+  take(r) {
+    this.buf.splice(this.buf.indexOf(r), 1)
+  }
+  /**
+   * Past a bookmarked stretch [a, ms) (it covers every camera): the rows read that start in it go, and the
+   * next look starts after it (the stretch holds the row just taken, so every row not read yet starts in or
+   * after it). Rows read that start before it stay.
+   */
+  skipTo(a, ms) {
+    this.buf = this.buf.filter((x) => x.startMs < a || x.startMs >= ms)
+    if (ms > this.from) {
+      this.from = ms
+      this.atFrom = new Set()
+    }
+  }
+}
+
+/**
  * Time-lapse thinning: for every camera set to `after: 'timelapse'`, rewrite its segments older
  * than `fullDays` so only one keyframe per `timelapseS` is left.
  *
+ * Dry run (the default): what it would convert, from the index -- every such file on a mounted
+ * location outside bookmarked stretches, not the first 2,000 -- with an estimate of what that frees
+ * (KEYFRAME_SHARE). No file is opened and the share helper is not asked anything.
+ * On: rewrites left half done by an earlier run are put right first; then, if thin-pace.mjs's rule
+ * says this round works (nights; by day only to keep up; never within minutes of "disk too slow"),
+ * the files go to their location's helper oldest first, `pace.atOnce` at a time (one per camera) at
+ * `pace.mbps`, until `deadline` (RUN_MS into the storage round by default), `maxSegments`, the switch
+ * leaving On, or "disk too slow" from the recorder.
+ *
  * @param {{ index: object, settings?: object, now?: number, dryRun?: boolean,
- *           present?: (loc)=>boolean, protectedRanges?: function|null, maxSegments?: number }} o
- * @returns {Promise<{ dryRun, thinned: {path, wasBytes, nowBytes, keptKeyframes, droppedKeyframes}[],
- *                     skipped: {path, why}[], warnings: string[], freedBytes: number, protection: 'ranges'|'none'|'unread' }>}
+ *           present?: (loc)=>boolean, protectedRanges?: function|null, maxSegments?: number,
+ *           share?: Function, armed?: () => boolean, deadline?: number, pace?: object,
+ *           siteMin?: (ms) => number, slow?: () => object|null, clock?: () => number }} o
+ *   now: the cutoffs are counted from it; clock: the time of day, the deadline and "disk too slow"
+ * @returns {Promise<{ dryRun, files, bytes, freedBytes, estimate, backlog, after, decision, stopped, pace,
+ *                     recovered, left, thinned: {path, wasBytes, nowBytes, keptKeyframes, droppedKeyframes}[],
+ *                     skipped: {path, why, files?}[], warnings: string[], protection: 'ranges'|'none'|'unread' }>}
  */
-export async function runThinning({ index, settings = null, now = Date.now(), dryRun = true, present = markerPresent, protectedRanges, maxSegments = MAX_SEGMENTS_PER_RUN } = {}) {
+export async function runThinning({ index, settings = null, now = Date.now(), dryRun = true, present = markerPresent, protectedRanges, maxSegments = MAX_SEGMENTS_PER_RUN, share = shareCall, armed = null, deadline = null, pace = null, siteMin = siteMinutesOfDay, slow = lastDiskTooSlow, clock = Date.now } = {}) {
   settings ??= await currentSettings()
-  const out = { dryRun, thinned: [], skipped: [], warnings: [], freedBytes: 0, protection: 'none' }
+  const out = { dryRun, files: 0, bytes: 0, freedBytes: 0, estimate: null, backlog: null, after: null, decision: null, stopped: null, pace: null, recovered: { rolledBack: 0, sweptUp: 0 }, left: [], thinned: [], skipped: [], warnings: [], protection: 'none' }
   if (!index) return out
-  const warn = (w) => {
+  const warn = (w, { quiet = false } = {}) => {
     out.warnings.push(w)
-    console.warn(`[thinning] ${w}`)
+    if (!quiet) console.warn(`[thinning] ${w}`)
+  }
+  pace ??= thinPace()
+  out.pace = { mbps: pace.mbps, atOnce: pace.atOnce, night: pace.night, text: describePace(pace) }
+  if (pace.warnings?.length) {
+    // (said in the log once, on the page every run)
+    const said = pace.warnings.join('; ')
+    for (const w of pace.warnings) warn(w, { quiet: said === paceSaid })
+    paceSaid = said
   }
   const locs = new Map((settings.storage?.locations ?? []).map((l) => [l.id, l]))
   const here = mountedSet(locs, present, warn)
+  const tick = makePacer() // the event loop goes round every 10 ms of the walks here
+  const stopLoc = new Map() // location id -> why nothing more is sent to its helper in this run
+  const goneTimes = new Map() // location id -> its helper stopped by itself this many times in this run
+  const stopLocation = (loc, why) => {
+    if (stopLoc.has(loc.id)) return
+    stopLoc.set(loc.id, why)
+    warn(`${loc.path}: ${why}: nothing more converted on it this run`)
+  }
+
+  // rewrites a run, a helper or the server did not finish: put right before anything else, and only
+  // with the switch On (a dry run touches nothing); housekeeping and retention leave them alone meanwhile
+  const inflight = typeof index.thinInflight === 'function' ? index.thinInflight() : []
+  if (inflight.length && dryRun) warn(`${inflight.length} time-lapse rewrite${inflight.length === 1 ? '' : 's'} may have been left half done (the server stopped, or the share hung): put right at the first run with the switch On; until then nothing deletes ${inflight.length === 1 ? 'that file' : 'those files'}`)
+  if (inflight.length && !dryRun) await putRightLeftovers(inflight)
 
   const cams = index.cameras()
   if (!cams.length) return out
   // Ask once for the whole window the run could touch, rather than per segment.
   let guard
+  let rangesFn
   try {
-    guard = await protectionFor(0, now, { protectedRanges })
+    rangesFn = protectedRanges === undefined ? await loadProtectedRanges() : protectedRanges
+    guard = await protectionFor(0, now, { protectedRanges: rangesFn })
   } catch (e) {
     warn(`bookmarks could not be read (${e.message}): nothing thinned this run`)
     // not 'none' ("nobody to ask, so nothing is protected"): the page said that too, in red, about
@@ -323,103 +447,405 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   }
   out.protection = guard.mode
 
-  let done = 0
+  // what waits, from the index: the dry run's answer, and the real run's backlog. The cameras go in groups
+  // of one cutoff and interval (with no camera of its own days: one group, every camera).
+  const groupsBy = new Map()
   for (const { nvr, ch } of cams) {
     const rec = camRec(settings, nvr, ch)
     if (rec.after !== 'timelapse') continue
-    if (!Number.isFinite(rec.fullDays) || !Number.isFinite(rec.timelapseS)) {
+    if (!Number.isFinite(rec.fullDays) || !Number.isFinite(rec.timelapseS) || !(rec.timelapseS > 0)) {
       warn(`${nvr}/${ch}: fullDays or timelapseS not set: skipped`)
       continue
     }
     const cutoff = now - rec.fullDays * DAY
-    let cursor = -Infinity
-    const seen = new Set()
-    for (let guardLoop = 0; guardLoop < 100 && done < maxSegments; guardLoop++) {
-      const batch = index.olderThan(nvr, ch, cutoff, BATCH).filter((s) => !seen.has(s.path))
-      if (!batch.length) break
-      for (const seg of batch) {
-        seen.add(seg.path)
-        if (done >= maxSegments) break
-        const skip = (why) => out.skipped.push({ path: seg.path, why })
-        if (guard.protected(seg)) {
-          skip('bookmarked or exported')
-          continue
-        }
-        const may = mayTouch(seg, locs, here)
-        if (!may.ok) {
-          skip(may.why)
-          continue
-        }
-        const n = names(seg.path)
-        let buf
-        let rows
-        try {
-          const st = statSync(n.seg)
-          if (st.size > MAX_SEGMENT_BYTES) {
-            skip(`larger than ${MAX_SEGMENT_BYTES} bytes`)
-            continue
-          }
-          buf = readFileSync(n.seg)
-          rows = parseIdx(readFileSync(n.idx))
-        } catch (e) {
-          skip(`cannot read it (${e.code || e.message})`)
-          continue
-        }
-        if (!rows.length) {
-          skip('no index rows')
-          continue
-        }
-        let plan
-        try {
-          plan = planThin(buf, rows, { codec: codecOf(seg.path), timelapseS: rec.timelapseS, cursor })
-        } catch (e) {
-          skip(`cannot be parsed (${e.message})`)
-          continue
-        }
-        if (!plan.keep.length) {
-          // Every keyframe in this file falls inside the previous one's interval. Leaving the file
-          // as it is costs a minute of footage; deleting it here would be a second kind of
-          // destruction hidden inside a "thin" job, so it is left for the retention job.
-          skip('nothing to keep at this interval (left alone)')
-          continue
-        }
-        const built = buildThinned(buf, plan.keep)
-        if (built.bytes.length >= buf.length) {
-          cursor = plan.cursor
-          skip('already thin')
-          continue
-        }
-        const row = { path: seg.path, wasBytes: buf.length, nowBytes: built.bytes.length, keptKeyframes: plan.keep.length, droppedKeyframes: rows.length - plan.keep.length }
-        if (dryRun) {
-          out.thinned.push(row)
-          out.freedBytes += buf.length - built.bytes.length
-          cursor = plan.cursor
-          done++
-          continue
-        }
-        try {
-          writeFsync(n.newSeg, built.bytes)
-          writeFsync(n.newIdx, built.idx)
-          const v = verifyThinned(n.newSeg, n.newIdx, { bytes: built.bytes.length, keyframes: plan.keep.length, codec: codecOf(seg.path) })
-          swapIn(seg.path, () => index.addSegment({ ...seg, bytes: v.bytes, keyframes: v.keyframes }))
-        } catch (e) {
-          warn(`${seg.path}: not thinned (${e.message}); the original is untouched`)
-          unlinkQuiet(n.newSeg)
-          unlinkQuiet(n.newIdx)
-          skip(`rewrite failed: ${e.message}`)
-          continue
-        }
-        out.thinned.push(row)
-        out.freedBytes += row.wasBytes - row.nowBytes
-        cursor = plan.cursor
-        done++
+    const k = `${cutoff}|${rec.timelapseS}`
+    if (!groupsBy.has(k)) groupsBy.set(k, { cutoff, timelapseS: rec.timelapseS, cams: [], order: groupsBy.size })
+    groupsBy.get(k).cams.push({ nvr, ch })
+  }
+  const groups = [...groupsBy.values()]
+  const backlog = await backlogOf(groups)
+  out.backlog = { files: backlog.files, bytes: backlog.bytes, oldestMs: backlog.oldestMs, lagMs: backlog.lagMs, perHourBytes: null }
+  const est = (k) => Math.round(backlog.weighted * KEYFRAME_SHARE[k])
+  if (dryRun) {
+    out.files = backlog.files
+    out.bytes = backlog.bytes
+    out.estimate = {
+      thinBytes: est('mid'),
+      low: est('low'),
+      high: est('high'),
+      note: `an estimate from the index: keyframes taken as ${KEYFRAME_SHARE.low * 100}-${KEYFRAME_SHARE.high * 100} % of a file's bytes, as in 13 real files measured on 29 Sep 2026`
+    }
+    out.freedBytes = backlog.bytes - out.estimate.thinBytes
+    return out
+  }
+
+  // ---- on: whether this round works (thin-pace.mjs), then the files, through the helper -------------
+  const defaults = settings.recording?.defaults ?? {}
+  if (Number.isFinite(defaults.fullDays)) {
+    const ref = now - defaults.fullDays * DAY
+    out.backlog.perHourBytes = index.startedBetween(ref - 3 * 3_600_000, ref).bytes / 3
+  }
+  if (backlog.files > 0 && backlog.lagMs > BEHIND_MS) {
+    const w = `FALLING BEHIND: ${backlog.files.toLocaleString('en-GB')} files (${gbs(backlog.bytes)}) of full video wait to be converted, the oldest ${hoursText(backlog.lagMs)} past its full-video days (at ${out.pace.text})`
+    warn(w, { quiet: clock() - behindSaidAt < 3_600_000 })
+    if (clock() - behindSaidAt >= 3_600_000) behindSaidAt = clock()
+  }
+  out.decision = decideRun({ now: clock(), backlogBytes: backlog.bytes, arrivalBytesPerHour: out.backlog.perHourBytes ?? 0, pace, siteMin, slow: slow() })
+  out.after = { files: backlog.files, bytes: backlog.bytes }
+  if (!out.decision.work) return out
+
+  const until = deadline ?? clock() + RUN_MS
+  const bucket = makeBucket(pace.mbps * 1e6)
+  // what the repair above could not put right (its share hung, or a person must look): not taken again
+  const held = new Set(index.thinInflight().map((r) => r.path))
+  const streams = groups.map((g) => new FullStream(index, g))
+  const busy = new Set() // "nvr/ch" of the cameras with a file being converted
+  const running = new Set()
+  // thin_inflight is written a few files ahead and cleared a few at a time (thinBegin, thinEnd): each commit
+  // is WAL pages, and a checkpoint on the main thread every 1,000 of them. A file noted and not taken, or
+  // done and not yet cleared, is harmless: putting it right finds nothing to do and its row as it is.
+  const noted = new Set()
+  let toEnd = []
+  const keepInFlight = new Set() // could not be put right in this run: stays in thin_inflight
+  const note = (rows) => {
+    const fresh = rows.filter((r) => !noted.has(r.path))
+    if (!fresh.length) return
+    index.thinBegin(fresh.map((r) => ({ path: r.path, loc: r.loc, bytes: r.bytes, keyframes: r.keyframes })), clock())
+    for (const r of fresh) noted.add(r.path)
+    if (toEnd.length) endNoted()
+  }
+  const endNoted = () => {
+    const list = toEnd
+    toEnd = []
+    index.thinEnd(list)
+    for (const p of list) noted.delete(p)
+  }
+  let taken = 0
+  const SWITCHED = 'the switch was set to Off or Dry run during this run'
+  const stopWhy = () => {
+    if (out.stopped) return out.stopped
+    if (clock() >= until) return `this round's ${RUN_MS / 60_000} minutes were up (the rest waits for the next round)`
+    if (taken >= maxSegments) return `the most one run takes on (${maxSegments} files)`
+    if (armed && !armed()) return SWITCHED
+    const sl = slow()
+    const ago = sl ? clock() - sl.at : NaN
+    if (ago >= 0 && ago < SLOW_HOLD_MS) return `the recorder reported "disk too slow" at ${utc(sl.at)}${sl.nvr !== undefined ? ` (${sl.nvr}/${Number(sl.ch) + 1})` : ''}: no more files this round, so recording keeps the disk`
+    if (here.size && [...here].every((id) => stopLoc.has(id))) return 'every location stopped (see the warnings)'
+    return null
+  }
+  try {
+    while (true) {
+      const why = stopWhy()
+      if (why) {
+        out.stopped = why
+        break
       }
-      if (batch.length < BATCH) break
+      // the oldest waiting file (the furthest past its full-video days) of a camera not already being
+      // converted: its time-lapse spacing carries from one file to the next
+      await tick()
+      let pick = null
+      for (const st of streams) {
+        const r = st.first(busy)
+        if (r && (!pick || st.g.cutoff - r.startMs > pick.st.g.cutoff - pick.s.startMs)) pick = { st, s: r }
+      }
+      if (!pick) {
+        if (!running.size) break // nothing left
+        await Promise.race(running)
+        continue
+      }
+      const { st, s } = pick
+      st.take(s)
+      // a row starting inside a bookmarked stretch: so does every row to the stretch's end, whatever the
+      // camera (one look); a file that starts before it and runs into it is passed by itself
+      const stretch = guard.stretchOf(s)
+      if (stretch) {
+        out.skipped.push({ path: s.path, why: 'bookmarked or exported' })
+        if (s.startMs >= stretch[0]) st.skipTo(stretch[0], afterStretch(stretch))
+        continue
+      }
+      const may = mayTouch(s, locs, here)
+      const loc = locs.get(s.loc)
+      if (!may.ok || stopLoc.has(loc.id) || held.has(s.path)) {
+        if (!may.ok) out.skipped.push({ path: s.path, why: may.why })
+        else if (held.has(s.path)) out.skipped.push({ path: s.path, why: 'a rewrite of it was left half done and is not put right yet' })
+        continue
+      }
+      while (running.size >= pace.atOnce) await Promise.race(running)
+      await bucket.take(s.bytes)
+      const late = stopWhy()
+      if (late) {
+        out.stopped = late
+        break
+      }
+      // in flight before the helper may make a file beside it (with the next few read that could go, in one
+      // transaction)
+      try {
+        note([s, ...st.buf.filter((r) => mayTouch(r, locs, here).ok && !stopLoc.has(r.loc) && !held.has(r.path) && !guard.stretchOf(r)).slice(0, NOTE_AHEAD)])
+      } catch (e) {
+        warn(`${s.path}: not converted: the index could not note it (${e.message})`)
+        out.stopped = `the index could not be written (${e.message})`
+        break
+      }
+      taken++
+      const key = `${s.nvr}/${s.ch}`
+      busy.add(key)
+      const job = one(st.g, key, s, loc)
+        .catch((e) => warn(`${s.path}: ${e.message}`))
+        .finally(() => {
+          busy.delete(key)
+          running.delete(job)
+        })
+      running.add(job)
+    }
+  } finally {
+    await Promise.allSettled(running)
+    // what was noted and not taken, and what is done, is no longer in flight; what could not be put right
+    // stays, for the next run (and nothing deletes it meanwhile)
+    const ending = new Set(toEnd)
+    for (const p of noted) if (!keepInFlight.has(p)) ending.add(p)
+    toEnd = [...ending]
+    try {
+      if (toEnd.length) endNoted()
+    } catch (e) {
+      warn(`the rewrites done could not be cleared from the index (${e.message}): the next run looks at them again (it finds nothing to put right)`)
     }
   }
-  // No line of its own here: storage-jobs.mjs writes one summary for the run (every run that changed
-  // footage; in dry run at most once an hour, where a line every 5 minutes said the same thing).
+  const wasBytes = out.thinned.reduce((a, t) => a + t.wasBytes, 0)
+  out.files = out.thinned.length
+  out.bytes = wasBytes
+  out.after = { files: Math.max(0, backlog.files - out.files), bytes: Math.max(0, backlog.bytes - wasBytes) }
   return out
+
+  // ---- the pieces ---------------------------------------------------------------------------------
+
+  /**
+   * What waits, from segments_full: per group, between bookmarked stretches, a stretch of time at a time
+   * (an hour to start with, halved while a sum takes over 8 ms, doubled while it takes under 2 ms), hours
+   * with nothing skipped with one look. No row objects, no files.
+   */
+  async function backlogOf(list) {
+    const b = { files: 0, bytes: 0, weighted: 0, oldestMs: null, lagMs: 0 }
+    const off = new Map() // why -> files on a location that is not usable now
+    const ranges = guard.ranges ?? []
+    let step = 3_600_000
+    for (const g of list) {
+      let lo = Number.MIN_SAFE_INTEGER
+      const spans = []
+      for (const [a, z] of ranges) {
+        if (a >= g.cutoff) break
+        spans.push([lo, a])
+        lo = Math.floor(z) + 1
+      }
+      spans.push([lo, g.cutoff])
+      for (const [from, to] of spans) {
+        if (from >= to) continue
+        for (let t = index.firstFull(g.cams, from, to); t !== null && t < to; ) {
+          await tick()
+          const end = Math.min(to, t + step)
+          const t0 = performance.now()
+          for (const r of index.fullSummary(g.cams, { fromMs: t, toMs: end, endBefore: to, stepMs: g.timelapseS * 1000 })) {
+            const loc = locs.get(r.loc)
+            if (!loc || !here.has(loc.id)) {
+              const why = loc ? `${loc.path} is not mounted` : `unknown location ${r.loc}`
+              off.set(why, (off.get(why) ?? 0) + r.files)
+              continue
+            }
+            b.files += r.files
+            b.bytes += r.bytes
+            b.weighted += r.weighted
+            if (b.oldestMs === null || r.firstMs < b.oldestMs) b.oldestMs = r.firstMs
+            b.lagMs = Math.max(b.lagMs, g.cutoff - r.firstMs)
+          }
+          const took = performance.now() - t0
+          if (took > 8) step = Math.max(5 * 60_000, step / 2)
+          else if (took < 2) step = Math.min(DAY, step * 2)
+          t = end < to ? index.firstFull(g.cams, end, to) : null
+        }
+      }
+    }
+    // one line per reason and per stretch, not per row (a drive unplugged with a week on it is 900,000 rows)
+    for (const [why, files] of off) out.skipped.push({ path: `${files.toLocaleString('en-GB')} files`, why, files })
+    const latest = Math.max(...list.map((g) => g.cutoff), -Infinity)
+    for (const [a, z] of ranges) if (a < latest) out.skipped.push({ path: `${utc(a)} to ${utc(z)}`, why: 'bookmarked or exported' })
+    return b
+  }
+
+  /** One file: rewritten by the helper, checked here, swapped by the helper, the row, the commit. */
+  async function one(g, key, s, loc) {
+    const p = s.path
+    const done = () => toEnd.push(p)
+    const prev = lastKept.get(key)
+    const cursor = prev && s.startMs >= prev.endMs - 5_000 && s.startMs - prev.endMs <= 5_000 ? prev.cursor : null
+    let r
+    try {
+      r = await share(loc, 'thin', { path: p, timelapseS: g.timelapseS, cursor, maxBytes: MAX_SEGMENT_BYTES, swap: false })
+    } catch (e) {
+      return lost(loc, s, e, 'rewrite')
+    }
+    if (r?.outcome === 'skipped') {
+      if (/half done/.test(r.why)) return lost(loc, s, Object.assign(new Error(r.why), { code: 'EHALFDONE' }), 'rewrite')
+      done()
+      if (LEFT_AS_IT_IS.test(r.why)) index.setThin(p, THIN.kept)
+      if (Number.isFinite(r.cursor)) lastKept.set(key, { endMs: s.endMs, cursor: r.cursor })
+      out.skipped.push({ path: p, why: r.why })
+      return
+    }
+    if (r?.outcome !== 'thinned') {
+      done()
+      warn(`${p}: not converted (${r?.why ?? 'no answer'}); the original is untouched`)
+      out.skipped.push({ path: p, why: r?.why ?? 'no answer' })
+      return
+    }
+    // the rewrite is beside the original: is it still to go in? The switch, a bookmark made since the
+    // run began (verify-1: a paced run lasts minutes), the row as it was when taken
+    const no = await mustNotSwap(s)
+    if (no) {
+      try {
+        await share(loc, 'thinAbort', { path: p })
+        done()
+      } catch (e) {
+        return lost(loc, s, e, 'abort')
+      }
+      out.skipped.push({ path: p, why: no })
+      return
+    }
+    try {
+      await share(loc, 'thinSwap', { path: p })
+    } catch (e) {
+      return lost(loc, s, e, 'swap')
+    }
+    try {
+      index.thinSwapped(p, { bytes: r.bytes, keyframes: r.keyframes })
+    } catch (e) {
+      // the row could not say time-lapse: the swap is rolled back, so file and row still agree
+      return lost(loc, s, Object.assign(e, { code: 'EINDEX' }), 'index')
+    }
+    try {
+      await share(loc, 'thinCommit', { path: p })
+    } catch (e) {
+      return lost(loc, s, e, 'commit')
+    }
+    done()
+    lastKept.set(key, { endMs: s.endMs, cursor: r.cursor })
+    out.thinned.push({ path: p, wasBytes: r.wasBytes, nowBytes: r.bytes, keptKeyframes: r.keyframes, droppedKeyframes: r.droppedKeyframes })
+    out.freedBytes += r.wasBytes - r.bytes
+  }
+
+  /** Why the rewrite beside `s` must not go in now, or null. */
+  async function mustNotSwap(s) {
+    if (armed && !armed()) {
+      out.stopped ??= SWITCHED
+      return SWITCHED
+    }
+    try {
+      const g = await protectionFor(s.startMs, s.endMs ?? s.startMs, { protectedRanges: rangesFn })
+      if (g.protected(s)) return 'bookmarked or exported (since the run began): the rewrite was thrown away'
+    } catch (e) {
+      out.stopped ??= `the bookmarks could not be read (${e.message})`
+      return 'the bookmarks could not be read: the rewrite was thrown away'
+    }
+    const row = index.byPath(s.path)
+    if (!row || row.bytes !== s.bytes || row.startMs !== s.startMs || row.thinned != null) return 'its index row changed while it was rewritten: the rewrite was thrown away'
+    return null
+  }
+
+  /**
+   * A step of a rewrite failed, or its helper was lost (`e.code`): the file is put right by the helper at
+   * once when it can be asked, else it stays in flight for the next run. ESHARESTUCK: the share hangs,
+   * nothing more goes to it this run. ESHAREGONE twice: the helper keeps dying, the same.
+   */
+  async function lost(loc, s, e, step) {
+    const code = e?.code ?? null
+    warn(`${s.path}: the ${step} did not finish (${e?.message ?? e}${code && !String(e?.message).includes(code) ? `, ${code}` : ''}): putting it right`)
+    if (code === 'ESHARESTUCK' || code === 'EMARKER') {
+      stopLocation(loc, code === 'EMARKER' ? 'its marker is not there (unmounted?)' : 'the share is not answering')
+      keepInFlight.add(s.path)
+      warn(`${s.path}: left in flight; it is put right at the next run, and nothing deletes it until then`)
+      return
+    }
+    if (code === 'ESHAREGONE') {
+      const n = (goneTimes.get(loc.id) ?? 0) + 1
+      goneTimes.set(loc.id, n)
+      if (n >= 2) stopLocation(loc, 'its share helper stopped twice in this run')
+    }
+    const ok = await putRight(loc, [{ path: s.path, loc: loc.id, wasBytes: s.bytes, wasKeyframes: s.keyframes }])
+    if (!ok || out.left.includes(s.path)) keepInFlight.add(s.path)
+  }
+
+  /** The leftovers from before this run, location by location. */
+  async function putRightLeftovers(rows) {
+    const byLoc = new Map()
+    for (const r of rows) {
+      const loc = locs.get(r.loc)
+      if (!loc || !here.has(loc.id)) {
+        warn(`${r.path}: a rewrite left half done on ${loc ? `${loc.path}, which is not mounted` : `location ${r.loc}, which is not in the list`}: put right once it is back; nothing deletes it until then`)
+        continue
+      }
+      if (!byLoc.has(loc.id)) byLoc.set(loc.id, { loc, rows: [] })
+      byLoc.get(loc.id).rows.push(r)
+    }
+    for (const { loc, rows: list } of byLoc.values()) {
+      for (let i = 0; i < list.length; i += 50) {
+        await tick()
+        if (!(await putRight(loc, list.slice(i, i + 50)))) break
+      }
+    }
+  }
+
+  /**
+   * The helper's thinRecover for these rewrites in flight ({ path, wasBytes, wasKeyframes }), then each row
+   * made to match its file: rolled back -> the original's size and keyframes, full video; no journal ->
+   * the pair on disk is whole, and is the one whose size it has: the original's, or the row's own when the
+   * row already says time-lapse (its swap reached the index). false when the helper could not be asked
+   * (all kept in flight).
+   */
+  async function putRight(loc, rows) {
+    const paths = rows.map((r) => r.path)
+    let res
+    const stats = new Map()
+    try {
+      res = await share(loc, 'thinRecover', { paths })
+      const need = paths.filter((p) => !res.rolledBack.includes(p) && !res.left.includes(p) && !res.refused.includes(p))
+      if (need.length) for (const x of await share(loc, 'stat', { paths: need })) stats.set(x.path, x)
+    } catch (e) {
+      warn(`${loc.path}: ${rows.length} rewrite${rows.length === 1 ? '' : 's'} could not be put right now (${e.message}): kept in flight for the next run; nothing deletes ${rows.length === 1 ? 'it' : 'them'} until then`)
+      if (e.code === 'ESHARESTUCK' || e.code === 'EMARKER') stopLocation(loc, e.code === 'EMARKER' ? 'its marker is not there (unmounted?)' : 'the share is not answering')
+      return false
+    }
+    const ended = []
+    for (const r of rows) {
+      const p = r.path
+      const cur = index.byPath(p)
+      if (res.left.includes(p)) {
+        // the segment or its .idx is missing and nothing beside it could be put back: a person must look
+        out.left.push(p)
+        warn(`LEFT HALF DONE, NEEDS A PERSON: ${p}: the file or its .idx is missing and there was nothing to put back; the files beside it are kept as they are, and nothing deletes it`)
+        continue
+      }
+      ended.push(p)
+      if (res.refused.includes(p)) {
+        warn(`${p}: outside ${loc.path}: not touched`)
+        continue
+      }
+      if (res.rolledBack.includes(p)) {
+        out.recovered.rolledBack++
+        if (cur) index.setThin(p, null, { bytes: r.wasBytes, keyframes: r.wasKeyframes })
+        continue
+      }
+      if (res.sweptUp.includes(p)) out.recovered.sweptUp++
+      const st = stats.get(p)
+      if (cur && st && !st.error) {
+        if (st.size === cur.bytes) continue // the row says what is on disk (the original, or the committed rewrite)
+        if (st.size === r.wasBytes) index.setThin(p, null, { bytes: r.wasBytes, keyframes: r.wasKeyframes })
+        else {
+          warn(`${p}: once put right its size (${st.size}) is neither the original's (${r.wasBytes}) nor its row's (${cur.bytes}): its row takes that size, as full video, and the next run looks at it again`)
+          index.setThin(p, null, { bytes: st.size })
+        }
+      } else if (st?.error) warn(`${p}: ${st.error === 'ENOENT' ? 'not there' : st.error} once put right (deleted meanwhile?): its row is left as it is`)
+    }
+    index.thinEnd(ended)
+    return true
+  }
 }
 
 // ---- the retention job ---------------------------------------------------------------------------
@@ -475,6 +901,9 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
   out.protection = guard.mode
 
   const refused = new Set() // seen in this run (taken, or tried and could not): never offered again
+  // a time-lapse rewrite in flight (runThinning; the server stopped or the share hung during it): the file
+  // on disk may be half swapped until the next thinning run puts it right, so it is not deleted before
+  const inflight = new Set(typeof index.thinInflight === 'function' ? index.thinInflight().map((r) => r.path) : [])
   let switched = false
   const deleters = new Map() // location id -> the location's deleter (on only)
   const deleterFor = (loc) => {
@@ -509,6 +938,10 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
   const del = async (seg, why) => {
     if (refused.has(seg.path)) return false
     refused.add(seg.path)
+    if (inflight.has(seg.path)) {
+      out.skipped.push({ path: seg.path, why: 'its time-lapse rewrite is in flight (put right at the next thinning run first)' })
+      return false
+    }
     if (guard.protected(seg)) {
       out.skipped.push({ path: seg.path, why: 'bookmarked or exported' })
       return false
@@ -639,4 +1072,4 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
   return out
 }
 
-export const _test = { names, suffix, writeFsync }
+export const _test = { names, suffix, forget: () => (lastKept.clear(), (behindSaidAt = -Infinity), (paceSaid = '')) }

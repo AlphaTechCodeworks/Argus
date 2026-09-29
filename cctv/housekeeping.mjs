@@ -159,7 +159,10 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
   const cams = here.size ? index.cameras() : []
   // the event loop goes round every PACE_MS of the walks below (segment-delete.mjs makePacer)
   const pace = makePacer()
-  const unsafe = new Set() // tried and could not, or must not: not tried again in this run
+  // A time-lapse rewrite in flight (thinning.mjs; rec-index.mjs thin_inflight): the server stopped or the
+  // share hung in the middle of it, and the file may be half swapped until the next thinning run puts it
+  // right. Deleting it meanwhile would leave the original set aside (.thin-old) on the share for good.
+  const unsafe = new Set(typeof index.thinInflight === 'function' ? index.thinInflight().map((r) => r.path) : []) // tried and could not, or must not: not tried again in this run
   let taken = 0 // files handed to a helper this run, every location together (MAX_DELETES)
   for (const loc of locs) {
     if (!here.has(loc.id)) continue // statfs would read the disk underneath the mount point

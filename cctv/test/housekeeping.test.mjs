@@ -83,6 +83,23 @@ const tail = (p) => p.split(/[\\/]/).slice(-5).join('/')
   stopShareHelpers()
 }
 
+// ---- a file whose time-lapse rewrite is in flight is not deleted (thinning.mjs, perf report Task 4) ------
+// The server stopped, or the share hung, in the middle of a rewrite: the file may be half swapped (the
+// original aside as .thin-old) until the next thinning run puts it right. Deleting the segment meanwhile
+// would leave that original on the share for good, out of the index.
+{
+  const { loc, index, add } = setup()
+  const held = add('n1', 0, 200)
+  const other = add('n1', 0, 199)
+  index.thinBegin({ path: held, loc: loc.id, bytes: 1000, keyframes: 1 }, NOW)
+  const free = fakeFree(1_000) // below the floor too: every rule wants the oldest
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: free.fn, onDelete: (seg) => (free.freed += seg.bytes) })
+  check('A FILE WHOSE REWRITE IS IN FLIGHT IS NOT DELETED, by retention or below the floor', existsSync(held) && index.byPath(held) !== null && !existsSync(other) && !r.deleted.some((d) => d.path === held), JSON.stringify(r.deleted.map((d) => [tail(d.path), d.why])))
+  index.thinEnd(held)
+  await run({ index, settings: settingsWith([loc]), freeOf: fakeFree(1_000).fn })
+  check('... and goes like any other once it is put right', !existsSync(held) && index.byPath(held) === null)
+}
+
 // ---- low space: oldest first, camera furthest past its full-days target first; full days protected
 {
   const { loc, index, add } = setup()
