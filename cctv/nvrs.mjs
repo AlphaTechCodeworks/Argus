@@ -29,6 +29,7 @@ import { cameraRecording, getSettings, onSettingsChange } from './settings.mjs'
 import { spareWhile } from './watchdog.mjs'
 import { checkHealth, listLocations, onChange as onStorageChange, startHealthChecks } from './storage.mjs'
 import { SPOOL_ID, drainSpool, spoolLocation, trimSpool } from './ram-spool.mjs'
+import { noteRecorderGap } from './thin-pace.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
 
@@ -849,6 +850,8 @@ const pushRecording = () => {
 const onRecording = (m) => {
   if (m.t === 'recgap') {
     console.warn(`[rec ${m.nvr}/${m.ch + 1}] not recorded ${new Date(m.fromMs).toISOString()} - ${new Date(m.toMs).toISOString()}: ${m.reason}`)
+    // "disk too slow": time-lapse thinning stands back for a while, so recording keeps the disk (thin-pace.mjs)
+    noteRecorderGap(m)
     // a failed write: check the locations now rather than in up to 30 s (the workers get the result)
     if (/not writable/.test(m.reason)) checkHealth().catch(() => {})
   }
