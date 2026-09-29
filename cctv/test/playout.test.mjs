@@ -246,5 +246,140 @@ for (const drift of [0.0049, -0.0049]) {
   check('no live page uses it or sets lateForMs', ['viewer.js', 'live-tile.js', 'player.js'].every((f) => !/PLAYBACK_CLOCK|lateForMs/.test(page(f))))
 }
 
+// ---- live: the clock's behaviour, pinned -------------------------------------------------------------
+// Live view shares this clock with playback, and playback changes must not move live by a frame. Every
+// display time schedule() returns and every buffer size and anchor adapt() leaves, for arrival patterns
+// that exercise all of it (bursts, outages, clock steps, lag, drift, a jittery link that grows and
+// shrinks the buffer), is hashed with the live options: the default and the viewer's "Smooth". The
+// hashes were taken from the clock as it was before the playback speed changes (c95b4fb).
+{
+  const { createHash } = await import('node:crypto')
+  const { readFileSync } = await import('node:fs')
+  const viewer = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8')
+  const m = viewer.match(/const SMOOTH_CLOCK = \{ startDelayMs: (\d+), minDelayMs: (\d+), maxDelayMs: (\d+) \}/)
+  const SMOOTH = m && { startDelayMs: Number(m[1]), minDelayMs: Number(m[2]), maxDelayMs: Number(m[3]) }
+  check('the viewer\'s Smooth clock is the one pinned here', JSON.stringify(SMOOTH) === '{"startDelayMs":400,"minDelayMs":300,"maxDelayMs":1200}', JSON.stringify(SMOOTH))
+
+  // arrival patterns (sorted by `at`)
+  const steady = () => Array.from({ length: 30 * 60 }, (_, i) => ({ at: 1000 + i * FRAME_MS + (i % 7) * 3, ts: 50_000 + i * FRAME_MS }))
+  const bursts = () => {
+    const arr = []
+    const pauses = [320, 450, 400, 380, 440, 350]
+    let held = []
+    let pauseEnd = -1
+    for (let i = 0; i < 30 * 120; i++) {
+      const cap = i * FRAME_MS
+      const cycle = Math.floor(cap / 3000)
+      const inCycle = cap - cycle * 3000
+      const pause = pauses[cycle % pauses.length]
+      if (inCycle >= 2500 && inCycle < 2500 + pause) {
+        pauseEnd = cycle * 3000 + 2500 + pause
+        held.push(i)
+        continue
+      }
+      held.forEach((j, k) => arr.push({ at: 1000 + pauseEnd + k * 2, ts: 7000 + j * FRAME_MS }))
+      held = []
+      arr.push({ at: Math.max(1000 + cap + 5, (arr.at(-1)?.at ?? 0) + 1), ts: 7000 + i * FRAME_MS })
+    }
+    return arr
+  }
+  const outage = () => {
+    const arr = []
+    let ts = 90_000
+    let at = 1000
+    for (let i = 0; i < 30 * 20; i++, ts += FRAME_MS, at += FRAME_MS) arr.push({ at, ts })
+    at += 11_000
+    for (let i = 0; i < 30 * 30; i++, ts += FRAME_MS, at += FRAME_MS) arr.push({ at, ts })
+    return arr
+  }
+  const stepBack = () => {
+    const arr = []
+    let ts = 10_000
+    let at = 1000
+    for (let i = 0; i < 30 * 10; i++, ts += FRAME_MS, at += FRAME_MS) arr.push({ at, ts })
+    ts -= 5000
+    for (let i = 0; i < 30 * 20; i++, ts += FRAME_MS, at += FRAME_MS) arr.push({ at, ts })
+    return arr
+  }
+  const lag = () => {
+    const arr = []
+    let ts = 0
+    let at = 1000
+    for (let i = 0; i < 30 * 5; i++, ts += FRAME_MS, at += FRAME_MS) arr.push({ at, ts })
+    for (let i = 0; i < 57; i++, ts += FRAME_MS, at += 2 * FRAME_MS) arr.push({ at, ts })
+    for (let i = 0; i < 30 * 20; i++, ts += FRAME_MS, at += FRAME_MS) arr.push({ at, ts })
+    return arr
+  }
+  const drift = (d) => () => Array.from({ length: 30 * 300 }, (_, i) => ({ at: 1000 + i * FRAME_MS + (i % 5) * 4, ts: 1000 + i * FRAME_MS * (1 + d) }))
+  // a jittery link: 0-60 ms of jitter with a 250-700 ms delivery spike now and then (seeded, so the
+  // same every run), for 3 minutes then quiet for 1: the buffer grows, then shrinks
+  const jittery = () => {
+    let seed = 7
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31)
+    const arr = []
+    let last = 0
+    for (let i = 0; i < 30 * 240; i++) {
+      const cap = i * FRAME_MS
+      const rough = cap < 180_000
+      const spike = rough && rnd() < 0.01 ? 250 + rnd() * 450 : 0
+      const at = Math.max(last + 0.5, 1000 + cap + (rough ? rnd() * 60 : 2) + spike)
+      last = at
+      arr.push({ at, ts: 20_000 + cap })
+    }
+    return arr
+  }
+  /** Every display time and every adapt() result, hashed (12 hex digits). */
+  const trace = (arrivals, options) => {
+    const c = new PlayoutClock(options)
+    const out = []
+    let nextAdapt = 1000
+    for (const { at, ts } of arrivals) {
+      while (nextAdapt <= at) {
+        c.adapt(nextAdapt)
+        out.push(`d${c.delay} a${c.anchor?.toFixed(3)}`)
+        nextAdapt += 1000
+      }
+      out.push(c.schedule(ts, at).toFixed(3))
+    }
+    out.push(`r${c.resyncs} l${c.lateTotal} d${c.delay}`)
+    return createHash('sha256').update(out.join('\n')).digest('hex').slice(0, 12)
+  }
+  const scenarios = { steady, bursts, outage, stepBack, lag, driftFast: drift(0.0049), driftSlow: drift(-0.0049), jittery }
+  // [default, Smooth] per scenario, from c95b4fb
+  const PINNED = {
+    steady: ['d654544fdf94', '4c2ad1864645'],
+    bursts: ['3cccf927b827', 'f9096bdc3a5f'],
+    outage: ['a03a35c7bc6d', 'ada818b16704'],
+    stepBack: ['906285f0f8ab', 'f399e9de443e'],
+    lag: ['9f53e966a70d', '681c692d4428'],
+    driftFast: ['f5e68c301271', '6a28cc11f4f8'],
+    driftSlow: ['196eac23cb85', '853263b47be5'],
+    jittery: ['ad060aca6c28', '250dbb82dd8e']
+  }
+  const got = {}
+  for (const [name, make] of Object.entries(scenarios)) {
+    const arr = make()
+    got[name] = [trace(arr), trace(arr, SMOOTH)]
+    check(`live clock unchanged: ${name}, default and Smooth`, got[name][0] === PINNED[name][0] && got[name][1] === PINNED[name][1], `${got[name].join(' ')}`)
+  }
+  if (process.env.PRINT_PINNED) console.log(JSON.stringify(got))
+  // the jittery link does exercise growing and shrinking (else it would pin nothing about them)
+  const j = new PlayoutClock()
+  let grew = 0
+  let shrank = 0
+  let na = 1000
+  for (const { at, ts } of jittery()) {
+    while (na <= at) {
+      const before = j.delay
+      j.adapt(na)
+      if (j.delay > before) grew++
+      if (j.delay < before) shrank++
+      na += 1000
+    }
+    j.schedule(ts, at)
+  }
+  check('  (the jittery link grows the live buffer and shrinks it again)', grew > 0 && shrank > 0, `grew ${grew}x, shrank ${shrank}x`)
+}
+
 console.log(failures ?`\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
