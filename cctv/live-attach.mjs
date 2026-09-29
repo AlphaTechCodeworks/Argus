@@ -39,13 +39,14 @@ function standIn(nvr, ch, main, { phone, held, clientH265, phoneLive }) {
 
 /**
  * @param {{ can: Function, currentUser: (req: object) => string|null,
- *   adaptiveLive: { attach: Function }, phoneLive: { attach: Function }, track?: Function }} o
+ *   adaptiveLive: { attach: Function }, phoneLive: { attach: Function }, track?: Function,
+ *   log?: (line: string) => void }} o
  *   can: rights.mjs can; currentUser: the request's signed-in user; track: access-watch.mjs's, which
- *   asks the live right again while the socket or channel is open
+ *   asks the live right again while the socket or channel is open; log: the stand-ins' lines
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
  *   clientH265: boolean, phone15: boolean }) => void} attachLive
  */
-export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track = () => {} }) {
+export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track = () => {}, log = (line) => console.log(line) }) {
   return function attachLive(ws, req, { nvr, who, ch, streamType, clientH265, phone15 }) {
     if (!can(who, 'live', { nvr: nvr.id, ch })) return ws.close(1008, 'not allowed')
     // live video: with a live worker, the worker's own login decides (it polls the camera list)
@@ -69,11 +70,14 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track 
     // sub-stream not running yet will be held (subFull)
     const held = streamType === 1 && (nvr.subHeld?.(ch) === true || (!(stream.gop?.length > 0) && nvr.subFull?.() === true))
     // a sub-stream that is not running yet (cold, refused by the NVR, or held at its limit): the
-    // camera's main stream meanwhile, until the sub-stream's own first frame (sub-bridge.mjs)
+    // camera's main stream meanwhile, until the sub-stream's own first frame (sub-bridge.mjs). Its
+    // start and end are logged with the camera and whether the viewer is remote: on 29 Sep a remote
+    // page's stand-ins could only be guessed from the code (stutter report 2.6, verify-6).
     if (streamType === 1 && !(stream.gop?.length > 0)) {
       const main = nvr.getStream(ch, 0)
-      const log = held ? (line) => console.log(`[${nvr.id}/${ch + 1}] sub-stream held at the NVR's limit: ${line}`) : undefined
-      bridgeSub(ws, { sub: stream, main: standIn(nvr, ch, main, { phone, held, clientH265, phoneLive }), clientH265, log })
+      const stand = standIn(nvr, ch, main, { phone, held, clientH265, phoneLive })
+      const who = `[sub-bridge] ${nvr.id}/${ch + 1}, ${remote ? 'remote' : 'local'} viewer${held ? ", sub-stream held at the NVR's limit" : ''}${stand !== main ? ', main converted for a phone' : ''}:`
+      bridgeSub(ws, { sub: stream, main: stand, clientH265, log: (line) => log(`${who} ${line}`) })
     }
     // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry. One key
     // per browser, from the upgrade request: a page's /live and /live-mux sockets are one viewer.

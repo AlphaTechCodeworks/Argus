@@ -119,5 +119,53 @@ const socket = () => {
   check('a later wrapper of ws.send survives the hand-over', counted === 2 && ws.got.join() === 'm-k,s-k,s-d', `${counted} ${ws.got.join()}`)
 }
 
+// every stand-in is logged, one line when it starts and one when it ends (with what it sent): on
+// 29 Sep nothing said which tiles had one, for how long, or how much it put on a remote viewer's link
+{
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  main.gop = [frame('m-k', true), frame('m-d1', false)]
+  const ws = socket()
+  const logs = []
+  let t = 1000
+  bridgeSub(ws, { sub, main, clientH265: true, cap: 1000, log: (l) => logs.push(l), now: () => t })
+  check('a stand-in logs its start', logs.length === 1 && logs[0] === 'stand-in started: the main stream until the sub-stream\'s first frame', logs.join(' | '))
+  ws.bufferedAmount = 5000 // over its cap: the next frame is held back
+  main.frame(frame('m-d2', false), false)
+  ws.bufferedAmount = 0
+  t = 3500
+  ws.send(frame('s-k', true))
+  check('... and its end: how long, why, the frames and bytes it sent and those its gate held back', logs.length === 2 && logs[1] === 'stand-in ended after 2.5 s (the sub-stream came): 2 frames, 0.00 MB sent, 1 held back', logs.join(' | '))
+  ws.send(frame('s-d', false))
+  ws.fire('close')
+  check('... once', logs.length === 2)
+}
+{
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  main.gop = [frame('m-k', true)]
+  const ws = socket()
+  const logs = []
+  bridgeSub(ws, { sub, main, clientH265: true, log: (l) => logs.push(l), now: () => 0 })
+  for (let i = 0; i < 4; i++) main.frame(Buffer.alloc(300_000, 0), false)
+  ws.fire('close')
+  check('a tile closed before its sub-stream came: logged as such, with the bytes in MB', logs[1] === 'stand-in ended after 0.0 s (the tile closed): 5 frames, 1.20 MB sent, 0 held back', logs.join(' | '))
+}
+{
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  main.gop = [frame('m-k', true, 1)]
+  const logs = []
+  bridgeSub(socket(), { sub, main, clientH265: false, log: (l) => logs.push(l), now: () => 0 })
+  check('an H.265 main for a browser without H.265: its end says why', logs[1] === 'stand-in ended after 0.0 s (the main stream is H.265, which this browser cannot play): 0 frames, 0.00 MB sent, 0 held back', logs.join(' | '))
+}
+{
+  const logs = []
+  const sub = new FakeStream()
+  sub.gop = [frame('s-k', true)]
+  bridgeSub(socket(), { sub, main: new FakeStream(), clientH265: true, log: (l) => logs.push(l) })
+  check('no stand-in (the sub-stream runs): nothing logged', logs.length === 0)
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

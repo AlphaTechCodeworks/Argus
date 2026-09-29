@@ -20,19 +20,29 @@ import { CAP_BYTES, gateSend } from './backpressure.mjs'
 
 export const CODEC_H265 = 1 // sdk.mjs frame header byte 1 (transcode.mjs CODEC_H265)
 
+// Why a stand-in ended, as its log line says it
+const ENDED = { sub: 'the sub-stream came', closed: 'the tile closed', h265: 'the main stream is H.265, which this browser cannot play' }
+
 /**
  * Sends `main` to `ws` until the first frame of the viewer's own stream is sent to it.
+ * Logs one line when it starts and one when it ends, with what it sent: a stand-in is a main
+ * stream on the viewer's link, 2-5 Mbit/s and up to 1.5 MB of replay at once, and on 29 Sep nothing
+ * said which remote tiles had one or for how long (stutter report 2.6, verify-6).
  * @param {object} ws the viewer's socket (ws: send, readyState, OPEN, bufferedAmount, on)
  * @param {{ sub: { gop: any[] }, main: { gop: any[], add: Function, remove: Function }, clientH265: boolean,
- *   cap?: number, log?: (line: string) => void }} o
+ *   cap?: number, log?: (line: string) => void, now?: () => number }} o
+ *   log: live-attach.mjs puts the camera and the viewer (remote or local) in front of each line
  * @returns {{ end: () => void, active: () => boolean } | null} null when there is nothing to bridge
  */
-export function bridgeSub(ws, { sub, main, clientH265, cap = CAP_BYTES[0], log = () => {} }) {
+export function bridgeSub(ws, { sub, main, clientH265, cap = CAP_BYTES[0], log = () => {}, now = Date.now }) {
   // the sub-stream is running: its own picture goes at once
   if (!main || sub.gop.length > 0) return null
   const realSend = ws.send.bind(ws)
+  const startedAt = now()
   let on = true
   let sent = 0
+  let bytes = 0
+  let heldBack = 0 // frames its own gate kept off a link that had too much queued
   // the stand-in's own gate: its waits and over-cap state never touch the viewer's (ws.waitForKey)
   const gate = {
     get readyState() { return ws.readyState },
@@ -48,7 +58,7 @@ export function bridgeSub(ws, { sub, main, clientH265, cap = CAP_BYTES[0], log =
     // (ws.send is left wrapped, passing straight through from now on: other layers wrap it after
     // us -- adaptive-live.mjs counts the bytes it sends -- and putting ours back would drop theirs)
     main.remove(tap)
-    if (sent) log(`${sent} frames of the main stream shown ${why === 'sub' ? 'until the sub-stream came' : 'until the tile closed'}`)
+    log(`stand-in ended after ${((now() - startedAt) / 1000).toFixed(1)} s (${ENDED[why]}): ${sent} frames, ${(bytes / 1e6).toFixed(2)} MB sent, ${heldBack} held back`)
   }
   const tap = {
     OPEN: 1,
@@ -61,8 +71,9 @@ export function bridgeSub(ws, { sub, main, clientH265, cap = CAP_BYTES[0], log =
       if (buf[1] === CODEC_H265 && !clientH265) return end('h265')
       if (gateSend(gate, (buf[0] & 1) === 1, { cap })) {
         sent++
+        bytes += buf.length
         realSend(buf)
-      }
+      } else heldBack++
     }
   }
   // the first frame of the viewer's own stream (a keyframe: it waits for one) ends the stand-in
@@ -71,6 +82,7 @@ export function bridgeSub(ws, { sub, main, clientH265, cap = CAP_BYTES[0], log =
     return realSend(...args)
   }
   ws.on?.('close', () => end('closed'))
+  log('stand-in started: the main stream until the sub-stream\'s first frame')
   main.add(tap) // replays the main stream's current GOP into the tap, keyframe first
   return { end, active: () => on }
 }

@@ -666,7 +666,8 @@ const fanOut = (c, buf, isKey, type, now) => {
   const asked = []
   const adaptive = { calls: [], attach(key, o) { this.calls.push({ key, ...o }) } }
   const phone = { ok: true, calls: [], attach(key, stream, type, ws, opts) { this.calls.push({ key, stream, type, ws, opts }); return this.ok } }
-  const attachLive = liveAttacher({ can: (who, action, target) => { asked.push({ who, action, target }); return allowed }, currentUser: () => 'ann', adaptiveLive: adaptive, phoneLive: phone })
+  const attachLogs = []
+  const attachLive = liveAttacher({ can: (who, action, target) => { asked.push({ who, action, target }); return allowed }, currentUser: () => 'ann', adaptiveLive: adaptive, phoneLive: phone, log: (l) => attachLogs.push(l) })
   const who = { user: 'ann', admin: false }
   const base = { who, ch: 3, streamType: 0, clientH265: false, phone15: false }
   const run = (o = {}, r = req()) => { const w = fakeWs(); const nvr = o.nvr ?? mkNvr(); attachLive(w, r, { ...base, nvr, ...o }); return { w, nvr } }
@@ -688,6 +689,13 @@ const fanOut = (c, buf, isKey, type, now) => {
   const cold = x.nvr.getStream(3, 1)
   const stand = [...x.nvr.getStream(3, 0).viewers]
   check('... a cold sub-stream: the main stream stands in (sub-bridge), the viewer waits on its sub-stream', cold.viewers.has(x.w) && stand.length === 1 && stand[0].background === true)
+  // every stand-in is logged, with its camera and whether the viewer is remote (stutter report 2.6)
+  check('... logged with its camera and "local"', attachLogs.at(-1) === "[sub-bridge] n1/4, local viewer: stand-in started: the main stream until the sub-stream's first frame", attachLogs.join(' | '))
+  x.w.send(frame(true))
+  check('... and its end', /^\[sub-bridge\] n1\/4, local viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): 0 frames, 0\.00 MB sent, 0 held back$/.test(attachLogs.at(-1)), attachLogs.at(-1))
+  run({ streamType: 1, nvr: mkNvr({ subCold: true }) }, req('127.0.0.1'))
+  check('... a remote viewer\'s stand-in is logged as remote', attachLogs.at(-1) === "[sub-bridge] n1/4, remote viewer: stand-in started: the main stream until the sub-stream's first frame", attachLogs.at(-1))
+  adaptive.calls.length = 0
   x = run({ clientH265: true }, req('127.0.0.1'))
   const key = createHash('sha1').update('ann|Desktop|c=1').digest('hex')
   const call = adaptive.calls.at(-1)
@@ -740,8 +748,9 @@ const fanOut = (c, buf, isKey, type, now) => {
   const phoneReq = { socket: { remoteAddress: '192.168.1.30' }, headers: { 'user-agent': 'Mozilla/5.0 (iPhone)', cookie: 'c=1' } }
   const deskReq = { socket: { remoteAddress: '192.168.1.20' }, headers: { 'user-agent': 'Desktop', cookie: 'c=1' } }
   const mkPhone = (free = 16, running = []) => ({ free, calls: [], detached: [], attach(key, stream, type, ws, opts) { this.calls.push({ key, stream, type, ws, opts }); return true }, detach(key, ws) { this.detached.push({ key, ws }) }, room() { return this.free }, has(key) { return running.includes(key) } })
+  const heldLogs = []
   const run = ({ nvr = mkNvr(), phone = mkPhone(), r = phoneReq, clientH265 = false } = {}) => {
-    const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive: phone })
+    const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive: phone, log: (l) => heldLogs.push(l) })
     const w = fakeWs()
     attach(w, r, { nvr, who: { user: 'ann' }, ch: 3, streamType: 1, clientH265, phone15: true })
     return { w, nvr, phone, sub: nvr.getStream(3, 1), main: nvr.getStream(3, 0) }
@@ -751,6 +760,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   const conv = x.phone.calls.find((c) => c.key === KEY)
   check('held sub, phone, H.265 main that plays: the stand-in is the main converted for phones, a conversion of its own asking in the background', conv && conv.stream === x.main && conv.type === 0 && conv.opts?.background === true && conv.ws.background === true && x.main.viewers.size === 0, JSON.stringify(x.phone.calls.map((c) => c.key)))
   check('... its conversion names its camera in the log', conv?.opts?.camera === 'v4/4', JSON.stringify(conv?.opts))
+  check('... its stand-in logged as held, and converted for a phone', heldLogs.at(-1) === "[sub-bridge] v4/4, local viewer, sub-stream held at the NVR's limit, main converted for a phone: stand-in started: the main stream until the sub-stream's first frame", heldLogs.join(' | '))
   check('... the held sub-stream itself is not thinned (nothing to thin; no conversion place held for it)', !x.phone.calls.some((c) => c.key === 'v4/3/1') && x.sub.viewers.has(x.w))
   x.w.send(frame(true)) // the sub-stream's first frame (there is room now): the stand-in ends
   check('... its first frame ends the stand-in, and the converted stream is let go', x.phone.detached.length === 1 && x.phone.detached[0].key === KEY && x.phone.detached[0].ws === conv.ws)
@@ -779,7 +789,7 @@ const fanOut = (c, buf, isKey, type, now) => {
     const hub = new StreamHub('v4', (m) => sent.push(m))
     const nvr = { ...mkNvr(), getStream: (ch, type) => hub.getStream(ch, type) }
     const phoneLive = new PhoneLive({ pool: new TranscodePool(16), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {} })
-    const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive })
+    const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive, log: () => {} })
     attach(fakeWs(), phoneReq, { nvr, who: { user: 'ann' }, ch: 3, streamType: 1, clientH265: false, phone15: true })
     const mains = sent.filter((m) => m.t === 'want' && m.ch === 3 && m.type === 0)
     check('... real hub + phone-live: the stand-in\'s conversion asks the worker for the main as background, never foreground', mains.length === 1 && mains[0].background === true && phoneLive.has(KEY), JSON.stringify(sent))
