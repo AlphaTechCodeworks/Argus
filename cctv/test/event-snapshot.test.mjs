@@ -7,7 +7,7 @@
 // Temp data folder only; no NVR, no SDK, no ffmpeg.
 //   node cctv/test/event-snapshot.test.mjs
 import { EventEmitter } from 'node:events'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -465,6 +465,87 @@ writeFileSync(snapPath(other.id), JPEG)
   if (held[2]) answer(held[2])
   await job3.catch(() => null)
   check('a picture removed while its copy was made: the copy is not kept', held.length === 3 && !existsSync(sdPath(gone.id)))
+
+  // a kept copy bears the time of the picture it was made from, and is served only while that picture is
+  // there: one renamed in just after the picture was taken again (between the last look and the rename) is
+  // newer than the new picture by the clock, but bears the old one's time
+  let answered = held.length
+  /** Asks for the copy, answers every ffmpeg it starts; how many ran, the last one's input, what came. */
+  const ask = async (e) => {
+    const n = held.length
+    const job = sdSnapshot(e, deps)
+    await Promise.race([job.catch(() => null), until(() => held.length > n)]) // (served from a kept copy: no ffmpeg to wait for)
+    while (answered < held.length) answer(held[answered++])
+    const got = await job.catch(() => null)
+    return { made: held.length - n, input: held.at(-1)?.input, got }
+  }
+  const { event: stamped } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 420_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(stamped.id), OLD)
+  const mOld = new Date(SEEN + 1000)
+  utimesSync(snapPath(stamped.id), mOld, mOld)
+  await ask(stamped)
+  const sdTime = statSync(sdPath(stamped.id), { throwIfNoEntry: false })?.mtimeMs
+  check('a kept copy bears its picture\'s time (not the time it was written)', sdTime !== undefined && Math.abs(sdTime - mOld.getTime()) < 1, `${sdTime} vs ${mOld.getTime()}`)
+  // the picture taken again (an id used again), dated after the old one, before the copy was written
+  writeFileSync(snapPath(stamped.id), NEW)
+  const mNew = new Date(SEEN + 30_000)
+  utimesSync(snapPath(stamped.id), mNew, mNew)
+  const second5 = { ...stamped, seenMs: SEEN + 20_000 }
+  const a = await ask(second5)
+  check('... the picture taken again: the copy of the old one is not served for it; a copy of the new picture is made', a.made === 1 && a.input?.equals(NEW) && a.got?.equals(copyOf(NEW)), `${a.made} ffmpeg(s)`)
+  // a copy of the old picture renamed in after that (the stat-to-rename window): it bears the old picture's time
+  writeFileSync(sdPath(stamped.id), copyOf(OLD))
+  utimesSync(sdPath(stamped.id), mOld, mOld)
+  const b = await ask(second5)
+  check('... a copy of the old picture in its place again (renamed in late): not served, made again from the new picture', b.made === 1 && b.input?.equals(NEW) && b.got?.equals(copyOf(NEW)), `${b.made} ffmpeg(s)`)
+  // a copy with no stamp (an older release's: the time it was written, after the picture)
+  writeFileSync(sdPath(stamped.id), copyOf(OLD))
+  const c = await ask(second5)
+  check('... nor one merely newer than the picture (no stamp): made again', c.made === 1 && c.got?.equals(copyOf(NEW)), `${c.made} ffmpeg(s)`)
+  const d = await ask(second5)
+  check('... its own copy, stamped, is served again with no ffmpeg', d.made === 0 && d.got?.equals(copyOf(NEW)), `${d.made} ffmpeg(s)`)
+}
+
+// ---- the picture read is the one looked at: taken again in between, it is not read in its place ----------
+{
+  // fs/promises' open and readFile, as event-snapshot.mjs sees them: the picture is taken again (a new file,
+  // a later time: an event id used again) just before its bytes are read, after the look that judged it
+  const fsp = (await import('node:fs/promises')).default
+  const { syncBuiltinESMExports } = await import('node:module')
+  const OLD = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(80, 3), Buffer.from([0xff, 0xd9])])
+  const NEW = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(80, 4), Buffer.from([0xff, 0xd9])])
+  const swapBeforeRead = async (file, fn) => {
+    const real = { open: fsp.open, readFile: fsp.readFile }
+    let swapped = false
+    const swap = (p) => {
+      if (swapped || String(p) !== file) return
+      swapped = true
+      writeFileSync(`${file}.swap`, NEW)
+      const t = new Date(Date.now() + 5000)
+      utimesSync(`${file}.swap`, t, t)
+      renameSync(`${file}.swap`, file)
+    }
+    fsp.open = async (p, ...a) => (swap(p), real.open(p, ...a))
+    fsp.readFile = async (p, ...a) => (swap(p), real.readFile(p, ...a))
+    syncBuiltinESMExports()
+    try {
+      return await fn()
+    } finally {
+      Object.assign(fsp, real)
+      syncBuiltinESMExports()
+    }
+  }
+  const { event: full } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 480_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(full.id), OLD)
+  const r = await swapBeforeRead(snapPath(full.id), () => call(full.id, carol))
+  check('the full picture taken again between the look and the read: 404, never the new picture for the old event', r.status === 404 && !(r.body && Buffer.from(r.body).equals(NEW)), `${r.status}`)
+  const { event: sdEv } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 540_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(sdEv.id), OLD)
+  const before = procs.length
+  const s = await swapBeforeRead(snapPath(sdEv.id), () => call(sdEv.id, dave))
+  check('... and for the SD copy: 404, no copy made of the new picture under the old one\'s look, none kept', s.status === 404 && procs.length === before && !existsSync(sdPath(sdEv.id)), `${s.status}, ${procs.length - before} ffmpeg(s)`)
+  const again = await call(sdEv.id, dave)
+  check('... asked again (the new picture now looked at): its copy', again.status === 200 && procs.at(-1)?.input.equals(NEW), `${again.status}`)
 }
 
 // ---- pictures go with their events ---------------------------------------------------------------------

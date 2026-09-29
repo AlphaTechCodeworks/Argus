@@ -29,7 +29,7 @@
 // Nothing here imports sdk.mjs: the tests run on any machine (ffmpeg's own part on the server).
 import { spawn as nodeSpawn } from 'node:child_process'
 import { rmSync, statSync } from 'node:fs'
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { DATA_DIR } from './auth.mjs'
@@ -327,14 +327,42 @@ function pictureOf(ev) {
   return st && !(st.mtimeMs < Number(ev.seenMs)) ? st : null
 }
 
+/** Two file times the same: an SD copy is stamped with its picture's (set to the microsecond at best). */
+const sameTime = (a, b) => Math.abs(a - b) < 1
+
+/**
+ * The bytes of `file` if it is still the file whose time is `mtimeMs` (as looked at before): read through
+ * one handle, whose own time is looked at, so a file taken again since (an event id used again: another
+ * event's picture, maybe of another camera) is never read in its place. null when it is not, or is gone.
+ * @param {string} file
+ * @param {number} mtimeMs
+ * @returns {Promise<Buffer|null>}
+ */
+async function readSame(file, mtimeMs) {
+  let fh
+  try {
+    fh = await open(file, 'r')
+  } catch {
+    return null
+  }
+  try {
+    return sameTime((await fh.stat()).mtimeMs, mtimeMs) ? await fh.readFile() : null
+  } finally {
+    await fh.close().catch(() => {})
+  }
+}
+
 /**
  * The SD copy of an event's picture, made the first time it is asked for, on its own one-at-a-time
- * ffmpeg queue, and kept beside the picture (made again when the picture is newer: taken again). Kept
- * only while the picture it was made from is still the one on disk: one taken again (an event id used
- * again) or removed while the copy was made would otherwise leave a copy newer than the picture, served
- * for the new event. The request it was made for still gets it: that picture was its event's (pictureOf,
- * D4) when it asked. Rejects when there is no picture of this event or the copy cannot be made (and
- * then, for SD_RETRY_MS, without trying again): the route then answers 404, never with the picture itself.
+ * ffmpeg queue, and kept beside the picture, stamped with the picture's time: a kept copy is served only
+ * while it bears the time of the picture there now (made again otherwise: the picture was taken again,
+ * an event id used again). A copy of a picture taken again or removed while the copy was made is not
+ * kept; and should one be renamed in all the same (the picture taken again between the last look and
+ * the rename), it bears the old picture's time, so it is never served for the new one. The picture is
+ * read only if it is still the one looked at (readSame): one taken again in between is another event's.
+ * The request a copy was made for gets it: that picture was its event's (pictureOf, D4) when it asked.
+ * Rejects when there is no picture of this event or the copy cannot be made (and then, for SD_RETRY_MS,
+ * without trying again): the route then answers 404, never with the picture itself.
  * @param {{ id: number, seenMs?: number }} ev an events-db row
  * @param {{ ffmpeg?: string, spawn?: Function, platform?: string, timeoutMs?: number }} [deps] (tests)
  * @returns {Promise<Buffer>}
@@ -345,13 +373,14 @@ export async function sdSnapshot(ev, { ffmpeg = 'ffmpeg', spawn = nodeSpawn, pla
   const sd = sdPath(id)
   const fullSt = pictureOf({ id, seenMs: ev?.seenMs })
   if (!fullSt) throw new Error('no picture of this event')
-  const sdSt = statSync(sd, { throwIfNoEntry: false })
-  if (sdSt && sdSt.mtimeMs >= fullSt.mtimeMs) return readFile(sd)
+  const kept = await readSame(sd, fullSt.mtimeMs) // (only a copy bearing this picture's time)
+  if (kept) return kept
   const key = `${id}@${fullSt.mtimeMs}`
   if (Date.now() - (sdFailed.get(key) ?? -Infinity) < SD_RETRY_MS) throw new Error('the SD copy could not be made a moment ago')
   if (sdInFlight.has(key)) return sdInFlight.get(key)
   const job = (async () => {
-    const input = await readFile(full)
+    const input = await readSame(full, fullSt.mtimeMs)
+    if (!input) throw new Error('its picture was taken again or removed while it was asked for')
     let jpeg
     try {
       jpeg = await sdOneAtATime(() => toJpeg(input, sdArgs(), { ffmpeg, spawn, platform, timeoutMs }))
@@ -364,6 +393,8 @@ export async function sdSnapshot(ev, { ffmpeg = 'ffmpeg', spawn = nodeSpawn, pla
     const tmp = `${sd}.${process.pid}-${++sdTmps}.tmp`
     try {
       await writeFile(tmp, jpeg)
+      // stamped with the time of the picture it was made from: served only while that picture is there
+      await utimes(tmp, fullSt.mtimeMs / 1000, fullSt.mtimeMs / 1000)
       // (looked at last thing before the rename: the picture's mtime as read when this copy was asked for)
       if (statSync(full, { throwIfNoEntry: false })?.mtimeMs === fullSt.mtimeMs) await rename(tmp, sd)
       else console.log(`[snapshot] the SD copy of event ${id} was not kept: its picture was taken again or removed while it was made`)
@@ -407,8 +438,12 @@ export async function handleSnapshot(req, res, eventId, who, deps = {}) {
   let jpeg
   try {
     if (!mayHd(who, cam.nvr, cam.ch)) jpeg = await sdSnapshot(ev, deps)
-    else if (pictureOf(ev)) jpeg = await readFile(snapPath(id))
-    else return missing() // not taken (yet, or at all), or an earlier event's picture (pictureOf)
+    else {
+      // not taken (yet, or at all), an earlier event's picture (pictureOf), or taken again since that look
+      const st = pictureOf(ev)
+      jpeg = st && (await readSame(snapPath(id), st.mtimeMs))
+      if (!jpeg) return missing()
+    }
   } catch {
     return missing() // no SD copy: never the picture itself instead
   }
