@@ -17,7 +17,10 @@
 //   - the whole path: a recorded .h265 file, ServerPlayback with &h265=0, {scrub}: one converted
 //     frame on the socket after {type:'scrub'}, for each of two scrubs, each ffmpeg with low_delay;
 //     played at 1x (no low_delay, every picture) and at 2x (keyframes only, with low_delay, each out
-//     without waiting for the next, stamped 8 a second).
+//     without waiting for the next, stamped 8 a second);
+//   - a remote PC's live view of an H.265 camera at level full (adaptive-live.mjs -> phone-live.mjs):
+//     every frame out at its own time, a keyframe every 2 s, 1920 wide, no keyframe past the 1 s
+//     buffer, and faster than real time with room to spare, on 4K at 20 fps and 1440p at 30.
 // ffmpeg runs behind ionice and nice here exactly as in the service. Nothing reaches an NVR.
 //   node cctv/test/transcode-ffmpeg.test.mjs        (on the server copy)
 import { execFileSync, spawn } from 'node:child_process'
@@ -28,6 +31,8 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-xcode-ffmpeg-test-'))
 const { CODEC_H264, CODEC_H265, DECODE_THREADS, PLAYBACK_LIMITS, TranscodePool, Transcoder } = await import('../transcode.mjs')
+const { AdaptiveLive } = await import('../adaptive-live.mjs')
+const { encodeFrame, parseFrame } = await import('../phone-live.mjs')
 const { CODEC, splitUnits } = await import('../rec-reader.mjs')
 const { SegmentWriter } = await import('../segment-writer.mjs')
 const { openRecIndex } = await import('../rec-index.mjs')
@@ -57,14 +62,16 @@ if (!execFileSync('ffmpeg', ['-hide_banner', '-encoders']).toString().includes('
  * wavefronts (none of the 45 H.265 cameras here uses them; with them low_delay would still decode on
  * several threads, and the decoder's speed would not look like the cameras').
  */
-function testVideo({ size, codec = 'h265', frames = 1, gop = 10, rate = 10, noise = false }) {
+function testVideo({ size, codec = 'h265', frames = 1, gop = 10, rate = 10, noise = false, kbps = 0, src = 'testsrc' }) {
+  // kbps: held to about a camera's bitrate (a 4K main here is ~4 Mbit/s), which is what the decoder has to chew through
   const enc = codec === 'h265'
-    ? ['-c:v', 'libx265', '-preset', 'ultrafast', '-x265-params', `log-level=error:keyint=${gop}:min-keyint=${gop}:scenecut=0:open-gop=0:bframes=0:wpp=0`]
-    : ['-c:v', 'libx264', '-preset', 'ultrafast', '-g', String(gop), '-keyint_min', String(gop), '-sc_threshold', '0', '-bf', '0']
+    ? ['-c:v', 'libx265', '-preset', 'ultrafast', '-x265-params', `log-level=error:keyint=${gop}:min-keyint=${gop}:scenecut=0:open-gop=0:bframes=0:wpp=0${kbps ? `:bitrate=${kbps}:vbv-maxrate=${kbps}:vbv-bufsize=${2 * kbps}` : ''}`]
+    : ['-c:v', 'libx264', '-preset', 'ultrafast', '-g', String(gop), '-keyint_min', String(gop), '-sc_threshold', '0', '-bf', '0', ...(kbps ? ['-b:v', `${kbps}k`, '-maxrate', `${kbps}k`, '-bufsize', `${2 * kbps}k`] : [])]
   return execFileSync('ffmpeg', [
-    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `testsrc=size=${size}:rate=${rate}`,
-    // noise: fresh grain in every picture, so every picture is expensive (a rate cap has work to do)
-    ...(noise ? ['-vf', 'noise=alls=40:allf=t'] : []),
+    '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `${src}=size=${size}:rate=${rate}`,
+    // noise: fresh grain in every picture, so every picture is expensive (a rate cap has work to do);
+    // a number: that much grain (40 by default: heavy)
+    ...(noise ? ['-vf', `noise=alls=${noise === true ? 40 : noise}:allf=t`] : []),
     '-frames:v', String(frames), ...enc, '-pix_fmt', 'yuv420p',
     '-f', codec === 'h265' ? 'hevc' : 'h264', 'pipe:1'
   ], { maxBuffer: 256 * 1024 * 1024 })
@@ -513,6 +520,57 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
   check('  what is sent stays within the cap (2.5 Mbit/s and a 1 s buffer per ffmpeg)', sent <= allowed, `${sent} B, allowed ${Math.round(allowed)} B`)
   check('  (the recording itself is far above it: the conversion is what holds the rate down)', recorded > 3 * allowed, `${recorded} B`)
   IDX.close()
+}
+
+// ---- a remote viewer's live view at level full: every frame, a keyframe every 2 s (stutter report 2.7) ----
+// A PC through the tunnel cannot decode H.265, so its full-size view of an H.265 camera is converted.
+// That went through level 15's settings (a 30 fps camera at 15 fps, 1280 wide), with a 4 s encoder
+// buffer, a single-threaded decoder and a keyframe every 50 pictures. The whole path as the service
+// runs it: AdaptiveLive at full, the camera's codec known from the NVR before its first keyframe (a
+// main started on demand), PhoneStream with REMOTE_CONVERSION, the real Transcoder and ffmpeg, niced.
+// Footage like the cameras': a 4K main at 20 fps (the 4K and 3200x1800 mains here) and a 1440p one at
+// 30 fps (the 30 fps mains), H.265 at a camera's bitrate with some grain, a keyframe every 2 s. Fed as
+// fast as ffmpeg takes it, so the time it takes is its headroom over real time.
+for (const c of [
+  { label: '4K H.265 at 20 fps', size: '3840x2160', fps: 20, seconds: 10, kbps: 4200, out: '1920x1080' },
+  { label: '1440p H.265 at 30 fps', size: '2560x1440', fps: 30, seconds: 6, kbps: 3000, out: '1920x1080' }
+]) {
+  const clip = testVideo({ size: c.size, src: 'testsrc2', frames: c.fps * c.seconds, gop: 2 * c.fps, rate: c.fps, noise: 12, kbps: c.kbps })
+  const units = splitUnits(clip, CODEC.h265).units
+  const N = units.length
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(2), log: (l) => logs.push(l), budgetBps: 1e12 })
+  const src = { gop: [], viewers: new Set(), add(w) { this.viewers.add(w) }, remove(w) { this.viewers.delete(w) } }
+  const ws = { OPEN: 1, readyState: 1, bufferedAmount: 0, got: [], send(b) { this.got.push({ at: performance.now(), ...parseFrame(b) }) }, on() {}, close() {} }
+  live.attach('pc', { ws, nvrId: 'n1', ch: 0, type: 0, source: src, codec: 'h265' })
+  const t0 = performance.now()
+  units.forEach((u, i) => {
+    const msg = encodeFrame(clip.subarray(u.start, u.end), u.isKey, CODEC_H265, T0 + (i * 1000) / c.fps)
+    for (const v of [...src.viewers]) v.send(msg)
+  })
+  await until(() => ws.got.length >= N - DECODE_THREADS, 120_000)
+  await sleep(QUIET_MS)
+  const got = ws.got
+  const secs = ((got.at(-1)?.at ?? Infinity) - t0) / 1000
+  const speed = got.length / secs / c.fps
+  const keys = got.map((g, i) => (g.isKey ? i : -1)).filter((i) => i >= 0)
+  const gaps = keys.slice(1).map((k, j) => got[k].ts - got[keys[j]].ts)
+  const frame = 1000 / c.fps
+  const keySizes = keys.map((k) => got[k].payload.length).sort((a, b) => a - b)
+  const kb = (n) => `${Math.round(n / 1024)} KB`
+  const bufBytes = (PLAYBACK_LIMITS.maxKbps * 1000 * PLAYBACK_LIMITS.bufSeconds) / 8
+  info(`${c.label} (${(clip.length * 8 / c.seconds / 1e6).toFixed(1)} Mbit/s) at level full: ${got.length} of ${N} pictures in ${secs.toFixed(1)} s = ${speed.toFixed(2)}x real time (the report's aim 2.5x); keyframes every ${gaps.map((g) => Math.round(g)).join(', ')} ms, median ${kb(keySizes[keySizes.length >> 1] ?? 0)}, largest ${kb(keySizes.at(-1) ?? 0)} (the report's aim 160 KB); sent ${(got.reduce((s, g) => s + g.payload.length, 0) * 8 / c.seconds / 1e6).toFixed(2)} Mbit/s`)
+  check(`${c.label}, remote PC at full: its own conversion, every frame kept`, logs.some((l) => l === `[phone-live] n1/1: converting a main stream at ${c.fps.toFixed(1)} fps to H.264, every frame kept`), logs.join(' | '))
+  check(`  every picture out as H.264, each at its own capture time, in order (all but the last ${DECODE_THREADS} at most, held in ffmpeg at the end): ${c.fps} fps in, ${c.fps} fps out`, got.length >= N - DECODE_THREADS && got.every((g, i) => g.codec === CODEC_H264 && Math.abs(g.ts - (T0 + i * frame)) < 0.5), `${got.length} of ${N}`)
+  check('  a keyframe first, then one every 2 s of video (± 1 frame)', keys[0] === 0 && gaps.length >= Math.floor(c.seconds / 2) - 1 && gaps.every((g) => Math.abs(g - 2000) <= frame + 0.5), `at ${keys.join(', ')}; ${gaps.map((g) => Math.round(g)).join(', ')} ms`)
+  const p = got.length ? probe(Buffer.concat(got.map((g) => g.payload))) : {}
+  check(`  it decodes, ${c.out} (at most 1920 wide), every picture sent`, p.codec_name === 'h264' && `${p.width}x${p.height}` === c.out && Number(p.nb_read_frames) === got.length, J(p))
+  check('  no keyframe bigger than the 1 s buffer at 2.5 Mbit/s (a 4 s buffer let them reach 430-550 KB)', (keySizes.at(-1) ?? Infinity) <= 1.1 * bufBytes, `largest ${keySizes.at(-1)} B, buffer ${bufBytes} B`)
+  // ahead of real time with room to spare on a busy server: the conversion runs at nice 10 behind the
+  // recorder, and one that falls behind is a picture that falls behind
+  check('  converted at least 1.5x faster than real time', speed >= 1.5, `${speed.toFixed(2)}x`)
+  for (const s of live.streams.values()) s.close()
+  clearInterval(live.timer)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
