@@ -194,13 +194,15 @@ function world() {
     }
   })
   check('BOOKMARKS UNREADABLE: NOTHING IS TOUCHED', r.thinned.length === 0 && statSync(s.path).size === s.bytes && r.warnings.some((x) => /bookmarks/.test(x)))
+  // not 'none', which is "nobody to ask, so nothing protected": this run stopped before any file (storage-jobs.mjs)
+  check('...and the run says the bookmarks were unreadable, not that there were none', r.protection === 'unread', r.protection)
   w.index.close()
 }
 {
   const w = world()
   const s = w.add('n1', 0, 60)
   const r = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, protectedRanges: () => [{ fromMs: 'oops', toMs: 1 }] })
-  check('a range we cannot read stops the run rather than guessing', r.thinned.length === 0 && statSync(s.path).size === s.bytes)
+  check('a range we cannot read stops the run rather than guessing', r.thinned.length === 0 && statSync(s.path).size === s.bytes && r.protection === 'unread', r.protection)
   w.index.close()
 }
 {
@@ -353,6 +355,24 @@ function world() {
   })
   check('A BOOKMARKED SEGMENT IS NEVER DELETED, however old', existsSync(booked.path) && r.skipped.some((s) => s.path === booked.path))
   check('...while the rest goes', !existsSync(other.path))
+  w.index.close()
+}
+{
+  const w = world()
+  const s = w.add('n1', 0, 200)
+  const r = await runRetention({
+    index: w.index,
+    settings: w.settings(),
+    now: NOW,
+    present: w.present,
+    dryRun: false,
+    freeOf: () => ({ freeBytes: 1, totalBytes: 100 }),
+    protectedRanges: () => {
+      throw new Error('bookmarks table locked')
+    }
+  })
+  check('BOOKMARKS UNREADABLE: RETENTION DELETES NOTHING, however old or full', existsSync(s.path) && r.deleted.length === 0 && r.warnings.some((x) => /bookmarks/.test(x)))
+  check('...and says the bookmarks were unreadable', r.protection === 'unread', r.protection)
   w.index.close()
 }
 {

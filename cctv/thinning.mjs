@@ -86,7 +86,8 @@ const overlaps = (ranges, fromMs, toMs) => ranges.some(([a, b]) => fromMs <= b &
 
 /**
  * A guard object for one run: .protected(seg) says whether a segment must be left alone.
- * `mode` is 'none' (no bookmarks module yet) or 'ranges'.
+ * `mode` is 'none' (no bookmarks module yet) or 'ranges'. A run's `protection` can also be
+ * 'unread': asking threw, and the run stopped before any file (the two catches below).
  */
 async function protectionFor(fromMs, toMs, { protectedRanges } = {}) {
   const fn = protectedRanges === undefined ? await loadProtectedRanges() : protectedRanges
@@ -321,7 +322,7 @@ export function recoverThinning(roots, { dryRun = false } = {}) {
  * @param {{ index: object, settings?: object, now?: number, dryRun?: boolean,
  *           present?: (loc)=>boolean, protectedRanges?: function|null, maxSegments?: number }} o
  * @returns {Promise<{ dryRun, thinned: {path, wasBytes, nowBytes, keptKeyframes, droppedKeyframes}[],
- *                     skipped: {path, why}[], warnings: string[], freedBytes: number, protection: string }>}
+ *                     skipped: {path, why}[], warnings: string[], freedBytes: number, protection: 'ranges'|'none'|'unread' }>}
  */
 export async function runThinning({ index, settings = null, now = Date.now(), dryRun = true, present = markerPresent, protectedRanges, maxSegments = MAX_SEGMENTS_PER_RUN } = {}) {
   settings ??= await currentSettings()
@@ -342,6 +343,9 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
     guard = await protectionFor(0, now, { protectedRanges })
   } catch (e) {
     warn(`bookmarks could not be read (${e.message}): nothing thinned this run`)
+    // not 'none' ("nobody to ask, so nothing is protected"): the page said that too, in red, about
+    // a run that touched nothing (review 2026-09-29)
+    out.protection = 'unread'
     return out
   }
   out.protection = guard.mode
@@ -456,7 +460,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
  * stretch.
  *
  * @returns {Promise<{ dryRun, deleted: {path, why, bytes}[], skipped: {path, why}[],
- *                     warnings: string[], freedBytes: number, protection: string }>}
+ *                     warnings: string[], freedBytes: number, protection: 'ranges'|'none'|'unread' }>}
  */
 export async function runRetention({ index, settings = null, now = Date.now(), dryRun = true, present = markerPresent, freeOf = defaultFreeOf, protectedRanges, maxDeletes = MAX_SEGMENTS_PER_RUN } = {}) {
   settings ??= await currentSettings()
@@ -473,6 +477,7 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
     guard = await protectionFor(0, now, { protectedRanges })
   } catch (e) {
     warn(`bookmarks could not be read (${e.message}): nothing deleted this run`)
+    out.protection = 'unread' // as in runThinning
     return out
   }
   out.protection = guard.mode

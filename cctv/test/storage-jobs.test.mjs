@@ -142,6 +142,45 @@ for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
   const i = await run('off', { now: T0 + SUMMARY_EVERY_MS + 25 * MIN })
   check('off: said once, then once an hour', h.logs.length === 2 && i.logs.length === 0, JSON.stringify([h.logs, i.logs]))
 }
+{
+  // A clock put back (a server that started a day or a year ahead and then got its time from NTP)
+  // must not buy a day or a year of silence (review 2026-09-29).
+  _test.reset()
+  const a = await run('dry-run', { now: T0 })
+  const b = await run('dry-run', { now: T0 - 86_400_000 })
+  check('the clock put back a day: logged at once, not a day later', a.logs.length === 2 && b.logs.length === 2, JSON.stringify([a.logs, b.logs]))
+  const c = await run('dry-run', { now: T0 - 86_400_000 + 5 * MIN })
+  check('...and from the new time on, once an hour again', c.logs.length === 0, JSON.stringify(c.logs))
+  const d = await run('dry-run', { now: T0 - 365 * 86_400_000 })
+  check('put back a year: logged at once too', d.logs.length === 2, JSON.stringify(d.logs))
+}
+
+// ---- the bookmarks: an alarm only when footage could have been touched without them ----------------------
+// thinning.mjs says protection 'none' when there was no protectedRanges to ask (files then go
+// unprotected), but also when there was nothing to look at; 'unread' when asking threw and the job
+// stopped before touching anything. Only the first, with files in play, is the alarm.
+{
+  _test.reset()
+  const r = await run('dry-run', { thinning: fakeJob('thinned', { protection: 'none' }), retention: fakeJob('deleted', { protection: 'none' }) })
+  check('no bookmarks asked but nothing to look at (an empty index): no alarm', r.warns.length === 0 && r.logs.length === 2 && !r.logs.some((l) => /BOOKMARKS/.test(l)) && r.runs.thinning.unprotected === false, JSON.stringify([r.logs, r.warns]))
+}
+{
+  _test.reset()
+  const r = await run('dry-run', { thinning: fakeJob('thinned', { protection: 'none', list: files(3), freedBytes: 1e9 }), retention: fakeJob('deleted', { protection: 'none', skipped: [{ path: 'a', why: '/srv/x is not mounted' }] }) })
+  check('no bookmarks asked and files in play: the alarm, as a warning', r.warns.length === 2 && r.warns.every((l) => /BOOKMARKS NOT CHECKED/.test(l)) && r.runs.thinning.unprotected === true && r.runs.retention.unprotected === true, JSON.stringify([r.logs, r.warns]))
+}
+{
+  _test.reset()
+  const r = await run('on', {
+    thinning: fakeJob('thinned', { protection: 'unread', warnings: ['bookmarks could not be read (bookmarks table locked): nothing thinned this run'] }),
+    retention: fakeJob('deleted', { protection: 'unread', warnings: ['bookmarks could not be read (bookmarks table locked): nothing deleted this run'] })
+  })
+  const t = r.runs.thinning
+  check('bookmarks unreadable: remembered as not run, saying why, not as "nothing to convert"', /bookmarks could not be read/.test(t.error ?? '') && /nothing was touched|before touching/.test(t.error ?? '') && t.unprotected === false, JSON.stringify(t))
+  check('...with the job\'s own warning kept (it has the reason)', t.warnings.some((w) => /bookmarks table locked/.test(w)))
+  check('...logged as a warning, without the false "not checked" alarm', r.warns.length === 2 && !r.warns.some((l) => /BOOKMARKS NOT CHECKED|nothing to convert|nothing to delete/.test(l)), JSON.stringify(r.warns))
+  check('...and retention still ran (it asks the bookmarks itself)', r.retention.calls.length === 1)
+}
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

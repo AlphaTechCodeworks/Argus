@@ -296,8 +296,13 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   check('switched off: says it is not running', /switched off/i.test(v7.lines[0].text) && !/would/.test(v7.lines[0].text), v7.lines[0].text)
   const v8 = view({ thinning: run({ warnings: ['w1', 'w2'], warningCount: 4 }) })
   check('warnings listed, with how many more there were', v8.lines[0].warnings.join('|') === 'w1|w2|and 2 more (the server log has them all)' && v8.lines[0].state === 'warn', JSON.stringify(v8.lines[0]))
-  const v9 = view({ thinning: run({ protection: 'none' }) })
-  check('a run that could not see the bookmarks is red and says so', v9.lines[0].state === 'bad' && v9.lines[0].warnings.some((w) => /bookmark/i.test(w)), JSON.stringify(v9.lines[0]))
+  const v9 = view({ thinning: run({ protection: 'none', segments: 3, bytes: 1e9, unprotected: true }) })
+  check('a run that had files in play without the bookmarks is red and says so', v9.lines[0].state === 'bad' && v9.lines[0].warnings.some((w) => /bookmark/i.test(w)), JSON.stringify(v9.lines[0]))
+  // (review 2026-09-29) 'none' with nothing in play is an empty index, not an alarm
+  const v9b = view({ thinning: run({ protection: 'none', unprotected: false }) })
+  check('no bookmarks asked but nothing in play: no alarm', v9b.lines[0].state === '' && v9b.lines[0].warnings.length === 0, JSON.stringify(v9b.lines[0]))
+  const v9c = view({ thinning: run({ protection: 'unread', error: 'the bookmarks could not be read, so it stopped before touching anything', warnings: ['bookmarks could not be read (bookmarks table locked): nothing thinned this run'], warningCount: 1 }) })
+  check('bookmarks unreadable: says it stopped, with the reason, and no "nothing was treated as bookmarked"', /failed: the bookmarks could not be read/.test(v9c.lines[0].text) && v9c.lines[0].warnings.some((w) => /table locked/.test(w)) && !v9c.lines[0].warnings.some((w) => /nothing was treated/.test(w)), JSON.stringify(v9c.lines[0]))
   const v10 = view({ thinning: run({}) }, at + 3 * 86_400_000)
   check('a last run more than a day ago gives the day too', /^Last run \d{1,2} [A-Z][a-z]{2} \d\d:\d\d/.test(v10.lines[0].text), v10.lines[0].text)
   check('an older server without the switch: nothing invented', jobsView(undefined).mode === null && jobsView(undefined).lines.every((l) => l.text === NOT_AVAILABLE))
@@ -310,7 +315,18 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   const wk = switchOnWarning({ ...base, defaults: { ...base.defaults, after: 'keep' } })
   const we = switchOnWarning({ ...base, defaults: { ...base.defaults, fullDays: 30 } })
   check('with full days equal to the total, the confirm promises no time-lapse either', !/rewritten/.test(we) && /older than 30 days/.test(we), we)
-  check('with "keep everything" the confirm promises no time-lapse, only deletion',!/time-lapse/.test(wk.replace(/^Switch time-lapse and retention ON\?/, '')) && /older than 30 days/.test(wk) && /for good/.test(wk), wk)
+  check('with "keep everything" the confirm promises no time-lapse, only deletion', !/time-lapse, one picture|rewritten/.test(wk) && /older than 30 days/.test(wk) && /for good/.test(wk), wk)
+  check('two things named: "Neither can be undone"', /Neither can be undone\./.test(w), w)
+  check('only deletion named: "This cannot be undone", no "Neither"', /This cannot be undone\./.test(wk) && !/Neither/.test(wk) && /This cannot be undone\./.test(we) && !/Neither/.test(we), wk)
+  // housekeeping.mjs does not ask the bookmarks (yet): the confirm must not let "kept" read as "kept for ever"
+  check('the confirm says the clean-up rules still delete past the total days, bookmarked or not', /clean-up rules/.test(w) && /bookmarked or not/.test(w), w)
+
+  // Save always sends what was picked (review 2026-09-29): the page's idea of the switch can be a
+  // minute old, and a "No change" on a stale view left it On while the admin believed it Off.
+  const { saveSteps } = await import('../public/storage.js')
+  check('Save: Off and Dry run are always sent, never asked about', ['off', 'dry-run'].every((m) => saveSteps(m).send === true && saveSteps(m).ask === false), JSON.stringify(saveSteps('off')))
+  check('Save: On is always asked about first, then sent', saveSteps('on').send === true && saveSteps('on').ask === true)
+  check('Save: nothing picked, or a value that is not a choice, sends nothing', saveSteps(undefined).send === false && saveSteps('ON').send === false)
 }
 
 // ---- the page's files ---------------------------------------------------------------------------
@@ -320,6 +336,8 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   check('the page loads storage.js and has the ids it paints into', /storage\.js/.test(html) && ['sr-locations', 'sr-warnings', 'sr-totals'].every((id) => html.includes(`id="${id}"`)))
   const tl = html.match(/<section[^>]*data-tab="storage"[^>]*aria-labelledby="sj-title"[\s\S]*?<\/section>/)?.[0] ?? ''
   check('Settings > Storage has the time-lapse and retention switch, its plan and its last runs', ['sj-title', 'sj-form', 'sj-choices', 'sj-plan', 'sj-runs', 'sj-msg'].every((id) => tl.includes(`id="${id}"`)), tl.slice(0, 200))
+  const note = tl.match(/<p class="hp-note">[\s\S]*?<\/p>/)?.[0] ?? ''
+  check('the note under the switch says the clean-up rules delete past the total days, bookmarked or not', /clean-up rules/.test(note) && /total days, bookmarked or not/.test(note), note)
 }
 
 rmSync(data, { recursive: true, force: true })

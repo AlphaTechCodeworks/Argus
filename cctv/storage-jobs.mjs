@@ -46,6 +46,9 @@ function record(job, mode, result, { at, tookMs = null, limit = null, error = nu
   const why = new Map()
   for (const s of skipped ?? []) why.set(s.why, (why.get(s.why) ?? 0) + 1)
   const warnings = result?.warnings ?? []
+  // 'unread': asking the bookmarks threw and the job stopped before any file. That is a run that
+  // did not happen, not one that found "nothing to convert" (its own warning has the reason).
+  if (!error && result?.protection === 'unread') error = 'the bookmarks could not be read, so it stopped before touching anything'
   return {
     job,
     mode,
@@ -63,6 +66,10 @@ function record(job, mode, result, { at, tookMs = null, limit = null, error = nu
     // time, so a figure at the limit means "at least this much", never "this is all of it".
     reachedLimit: Boolean(list && Number.isFinite(limit) && list.length >= limit),
     protection: result?.protection ?? null,
+    // The alarm: files were (or, in dry run, would have been) taken on with nobody asked which of
+    // them are bookmarked. 'none' alone is not it: an empty index says 'none' too, having had
+    // nothing to ask about, and was a red line and an hourly warning for nothing (review 2026-09-29).
+    unprotected: result?.protection === 'none' && (list?.length > 0 || skipped?.length > 0),
     error
   }
 }
@@ -73,7 +80,7 @@ export function summaryLine(r) {
   if (r.mode === 'off') return `${tag} switched off (Settings > Storage): not run`
   const how = r.dryRun ? 'dry run, nothing touched' : 'on'
   if (r.error) return `${tag} ${how}: did not run: ${r.error}`
-  const extra = [r.skipped ? `${n(r.skipped)} skipped` : '', r.warningCount ? `${plural(r.warningCount, 'warning', 'warnings')} (above)` : '', r.protection === 'none' ? 'BOOKMARKS NOT CHECKED' : '']
+  const extra = [r.skipped ? `${n(r.skipped)} skipped` : '', r.warningCount ? `${plural(r.warningCount, 'warning', 'warnings')} (above)` : '', r.unprotected ? 'BOOKMARKS NOT CHECKED' : '']
     .filter(Boolean)
     .join(', ')
   const tail = extra ? `; ${extra}` : ''
@@ -91,9 +98,12 @@ function keep(r, { log, warn }) {
   const last = logged[r.job]
   const key = `${r.mode}|${r.error ?? ''}`
   const changedFootage = r.mode === 'on' && r.segments > 0
-  if (!changedFootage && key === last.key && r.at - last.at < SUMMARY_EVERY_MS) return
+  // A clock put back (a server that started a day ahead, then NTP) makes `since` negative: that is
+  // due now, or there would be no line until the clock passed the old time again (review 2026-09-29).
+  const since = r.at - last.at
+  if (!changedFootage && key === last.key && since >= 0 && since < SUMMARY_EVERY_MS) return
   logged[r.job] = { key, at: r.at }
-  ;(r.error || r.protection === 'none' ? warn : log)(summaryLine(r))
+  ;(r.error || r.unprotected ? warn : log)(summaryLine(r))
 }
 
 /**

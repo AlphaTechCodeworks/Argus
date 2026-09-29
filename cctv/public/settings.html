@@ -168,7 +168,7 @@
 
     <section class="se-section" data-tab="storage" aria-labelledby="sj-title">
       <h2 id="sj-title">Time-lapse and retention</h2>
-      <p class="st-help">The two jobs that rewrite and delete recordings on purpose, every 5 minutes while the server records: time-lapse turns footage past its full-video days into one picture every few seconds, and retention deletes footage past its total days. The days are set on the Recording tab. Bookmarked and exported stretches are kept.</p>
+      <p class="st-help">The two jobs that rewrite and delete recordings on purpose, every 5 minutes while the server records: time-lapse turns footage past its full-video days into one picture every few seconds, and retention deletes footage past its total days. The days are set on the Recording tab. These two jobs keep bookmarked and exported stretches.</p>
       <!-- storage.js paints the plan and the last runs, and saves the switch (asking first before On) -->
       <p id="sj-plan" class="st-help"></p>
       <form id="sj-form" autocomplete="off">
@@ -176,7 +176,8 @@
         <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="sj-msg" class="st-meta" role="status"></span></div>
       </form>
       <ul id="sj-runs" class="sj-runs" aria-live="polite"></ul>
-      <p class="hp-note">Separate from this switch, and whatever it is set to: the clean-up rules at the bottom of this tab delete the oldest footage when a drive runs low on space, and footage past a camera's total days.</p>
+      <!-- "bookmarked or not" until housekeeping.mjs asks the bookmarks (it does not, 2026-09-29) -->
+      <p class="hp-note">Separate from this switch, and whatever it is set to: the clean-up rules at the bottom of this tab delete the oldest footage when a drive runs low on space, and footage past a camera's total days, bookmarked or not.</p>
     </section>
 
     <section class="se-section" data-tab="storage" aria-labelledby="loc-title">

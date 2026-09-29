@@ -140,7 +140,8 @@ function runLine(job, r, now) {
   if (!r) return { job, label, text: 'not run yet since the server started (it runs every 5 minutes while the server records)', state: '', warnings: [] }
   if (r.mode === 'off') return { job, label, text: `Switched off: not run (checked ${when(r.at, now)})`, state: '', warnings: [] }
   const head = `Last run ${when(r.at, now)}${r.dryRun ? ' (dry run)' : ''}`
-  if (r.error) return { job, label, text: `${head} failed: ${r.error}`, state: 'bad', warnings: [] }
+  // the job's own warnings go with it: for unreadable bookmarks they hold the reason
+  if (r.error) return { job, label, text: `${head} failed: ${r.error}`, state: 'bad', warnings: [...(r.warnings ?? [])] }
   const thin = job === 'thinning'
   let text = r.segments
     ? `${head}: ${thin ? (r.dryRun ? 'would convert' : 'converted') : r.dryRun ? 'would delete' : 'deleted'} ${count(r.segments)} ${r.segments === 1 ? 'file' : 'files'}, ${r.dryRun ? 'freeing' : 'freed'} ${bytes(r.bytes)}`
@@ -149,9 +150,10 @@ function runLine(job, r, now) {
   if (r.skipped) text += ` · ${count(r.skipped)} skipped${r.skippedWhy?.length ? ` (${r.skippedWhy.map((s) => `${s.why} ${count(s.n)}`).join(', ')})` : ''}`
   const warnings = [...(r.warnings ?? [])]
   if (r.warningCount > warnings.length) warnings.push(`and ${count(r.warningCount - warnings.length)} more (the server log has them all)`)
-  // Without the bookmarks the job cannot tell a bookmarked stretch from the rest (thinning.mjs).
-  if (r.protection === 'none') warnings.unshift('Bookmarks could not be read: nothing was treated as bookmarked or exported.')
-  return { job, label, text, state: r.protection === 'none' ? 'bad' : warnings.length ? 'warn' : '', warnings }
+  // Files in play and nobody asked which are bookmarked (storage-jobs.mjs `unprotected`); an empty
+  // index also has nobody asked, and is no alarm.
+  if (r.unprotected) warnings.unshift('Bookmarks could not be read: nothing was treated as bookmarked or exported.')
+  return { job, label, text, state: r.unprotected ? 'bad' : warnings.length ? 'warn' : '', warnings }
 }
 
 /**
@@ -173,12 +175,26 @@ export function switchOnWarning(jobs) {
   const full = Number.isFinite(d.fullDays) ? `older than ${days(d.fullDays)}` : 'older than its full-video days'
   const total = Number.isFinite(d.retentionDays) ? `older than ${days(d.retentionDays)}` : 'older than its total days'
   // the same test as planText: no time-lapse is promised where there is no stretch for it
-  const what =
-    d.after === 'timelapse' && !(d.fullDays >= d.retentionDays)
-      ? `Footage ${full} (the full-video days) will be rewritten to time-lapse, one picture every ${d.timelapseS ?? '?'} s, and footage ${total} (the total days) deleted, for good.`
-      : `Footage ${total} (the total days) will be deleted, for good.`
+  const both = d.after === 'timelapse' && !(d.fullDays >= d.retentionDays)
+  const what = both
+    ? `Footage ${full} (the full-video days) will be rewritten to time-lapse, one picture every ${d.timelapseS ?? '?'} s, and footage ${total} (the total days) deleted, for good. Neither can be undone.`
+    : `Footage ${total} (the total days) will be deleted, for good. This cannot be undone.`
   const own = jobs?.camerasOwnDays ? `\n\n${cams(jobs.camerasOwnDays)} (Settings › Recording) and ${jobs.camerasOwnDays === 1 ? 'follows' : 'follow'} those.` : ''
-  return `Switch time-lapse and retention ON?\n\n${what} Neither can be undone.\n\nBookmarked and exported stretches are kept.${own}`
+  // "kept" must not read as "kept for ever": housekeeping.mjs does not ask the bookmarks (2026-09-29),
+  // and it deletes past the total days whatever this switch says. Out when it does ask them.
+  const kept = 'Bookmarked and exported stretches are kept by these two jobs. The clean-up rules on this tab still delete footage past the total days, bookmarked or not, whatever this switch says.'
+  return `Switch time-lapse and retention ON?\n\n${what}\n\n${kept}${own}`
+}
+
+/**
+ * What Save does with the choice picked: always sent, and On always asked about first. The page's
+ * idea of the switch can be a minute old (another admin, another tab), and saying "No change" on
+ * that once left the switch On while the admin believed they had set it Off (review 2026-09-29).
+ * Sending an unchanged value is harmless: the audit names the switch only when it really moves.
+ */
+export function saveSteps(want) {
+  if (!THINNING_CHOICES.some((c) => c.value === want)) return { send: false, ask: false }
+  return { send: true, ask: want === 'on' }
 }
 
 // ---- painting ------------------------------------------------------------------------------------
@@ -287,15 +303,11 @@ if (typeof document !== 'undefined') {
 
   document.getElementById('sj-form')?.addEventListener('submit', async (e) => {
     e.preventDefault()
-    const current = jobs?.mode
     const want = document.querySelector('input[name="sj-mode"]:checked')?.value
-    if (!want || !current) return
-    if (want === current) {
-      picked = null
-      return say('No change')
-    }
+    const steps = saveSteps(want)
+    if (!steps.send || !jobs?.mode) return
     // On is the one that destroys footage: say exactly what it will do, and take no for an answer.
-    if (want === 'on' && !confirm(switchOnWarning(jobs))) {
+    if (steps.ask && !confirm(switchOnWarning(jobs))) {
       picked = null
       paintJobs({ jobs })
       return say('Not changed')
