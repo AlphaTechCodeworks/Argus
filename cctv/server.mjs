@@ -1053,8 +1053,9 @@ startWarmStreams({
   }
 })
 const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on conversions for phones and remote viewers together
-// one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs)
-const attachLive = liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track: watch.track })
+// one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs); isAdmin: a
+// remote main moved between streams asks Live HD again, with the account's role as it is then
+const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, track: watch.track })
 
 // This listener is synchronous and nothing above it catches: anything that throws here takes the
 // whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27

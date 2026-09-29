@@ -32,7 +32,17 @@
 // the new stream has one, and goes over at the camera's next keyframe, where the new level's stream
 // starts; it is never sent a frame older than one it has had. A sub-stream a level would only pass
 // through stays on the camera's own stream (#passes).
+//
+// A main stream (the full-size view) is main-stream pictures on the viewer's socket from whatever
+// stream it is put on: the camera's own, level full's conversion, or a level's conversion another
+// viewer started. live-attach.mjs let it in with Live HD (rights.mjs); every move here puts it on
+// another stream, each with its own replay or keyframe, and asks again first, from the session as it
+// is then (attach's mayMain). No longer allowed: it is not moved, it is sent nothing more, and it is
+// closed 1008 as the access watch would close it at its next sweep ('hd not allowed' when only Live HD
+// went, #mayMove). A sub-stream's streams never carry the main stream (their keys hold the stream
+// type): not asked.
 import { FIRM_INTERVALS, PhoneStream, RATE_SAMPLES, keepEveryFor, maxPhoneStreams, steadyRate } from './phone-live.mjs'
+import { HD_NOT_ALLOWED } from './stream-param.mjs'
 import { CODEC_H265, PLAYBACK_LIMITS, TranscodePool } from './transcode.mjs'
 
 export const LEVELS = Object.freeze([
@@ -409,8 +419,15 @@ export class AdaptiveLive {
    * @param {{ down?: boolean }} [o] down: to send less (a step down; a tile that finds a slot at last)
    */
   #retarget(e, level, { down = false } = {}) {
+    if (e.refused) return
     let want = this.#streamFor(e, level)
     let made = this.#made
+    // a main about to be put on another stream (or made one, for a switch): only while its viewer may
+    // still see main (#mayMove); a stream made for it that nobody is on closes again
+    if (want !== e.stream && e.switch?.to !== want && !this.#mayMove(e)) {
+      if (made && made.clients.size === 0 && !this.#awaited(made)) made.close()
+      return
+    }
     // no slot for its level's stream while its own conversion holds one: that one hands its slot over
     // (not one another socket is on or waits for: closing it would free nothing, and cost its picture)
     const own = e.stream && e.stream !== e.source && !e.stream.passthrough && e.stream.clients.size === 1 && !this.#awaited(e.stream)
@@ -502,6 +519,7 @@ export class AdaptiveLive {
    * would tell the NVR worker it is background (at a sub-stream limit, one a viewer's may displace).
    */
   #swap(e) {
+    if (!this.#mayMove(e)) return
     const sw = e.switch
     const from = e.stream
     e.switch = null
@@ -525,6 +543,7 @@ export class AdaptiveLive {
    * camera's own stream, from this keyframe.
    */
   #handOver(e, { atKey }) {
+    if (!this.#mayMove(e)) return
     const sw = e.switch
     e.switch = null
     this.#leaveStream(e)
@@ -540,6 +559,7 @@ export class AdaptiveLive {
 
   /** A switch done at the new stream's start (#pass), or given up waiting for it: onto the new stream now. */
   #cutOver(e) {
+    if (!this.#mayMove(e)) return
     const sw = e.switch
     if (sw.to === null) return this.#handOver(e, { atKey: false })
     e.switch = null
@@ -547,6 +567,37 @@ export class AdaptiveLive {
     this.#leaveStream(e)
     // (a stream made for it and closed meanwhile: whatever the level has now)
     this.#join(e, sw.to.closed ? this.#streamFor(e, sw.level) : sw.to)
+  }
+
+  /**
+   * Whether a socket may be put on another stream now (#retarget, and where a switch it waits for goes
+   * over: #swap, #handOver, #cutOver, up to SWITCH_MAX_MS after it was decided). A main's viewer is asked
+   * again (mayMain, live-attach.mjs: Live and Live HD, from the session and the rights as they are now),
+   * which answers true or the access watch's refusal: 'hd not allowed' (only Live HD went), 'not
+   * allowed', 'signed out'; anything else, a check that throws included, is a no ('hd not allowed', or
+   * 'not allowed' for a throw). No: the socket stays where it is, its switch dropped, nothing more is
+   * sent to it (attach's send), and it is closed 1008 with that reason -- on 'hd not allowed' the page
+   * drops to the sub-stream (live-tile.js) -- as when the access watch closes it, which may be up to its
+   * SWEEP_MS later.
+   */
+  #mayMove(e) {
+    if (e.refused) return false
+    if (e.type !== 0 || typeof e.mayMain !== 'function') return true
+    let answer
+    try {
+      answer = e.mayMain()
+    } catch {
+      answer = 'not allowed' // default deny
+    }
+    if (answer === true) return true
+    const reason = typeof answer === 'string' && answer ? answer : HD_NOT_ALLOWED
+    e.refused = true
+    this.#cancelSwitch(e)
+    this.log(`[adaptive] ${e.nvrId}/${e.ch + 1}: a main stream not moved to another stream: its viewer may no longer see it; closed 1008 "${reason}"`)
+    try {
+      e.ws.close(1008, reason)
+    } catch {}
+    return false
   }
 
   /** Onto a stream now, with its replay; nothing older than what it had goes out (#guard). */
@@ -622,24 +673,26 @@ export class AdaptiveLive {
   /**
    * Takes a remote viewer's /live socket.
    * @param {string} viewerKey one per browser (the session), so all its tiles move together
-   * @param {{ codec?: 'h264'|'h265' }} o codec: what the NVR saw this camera stream send (nvrs.mjs
-   *   codecSeen), for as long as the stream itself has no keyframe to say (#h265)
+   * @param {{ codec?: 'h264'|'h265', mayMain?: () => boolean }} o codec: what the NVR saw this camera
+   *   stream send (nvrs.mjs codecSeen), for as long as the stream itself has no keyframe to say (#h265);
+   *   mayMain: whether a main's viewer may still see it (true, or why not), asked before each move (#mayMove)
    */
-  attach(viewerKey, { ws, nvrId, ch, type, source, clientH265 = false, codec }) {
+  attach(viewerKey, { ws, nvrId, ch, type, source, clientH265 = false, codec, mayMain = null }) {
     const now = this.now()
     let v = this.viewers.get(viewerKey)
     if (!v) this.viewers.set(viewerKey, (v = this.#arrive(viewerKey, now)))
     // lastTs: capture time of the last frame it was sent that its browser can show (#retarget); after /
     // afterAt: nothing older than this goes to it, since then (#guard); switch: a move waiting for the
-    // new stream's first picture (#switchTo); passAt: whether its level sends it as it is (#passes)
-    const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null }
+    // new stream's first picture (#switchTo); passAt: whether its level sends it as it is (#passes);
+    // refused: a main whose viewer may no longer see it, found at a move (#mayMove), sent nothing more
+    const entry = { ws, nvrId, ch, type, source, clientH265, codec, mayMain, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null, refused: false }
     // Every frame to this socket, the replay as it joins too: a move waiting to switch goes over at the
     // new stream's start, and nothing older than it had goes after one (#pass). Then the bytes, for the
     // uplink budget and the Health page, and for what a plain /live socket has written (#written).
     const send = ws.send.bind(ws)
     ws.send = (data, ...rest) => {
       const f = header(data)
-      if (f && !this.#pass(entry, f)) return
+      if (f && (entry.refused || !this.#pass(entry, f))) return
       const n = data?.length ?? data?.byteLength ?? 0
       v.sentBytes += n
       entry.sent += n
@@ -659,11 +712,12 @@ export class AdaptiveLive {
     if (v.grace?.opening && now - v.grace.from < OPENING_MS) v.grace.marks = this.#marks(v)
     ws.on?.('close', () => {
       this.#cancelSwitch(entry)
+      // (none: a main refused at a level change that had been taken off its stream first, #move)
       const s = entry.stream
-      s.remove(ws)
+      s?.remove(ws)
       v.sockets.delete(entry)
       for (const x of v.left) if (x.closed) v.left.delete(x)
-      if (s !== source && s.clients.size === 0) v.left.add(s)
+      if (s && s !== source && s.clients.size === 0) v.left.add(s)
       if (v.sockets.size === 0) this.#leave(v)
     })
     this.#start()

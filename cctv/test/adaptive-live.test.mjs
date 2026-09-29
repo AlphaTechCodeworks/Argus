@@ -1474,5 +1474,174 @@ const brief = (got, from, to) => got.filter((f) => f.at >= from && f.at <= to).m
   }
 }
 
+// ---- a main moved only while its viewer may still see main (stream rights: Live HD) ----
+// A full-size view's main stream is main-stream pictures on the viewer's socket from whatever stream it
+// is put on. live-attach.mjs lets it in with Live HD; the level changes above put it on other streams:
+// another viewer's conversion of that main, level full's, the camera's own. Each such move asks again
+// first (attach's mayMain: the session and the rights now). No longer allowed (Live HD taken away, the
+// access watch's sweep not come yet): not moved, nothing more sent, closed 1008 'hd not allowed'.
+/**
+ * Another remote viewer's full-size view of the rig's camera `t` (its main): mayMain asks `may()`,
+ * counted. `sync`: its close runs its handlers at once (a mux channel runs them a tick later, a ws
+ * socket once the close handshake is done: `sync` false leaves them to the test).
+ */
+function viewerOn(r, key, t, may, { sync = true } = {}) {
+  const ws = r.socket()
+  let asked = 0
+  ws.close = (code, reason) => {
+    if (ws.closedWith) return
+    ws.closedWith = { code, reason }
+    ws.gotAtClose = ws.got.length
+    if (sync) ws.handlers.close?.()
+  }
+  r.live.attach(key, { ws, nvrId: 'n1', ch: t.ch, type: t.type ?? 1, source: t.stream, mayMain: () => { asked++; return may() } })
+  const v = r.live.viewers.get(key)
+  return { ws, v, asked: () => asked, entry: () => [...v.sockets].find((e) => e.ws === ws) }
+}
+const refused = (ws) => ws.closedWith?.code === 1008 && ws.closedWith.reason === 'hd not allowed'
+{
+  // Viewer A (the rig's) steps its main down to 15: its conversion of the main runs. B and C, two more
+  // PCs on the camera's own main at full, step down to 15 too, where A's conversion runs: B's Live HD
+  // was taken away meanwhile, C's was not.
+  const r = rig({ cams: [{ fps: 25, type: 0 }], pool: 4 })
+  const [t] = r.tiles
+  r.down(5000)
+  r.to(7000)
+  const a15 = r.entry(t).stream
+  let bMay = true
+  const b = viewerOn(r, 'b', t, () => bMay, { sync: false })
+  const c = viewerOn(r, 'c', t, () => true)
+  r.to(10_000)
+  check('Live HD: a PC on the camera\'s own main at full, another viewer\'s conversion of it at 15', a15?.fps === 15 && !a15.closed && b.entry().stream === t.stream && c.entry().stream === t.stream && b.ws.got.length > 0, `${a15?.fps}`)
+  bMay = false // taken away; the access watch has not swept yet
+  r.down(11_000, [b.ws, c.ws])
+  check('  its level change onto the other viewer\'s conversion asks first: no Live HD, closed 1008 "hd not allowed", not put on it', LEVELS[b.v.level].id === '15' && refused(b.ws) && !a15.clients.has(b.ws) && b.asked() >= 1, JSON.stringify(b.ws.closedWith))
+  check('  said once', r.logs.filter((l) => l.includes('a main stream not moved')).length === 1 && r.logs.some((l) => l.endsWith('n1/1: a main stream not moved to another stream: its viewer may no longer see it; closed 1008 "hd not allowed"')), r.logs.filter((l) => l.includes('not moved')).join(' | '))
+  check('  the one still allowed goes over as before (asked, and on that conversion)', c.entry().stream === a15 && a15.clients.has(c.ws) && !c.ws.closedWith && c.asked() >= 1)
+  r.to(15_000)
+  check('  its socket still closing (its close not done yet): sent nothing more, moved nowhere, however many looks', b.ws.got.length === b.ws.gotAtClose && b.entry().stream === t.stream && !a15.clients.has(b.ws) && r.live.streams.size === 1, `${b.ws.got.length - b.ws.gotAtClose} more`)
+  b.ws.handlers.close()
+  check('  and once closed, off the camera\'s stream', !t.stream.clients.has(b.ws) && !r.live.viewers.has('b'))
+}
+{
+  // Decided while allowed, taken away before it goes over: A's conversion of the main at 15, B's own at
+  // 8. B climbs back to 15 at 29 s: from its conversion onto A's, at that one's next keyframe (#swap).
+  const r = rig({ cams: [{ fps: 25, gopS: 3, type: 0 }], pool: 4 })
+  const [t] = r.tiles
+  let bMay = true
+  const b = viewerOn(r, 'b', t, () => bMay)
+  r.down(5000, [t.ws, b.ws])
+  r.down(9000, [b.ws])
+  for (let ms = 10_000; ms <= 28_000; ms += 1000) { r.to(ms); r.v.cleanSince = T + ms } // A stays at 15
+  const a15 = r.entry(t).stream
+  const b8 = b.entry().stream
+  r.to(29_000)
+  check('Live HD: a climb onto another viewer\'s conversion of the main, decided while allowed', LEVELS[b.v.level].id === '15' && b.entry().switch?.to === a15 && b8.fps === 8 && a15.fps === 15, `${LEVELS[b.v.level].id} ${b.entry().switch?.to === a15}`)
+  bMay = false
+  r.to(33_000)
+  check('  taken away before that conversion\'s keyframe: asked again there, closed "hd not allowed", never put on it', refused(b.ws) && !a15.clients.has(b.ws) && b.ws.got.length === b.ws.gotAtClose, JSON.stringify(b.ws.closedWith))
+  check('  its own conversion closed, its slot back; the other viewer\'s runs on', b8.closed && !a15.closed && r.live.pool.active === 1 && a15.clients.has(t.ws), `${r.live.pool.active} slots`)
+}
+{
+  // Onto the camera's own main: a PC at 15 on a conversion made for it climbs back to full at 25 s,
+  // decided while allowed, going over at the camera's keyframe at 26 s (#swap); taken away in between
+  const r = rig({ cams: [{ fps: 25, type: 0 }], pool: 4 })
+  const [t] = r.tiles
+  let bMay = true
+  const b = viewerOn(r, 'b', t, () => bMay)
+  r.down(5000, [b.ws])
+  r.to(25_000)
+  const b15 = b.entry().stream
+  check('Live HD: a climb back onto the camera\'s own main, waiting for its keyframe', b.v.level === 0 && b.entry().switch?.to === t.stream && b15.fps === 15, `${b.v.level}`)
+  bMay = false
+  r.to(27_000)
+  check('  taken away meanwhile: asked again at the keyframe, closed "hd not allowed", never on the camera\'s stream again', refused(b.ws) && !t.stream.clients.has(b.ws) && b.ws.got.length === b.ws.gotAtClose, JSON.stringify(b.ws.closedWith))
+  check('  nobody left on the conversion made for it (it closes after its stop delay, as at any leave at full)', b15.clients.size === 0, `${b15.clients.size}`)
+}
+{
+  // No slot free (pool 1): a step down 15 -> 8 hands its own conversion's slot over at the camera's next
+  // keyframe (#handOver); taken away before it
+  const r = rig({ cams: [{ fps: 25, type: 0 }], pool: 1 })
+  const [t] = r.tiles
+  let bMay = true
+  const b = viewerOn(r, 'b', t, () => bMay)
+  r.down(5000, [b.ws])
+  const b15 = b.entry().switch?.to
+  r.down(9000, [b.ws])
+  check('Live HD: a step down with no slot free, its conversion kept for the hand-over', LEVELS[b.v.level].id === '8' && b.entry().stream === b15 && b.entry().switch?.to === null && r.live.pool.active === 1)
+  bMay = 'not allowed' // Live itself taken away: the refusal the access watch would give
+  r.to(11_000)
+  check('  Live taken away before the keyframe: no hand-over, closed 1008 "not allowed" (the watch\'s words), no conversion of 8 made, the slot back', b.ws.closedWith?.code === 1008 && b.ws.closedWith.reason === 'not allowed' && b15.closed && !r.live.streams.has('n1/0/0@8') && r.live.pool.active === 0 && b.ws.got.length === b.ws.gotAtClose, `${[...r.live.streams.keys()]} ${r.live.pool.active}`)
+}
+{
+  // A switch that goes over when its new stream starts, or when its wait runs out (#cutOver): a step down
+  // on a camera whose next keyframe is 3 s off; taken away while it waits (a check that throws: a no)
+  const r = rig({ cams: [{ fps: 25, gopS: 4, type: 0 }], pool: 4 })
+  const [t] = r.tiles
+  let broken = false
+  const b = viewerOn(r, 'b', t, () => { if (broken) throw new Error('rights unreadable'); return true })
+  r.down(7000, [b.ws]) // keyframes at 6, 10 s
+  const made = b.entry().switch?.to
+  broken = true
+  r.to(10_500)
+  check('Live HD: a step down waiting to go over, the check throwing meanwhile: a no, closed 1008 "not allowed", the stream made for it closed', made?.fps === 15 && b.ws.closedWith?.code === 1008 && b.ws.closedWith.reason === 'not allowed' && made.closed && r.live.streams.size === 0 && r.live.pool.active === 0 && b.ws.got.length === b.ws.gotAtClose, `${[...r.live.streams.keys()]}`)
+}
+{
+  // Level full's conversions of mains past FULL_MAX: a third PC waits on level 15's, and goes to full once
+  // one is free. Its Live HD taken away meanwhile: no conversion of full made for it, closed
+  const r = fullRig(3)
+  try {
+    let may2 = true
+    let asked2 = 0
+    const socks = [0, 1, 2].map((ch) => {
+      const ws = r.sock()
+      const close = ws.close
+      ws.close = (code, reason) => { ws.closedWith ??= { code, reason }; ws.gotAtClose ??= ws.got.length; close() }
+      r.live.attach(`pc${ch}`, { ws, nvrId: 'n', ch, type: 0, source: r.mains[ch].s, codec: 'h265', mayMain: ch === 2 ? () => { asked2++; return may2 } : () => true })
+      clearInterval(r.live.timer)
+      return ws
+    })
+    r.play(1000)
+    check('Live HD: the third PC past FULL_MAX on level 15\'s conversion; waiting for full asks nothing', r.live.streams.get('n/2/0@15')?.clients.has(socks[2]) && asked2 === 0, `${asked2}`)
+    may2 = false
+    socks[0].close()
+    r.play(2 * TICK_MS + 2000)
+    check('  one PC gone, its Live HD taken away meanwhile: not moved to full, closed "hd not allowed", no conversion of full left for it', refused(socks[2]) && asked2 === 1 && !r.live.streams.has('n/2/0@full') && r.full() === 1 && r.peak <= 2 && socks[2].got.length === socks[2].gotAtClose, `${[...r.live.streams].map(([k, s]) => `${k}:${s.clients.size}${s.closed ? ' closed' : ''}`)} asked ${asked2}`)
+  } finally {
+    r.restore()
+  }
+}
+{
+  // A main with no picture yet (an H.265 camera for a browser without it, its conversion's first picture
+  // not out) is taken off its stream at a level change before it is put on the new one (#move). Refused
+  // there it is on no stream at all, and its close must still let it go (a ws socket's 'close' comes
+  // later, and a handler that throws there would take the process down)
+  const r = fullRig(1)
+  try {
+    const ws = r.sock()
+    const close = ws.close
+    ws.close = (code, reason) => { ws.closedWith ??= { code, reason }; close() }
+    r.live.attach('pc', { ws, nvrId: 'n', ch: 0, type: 0, source: r.mains[0].s, codec: 'h265', mayMain: () => false })
+    clearInterval(r.live.timer)
+    r.play(SETTLE_MS + 1000)
+    const full = r.live.streams.get('n/0/0@full')
+    ws.overSince = r.now - 3000
+    r.live.tick()
+    check('Live HD: a main with no picture yet, taken off its stream at a level change and refused there: closed "hd not allowed", and let go', full && refused(ws) && !r.live.viewers.has('pc') && ![...r.live.streams.values()].some((s) => s.clients.has(ws)) && r.live.pool.active === 0, `${[...r.live.streams.keys()]} ${r.live.viewers.size} ${r.live.pool.active}`)
+  } finally {
+    r.restore()
+  }
+}
+{
+  // A sub-stream's moves never ask (its streams never carry the main stream): full -> 15 -> 8 and back
+  const r = rig({ cams: [{ fps: 30 }] })
+  const [t] = r.tiles
+  const b = viewerOn(r, 'b', t, () => false)
+  r.down(5000, [b.ws])
+  r.down(9000, [b.ws])
+  r.to(51_000)
+  check('Live HD: a sub-stream\'s level changes ask nothing, and it moves as before', b.asked() === 0 && !b.ws.closedWith && b.v.level === 0 && b.entry().stream === t.stream && b.ws.got.length > 0, `${b.asked()} ${b.v.level}`)
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

@@ -66,17 +66,18 @@ const standInHandle = (ws, bridge, wait) => ({
 })
 
 /**
- * @param {{ can: Function, currentUser: (req: object) => string|null,
+ * @param {{ can: Function, currentUser: (req: object) => string|null, isAdmin?: (user: string) => boolean,
  *   adaptiveLive: { attach: Function }, phoneLive: { attach: Function }, track?: Function,
  *   waitTimers?: { every?: Function, clear?: Function, now?: () => number },
  *   log?: (line: string) => void, now?: () => number }} o
- *   can: rights.mjs can; currentUser: the request's signed-in user; track: access-watch.mjs's, which
- *   asks the rights again while the socket or channel is open; waitTimers: live-wait.mjs's timers
+ *   can: rights.mjs can; currentUser: the request's signed-in user; isAdmin: the account's role now
+ *   (without it, the `who` a socket was let in with, for the same user); track: access-watch.mjs's,
+ *   which asks the rights again while the socket or channel is open; waitTimers: live-wait.mjs's timers
  *   (tests); log: the stand-ins' lines; now: the clock (tests)
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
  *   clientH265: boolean, phone15: boolean }) => void} attachLive
  */
-export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now }) {
+export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now }) {
   const quiet = new Map() // camera and viewer -> { at, left }: its H.265 stand-in line last said, and those left out since
   /** The H.265 stand-in line for a camera and viewer, or null when it was said less than H265_QUIET_MS ago. */
   const h265Line = (line, key) => {
@@ -147,10 +148,20 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track 
     // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry, per
     // browser (viewerOf). With the codec the NVR saw on this stream: a main started on demand has no
     // keyframe yet, and its first one, H.265, must not go to a browser that cannot decode it
-    // (adaptive-live.mjs #h265)
+    // (adaptive-live.mjs #h265). A main is moved between streams there at its level changes (the
+    // camera's own, level full's conversion, another viewer's): each move asks Live HD again first
+    // (mayMain), from the session and the account's role as they are then, as the access watch asks,
+    // never the `who` above (a demoted admin's); not allowed, it answers with the watch's reason
     if (remote) {
       const codec = nvr.codecSeen?.get?.(`${ch}:${streamType}`)?.codec
-      adaptiveLive.attach(viewerOf(req, currentUser), { ws, nvrId: nvr.id, ch, type: streamType, source: stream, clientH265, codec })
+      const mayMain = streamType !== 0 ? undefined : () => {
+        const user = currentUser(req)
+        if (!user) return 'signed out'
+        const as = { user, admin: isAdmin ? isAdmin(user) === true : user === who.user && who.admin === true }
+        if (can(as, 'live', { nvr: nvr.id, ch }) !== true) return 'not allowed'
+        return can(as, 'live-hd', { nvr: nvr.id, ch }) === true || HD_NOT_ALLOWED
+      }
+      adaptiveLive.attach(viewerOf(req, currentUser), { ws, nvrId: nvr.id, ch, type: streamType, source: stream, clientH265, codec, mayMain })
       return
     }
     // a phone asking for 15 fps gets the shared thinned stream (phone-live.mjs), when there is room.

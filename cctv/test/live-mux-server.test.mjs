@@ -18,6 +18,7 @@ import { bridgeSub } from '../sub-bridge.mjs'
 import { AdaptiveLive, PRESSURE_BYTES, SETTLE_MS } from '../adaptive-live.mjs'
 import { TranscodePool } from '../transcode.mjs'
 import { H265_QUIET_MS, PHONE_SPARE, liveAttacher } from '../live-attach.mjs'
+import { encodeFrame } from '../phone-live.mjs'
 import { camera } from './remote-page.mjs'
 
 let failures = 0
@@ -1229,6 +1230,142 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('... its lines say it is held, and keyframes', heldAfter.logs[0] === "[sub-bridge] nvr-2/16, remote viewer, sub-stream held at the NVR's limit: stand-in started: the main stream's keyframes until the sub-stream's first frame", heldAfter.logs.join(' | '))
 }
 
+// ---- Live HD x remote levels (the merge of live-smooth): what live-attach.mjs hands adaptive-live.mjs
+// for a remote main, asked again at each move between streams, from the session and the role now ----
+{
+  const calls = []
+  let user = 'ann'
+  let admin = true
+  let rights = {}
+  const attach = liveAttacher({ can: (who, action) => who?.admin === true || rights[action] === true, currentUser: () => user, isAdmin: () => admin, adaptiveLive: { attach(key, o) { calls.push(o) } }, phoneLive: {}, track: () => {}, log: () => {} })
+  const hubN = new StreamHub('n1', () => {}, { stopDelayMs: { 0: 5, 1: 5 } })
+  const nvr = { id: 'n1', liveOnline: true, getStream: (ch, type) => { const s = hubN.getStream(ch, type); if (type === 1 && !s.gop.length) s.gop = [frame(true)]; return s } }
+  const fake = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, send() {}, on() { return this }, close() {} })
+  const at = (addr, streamType, who = { user: 'ann', admin: true }) => attach(fake(), { socket: { remoteAddress: addr }, headers: { 'user-agent': 'PC', cookie: 'c=1' } }, { nvr, who, ch: 3, streamType, clientH265: false, phone15: false })
+  at('127.0.0.1', 0)
+  at('127.0.0.1', 1)
+  at('192.168.1.20', 0)
+  const [main, grid] = calls
+  check('Live HD x levels: a remote main is handed to adaptive-live with its question (mayMain); a remote sub-stream without one; a local main not at all', calls.length === 2 && typeof main.mayMain === 'function' && main.type === 0 && grid.type === 1 && grid.mayMain === undefined, JSON.stringify(calls.map((c) => [c.type, typeof c.mayMain])))
+  check('  an admin: yes', main.mayMain() === true)
+  admin = false
+  check('  the same account demoted since (the `who` it came in with still says admin), no rights of its own: "not allowed"', main.mayMain() === 'not allowed', String(main.mayMain()))
+  rights = { live: true, 'live-hd': true }
+  check('  Live and Live HD on the camera: yes', main.mayMain() === true)
+  rights = { live: true }
+  check('  Live HD taken away: "hd not allowed"', main.mayMain() === 'hd not allowed', String(main.mayMain()))
+  rights = { 'live-hd': true }
+  check('  Live taken away: "not allowed"', main.mayMain() === 'not allowed', String(main.mayMain()))
+  rights = { live: true, 'live-hd': true }
+  user = null
+  check('  signed out: "signed out"', main.mayMain() === 'signed out', String(main.mayMain()))
+  user = 'ann'
+  const noRole = liveAttacher({ can: (who, action) => who?.admin === true || rights[action] === true, currentUser: () => user, adaptiveLive: { attach(key, o) { calls.push(o) } }, phoneLive: {}, track: () => {}, log: () => {} })
+  rights = {}
+  noRole(fake(), { socket: { remoteAddress: '127.0.0.1' }, headers: {} }, { nvr, who: { user: 'ann', admin: true }, ch: 3, streamType: 0, clientH265: false, phone15: false })
+  const m2 = calls.at(-1).mayMain
+  user = 'bob'
+  check('  (no isAdmin handed in: the `who` it came in with, for that user only)', m2() === 'not allowed' && ((user = 'ann'), m2() === true))
+}
+
+// ---- Live HD x remote levels, end to end: a remote page's main moved by the level controller only
+// while its viewer has Live HD; a viewer without it never shown the main stream, whatever the levels
+// of the others on the same camera. Real serveMux, liveAttacher, AdaptiveLive, PhoneStream and
+// HubStreams; a converter that hands back what it is given (so a converted main still says 'M') ----
+{
+  let t = 0
+  const rights = { ann: { live: true, 'live-hd': true }, bob: { live: true, 'live-hd': true }, cy: { live: true } }
+  const can = (who, action) => rights[who?.user]?.[action] === true
+  const hub = new StreamHub('n1', () => {}, { stopDelayMs: { 0: 5, 1: 5 } })
+  const nvr = { id: 'n1', liveOnline: true, getStream: (ch, type) => hub.getStream(ch, type) }
+  const logs = []
+  const adaptiveLive = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: (o) => ({ push: (ts, isKey, payload) => o.onFrame(ts, isKey, payload), endPicture() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => t })
+  const attach = liveAttacher({ can, currentUser: (req) => req.user, isAdmin: () => false, adaptiveLive, phoneLive: {}, track: () => {}, log: () => {} })
+  const page = (user, subs) => {
+    const req = { user, socket: { remoteAddress: '127.0.0.1' }, headers: { 'user-agent': `PC of ${user}`, cookie: `c=${user}` } }
+    const p = setup({ attach: (channel, s) => attach(channel, req, { nvr, who: { user, admin: false }, ch: s.ch, streamType: s.stream, clientH265: false, phone15: false }) })
+    p.state.user = user
+    for (const [id, stream] of subs) p.ws.msg(sub(id, { stream }))
+    p.press = () => { for (const c of p.mux.channels.values()) c.overSince = t - 3000 }
+    return p
+  }
+  // the camera: its main 25 fps ('M'), its sub-stream 20 fps ('S'), H.264, a keyframe every second
+  const main = hub.getStream(3, 0)
+  const subS = hub.getStream(3, 1)
+  let pages = []
+  const cameraTo = (ms) => {
+    for (; t < ms; t += 10) {
+      if (t % 40 === 0) main.onFrame(encodeFrame(Buffer.from('MMMM'), t % 1000 === 0, 0, t), t % 1000 === 0)
+      if (t % 50 === 0) subS.onFrame(encodeFrame(Buffer.from('SSSS'), t % 1000 === 0, 0, t), t % 1000 === 0)
+      for (const p of pages) p.ws.drain()
+      if (t > 0 && t % 2000 === 0) {
+        for (const p of pages) if (p.pressAt === t) p.press()
+        adaptiveLive.tick()
+        for (const p of pages) for (const c of p.mux.channels.values()) c.overSince = null
+      }
+    }
+  }
+  cameraTo(1000) // running before anyone opens
+  const ann = page('ann', [[1, 1], [2, 0]]) // her grid tile and her full-size view of the camera
+  const bob = page('bob', [[1, 0]]) // his full-size view
+  const cy = page('cy', [[1, 1]]) // the grid tile of a viewer without Live HD
+  pages = [ann, bob, cy]
+  clearInterval(adaptiveLive.timer)
+  // (what the frames on a page's channel were: 'M' the main stream, converted or not; 'S' the sub-stream)
+  const onPage = (p, id) => p.ws.frames().filter((f) => f.id === id).map((f) => String.fromCharCode(f.body[16]))
+  const mains = (p, id) => onPage(p, id).filter((c) => c === 'M').length
+  ann.pressAt = 6000 // ann down to 15: her main's conversion runs from then on
+  cameraTo(8000)
+  const a15 = adaptiveLive.streams.get('n1/3/0@15')
+  check('Live HD x levels: ann down to 15, a conversion of the camera\'s main runs for her full-size view', a15 && !a15.closed && mains(ann, 2) > 0, `${[...adaptiveLive.streams.keys()]}`)
+  rights.bob = { live: true } // bob's Live HD taken away (the access watch has not swept yet)
+  const before = mains(bob, 1)
+  const bobMain = bob.mux.channels.get(1)
+  bob.pressAt = 10_000 // bob down to 15, where ann's conversion runs
+  cameraTo(10_010)
+  const end = bob.ws.texts().find((m) => m.op === 'end' && m.id === 1)
+  check('  bob\'s level change onto that conversion: his page is told "end" 1008 "hd not allowed" for his full-size view (it drops to the sub-stream)', end?.code === 1008 && end.reason === 'hd not allowed' && !a15.clients.has(bobMain), JSON.stringify(bob.ws.texts()))
+  const at = bob.ws.sent.findIndex((m) => typeof m === 'string' && JSON.parse(m).op === 'end')
+  cameraTo(14_000)
+  check('  and no main-stream picture after it, from any stream', before > 0 && at >= 0 && bob.ws.sent.slice(at).every((m) => typeof m === 'string'), `${before} before, ${bob.ws.sent.length - at - 1} after`)
+  check('  said in the log', logs.some((l) => l.includes('n1/4: a main stream not moved') && l.endsWith('closed 1008 "hd not allowed"')), logs.filter((l) => l.includes('not moved')).join(' | '))
+  cy.pressAt = 16_000 // cy down to 15, 8, then back up, beside ann's conversion of the main
+  cameraTo(17_000)
+  cy.pressAt = 20_000
+  cameraTo(62_000)
+  check('  cy (Live, no Live HD) through 15, 8 and back to full beside ann\'s conversion of the main: never a main-stream picture, sub-stream pictures throughout', mains(cy, 1) === 0 && onPage(cy, 1).length > 500 && !cy.ws.texts().some((m) => m.op === 'end'), `${mains(cy, 1)} main, ${onPage(cy, 1).length} in all`)
+  check('  ann, who has it, keeps her full-size view', mains(ann, 2) > 500 && !ann.ws.texts().some((m) => m.op === 'end'), `${mains(ann, 2)}`)
+  for (const p of pages) p.ws.close(1000, 'bye')
+  await tick()
+}
+
+// ---- the merge: a remote viewer's stand-in, keyframes only (live-smooth), is still Live HD's (stream
+// rights): only with it, watched for it, and its end line says when it was taken away ----
+{
+  const logs = []
+  const tracked = []
+  let rights = { live: true, 'live-hd': true }
+  const hubS = new StreamHub('n1', () => {}, { stopDelayMs: { 0: 5, 1: 5 } })
+  const nvr = { id: 'n1', liveOnline: true, getStream: (ch, type) => hubS.getStream(ch, type), subHeld: () => false, subFull: () => false }
+  const attach = liveAttacher({ can: (who, action) => rights[action] === true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive: {}, track: (w, r, what) => tracked.push({ w, what }), log: (l) => logs.push(l), waitTimers: { every: () => ({}), clear: () => {}, now: () => 0 } })
+  const remoteReq = { socket: { remoteAddress: '127.0.0.1' }, headers: { 'user-agent': 'PC', cookie: 'c=1' } }
+  const m = setup({ attach: (channel, s) => attach(channel, remoteReq, { nvr, who: { user: 'ann' }, ch: s.ch, streamType: s.stream, clientH265: false, phone15: false }) })
+  const mainS = hubS.getStream(3, 0)
+  m.ws.msg(sub(1)) // its sub-stream cold (no frame yet): the main stands in
+  const handle = tracked.find((x) => x.w !== m.mux.channels.get(1))
+  const feed = (from, to) => { for (let i = from; i < to; i++) { mainS.onFrame(encodeFrame(Buffer.from('MMMM'), i % 5 === 0, 0, i * 40), i % 5 === 0); m.ws.drain() } }
+  feed(0, 10)
+  const got = () => m.ws.frames().filter((f) => f.id === 1)
+  check('merge: a remote viewer with Live HD, its sub-stream cold: the main\'s keyframes only (live-smooth), the stand-in watched for Live and Live HD (stream rights)', got().length === 2 && got().every((f) => f.body[0] === 1) && JSON.stringify(handle?.what.actions) === '["live","live-hd"]', `${got().length} ${JSON.stringify(tracked.map((x) => x.what.actions))}`)
+  rights = { live: true }
+  handle.w.close(1008, 'hd not allowed') // what the access watch does when Live HD goes
+  feed(10, 20)
+  check('  Live HD taken away: nothing more of the main, its end line says why, and its tile is told why it waits', got().length === 2 && logs.some((l) => /^\[sub-bridge\] n1\/4, remote viewer: stand-in ended after [\d.]+ s \(Live HD was taken away\): 2 keyframes, [\d.]+ MB sent, 0 held back$/.test(l)) && m.ws.texts().some((x) => x.op === 'wait' && x.id === 1), logs.join(' | '))
+  tracked.length = 0
+  m.ws.msg(sub(2, { ch: 5 })) // without Live HD: another cold sub-stream
+  check('  without Live HD, a remote viewer\'s cold sub-stream: no stand-in, the main not asked for, a wait notice', !hubS.streams.has('5:0') && tracked.length === 1 && m.ws.texts().some((x) => x.op === 'wait' && x.id === 2), JSON.stringify([...hubS.streams.keys()]))
+}
+
 // ---- server.mjs wiring (source shape: importing server.mjs starts the NVRs) ----
 {
   const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
@@ -1237,7 +1374,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('... pinged like the others (a pong late behind its backlog is waited for: backpressure.test), with the same connection handler', /keepAlive\(muxWss, \{ quiet: /.test(src) && /wss\.on\('connection', onConnection\)/.test(src) && /muxWss\.on\('connection', onConnection\)/.test(src))
   const conn = src.slice(src.indexOf('const onConnection'))
   check('/live-mux is served right after meterSocket, before the NVR lookup', /meterSocket\(ws, [^)]*\)\n[\s\S]*?if \(url\.pathname === '\/live-mux'\) \{\n\s*pageSockets\.set\(ws, serveMux\(ws,/.test(conn) && conn.indexOf("'/live-mux'") < conn.indexOf('nvrs.get('))
-  check('/live and every mux channel go through the same attachLive (live-attach.mjs)', (src.match(/attachLive\((ws|channel), req,/g) ?? []).length === 2 && /const attachLive = liveAttacher\(\{ can, currentUser, adaptiveLive, phoneLive, track: watch\.track \}\)/.test(src) && !/function attachLive/.test(src))
+  check('/live and every mux channel go through the same attachLive (live-attach.mjs)', (src.match(/attachLive\((ws|channel), req,/g) ?? []).length === 2 && /const attachLive = liveAttacher\(\{ can, currentUser, isAdmin: \(u\) => AUTH_OFF \|\| auth\.isAdmin\(u\), adaptiveLive, phoneLive, track: watch\.track \}\)/.test(src) && !/function attachLive/.test(src))
   check('the session is checked again for each sub', /session: \(\) => currentUser\(req\)/.test(src))
   check('/live parses its stream once, strictly (stream-param.mjs)', /streamType: streamParam\(url\.searchParams\.get\('stream'\)\)/.test(src) && !/Number\(url\.searchParams\.get\('stream'\)/.test(src))
   check('the page socket\'s close is logged as remote or local, by the rule live-attach uses', /serveMux\(ws, \{[\s\S]{0,400}?who: isRemoteAddress\(req\.socket\.remoteAddress\) \? 'remote' : 'local'/.test(src))
