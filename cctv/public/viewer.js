@@ -3,6 +3,7 @@ import { isPhone, maxLiveFps } from './device.js'
 import { attachZoom } from './pinch-zoom.js'
 import { diffCameras, shownCameras, visibleCameras } from './grid-diff.js'
 import { enableGridDrag } from './grid-drag.js'
+import { activeTrace, downloadTrace, startTrace, stopTrace } from './frame-trace.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
 import { ImagePanel } from './image-panel.js'
 import { LinesPanel } from './lines-panel.js'
@@ -55,7 +56,9 @@ let overlayZoom = null // the full-size view's zoom (pinch-zoom.js), while it is
 let single = null // key (nvr/ch) of the camera shown full-size, or null for the grid
 const camKey = (cam) => `${cam.nvr}/${cam.ch}`
 let tiles = []
-let showStats = false
+// each tile's counters (press D); ?stats=1 in the address shows them from the start, for a phone,
+// which has no D key
+let showStats = new URLSearchParams(location.search).get('stats') === '1'
 let isAdmin = false
 
 // picture settings of the camera shown full-size (admins); measures the stream on screen
@@ -1004,8 +1007,60 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'd' || e.key === 'D') {
     showStats = !showStats
     grid.classList.toggle('show-stats', showStats)
+    showTraceBtn()
   }
 })
+
+// The frame trace (frame-trace.js), behind the D overlay: for 2 minutes, every frame of every tile
+// as it arrives, then a JSON file to download, which test/live-replay.mjs replays through the player
+// (stutter report, 2026-09-29, Task 0). Its button shows only with the overlay, or while a trace
+// runs; nothing is recorded until it is pressed.
+const traceBtn = document.createElement('button')
+traceBtn.type = 'button'
+traceBtn.title = 'Records when each frame of every tile arrives, for 2 minutes, then saves it as a file (for diagnosing stutter)'
+document.querySelector('header .controls')?.append(traceBtn)
+let traceTimer = null
+let traceSaved = '' // what the last trace was saved as
+function showTraceBtn() {
+  const t = activeTrace()
+  traceBtn.hidden = !showStats && !t
+  traceBtn.textContent = t
+    ? `● Trace: ${Math.ceil((t.durationMs - t.elapsedMs) / 1000)} s left, ${t.frames} frames (stop)`
+    : traceSaved || 'Record trace (2 min)'
+}
+traceBtn.addEventListener('click', () => {
+  if (activeTrace()) {
+    stopTrace() // saved at once, as at the end
+    return
+  }
+  traceSaved = ''
+  startTrace({
+    // what the page was, to read the trace by
+    page: {
+      host: location.host,
+      userAgent: navigator.userAgent,
+      layout: layoutSelect.value,
+      page: page + 1,
+      single,
+      smooth: smoothBox.checked,
+      pacing: PACING,
+      maxFps: maxLiveFps(),
+      mux: !liveMuxOff,
+      screen: `${screen.width}x${screen.height}@${window.devicePixelRatio}`,
+      tiles: tiles.length
+    },
+    onDone: (trace) => {
+      clearInterval(traceTimer)
+      traceTimer = null
+      const { name, bytes } = downloadTrace(trace)
+      traceSaved = `Saved ${name} (${(bytes / 1e6).toFixed(1)} MB): record again`
+      showTraceBtn()
+    }
+  })
+  traceTimer = setInterval(showTraceBtn, 1000)
+  showTraceBtn()
+})
+showTraceBtn()
 
 // no video while the tab is hidden: saves CPU, GPU and NVR bandwidth
 let hiddenTimer

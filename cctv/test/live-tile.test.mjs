@@ -240,6 +240,64 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   check('source closed: the full-size view opens its own connection', full.source === null && sockets.length === before + 1, `sockets ${sockets.length - before}`)
   full.close()
 }
+// the debug frame trace (frame-trace.js, behind the D overlay): while one runs, every frame that
+// arrives on the tile's socket, its connection events and the D overlay's counters; nothing else
+{
+  const { activeTrace, startTrace, stopTrace } = await import('../public/frame-trace.js')
+  const us = (b, v) => new DataView(b.buffer).setBigInt64(8, BigInt(v), true)
+  const mk = () => {
+    const x = new LiveTile(tileEl, { nvr: 'n1', ch: 9 }, 1, 0, { now: () => now })
+    clearTimeout(x.retry)
+    x.player.push = () => {}
+    return x
+  }
+  const quiet = mk()
+  quiet.connect()
+  const wq = sockets.at(-1)
+  wq.readyState = 1
+  wq.onmessage({ data: new Uint8Array(40).buffer })
+  check('trace: none runs unless the viewer starts one', activeTrace() === null)
+  quiet.close()
+
+  let clock = 0
+  startTrace({ now: () => clock, later: () => 1, cancel: () => {} })
+  const t6 = mk()
+  t6.connect()
+  const w6 = sockets.at(-1)
+  clock = 5
+  w6.readyState = 1
+  w6.onopen()
+  const send6 = (key, v, size = 40) => {
+    const b = new Uint8Array(size)
+    b[0] = key ? 1 : 0
+    us(b, v)
+    w6.onmessage({ data: b.buffer })
+  }
+  clock = 10
+  send6(true, 1_000_000, 900)
+  clock = 60.25
+  send6(false, 1_050_000)
+  t6.player.stats = { ...t6.player.stats, fps: 20, dropped: 3, late: 2, resyncs: 1, delayMs: 350 }
+  clock = 1000
+  t6.updateStatus()
+  const full = new LiveTile({ querySelector: (s) => ({ ...parts, '.status': el() })[s], append() {} }, { nvr: 'n1', ch: 9 }, 1, 0, { now: () => now, borrowFrom: t6 })
+  full.player.push = () => {}
+  clock = 1100
+  t6.suspend()
+  send6(false, 1_100_000)
+  t6.resume()
+  clock = 1200
+  w6.close() // the socket drops: the tile reconnects later
+  clearTimeout(t6.retry)
+  t6.close()
+  full.close()
+  const x = stopTrace()
+  const [a, b] = x.tiles
+  check('trace: the tile\'s frames as its socket delivered them (arrival, capture, bytes, key)', JSON.stringify(a.frames) === '[[10,0,900,1],[60.3,50,40,0],[1100,100,40,0]]', JSON.stringify(a.frames))
+  check('... its connection and display events', JSON.stringify(a.events.map((e) => e[1])) === '["connect","open","suspend","resume","close","end"]' && a.events[0][2] === 'sub', JSON.stringify(a.events))
+  check('... the D overlay\'s counters once a second', JSON.stringify(a.stats) === '[[1000,20,3,2,1,350]]', JSON.stringify(a.stats))
+  check('... a tile borrowing it records the borrow, and no frames of its own', b.camera === 'n1/10' && JSON.stringify(b.events.map((e) => e.slice(1))) === '[["borrow",1],["end"]]' && b.frames.length === 0, JSON.stringify(b))
+}
 t.close()
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

@@ -3,6 +3,7 @@
 import { clearStill, maybeKeepStill, showStill } from './stills.js'
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
 import { liveSocket } from './live-mux.js'
+import { activeTrace } from './frame-trace.js'
 
 // Whether this device can play H.265, told to the server with each live stream: a remote viewer
 // who can is sent an H.265 camera as it is (about half the data of H.264 for the same picture)
@@ -223,6 +224,7 @@ export class LiveTile {
       this.connect()
     }
     const s = this.player.stats
+    activeTrace()?.stats(this, s) // the D overlay's frame trace (frame-trace.js), when one runs
     const ws = this.ws
     const open = (this.source ? true : ws && ws.readyState === 1) && !this.suspended && !this.closed
     const since = open ? this.now() - (this.lastDataAt || this.now()) : 0
@@ -299,16 +301,24 @@ export class LiveTile {
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
     this.connectAt = this.now()
+    // The frame trace (frame-trace.js), when the viewer runs one from the D overlay: each frame as it
+    // arrives here, on this tile's socket or channel, and what happens to the connection. Otherwise
+    // one call per frame that finds none.
+    activeTrace()?.event(this, 'connect', this.streamType === MAIN_STREAM ? 'main' : 'sub')
     this.ws.onopen = () => {
       this.lastDataAt = this.now()
       lastOpenAt = this.lastDataAt
+      activeTrace()?.event(this, 'open')
     }
     this.ws.onmessage = (e) => {
       this.attempts = 0
       this.lastDataAt = this.now()
-      this.onMessage(new Uint8Array(e.data))
+      const buf = new Uint8Array(e.data)
+      activeTrace()?.frame(this, buf)
+      this.onMessage(buf)
     }
     this.ws.onclose = () => {
+      activeTrace()?.event(this, 'close')
       this.player.reset()
       if (!this.closed) {
         this.opts.onDisconnect?.()
@@ -373,6 +383,7 @@ export class LiveTile {
     if (!src?.lendable || src.streamType !== this.streamType || src.nvr !== this.nvr || src.ch !== this.ch) return false
     this.source = src
     this.lastDataAt = this.now()
+    activeTrace()?.event(this, 'borrow', src) // its frames are the source's, traced there
     for (const m of src.gop) this.onMessage(m)
     this.tap = (buf) => {
       this.lastDataAt = this.now()
@@ -425,6 +436,7 @@ export class LiveTile {
    */
   suspend() {
     this.suspended = true
+    activeTrace()?.event(this, 'suspend')
   }
 
   /**
@@ -435,6 +447,7 @@ export class LiveTile {
   resume() {
     if (!this.suspended || this.closed) return
     this.suspended = false
+    activeTrace()?.event(this, 'resume')
     if (this.lendable) {
       this.player.reset()
       for (const m of this.gop) this.#decode(m)
@@ -470,6 +483,7 @@ export class LiveTile {
   }
 
   close() {
+    if (!this.closed) activeTrace()?.event(this, 'end')
     liveTiles.delete(this)
     this.closed = true
     this.#unborrow()
