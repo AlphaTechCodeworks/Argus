@@ -111,12 +111,15 @@ export class PhoneStream {
    *   meanwhile starts). Its ffmpeg starts at that keyframe, as every conversion's at its first: started
    *   ahead, the first picture came 0 ms (a sub, 30 fps) and 12 ms (1080p H.265 at 20) sooner, of 85
    *   and 169 ms (the server, 29 Sep)
+   *   wholeReplay: the camera's GOP so far is replayed to it whole as it joins, whatever its size (a remote
+   *   viewer's, which learns its rate from it); not given (a phone): cut to its keyframe past 1.5 MB, as
+   *   for any viewer (gop-replay.mjs)
    *   srcFps: the source's frame rate, when the caller knows it already: decided on it at the first
    *   frame, nothing learnt (adaptive-live.mjs #handOver makes a stream inside the camera's keyframe's
    *   fan-out, and with fromNextKey it converts from that very keyframe); 0, not given: learnt
    *   onRate: told the frame rate once it is decided (adaptive-live.mjs remembers it)
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, onRate = () => {}, background = false, camera = '?' }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, background = false, camera = '?' }) {
     // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
     // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps / fromNextKey / srcFps: how its
     // conversion runs and starts (a phone on the local network gives none: the converter's own, as always)
@@ -143,6 +146,11 @@ export class PhoneStream {
     // what the normal stream sees: one more viewer, which never falls behind
     // (background: only a stand-in, live-attach.mjs: the NVR worker joins a main that plays for it, never starts one)
     this.tap = { OPEN: 1, readyState: 1, bufferedAmount: 0, background, send: (buf) => this.#onSource(buf) }
+    // A main's GOP so far over 1.5 MB is replayed as its keyframe alone, the rest from the next keyframe
+    // on (gop-replay.mjs), and a remote viewer's stream learnt its rate from those two keyframes, 2 s
+    // apart: 0.5 fps, a 25-30 fps main converted one picture at a time, each a keyframe, under a level's
+    // cap (the review of ef43e60). This replay never goes over the network: whole.
+    if (wholeReplay) this.tap.replayMaxBytes = Infinity
     // (what the normal stream replays as the tap joins is learnt from, never sent on as it comes: #onSource)
     this.joining = true
     source.add(this.tap)

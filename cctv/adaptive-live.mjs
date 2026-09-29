@@ -59,8 +59,10 @@ export const LEVELS = Object.freeze([
  * whichever comes first, a sub-stream's own H.264 going out as it comes meanwhile (PhoneStream learnMs).
  * A source under 10 fps is then converted picture by picture (slowFps): the two decoder threads and
  * ffmpeg's parser held two pictures back, 2.7 s each at 0.8 fps, where one thread has time to spare.
+ * It learns from the camera's GOP replayed whole (wholeReplay): cut to its keyframe, as a big main's is
+ * for a viewer, it read 0.5 fps off two keyframes 2 s apart.
  */
-export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10 })
+export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true })
 export const TICK_MS = 2000
 /**
  * A link that is not keeping up: what its page has queued takes longer than QUEUE_S to go at the rate

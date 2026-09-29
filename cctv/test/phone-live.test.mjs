@@ -118,7 +118,7 @@ const makeTranscoder = (o) => {
 
 // ---- what a remote viewer's level asks of its stream (adaptive-live.mjs) ----
 // (REMOTE_CONVERSION there: how every level's conversion runs, and how soon it starts)
-const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10 }
+const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true }
 {
   /** One PhoneStream fed `n` frames at `fps` (a keyframe every 12), with a fake converter. */
   const run = (opts, { type = 0, codec = 1, fps = 30, n = 24 } = {}) => {
@@ -338,6 +338,33 @@ const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, s
     known.xs[0]?.pushed[0] === 2000 && known.out[0]?.key && known.out[0].ts === 2000 && known.out.every((o) => o.converted) && known.s.startTs === 2000, JSON.stringify(known.out.slice(0, 4)))
   const learnt = handOver({})
   check('  (not given: learnt again from there, the camera\'s own frames sent on meanwhile, converted only from the keyframe after)', learnt.xs.every((x) => x.pushed.length === 0) && learnt.out.length > 0 && learnt.out.every((o) => !o.converted), JSON.stringify(learnt.out.slice(0, 3)))
+}
+
+// ---- a remote viewer's stream learns its rate from the camera's whole replay ----
+// A main's GOP so far over 1.5 MB (gop-replay.mjs REPLAY_MAX_BYTES: a 25 fps 4K main 1.6 s in) is replayed
+// to a new viewer as its keyframe alone, the rest from the next keyframe on. A level's stream joining it
+// learnt its rate from those two keyframes, 2 s apart: 0.5 fps, and converted a 25 fps main one picture
+// at a time, every picture a keyframe, under level 15's 2.5 Mbit/s (the review of ef43e60). Its tap never
+// goes over the network: a remote viewer's stream is replayed the GOP whole.
+{
+  const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 10_000 } }
+  const bigMain = (opts) => {
+    const src = new HubStream(hub, 0, 0)
+    src.add(fakeWs())
+    const frame = (i) => encodeFrame(Buffer.alloc(i % 50 === 0 ? 200_000 : 60_000), i % 50 === 0, 1, i * 40)
+    for (let i = 0; i < 40; i++) src.onFrame(frame(i), i % 50 === 0) // 1.6 s into a 2 s GOP: 2.54 MB
+    const xs = []
+    const logs = []
+    const s = new PhoneStream({ source: src, type: 0, slot: { release() {} }, camera: 'n1/1', log: (l) => logs.push(l), fps: 15, ...opts, makeTranscoder: (o) => { xs.push(o); return { push() {}, endPicture() {}, close() {} } } })
+    for (let i = 40; i < 120; i++) src.onFrame(frame(i), i % 50 === 0)
+    s.close()
+    return { o: xs[0], logs, gop: src.gop.length }
+  }
+  const remote = bigMain(REMOTE)
+  check('a remote viewer\'s stream joining a main whose GOP so far is 2.5 MB: its rate from the replay, 25 fps (1 in 2, a keyframe every 25 pictures), not 0.5 from two keyframes',
+    remote.o?.keepEvery === 2 && remote.o.gop === 25 && remote.o.lowDelay === false && remote.logs[0] === '[phone-live] n1/1: converting a main stream at 25.0 fps to about 15: keeping 1 in 2', JSON.stringify({ o: remote.o && { k: remote.o.keepEvery, g: remote.o.gop, low: remote.o.lowDelay }, logs: remote.logs }))
+  const phone = bigMain({})
+  check('  a phone on the local network: its replay as before (cut to the keyframe past 1.5 MB)', phone.o && phone.logs[0] !== remote.logs[0], JSON.stringify(phone.logs))
 }
 
 // ---- a socket moved onto a running level stream at its keyframe (adaptive-live.mjs #swap) ----
