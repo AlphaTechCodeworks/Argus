@@ -107,9 +107,12 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track 
       bridgeSub(ws, { sub: stream, main: stand, clientH265, log: say })
     }
     // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry, per
-    // browser (viewerOf)
+    // browser (viewerOf). With the codec the NVR saw on this stream: a main started on demand has no
+    // keyframe yet, and its first one, H.265, must not go to a browser that cannot decode it
+    // (adaptive-live.mjs #h265)
     if (remote) {
-      adaptiveLive.attach(viewerOf(req, currentUser), { ws, nvrId: nvr.id, ch, type: streamType, source: stream, clientH265 })
+      const codec = nvr.codecSeen?.get?.(`${ch}:${streamType}`)?.codec
+      adaptiveLive.attach(viewerOf(req, currentUser), { ws, nvrId: nvr.id, ch, type: streamType, source: stream, clientH265, codec })
       return
     }
     // a phone asking for 15 fps gets the shared thinned stream (phone-live.mjs), when there is room.

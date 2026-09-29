@@ -803,6 +803,15 @@ const fanOut = (c, buf, isKey, type, now) => {
   const key = createHash('sha1').update('ann|Desktop|c=1').digest('hex')
   const call = adaptive.calls.at(-1)
   check('... a remote viewer: adaptive-live, one key per browser (user, user agent, cookie)', adaptive.calls.length === 1 && call.key === key && call.ws === x.w && call.nvrId === 'n1' && call.ch === 3 && call.type === 0 && call.clientH265 === true && x.nvr.getStream(3, 0).viewers.size === 0)
+  // what the NVR saw each stream send (nvrs.mjs codecSeen): a main started on demand has no keyframe
+  // yet, and adaptive-live must not send its first one, H.265, to a PC that cannot decode it (stutter
+  // report 2.7)
+  check('... no codec seen for it: none passed', call.codec === undefined, JSON.stringify(call.codec))
+  const seen = mkNvr()
+  seen.codecSeen = new Map([['3:0', { codec: 'h265', width: 3840, height: 2160 }], ['3:1', { codec: 'h264' }]])
+  run({ nvr: seen }, req('127.0.0.1'))
+  run({ nvr: seen, streamType: 1 }, req('127.0.0.1'))
+  check('... the codec the NVR saw on that very stream (main H.265, sub H.264)', adaptive.calls.at(-2).codec === 'h265' && adaptive.calls.at(-2).type === 0 && adaptive.calls.at(-1).codec === 'h264' && adaptive.calls.at(-1).type === 1, JSON.stringify(adaptive.calls.slice(-2).map((c) => c.codec)))
   x = run({ phone15: true }, req('192.168.1.20', { 'user-agent': 'Mozilla/5.0 (iPhone)' }))
   check('... a phone asking for 15 fps: the shared thinned stream', phone.calls.length === 1 && phone.calls[0].key === 'n1/3/0' && phone.calls[0].ws === x.w && x.nvr.getStream(3, 0).viewers.size === 0)
   check('... which names its camera in the log, the channel from 1', phone.calls[0].opts?.camera === 'n1/4', JSON.stringify(phone.calls[0].opts))

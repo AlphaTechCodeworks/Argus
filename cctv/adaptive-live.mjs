@@ -118,9 +118,16 @@ export class AdaptiveLive {
     this.timer = null
   }
 
-  /** Whether a socket's camera sends H.265, as its stream's keyframe says. */
+  /**
+   * Whether a socket's camera sends H.265: its stream's keyframe says, and until the stream has one,
+   * what the NVR saw it send (entry.codec, nvrs.mjs codecSeen). A main started on demand has no
+   * keyframe when the socket joins, and its first one, H.265, went out as it was until the next tick
+   * moved the socket: a PC cannot decode it, and its full-size view fell back to the sub-stream for 2
+   * minutes (viewer.js NO_MAIN_MS; stutter report 2.7). What the stream shows wins over what was seen.
+   */
   #h265(entry) {
-    return entry.source.gop?.[0]?.[1] === 1
+    const key = entry.source.gop?.[0]
+    return key ? key[1] === 1 : entry.codec === 'h265'
   }
 
   /** Whether a socket's frames go through a conversion on this level. */
@@ -152,12 +159,14 @@ export class AdaptiveLive {
   /**
    * Takes a remote viewer's /live socket.
    * @param {string} viewerKey one per browser (the session), so all its tiles move together
+   * @param {{ codec?: 'h264'|'h265' }} o codec: what the NVR saw this camera stream send (nvrs.mjs
+   *   codecSeen), for as long as the stream itself has no keyframe to say (#h265)
    */
-  attach(viewerKey, { ws, nvrId, ch, type, source, clientH265 = false }) {
+  attach(viewerKey, { ws, nvrId, ch, type, source, clientH265 = false, codec }) {
     const now = this.now()
     let v = this.viewers.get(viewerKey)
     if (!v) this.viewers.set(viewerKey, (v = new Viewer(viewerKey, now)))
-    const entry = { ws, nvrId, ch, type, source, clientH265, stream: null }
+    const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null }
     entry.stream = this.#streamFor(entry, v.level)
     entry.stream.add(ws)
     v.sockets.add(entry)
@@ -239,8 +248,9 @@ export class AdaptiveLive {
       if (n.level !== v.level) this.#move(v, n.level, n.why)
       // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
       // without the HEVC codec (#streamFor converts it). A camera found to be H.265 only after its
-      // socket was attached (no keyframe seen yet then) moves to its conversion here -- that socket
-      // alone. This used to move the whole viewer to 15 fps: every tile of the browser went through
+      // socket was attached (no keyframe then, and no codec the NVR had seen) moves to its conversion
+      // here -- that socket alone -- and one whose keyframe shows H.264 after all moves back to its
+      // own stream. This used to move the whole viewer to 15 fps: every tile of the browser went through
       // a conversion because one full-screen main stream was H.265 (slow starts, 15 fps, the
       // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
       else if (v.level === 0) {

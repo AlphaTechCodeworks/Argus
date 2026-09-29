@@ -255,5 +255,39 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   check('an H.265 main stepped down from full: onto level 15\'s conversion, 1 in 2 of 30 fps', live.streams.has('n1/4/0@15') && made.length === 2 && made[1].o.keepEvery === 2 && made[1].o.maxWidth === 1280, `${[...live.streams.keys()]} ${made.map((x) => x.o.keepEvery)}`)
   clearInterval(live.timer)
 }
+{
+  // A main started on demand has no keyframe yet when the socket joins. Its first keyframe, H.265,
+  // went out raw until the next tick moved the socket: the PC's decoder cannot take it, and the
+  // full-size view fell back to the sub-stream for 2 minutes (viewer.js NO_MAIN_MS). The NVR's
+  // codecSeen says what the camera sends (live-attach.mjs passes it as codec).
+  const { made, make } = converters()
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: make, log: () => {}, budgetBps: 1e9 })
+  const cold = fakeSource('cold main')
+  const ws = fakeWs()
+  live.attach('cold', { ws, nvrId: 'n1', ch: 2, type: 0, source: cold, codec: 'h265' })
+  check('no keyframe yet, H.265 seen on it: converted from the start, not the raw stream', !cold.viewers.has(ws) && live.streams.has('n1/2/0@full'), [...live.streams.keys()].join())
+  send(cold, 24)
+  check('  its first keyframe never reaches the browser as H.265', ws.got.length === 12 && ws.got.every((b) => b[1] === 0) && made.length === 1, `${ws.got.length} frames, codecs ${[...new Set(ws.got.map((b) => b[1]))]}`)
+  const h264 = fakeSource('cold h264')
+  const w2 = fakeWs()
+  live.attach('cold', { ws: w2, nvrId: 'n1', ch: 3, type: 0, source: h264, codec: 'h264' })
+  const none = fakeSource('never seen')
+  const w3 = fakeWs()
+  live.attach('cold', { ws: w3, nvrId: 'n1', ch: 5, type: 0, source: none })
+  check('  H.264 seen, or nothing seen yet: the camera\'s own stream, as before', h264.viewers.has(w2) && none.viewers.has(w3))
+  const plays = fakeSource('cold, H.265-capable')
+  const w4 = fakeWs()
+  live.attach('other', { ws: w4, nvrId: 'n1', ch: 6, type: 0, source: plays, codec: 'h265', clientH265: true })
+  check('  a browser that plays H.265: the camera\'s own stream', plays.viewers.has(w4))
+  // what the stream itself shows wins: the camera was changed to H.264 since it was seen
+  const changed = fakeSource('now h264')
+  const w5 = fakeWs()
+  live.attach('cold', { ws: w5, nvrId: 'n1', ch: 7, type: 0, source: changed, codec: 'h265' })
+  changed.gop = [encodeFrame(Buffer.from([0, 0, 1, 1]), true, 0, 0)]
+  live.tick()
+  check('  its keyframe says H.264 after all: the next tick puts it on the camera\'s own stream', changed.viewers.has(w5) && !live.streams.get('n1/7/0@full')?.clients.has(w5))
+  clearInterval(live.timer)
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
