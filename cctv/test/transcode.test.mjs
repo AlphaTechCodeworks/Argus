@@ -67,6 +67,18 @@ const check = (name, ok, extra = '') => {
   check('  releasing twice does not invent a free slot', p.active === 1, `active ${p.active}`)
   const none = new TranscodePool(0)
   check('  a cap of 0 turns the feature off', none.acquire() === null)
+
+  // keepFree: a conversion that has an alternative (a remote viewer's playback fitted to the tunnel,
+  // rec-playback.mjs) leaves that many slots for the ones that have none (H.265 for a browser without it)
+  const q = new TranscodePool(2)
+  const opt = q.acquire({ keepFree: 1 })
+  check('pool, keepFree 1: a slot while two are free', Boolean(opt) && q.active === 1)
+  check('  not the last one', q.acquire({ keepFree: 1 }) === null && q.active === 1)
+  const need = q.acquire()
+  check('  which is still there for a conversion that must have it', Boolean(need) && q.active === 2)
+  opt?.release()
+  need?.release()
+  check('  a cap of 1 has no slot to spare', new TranscodePool(1).acquire({ keepFree: 1 }) === null)
 }
 
 // ---- ffmpeg arguments -------------------------------------------------------------------------

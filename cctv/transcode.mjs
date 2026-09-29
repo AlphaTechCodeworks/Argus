@@ -102,10 +102,15 @@ export class TranscodePool {
    * A slot, or null when the cap is reached. Null is not a queue: the viewer is told plainly that
    * the server is busy, because a queue for something this expensive only ever turns into a page
    * that waits for ever.
+   * keepFree: leave that many slots free, else null. A conversion that has an alternative (a remote
+   * viewer's server playback fitted to the tunnel, which can send the recording itself instead)
+   * asks with 1, so it never takes the last slot from one that has none: H.265 for a browser that
+   * cannot decode it, in server playback and in NVR playback alike (the same pool).
+   * @param {{ keepFree?: number }} [opts]
    * @returns {{ release: () => void }|null}
    */
-  acquire() {
-    if (this.active >= this.max) return null
+  acquire({ keepFree = 0 } = {}) {
+    if (this.active + keepFree >= this.max) return null
     this.active++
     let done = false
     return {

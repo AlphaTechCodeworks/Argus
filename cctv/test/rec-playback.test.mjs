@@ -1289,6 +1289,63 @@ for (const speed of [2, 4]) {
     check('remote, closed after taking its slot and before any frame was converted: the slot is given back', session.closed && fitMsgs(ws).length === 1 && xs.length === 0 && pool.active === 0, `closed ${session.closed}, ${xs.length} conversions, pool ${pool.active}`)
   }
   {
+    // Closed while its first file is still being opened (a camera, a day or a quality switched at
+    // once, the tab closed; the .idx takes longer while the NAS is slow): close() has run with no
+    // slot to give back and never runs again, so the file that finishes opening after it must not
+    // take one. Two such leaks emptied the process-wide pool until a restart: every H.265
+    // conversion refused from then on, here and in NVR playback.
+    const xs = []
+    const pool = new TranscodePool(2)
+    const opts = { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) }
+    const gone = []
+    for (let i = 0; i < 3; i++) {
+      const l = open(0, T0 + 1000, { remote: true, opts })
+      l.session.close() // at once: the first file is still opening
+      gone.push(l)
+    }
+    const s = open(0, T0 + 1000, { remote: true, opts })
+    s.ws.close(1001) // the socket's own close event, as the tab going away
+    gone.push(s)
+    await sleep(200)
+    check('remote, closed while its first file was still opening: no slot taken after the close', pool.active === 0 && xs.length === 0, `pool ${pool.active}, ${xs.length} conversions`)
+    check('  and nothing decided for a closed session (no {type:"fit"})', gone.every((l) => fitMsgs(l.ws).length === 0), J(gone.map((l) => fitMsgs(l.ws))))
+    // the pool still has both slots: two viewers after it convert
+    const live = [open(0, T0 + 1000, { remote: true, opts }), open(10, T10 + 100, { extra: '&h265=0', opts })]
+    await until(() => live.every((l) => l.ws.bins.filter((b) => !b.key).length >= 3), 3000)
+    check('  the pool is whole: a remote viewer and an H.265 conversion after it both play converted', live.every((l) => l.ws.bins.filter((b) => !b.key).length >= 3 && l.ws.bins.every(converted)) && pool.active === 2, `pool ${pool.active}`)
+    for (const l of live) l.session.close()
+  }
+  {
+    // A remote viewer's conversion is optional (the recording itself still plays, if not as smoothly);
+    // H.265 for a browser without it has nothing else to play, here or in NVR playback (playback.mjs),
+    // and both come out of the same process-wide pool. So a remote viewer never takes the last free
+    // slot: two remote viewers over the cap must not turn the site PC's H.265 playback into a refusal.
+    const xs = []
+    const pool = new TranscodePool(2)
+    const opts = { fitAboveKbps: 0, pool, makeTranscoder: fakeXcode(xs) }
+    const r1 = open(0, T0 + 1000, { remote: true, opts })
+    await until(() => fitMsgs(r1.ws).length > 0, 2000)
+    const r2 = open(0, T0 + 1000, { remote: true, opts })
+    await until(() => fitMsgs(r2.ws).length > 0, 2000)
+    const site = open(10, T10 + 100, { extra: '&h265=0', opts })
+    const plays = (l) => l.ws.bins.filter((b) => !b.key).length >= 5
+    await until(() => [r1, r2, site].every(plays) || site.ws.texts.some((t) => t.type === 'error'), 3000)
+    check('two remote viewers over the cap, then a browser without H.265 on an H.265 recording: all three play', [r1, r2, site].every(plays) && [r1, r2, site].every((l) => l.ws.readyState === 1 && !l.ws.texts.some((t) => t.type === 'error')), J(site.ws.texts.filter((t) => t.type === 'error')))
+    check('  the first remote viewer is converted', J(fitMsgs(r1.ws)) === J([{ type: 'fit', on: true }]) && r1.ws.bins.every(converted), J(fitMsgs(r1.ws)))
+    check('  the second is left the recording itself: the last slot is not for a conversion that has an alternative', J(fitMsgs(r2.ws)) === J([{ type: 'fit', on: false, busy: true }]) && !r2.ws.bins.some(converted), J(fitMsgs(r2.ws)))
+    check('  the H.265 one takes that slot: converted', site.ws.bins.every(converted) && pool.active === 2, `pool ${pool.active}`)
+    for (const l of [r1, r2, site]) l.session.close()
+    check('  every slot given back', pool.active === 0, String(pool.active))
+
+    // a remote viewer who needs the conversion anyway (H.265, a browser without it) may take the last one
+    const held = pool.acquire()
+    const h = open(10, T10 + 100, { remote: true, extra: '&h265=0', opts })
+    await until(() => plays(h), 3000)
+    check('  a remote viewer on H.265 its browser cannot decode may take the last slot: converted, "on"', plays(h) && h.ws.bins.every(converted) && J(fitMsgs(h.ws)) === J([{ type: 'fit', on: true }]) && pool.active === 2, `${J(fitMsgs(h.ws))}, pool ${pool.active}`)
+    h.session.close()
+    held.release()
+  }
+  {
     // A remote viewer on H.265 it cannot decode, no slot at the start: the recording itself where it
     // can play it. A slot the H.265 then takes serves the whole session from the next jump, and the
     // page is told when that happens.
@@ -1361,14 +1418,22 @@ for (const speed of [2, 4]) {
     const n = ws.bins.length
     await until(() => ws.bins.length >= n + 10, 3000)
     check('  a slot freed while it plays: it stays on the recording itself until the next jump', ws.bins.length >= n + 10 && !ws.bins.some(converted) && xs.length === 0 && pool.active === 1)
+    // that slot is the last free one, kept for a conversion with no alternative (H.265 for a browser
+    // without it): the next seek still sends the recording itself
     ws.command({ seek: T0 + 30_000, gen: 1 })
     await until(() => binsAfterStart(ws, 1).filter((b) => !b.key).length >= 5, 3000)
-    const after = binsAfterStart(ws, 1)
-    check('  the next seek takes the free slot: converted from there', after.filter((b) => !b.key).length >= 5 && after.every(converted) && xs.length === 1 && pool.active === 2, `${after.length} frames, ${after.filter((b) => !converted(b)).length} not converted, pool ${pool.active}`)
+    const kept = binsAfterStart(ws, 1)
+    check('  the next seek, one slot free: the last one is left alone, still the recording itself', kept.filter((b) => !b.key).length >= 5 && !kept.some(converted) && xs.length === 0 && pool.active === 1 && J(fitMsgs(ws).at(-1)) === J({ type: 'fit', on: false, busy: true }), `${kept.filter(converted).length}/${kept.length} converted, pool ${pool.active}, ${J(fitMsgs(ws))}`)
+    held[1].release()
+    ws.command({ seek: T0 + 40_000, gen: 2 })
+    await until(() => binsAfterStart(ws, 2).filter((b) => !b.key).length >= 5, 3000)
+    const after = binsAfterStart(ws, 2)
+    check('  both free: the next seek takes one, converted from there', after.filter((b) => !b.key).length >= 5 && after.every(converted) && xs.length === 1 && pool.active === 1, `${after.length} frames, ${after.filter((b) => !converted(b)).length} not converted, pool ${pool.active}`)
     check('  and the page is told so', J(fitMsgs(ws).at(-1)) === J({ type: 'fit', on: true }), J(fitMsgs(ws)))
+    const other = pool.acquire()
     session.close()
     check('  close gives back only its own slot', pool.active === 1, String(pool.active))
-    held[1].release()
+    other.release()
   }
   {
     // H.265 for a browser that cannot decode it has no recording-itself to fall back to: refused as before
