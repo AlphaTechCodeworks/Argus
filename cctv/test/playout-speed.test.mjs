@@ -10,12 +10,13 @@
 // 2 s ahead. A speed change used to put the frames already buffered a whole buffer later, which at 2x
 // and 4x is more decoded frames than the decoder hands out.
 //
-// The model: a 15 fps camera at 2560x1440 (the size of the value4u cameras the report measured;
-// the frame rate is assumed) with a keyframe every 2 s; the server sends each frame at its media
-// time / speed on a 15 ms tick (rec-playback.mjs) and re-anchors its pacer where it is when a speed
-// command reaches it; the link delays every frame (in order) and every command; the decoder takes
-// 8 ms a frame, one at a time, while the page holds fewer than 6; the display refreshes at 60 Hz;
-// the player's once-a-second timer (the clock's adapt) runs every virtual second.
+// The model: a camera at 2560x1440 (the size of the value4u cameras the report measured) at 15 fps,
+// or 25 and 30 where a case says so (the frame rates are assumed; the site has 30 fps cameras), with a
+// keyframe every 2 s; the server sends each frame at its media time / speed on a 15 ms tick
+// (rec-playback.mjs) and re-anchors its pacer where it is when a speed command reaches it; the link
+// delays every frame (in order) and every command; the decoder takes 8 ms a frame, one at a time,
+// while the page holds fewer than 6; the display refreshes at 60 Hz; the player's once-a-second
+// timer (the clock's adapt) runs every virtual second.
 //   node cctv/test/playout-speed.test.mjs
 import { PLAYBACK_CLOCK } from '../public/playout.js'
 
@@ -25,9 +26,6 @@ const check = (name, ok, extra = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? `  (${extra})` : ''}`)
 }
 
-const FPS = 15
-const FRAME_MS = 1000 / FPS
-const GOP = 30 // frames: a keyframe every 2 s
 const POOL = 6 // decoded frames the page may hold (the viewing PC's decoder at 2560x1440)
 const DECODE_MS = 8
 const REFRESH_MS = 1000 / 60
@@ -133,12 +131,14 @@ function random(seed) {
 }
 
 /**
- * Plays `plan` ([{ at: ms, speed }], the first at 0) until `endMs`, over a link with one-way delay
- * `latencyMs` plus up to `jitterMs`. Returns, per step of the plan, the frames the server sent at
- * that speed, how many of them were shown, the longest time the picture stood still, and the
- * player's drop count.
+ * Plays `plan` ([{ at: ms, speed }], the first at 0) from an `fps` camera until `endMs`, over a link
+ * with one-way delay `latencyMs` plus up to `jitterMs`. Returns, per step of the plan, the frames the
+ * server sent at that speed and how many of them were decoded and shown; how long the picture stood
+ * still at each change; the buffer at the end; and how far ahead each frame arrived (leads).
  */
-async function replay({ plan, endMs, latencyMs, jitterMs, clock = PLAYBACK_CLOCK }) {
+async function replay({ plan, endMs, latencyMs, jitterMs, clock = PLAYBACK_CLOCK, fps = 15 }) {
+  const FRAME_MS = 1000 / fps
+  const GOP = 2 * fps // frames: a keyframe every 2 s
   vnow = 0
   open = 0
   decoder = null
@@ -146,6 +146,7 @@ async function replay({ plan, endMs, latencyMs, jitterMs, clock = PLAYBACK_CLOCK
   timers.length = 0
   const rnd = random(11)
   const shown = [] // { at, ts }
+  const leads = [] // { at, lead, delay }: each frame as it arrives, and the buffer then
   const player = new VideoPlayer(canvas, { clock, onFrame: (ts) => shown.push({ at: vnow, ts }) })
 
   // the server's pacer
@@ -190,6 +191,8 @@ async function replay({ plan, endMs, latencyMs, jitterMs, clock = PLAYBACK_CLOCK
     }
     while (inFlight.length && inFlight[0].at <= vnow) {
       const { i } = inFlight.shift()
+      // how far ahead of its display time each frame arrives (the decoder must hold that much)
+      if (player.clock.anchor !== null) leads.push({ at: vnow, lead: player.clock.presentAt(frameTs(i)) - vnow, delay: player.clock.delay })
       player.push({ isKey: i % GOP === 0, codecId: 0, timestampUs: Math.round(frameTs(i) * 1000), data: new Uint8Array(8) })
       while (player.configuring) await new Promise((r) => setImmediate(r))
     }
@@ -230,13 +233,14 @@ async function replay({ plan, endMs, latencyMs, jitterMs, clock = PLAYBACK_CLOCK
     const k = shown.findIndex((s) => s.at > at)
     return k > 0 ? Math.round(shown[k].at - shown[k - 1].at) : Infinity
   })
-  const result = { steps, holds, delay: player.clock.delay }
+  const result = { steps, holds, delay: player.clock.delay, leads }
   player.close()
   return result
 }
 
 const say = (r) => r.steps.map((s) => `${s.speed}x ${s.shown}/${s.frames} shown (${s.decoded} decoded)`).join(', ') + `; held ${r.holds.join('/')} ms at the changes; buffer ${r.delay} ms`
-const HOLD_MS = FRAME_MS + REFRESH_MS + 1 // at most one 1x frame's time (shown on the next refresh)
+const holdMs = (fps = 15) => 1000 / fps + REFRESH_MS + 1 // at most one 1x frame's time (shown on the next refresh)
+const HOLD_MS = holdMs()
 
 const SITE = { name: 'on site', latencyMs: 3, jitterMs: 4 }
 const TUNNEL = { name: 'through the tunnel', latencyMs: 60, jitterMs: 40 }
@@ -257,6 +261,11 @@ for (const link of [SITE, TUNNEL]) {
 
 // ---- 1x, 2x for 6 s, 4x for 10 s, back to 1x --------------------------------------------------------
 // (before: 4x showed 172-252 of 600 frames, and the 1x after it lost a keyframe interval)
+// Back at 1x, the frames the server still sends at 4x are played at up to 4x (PlayoutClock.arrived),
+// so the buffer keeps the frames it had. At 15 fps 4x is 60 frames a second, a 60 Hz display's every
+// refresh, and the picture is brought forward as each frame arrives, on the link's jitter: now and
+// then two of them fall due by the same refresh and the display shows the newer. So 4x is counted as
+// decoded, with no more than 1% of it skipped by the display; 1x and 2x must show every frame.
 for (const link of [SITE, TUNNEL]) {
   for (const buffer of BUFFERS) {
     const plan = [{ at: 0, speed: 1 }, { at: 6000, speed: 2 }, { at: 12_000, speed: 4 }, { at: 22_000, speed: 1 }]
@@ -272,7 +281,68 @@ for (const link of [SITE, TUNNEL]) {
       // newer). adapt() grows the buffer after the 1.5 s warm-up and it is even again. The old change
       // held a whole buffer and showed 252 of these 600 frames instead (235 never decoded).
       check('  4x from the smallest buffer through the tunnel: over 90% shown, the rest late, not lost', x4.shown >= 0.9 * x4.frames && r.steps.filter((s) => s !== x4).every((s) => s.shown === s.frames), say(r))
-    } else check('  every frame shown at every speed', r.steps.every((s) => s.shown === s.frames), say(r))
+    } else check('  every 1x and 2x frame shown, and 99% of 4x', x4.shown >= 0.99 * x4.frames && r.steps.filter((s) => s !== x4).every((s) => s.shown === s.frames), say(r))
+  }
+}
+
+// ---- 25 and 30 fps, and a slower tunnel: 2x, 4x, then a long run of 1x --------------------------------
+// At 15 fps the decoder's 6 frames and the 12 the player lets wait for it (player.js MAX_DECODE_QUEUE)
+// are 1.2 s of video; at 25 fps 720 ms, at 30 fps 600 ms. A slow-down is where that bites. The frames
+// the server sends at 4x until the command reaches it keep coming for a round trip, and each is shown
+// at 1x: with the next frame keeping its time they arrived 4 x the lead at 4x + 3 x the round trip
+// ahead, 656-697 ms at 30 fps through the tunnel. That is more than the decoder holds, but under the
+// 780 ms (delay + behindMs) at which the clock re-syncs, and the clock only sees a frame once it is
+// decoded, when it is at most 6 frames ahead. So the decoder overflowed, the player dropped to the
+// next keyframe, and the next keyframe interval did the same, for good: 1x after 4x showed 342 of 1138
+// frames at 30 fps through the tunnel from a 300 ms buffer, and 342 of 947 at 25 fps through a
+// 90 ms tunnel from 600 ms. (The old whole-buffer hold landed above 780 ms and re-synced: 1086 of
+// 1138 and 831 of 947.)
+//
+// At 4x (100 and 120 frames a second) a 60 Hz display cannot show every frame, and neither can 2x at
+// 30 fps quite, so those count as decoded; every 1x frame, before and after, must be shown.
+// Not here: 30 fps from a 600 ms buffer. That is the decoder's whole 600 ms, and through the tunnel it
+// loses frames at 1x before any speed change, with or without this; keeping fewer frames decoded
+// (report cause 5, fix b) is what fixes it.
+const SLOW_TUNNEL = { name: 'through a slower tunnel', latencyMs: 90, jitterMs: 40 }
+const DECODER_FRAMES = POOL + 12 // decoded, and waiting to be decoded, before the player drops to a keyframe
+for (const [fps, buffers] of [[25, BUFFERS], [30, [PLAYBACK_CLOCK.startDelayMs]]]) {
+  for (const link of [SITE, TUNNEL, SLOW_TUNNEL]) {
+    for (const buffer of buffers) {
+      const plan = [{ at: 0, speed: 1 }, { at: 6000, speed: 2 }, { at: 12_000, speed: 4 }, { at: 22_000, speed: 1 }]
+      const r = await replay({ plan, endMs: 60_000, fps, clock: { ...PLAYBACK_CLOCK, startDelayMs: buffer }, ...link })
+      const lead = (from) => Math.round(Math.max(...r.leads.filter((l) => l.at > from).map((l) => l.lead)))
+      const over = (from) => Math.round(Math.max(...r.leads.filter((l) => l.at > from).map((l) => l.lead - l.delay)))
+      const x1 = r.steps.filter((s) => s.speed === 1)
+      const tell = `${say(r)}; arriving up to ${lead(22_000)} ms ahead after the slow-down; from 2 s after it up to ${lead(24_000)} ms, ${over(24_000)} ms beyond the buffer`
+      check(`${fps} fps, 2x, 4x, then 38 s of 1x ${link.name}, ${buffer} ms buffer: every frame decoded (none dropped for the decoder)`, x1.at(-1).frames > 900 && r.steps.every((s) => s.decoded === s.frames), tell)
+      check('  every 1x frame shown, before and after', x1.every((s) => s.shown === s.frames), tell)
+      check('  after the slow-down no frame arrives further ahead than the decoder holds', lead(22_000) < (DECODER_FRAMES * 1000) / fps, tell)
+      check('  from 2 s after it no frame arrives further ahead than the buffer and the link jitter', over(24_000) <= link.jitterMs + PACER_TICK_MS, tell)
+      check('  no hold longer than a frame at a change', r.holds.every((h) => h <= holdMs(fps)), tell)
+    }
+  }
+}
+
+// ---- 1x and 4x in turn, 3 s each ------------------------------------------------------------------
+// Through the tunnel the 4x frames come just in time, so a slow-down can find every decoded frame shown
+// and nothing buffered. setRate then changed only the rate: the next frame re-synced a whole buffer
+// ahead, the catch-up never started, and the 4x frames still coming piled up on top of it. With the
+// catch-up alone that dropped 13-311 frames for the decoder in 8 of these 10 runs, with holds of
+// 467-800 ms; the clock before either dropped 25-392 in 4 of them. Now the newest decoded frame keeps
+// its time.
+const TOGGLE = [{ at: 0, speed: 1 }, { at: 6000, speed: 4 }, { at: 9000, speed: 1 }, { at: 12_000, speed: 4 }, { at: 15_000, speed: 1 }]
+for (const [fps, buffers] of [[15, BUFFERS], [25, BUFFERS], [30, [PLAYBACK_CLOCK.startDelayMs]]]) {
+  for (const link of [TUNNEL, SLOW_TUNNEL]) {
+    for (const buffer of buffers) {
+      const r = await replay({ plan: TOGGLE, endMs: 35_000, fps, clock: { ...PLAYBACK_CLOCK, startDelayMs: buffer }, ...link })
+      const x1 = r.steps.filter((s) => s.speed === 1)
+      const sum = (k) => x1.reduce((n, s) => n + s[k], 0)
+      const tell = `${say(r)}; 1x ${sum('shown')}/${sum('frames')} shown`
+      check(`1x and 4x in turn, ${fps} fps ${link.name}, ${buffer} ms buffer: every frame decoded (none dropped for the decoder)`, r.steps.every((s) => s.decoded === s.frames), tell)
+      check('  no hold longer than a frame at a change', r.holds.every((h) => h <= holdMs(fps)), tell)
+      // (the 1x frames still coming when the page asks for 4x are shown at 4x, where a 60 Hz display skips some)
+      check('  98% of the 1x frames shown', sum('shown') >= 0.98 * sum('frames'), tell)
+    }
   }
 }
 

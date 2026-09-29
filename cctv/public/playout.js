@@ -14,6 +14,8 @@
 //     instead of showing every one of them the moment it decodes
 //   - camera clock a little fast or slow      -> the anchor is slewed by at most 1% of
 //     real time (10 ms per second), so drift never builds up into a jump
+//   - playback slowed down                    -> the frames still coming at the old speed
+//     play at up to that speed, so the buffer keeps the frames it had (setRate, arrived)
 //
 // Pure logic with no browser APIs, so it can be tested in Node against
 // recorded arrival times.
@@ -36,7 +38,8 @@ export const PLAYOUT_DEFAULTS = {
   slewWindowMs: 5000, // drift is measured on the earliest arrival in windows this long
   slewMax: 0.01, // the anchor moves at most this share of real time (1%)
   slewDeadMs: 5, // smaller drift errors are left alone
-  growSlew: 0 // 0: a grown buffer moves the anchor at once; else each frame takes this share of its spacing
+  growSlew: 0, // 0: a grown buffer moves the anchor at once; else each frame takes this share of its spacing
+  catchUpMs: 2000 // after a slow-down (setRate), frames arriving this long are checked for being too far ahead
 }
 
 /**
@@ -64,6 +67,7 @@ export class PlayoutClock {
   reset() {
     this.anchor = null
     this.lastAt = null // display time given to the previous frame
+    this.lastAtTs = null // ... and its capture time (setRate's pivot when nothing is buffered)
     this.queuedUntil = 0 // after a hole: display time of the frames still queued from before it
     this.late = 0 // late frames since the last adapt()
     this.lateTotal = 0
@@ -71,6 +75,7 @@ export class PlayoutClock {
     this.warmupUntil = 0
     this.steadySince = null
     this.growLeft = 0 // growth adapt() decided that the anchor has still to take up (growSlew)
+    this.catchUp = null // after a slow-down: { from, until, lastTs, lastNow, target } (setRate, arrived)
     this.#track()
   }
 
@@ -141,6 +146,7 @@ export class PlayoutClock {
     }
     this.#measureDrift(tsMs, now)
     this.lastAt = at
+    this.lastAtTs = tsMs
     return at
   }
 
@@ -172,6 +178,7 @@ export class PlayoutClock {
     this.warmupUntil = now + this.opts.warmupMs
     this.steadySince = now
     this.growLeft = 0 // (the new anchor has the whole delay)
+    this.catchUp = null // (and no more than it)
     this.#track()
   }
 
@@ -181,19 +188,77 @@ export class PlayoutClock {
    * put that frame a whole buffer later: the picture held for the buffer's length at every change,
    * and at 2x and 4x the buffer then held two or four times the decoded frames -- more than a
    * hardware decoder hands out (6 at 2560x1440 on the viewing PC), so it stalled and the player
-   * skipped to the next keyframe, 2-4 s on (smoothness report cause 5). The frames the server sends
-   * at the old speed while the change reaches it are simply shown as they come.
+   * skipped to the next keyframe, 2-4 s on (smoothness report cause 5).
+   *
+   * With nothing buffered (every decoded frame shown: at 4x through the tunnel the frames come just
+   * in time) the newest decoded frame keeps its time instead. That case used to change only the rate:
+   * the next frame's time made no sense, so it re-synced a whole buffer ahead (at 4x, four times the
+   * frames), and a slow-down's catch-up (below) never started.
+   *
+   * The frames the server sends at the old speed until the command reaches it are still coming. After
+   * a speed-up they come late and are shown as they come. After a slow-down they come early, each one
+   * further ahead than the last: 4x to 1x put them 4 x the lead + 3 x the round trip ahead, 656-697 ms
+   * at 30 fps through the tunnel. That is more than the hardware decoder holds (its 6 frames and the
+   * player's 12 waiting are 600 ms at 30 fps), but the clock only sees a frame once it is decoded, at
+   * most 6 frames ahead, so it never re-synced: the player dropped to the next keyframe, and again at
+   * every one after it. So after a slow-down arrived() looks at the frames as they come in, for
+   * catchUpMs, and plays those that would add to the buffer at up to the old speed: the picture
+   * carries on at 4x about as long as the server did, and the buffer keeps the frames it had.
    */
   setRate(rate, tsMs, now) {
-    if (this.anchor === null || tsMs === undefined) {
-      this.rate = rate // nothing buffered: the next frame anchors the clock
+    const pivot = tsMs ?? this.lastAtTs
+    if (this.anchor === null || pivot === null) {
+      this.rate = rate // no clock yet: the next frame anchors it
       return
     }
-    const at = this.presentAt(tsMs)
+    const at = this.presentAt(pivot)
     const growLeft = this.growLeft
+    // (4x to 2x to 1x in quick succession: frames sent at 4x may still be coming)
+    const from = Math.max(this.rate, this.catchUp !== null && now <= this.catchUp.until ? this.catchUp.from : 0)
     this.rate = rate
-    this.anchorAt(tsMs, now, at - now)
+    this.anchorAt(pivot, now, at - now)
     this.growLeft = growLeft // (a growth under way carries on)
+    if (rate < from) this.catchUp = { from, until: now + this.opts.catchUpMs, lastTs: null, lastNow: now, target: null }
+  }
+
+  /**
+   * A frame as it arrives, before it waits to be decoded (player.push). Only a slow-down (setRate) makes
+   * this do anything, and only for catchUpMs.
+   *
+   * The first frame to arrive after the change sets the lead to keep: the one the buffer had, as many
+   * frames as before, but no more than the delay and no fewer than minDelayMs make at 1x (delay /
+   * rate: at 2x the same frames last half as long). Not the delay itself: at 25 fps a 640 ms buffer
+   * is 16 frames, and the decoder waits for its 6 to be shown with at most 12 more queued, so the
+   * frames the server sent at 4x, piling up behind the 1x picture until the lead got there, overflowed
+   * the queue anyway. A frame that would be shown further ahead than that lead brings the picture
+   * forward by what the old speed gains in the time since the frame before -- no more, so the picture
+   * runs at most at the old speed, in steps of the few ms between 4x frames. While the old-speed
+   * frames come in that is what each adds to the lead, so it holds. A growth adapt() has not passed
+   * on yet is dropped first: the buffer is big enough.
+   */
+  arrived(tsMs, now) {
+    const c = this.catchUp
+    if (c === null || this.anchor === null) return
+    if (now > c.until) {
+      this.catchUp = null
+      return
+    }
+    const since = now - c.lastNow
+    const jump = c.lastTs !== null && Math.abs(since - (tsMs - c.lastTs) / this.rate) > this.opts.jumpMs
+    c.lastTs = tsMs
+    c.lastNow = now
+    if (jump) {
+      this.catchUp = null // a hole in the footage (the server skips one at once): not a lead to take out
+      return
+    }
+    const lead = this.presentAt(tsMs) + this.growLeft - now // (once a growth under way is taken up)
+    c.target ??= Math.min(this.delay, Math.max(this.opts.minDelayMs, lead * this.rate)) / this.rate
+    let over = lead - c.target
+    if (over <= 0) return
+    const g = Math.min(over, this.growLeft)
+    this.growLeft -= g
+    over -= g
+    if (over > 0) this.#shift(-Math.min(over, since * (c.from / this.rate - 1)))
   }
 
   // a deliberate move of the anchor: the drift reference moves with it, so it is not taken for drift

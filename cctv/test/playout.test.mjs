@@ -201,13 +201,21 @@ for (const drift of [0.0049, -0.0049]) {
   check('4x back to 1x: the same the other way', Math.abs(c.presentAt(96 * 40) - after[0] - 30) < 1e-6 && Math.abs(c.presentAt(97 * 40) - c.presentAt(96 * 40) - 40) < 1e-6)
   const due = c.presentAt(96 * 40) - (now + 30)
   check('  no re-sync, and the next frame is due in 55 ms as it was (the old change put it 300 ms away)', c.resyncs === 0 && Math.abs(due - 55) < 1e-6, `next due in ${due.toFixed(1)} ms`)
-  // nothing buffered, or no clock yet: only the rate changes (the next frame anchors as before)
+  // no clock yet: only the rate changes (the first frame anchors the clock)
   const e = new PlayoutClock(PLAYBACK_CLOCK)
   e.setRate(2, undefined, 500)
   check('setRate with no clock yet: just the rate', e.rate === 2 && e.anchor === null)
-  const a = c.anchor
-  c.setRate(2, undefined, now + 100)
-  check('setRate with nothing buffered: just the rate', c.rate === 2 && c.anchor === a)
+  // nothing buffered, every decoded frame shown (at 4x through the tunnel the frames come just in time):
+  // the newest decoded frame keeps its time and the next follows at the new rate. It used to change only
+  // the rate, so the next frame's display time made no sense and it re-synced a whole buffer ahead
+  const t = now + 215 // frame 99, the newest scheduled, was shown 10 ms ago
+  const last = c.presentAt(99 * 40)
+  c.setRate(2, undefined, t)
+  const next = c.schedule(100 * 40, t + 5)
+  check('setRate with nothing buffered: the newest decoded frame keeps its time, the next follows at the new rate', c.rate === 2 && Math.abs(c.presentAt(99 * 40) - last) < 1e-6 && Math.abs(next - last - 20) < 1e-6 && c.resyncs === 0, `${(t - last).toFixed(0)} ms after it was shown; the next ${(next - last).toFixed(1)} ms after it; resyncs ${c.resyncs}`)
+  c.setRate(1, undefined, t + 30)
+  // (from 4x: the 4x of 250 ms ago may still be coming too)
+  check('  a slow-down with nothing buffered looks for the frames still coming at the old speed too', c.catchUp !== null && c.catchUp.from === 4)
 }
 
 // ---- playback: a bigger buffer reaches the picture a few ms a frame, not 40 ms at once ---------------
@@ -247,6 +255,99 @@ for (const drift of [0.0049, -0.0049]) {
   check('  playback: the picture does not move when it grows', pb.jump === 0, `moved ${pb.jump} ms at once`)
   check('  playback: it moves 4 ms a frame (10% of 40 ms), and all 40 ms within 10 frames', pb.moves.every((m) => m <= 4 + 1e-9) && Math.abs(pb.moves.slice(0, 10).reduce((a, b) => a + b, 0) - 40) < 1e-6 && Math.abs(pb.total - 40) < 1e-6, pb.moves.map((m) => m.toFixed(1)).join(' '))
   check('  live: 40 ms at once, as before', live.grew === 40 && live.jump === 40 && live.moves.every((m) => m === 0), `jump ${live.jump}, then ${live.moves.join(' ')}`)
+}
+
+// ---- playback: after a slow-down the frames still coming at the old speed don't pile up --------------
+// (review of cause 5 fix a.) From 4x back to 1x the server sends 4x until the command reaches it: for a
+// round trip, 40 ms of video every 10 ms. Shown at 1x each of those came 30 ms further ahead than the
+// one before, and the lead stayed there: more decoded frames than the viewing PC's decoder holds at 25
+// and 30 fps (playout-speed.test.mjs replays that). player.push now passes each frame to arrived() as it
+// comes in, and after a slow-down the clock plays those at up to the old speed instead.
+{
+  const STEP = 40 // 25 fps
+  /**
+   * 4x with the newest frame shown lead4 ms from now, then the speed to (1x or 2x): 14 frames still at 4x
+   * (a 140 ms round trip), then 50 at the new speed. Each frame goes to arrived() (unless feed is false:
+   * the clock as it was) and schedule(). Returns every frame's lead as it arrives and the anchor moves.
+   */
+  const slowDown = ({ lead4 = 50, to = 1, feed = true, extra } = {}) => {
+    const c = new PlayoutClock(PLAYBACK_CLOCK)
+    c.setRate(4) // (no frame yet: just the rate)
+    let ts = 0
+    let now = 1000
+    for (let i = 0; i < 100; i++, ts += STEP, now += 10) c.schedule(ts, now)
+    ts -= STEP
+    now -= 10
+    c.anchorAt(ts, now, lead4) // the newest frame due lead4 from now, the ones before it 10 ms apart
+    const next = ts - Math.floor(lead4 / 10) * STEP // the oldest frame still waiting to be shown
+    c.setRate(to, next, now)
+    const armed = c.catchUp !== null
+    const frames = []
+    let target = null // the lead the catch-up keeps (set by the first frame after the change)
+    const add = (n, gap) => {
+      for (let i = 0; i < n; i++) {
+        ts += STEP
+        now += gap
+        extra?.(c, frames.length, ts, now)
+        const before = c.anchor
+        if (feed) c.arrived(ts, now)
+        if (frames.length === 0) target = c.catchUp?.target ?? null
+        frames.push({ gap, lead: c.presentAt(ts) - now, moved: before - c.anchor })
+        c.schedule(ts, now)
+      }
+    }
+    add(14, 10) // still 4x
+    add(50, STEP / to) // the new speed
+    return { c, armed, target, frames, first: frames[0].lead, max: Math.max(...frames.map((f) => f.lead)), last: frames.at(-1).lead }
+  }
+  const ms = (x) => `${Math.round(x)} ms`
+  const was = slowDown({ feed: false })
+  const now = slowDown()
+  check('4x to 1x: the frames still coming at 4x do not pile up: each arrives as far ahead as the first after the change', now.armed && now.frames.every((f) => Math.abs(f.lead - now.first) < 1e-6), `first ${ms(now.first)}, most ${ms(now.max)}, last ${ms(now.last)}`)
+  check('  where they used to come 30 ms further ahead each, and stay there', Math.abs(was.max - (was.first + 13 * 30)) < 1e-6 && Math.abs(was.last - was.max) < 1e-6, `the clock as it was: first ${ms(was.first)}, then up to ${ms(was.max)}, last ${ms(was.last)}`)
+  check('  the picture runs at most at 4x: each frame brings it forward no more than 3x the time since the one before', now.frames.every((f) => f.moved <= 3 * f.gap + 1e-9) && now.frames.slice(0, 14).some((f) => f.moved > 0), now.frames.slice(0, 15).map((f) => f.moved.toFixed(0)).join(' '))
+  check('  and once the 1x frames come, not at all', now.frames.slice(14).every((f) => f.moved === 0))
+  // the lead it keeps: the one the buffer had, within the playback buffer's limits
+  const small = slowDown({ lead4: 20 }) // (4x through a slow link: the frames came just in time)
+  const big = slowDown({ lead4: 150 }) // 600 ms at 1x, over the 300 ms delay
+  check('  a buffer smaller than minDelayMs is let grow back to it from the 4x frames (200 ms at 1x), no further', Math.abs(small.target - 200) < 1e-6 && small.first < 200 && Math.abs(small.max - 200) < 1e-6 && Math.abs(small.last - 200) < 1e-6, `target ${ms(small.target)}, first ${ms(small.first)}`)
+  check('  one bigger than the delay comes back to it (300 ms), at up to 4x', Math.abs(big.target - 300) < 1e-6 && Math.abs(big.last - 300) < 1e-6 && big.frames.every((f) => f.moved <= 3 * f.gap + 1e-9), `target ${ms(big.target)}, first ${ms(big.first)}, last ${ms(big.last)}`)
+  const half = slowDown({ lead4: 150, to: 2 })
+  check('  4x to 2x: the delay makes 150 ms at 2x, and the picture runs at most twice as fast', Math.abs(half.target - 150) < 1e-6 && Math.abs(half.last - 150) < 1e-6 && half.frames.every((f) => f.moved <= f.gap + 1e-9), `target ${ms(half.target)}, last ${ms(half.last)}`)
+  // a growth adapt() decided that schedule() has not passed on yet goes first: the buffer is big enough
+  let grow = null
+  slowDown({
+    extra: (c, n) => {
+      if (n === 3) c.growLeft = 20
+      if (n === 4) grow = c.growLeft
+    }
+  })
+  check('  a growth still to come is dropped first', grow === 0, `growth left ${grow}`)
+  // only for catchUpMs after the change (these runs last 2.1 s), and a hole in the footage ends it
+  check('  it looks at the frames for catchUpMs (2 s) after the change, then stops', PLAYOUT_DEFAULTS.catchUpMs === 2000 && PLAYBACK_CLOCK.catchUpMs === undefined && now.c.catchUp === null)
+  let holed = null
+  slowDown({
+    extra: (c, n, ts, t) => {
+      if (n !== 5) return
+      const a = c.anchor
+      c.arrived(ts + 13_000, t) // the first frame after a 13 s hole, sent at once
+      holed = { moved: a - c.anchor, over: c.catchUp === null }
+    }
+  })
+  check('  a hole in the footage is not a lead to take out: it ends there', holed?.moved === 0 && holed.over, JSON.stringify(holed))
+  // not on a speed-up; a re-anchor (resume, re-sync) or a seek (reset) ends it
+  const up = new PlayoutClock(PLAYBACK_CLOCK)
+  for (let i = 0; i < 50; i++) up.schedule(i * STEP, 1000 + i * STEP)
+  up.setRate(4, 45 * STEP, 1000 + 49 * STEP)
+  const a0 = up.anchor
+  for (let i = 50; i < 60; i++) up.arrived(i * STEP, 1000 + 49 * STEP + (i - 49) * 10)
+  check('  a speed-up leaves arrived() doing nothing', up.catchUp === null && up.anchor === a0)
+  const r1 = slowDown({ extra: (c, n, ts, t) => n === 2 && c.anchorAt(ts - STEP, t, 300) })
+  const r2 = slowDown({ extra: (c, n) => n === 2 && c.reset() })
+  check('  a re-anchor or a reset ends it', r1.c.catchUp === null && r2.c.catchUp === null)
+  const { readFileSync } = await import('node:fs')
+  const player = readFileSync(new URL('../public/player.js', import.meta.url), 'utf8')
+  check('  player.push passes every frame to it, except while paused (resume re-anchors)', /\n {4}if \(!this\.paused\) this\.clock\.arrived\(chunk\.timestampUs \/ 1000, performance\.now\(\)\)\r?\n {4}if \(this\.configuring\) return this\.#hold\(chunk\)/.test(player) && player.split('.arrived(').length === 2)
 }
 
 // ---- server: an 11 s outage is not restarted as a stall (live.mjs; the live worker uses the same) --
@@ -399,8 +500,11 @@ for (const drift of [0.0049, -0.0049]) {
     }
     return arr
   }
-  /** Every display time and every adapt() result, hashed (12 hex digits). */
-  const trace = (arrivals, options) => {
+  /**
+   * Every display time and every adapt() result, hashed (12 hex digits). arrive: each frame goes to
+   * arrived() first, as player.push now does for live too (live never changes speed: it must change nothing).
+   */
+  const trace = (arrivals, options, arrive = false) => {
     const c = new PlayoutClock(options)
     const out = []
     let nextAdapt = 1000
@@ -410,6 +514,7 @@ for (const drift of [0.0049, -0.0049]) {
         out.push(`d${c.delay} a${c.anchor?.toFixed(3)}`)
         nextAdapt += 1000
       }
+      if (arrive) c.arrived(ts, at)
       out.push(c.schedule(ts, at).toFixed(3))
     }
     out.push(`r${c.resyncs} l${c.lateTotal} d${c.delay}`)
@@ -431,7 +536,8 @@ for (const drift of [0.0049, -0.0049]) {
   for (const [name, make] of Object.entries(scenarios)) {
     const arr = make()
     got[name] = [trace(arr), trace(arr, SMOOTH)]
-    check(`live clock unchanged: ${name}, default and Smooth`, got[name][0] === PINNED[name][0] && got[name][1] === PINNED[name][1], `${got[name].join(' ')}`)
+    const fed = [trace(arr, undefined, true), trace(arr, SMOOTH, true)]
+    check(`live clock unchanged: ${name}, default and Smooth, with and without arrived()`, [got[name], fed].every((g) => g[0] === PINNED[name][0] && g[1] === PINNED[name][1]), `${got[name].join(' ')}, fed ${fed.join(' ')}`)
   }
   if (process.env.PRINT_PINNED) console.log(JSON.stringify(got))
   // the jittery link does exercise growing and shrinking (else it would pin nothing about them)

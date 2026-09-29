@@ -188,6 +188,10 @@ export class VideoPlayer {
         console.warn('onChunk', e)
       }
     }
+    // each frame as it arrives, before it waits for the decoder: after a playback slow-down the clock
+    // keeps the frames still coming at the old speed from piling up there (PlayoutClock.arrived; it
+    // does nothing otherwise, and live never changes speed). Not while paused: resume re-anchors.
+    if (!this.paused) this.clock.arrived(chunk.timestampUs / 1000, performance.now())
     if (this.configuring) return this.#hold(chunk)
     return this.#feed(chunk)
   }
