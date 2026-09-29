@@ -31,7 +31,7 @@
 // the new stream has one, and goes over at the camera's next keyframe, where the new level's stream
 // starts; it is never sent a frame older than one it has had. A sub-stream a level would only pass
 // through stays on the camera's own stream (#passes).
-import { PhoneStream, RATE_SAMPLES, keepEveryFor, maxPhoneStreams } from './phone-live.mjs'
+import { FIRM_INTERVALS, PhoneStream, RATE_SAMPLES, keepEveryFor, maxPhoneStreams, steadyRate } from './phone-live.mjs'
 import { CODEC_H265, PLAYBACK_LIMITS, TranscodePool } from './transcode.mjs'
 
 export const LEVELS = Object.freeze([
@@ -62,9 +62,11 @@ export const LEVELS = Object.freeze([
  * A source under 10 fps is then converted picture by picture (slowFps): the two decoder threads and
  * ffmpeg's parser held two pictures back, 2.7 s each at 0.8 fps, where one thread has time to spare.
  * It learns from the camera's GOP replayed whole (wholeReplay): cut to its keyframe, as a big main's is
- * for a viewer, it read 0.5 fps off two keyframes 2 s apart.
+ * for a viewer, it read 0.5 fps off two keyframes 2 s apart. And a hole in what it learns from is left
+ * out, a rate read on too few frames read again at the 12th (rejudge): nvr-2's freezes as streams open
+ * read a 20 fps main as 1.6 fps, for the conversion's whole life (the final review of live-smooth).
  */
-export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true })
+export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true, rejudge: true })
 export const TICK_MS = 2000
 /**
  * A link that is not keeping up: what its page has queued takes longer than QUEUE_S to go at the rate
@@ -277,9 +279,12 @@ export class AdaptiveLive {
   }
 
   /**
-   * A camera stream's frame rate: from the GOP it holds, once that is 12 frames or 1 s of them (as a
-   * level's stream learns it, phone-live.mjs); else the one read or learnt last (a look just after a
-   * keyframe has one frame to go on); 0 when not known yet.
+   * A camera stream's frame rate: from the GOP it holds, once that is 12 frames, or 1 s of them on
+   * FIRM_INTERVALS steps or more, a hole among them left out (as a level's stream reads it,
+   * phone-live.mjs steadyRate); else the one read or learnt last (a look just after a keyframe has one
+   * frame to go on); 0 when not known yet. It read the mean over the GOP, and off nvr-2's 15 s freeze
+   * after a keyframe and 3 frames, 0.3 fps: a 30 fps sub passed through at level 8 (the final review of
+   * live-smooth). Two frames 1.25 s apart are a trickle or a hole: not a rate to go on.
    */
   #rateOf(entry) {
     const key = `${entry.nvrId}/${entry.ch}/${entry.type}`
@@ -287,7 +292,10 @@ export class AdaptiveLive {
     const first = header(gop[0])
     const last = header(gop.at(-1))
     const span = first && last ? last.ts - first.ts : 0
-    if (span > 0 && (gop.length >= RATE_SAMPLES || span >= REMOTE_CONVERSION.learnMs)) this.rates.set(key, ((gop.length - 1) * 1000) / span)
+    if (span > 0 && (gop.length >= RATE_SAMPLES || (span >= REMOTE_CONVERSION.learnMs && gop.length > FIRM_INTERVALS))) {
+      const fps = steadyRate(gop.map((b) => header(b)?.ts ?? NaN).filter(Number.isFinite))
+      if (fps > 0) this.rates.set(key, fps)
+    }
     return this.rates.get(key) ?? 0
   }
 
@@ -315,9 +323,10 @@ export class AdaptiveLive {
       // there is converted even with nothing to thin (h264Only); the other levels are shared with
       // browsers that can. Made for a socket with a picture, it starts at the camera's next keyframe,
       // where that socket switches to it (fromNextKey, #switchTo); the rate it learns is remembered
-      // for this camera stream (#passes).
+      // for this camera stream (#passes). One sent as it is that its rate read again says to convert
+      // takes a slot then (rejudge).
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), onRate, acquire: () => this.pool.acquire(), onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
       this.#made = s
     }

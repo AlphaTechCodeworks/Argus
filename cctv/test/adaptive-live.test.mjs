@@ -876,6 +876,56 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   check('REMOTE_CONVERSION: a source under 10 fps is converted picture by picture', REMOTE_CONVERSION.slowFps === 10 && made.length === 1 && made[0].o.lowDelay === true, JSON.stringify(REMOTE_CONVERSION))
   clearInterval(live.timer)
 }
+{
+  // A page back at level 8 opens a tile on a cold 30 fps nvr-2 sub, and the NVR freezes 15 s just after
+  // the sub's keyframe and 2 frames (it freezes all its cameras 11-32 s when streams are opened, stutter
+  // report 2.3). The level's stream read 0.2 fps off that hole, sent the sub as it was, 93 frames in 3 s
+  // where level 8 sends about 25, and the controller remembered 0.2 fps for that camera stream, for
+  // #passes and #handOver to reuse (the final review of live-smooth).
+  let now = T
+  const { make } = converters()
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(16), makeTranscoder: make, log: (l) => logs.push(l), budgetBps: 1e9, now: () => now })
+  const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
+  const sub = new HubStream(hub, 4, 1)
+  live.gone.set('back', { level: 3, at: now - 5000 })
+  const ws = fakeWs()
+  live.attach('back', { ws, nvrId: 'nvr-2', ch: 4, type: 1, source: sub })
+  let ts = 0
+  let n = 0
+  const frame = () => {
+    const key = n % 60 === 0
+    sub.onFrame(encodeFrame(Buffer.from([0, 0, 1, 1]), key, 0, ts), key)
+    n++
+    ts += 1000 / 30
+    now += 33
+  }
+  for (let i = 0; i < 3; i++) frame()
+  ts += 15_000
+  now += 15_000
+  for (let i = 0; i < 90; i++) frame()
+  const v = live.viewers.get('back')
+  check('a cold 30 fps sub at level 8 whose NVR froze 15 s after its first 3 frames: converted, about 8 a second (was sent as it is: 93 frames in 3 s)', LEVELS[v.level].id === '8' && ws.got.length <= 3 + 25 && !logs.some((l) => l.includes('sent as it is')), `${ws.got.length} sent | ${logs.join(' | ')}`)
+  check('  the controller remembers it at 30 fps, not 0.2', Math.abs((live.rates.get('nvr-2/4/1') ?? 0) - 30) < 0.5, String(live.rates.get('nvr-2/4/1')))
+  clearInterval(live.timer)
+}
+{
+  // ...and a camera stream's own GOP with such a hole in it: its rate, as #passes and #handOver read it,
+  // leaves the hole out (it read 0.2 fps off a keyframe, 3 frames and one 15 s later)
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(16), makeTranscoder: converters().make, log: (l) => logs.push(l), budgetBps: 1e9 })
+  const src = fakeSource('holed sub')
+  src.gop = [0, 33.3, 66.7, 100, 15_100, 15_133.3].map((t, i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i === 0, 0, t))
+  live.gone.set('back2', { level: 3, at: Date.now() - 5000 })
+  const ws = fakeWs()
+  live.attach('back2', { ws, nvrId: 'nvr-2', ch: 5, type: 1, source: src })
+  check('a sub whose GOP holds a 15 s hole, at level 8: read as 30 fps, so converted (1 in 4), not passed through at 0.2', Math.abs((live.rates.get('nvr-2/5/1') ?? 0) - 30) < 0.5 && !src.viewers.has(ws), `${live.rates.get('nvr-2/5/1')} | ${[...live.streams.keys()]}`)
+  const two = fakeSource('two frames')
+  two.gop = [0, 1250].map((t, i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i === 0, 0, t))
+  live.attach('back2', { ws: fakeWs(), nvrId: 'nvr-2', ch: 6, type: 1, source: two })
+  check('  a GOP of 2 frames 1.25 s apart: too few to read a rate off (a trickle, or a hole): not remembered', !live.rates.has('nvr-2/6/1'), String(live.rates.get('nvr-2/6/1')))
+  clearInterval(live.timer)
+}
 
 // ---- level changes without a freeze or a jump back (stutter report 2.5, verify-5) ----
 /**
