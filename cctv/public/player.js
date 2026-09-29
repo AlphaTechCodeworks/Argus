@@ -148,8 +148,10 @@ export class VideoPlayer {
    *     tunnel keeps REMOTE_QUEUED_FRAMES for its bigger buffer)
    *   onFrame: called with the capture time of each frame as it is shown
    *   onPoster: called when a preroll's keyframe is drawn as a poster (skipUntil; onFrame is not)
-   *   maxFps: draw at most this many frames a second (a phone gains nothing above 15); the frames
-   *     between are still decoded -- each depends on the one before -- just never drawn
+   *   maxFps: the frame rate worth drawing here (a phone gains little above 15), held in the video's
+   *     own time: a stream up to 4/3 of it is drawn whole (20 fps at 15), a faster one every 2nd (or
+   *     3rd) frame, evenly. The frames between are still decoded -- each depends on the one before --
+   *     just never drawn
    */
   constructor(canvas, options = {}) {
     this.canvas = canvas
@@ -160,8 +162,14 @@ export class VideoPlayer {
     this.onPoster = options.onPoster
     this.paintFirst = options.paintFirst === true // live: the first picture at once (see #onDecoded)
     this.firstPainted = false
-    this.minDrawGapMs = options.maxFps > 0 ? 1000 / options.maxFps - 4 : 0 // -4: one display refresh of slack
-    this.lastDrawAt = 0
+    // maxFps: a frame is drawn only if it was captured at least 3/4 of a 1/maxFps interval after the
+    // last one drawn, less 4 ms for the cameras' own clocks (the 20 fps models stamp frames 49.6 ms
+    // apart). At 15 that is 46 ms: 20 fps is drawn whole, 50 ms apart; 25 fps every 2nd frame, 80 ms
+    // apart; 30 fps every 2nd, 67 ms apart. Held in wall time (one draw every 62.7 ms at most), a
+    // 20 fps camera drew 15 a second on a 60 Hz phone, stepping 50, 50 and 100 ms through the video:
+    // movement at 1x, 1x, 2x, several times a second (stutter report 2.8, 29 Sep)
+    this.minDrawStepMs = options.maxFps > 0 ? (0.75 * 1000) / options.maxFps - 4 : 0
+    this.lastDrawnTs = null // capture time (ms) of the last frame present() drew
     this.clock = new PlayoutClock(options.clock)
     this.maxQueued = options.maxQueuedFrames ?? MAX_QUEUED_FRAMES
     this.arrivalClock = options.arrivalClock === true && this.pacing // (without pacing there is no clock)
@@ -436,9 +444,13 @@ export class VideoPlayer {
     let due = -1
     for (let i = 0; i < this.queue.length && this.clock.presentAt(this.queue[i].ts) <= now; i++) due = i
     if (due < 0) return
-    // held to maxFps: wait, and draw the newest due frame when the gap is up
-    if (this.minDrawGapMs && now - this.lastDrawAt < this.minDrawGapMs) return
-    this.lastDrawAt = now
+    // held to maxFps in the video's own time: wait for a frame far enough on. One from before the last
+    // drawn (the stream went back: a switch, a camera clock set back) is drawn at once, not held until
+    // the video passes that point again
+    const last = this.lastDrawnTs
+    const step = this.queue[due].ts - last
+    if (this.minDrawStepMs && last !== null && step >= 0 && step < this.minDrawStepMs) return
+    this.lastDrawnTs = this.queue[due].ts
     for (let i = 0; i < due; i++) {
       this.queue[i].frame.close()
       this.stats.dropped++
