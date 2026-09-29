@@ -167,13 +167,13 @@ export class PhoneStream {
    *   the stream converts (or is sent as it is) as that rate says, from the camera's next keyframe (a
    *   remote viewer's); not given (a phone): the mean over its 12 frames, once
    *   acquire: a conversion slot, or null, for a stream sent as it is that its rate read again says to
-   *   convert (adaptive-live.mjs: its pool); not given: it stays as it is
+   *   convert (adaptive-live.mjs: its pool, at levels 8 and 4); not given: it stays as it is
    *   maxLagS: more than this many seconds of the camera's pictures in the converter and not out yet
    *   (Transcoder.pending) for LAG_HOLD_MS, it has fallen behind real time: reset, and started again at
    *   the camera's next keyframe (#lag; a remote viewer's). 0, not given (a phone): no bound, as before
    *   now: the clock (LAG_HOLD_MS), for tests
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, rejudge = false, acquire = () => null, maxLagS = 0, now = () => Date.now(), background = false, camera = '?' }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, rejudge = false, acquire = null, maxLagS = 0, now = () => Date.now(), background = false, camera = '?' }) {
     // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
     // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps / fromNextKey / srcFps / rejudge /
     // maxLagS: how its conversion runs and starts (a phone on the local network gives none: the
@@ -424,9 +424,9 @@ export class PhoneStream {
       return this.#fanOut(buf, true)
     }
     if (this.passthrough) {
-      const slot = this.acquire()
+      const slot = this.acquire?.() ?? null
       if (!slot) {
-        this.log(`${this.who} a sub stream at ${fps.toFixed(1)} fps: still sent as it is, no conversion slot free`)
+        this.log(`${this.who} a sub stream at ${fps.toFixed(1)} fps: still sent as it is${this.acquire ? ', no conversion slot free' : ''}`)
         return this.#fanOut(buf, true)
       }
       this.slot = slot

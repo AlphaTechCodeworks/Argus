@@ -910,6 +910,36 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   clearInterval(live.timer)
 }
 {
+  // A cold 30 fps sub with a 1.2 s hole after its keyframe and one frame: read as 1.6 fps and sent as it
+  // is, then read again at its 12th frame as 30. At level 8 it is converted from the camera's next
+  // keyframe (a slot taken for it); at level 15 it stays as it is: converted there, a sub comes out
+  // bigger than it went in (nvr-2/6 0.37 -> 0.47 Mbit/s; the stutter report's "do not convert grid
+  // sub-streams at level 15").
+  const at = (level) => {
+    const { made, make } = converters()
+    const logs = []
+    const pool = new TranscodePool(16)
+    const live = new AdaptiveLive({ pool, makeTranscoder: make, log: (l) => logs.push(l), budgetBps: 1e9 })
+    const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
+    const sub = new HubStream(hub, 4, 1)
+    live.gone.set('holed', { level: level + 1, at: Date.now() - 5000 })
+    const ws = fakeWs()
+    live.attach('holed', { ws, nvrId: 'nvr-2', ch: 4, type: 1, source: sub })
+    let ts = 0
+    for (let i = 0; i < 90; i++) {
+      const key = i % 60 === 0
+      sub.onFrame(encodeFrame(Buffer.from([0, 0, 1, 1]), key, 0, ts), key)
+      ts += i === 1 ? 1200 : 1000 / 30
+    }
+    clearInterval(live.timer)
+    return { made, logs, pool, level: LEVELS[live.viewers.get('holed').level].id }
+  }
+  const eight = at(2)
+  check('a 30 fps sub read as 1.6 fps off a hole, read again as 30: at level 8 converted from the next keyframe, 1 in 4, a slot taken', eight.level === '8' && eight.made.length === 1 && eight.made[0].o.keepEvery === 4 && eight.pool.active === 1 && eight.logs.at(-1) === '[phone-live] nvr-2/5: converting a sub stream at 30.0 fps to about 8: keeping 1 in 4', eight.logs.join(' | '))
+  const fifteen = at(1)
+  check('  at level 15: still sent as it is (never converted there), no slot taken', fifteen.level === '15' && fifteen.made.length === 0 && fifteen.pool.active === 0 && fifteen.logs.at(-1) === '[phone-live] nvr-2/5: a sub stream at 30.0 fps: still sent as it is', fifteen.logs.join(' | '))
+}
+{
   // ...and a camera stream's own GOP with such a hole in it: its rate, as #passes and #handOver read it,
   // leaves the hole out (it read 0.2 fps off a keyframe, 3 frames and one 15 s later)
   const logs = []

@@ -351,10 +351,12 @@ export class AdaptiveLive {
       // there is converted even with nothing to thin (h264Only); the other levels are shared with
       // browsers that can. Made for a socket with a picture, it starts at the camera's next keyframe,
       // where that socket switches to it (fromNextKey, #switchTo); the rate it learns is remembered
-      // for this camera stream (#passes). One sent as it is that its rate read again says to convert
-      // takes a slot then (rejudge).
+      // for this camera stream (#passes). At 8 and 4, one sent as it is that its rate read again says
+      // to convert takes a slot then (rejudge); at 15 it stays as it is: converted there, a sub came out
+      // bigger than it went in (nvr-2/6 0.37 -> 0.47 Mbit/s; the stutter report: do not convert grid
+      // sub-streams at level 15), and at full nothing is thinned.
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), onRate, acquire: () => this.pool.acquire(), onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
       this.#made = s
     }
