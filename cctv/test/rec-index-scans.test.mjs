@@ -339,6 +339,122 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   ix.close()
 }
 
+// ---- time-lapse thinning's rows (thinning.mjs; perf report Task 4 and its check verify-1, 2026-09-29) ------
+// A rewritten file kept its row as it was: olderThan() gave the same oldest 500 of a camera every run,
+// the job re-read all of them ("already thin") and never got past them. Now a row carries `thinned`
+// (null: full video not looked at yet; THIN.timelapse; THIN.kept: looked at and left as it was), and
+// the job walks only the rows still null, through a partial index that holds nothing else. Its key is
+// time first (start_ms, nvr, ch): the deletion jobs take the oldest files of every camera together, and a
+// camera-first key spread each batch of 100 over 87 index pages (1,350 WAL pages for 470 files instead of
+// 931: a checkpoint on the main thread in every such run); time-first adds about 15.
+{
+  const { THIN, THIN_SQL } = await import('../rec-index.mjs')
+  const f = join(ROOT, 'thin.db')
+  const ix = openRecIndex(f)
+  const raw = new DatabaseSync(f)
+  const add = (ch, i, extra = {}) => ix.addSegment({ nvr: 't1', ch, path: `/rec/t1/${ch}/${i}.h265`, startMs: T0 + i * MIN, endMs: T0 + i * MIN + 59_000, bytes: 12_000_000, keyframes: 30, loc: 'L1', ...extra })
+  for (let i = 0; i < 20; i++) add(0, i)
+  for (let i = 0; i < 20; i++) add(1, i, { loc: i < 5 ? 'L2' : 'L1' })
+  check('a new row is full video, not looked at yet (thinned null)', ix.byPath('/rec/t1/0/0.h265').thinned === null, J(ix.byPath('/rec/t1/0/0.h265')))
+  check('THIN names the two marks', THIN.timelapse === 1 && THIN.kept === 2)
+
+  // thinning: the swap's index half, with the rewrite in flight kept in its own table
+  const before = ix.locationUse('L1').bytes
+  ix.thinBegin([{ path: '/rec/t1/0/0.h265', loc: 'L1', bytes: 12_000_000, keyframes: 30 }, { path: '/rec/t1/0/1.h265', loc: 'L1', bytes: 12_000_000, keyframes: 30 }], T0)
+  ix.thinBegin({ path: '/rec/t1/0/9.h265', loc: 'L1', bytes: 12_000_000, keyframes: 30 }, T0 + 1)
+  check('rewrites begun (a few at once, or one) are in flight, with what each file was', J(ix.thinInflight().map((r) => [r.path, r.wasBytes, r.wasKeyframes])) === J([['/rec/t1/0/0.h265', 12_000_000, 30], ['/rec/t1/0/1.h265', 12_000_000, 30], ['/rec/t1/0/9.h265', 12_000_000, 30]]), J(ix.thinInflight()))
+  ix.thinSwapped('/rec/t1/0/0.h265', { bytes: 1_300_000, keyframes: 6 })
+  const row = ix.byPath('/rec/t1/0/0.h265')
+  check('swapped: the row says time-lapse, with the new size and keyframes', row.thinned === THIN.timelapse && row.bytes === 1_300_000 && row.keyframes === 6 && row.startMs === T0, J(row))
+  check('... the location\'s total follows the new size (the triggers)', ix.locationUse('L1').bytes === before - 10_700_000, J(ix.locationUse('L1')))
+  ix.thinEnd(['/rec/t1/0/0.h265', '/rec/t1/0/9.h265'])
+  check('rewrites ended (a few at once, or one) are no longer in flight', J(ix.thinInflight().map((r) => r.path)) === J(['/rec/t1/0/1.h265']))
+  ix.setThin('/rec/t1/0/1.h265', null, { bytes: 12_000_000, keyframes: 30 })
+  ix.thinEnd('/rec/t1/0/1.h265')
+  ix.setThin('/rec/t1/0/2.h265', THIN.kept)
+  check('setThin: a row marked as left as it was keeps its size; null puts a row back as full video', ix.byPath('/rec/t1/0/2.h265').thinned === THIN.kept && ix.byPath('/rec/t1/0/2.h265').bytes === 12_000_000 && ix.byPath('/rec/t1/0/1.h265').thinned === null)
+  check('... a row written again (the recorder, backfill) is full video again unless it says otherwise', (add(0, 2), ix.byPath('/rec/t1/0/2.h265').thinned === null) && (add(0, 2, { thinned: THIN.kept }), ix.byPath('/rec/t1/0/2.h265').thinned === THIN.kept))
+
+  // the walk: only rows still full video, older than the cutoff, from a start time on
+  const cutoff = T0 + 10 * MIN
+  const cam0 = [{ nvr: 't1', ch: 0 }]
+  const walk = ix.fullOlderThan(cam0, cutoff, 100).map((r) => Number(r.path.match(/(\d+)\.h265$/)[1]))
+  check('fullOlderThan: the cameras\' full-video rows that ended before the cutoff, oldest first, none thinned or kept', J(walk) === J([1, 3, 4, 5, 6, 7, 8, 9]), J(walk))
+  check('... from a start time on, and at most `limit`', J(ix.fullOlderThan(cam0, cutoff, 3, T0 + 4 * MIN).map((r) => r.startMs)) === J([T0 + 4 * MIN, T0 + 5 * MIN, T0 + 6 * MIN]))
+  const two = ix.fullOlderThan([{ nvr: 't1', ch: 0 }, { nvr: 't1', ch: 1 }], cutoff, 4).map((r) => [r.ch, r.startMs - T0])
+  check('... several cameras at once, in start order, only those asked for', J(two) === J([[1, 0], [0, MIN], [1, MIN], [1, 2 * MIN]]) && ix.fullOlderThan([{ nvr: 't9', ch: 0 }], cutoff, 4).length === 0, J(two))
+  check('firstFull: where the cameras\' next full-video row starts, or null', ix.firstFull(cam0, T0 + 2 * MIN, cutoff) === T0 + 3 * MIN && ix.firstFull(cam0, T0 + 20 * MIN, T0 + 30 * MIN) === null, String(ix.firstFull(cam0, T0 + 2 * MIN, cutoff)))
+
+  // the dry run's figures: one aggregate per stretch between bookmarks, by camera and location
+  const sum = ix.fullSummary([{ nvr: 't1', ch: 1 }], { fromMs: T0, toMs: cutoff, endBefore: cutoff, stepMs: 10_000 })
+  const byLoc = Object.fromEntries(sum.map((r) => [r.loc, r]))
+  // each file is 59 s with 30 keyframes: one kept per 10 s is 5.9 of 30, so 12 MB counts as 2.36 MB
+  check('fullSummary: files and bytes per location, and the bytes weighted by the share of keyframes kept', byLoc.L1?.files === 5 && byLoc.L2?.files === 5 && byLoc.L1.bytes === 60_000_000 && Math.abs(byLoc.L1.weighted - 5 * 12_000_000 * (5.9 / 30)) < 1 && byLoc.L2.firstMs === T0, J(sum))
+  check('... a file shorter than one interval still keeps one keyframe; one with fewer keyframes keeps them all', (() => {
+    add(2, 0, { endMs: T0 + 2000, keyframes: 1, bytes: 1000 })
+    add(2, 1, { keyframes: 3, bytes: 3000 })
+    const s = ix.fullSummary([{ nvr: 't1', ch: 2 }], { fromMs: T0, toMs: cutoff, endBefore: cutoff, stepMs: 10_000 })[0]
+    return s.files === 2 && Math.abs(s.weighted - 4000) < 1e-6
+  })(), J(ix.fullSummary([{ nvr: 't1', ch: 2 }], { fromMs: T0, toMs: cutoff, endBefore: cutoff, stepMs: 10_000 })))
+  const both = ix.fullSummary([{ nvr: 't1', ch: 1 }, { nvr: 't1', ch: 2 }], { fromMs: T0, toMs: cutoff, endBefore: cutoff, stepMs: 10_000 }).map((r) => [r.nvr, r.ch, r.loc, r.files])
+  check('... per camera and location, several cameras at once', J(both.sort()) === J([['t1', 1, 'L1', 5], ['t1', 1, 'L2', 5], ['t1', 2, 'L1', 2]]), J(both))
+  check('startedBetween: what started in a window, every camera', J(ix.startedBetween(T0, T0 + 2 * MIN)) === J({ files: 6, bytes: 12_000_000 * 3 + 1_300_000 + 1000 + 3000 }), J(ix.startedBetween(T0, T0 + 2 * MIN)))
+
+  const planOf = (sql, ...p) => raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...p).map((r) => r.detail).join(' | ')
+  const keys = JSON.stringify(['t1/0'])
+  const w = planOf(THIN_SQL.fullOlderThan, -1e15, cutoff, cutoff, keys, 50)
+  check('fullOlderThan searches the partial index of full-video rows, bounded by start_ms, in its order (no sort)', /^SEARCH segments USING INDEX segments_full \(start_ms>\? AND start_ms<\?\)/.test(w) && !/TEMP B-TREE|SCAN segments/.test(w), w)
+  const ff = planOf(THIN_SQL.firstFull, -1e15, cutoff, keys)
+  check('firstFull too', /^SEARCH segments USING INDEX segments_full \(start_ms>\? AND start_ms<\?\)/.test(ff) && !/TEMP B-TREE|SCAN segments/.test(ff), ff)
+  const s = planOf(THIN_SQL.fullSummary, 10_000, -1e15, cutoff, cutoff, keys)
+  check('fullSummary searches it too', /SEARCH segments USING INDEX segments_full \(start_ms>\? AND start_ms<\?\)/.test(s) && !/SCAN segments/.test(s), s)
+  const b = planOf(THIN_SQL.startedBetween, T0, cutoff)
+  check('startedBetween searches segments_start', /^SEARCH segments USING INDEX segments_start \(start_ms>\? AND start_ms<\?\)$/.test(b), b)
+  raw.close()
+  ix.close()
+}
+// the thinning index costs the deletion jobs next to nothing: the oldest files of 87 cameras, deleted 100 a
+// transaction as housekeeping does, write about as many WAL pages as the same files once rewritten (which
+// are not in it). A camera-first key wrote 87 more pages a batch.
+{
+  const frames = (thinned) => {
+    const f = join(ROOT, `thin-wal-${thinned}.db`)
+    const ix = openRecIndex(f)
+    const raw = new DatabaseSync(f)
+    raw.exec('BEGIN')
+    const ins = raw.prepare('INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc, thinned) VALUES (?, ?, ?, ?, ?, 1000, 30, ?, ?)')
+    for (let k = 0; k < 60; k++) for (let c = 0; c < 87; c++) ins.run(`/rec/nvr-${c % 4}/${c}/${k}.h265`, `nvr-${c % 4}`, c, T0 + k * MIN, T0 + k * MIN + 59_000, 'L1', thinned ? 1 : null)
+    raw.exec('COMMIT')
+    raw.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()
+    const oldest = ix.oldest(261, { loc: 'L1' }).map((r) => r.path)
+    for (let i = 0; i < oldest.length; i += 100) ix.removeMany(oldest.slice(i, i + 100))
+    const n = raw.prepare('PRAGMA wal_checkpoint(PASSIVE)').get().log
+    raw.close()
+    ix.close()
+    return n
+  }
+  const full = frames(false)
+  const thin = frames(true)
+  check('deleting the oldest full-video files writes about as many WAL pages as deleting rewritten ones (time-first key)', full <= thin * 1.1 + 10, `${full} vs ${thin} pages for 261 files in 3 transactions`)
+}
+// an index written before `thinned` gains the column, its partial index and the in-flight table at open
+{
+  const f = join(ROOT, 'before-thin.db')
+  const pre = new DatabaseSync(f)
+  pre.exec(`CREATE TABLE segments (path TEXT PRIMARY KEY, nvr TEXT NOT NULL, ch INTEGER NOT NULL, start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL, bytes INTEGER NOT NULL, keyframes INTEGER NOT NULL, loc TEXT);
+    CREATE INDEX segments_cam ON segments (nvr, ch, start_ms);`)
+  pre.prepare("INSERT INTO segments VALUES ('/a/1.h264', 'a', 0, 1000, 61000, 500, 30, 'L1'), ('/a/2.h264', 'a', 0, 61000, 121000, 700, 30, 'L1')").run()
+  pre.close()
+  const ix = openRecIndex(f)
+  const raw = new DatabaseSync(f)
+  const idx = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'segments_full'").get()
+  const tab = raw.prepare("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = 'thin_inflight'").get()
+  raw.close()
+  check('an existing index gains thinned, segments_full (full-video rows only) and thin_inflight at open; its rows are full video', /WHERE thinned IS NULL/.test(idx?.sql ?? '') && tab?.one === 1 && ix.fullOlderThan([{ nvr: 'a', ch: 0 }], 200_000, 10).length === 2 && ix.byPath('/a/1.h264').thinned === null, idx?.sql ?? 'no segments_full')
+  ix.close()
+}
+
 // ---- every rewritten statement searches an index, bounded where a bound is the point ---------------
 // (The old statements were searches too -- "segments_cam (nvr=? AND ch=?)" -- which is exactly how
 // they came to read every row of a camera: the plan must show the bound on start_ms, and the
@@ -403,6 +519,23 @@ index.close()
     check(`${name}: at least 10x quicker than reading every row`, a * 10 < b, `${a.toFixed(3)} ms vs ${b.toFixed(3)} ms`)
   }
   check('... and the same answers there too', ix.lastSegmentEnd('big', 0) === T0 + 100_000 * MIN && ix.olderThan('big', 0, T0, 200).length === 0 && ix.cameras().length === 2 && J(ix.locationUse('L1')) === J({ bytes: 200_000_000, segments: 200_000 }))
+  // 99,990 of each camera's files already rewritten: the walk for the next ones to rewrite does not pass
+  // them (olderThan + a filter, which is what the job did, reads every one of them first)
+  const cams2 = [{ nvr: 'big', ch: 0 }, { nvr: 'big', ch: 1 }]
+  raw.exec('BEGIN')
+  raw.prepare('UPDATE segments SET thinned = 1 WHERE nvr = ? AND start_ms < ?').run('big', T0 + 99_990 * MIN)
+  raw.exec('COMMIT')
+  const filtered = raw.prepare('SELECT path FROM segments INDEXED BY segments_cam WHERE nvr = ? AND ch = ? AND start_ms < ? AND end_ms < ? AND thinned IS NULL ORDER BY start_ms LIMIT ?')
+  const cut = T0 + 100_001 * MIN
+  const b = time(() => (filtered.all('big', 0, cut, cut, 5), filtered.all('big', 1, cut, cut, 5)))
+  const a = time(() => ix.fullOlderThan(cams2, cut, 10))
+  check('fullOlderThan past 199,980 rewritten files: at least 10x quicker than filtering them', a * 10 < b && ix.fullOlderThan(cams2, cut, 10)[0]?.startMs === T0 + 99_990 * MIN, `${a.toFixed(3)} ms vs ${b.toFixed(3)} ms`)
+  // a camera never rewritten (not set to time-lapse) among them: each walk passes its old rows, on the
+  // index's own columns (0.3-0.4 us a row on the development PC; about 11 ms a walk for a camera kept 30
+  // days as full video with 7 full-video days elsewhere). A guard, not a race: under 1 us a row.
+  raw.prepare('UPDATE segments SET thinned = NULL WHERE nvr = ? AND ch = ?').run('big', 0)
+  const a1 = time(() => ix.fullOlderThan([{ nvr: 'big', ch: 1 }], cut, 5))
+  check('... and past a camera never rewritten (99,990 of its rows first): under 1 us a row passed', a1 < 99_990 / 1000 && ix.fullOlderThan([{ nvr: 'big', ch: 1 }], cut, 5)[0]?.startMs === T0 + 99_990 * MIN, `${a1.toFixed(1)} ms, ${((a1 / 99_990) * 1000).toFixed(2)} us a row`)
   raw.close()
   ix.close()
 }

@@ -169,7 +169,37 @@ CREATE TABLE IF NOT EXISTS alarm_rules (
   user TEXT, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
 `
 
-const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, keyframes, loc, source, filled_ms AS filledMs'
+/**
+ * Time-lapse thinning's rows (thinning.mjs, since 2026-09-29; perf report Task 4 and its check verify-1).
+ * `thinned` on a segment row: null = full video, not looked at yet; THIN.timelapse = rewritten to one
+ * keyframe per timelapseS; THIN.kept = looked at and left as it was (already that thin, nothing to keep
+ * at the interval, cannot be parsed, the file not there). A rewritten row used to keep its place among
+ * a camera's oldest rows unchanged: olderThan() gave the same oldest 500 every run, the job read all of
+ * them again ("already thin", about 57 GB over SMB a run at 87 cameras) and never got past them
+ * (verify-1 correction 2). The job walks segments_full instead, which holds only the rows still null:
+ * about the newest fullDays of footage plus what waits for the job, never the time-lapse days. Its key
+ * is time first, cameras after: the deletion jobs and the job itself take the oldest files of every
+ * camera together, and with a camera-first key each batch of 100 touched 87 more index pages (1,350 WAL
+ * pages for 470 files deleted instead of 931, so a checkpoint on the main thread in every such run: 36-92
+ * ms on the development PC); time-first adds about 15. A camera left out of a walk (not set to time-lapse)
+ * is passed on the index's own columns, without reading its rows (0.4 us a row against 1.4 us read, on
+ * the development PC, scratchpad idx-bench.mjs). Building it on an index that predates it reads every
+ * row once, at the first start with this code (as segments_loc did: about 1.6-1.8 s for 377,000 rows on
+ * the development PC).
+ * thin_inflight: each rewrite between its start and its commit, with the file's size and keyframes
+ * before; after the swap the segment row has the new ones. It is on the system disk with the index, so
+ * a server that stops in the middle of one finds it at the next run and has the share helper put the
+ * file right (share-ops.mjs thinRecover) before anything else touches that file: housekeeping and
+ * retention pass over it meanwhile.
+ */
+export const THIN = Object.freeze({ timelapse: 1, kept: 2 })
+const THIN_SCHEMA = `
+CREATE INDEX IF NOT EXISTS segments_full ON segments (start_ms, nvr, ch) WHERE thinned IS NULL;
+CREATE TABLE IF NOT EXISTS thin_inflight (
+  path TEXT PRIMARY KEY, loc TEXT, was_bytes INTEGER NOT NULL, was_keyframes INTEGER NOT NULL, at_ms INTEGER NOT NULL);
+`
+
+const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, keyframes, loc, source, filled_ms AS filledMs, thinned'
 const BF_COLS = 'id, nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason, kind, state, attempts, last_try_ms AS lastTryMs, last_error AS lastError, filled_ms AS filledMs, note, first_seen_ms AS firstSeenMs'
 /** Fields of a backfill ledger row a job may change, and the column each one is stored in. */
 const BF_SET = { state: 'state', attempts: 'attempts', lastTryMs: 'last_try_ms', lastError: 'last_error', filledMs: 'filled_ms', note: 'note', reason: 'reason', kind: 'kind', toMs: 'to_ms' }
@@ -225,6 +255,27 @@ export const LOCATION_SQL = {
     WHERE s.rowid IN (SELECT rowid FROM segments INDEXED BY segments_cam WHERE nvr = json_extract(c.value, '$[0]') AND ch = json_extract(c.value, '$[1]') AND loc = ? AND start_ms >= ? ORDER BY start_ms LIMIT ?)
     ORDER BY c.key, s.start_ms, s.rowid`
 }
+/**
+ * Time-lapse thinning's lookups (thinning.mjs; THIN above), every 5 minutes on the main thread. Kept here
+ * as text so rec-index-scans.test.mjs can check each one's query plan. INDEXED BY: the partial index is
+ * the point (a camera's time-lapse days are never read), and it names the mistake at once if the WHERE
+ * ever stops implying the index's own.
+ */
+// (the cameras a walk or a sum is for: a JSON list of "nvr/ch" keys, matched on the index's own columns)
+const IN_CAMS = "(nvr || '/' || ch) IN (SELECT value FROM json_each(?))"
+export const THIN_SQL = {
+  // the job's walk: some cameras' full-video rows (those with one cutoff) that ended before it, oldest first
+  fullOlderThan: `SELECT ${SEG_COLS} FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ? AND end_ms < ? AND ${IN_CAMS} ORDER BY start_ms LIMIT ?`,
+  // where those cameras' next full-video row starts (the sums below skip hours with none)
+  firstFull: `SELECT start_ms AS s FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ? AND ${IN_CAMS} ORDER BY start_ms LIMIT 1`,
+  // the dry run's figures and the backlog, a stretch of time at a time, by camera and location: files,
+  // bytes, and bytes weighted by the share of keyframes one per timelapseS keeps (at least one a file,
+  // at most all of them). No file is read for them (verify-1: the dry run read ~24 GB a run).
+  fullSummary: `SELECT nvr, ch, loc, COUNT(*) AS files, SUM(bytes) AS bytes, SUM(bytes * MIN(1.0, MAX(1.0, (end_ms - start_ms) * 1.0 / ?) / MAX(keyframes, 1))) AS weighted, MIN(start_ms) AS firstMs
+    FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ? AND end_ms < ? AND ${IN_CAMS} GROUP BY nvr, ch, loc`,
+  // what every camera recorded in a window (the rate footage passes the cutoff at: thinning's pace)
+  startedBetween: 'SELECT COUNT(*) AS files, IFNULL(SUM(bytes), 0) AS bytes FROM segments WHERE start_ms >= ? AND start_ms < ?'
+}
 /** "From the start" for oldestOf / oldest: earlier than any start_ms. */
 const NO_START = Number.MIN_SAFE_INTEGER
 /** lastSegmentEnd() without a bound: later than any start. */
@@ -249,7 +300,10 @@ export function openRecIndex(file) {
     const have = new Set(db.prepare('PRAGMA table_info(segments)').all().map((r) => r.name))
     if (!have.has('source')) db.exec('ALTER TABLE segments ADD COLUMN source TEXT')
     if (!have.has('filled_ms')) db.exec('ALTER TABLE segments ADD COLUMN filled_ms INTEGER')
+    // (THIN above; a column added with no default costs nothing, the partial index reads every row once)
+    if (!have.has('thinned')) db.exec('ALTER TABLE segments ADD COLUMN thinned INTEGER')
   }
+  db.exec(THIN_SCHEMA)
   // The totals per location (TOTALS_SCHEMA above). A REPLACE's old row is taken off by loc_totals_replace,
   // so the delete trigger must stay out of it: recursive_triggers off (SQLite's default, set in case).
   db.exec('PRAGMA recursive_triggers = OFF')
@@ -269,7 +323,15 @@ export function openRecIndex(file) {
     }
   }
   const q = {
-    add: db.prepare('INSERT OR REPLACE INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc, source, filled_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+    add: db.prepare('INSERT OR REPLACE INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc, source, filled_ms, thinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+    fullOlderThan: db.prepare(THIN_SQL.fullOlderThan),
+    firstFull: db.prepare(THIN_SQL.firstFull),
+    fullSummary: db.prepare(THIN_SQL.fullSummary),
+    startedBetween: db.prepare(THIN_SQL.startedBetween),
+    setThin: db.prepare('UPDATE segments SET thinned = ?, bytes = IFNULL(?, bytes), keyframes = IFNULL(?, keyframes) WHERE path = ?'),
+    thinBegin: db.prepare('INSERT OR REPLACE INTO thin_inflight (path, loc, was_bytes, was_keyframes, at_ms) VALUES (?, ?, ?, ?, ?)'),
+    thinEnd: db.prepare('DELETE FROM thin_inflight WHERE path = ?'),
+    thinAll: db.prepare('SELECT path, loc, was_bytes AS wasBytes, was_keyframes AS wasKeyframes, at_ms AS atMs FROM thin_inflight ORDER BY at_ms, path'),
     // the ledger: a hole seen again keeps the state and the attempt count it already had
     bfAdd: db.prepare('INSERT OR IGNORE INTO backfill_gaps (nvr, ch, from_ms, to_ms, reason, kind, first_seen_ms) VALUES (?, ?, ?, ?, ?, ?, ?)'),
     bfFind: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps WHERE nvr = ? AND ch = ? AND from_ms = ? AND to_ms = ?`),
@@ -338,6 +400,21 @@ export function openRecIndex(file) {
     const long = q.longEnd.get(nvr, ch, before).e
     return long !== null && long > inWindow ? long : inWindow
   }
+  /** [{ nvr, ch }] -> the JSON list THIN_SQL matches cameras against ("nvr/ch", as the index's columns make it). */
+  const camKeys = (cams) => JSON.stringify(cams.map((c) => camKey(c.nvr, c.ch)))
+  /** Runs fn over items in one transaction (nothing to do: no transaction). */
+  const inOne = (items, fn) => {
+    if (!items.length) return
+    if (items.length === 1) return fn(items[0])
+    db.exec('BEGIN')
+    try {
+      for (const x of items) fn(x)
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+  }
   /** camera key -> the file its writer has open: { nvr, ch, path, startMs, loc } (memory only) */
   const opens = new Map()
   const openSeg = (o) => (o ? { nvr: o.nvr, ch: o.ch, path: o.path, startMs: o.startMs, endMs: null, bytes: null, keyframes: null, loc: o.loc, open: true } : null)
@@ -346,8 +423,48 @@ export function openRecIndex(file) {
     addSegment(s) {
       // source/filledMs: null for footage the recorder wrote live; backfill.mjs sets them to
       // "backfill:<nvr id>" and the time it was pulled, which is what an evidence export states.
-      q.add.run(String(s.path), String(s.nvr), Number(s.ch), Math.round(s.startMs), Math.round(s.endMs), Number(s.bytes), Number(s.keyframes), s.loc ?? null, s.source ?? null, s.filledMs == null ? null : Math.round(s.filledMs))
+      // thinned: a file written again is full video again (the recorder and backfill never pass it)
+      q.add.run(String(s.path), String(s.nvr), Number(s.ch), Math.round(s.startMs), Math.round(s.endMs), Number(s.bytes), Number(s.keyframes), s.loc ?? null, s.source ?? null, s.filledMs == null ? null : Math.round(s.filledMs), s.thinned == null ? null : Number(s.thinned))
     },
+
+    // ---- time-lapse thinning (THIN above; thinning.mjs)
+    /** Some cameras' ([{ nvr, ch }]) full-video rows (thinned null) that ended before ms, oldest first, from fromMs on. */
+    fullOlderThan: (cams, ms, limit, fromMs = NO_START) => q.fullOlderThan.all(fromMs, ms, ms, camKeys(cams), Number(limit)).map(plain),
+    /** Where those cameras' next full-video row in [fromMs, toMs) starts, or null. */
+    firstFull: (cams, fromMs, toMs) => q.firstFull.get(fromMs, toMs, camKeys(cams))?.s ?? null,
+    /**
+     * Those cameras' full-video rows starting in [fromMs, toMs) and ending before endBefore, by camera and
+     * location: [{ nvr, ch, loc, files, bytes, weighted, firstMs }] (weighted: THIN_SQL.fullSummary).
+     */
+    fullSummary: (cams, { fromMs = NO_START, toMs, endBefore, stepMs }) =>
+      q.fullSummary.all(Math.max(1, Number(stepMs)), fromMs, toMs, endBefore, camKeys(cams)).map((r) => ({ nvr: r.nvr, ch: Number(r.ch), loc: r.loc, files: Number(r.files), bytes: Number(r.bytes), weighted: Number(r.weighted), firstMs: Number(r.firstMs) })),
+    /** { files, bytes } of every camera's rows that started in [fromMs, toMs). */
+    startedBetween: (fromMs, toMs) => {
+      const r = q.startedBetween.get(fromMs, toMs)
+      return { files: Number(r.files), bytes: Number(r.bytes) }
+    },
+    /** Marks a row (THIN.timelapse, THIN.kept, or null for full video again); bytes/keyframes when given. */
+    setThin(path, state, { bytes = null, keyframes = null } = {}) {
+      q.setThin.run(state == null ? null : Number(state), bytes == null ? null : Number(bytes), keyframes == null ? null : Number(keyframes), String(path))
+    },
+    /**
+     * Rewrites of these files may start: what each was (thin_inflight). One row { path, loc, bytes,
+     * keyframes } or a list of them, in one transaction (thinning.mjs notes a few files at a time: each
+     * commit is WAL pages, and a checkpoint on the main thread every 1,000 of them).
+     */
+    thinBegin(rows, atMs = Date.now()) {
+      inOne(Array.isArray(rows) ? rows : [rows], (r) => q.thinBegin.run(String(r.path), r.loc ?? null, Number(r.bytes), Number(r.keyframes), Math.round(atMs)))
+    },
+    /** The rewrite is in the file's place (the swap, before its commit): the row says time-lapse with the new size. */
+    thinSwapped(path, { bytes, keyframes }) {
+      q.setThin.run(THIN.timelapse, Number(bytes), Number(keyframes), String(path))
+    },
+    /** These rewrites are over (committed, put right, or never started): one path or a list, one transaction. */
+    thinEnd(paths) {
+      inOne(Array.isArray(paths) ? paths : [paths], (p) => q.thinEnd.run(String(p)))
+    },
+    /** The rewrites in flight: [{ path, loc, wasBytes, wasKeyframes, atMs }]. */
+    thinInflight: () => q.thinAll.all().map(plain),
 
     // ---- the backfill ledger (phase 2b; see backfill.mjs)
     /** Records a hole worth filling, or returns the row already there (state and attempts kept). */
