@@ -307,7 +307,10 @@ export async function takeSnapshot(event, { index, readerFor = openReader, ffmpe
   return job
 }
 
-const sdInFlight = new Map() // event id -> its SD copy being made
+// `${id}@${the picture's mtime}` -> its SD copy being made: a request for a picture taken again under the
+// same id (an event id used again) never joins the copy of the one before it
+const sdInFlight = new Map()
+let sdTmps = 0 // two copies of one id can be made one after the other: each its own temp name
 /** A copy that could not be made is not tried again for this long (each try is up to SNAP_FFMPEG_MS). */
 export const SD_RETRY_MS = 5 * 60_000
 const sdFailed = new Map() // `${id}@${the picture's mtime}` -> when making its copy failed
@@ -326,9 +329,12 @@ function pictureOf(ev) {
 
 /**
  * The SD copy of an event's picture, made the first time it is asked for, on its own one-at-a-time
- * ffmpeg queue, and kept beside the picture (made again when the picture is newer: taken again). Rejects
- * when there is no picture of this event or the copy cannot be made (and then, for SD_RETRY_MS, without
- * trying again): the route then answers 404, never with the picture itself.
+ * ffmpeg queue, and kept beside the picture (made again when the picture is newer: taken again). Kept
+ * only while the picture it was made from is still the one on disk: one taken again (an event id used
+ * again) or removed while the copy was made would otherwise leave a copy newer than the picture, served
+ * for the new event. The request it was made for still gets it: that picture was its event's (pictureOf,
+ * D4) when it asked. Rejects when there is no picture of this event or the copy cannot be made (and
+ * then, for SD_RETRY_MS, without trying again): the route then answers 404, never with the picture itself.
  * @param {{ id: number, seenMs?: number }} ev an events-db row
  * @param {{ ffmpeg?: string, spawn?: Function, platform?: string, timeoutMs?: number }} [deps] (tests)
  * @returns {Promise<Buffer>}
@@ -343,7 +349,7 @@ export async function sdSnapshot(ev, { ffmpeg = 'ffmpeg', spawn = nodeSpawn, pla
   if (sdSt && sdSt.mtimeMs >= fullSt.mtimeMs) return readFile(sd)
   const key = `${id}@${fullSt.mtimeMs}`
   if (Date.now() - (sdFailed.get(key) ?? -Infinity) < SD_RETRY_MS) throw new Error('the SD copy could not be made a moment ago')
-  if (sdInFlight.has(id)) return sdInFlight.get(id)
+  if (sdInFlight.has(key)) return sdInFlight.get(key)
   const job = (async () => {
     const input = await readFile(full)
     let jpeg
@@ -355,18 +361,20 @@ export async function sdSnapshot(ev, { ffmpeg = 'ffmpeg', spawn = nodeSpawn, pla
       sdFailed.set(key, now)
       throw e
     }
-    const tmp = `${sd}.${process.pid}.tmp`
+    const tmp = `${sd}.${process.pid}-${++sdTmps}.tmp`
     try {
       await writeFile(tmp, jpeg)
-      await rename(tmp, sd)
+      // (looked at last thing before the rename: the picture's mtime as read when this copy was asked for)
+      if (statSync(full, { throwIfNoEntry: false })?.mtimeMs === fullSt.mtimeMs) await rename(tmp, sd)
+      else console.log(`[snapshot] the SD copy of event ${id} was not kept: its picture was taken again or removed while it was made`)
     } catch (e) {
       console.warn(`[snapshot] could not keep the SD copy of event ${id}: ${e.message}`)
     } finally {
       await rm(tmp, { force: true })
     }
     return jpeg
-  })().finally(() => sdInFlight.delete(id))
-  sdInFlight.set(id, job)
+  })().finally(() => sdInFlight.delete(key))
+  sdInFlight.set(key, job)
   return job
 }
 

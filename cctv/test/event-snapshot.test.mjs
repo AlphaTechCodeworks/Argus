@@ -28,7 +28,7 @@ writeFileSync(join(process.env.DATA_DIR, 'rights.json'), JSON.stringify({
 
 const {
   SD_RETRY_MS, SD_WIDTH, SNAP_AFTER_MS, SNAP_DIR, SNAP_LATE_MS, SNAP_POLL_MS, SNAP_WAIT_MS,
-  forgetSnapshots, handleSnapshot, sdArgs, sdPath, snapArgs, snapPath, sweepSnapshots, takeSnapshot
+  forgetSnapshots, handleSnapshot, sdArgs, sdPath, sdSnapshot, snapArgs, snapPath, sweepSnapshots, takeSnapshot
 } = await import('../event-snapshot.mjs')
 const { addEvent, closeEvents } = await import('../events-db.mjs')
 const { CODEC } = await import('../rec-reader.mjs')
@@ -413,6 +413,58 @@ writeFileSync(snapPath(other.id), JPEG)
   const src = readFileSync(new URL('../event-snapshot.mjs', import.meta.url), 'utf8')
   check('the SD copies take turns on a queue of their own, never ahead of or behind a new event\'s picture', /sdOneAtATime\(\(\) => toJpeg\(input, sdArgs\(\)/.test(src) && /= await oneAtATime\(\(\) => toJpeg\(found\.key\.buf, snapArgs\(found\.key\.codec\), o\)\)/.test(src))
   check('sdPath refuses what is not an event id', (() => { try { sdPath('../x'); return false } catch { return true } })())
+}
+
+// ---- the SD copy and the picture it was made from (an event id used again while a copy is made, D4) -------
+{
+  // an ffmpeg that answers only when told (a copy can wait its turn on the queue); its "copy" names its input
+  const held = []
+  const spawnHeld = () => {
+    const p = new EventEmitter()
+    p.stdout = new EventEmitter()
+    p.stderr = new EventEmitter()
+    p.stdin = Object.assign(new EventEmitter(), { end: (buf) => { p.input = Buffer.from(buf); held.push(p) } })
+    p.kill = () => p.emit('close', null)
+    return p
+  }
+  const copyOf = (b) => Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from('sd-copy-of:'), b]) // (a JPEG's first and last bytes)
+  const answer = (p) => { p.stdout.emit('data', copyOf(p.input)); p.emit('close', 0) }
+  const until = async (pred) => { for (let i = 0; i < 300 && !pred(); i++) await new Promise((r) => setTimeout(r, 10)); return pred() }
+  const deps = { spawn: spawnHeld, platform: 'linux', timeoutMs: 10_000 }
+  const OLD = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(100, 1), Buffer.from([0xff, 0xd9])])
+  const NEW = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(100, 2), Buffer.from([0xff, 0xd9])])
+  const { event: first } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 300_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(first.id), OLD)
+  const m1 = new Date(SEEN + 10_000)
+  utimesSync(snapPath(first.id), m1, m1)
+  const job1 = sdSnapshot(first, deps)
+  await until(() => held.length === 1)
+  // meanwhile the newest row is deleted and its id handed out again: a new event, seen later, and its picture
+  // taken over the old one
+  const second = { ...first, seenMs: m1.getTime() + 10_000 }
+  writeFileSync(snapPath(first.id), NEW)
+  const m2 = new Date(m1.getTime() + 20_000)
+  utimesSync(snapPath(first.id), m2, m2)
+  const job2 = sdSnapshot(second, deps)
+  answer(held[0])
+  const got1 = await job1
+  check('a copy whose picture was taken again while it was made (an id used again): the request it was made for gets it (that picture was its event\'s when asked)', got1.equals(copyOf(OLD)))
+  check('... but it is not kept as <id>-sd.jpg (newer than the new picture, it would be served for the new event)', !existsSync(sdPath(first.id)))
+  await until(() => held.length === 2)
+  check('the new event\'s request does not join the copy of the old picture: a copy of its own, of the new picture', held.length === 2 && held[1].input.equals(NEW), `${held.length} ffmpeg(s)`)
+  if (held[1]) answer(held[1])
+  const got2 = await job2
+  check('... which it gets, and which is kept', got2.equals(copyOf(NEW)) && existsSync(sdPath(first.id)) && readFileSync(sdPath(first.id)).equals(copyOf(NEW)), got2.subarray(2, 14).toString())
+  check('... asked again: that kept copy, no ffmpeg', (await sdSnapshot(second, deps)).equals(copyOf(NEW)) && held.length === 2)
+  // the picture removed with its event while its copy was made: no copy left behind for the id
+  const { event: gone } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 360_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(gone.id), OLD)
+  const job3 = sdSnapshot(gone, deps)
+  await until(() => held.length === 3)
+  forgetSnapshots([gone.id])
+  if (held[2]) answer(held[2])
+  await job3.catch(() => null)
+  check('a picture removed while its copy was made: the copy is not kept', held.length === 3 && !existsSync(sdPath(gone.id)))
 }
 
 // ---- pictures go with their events ---------------------------------------------------------------------
