@@ -338,6 +338,8 @@ const auditRowsAll = () => readFileSync(join(DATA, 'audit.jsonl'), 'utf8').trim(
 {
   const [, body] = await R.handleRights('GET', '/api/admin/rights', async () => ({}), ADMIN)
   const r = renderRights(body)
+  check('the Rights table uses the editor\'s names, in its order', JSON.stringify(r.labels) === JSON.stringify(['Live', 'Live HD', 'Playback SD', 'Playback HD', 'Export']) && JSON.stringify(r.actions) === JSON.stringify(['live', 'live-hd', 'playback-nvr', 'playback-server', 'export']))
+  check('... an action it does not know goes last, under its own key', renderRights({ actions: ['live', 'live-4k'], users: [], formats: [] }).labels.join() === 'Live,live-4k')
   check('render lists every account', r.users.length === 4)
   check('render does not offer "admin" as a per-camera column', !r.actions.includes('admin'))
   const boss = r.users.find((u) => u.user === 'boss')

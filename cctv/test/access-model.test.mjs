@@ -7,7 +7,7 @@
 // The rules that matter are the ones that decide what a person may see without the admin noticing:
 // a site tick means "and every camera added later", unticking one camera must not take the rest of
 // the site with it, and a grant the tree cannot show must survive a save instead of vanishing.
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -91,7 +91,7 @@ const grantsOf = (state) => M.toRow(state).grants
   const v = M.view(M.fromRow(row({ live: ['*'] }), tree), tree)
   check("'*' ticks All sites", v.all.live.state === 'on')
   check("'*' ticks every site and every camera", v.sites.every((s) => s.cells.live.state === 'on' && s.cameras.every((c) => c.cells.live.state === 'on')))
-  check('...and nothing in the other columns', v.sites.every((s) => s.cells.playback.state === 'off' && s.cells.export.state === 'off') && v.all.playback.state === 'off')
+  check('...and nothing in the other columns (Live HD, Playback SD, Playback HD, Export)', v.sites.every((s) => ['live-hd', 'playback-nvr', 'playback-server', 'export'].every((c) => s.cells[c].state === 'off')) && ['live-hd', 'playback-nvr', 'playback-server'].every((c) => v.all[c].state === 'off'))
 }
 
 // ---- an NVR target ticks the site and its cameras ------------------------------------------------------
@@ -159,49 +159,44 @@ const grantsOf = (state) => M.toRow(state).grants
   check("every site ticked one by one is not widened to '*' (a site added later is not included)", M.view(every, tree).all.live.state === 'some' && J(grantsOf(every).live) === J(['dark', 'nvr-2', 'nvr1', 'solus']))
 }
 
-// ---- Playback is two rights ----------------------------------------------------------------------------
+// ---- five columns, one right each; Live HD needs Live ---------------------------------------------------
 {
-  const on = M.toggle(M.fromRow(row(), tree), tree, 'playback', 'nvr1', true)
-  check('ticking Playback grants server and NVR playback', J(grantsOf(on)['playback-server']) === J(['nvr1']) && J(grantsOf(on)['playback-nvr']) === J(['nvr1']))
-  const off = M.toggle(on, tree, 'playback', 'nvr1', false)
-  check('unticking Playback takes both away', J(grantsOf(off)['playback-server']) === '[]' && J(grantsOf(off)['playback-nvr']) === '[]')
-
-  const split = M.fromRow(row({ 'playback-server': ['nvr1'], 'playback-nvr': ['*'] }), tree)
-  const v = M.view(split, tree)
-  const s = v.sites.find((x) => x.nvr === 'nvr-2')
-  check('a row with only NVR playback on a site shows ticked', s.cells.playback.state === 'on')
-  check('...and says which', /NVR/.test(s.cells.playback.note) && /only/.test(s.cells.playback.note), s.cells.playback.note)
-  check('...on its cameras too', s.cameras.every((c) => c.cells.playback.state === 'on' && /NVR/.test(c.cells.playback.note)))
-  const both = v.sites.find((x) => x.nvr === 'nvr1')
-  check('a site with both says nothing extra', both.cells.playback.state === 'on' && both.cells.playback.note === '')
-  const serverOnly = M.view(M.fromRow(row({ 'playback-server': ['solus/1'] }), tree), tree).sites.find((x) => x.nvr === 'solus')
-  check('server playback only on one camera: that camera ticked, saying so', serverOnly.cameras[1].cells.playback.state === 'on' && /server/.test(serverOnly.cameras[1].cells.playback.note))
-  check('...and its site part-ticked', serverOnly.cells.playback.state === 'some')
-
-  const liveChanged = M.toggle(split, tree, 'live', 'nvr1', true)
-  check('changing another column keeps the playback split exactly', J(grantsOf(liveChanged)['playback-server']) === J(['nvr1']) && J(grantsOf(liveChanged)['playback-nvr']) === J(['*']))
-  const camOff = M.toggle(split, tree, 'playback', 'nvr1/0', false)
-  check('unticking one camera takes both away from it and nothing else',
-    J(grantsOf(camOff)['playback-server']) === J(['nvr1/1', 'nvr1/2', 'nvr1/3']) && J(grantsOf(camOff)['playback-nvr']) === J(['dark', 'nvr-2', 'nvr1/1', 'nvr1/2', 'nvr1/3', 'solus']),
-    J(grantsOf(camOff)))
-  const camOn = M.toggle(M.fromRow(row({ 'playback-nvr': ['solus/0'] }), tree), tree, 'playback', 'solus/1', true)
-  check('ticking a camera grants both on that camera and leaves the others as they were',
-    J(grantsOf(camOn)['playback-server']) === J(['solus/1']) && J(grantsOf(camOn)['playback-nvr']) === J(['solus/0', 'solus/1']))
-  const allOn = M.toggle(split, tree, 'playback', '*', true)
-  check("All sites in Playback is '*' for both", J(grantsOf(allOn)['playback-server']) === J(['*']) && J(grantsOf(allOn)['playback-nvr']) === J(['*']))
+  check('five columns in the owner\'s order, with their full names and meanings', J(M.COLUMNS) === J(['live', 'live-hd', 'playback-nvr', 'playback-server', 'export']) && J(M.COLUMNS.map((c) => M.COLUMN_LABELS[c])) === J(['Live', 'Live HD', 'Playback SD', 'Playback HD', 'Export']) && M.COLUMNS.every((c) => typeof M.COLUMN_TITLES[c] === 'string' && M.COLUMN_TITLES[c].startsWith(M.COLUMN_LABELS[c])))
+  check('the columns are every grantable right, once', J([...M.COLUMNS].sort()) === J([...M.GRANTABLE].sort()))
+  const [top, sub] = M.HEAD_ROWS
+  check('two header rows: Live (Grid, HD), Playback (SD, HD), Export', J(top.map((h) => h.text)) === J(['Site / camera', 'Live', 'Playback', 'Export']) && J(sub.map((h) => [h.text, h.column])) === J([['Grid', 'live'], ['HD', 'live-hd'], ['SD', 'playback-nvr'], ['HD', 'playback-server']]) && top[0].rowspan === 2 && top[0].rowhead === true && top[1].colspan === 2 && top[2].colspan === 2 && top[3].rowspan === 2 && top[3].column === 'export')
+  const hdOn = M.toggle(M.fromRow(row({ live: ['nvr1/3'] }), tree), tree, 'live-hd', 'nvr1', true)
+  check('ticking Live HD on a site ticks Live there too (HD needs Live)', J(grantsOf(hdOn)['live-hd']) === J(['nvr1']) && J(grantsOf(hdOn).live) === J(['nvr1']), J(grantsOf(hdOn)))
+  const hdCam = M.toggle(M.fromRow(row(), tree), tree, 'live-hd', 'solus/1', true)
+  check('... on one camera: Live on that camera only', J(grantsOf(hdCam).live) === J(['solus/1']) && J(grantsOf(hdCam)['live-hd']) === J(['solus/1']))
+  const hdAll = M.toggle(M.fromRow(row(), tree), tree, 'live-hd', '*', true)
+  check("... on All sites: '*' for both", J(grantsOf(hdAll).live) === J(['*']) && J(grantsOf(hdAll)['live-hd']) === J(['*']))
+  const liveOff = M.toggle(hdAll, tree, 'live', 'nvr1/0', false)
+  const cam0 = M.view(liveOff, tree).sites.find((s) => s.nvr === 'nvr1').cameras[0]
+  check('unticking Live on a camera unticks Live HD there too, and nothing else', cam0.cells['live-hd'].state === 'off' && J(grantsOf(liveOff)['live-hd']) === J(grantsOf(liveOff).live), J(grantsOf(liveOff)))
+  const hdOff = M.toggle(hdAll, tree, 'live-hd', 'solus', false)
+  check('unticking Live HD leaves Live as it was', J(grantsOf(hdOff).live) === J(['*']) && !grantsOf(hdOff)['live-hd'].includes('*'))
+  const pbSd = M.toggle(M.fromRow(row(), tree), tree, 'playback-nvr', 'nvr1', true)
+  check('Playback SD is the NVR\'s copy alone, Playback HD the server\'s alone', J(grantsOf(pbSd)['playback-nvr']) === J(['nvr1']) && grantsOf(pbSd)['playback-server'].length === 0 && J(grantsOf(M.toggle(pbSd, tree, 'playback-server', 'nvr1', true))['playback-server']) === J(['nvr1']))
+  const stray = M.view(M.fromRow(row({ 'live-hd': ['nvr1/2'] }), tree), tree)
+  const cam2 = stray.sites.find((s) => s.nvr === 'nvr1').cameras.find((c) => c.ch === 2)
+  check('a stored Live HD tick where Live is not: noted "no effect without Live", and warned about', cam2.cells['live-hd'].state === 'on' && /no effect without Live/.test(cam2.cells['live-hd'].note) && stray.warnings.some((w) => /Live HD is ticked where Live is not/.test(w)), J(cam2.cells))
+  check('... none of that for Live HD with Live', M.view(hdOn, tree).warnings.length === 0 && M.view(hdOn, tree).sites.find((s) => s.nvr === 'nvr1').cells['live-hd'].note === '')
+  check('a column the editor does not have changes nothing', M.toggle(hdOn, tree, 'playback', 'nvr1', true) === hdOn)
 }
 
 // ---- a click on a box (what the page calls) ------------------------------------------------------------
 {
   const st = M.fromRow(row({ live: ['nvr1/0'], 'playback-nvr': ['solus'] }), tree)
   const v = M.view(st, tree)
-  check('cellAt finds All sites, a site and a camera', M.cellAt(v, 'live', '*').state === 'some' && M.cellAt(v, 'live', 'nvr1').state === 'some' && M.cellAt(v, 'live', 'nvr1/0').state === 'on' && M.cellAt(v, 'playback', 'solus').state === 'on')
+  check('cellAt finds All sites, a site and a camera', M.cellAt(v, 'live', '*').state === 'some' && M.cellAt(v, 'live', 'nvr1').state === 'some' && M.cellAt(v, 'live', 'nvr1/0').state === 'on' && M.cellAt(v, 'playback-nvr', 'solus').state === 'on')
   check('cellAt of something not drawn is null', M.cellAt(v, 'live', 'gone') === null && M.cellAt(v, 'nope', 'nvr1') === null && M.cellAt(v, 'live', 'nvr1/9') === null)
   check('a click on a part-ticked site ticks the whole site', J(grantsOf(M.click(st, tree, 'live', 'nvr1')).live) === J(['nvr1']))
   check('a click on a ticked camera unticks it', J(grantsOf(M.click(st, tree, 'live', 'nvr1/0')).live) === '[]')
-  const pb = M.click(st, tree, 'playback', 'solus')
-  check('a click on Playback ticked for the NVR only takes both away', J(grantsOf(pb)['playback-server']) === '[]' && J(grantsOf(pb)['playback-nvr']) === '[]')
-  check('a second click grants both', J(grantsOf(M.click(pb, tree, 'playback', 'solus'))['playback-server']) === J(['solus']) && J(grantsOf(M.click(pb, tree, 'playback', 'solus'))['playback-nvr']) === J(['solus']))
+  const pb = M.click(st, tree, 'playback-nvr', 'solus')
+  check('a click on a ticked Playback SD box takes it away, and only it', J(grantsOf(pb)['playback-nvr']) === '[]' && J(grantsOf(pb)['playback-server']) === '[]')
+  check('a second click gives it back, and only it', J(grantsOf(M.click(pb, tree, 'playback-nvr', 'solus'))['playback-nvr']) === J(['solus']) && J(grantsOf(M.click(pb, tree, 'playback-nvr', 'solus'))['playback-server']) === '[]')
+  check('a click on Live HD ticks Live too', J(grantsOf(M.click(st, tree, 'live-hd', 'nvr1/1')).live) === J(['nvr1/0', 'nvr1/1']))
   check('a click on All sites when part-ticked ticks everything', J(grantsOf(M.click(st, tree, 'live', '*')).live) === J(['*']))
   check('a click on something not drawn changes nothing', M.click(st, tree, 'live', 'gone') === st)
 }
@@ -215,7 +210,7 @@ const grantsOf = (state) => M.toRow(state).grants
   check('an NVR the server no longer has is "not on this server any more"', kept.gone.reason === M.GONE && /gone/.test(kept.gone.text))
   check('so is a camera its NVR no longer lists', kept['nvr1/9'].reason === M.GONE && /Main site/.test(kept['nvr1/9'].text) && /10/.test(kept['nvr1/9'].text), kept['nvr1/9'].text)
   check('a camera on an NVR that has not listed its cameras says that instead', kept['dark/4'].reason !== M.GONE && /not listed|offline/i.test(kept['dark/4'].reason), kept['dark/4'].reason)
-  check('each says which rights it carries', J(kept.gone.columns) === J(['Live', 'Playback (server)']) && J(kept['gone/2'].columns) === J(['Export']), J(kept.gone.columns))
+  check('each says which rights it carries', J(kept.gone.columns) === J(['Live', 'Playback HD']) && J(kept['gone/2'].columns) === J(['Export']), J(kept.gone.columns))
   const edited = M.toggle(st, tree, 'live', 'solus', true)
   check('an unrelated change keeps them in the saved row', ['gone', 'nvr1/9', 'dark/4'].every((t) => grantsOf(edited).live.includes(t)) && grantsOf(edited).export.includes('gone/2'))
   const dropped = M.dropKept(st, 'gone')
@@ -297,7 +292,7 @@ const grantsOf = (state) => M.toRow(state).grants
     if (r === 0) state = M.setAll(state, rnd(2) === 0)
     else if (r === 1) state = M.setFormat(state, M.FORMATS[rnd(3)], rnd(2) === 0)
     else if (r === 2) state = M.dropKept(state, targets[rnd(targets.length)])
-    else state = M.toggle(state, tree, columns[rnd(3)], targets[rnd(targets.length)], rnd(2) === 0)
+    else state = M.toggle(state, tree, columns[rnd(columns.length)], targets[rnd(targets.length)], rnd(2) === 0)
     const out = M.toRow(state)
     if (J(R.cleanRights(out)) !== J(out)) bad = { i, out }
     // and the ticks shown are what the row grants: every camera cell agrees with can()'s rule
@@ -305,8 +300,10 @@ const grantsOf = (state) => M.toRow(state).grants
     for (const n of tree) for (const c of n.cameras) {
       const cells = v.sites.find((s) => s.nvr === n.nvr).cameras.find((x) => x.ch === c.ch).cells
       const covers = (list) => list.includes('*') || list.includes(n.nvr) || list.includes(`${n.nvr}/${c.ch}`)
-      const want = { live: covers(out.grants.live), playback: covers(out.grants['playback-server']) || covers(out.grants['playback-nvr']), export: covers(out.grants.export) }
+      const want = Object.fromEntries(columns.map((col) => [col, covers(out.grants[col])]))
       for (const col of columns) if ((cells[col].state === 'on') !== want[col]) bad = bad ?? { i, cam: `${n.nvr}/${c.ch}`, col, cell: cells[col], out }
+      // the editor keeps Live HD inside Live: never HD on a camera without Live
+      if (want['live-hd'] && !want.live) bad = bad ?? { i, cam: `${n.nvr}/${c.ch}`, hdWithoutLive: true, out }
     }
     // a ticked site box is the NVR target (or '*'): the one tick that also covers cameras added later
     for (const s of v.sites) {
@@ -315,11 +312,20 @@ const grantsOf = (state) => M.toRow(state).grants
     }
     if ((v.all.live.state === 'on') !== out.grants.live.includes('*')) bad = bad ?? { i, all: v.all.live, out }
   }
-  check('3000 random clicks: every row is already clean, and every camera tick matches the row', bad === null, J(bad))
+  check('3000 random clicks: every row is already clean, every camera tick matches the row, and Live HD stays inside Live', bad === null, J(bad))
 }
 
 // ---- a stored Live HD list survives a save (stream rights): the editor never drops it ---------------------
 check('Live HD kept through the editor: fromRow then toRow gives the same list', J(M.toRow(M.fromRow(row({ live: ['nvr1'], 'live-hd': ['nvr1'] }), tree)).grants['live-hd']) === J(['nvr1']))
+
+// ---- the editor's phone layout (style.css): two rules a browser would otherwise override ----------------
+{
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8')
+  // `.ac-tree small { display: block }` outranks a bare `.ac-row-notes`, so the notes would show twice
+  check('the row header\'s notes are hidden on wide screens, by a rule that outranks .ac-tree small', /^\.ac-tree \.ac-row-notes \{ display: none;/m.test(css))
+  const phone = css.slice(css.lastIndexOf('@media (max-width: 560px) {', css.indexOf('.ac-tree thead th.ac-col { width: 44px; }')))
+  check('on a phone the editor is 100vw - 16px wide, past the browser\'s own cap on a modal dialog', /^\s*\.ac-dialog \{ width: calc\(100vw - 16px\); max-width: calc\(100vw - 16px\); padding: 10px; \}/m.test(phone.slice(0, phone.indexOf('\n}'))))
+}
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
