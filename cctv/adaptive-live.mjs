@@ -405,7 +405,10 @@ export class AdaptiveLive {
    *    went over at once, and a climb onto another viewer's stream held up to that stream's keyframe
    *    interval (1.07 s in the review of ef43e60);
    *  - onto one from the camera's own frames (its stream, or one passing them on): at once, and nothing
-   *    until that stream's next keyframe at or past what it had (#guard).
+   *    until that stream's next keyframe at or past what it had (#guard);
+   *  - no slot free, the conversion it is on not its own to hand over, and a camera stream its browser
+   *    cannot play (H.265): it stays on that conversion (#slotless), as a main past FULL_MAX stays on
+   *    level 15's, and every look tries again.
    * @param {{ down?: boolean }} [o] down: to send less (a step down; a tile that finds a slot at last)
    */
   #retarget(e, level, { down = false } = {}) {
@@ -413,7 +416,9 @@ export class AdaptiveLive {
     let made = this.#made
     // no slot for its level's stream while its own conversion holds one: that one hands its slot over
     // (not one another socket is on or waits for: closing it would free nothing, and cost its picture)
-    const own = e.stream && e.stream !== e.source && !e.stream.passthrough && e.stream.clients.size === 1 && !this.#awaited(e.stream)
+    const converted = e.stream && e.stream !== e.source && !e.stream.passthrough && !e.stream.closed
+    const own = converted && e.stream.clients.size === 1 && !this.#awaited(e.stream)
+    e.slotless = false
     if (want === e.source && own && this.#converts(e, level)) {
       // with a picture: at the camera's next keyframe, the rate it has now handed to the new stream
       if (e.lastTs !== null) {
@@ -426,6 +431,16 @@ export class AdaptiveLive {
       this.#leaveStream(e)
       want = this.#streamFor(e, level)
       made = this.#made
+    }
+    // No slot, and a conversion it cannot hand over (another socket's too): an H.265 camera stream for a
+    // browser that cannot play it stays on the conversion it has. It went onto the camera's own stream:
+    // with FULL_MAX reached and the pool at its cap, two PCs sharing level 15's stream of a camera found
+    // room at full as another PC stepped down, and no slot, and were sent 1.5 s of H.265 (40 frames) -- a
+    // PC without HEVC shows black, and its full-size view falls back to the sub-stream for 2 minutes
+    // (viewer.js NO_MAIN_MS; the review of d5390d6). No slot is no room: the tick asks again at every look.
+    if (want === e.source && converted && this.#converts(e, level) && this.#h265(e) && !e.clientH265) {
+      e.slotless = true
+      return this.#cancelSwitch(e)
     }
     if (want === e.stream) return this.#cancelSwitch(e)
     if (e.switch?.to === want) return
@@ -631,8 +646,9 @@ export class AdaptiveLive {
     if (!v) this.viewers.set(viewerKey, (v = this.#arrive(viewerKey, now)))
     // lastTs: capture time of the last frame it was sent that its browser can show (#retarget); after /
     // afterAt: nothing older than this goes to it, since then (#guard); switch: a move waiting for the
-    // new stream's first picture (#switchTo); passAt: whether its level sends it as it is (#passes)
-    const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null }
+    // new stream's first picture (#switchTo); passAt: whether its level sends it as it is (#passes);
+    // slotless: kept on the conversion it had, for want of a slot for its level's (#retarget)
+    const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null, slotless: false }
     // Every frame to this socket, the replay as it joins too: a move waiting to switch goes over at the
     // new stream's start, and nothing older than it had goes after one (#pass). Then the bytes, for the
     // uplink budget and the Health page, and for what a plain /live socket has written (#written).
@@ -908,8 +924,9 @@ export class AdaptiveLive {
         // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
         // Below full, a tile left on the camera's own stream for want of a slot tries again: one may
         // have come free since. It stayed raw for as long as the page stayed on that level (verify-1).
+        // So does one kept on the conversion it had for want of one (#retarget: slotless).
         // (Going there is sending less, as a step down: SWITCH_WAIT_MS.)
-        for (const e of v.sockets) if (v.level === 0 || e.stream === e.source) this.#retarget(e, v.level, { down: v.level > 0 })
+        for (const e of v.sockets) if (v.level === 0 || e.stream === e.source || e.slotless) this.#retarget(e, v.level, { down: v.level > 0 })
         if (n.stays && v.stayedAt !== v.level) {
           v.stayedAt = v.level
           this.log(`[adaptive] ${v.key.slice(0, 8)}: stays at ${LEVELS[v.level].id}, a level lower would find no conversion slot either (${n.stays}; ${this.#state(v, this.#link(v))})`)
