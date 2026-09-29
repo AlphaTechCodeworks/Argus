@@ -60,7 +60,7 @@ export const RIGHTS_FILE = join(DATA_DIR, 'rights.json')
 export const RIGHTS_V1_BACKUP = join(DATA_DIR, 'rights.v1.json')
 /** Every account's Live HD as this version last wrote it: what an upgrade after a rollback restores. */
 export const RIGHTS_SHADOW = join(DATA_DIR, 'rights.v2.json')
-/** Where an upgrade keeps a shadow it could not use (it then gives Live HD to nobody: upgradeToV2). */
+/** Where an upgrade keeps a copy of a shadow it could not use (it then gives Live HD to nobody: upgradeToV2). */
 export const RIGHTS_SHADOW_UNREADABLE = `${RIGHTS_SHADOW}.unreadable`
 const VERSION = 2
 
@@ -179,11 +179,19 @@ function noteNewer(from) {
  * time a Date can hold), which the upgrade must not take for "none": that would give Live HD = Live to
  * everyone, back to every account it had been taken from (upgradeToV2 fails closed instead). An
  * account's entry that is not a list holds no Live HD, for the same reason (it is still remembered).
+ * An unusable shadow comes with its bytes (`bytes`), for the copy upgradeToV2 keeps; none when it
+ * could not be read at all.
  */
 function readShadow() {
   if (!existsSync(RIGHTS_SHADOW)) return null
+  let bytes
   try {
-    const raw = JSON.parse(readFileSync(RIGHTS_SHADOW, 'utf8'))
+    bytes = readFileSync(RIGHTS_SHADOW)
+  } catch (e) {
+    return { unreadable: e.message }
+  }
+  try {
+    const raw = JSON.parse(bytes.toString('utf8'))
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('not a rights shadow')
     // within the Date range (+-8.64e15 ms): the upgrade's audit row prints it, and toISOString throws past it
     if (!Number.isFinite(raw.writtenAt) || Math.abs(raw.writtenAt) > 8.64e15) throw new Error('its writtenAt is not a time')
@@ -195,7 +203,7 @@ function readShadow() {
     }
     return { writtenAt: raw.writtenAt, users }
   } catch (e) {
-    return { unreadable: e.message }
+    return { unreadable: e.message, bytes }
   }
 }
 
@@ -245,10 +253,15 @@ const someNames = (list) => (list.length > 8 ? `${list.slice(0, 8).join(', ')} a
  * mangled into a string or a fraction, read as version 1) keeps that list, cut to its Live: never
  * widened to Live or by the shadow, as a version 2 file is read as it is. A shadow that is there but
  * cannot be used is not "no shadow" (that would give everyone Live HD = Live, back to every account it
- * had been taken from): it is moved aside as rights.v2.json.unreadable, every account gets no Live HD
- * (an admin keeps everything: admin is the role), and the audit row and the console say so, with the
- * accounts to give it back to. If it cannot be moved aside nothing is written (it would be written
- * over) and the rights are used from memory, with Live HD for nobody.
+ * had been taken from): every account gets no Live HD (an admin keeps everything: admin is the role),
+ * and the audit row and the console say so, with the accounts to give it back to. A copy of its bytes
+ * is kept as rights.v2.json.unreadable, and the file itself stays in its place until writeStore's new
+ * shadow replaces it (one rename): there is never a moment without a shadow, which a crash, or
+ * adduser.mjs upgrading at the same moment, would find with rights.json still version 1 and take for
+ * "no shadow". If the copy cannot be kept (or the shadow could not be read at all, so there are no
+ * bytes to keep) nothing is written (the shadow would be written over) and the rights are used from
+ * memory, with Live HD for nobody. The new shadow in place and rights.json then not written leaves a
+ * shadow with no Live HD for anyone, which the next try restores: Live HD for nobody again.
  * @param {object} raw the file's own rows (which of them already carry a live-hd list)
  * @param {*} said the file's own version field (named in the audit row when it is not `from`)
  */
@@ -282,26 +295,18 @@ function upgradeToV2(users, text, from, raw = {}, said = from) {
     if (viewer(name) && row.grants['playback-nvr'].some((t) => !coversAll(hd, t))) sdOnly.push(name)
   }
   const store = { version: VERSION, users }
-  let aside = false
   try {
     if (bad !== null) {
-      // kept for a person to look at, out of the way of the shadow writeStore writes in its place
-      renameSync(RIGHTS_SHADOW, RIGHTS_SHADOW_UNREADABLE)
-      aside = true
+      // a copy for a person to look at; the file itself is replaced only by writeStore's shadow (a rename
+      // over it), never moved first: a shadow gone missing would mean Live HD = Live for everyone
+      if (!shadow.bytes) throw new Error(`${RIGHTS_SHADOW} could not be read, so it cannot be kept`)
+      writeFileSync(RIGHTS_SHADOW_UNREADABLE, shadow.bytes, { mode: 0o600 })
     }
     const tmp = `${RIGHTS_V1_BACKUP}.tmp-${process.pid}`
     writeFileSync(tmp, text, { mode: 0o600 })
     renameSync(tmp, RIGHTS_V1_BACKUP)
     writeStore(store)
   } catch (e) {
-    // put back, so the next try fails closed the same way (a shadow gone missing would mean Live HD = Live)
-    if (aside) {
-      try {
-        renameSync(RIGHTS_SHADOW_UNREADABLE, RIGHTS_SHADOW)
-      } catch (e2) {
-        console.error(`[rights] could not put ${RIGHTS_SHADOW_UNREADABLE} back (${e2.message})`)
-      }
-    }
     const none = bad !== null ? `, with Live HD for nobody (${RIGHTS_SHADOW} cannot be used: ${bad})` : ''
     console.error(`[rights] could not write the upgraded ${RIGHTS_FILE} (${e.message}); using it upgraded from memory${none}`)
     return store
@@ -311,7 +316,7 @@ function upgradeToV2(users, text, from, raw = {}, said = from) {
   try {
     const lines = []
     // first, so the audit row's 500-character cap never cuts it; the names last, for the same reason
-    if (bad !== null) lines.push(`rights.v2.json could not be used (${String(bad).slice(0, 80)}) and is kept as rights.v2.json.unreadable, so Live HD was given to nobody; re-grant it in the access editor (Users & audit, Edit access) to whoever should have it: ${withheld.length ? `${withheld.length} account(s) with Live have none now (${someNames(withheld)})` : 'no account but an admin has Live'}`)
+    if (bad !== null) lines.push(`rights.v2.json could not be used (${String(bad).slice(0, 80)}) and a copy of it is kept as rights.v2.json.unreadable, so Live HD was given to nobody; re-grant it in the access editor (Users & audit, Edit access) to whoever should have it: ${withheld.length ? `${withheld.length} account(s) with Live have none now (${someNames(withheld)})` : 'no account but an admin has Live'}`)
     if (kept.length) lines.push(`Live HD kept as the file had it (cut to Live) for ${kept.length} account(s) (${someNames(kept)})`)
     if (copied.length) lines.push(`Live HD given wherever Live was granted for ${copied.length} account(s) (${someNames(copied)})`)
     if (restored.length) lines.push(`Live HD restored from rights.v2.json (written ${new Date(shadow.writtenAt).toISOString()}) for ${restored.length} account(s) (${someNames(restored)})`)

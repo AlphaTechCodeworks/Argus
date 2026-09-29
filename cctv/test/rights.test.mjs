@@ -4,7 +4,8 @@
 //
 // The point of this file is the refusals. A permission test that only proves "the admin can" has
 // proved nothing: every case below that matters is a case where the answer must be false.
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -670,8 +671,8 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   quiet(() => R.loadRights())
   check('shadow with an entry that is not a list: that account gets no Live HD; the others as the shadow says', R.rightsOf('jo').grants['live-hd'].length === 0 && J(R.rightsOf('sam').grants['live-hd']) === J(['n5']) && !existsSync(UNREADABLE))
   check('... restored from the shadow for both (the audit row)', /Live HD restored from rights\.v2\.json \(written [^)]+\) for 2 account\(s\) \(jo, sam\)/.test(systemRows().at(-1)?.detail ?? ''), systemRows().at(-1)?.detail)
-  // the unusable shadow cannot be moved aside (a folder with a file in it where it would go): nothing is
-  // written (it would be written over), Live HD for nobody from memory, the upgrade tried again later
+  // the unusable shadow's copy cannot be kept (a folder with a file in it where it would go): nothing is
+  // written (the shadow would be written over), Live HD for nobody from memory, the upgrade tried again later
   writeFileSync(R.RIGHTS_SHADOW, 'not json')
   mkdirSync(UNREADABLE, { recursive: true })
   writeFileSync(join(UNREADABLE, 'x'), 'x')
@@ -680,18 +681,80 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   const e1 = threw(() => quiet(() => R.rightsOf('jo')))
   check('shadow unusable and cannot be kept aside: nothing thrown, nothing written, Live HD for nobody', e1 === null && readFileSync(R.RIGHTS_FILE, 'utf8') === v1 && readFileSync(R.RIGHTS_SHADOW, 'utf8') === 'not json' && R.rightsOf('jo').grants['live-hd'].length === 0 && R.can(VIEWER, 'live-hd', { nvr: 'n1', ch: 0 }) === false && systemRows().length === rows, e1?.message)
   rmSync(UNREADABLE, { recursive: true, force: true })
-  // kept aside, then rights.json cannot be written: put back, so the next try fails closed the same way
-  // (a shadow missing then would mean Live HD = Live for everyone)
+  // a shadow that cannot even be read (a folder in its place): there are no bytes to keep, so nothing is
+  // written either (as when the copy cannot be kept), and Live HD for nobody from memory
+  rmSync(R.RIGHTS_SHADOW, { force: true })
+  mkdirSync(R.RIGHTS_SHADOW)
+  writeFileSync(R.RIGHTS_FILE, `${v1}  `)
+  rows = systemRows().length
+  const e0 = threw(() => quiet(() => R.rightsOf('jo')))
+  check('shadow that cannot be read at all: nothing thrown, nothing written or moved, Live HD for nobody', e0 === null && readFileSync(R.RIGHTS_FILE, 'utf8') === `${v1}  ` && statSync(R.RIGHTS_SHADOW).isDirectory() && !existsSync(UNREADABLE) && R.rightsOf('jo').grants['live-hd'].length === 0 && R.can(VIEWER, 'live-hd', { nvr: 'n1', ch: 0 }) === false && systemRows().length === rows, e0?.message)
+  rmSync(R.RIGHTS_SHADOW, { recursive: true, force: true })
+  rmSync(UNREADABLE, { recursive: true, force: true })
+  // never a moment without a shadow: the unusable one stays in its place until the shadow that replaces it
+  // lands (one rename). A crash just before that rename, or adduser.mjs upgrading at the same moment, must
+  // not find rights.json still version 1 and no shadow at all: that reads as "no shadow", Live HD = Live
+  // for everyone. The files are looked at the moment that rename is asked for, then put back as a crash
+  // there would leave them, and upgraded again.
+  writeFileSync(R.RIGHTS_SHADOW, 'not json')
+  writeFileSync(R.RIGHTS_FILE, v1)
+  const fileText = (p) => (existsSync(p) && statSync(p).isFile() ? readFileSync(p, 'utf8') : null) // (null: none, or a folder)
+  const shadowUsers = () => {
+    try {
+      return JSON.parse(readFileSync(R.RIGHTS_SHADOW, 'utf8')).users
+    } catch {
+      return null
+    }
+  }
+  let moment = null
+  const realRename = fs.renameSync
+  fs.renameSync = (from, to) => {
+    if (moment === null && to === R.RIGHTS_SHADOW) moment = { rights: fileText(R.RIGHTS_FILE), shadow: fileText(R.RIGHTS_SHADOW), aside: fileText(UNREADABLE) }
+    return realRename(from, to)
+  }
+  syncBuiltinESMExports() // (rights.mjs's own `renameSync` is this one now)
+  try {
+    quiet(() => R.loadRights())
+  } finally {
+    fs.renameSync = realRename
+    syncBuiltinESMExports()
+  }
+  check('the unusable shadow is still in its place when the shadow replacing it is renamed in (its copy kept already)', moment?.shadow === 'not json' && moment?.aside === 'not json' && moment?.rights === v1, J(moment))
+  check('... then replaced by a shadow with no Live HD; the copy kept', J(shadowUsers()) === J({ boss: [], jo: [], sam: [] }) && fileText(UNREADABLE) === 'not json')
+  if (moment?.rights) {
+    writeFileSync(R.RIGHTS_FILE, moment.rights)
+    if (moment.shadow === null) rmSync(R.RIGHTS_SHADOW, { force: true })
+    else writeFileSync(R.RIGHTS_SHADOW, moment.shadow)
+    rows = systemRows().length
+    quiet(() => R.loadRights())
+    check('... a crash at that moment, then the next upgrade: still Live HD for nobody (never Live HD = Live)', R.rightsOf('jo').grants['live-hd'].length === 0 && R.rightsOf('sam').grants['live-hd'].length === 0 && R.can(VIEWER, 'live-hd', { nvr: 'n1', ch: 0 }) === false && R.can(SAM, 'live-hd', { nvr: 'n5', ch: 0 }) === false, `jo ${J(R.rightsOf('jo').grants['live-hd'])}, sam ${J(R.rightsOf('sam').grants['live-hd'])}`)
+    check('... and its audit row names the unusable shadow again', systemRows().length === rows + 1 && systemRows().at(-1).detail.includes('rights.v2.json could not be used ('), systemRows().at(-1)?.detail)
+  }
+  rmSync(UNREADABLE, { recursive: true, force: true })
+  // the shadow replacing it cannot be written (a folder where its temp file goes): nothing to put back, the
+  // unusable one never left its place, so the next try fails closed the same way
+  writeFileSync(R.RIGHTS_SHADOW, 'not json')
+  writeFileSync(R.RIGHTS_FILE, `${v1}   `)
+  const shadowTmp = `${R.RIGHTS_SHADOW}.tmp-${process.pid}`
+  mkdirSync(shadowTmp)
+  writeFileSync(join(shadowTmp, 'x'), 'x')
+  rows = systemRows().length
+  const e3 = threw(() => quiet(() => R.rightsOf('jo')))
+  check('shadow unusable and its replacement cannot be written: nothing thrown, the unusable one in its place, its copy kept, rights.json version 1, Live HD for nobody', e3 === null && fileText(R.RIGHTS_SHADOW) === 'not json' && fileText(UNREADABLE) === 'not json' && disk().version === 1 && R.rightsOf('jo').grants['live-hd'].length === 0 && systemRows().length === rows, e3?.message)
+  rmSync(shadowTmp, { recursive: true, force: true })
+  rmSync(UNREADABLE, { recursive: true, force: true })
+  // the shadow replaced, then rights.json cannot be written: the shadow now there holds no Live HD, so the
+  // next try gives none either (restored from it)
   writeFileSync(R.RIGHTS_FILE, `${v1} `)
   const blocker = `${R.RIGHTS_FILE}.tmp-${process.pid}`
   mkdirSync(blocker)
   rows = systemRows().length
   const e2 = threw(() => quiet(() => R.rightsOf('jo')))
-  check('shadow unusable and rights.json cannot be written: the unusable shadow back in its place, Live HD for nobody', e2 === null && readFileSync(R.RIGHTS_SHADOW, 'utf8') === 'not json' && !existsSync(UNREADABLE) && disk().version === 1 && R.rightsOf('jo').grants['live-hd'].length === 0 && systemRows().length === rows, e2?.message)
+  check('shadow unusable and rights.json cannot be written: nothing thrown, the copy kept, the shadow now holds no Live HD, rights.json version 1, Live HD for nobody', e2 === null && fileText(UNREADABLE) === 'not json' && J(shadowUsers()) === J({ boss: [], jo: [], sam: [] }) && disk().version === 1 && R.rightsOf('jo').grants['live-hd'].length === 0 && systemRows().length === rows, e2?.message)
   rmSync(blocker, { recursive: true, force: true })
   writeFileSync(R.RIGHTS_FILE, v1)
   quiet(() => R.loadRights())
-  check('... and the next try (the file changed) does it: kept aside, Live HD for nobody, audited', existsSync(UNREADABLE) && disk().version === 2 && R.rightsOf('jo').grants['live-hd'].length === 0 && systemRows().length === rows + 1 && /rights\.v2\.json\.unreadable/.test(systemRows().at(-1).detail))
+  check('... and the next try (the file changed): still Live HD for nobody, upgraded and audited', disk().version === 2 && R.rightsOf('jo').grants['live-hd'].length === 0 && R.rightsOf('sam').grants['live-hd'].length === 0 && systemRows().length === rows + 1, systemRows().at(-1)?.detail)
   rmSync(UNREADABLE, { recursive: true, force: true })
 }
 
