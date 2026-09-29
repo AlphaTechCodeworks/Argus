@@ -3,6 +3,7 @@
 // disks.mjs, netshares.mjs). The NAS password is sent once and cleared: the page never keeps it,
 // and no answer from the server ever contains it.
 import { DEFAULT_OSD, OSD_CORNERS, cleanOsdSettings, cornerOf, drawOsd, osdFont, osdLayout } from './osd-overlay.js'
+import { locationEdit } from './storage.js'
 
 const $ = (id) => document.getElementById(id)
 const notice = $('notice')
@@ -244,6 +245,54 @@ $('misc').addEventListener('submit', async (e) => {
 
 // ---- storage locations --------------------------------------------------------------------------------
 
+// A location's space limit and own free-space marks, as typed and not saved yet: the cards are rebuilt
+// every 30 s (loadStorage), and that must not throw away what an admin is typing.
+const locEdits = new Map() // id -> { limitGB, lowFreePct, floorFreePct } (the inputs' text)
+let locNote = null // { id, text, bad }: the last save's answer, shown on its card
+
+/** The card's form: the limit (enforced) and the marks, empty for none / the default. */
+function locationForm(l) {
+  const typed = locEdits.get(l.id) ?? { limitGB: l.limitGB ?? '', lowFreePct: l.lowFreePct ?? '', floorFreePct: l.floorFreePct ?? '' }
+  const input = (key, attrs) => {
+    const i = el('input', { type: 'number', value: String(typed[key]), ...attrs })
+    i.addEventListener('input', () => locEdits.set(l.id, { ...(locEdits.get(l.id) ?? typed), [key]: i.value }))
+    return i
+  }
+  const limit = input('limitGB', { min: 1, step: 'any', placeholder: 'none' })
+  const low = input('lowFreePct', { min: 1, max: 50, step: 1, placeholder: `default ${settings.storage.lowFreePct}` })
+  const floor = input('floorFreePct', { min: 1, max: 49, step: 1, placeholder: `default ${settings.storage.floorFreePct}` })
+  const form = el(
+    'form',
+    { className: 'se-grid st-loc-form', autocomplete: 'off' },
+    el('label', {}, 'Space limit for Argus (GB)', limit),
+    el('label', {}, 'Low mark (% free)', low),
+    el('label', {}, 'Hard floor (% free)', floor),
+    el('div', { className: 'se-actions' }, el('button', { type: 'submit', textContent: 'Save' }))
+  )
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const step = locationEdit(l, { limitGB: limit.value, lowFreePct: low.value, floorFreePct: floor.value })
+    if (step.error) {
+      locNote = { id: l.id, text: step.error, bad: true }
+      return renderLocations()
+    }
+    // a new or lower limit can delete footage within 5 minutes: said in so many words, and a no is taken
+    if (step.ask && !confirm(step.ask)) {
+      locNote = { id: l.id, text: 'Not changed', bad: false }
+      return renderLocations()
+    }
+    try {
+      await api('POST', '/api/admin/storage', step.body)
+      locEdits.delete(l.id)
+      locNote = { id: l.id, text: 'Saved', bad: false }
+    } catch (err) {
+      locNote = { id: l.id, text: err.message, bad: true }
+    }
+    await loadStorage({ force: true })
+  })
+  return form
+}
+
 function renderLocations() {
   if (!locations.length) {
     $('locations').replaceChildren(el('p', { className: 'st-empty', textContent: 'No storage locations yet: nothing can be recorded. Add a folder below, or prepare a USB drive.' }))
@@ -263,10 +312,12 @@ function renderLocations() {
         'article',
         { className: 'st-card' },
         el('div', { className: 'st-card-head' }, el('h3', { textContent: l.path }), el('span', { className: `st-status ${h.ok ? 'st-online' : 'st-offline'}`, textContent: h.ok ? 'OK' : 'Not usable' })),
-        el('p', { className: 'st-meta', textContent: `${l.type} · ${l.id}${l.limitGB ? ` · limit ${l.limitGB} GB` : ''}` }),
+        el('p', { className: 'st-meta', textContent: `${l.type} · ${l.id}${l.limitGB ? ` · limit ${l.limitGB.toLocaleString('en-GB')} GB, enforced` : ''}` }),
         h.totalBytes ? el('p', { className: 'st-meta', textContent: `${gb(h.freeBytes)} free of ${gb(h.totalBytes)} (${pct}%)${h.writeMBps ? ` · writes ${h.writeMBps} MB/s` : ''}` }) : null,
         h.ok ? null : el('p', { className: 'st-error-text', textContent: h.reason }),
         l.sameDisk ? el('p', { className: 'st-warn-text', textContent: 'On the system disk: recordings could fill it.' }) : null,
+        locationForm(l),
+        locNote?.id === l.id ? el('p', { className: locNote.bad ? 'st-error' : 'st-meta', textContent: locNote.text }) : null,
         el('div', { className: 'st-card-actions' }, role, remove)
       )
     })
@@ -353,10 +404,11 @@ $('f-select').addEventListener('click', () => {
 })
 $('f-cancel').addEventListener('click', () => $('folders').close())
 
-async function loadStorage() {
+async function loadStorage({ force = false } = {}) {
   try {
     locations = (await api('GET', '/api/admin/storage')).locations
-    renderLocations()
+    // not while an admin is in a location's limit or marks (the 30-second refresh took the cursor away)
+    if (force || !document.activeElement?.closest?.('#locations .st-loc-form')) renderLocations()
     if (!camEdits.size) renderCameras() // (never throws away unsaved camera changes)
   } catch (err) {
     say('l-msg', err.message, true)

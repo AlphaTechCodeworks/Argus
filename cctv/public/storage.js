@@ -54,6 +54,48 @@ export function forecastCell(f, { alertDays = 7 } = {}) {
   }
 }
 
+/** Whole GB of 1,000,000,000 bytes, as a space limit is set: "5,512 GB". */
+export const wholeGB = (b) => `${Math.round(b / 1e9).toLocaleString('en-GB')} GB`
+
+/** Under a location with a space limit: that it is enforced, and how (housekeeping.mjs, 2026-09-29). */
+export const LIMIT_TEXT =
+  "The space limit is enforced: when Argus's recordings here go over it, the oldest are deleted down to it within 5 minutes, footage past its full-video days first; never the newest 24 hours, nor bookmarked or exported stretches. 1 GB = 1,000,000,000 bytes."
+
+/** Argus's recordings on a location (as the index counts them) against its space limit. */
+export function limitCell(l) {
+  const held = Number.isFinite(l?.argusBytes) ? l.argusBytes : null
+  const limit = Number.isFinite(l?.limitBytes) && l.limitBytes > 0 ? l.limitBytes : null
+  if (!limit) return { value: held === null ? NOT_AVAILABLE : wholeGB(held), state: 'ok', note: 'no space limit set' }
+  if (held === null) return { value: NOT_AVAILABLE, state: 'ok', note: `of the ${wholeGB(limit)} limit (enforced)` }
+  const pct = (held / limit) * 100
+  return { value: wholeGB(held), state: held > limit ? 'bad' : pct >= 95 ? 'warn' : 'ok', note: `of the ${wholeGB(limit)} limit (enforced), ${Math.round(pct)} %` }
+}
+
+/**
+ * Settings > Storage, a location's card: what saving its limit and own marks sends, and the question
+ * asked first when the limit is new or lower (it is enforced: footage over it goes within 5 minutes).
+ * form: the inputs' text; empty is no limit / the default mark. The server checks everything again.
+ * @returns {{ body: object|null, ask: string|null, error: string|null }}
+ */
+export function locationEdit(loc, form) {
+  const text = (v) => String(v ?? '').trim()
+  const limitGB = text(form.limitGB) === '' ? null : Number(text(form.limitGB))
+  if (limitGB !== null && !(Number.isFinite(limitGB) && limitGB > 0)) return { body: null, ask: null, error: 'The space limit must be a positive number of GB (1 GB = 1,000,000,000 bytes), or empty for none.' }
+  const marks = {}
+  for (const [k, name] of [['lowFreePct', 'The low mark'], ['floorFreePct', 'The hard floor']]) {
+    const t = text(form[k])
+    const v = t === '' ? null : Number(t)
+    if (v !== null && !(Number.isInteger(v) && v >= 1 && v <= 50)) return { body: null, ask: null, error: `${name} must be a whole number from 1 to 50 (% free), or empty for the default.` }
+    marks[k] = v
+  }
+  const body = { action: 'set', id: loc.id, limitGB, ...marks }
+  const lower = limitGB !== null && !(Number(loc.limitGB) > 0 && limitGB >= Number(loc.limitGB))
+  const ask = lower
+    ? `Limit Argus's recordings on ${loc.path} to ${limitGB.toLocaleString('en-GB')} GB?\n\nThe limit is enforced: if Argus holds more than that there, its oldest footage is deleted within 5 minutes, down to the limit (footage past its full-video days first; never the newest 24 hours, nor bookmarked or exported stretches). Deleted footage cannot be brought back.\n\n1 GB = 1,000,000,000 bytes.`
+    : null
+  return { body, ask, error: null }
+}
+
 /** One camera row: days kept here against what the camera is meant to keep. */
 function cameraRow(c) {
   const target = Number.isFinite(c.targetDays) ? `${c.targetDays} days` : NOT_AVAILABLE
@@ -89,6 +131,8 @@ export function renderStorage(data, { alertDays = 7 } = {}) {
       growth: l.forecast && Number.isFinite(l.forecast.bytesPerDay) ? `${bytes(l.forecast.bytesPerDay)} a day` : NOT_AVAILABLE,
       forecast: forecastCell(l.forecast, { alertDays }),
       recycling: l.cycling === true ? 'yes — oldest footage is being overwritten as designed' : l.cycling === false ? 'not yet' : NOT_AVAILABLE,
+      limit: limitCell(l),
+      limitText: Number.isFinite(l.limitBytes) && l.limitBytes > 0 ? LIMIT_TEXT : '',
       cameras: (l.cameras ?? []).map(cameraRow)
     }
   })
@@ -180,9 +224,9 @@ export function switchOnWarning(jobs) {
     ? `Footage ${full} (the full-video days) will be rewritten to time-lapse, one picture every ${d.timelapseS ?? '?'} s, and footage ${total} (the total days) deleted, for good. Neither can be undone.`
     : `Footage ${total} (the total days) will be deleted, for good. This cannot be undone.`
   const own = jobs?.camerasOwnDays ? `\n\n${cams(jobs.camerasOwnDays)} (Settings › Recording) and ${jobs.camerasOwnDays === 1 ? 'follows' : 'follow'} those.` : ''
-  // "kept" must not read as "kept for ever": housekeeping.mjs does not ask the bookmarks (2026-09-29),
-  // and it deletes past the total days whatever this switch says. Out when it does ask them.
-  const kept = 'Bookmarked and exported stretches are kept by these two jobs. The clean-up rules on this tab still delete footage past the total days, bookmarked or not, whatever this switch says.'
+  // housekeeping.mjs asks the bookmarks too since 2026-09-29; it deletes past the total days (and at low
+  // space, and over a space limit) whatever this switch says
+  const kept = 'Bookmarked and exported stretches are kept, by these two jobs and by the clean-up rules on this tab, which delete footage past the total days whatever this switch says.'
   return `Switch time-lapse and retention ON?\n\n${what}\n\n${kept}${own}`
 }
 
@@ -242,6 +286,7 @@ if (typeof document !== 'undefined') {
         for (const c of [
           { label: 'Used', value: l.usedPct, state: l.usedState, note: l.used },
           { label: 'Free', value: l.free, state: 'ok', note: '' },
+          { label: "Argus's recordings", value: l.limit.value, state: l.limit.state, note: l.limit.note },
           { label: 'Growth', value: l.growth, state: 'ok', note: '' },
           { label: 'Forecast', value: l.forecast.value, state: l.forecast.state, note: l.forecast.note },
           { label: 'Recycling', value: l.recycling, state: 'ok', note: '' }
@@ -251,6 +296,7 @@ if (typeof document !== 'undefined') {
           cards.append(node)
         }
         panel.append(cards)
+        if (l.limitText) panel.append(el('p', { className: 'hp-note', textContent: l.limitText }))
 
         if (l.cameras.length) {
           // folded: a hundred cameras is a hundred rows, and the cards above already say how it stands

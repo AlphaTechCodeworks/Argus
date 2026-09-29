@@ -15,6 +15,7 @@
 import { mkdirSync, readFileSync, renameSync, statfsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isAdmin } from './auth.mjs'
+import { freeMarks } from './location-health.mjs'
 import { lastRuns } from './storage-jobs.mjs'
 
 // The caller may hand us a plain user name or the { user, admin } the newer routes pass around.
@@ -175,10 +176,17 @@ const roundDays = (ms) => (Number.isFinite(ms) ? Math.round((ms / DAY) * 10) / 1
 /**
  * Everything the Storage page and the jobs need, per location and per camera.
  *
+ * Each location's row carries its own free-space marks (location-health.mjs freeMarks), what Argus's
+ * recordings take there as the index counts them (argusBytes: the index's totals, one row read) against
+ * its space limit (limitBytes, 1 GB = 1,000,000,000 bytes; enforced by housekeeping.mjs since
+ * 2026-09-29), and housekeeping's alarms about it (`alarms`: its housekeepingAlarms(), handed in so this
+ * module does not load the jobs).
+ *
  * @param {{ settings?: object, index: object|null, history?: object, now?: number,
- *           freeOf?: (loc) => {freeBytes,totalBytes}, present?: (loc) => boolean }} o
+ *           freeOf?: (loc) => {freeBytes,totalBytes}, present?: (loc) => boolean,
+ *           alarms?: { id, path, kind, text }[] }} o
  */
-export function buildStorageReport({ settings, index = null, history = {}, now = Date.now(), freeOf = defaultFreeOf, present = markerPresent } = {}) {
+export function buildStorageReport({ settings, index = null, history = {}, now = Date.now(), freeOf = defaultFreeOf, present = markerPresent, alarms = [] } = {}) {
   if (!settings?.storage) throw new Error('buildStorageReport needs the settings object')
   const warnings = []
   const floorFreePct = settings.storage?.floorFreePct ?? 5
@@ -215,24 +223,33 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
 
   const locations = []
   for (const loc of settings.storage?.locations ?? []) {
+    const marks = freeMarks(settings, loc)
+    let argusBytes = null
+    try {
+      argusBytes = index ? index.locationUse(loc.id).bytes : null
+    } catch {}
     const row = {
       id: loc.id,
       path: loc.path,
       type: loc.type,
       role: loc.role,
       limitGB: loc.limitGB ?? null,
+      limitBytes: Number(loc.limitGB) > 0 ? Number(loc.limitGB) * 1e9 : null,
+      argusBytes,
       mounted: false,
       usedBytes: null,
       freeBytes: null,
       totalBytes: null,
       usedPct: null,
       freePct: null,
-      lowFreePct,
-      floorFreePct,
+      lowFreePct: marks.lowFreePct,
+      floorFreePct: marks.floorFreePct,
       cameras: [],
       cycling: null,
-      forecast: { bytesPerDay: null, daysToFull: null, confident: false, reason: 'not available', samples: 0, spanMs: 0 }
+      forecast: { bytesPerDay: null, daysToFull: null, confident: false, reason: 'not available', samples: 0, spanMs: 0 },
+      alarms: alarms.filter((a) => a?.id === loc.id).map((a) => String(a.text))
     }
+    warnings.push(...row.alarms)
     let mounted = false
     try {
       mounted = present(loc)
@@ -283,7 +300,7 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
       row.cycling = row.cameras.length === 0 ? null : row.cameras.some((c) => c.meetsTarget === true)
     }
 
-    row.forecast = forecast(history?.[loc.id] ?? [], { now, freeBytes: row.freeBytes, totalBytes: row.totalBytes, floorFreePct })
+    row.forecast = forecast(history?.[loc.id] ?? [], { now, freeBytes: row.freeBytes, totalBytes: row.totalBytes, floorFreePct: marks.floorFreePct })
     locations.push(row)
   }
 
@@ -354,11 +371,13 @@ export function jobsReport(settings) {
 let indexRef = () => null
 let dataDirRef = null
 let settingsRef = null
+let alarmsRef = () => []
 /**
- * server.mjs: setStorageContext({ index, dataDir }) after the index is open.
+ * server.mjs: setStorageContext({ index, dataDir, alarms }) after the index is open; alarms: housekeeping.mjs
+ * housekeepingAlarms (a location over its limit with nothing it may delete, or not freeing space).
  * `settingsOf` is only for the offline tests, where settings.mjs cannot be loaded at all.
  */
-export function setStorageContext({ index = null, dataDir = null, settingsOf = null } = {}) {
+export function setStorageContext({ index = null, dataDir = null, settingsOf = null, alarms = null } = {}) {
   // `index` may be the recordings index itself or a function that returns it. The server has only
   // the getter to hand at start-up, because the index is not open yet then -- and handing the
   // getter straight through produced a page that threw "index.cameras is not a function" the first
@@ -366,6 +385,7 @@ export function setStorageContext({ index = null, dataDir = null, settingsOf = n
   indexRef = typeof index === 'function' ? index : () => index
   dataDirRef = dataDir
   settingsRef = settingsOf
+  alarmsRef = typeof alarms === 'function' ? alarms : () => []
 }
 
 /**
@@ -387,7 +407,11 @@ export async function handleStorage(method, pathname, _readJson, user) {
   } catch (e) {
     console.warn(`[storage-report] sample not taken: ${e.message}`)
   }
-  return [200, { ...buildStorageReport({ settings, index: indexRef(), history }), jobs: jobsReport(settings) }]
+  let alarms = []
+  try {
+    alarms = alarmsRef() ?? []
+  } catch {}
+  return [200, { ...buildStorageReport({ settings, index: indexRef(), history, alarms }), jobs: jobsReport(settings) }]
 }
 
 export const _test = { HISTORY_FILE }

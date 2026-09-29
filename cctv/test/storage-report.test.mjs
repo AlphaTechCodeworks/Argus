@@ -158,6 +158,18 @@ const seg = (nvr, ch, ageDays, loc = 'L1') => ({ nvr, ch, loc, path: `/srv/rec/$
   check('a location we cannot stat: nulls and a warning, never zeroes', r.locations[0].usedBytes === null && r.locations[0].usedPct === null && r.warnings.some((w) => /statfs said no/.test(w)))
 }
 
+// ---- each location's space limit and own marks (the owner's 12,000 GB of the NAS, 2026-09-29) ----------
+{
+  const NAS = { ...L2, role: 'main', limitGB: 12_000, lowFreePct: 7, floorFreePct: 4 }
+  const index = { ...fakeIndex([seg('n1', 0, 3, 'L2')]), locationUse: (loc) => ({ bytes: loc === 'L2' ? 5_512e9 : 0, segments: 1 }) }
+  const alarms = [{ id: 'L2', path: NAS.path, kind: 'limit-blocked', text: `${NAS.path}: over its 12,000 GB limit (12,100.0 GB held), but everything left there is from the newest 24 h: kept.` }]
+  const r = buildStorageReport({ settings: settings([L1, NAS]), index, history: {}, now: NOW, freeOf: () => ({ freeBytes: 7.7e12, totalBytes: 16.63e12 }), present: () => true, alarms })
+  const nas = r.locations.find((l) => l.id === 'L2')
+  check('a location\'s own marks are its row\'s (the report\'s defaults stay the settings\')', nas.lowFreePct === 7 && nas.floorFreePct === 4 && r.locations[0].lowFreePct === 15 && r.lowFreePct === 15, JSON.stringify({ low: nas.lowFreePct, floor: nas.floorFreePct }))
+  check('Argus\'s bytes there (the index\'s count) and the limit in bytes (1 GB = 1,000,000,000 bytes)', nas.argusBytes === 5_512e9 && nas.limitBytes === 12_000e9 && r.locations[0].limitBytes === null, JSON.stringify({ a: nas.argusBytes, l: nas.limitBytes }))
+  check('housekeeping\'s alarm for the location is in the warnings and on its row', r.warnings.some((w) => /newest 24 h/.test(w)) && nas.alarms.length === 1, JSON.stringify(r.warnings))
+}
+
 // ---- the alert candidate ------------------------------------------------------------------------
 const reportWith = (o) => ({ locations: [{ id: 'L1', path: '/srv/rec/usb1', mounted: true, usedPct: 90, cycling: false, forecast: { bytesPerDay: 50e9, daysToFull: 3, confident: true, reason: '' }, ...o }] })
 {
@@ -260,6 +272,32 @@ check('days: null is words', days(null) === NOT_AVAILABLE && days(3) === '3 days
   const l = r.locations[0]
   check('render: an unmounted drive is words everywhere, never 0', l.status.value === 'Not mounted' && l.used === NOT_AVAILABLE && l.usedPct === NOT_AVAILABLE && l.free === NOT_AVAILABLE && l.growth === NOT_AVAILABLE)
 }
+{
+  // Argus's recordings against the location's space limit (1 GB = 1,000,000,000 bytes), and that it is enforced
+  const { limitCell, LIMIT_TEXT } = await import('../public/storage.js')
+  const at = (argusBytes, limitBytes) => renderStorage({ locations: [{ id: 'L2', path: '/srv/cctv-net/nas', type: 'network', role: 'main', mounted: true, usedBytes: 8.9e12, freeBytes: 7.73e12, totalBytes: 16.63e12, usedPct: 53.5, freePct: 46.5, lowFreePct: 7, floorFreePct: 4, argusBytes, limitBytes, cameras: [] }] }).locations[0]
+  const l = at(5_512e9, 12_000e9)
+  check('render: Argus\'s recordings against the limit, in whole GB, enforced', l.limit.value === '5,512 GB' && l.limit.note === 'of the 12,000 GB limit (enforced), 46 %' && l.limit.state === 'ok', JSON.stringify(l.limit))
+  check('render: ... near the limit (95 %) a warning, over it bad', at(11_500e9, 12_000e9).limit.state === 'warn' && at(12_100e9, 12_000e9).limit.state === 'bad')
+  check('render: ... the line that says it is enforced and how, with what a GB is', l.limitText === LIMIT_TEXT && /enforced/.test(LIMIT_TEXT) && /newest 24 hours/.test(LIMIT_TEXT) && /bookmarked/.test(LIMIT_TEXT) && /1 GB = 1,000,000,000 bytes/.test(LIMIT_TEXT), l.limitText)
+  const none = at(5_512e9, null)
+  check('render: no limit set: the figure, and no enforcement line', none.limit.value === '5,512 GB' && /no space limit/.test(none.limit.note) && none.limitText === '', JSON.stringify(none.limit))
+  check('render: Argus\'s bytes not known: words, not 0', limitCell({ argusBytes: null, limitBytes: 12_000e9 }).value === NOT_AVAILABLE)
+  check('render: the location\'s own marks colour its use', at(5_512e9, 12_000e9).usedState === 'ok' && renderStorage({ locations: [{ id: 'x', path: '/p', mounted: true, usedBytes: 94, freeBytes: 6, totalBytes: 100, usedPct: 94, freePct: 6, lowFreePct: 7, floorFreePct: 4, cameras: [] }] }).locations[0].usedState === 'warn')
+}
+{
+  // Settings > Storage, a location's card: its limit and own marks, and the question asked before a limit
+  // that could delete footage at once
+  const { locationEdit } = await import('../public/storage.js')
+  const nas = { id: 'nas-1', path: '/srv/cctv-net/nas', limitGB: null, lowFreePct: null, floorFreePct: null }
+  const e1 = locationEdit(nas, { limitGB: '12000', lowFreePct: '7', floorFreePct: '' })
+  check('edit: what is sent (empty is the default / no limit)', JSON.stringify(e1.body) === JSON.stringify({ action: 'set', id: 'nas-1', limitGB: 12000, lowFreePct: 7, floorFreePct: null }) && !e1.error, JSON.stringify(e1))
+  check('edit: a new limit is asked about first: enforced, what goes and what never does, for good', /12,000 GB/.test(e1.ask) && /enforced/.test(e1.ask) && /oldest/.test(e1.ask) && /newest 24 hours/.test(e1.ask) && /bookmarked/.test(e1.ask) && /cannot be brought back/.test(e1.ask) && /1 GB = 1,000,000,000 bytes/.test(e1.ask), e1.ask)
+  const set = { ...nas, limitGB: 12000 }
+  check('edit: a lower limit is asked about; a higher one, the same one, or none is not', !!locationEdit(set, { limitGB: '11000' }).ask && !locationEdit(set, { limitGB: '13000' }).ask && !locationEdit(set, { limitGB: '12000' }).ask && !locationEdit(set, { limitGB: '' }).ask)
+  check('edit: a limit that is not a positive number is refused on the page', /positive/.test(locationEdit(nas, { limitGB: '-3' }).error ?? '') && /positive/.test(locationEdit(nas, { limitGB: 'lots' }).error ?? ''))
+  check('edit: marks that are not whole numbers 1-50 refused on the page', /whole number/.test(locationEdit(nas, { lowFreePct: '7.5' }).error ?? '') && /whole number/.test(locationEdit(nas, { floorFreePct: '0' }).error ?? ''))
+}
 check('render: nothing configured is not a crash', renderStorage({}).empty === true && renderStorage(null).empty === true)
 check('render: a camera whose days we cannot say gets no colour', renderStorage({ locations: [{ id: 'L', path: '/p', mounted: true, usedBytes: 1, freeBytes: 1, totalBytes: 2, usedPct: 50, freePct: 50, cameras: [{ camera: 'c', daysKept: null, targetDays: null, meetsTarget: null }] }] }).locations[0].cameras[0].state === '')
 
@@ -318,8 +356,8 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   check('with "keep everything" the confirm promises no time-lapse, only deletion', !/time-lapse, one picture|rewritten/.test(wk) && /older than 30 days/.test(wk) && /for good/.test(wk), wk)
   check('two things named: "Neither can be undone"', /Neither can be undone\./.test(w), w)
   check('only deletion named: "This cannot be undone", no "Neither"', /This cannot be undone\./.test(wk) && !/Neither/.test(wk) && /This cannot be undone\./.test(we) && !/Neither/.test(we), wk)
-  // housekeeping.mjs does not ask the bookmarks (yet): the confirm must not let "kept" read as "kept for ever"
-  check('the confirm says the clean-up rules still delete past the total days, bookmarked or not', /clean-up rules/.test(w) && /bookmarked or not/.test(w), w)
+  // housekeeping.mjs keeps bookmarked stretches too since 2026-09-29 (it asks the bookmarks as these jobs do)
+  check('the confirm says bookmarked and exported stretches are kept, by the clean-up rules too', /Bookmarked and exported stretches are kept/.test(w) && /clean-up rules/.test(w) && !/bookmarked or not/.test(w), w)
 
   // Save always sends what was picked (review 2026-09-29): the page's idea of the switch can be a
   // minute old, and a "No change" on a stale view left it On while the admin believed it Off.
@@ -351,7 +389,7 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   // repainted every minute: as a live region a screen reader read both lines out again each time
   check('the last-runs list is not a live region (#sj-msg announces saves)', /<ul id="sj-runs"[^>]*>/.test(tl) && !/<ul id="sj-runs"[^>]*aria-live/.test(tl), tl.match(/<ul id="sj-runs"[^>]*>/)?.[0])
   const note = tl.match(/<p class="hp-note">[\s\S]*?<\/p>/)?.[0] ?? ''
-  check('the note under the switch says the clean-up rules delete past the total days, bookmarked or not', /clean-up rules/.test(note) && /total days, bookmarked or not/.test(note), note)
+  check('the note under the switch says what the clean-up rules delete (low space, the space limit, past the total days), bookmarks excepted', /clean-up rules/.test(note) && /space limit/.test(note) && /total days/.test(note) && /except bookmarked and exported stretches/.test(note) && !/bookmarked or not/.test(note), note)
 }
 
 rmSync(data, { recursive: true, force: true })

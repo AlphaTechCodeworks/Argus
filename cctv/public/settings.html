@@ -179,13 +179,14 @@
       </form>
       <!-- not a live region: repainted every minute, and #sj-msg already announces saves -->
       <ul id="sj-runs" class="sj-runs"></ul>
-      <!-- "bookmarked or not" until housekeeping.mjs asks the bookmarks (it does not, 2026-09-29) -->
-      <p class="hp-note">Separate from this switch, and whatever it is set to: the clean-up rules at the bottom of this tab delete the oldest footage when a drive runs low on space, and footage past a camera's total days, bookmarked or not.</p>
+      <!-- housekeeping.mjs keeps bookmarked stretches too since 2026-09-29 -->
+      <p class="hp-note">Separate from this switch, and whatever it is set to: the clean-up rules delete the oldest footage when a location runs low on space or goes over its space limit (set on each location below), and footage past a camera's total days, except bookmarked and exported stretches.</p>
     </section>
 
     <section class="se-section" data-tab="storage" aria-labelledby="loc-title">
       <h2 id="loc-title">Your locations</h2>
-      <p class="st-help">Folders where recordings are written. Each holds a marker file; a location without it (drive unplugged, share down) is never written and recording moves to the next one.</p>
+      <p class="st-help">Folders where recordings are written. Each holds a marker file; a location without it (drive unplugged, share down) is never written and recording moves to the next one. Each can have a space limit for Argus's recordings and free-space marks of its own.</p>
+      <p class="st-help">The space limit is enforced: when Argus's recordings on a location go over it, the oldest are deleted down to it within 5 minutes, footage past its full-video days first; never the newest 24 hours, nor bookmarked or exported stretches. It is in GB of 1,000,000,000 bytes, at most the size of the drive or share. Below a location's low mark, footage past its full-video days is deleted; below its hard floor, any footage, oldest first, and recording moves elsewhere. Empty: no limit, and the default marks (Clean-up rules, below).</p>
       <div id="locations" class="st-cards"></div>
       <details class="se-fold se-add">
         <summary>Add a folder…</summary>
@@ -196,7 +197,7 @@
         </div>
         <label>Type <select id="l-type"><option value="usb">External disk (USB/eSATA)</option><option value="internal">Internal (ZFS pool, disk)</option><option value="network">Network share (NFS, SMB, iSCSI)</option></select></label>
         <label>Role <select id="l-role"><option value="main">Main</option><option value="overflow">Overflow</option><option value="archive">Archive</option></select></label>
-        <label>Space limit (GB, empty = none) <input id="l-limit" type="number" min="1" step="any" /></label>
+        <label>Space limit for Argus (GB of 1,000,000,000 bytes; empty = none; enforced) <input id="l-limit" type="number" min="1" step="any" /></label>
         <label class="st-check se-wide" id="l-same-row" hidden><input id="l-same" type="checkbox" /> Same disk as the system (recordings could fill the system disk)</label>
         <div class="se-actions"><button type="submit">Add location</button><span id="l-msg" class="st-meta"></span></div>
       </form>
@@ -238,8 +239,8 @@
       <form id="misc" class="se-grid" autocomplete="off">
         <label>Recent footage kept in RAM <select id="m-recent"></select></label>
         <label>Timeline thumbnails <select id="m-thumbs"></select></label>
-        <label>Low space: delete oldest below (% free) <input id="m-low" type="number" min="1" max="50" required /></label>
-        <label>Hard floor: full-video period touched only below (% free) <input id="m-floor" type="number" min="1" max="49" required /></label>
+        <label>Low space: delete oldest below (% free; the default, a location can have its own) <input id="m-low" type="number" min="1" max="50" required /></label>
+        <label>Hard floor: full-video period touched only below (% free; the default, a location can have its own) <input id="m-floor" type="number" min="1" max="49" required /></label>
         <p id="m-ram" class="st-help se-wide" hidden></p>
         <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="m-msg" class="st-meta"></span></div>
       </form>
