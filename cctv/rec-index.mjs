@@ -77,14 +77,26 @@ CREATE INDEX IF NOT EXISTS backfill_state ON backfill_gaps (state, from_ms);
  * 102 ms for 440,000 synthetic rows on the development PC (about 20 ms on production's VM, which scans
  * 4-5 times faster), and the index grows to about 3.7 million rows at 30 days (perf report 1): a main
  * thread stall every time it was asked. Here it is one row. The triggers are in the file, so a row
- * written by any connection counts; REPLACE (addSegment of a file already indexed: a time-lapse rewrite)
- * takes the old row off only with recursive_triggers on, which openRecIndex sets. A row with no location
- * counts under ''. Created, and filled from the rows already there, the first time this code opens an
- * index (one read of every row, once). To rebuild it, drop the table: the next open fills it again.
+ * written by any connection counts. REPLACE (addSegment of a file already indexed: a time-lapse rewrite)
+ * deletes the old row without the delete trigger under SQLite's default settings, which every other
+ * connection has (older code of ours after a roll-back, the sqlite3 tool): so the old row is taken off
+ * BEFORE the insert, by loc_totals_replace, and the delete trigger is left out of it (recursive_triggers
+ * off, as openRecIndex sets it; on, the old row would be taken off twice). Until 2026-09-29's review it
+ * was the other way round, and a REPLACE from any other connection counted the file twice. (A hand-typed
+ * INSERT OR IGNORE / OR FAIL of a file already indexed would still count wrong: nothing here does that.)
+ * A row with no location counts under ''. Created, and filled from the rows already there, the first time
+ * this code opens an index (one read of every row, once).
+ * To rebuild it, WITH THE SERVER STOPPED: DROP TABLE loc_totals, then start it (the open fills it again).
+ * Dropped while the server runs, every segment it indexes fails ("no such table") until it is restarted.
  * (2026-09-29, perf report Task 3 and the owner's 12 TB limit)
  */
 const TOTALS_SCHEMA = `
 CREATE TABLE IF NOT EXISTS loc_totals (loc TEXT PRIMARY KEY NOT NULL, bytes INTEGER NOT NULL, segments INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS loc_totals_replace BEFORE INSERT ON segments
+  WHEN EXISTS (SELECT 1 FROM segments WHERE path = NEW.path) BEGIN
+  UPDATE loc_totals SET bytes = bytes - (SELECT bytes FROM segments WHERE path = NEW.path), segments = segments - 1
+    WHERE loc = (SELECT IFNULL(loc, '') FROM segments WHERE path = NEW.path);
+END;
 CREATE TRIGGER IF NOT EXISTS loc_totals_add AFTER INSERT ON segments BEGIN
   INSERT INTO loc_totals (loc, bytes, segments) VALUES (IFNULL(NEW.loc, ''), NEW.bytes, 1)
     ON CONFLICT (loc) DO UPDATE SET bytes = bytes + excluded.bytes, segments = segments + 1;
@@ -180,8 +192,9 @@ export const CAMERA_SQL = {
   // older than its retention, and every camera again once a pass has deleted what was) read every
   // one of its rows: 600 ms for 87 cameras on a 3-day index, three times every 5 minutes. A row that
   // ends before it starts (never written on purpose) now waits until its start passes the cutoff:
-  // this only ever deletes less, never more.
-  olderThan: `SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms < ? AND end_ms < ? ORDER BY start_ms LIMIT ?`,
+  // this only ever deletes less, never more. The lower bound: where the walk goes on after a
+  // bookmarked stretch (thinning.mjs runRetention; NO_START for the camera's oldest).
+  olderThan: `SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms < ? AND end_ms < ? ORDER BY start_ms LIMIT ?`,
   // cameras(): one index seek per camera (a skip scan of segments_cam) instead of SELECT DISTINCT,
   // which reads every entry of the index (26 ms on 3 days, and the site keeps 183)
   firstNvr: 'SELECT MIN(nvr) AS nvr FROM segments',
@@ -205,10 +218,11 @@ export const LOCATION_SQL = {
   // at a location every 5 minutes (housekeeping.mjs). The cameras come as a JSON list of [nvr, ch]; the
   // subquery is oldestOf's, searched once per camera (CROSS JOIN keeps the list the outer loop). Asking
   // 87 cameras one by one was 87 statements, and asking them again for every file deleted was the 22.8 ms
-  // pick that froze the main thread 12-15 s a run once the NAS is full (perf report R2).
+  // pick that froze the main thread 12-15 s a run once the NAS is full (perf report R2). From a start
+  // time on: the first row no bookmark covers (segment-delete.mjs firstUnprotected), NO_START otherwise.
   oldestPerCamera: `SELECT s.nvr, s.ch, s.path, s.start_ms AS startMs, s.end_ms AS endMs, s.bytes, s.keyframes, s.loc, s.source, s.filled_ms AS filledMs
     FROM json_each(?) AS c CROSS JOIN segments AS s
-    WHERE s.rowid IN (SELECT rowid FROM segments INDEXED BY segments_cam WHERE nvr = json_extract(c.value, '$[0]') AND ch = json_extract(c.value, '$[1]') AND loc = ? ORDER BY start_ms LIMIT ?)
+    WHERE s.rowid IN (SELECT rowid FROM segments INDEXED BY segments_cam WHERE nvr = json_extract(c.value, '$[0]') AND ch = json_extract(c.value, '$[1]') AND loc = ? AND start_ms >= ? ORDER BY start_ms LIMIT ?)
     ORDER BY c.key, s.start_ms, s.rowid`
 }
 /** "From the start" for oldestOf / oldest: earlier than any start_ms. */
@@ -236,9 +250,9 @@ export function openRecIndex(file) {
     if (!have.has('source')) db.exec('ALTER TABLE segments ADD COLUMN source TEXT')
     if (!have.has('filled_ms')) db.exec('ALTER TABLE segments ADD COLUMN filled_ms INTEGER')
   }
-  // The totals per location (TOTALS_SCHEMA above). REPLACE takes the old row off through the delete
-  // trigger only with recursive_triggers on; no other trigger in this file calls itself.
-  db.exec('PRAGMA recursive_triggers = ON')
+  // The totals per location (TOTALS_SCHEMA above). A REPLACE's old row is taken off by loc_totals_replace,
+  // so the delete trigger must stay out of it: recursive_triggers off (SQLite's default, set in case).
+  db.exec('PRAGMA recursive_triggers = OFF')
   if (db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = 'loc_totals'").get()) db.exec(TOTALS_SCHEMA)
   else {
     // first open with this code: create and fill in one transaction, asked again inside it, so a row
@@ -395,12 +409,13 @@ export function openRecIndex(file) {
     /** One camera's oldest segments on one location (those starting at or after fromMs). */
     oldestOf: (nvr, ch, loc, limit, fromMs = NO_START) => q.oldestOf.all(String(nvr), Number(ch), loc, fromMs, limit).map(plain),
     /**
-     * Each camera's oldest `limit` segments on one location, in one statement: cams [{ nvr, ch }]; the
-     * rows come camera by camera in the order given, each camera's oldest first.
+     * Each camera's oldest `limit` segments on one location (those starting at or after fromMs), in one
+     * statement: cams [{ nvr, ch }]; the rows come camera by camera in the order given, each camera's
+     * oldest first.
      */
-    oldestPerCamera: (loc, cams, limit) => q.oldestPerCamera.all(JSON.stringify(cams.map((c) => [String(c.nvr), Number(c.ch)])), String(loc), Number(limit)).map(plain),
-    /** One camera's segments that ended before ms (oldest first). */
-    olderThan: (nvr, ch, ms, limit) => q.olderThan.all(String(nvr), Number(ch), ms, ms, limit).map(plain),
+    oldestPerCamera: (loc, cams, limit, fromMs = NO_START) => q.oldestPerCamera.all(JSON.stringify(cams.map((c) => [String(c.nvr), Number(c.ch)])), String(loc), fromMs, Number(limit)).map(plain),
+    /** One camera's segments that ended before ms (oldest first; those starting at or after fromMs). */
+    olderThan: (nvr, ch, ms, limit, fromMs = NO_START) => q.olderThan.all(String(nvr), Number(ch), fromMs, ms, ms, limit).map(plain),
     /** Whether a segment file has a row. */
     has: (path) => q.has.get(String(path)) !== undefined,
     remove(path) {

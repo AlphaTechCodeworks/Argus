@@ -167,6 +167,19 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
     }
   }
   check('olderThan gives what it gave before (files that end before they start: never more)', bad.length === 0, bad.length ? `${bad.length} of ${asked} differ: ${bad.slice(0, 4).join('; ')}` : `${asked} lookups`)
+  // from a start time on (runRetention's walk after a bookmarked stretch, 2026-09-29): exactly the rows
+  // of the whole answer that start at or after it
+  const bad2 = []
+  for (const [nvr, ch] of cams) {
+    const cut = T0 + 3 * 24 * 60 * MIN
+    const all = index.olderThan(nvr, ch, cut, 100_000)
+    for (const from of [T0 - 1, T0 + 100 * MIN, T0 + 100 * MIN + 1, T0 + 2 * 24 * 60 * MIN, cut + 1]) {
+      const want = all.filter((r) => r.startMs >= from).slice(0, 9).map((r) => r.path).join()
+      const got = index.olderThan(nvr, ch, cut, 9, from).map((r) => r.path).join()
+      if (got !== want) bad2.push(`${nvr}/${ch} from ${from}`)
+    }
+  }
+  check('olderThan from a start time on: the same rows, those starting at or after it', bad2.length === 0, bad2.slice(0, 4).join('; '))
 }
 
 // ---- cameras --------------------------------------------------------------------------------------
@@ -242,8 +255,20 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   const later = same()
   const raw = new DatabaseSync(file) // a row written by another connection counts as well (the triggers are in the file)
   raw.prepare("INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES ('/rec/L3/x.h264', 'n9', 1, 1, 2, 77, 1, 'L3')").run()
+  const other = same()
+  // ... and a file written again by another connection with SQLite's defaults (older code of ours, the
+  // sqlite3 tool): its REPLACE took the old row off without telling the triggers, which counted the file
+  // twice, and the space limit would have deleted for it (review of p2-delete, 2026-09-29)
+  raw.prepare("INSERT OR REPLACE INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES ('/rec/L3/x.h264', 'n9', 1, 1, 2, 10, 1, 'L3')").run()
+  raw.prepare("INSERT OR REPLACE INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES ('/rec/L3/x.h264', 'n9', 1, 1, 2, 10, 1, 'L2')").run()
+  const replaced = same()
+  raw.prepare("INSERT OR REPLACE INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES ('/rec/L3/x.h264', 'n9', 1, 1, 2, 10, 1, 'L3')").run()
   raw.close()
-  check('locationUse is always what reading every row says: after a file written again, moved, removed, removed in a batch, and a row from another connection', again.length === 0 && later.length === 0 && same().length === 0, [...again, ...later, ...same()].join('; ') || J(index.locationUse('L3')))
+  check('locationUse is always what reading every row says: after a file written again, moved, removed, removed in a batch, and a row from another connection', again.length === 0 && later.length === 0 && other.length === 0 && same().length === 0, [...again, ...later, ...other, ...same()].join('; ') || J(index.locationUse('L3')))
+  check('... and a file written again (REPLACE) by a connection with SQLite\'s defaults, its size or its location changed: counted once', replaced.length === 0 && same().length === 0, [...replaced, ...same()].join('; '))
+  // ... and so does this code's own REPLACE, the triggers having been made for either setting
+  index.addSegment({ nvr: 'n9', ch: 1, path: '/rec/L3/x.h264', startMs: 1, endMs: 2, bytes: 11, keyframes: 1, loc: 'L3' })
+  check('... and again through the index', same().length === 0 && index.byPath('/rec/L3/x.h264').bytes === 11, same().join('; '))
   check('... a file written again counts once, with its new size', index.locationUse('L2').segments === 300 - 5 && index.byPath(p(5)).bytes === 123, J(index.locationUse('L2')))
   const planOf = (sql, ...params) => old.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params).map((r) => r.detail).join(' | ')
   const use = planOf(LOCATION_SQL.locBytes, 'L1')
@@ -282,7 +307,16 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
     if (index.oldest(20, { loc: 'L1', fromMs: from }).map((r) => r.path).join() !== oldAt.all('L1', from, 20).map((r) => r.path).join()) bad2.push(`oldest from ${from}`)
   }
   check('oldestOf and oldest from a start time on: the rows starting at or after it, oldest first', bad2.length === 0, bad2.slice(0, 4).join('; '))
-  const perCam = planOf(LOCATION_SQL.oldestPerCamera, '[["n1",0]]', 'L1', 8)
+  // ... and from a start time on (the deletion jobs' first look past the bookmarked stretches at the oldest end)
+  const badFrom = []
+  for (const from of [T0 - 1, T0 + 100 * MIN, T0 + 100 * MIN + 1, T0 + 2 * 24 * 60 * MIN]) {
+    const rows = index.oldestPerCamera('L1', every.map(([nvr, ch]) => ({ nvr, ch })), 5, from)
+    const got = every.map(([nvr, ch]) => rows.filter((r) => r.nvr === nvr && r.ch === ch).map((r) => r.path).join(','))
+    const want = wantOf('L1', 5, from)
+    for (let i = 0; i < every.length; i++) if (got[i] !== want[i]) badFrom.push(`${every[i].join('/')} from ${from}`)
+  }
+  check('oldestPerCamera from a start time on: as oldestOf from it, camera by camera', badFrom.length === 0, badFrom.slice(0, 4).join('; '))
+  const perCam = planOf(LOCATION_SQL.oldestPerCamera, '[["n1",0]]', 'L1', -1e15, 8)
   check('oldestPerCamera searches segments_cam once per camera it is given, never a scan of the segments', /SEARCH segments USING INDEX segments_cam \(nvr=\? AND ch=\?/.test(perCam) && !/SCAN segments/.test(perCam), perCam)
   const at = planOf(LOCATION_SQL.oldestAt, 'L1', -1e15, 50)
   check('oldest on one location from a start time: segments_loc, in start_ms order', /^SEARCH segments USING INDEX segments_loc \(loc=\? AND start_ms>\?\)$/.test(at), at)
@@ -314,7 +348,7 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
     newestStart: /segments_cam \(nvr=\? AND ch=\? AND start_ms<\?\)/,
     endSince: /segments_cam \(nvr=\? AND ch=\? AND start_ms>\? AND start_ms<\?\)/,
     longEnd: /INDEX segments_long \(nvr=\? AND ch=\?\)/,
-    olderThan: /segments_cam \(nvr=\? AND ch=\? AND start_ms<\?\)/,
+    olderThan: /segments_cam \(nvr=\? AND ch=\? AND start_ms>\? AND start_ms<\?\)/,
     firstNvr: /COVERING INDEX segments_cam/,
     nextNvr: /segments_cam \(nvr>\?\)/,
     firstCh: /segments_cam \(nvr=\?\)/,
