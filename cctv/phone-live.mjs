@@ -145,10 +145,16 @@ export class PhoneStream {
     this.joining = false
   }
 
-  add(ws) {
+  /**
+   * @param {{ replay?: boolean }} [o] replay false: nothing is replayed, and the socket starts where its
+   *   waitForKey says (a socket adaptive-live.mjs moves here at this stream's keyframe, from inside its
+   *   fan-out: it takes that keyframe as it goes out, once; as stream-hub.mjs HubStream.add)
+   */
+  add(ws, { replay = true } = {}) {
     clearTimeout(this.stopTimer)
     this.stopTimer = null
     this.clients.add(ws)
+    if (!replay) return
     if (this.gop.length > 0) replayGop(this.gop, ws)
     else ws.waitForKey = true
   }

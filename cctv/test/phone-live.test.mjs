@@ -320,6 +320,33 @@ const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, s
   check('  (not given: learnt again from there, the camera\'s own frames sent on meanwhile, converted only from the keyframe after)', learnt.xs.every((x) => x.pushed.length === 0) && learnt.out.length > 0 && learnt.out.every((o) => !o.converted), JSON.stringify(learnt.out.slice(0, 3)))
 }
 
+// ---- a socket moved onto a running level stream at its keyframe (adaptive-live.mjs #swap) ----
+// A remote viewer's tile going onto another viewer's stream of its new level: it keeps its own until that
+// stream's next keyframe past what it has, and joins it as that keyframe goes out, from inside its
+// fan-out. Its GOP replayed then is older than what the tile has (or that same keyframe again).
+{
+  const src = fakeSource()
+  const s = new PhoneStream({ source: src, type: 1, slot: { release() {} }, camera: 'n1/1', log: () => {}, fps: 15, ...REMOTE, srcFps: 20, makeTranscoder })
+  const frame = (i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i % 20 === 0, 0, i * 50)
+  for (let i = 0; i < 30; i++) src.emit(frame(i))
+  const moved = fakeWs()
+  const plain = fakeWs()
+  s.add({
+    OPEN: 1, readyState: 1, bufferedAmount: 0,
+    send: (b) => {
+      const f = parseFrame(b)
+      if (!f.isKey || f.ts !== 2000 || s.clients.has(moved)) return
+      moved.waitForKey = true
+      s.add(moved, { replay: false })
+      s.add(plain)
+    }
+  })
+  for (let i = 30; i < 45; i++) src.emit(frame(i))
+  const ts = (ws) => ws.got.map((b) => parseFrame(b).ts)
+  check('PhoneStream.add replay false, from inside its keyframe\'s fan-out: nothing replayed, that keyframe once, then on', s.passthrough && ts(moved).join() === '2000,2050,2100,2150,2200', ts(moved).join())
+  check('  (a default add there: the keyframe twice, replayed and then as it goes out)', ts(plain).filter((t) => t === 2000).length === 2, ts(plain).slice(0, 3).join())
+}
+
 // ---- a trickle's conversion: each picture out as it goes in ----
 // ffmpeg's parser holds a picture until the next one begins, and a second decoder thread one more
 // (transcode.mjs): measured through the real ffmpeg on the server (29 Sep), a remote PC's conversion
