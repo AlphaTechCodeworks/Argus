@@ -18,6 +18,12 @@
 // real trace existed yet on 29 Sep): a real trace can be dropped in beside them and replayed the same
 // way. Every frame keeps its capture time; nothing here invents one.
 //
+// A gain is reported on both decoder models: the default (decoderFor: inFlight 0, the scratch
+// harness's, about 3 times too gloomy against real Chrome on the owner's PC, verify-2) and the
+// Chrome-like one ({ ...decoderFor(tile), inFlight: 5 }); live-replay.test.mjs pins today's numbers
+// on both. One replay at a time: play() and playTile() run on one virtual page, so await each one
+// (a Promise.all over a trace's tiles is refused).
+//
 // From a test:
 //   import { readTrace, playTile, fixtureTrace } from './live-replay.mjs'
 //   const r = await playTile(fixtureTrace('tunnel-stall').tiles[0], { decoder: { pool: 16, decodeMs: 3 } })
@@ -41,6 +47,7 @@ let vnow = 0
 const intervals = []
 const decoders = []
 let decoderModel = { pool: Infinity, decodeMs: 4, inFlight: 0 }
+let playing = false // play() is running: one replay at a time
 
 class Frame {
   constructor(dec, timestamp) {
@@ -344,6 +351,10 @@ export function decoderFor(tile) {
  *   (its clock's), and counts (for adding stretches up)
  */
 export async function play(arr, { player = REPO_PLAYER, clock, maxFps, playerOptions = {}, decoder = {}, fps = frameRateOf(arr), warmMs = 3000, patch, from = 0 } = {}) {
+  // one virtual page, clock and set of decoders for the whole module: a second replay at the same
+  // time would run on the first's, and put the real globals back under it
+  if (playing) throw new Error('play() is not re-entrant: await each replay')
+  playing = true
   const restore = installPage()
   try {
     const { VideoPlayer } = await import(player)
@@ -382,6 +393,7 @@ export async function play(arr, { player = REPO_PLAYER, clock, maxFps, playerOpt
     return res
   } finally {
     restore()
+    playing = false
   }
 }
 

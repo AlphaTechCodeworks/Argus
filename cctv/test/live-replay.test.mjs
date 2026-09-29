@@ -5,7 +5,7 @@
 //   node cctv/test/live-replay.test.mjs
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import {
-  FIXTURES, FIXTURE_DIR, NETS, arrivals, fixtureTrace, frameRateOf, modelTrace, play, playTile, segments, traceProblem, traceText
+  FIXTURES, FIXTURE_DIR, NETS, arrivals, decoderFor, fixtureTrace, frameRateOf, modelTrace, play, playTile, segments, traceProblem, traceText
 } from './live-replay.mjs'
 import { FrameTrace } from '../public/frame-trace.js'
 
@@ -138,6 +138,17 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
   check('a 5 s hole at the camera: shown as a still picture of 5 s, no frame made up for it', r.maxStillMs >= 5000 && r.counts.shown <= arr.length, brief(r))
   check('the virtual page is only there while it plays (setInterval, performance put back)', globalThis.setInterval === realSetInterval && globalThis.performance === realPerformance && typeof globalThis.VideoDecoder === 'undefined')
 }
+{
+  // one replay at a time: play() puts one virtual page and clock in place, and a second at the same
+  // time (Promise.all over a trace's tiles) would silently run both on it
+  const arr = arrivals({ fps: 20, durMs: 15_000, ...NETS.tunnel, seed: 4 })
+  const solo = await play(arr, { fps: 20 })
+  const first = play(arr, { fps: 20 })
+  const second = await play(arr, { fps: 20 }).then(() => null, (e) => e)
+  const r = await first
+  check('play() is not re-entrant: a second while one runs is refused, the first unharmed', second?.message === 'play() is not re-entrant: await each replay' && brief(r) === brief(solo), `${second} ${brief(r)} ${brief(solo)}`)
+  check('... and the next, once it is done, runs', brief(await play(arr, { fps: 20 })) === brief(solo))
+}
 
 // ---- the baseline: today's player (public/player.js and playout.js at 119c43e) on the fixtures ----
 // The numbers every later change is measured against (stutter report, section 3). A change to the
@@ -157,6 +168,24 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
   check('baseline: tunnel with a 1.2 s stall every ~20 s, 20 fps sub: 89.0%, 6.6 freezes a minute, the D overlay\'s "dropped" counting them (report 2.4)', near(r, 89.0, 6.6) && r.dropped > 0, brief(r))
   r = await base('switch', 0)
   check('baseline: a level change onto a new conversion: the picture steps back 1.4 s (report 2.5)', r.backwards >= 1 && r.maxBackMs === 1400, brief(r))
+}
+// ---- the same baseline with a decoder like real Chrome's on the owner's PC: it takes about 5 frames
+// in before its queue counts them (verify-2: a 20-frame burst read 15), and the model above, which
+// counts every one, is about 3 times too gloomy. A gain is claimed on both, never on one alone ----
+{
+  const chrome = async (name, i) => {
+    const tile = fixtureTrace(name).tiles[i]
+    return playTile(tile, { decoder: { ...decoderFor(tile), inFlight: 5 } })
+  }
+  const near = (r, shown, freezes) => Math.abs(r.shownPct - shown) <= 0.5 && Math.abs(r.freezesPerMin - freezes) <= 0.5
+  let r = await chrome('lan', 1)
+  check('baseline, Chrome-like decoder: local network, 30 fps 2560x1440 main: 98.3% shown, 0.5 freezes a minute', near(r, 98.3, 0.5), brief(r))
+  r = await chrome('tunnel-nvr', 0)
+  check('baseline, Chrome-like decoder: tunnel with the NVR\'s pauses: 99.6%, no freeze', near(r, 99.6, 0), brief(r))
+  r = await chrome('tunnel-hol', 0)
+  check('baseline, Chrome-like decoder: tunnel with other tiles\' keyframes ahead: 96.5%, 3.5 freezes a minute', near(r, 96.5, 3.5), brief(r))
+  r = await chrome('tunnel-stall', 0)
+  check('baseline, Chrome-like decoder: tunnel with a 1.2 s stall every ~20 s: 90.7%, 5.6 freezes a minute', near(r, 90.7, 5.6), brief(r))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
