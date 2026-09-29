@@ -232,6 +232,15 @@ class MuxChannel {
     return this.#mux.drain.written
   }
 
+  /**
+   * Which page socket this channel is on: the same object for every channel of one socket, nothing
+   * more. adaptive-live tells a browser's page socket gone dead (its network changed, and the server's
+   * end still open) from the new one the same browser opened (the final review of 29 Sep).
+   */
+  get page() {
+    return this.#mux.page
+  }
+
   // A new channel's GOP replay (gop-replay.mjs) queues behind whatever the page's socket already
   // holds, and every channel subscribed after it queues behind the replay: 64 subs in one go put
   // ~10 MB of replays in front of the last tile's keyframe. A replay goes whole while it fits in
@@ -359,6 +368,7 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
     queued: 0, // bytes of frames handed to ws and not written yet: every channel's, ended ones' too
     progressAt: now(), // when ws last wrote some of them (or the queue last started from empty)
     drain: drainMeter(now), // how fast it writes them (DRAIN_WINDOW_MS)
+    page: Object.freeze({}), // this socket, as its channels name it (MuxChannel.page)
     stalled: () => mux.queued > 0 && now() - mux.progressAt > STUCK_MS,
     sendText: (msg) => {
       if (ws.readyState === OPEN) ws.send(JSON.stringify(msg))

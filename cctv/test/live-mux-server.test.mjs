@@ -488,6 +488,11 @@ const fanOut = (c, buf, isKey, type, now) => {
   }
   check('4 x 100 KB written over the 1 s they were queued: 400 KB/s', Math.round(c.drainBps) === 400_000, String(c.drainBps))
   check('writtenBytes: every byte the page\'s socket has written, ever (adaptive-live\'s grace after a level change)', c.writtenBytes === 400_000, String(c.writtenBytes))
+  // which page socket a channel is on: adaptive-live tells a browser's page gone dead from its new one
+  ws.msg({ op: 'sub', id: 2, nvr: 'n1', ch: 4, stream: 1 })
+  const other = setup()
+  other.ws.msg(sub(1))
+  check('page: the same for every channel of one socket, another socket\'s its own', c.page != null && attached[1].channel.page === c.page && other.attached[0].channel.page != null && other.attached[0].channel.page !== c.page)
   state.t = 3000
   check('... idle since: still the rate it drained at while it had something to write', Math.round(c.drainBps) === 400_000, String(c.drainBps))
   state.t = 1000 + DRAIN_WINDOW_MS + 1
