@@ -419,6 +419,15 @@ export class Transcoder {
     return Boolean(this.proc)
   }
 
+  /**
+   * The pictures pushed in (those ffmpeg keeps) and not handed back yet: how far behind it runs. A live
+   * conversion that falls behind the camera is reset on it (phone-live.mjs maxLagS); push writes on
+   * regardless, so under a load that takes ffmpeg below real time the backlog would only grow.
+   */
+  get pending() {
+    return this.times.length
+  }
+
   #start() {
     // asked afresh for every run (each starts at a keyframe after a reset): one session plays forward,
     // scrubs and plays keyframes only in turn, and only playing forward goes without low_delay
