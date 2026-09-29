@@ -25,6 +25,21 @@ const MAX_GOP_FRAMES = 200
 const STOP_DELAY_MS = 10_000
 /** Frames looked at to learn the stream's frame rate before converting. */
 export const RATE_SAMPLES = 12
+/**
+ * A conversion held to maxLagS (a remote viewer's) is given this long, in the camera's time from its
+ * first frame, to work through the GOP it starts from (a fresh tile's replay: up to a keyframe
+ * interval, 3.2 s on an nvr sub, all at once) before what is in it counts (#lag). At 1.5x real time
+ * a 3.2 s GOP is gone in 2.1 s.
+ */
+export const CATCH_UP_MS = 5000
+/** ...and never held to fewer pictures than this in it (a trickle's 2 s is one or two). */
+const MIN_LAG_PICTURES = 8
+/**
+ * ...and reset only once it has been over for this long by the clock: frames handed in faster than
+ * they come (a burst after a hiccup; transcode-ffmpeg.test feeds a whole clip at once to measure the
+ * headroom) are not a converter that falls behind.
+ */
+export const LAG_HOLD_MS = 1000
 
 /** The cap, from the environment; a bad or missing value means 16. */
 export function maxPhoneStreams(env = process.env) {
@@ -153,12 +168,17 @@ export class PhoneStream {
    *   remote viewer's); not given (a phone): the mean over its 12 frames, once
    *   acquire: a conversion slot, or null, for a stream sent as it is that its rate read again says to
    *   convert (adaptive-live.mjs: its pool); not given: it stays as it is
+   *   maxLagS: more than this many seconds of the camera's pictures in the converter and not out yet
+   *   (Transcoder.pending) for LAG_HOLD_MS, it has fallen behind real time: reset, and started again at
+   *   the camera's next keyframe (#lag; a remote viewer's). 0, not given (a phone): no bound, as before
+   *   now: the clock (LAG_HOLD_MS), for tests
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, rejudge = false, acquire = () => null, background = false, camera = '?' }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, rejudge = false, acquire = () => null, maxLagS = 0, now = () => Date.now(), background = false, camera = '?' }) {
     // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
-    // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps / fromNextKey / srcFps / rejudge:
-    // how its conversion runs and starts (a phone on the local network gives none: the converter's own, as always)
-    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs, slowFps, fromNextKey, srcFps, onRate, rejudge, acquire })
+    // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps / fromNextKey / srcFps / rejudge /
+    // maxLagS: how its conversion runs and starts (a phone on the local network gives none: the
+    // converter's own, as always)
+    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs, slowFps, fromNextKey, srcFps, onRate, rejudge, acquire, maxLagS, now })
     // Every line names its camera. On 29 Sep they named none, and the 15-24 conversions a remote
     // viewer's level change started at once could only be matched to cameras by their timing
     // (stutter report 2.10).
@@ -177,6 +197,11 @@ export class PhoneStream {
     this.firm = null // (rejudge) false: that rate read on too few steps, read again at the 12th frame (#rejudge)
     this.redo = 0 // the rate read again, more than 2x off: what it follows from the camera's next keyframe (#redo)
     this.xcode = null
+    this.keepEvery = 1 // of the source's frames, the one in how many its converter keeps
+    this.lagFrom = null // capture time of its converter's first frame (#lag: CATCH_UP_MS)
+    this.lagArmed = false // (#lag) what is in its converter counts: it has caught up, or had CATCH_UP_MS to
+    this.lagSince = null // (#lag) since when, by the clock, too much has been in it
+    this.lagResets = 0
     this.eachPicture = false // each picture ended as it goes in (slowFps)
     this.passthrough = false
     this.closed = false
@@ -313,6 +338,9 @@ export class PhoneStream {
       this.startTs ??= f.ts
     }
     this.#push(f)
+    // (what the camera's stream replays as it joins goes in at once, as the frames held at the decision
+    // do: only a frame that comes as the camera sends it says how far behind the converter runs)
+    if (this.maxLagS > 0 && !this.joining) this.#lag(f)
   }
 
   /** Whether a stream at this rate is sent as it is: nothing to thin, a sub-stream, and a codec its viewers play. */
@@ -329,6 +357,10 @@ export class PhoneStream {
     // goes in (Transcoder.endPicture): 0.2 s, and 1.5 s. One decoder thread is plenty at that rate:
     // it converts 4K H.265 at 24 pictures a second here (transcode.mjs DECODE_THREADS).
     this.eachPicture = this.slowFps > 0 && fps > 0 && fps < this.slowFps
+    this.keepEvery = keepEvery
+    this.lagFrom = null
+    this.lagArmed = false
+    this.lagSince = null
     this.xcode = this.makeTranscoder({
       inCodec: f.codec === CODEC_H265 ? CODEC_H265 : CODEC_H264,
       keepEvery,
@@ -427,6 +459,38 @@ export class PhoneStream {
   #push(f) {
     this.xcode.push(f.ts, f.isKey, f.payload)
     if (this.eachPicture) this.xcode.endPicture?.()
+    this.lagFrom ??= f.ts
+  }
+
+  /**
+   * A conversion that has fallen behind the camera (maxLagS): reset, and started again at the camera's
+   * next keyframe (Transcoder.push waits for one), said once. ffmpeg runs niced so that recording wins
+   * (transcode.mjs), and live conversions had no bound: under a load that takes one below real time,
+   * push went on writing to its stdin, the remote picture fell further behind and the server's memory
+   * grew for as long as the load lasted. A level-full conversion is 1.38-1.50 cores for a 4K H.265 camera
+   * at 1x (f24fe50), with little margin on a busy box (the final review of live-smooth). The GOP it
+   * starts from, pushed at once, is its own start: counted once it has caught up, or CATCH_UP_MS after
+   * its first frame (lagFrom). Over for LAG_HOLD_MS by the clock, not frames handed in at once.
+   */
+  #lag(f) {
+    // (a picture handed out as it went in can end in a socket moving off it, and the stream closing)
+    const pending = this.xcode?.pending
+    if (!(pending >= 0) || !(this.rate > 0)) return
+    const most = Math.max(MIN_LAG_PICTURES, Math.ceil((this.maxLagS * this.rate) / this.keepEvery))
+    if (!this.lagArmed) {
+      if (pending > most && f.ts - this.lagFrom <= CATCH_UP_MS) return
+      this.lagArmed = true
+    }
+    if (pending <= most) {
+      this.lagSince = null
+      return
+    }
+    const now = this.now()
+    this.lagSince ??= now
+    if (now - this.lagSince < LAG_HOLD_MS) return
+    this.lagSince = null
+    this.xcode.reset?.()
+    if (this.lagResets++ === 0) this.log(`${this.who} the conversion fell behind the camera: ${pending} pictures in it, more than ${this.maxLagS} s of them for ${LAG_HOLD_MS / 1000} s; started again at the camera's next keyframe (said once)`)
   }
 
   #onConverted(ts, isKey, out) {
