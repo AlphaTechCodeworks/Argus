@@ -101,7 +101,7 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
   const fresh = await playTile({ id: 1, frames: all.filter((f) => f[0] >= 30_300), events: [[30_030, 'connect', 'sub'], [30_200, 'open']] })
   const oldEvents = tile.events.map((e) => (e[1] === 'resume' ? [e[0], 'resume'] : e))
   const wrong = await playTile({ ...tile, events: oldEvents })
-  check('... and replays as any new connection with that start does, not with the kept GOP in front (4 resyncs, 11 dropped)', r.backwards === 0 && r.resyncs === fresh.resyncs && r.dropped === fresh.dropped && wrong.resyncs > r.resyncs, `${brief(r)} fresh ${brief(fresh)} kept in front ${brief(wrong)}`)
+  check('... and replays as any new connection with that start does, not with the kept GOP in front (more resyncs and frames passed over)',r.backwards === 0 && r.resyncs === fresh.resyncs && r.dropped === fresh.dropped && wrong.resyncs > r.resyncs, `${brief(r)} fresh ${brief(fresh)} kept in front ${brief(wrong)}`)
   const old = segments({ ...tile, events: oldEvents })
   check('... a trace from before the resume said which (no word): as a resume that decoded what it kept', old[1]?.fromMs === 30_030 && old[1].arr[0].at === 30_030 && old[1].arr[0].ts === 24_000, JSON.stringify(old.map((p) => [p.fromMs, p.arr.length, p.arr[0]])))
 }
@@ -150,24 +150,30 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
   check('... and the next, once it is done, runs', brief(await play(arr, { fps: 20 })) === brief(solo))
 }
 
-// ---- the baseline: today's player (public/player.js and playout.js at 119c43e) on the fixtures ----
+// ---- the baseline: the Live page's player (public/player.js and playout.js) on the fixtures ----
 // The numbers every later change is measured against (stutter report, section 3). A change to the
 // player or its clock that moves them updates them here, with its gain: that is the point.
+// Gains so far (the numbers at 119c43e in brackets):
+//   report 2.2 (live-smooth t1, 29 Sep): frames timed as they arrive, a burst after a hiccup not taken
+//   for a slow decoder (player.js arrivalClock, as live-tile.js makes its player)
 {
   const base = async (name, i) => playTile(fixtureTrace(name).tiles[i])
   const near = (r, shown, freezes) => Math.abs(r.shownPct - shown) <= 0.5 && Math.abs(r.freezesPerMin - freezes) <= 0.5
   let r = await base('lan', 0)
   check('baseline: local network, 20 fps sub: every frame, no freeze', r.shownPct === 100 && r.freezesPerMin === 0 && r.dropped === 0, brief(r))
   r = await base('lan', 1)
-  check('baseline: local network, 30 fps 2560x1440 main, a decoder holding 6 pictures: 87.7% shown, 5.7 freezes a minute (report 2.2)', near(r, 87.7, 5.7), brief(r))
+  check('baseline: local network, 30 fps 2560x1440 main, a decoder holding 6 pictures: every frame, no freeze, never still over 1.5 frame intervals [87.7%, 5.7 freezes a minute]', r.shownPct === 100 && r.freezesPerMin === 0 && r.maxStillMs <= 50, brief(r))
   r = await base('tunnel-nvr', 0)
-  check('baseline: tunnel with the NVR\'s pauses, 20 fps sub: 98.9%, 1.0 freeze a minute', near(r, 98.9, 1.0), brief(r))
+  check('baseline: tunnel with the NVR\'s pauses, 20 fps sub: 99.7%, no freeze [98.9%, 1.0]', near(r, 99.7, 0), brief(r))
   r = await base('tunnel-hol', 0)
-  check('baseline: tunnel with other tiles\' keyframes ahead on the socket, 20 fps sub: 84.1%, 8.6 freezes a minute', near(r, 84.1, 8.6), brief(r))
+  check('baseline: tunnel with other tiles\' keyframes ahead on the socket, 20 fps sub: 98.9%, 2.0 freezes a minute [84.1%, 8.6]', near(r, 98.9, 2.0), brief(r))
   r = await base('tunnel-stall', 0)
-  check('baseline: tunnel with a 1.2 s stall every ~20 s, 20 fps sub: 89.0%, 6.6 freezes a minute, the D overlay\'s "dropped" counting them (report 2.4)', near(r, 89.0, 6.6) && r.dropped > 0, brief(r))
+  check('baseline: tunnel with a 1.2 s stall every ~20 s, 20 fps sub: 97.3%, 3.1 freezes a minute, the D overlay\'s "dropped" counting the frames passed over (report 2.4) [89.0%, 6.6]', near(r, 97.3, 3.1) && r.dropped > 0, brief(r))
   r = await base('switch', 0)
   check('baseline: a level change onto a new conversion: the picture steps back 1.4 s (report 2.5)', r.backwards >= 1 && r.maxBackMs === 1400, brief(r))
+  // the player as it was, and as playback's still is: the harness can replay it (playerOptions)
+  r = await playTile(fixtureTrace('lan').tiles[1], { playerOptions: { arrivalClock: false } })
+  check('... without arrivalClock (the player at 119c43e): local network, 30 fps 2560x1440 main: 87.7%, 5.7 freezes a minute', near(r, 87.7, 5.7), brief(r))
 }
 // ---- the same baseline with a decoder like real Chrome's on the owner's PC: it takes about 5 frames
 // in before its queue counts them (verify-2: a 20-frame burst read 15), and the model above, which
@@ -179,13 +185,13 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
   }
   const near = (r, shown, freezes) => Math.abs(r.shownPct - shown) <= 0.5 && Math.abs(r.freezesPerMin - freezes) <= 0.5
   let r = await chrome('lan', 1)
-  check('baseline, Chrome-like decoder: local network, 30 fps 2560x1440 main: 98.3% shown, 0.5 freezes a minute', near(r, 98.3, 0.5), brief(r))
+  check('baseline, Chrome-like decoder: local network, 30 fps 2560x1440 main: every frame, no freeze [98.3%, 0.5]', r.shownPct === 100 && r.freezesPerMin === 0, brief(r))
   r = await chrome('tunnel-nvr', 0)
-  check('baseline, Chrome-like decoder: tunnel with the NVR\'s pauses: 99.6%, no freeze', near(r, 99.6, 0), brief(r))
+  check('baseline, Chrome-like decoder: tunnel with the NVR\'s pauses: 99.7%, no freeze [99.6%, 0]', near(r, 99.7, 0), brief(r))
   r = await chrome('tunnel-hol', 0)
-  check('baseline, Chrome-like decoder: tunnel with other tiles\' keyframes ahead: 96.5%, 3.5 freezes a minute', near(r, 96.5, 3.5), brief(r))
+  check('baseline, Chrome-like decoder: tunnel with other tiles\' keyframes ahead: 98.9%, 2.0 freezes a minute [96.5%, 3.5]', near(r, 98.9, 2.0), brief(r))
   r = await chrome('tunnel-stall', 0)
-  check('baseline, Chrome-like decoder: tunnel with a 1.2 s stall every ~20 s: 90.7%, 5.6 freezes a minute', near(r, 90.7, 5.6), brief(r))
+  check('baseline, Chrome-like decoder: tunnel with a 1.2 s stall every ~20 s: 97.3%, 3.1 freezes a minute [90.7%, 5.6]', near(r, 97.3, 3.1), brief(r))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

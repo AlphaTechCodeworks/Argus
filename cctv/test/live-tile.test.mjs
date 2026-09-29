@@ -62,6 +62,9 @@ let now = 1_000_000
 const t = new LiveTile(tileEl, { nvr: 'n1', ch: 2 }, 1, 0, { now: () => now })
 clearInterval(t.statusTimer) // driven by hand below
 clearTimeout(t.retry)
+// the player times each frame as it arrives, and a long decode queue is not a slow decoder unless it is
+// really behind (player.js arrivalClock; test/player-burst.test.mjs)
+check('a live tile\'s player times frames as they arrive (arrivalClock)', t.player.arrivalClock === true)
 t.player.push = () => {} // no decoding here
 t.connect()
 const ws = sockets.at(-1)

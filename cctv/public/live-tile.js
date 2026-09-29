@@ -126,6 +126,9 @@ export class LiveTile {
     this.player = new VideoPlayer(tile.querySelector('canvas'), {
       pacing: opts.pacing ?? true,
       paintFirst: true, // the camera appears the moment its first keyframe is decoded
+      // each frame timed as it arrives, and the burst after a hiccup decoded, not dropped to the next
+      // keyframe as if the decoder could not keep up (player.js; stutter report 2.2, 29 Sep)
+      arrivalClock: true,
       clock: opts.clock,
       maxFps: opts.maxFps,
       onUnsupported: (codecId) => (opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)),

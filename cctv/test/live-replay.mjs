@@ -6,7 +6,8 @@
 // Moved into the repo from the 29 Sep stutter investigation's scratch harness (evc-harness.mjs,
 // the replays behind the stutter report and its verdicts), unchanged in what it models:
 //   - the page: performance.now, the display (present() at 60 Hz), the player's once-a-second
-//     timer, all on a virtual clock;
+//     timer, all on a virtual clock; the player made as live-tile.js makes it (paintFirst,
+//     arrivalClock), unless playerOptions say otherwise;
 //   - the decoder: a stand-in for the viewing PC's. Chrome's hardware decoder on the owner's PC
 //     hands the page at most `pool` decoded pictures (6 at 2560x1440) and decodes nothing more
 //     until the page closes one; each decode takes `decodeMs`. `inFlight` is how many frames the
@@ -30,6 +31,7 @@
 // From the command line, one row per tile (the fixtures when no file is named):
 //   node cctv/test/live-replay.mjs [trace.json ...] [--player path/to/player.js] [--pool N]
 //     [--decode-ms N] [--in-flight N] [--clock '{"startDelayMs":350}'] [--max-fps 15]
+//     [--player-options '{"arrivalClock":false}']
 //   node cctv/test/live-replay.mjs --write-fixtures   (makes the fixtures again from FIXTURES)
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
@@ -343,7 +345,9 @@ export function decoderFor(tile) {
  *   patch?: (player: object) => void }} [o]
  *   player: the URL of the player module (the repo's by default; a prototype copy to compare);
  *   clock: PlayoutClock options, as the Live page passes them (undefined: live's own);
- *   playerOptions: anything else for the VideoPlayer; fps: the stream's, for the measures (by
+ *   playerOptions: anything else for the VideoPlayer, over live-tile.js's own (paintFirst and
+ *   arrivalClock; { arrivalClock: false } replays the clock as it was before 29 Sep, and as playback's
+ *   still is); fps: the stream's, for the measures (by
  *   default from the capture times); from: when (in the arrivals' time) the player starts, 0 for a
  *   whole trace, a stretch's start for a stretch of one (playTile)
  * @returns the measures (see rates()), plus notDecoded (frames never handed to the decoder),
@@ -363,7 +367,7 @@ export async function play(arr, { player = REPO_PLAYER, clock, maxFps, playerOpt
     decoders.length = 0
     decoderModel = { pool: Infinity, decodeMs: 4, inFlight: 0, ...decoder }
     const shown = []
-    const p = new VideoPlayer(canvas(), { clock, maxFps, paintFirst: true, ...playerOptions, onFrame: (ts) => shown.push({ at: vnow, ts: ts - TS0 }) })
+    const p = new VideoPlayer(canvas(), { clock, maxFps, paintFirst: true, arrivalClock: true, ...playerOptions, onFrame: (ts) => shown.push({ at: vnow, ts: ts - TS0 }) })
     patch?.(p)
     const end = (arr.at(-1)?.at ?? from) + 3000
     let k = 0
@@ -565,6 +569,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const inFlight = opt('--in-flight')
   const clock = opt('--clock')
   const maxFps = opt('--max-fps')
+  const playerOptions = opt('--player-options')
   const files = args.filter((a) => !a.startsWith('--'))
   const traces = files.length ? files.map((f) => [f, readTrace(f)]) : Object.keys(FIXTURES).map((n) => [`${n} (fixture)`, fixtureTrace(n)])
   const rows = []
@@ -572,7 +577,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     for (const tile of trace.tiles) {
       if (!tile.frames.length) continue
       const decoder = { ...decoderFor(tile), ...(pool && { pool: Number(pool) }), ...(decodeMs && { decodeMs: Number(decodeMs) }), ...(inFlight && { inFlight: Number(inFlight) }) }
-      const r = await playTile(tile, { decoder, player: player && pathToFileURL(player).href, clock: clock && JSON.parse(clock), maxFps: maxFps && Number(maxFps) })
+      const r = await playTile(tile, { decoder, player: player && pathToFileURL(player).href, clock: clock && JSON.parse(clock), maxFps: maxFps && Number(maxFps), playerOptions: playerOptions && JSON.parse(playerOptions) })
       rows.push({ trace: name, tile: `${tile.camera} ${tile.stream}`, fps: +frameRateOf(tileArrivals(tile)).toFixed(1), pool: decoder.pool, ...r })
     }
   }
