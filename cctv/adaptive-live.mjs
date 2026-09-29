@@ -357,7 +357,7 @@ export class AdaptiveLive {
       // bigger than it went in (nvr-2/6 0.37 -> 0.47 Mbit/s; the stutter report: do not convert grid
       // sub-streams at level 15), and at full nothing is thinned.
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, now: this.now, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
       this.#made = s
     }
@@ -367,7 +367,9 @@ export class AdaptiveLive {
 
   /**
    * Whether a main's level-full conversion may start (FULL_MAX): one that nobody is on or waits for
-   * (its FULL_STOP_MS running) is closed to make room, the one left longest first.
+   * (its FULL_STOP_MS running) is closed to make room, the one left longest first (PhoneStream emptyAt):
+   * the one left last is the one a PC stepping back with ‹ finds running. They went in the order they
+   * were made (the review of d5390d6).
    */
   #roomAtFull() {
     const idle = []
@@ -377,6 +379,8 @@ export class AdaptiveLive {
       if (s.clients.size === 0 && !this.#awaited(s)) idle.push(s)
       else busy++
     }
+    const left = (s) => s.emptyAt ?? -Infinity // (never had anyone on it: first)
+    idle.sort((a, b) => (left(a) < left(b) ? -1 : left(a) > left(b) ? 1 : 0))
     while (busy + idle.length >= FULL_MAX && idle.length) idle.shift().close()
     return busy + idle.length < FULL_MAX
   }

@@ -173,7 +173,7 @@ export class PhoneStream {
    *   maxLagS: more than this many seconds of the camera's pictures in the converter and not out yet
    *   (Transcoder.pending) for LAG_HOLD_MS, it has fallen behind real time: reset, and started again at
    *   the camera's next keyframe (#lag; a remote viewer's). 0, not given (a phone): no bound, as before
-   *   now: the clock (LAG_HOLD_MS), for tests
+   *   now: the clock (LAG_HOLD_MS, emptyAt), for tests
    */
   constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, rejudge = false, acquire = null, maxLagS = 0, now = () => Date.now(), background = false, camera = '?' }) {
     // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
@@ -209,6 +209,7 @@ export class PhoneStream {
     this.passthrough = false
     this.closed = false
     this.stopTimer = null
+    this.emptyAt = null // when its last viewer left (its stop delay running), by `now`; null while it has one
     // what the normal stream sees: one more viewer, which never falls behind
     // (background: only a stand-in, live-attach.mjs: the NVR worker joins a main that plays for it, never starts one)
     this.tap = { OPEN: 1, readyState: 1, bufferedAmount: 0, background, send: (buf) => this.#onSource(buf) }
@@ -231,6 +232,7 @@ export class PhoneStream {
   add(ws, { replay = true } = {}) {
     clearTimeout(this.stopTimer)
     this.stopTimer = null
+    this.emptyAt = null
     this.clients.add(ws)
     if (!replay) return
     if (this.gop.length > 0) replayGop(this.gop, ws)
@@ -238,8 +240,9 @@ export class PhoneStream {
   }
 
   remove(ws) {
-    this.clients.delete(ws)
+    const had = this.clients.delete(ws)
     if (this.clients.size > 0 || this.closed) return
+    if (had || this.emptyAt === null) this.emptyAt = this.now()
     clearTimeout(this.stopTimer)
     this.stopTimer = setTimeout(() => {
       if (this.clients.size === 0) this.close()

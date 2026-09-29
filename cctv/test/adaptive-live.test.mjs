@@ -1104,6 +1104,33 @@ function fullRig(n, { pool = 16, out = false } = {}) {
     r.restore()
   }
 }
+{
+  // Past FULL_MAX a level-full conversion nobody is on any more (its FULL_STOP_MS running) is closed to
+  // make room, the one left longest first: the one left last is the one a PC stepping back with ‹ finds
+  // running. They were closed in the order they were made, which the comment did not say (the review of
+  // d5390d6).
+  const r = fullRig(3)
+  try {
+    const socks = [0, 1].map((ch) => {
+      const ws = r.sock()
+      r.live.attach(`pc${ch}`, { ws, nvrId: 'n', ch, type: 0, source: r.mains[ch].s, codec: 'h265' })
+      clearInterval(r.live.timer)
+      return ws
+    })
+    r.play(1000)
+    const [a, b] = ['n/0/0@full', 'n/1/0@full'].map((k) => r.live.streams.get(k))
+    socks[1].close() // camera 1's viewer goes first...
+    r.play(500)
+    socks[0].close() // ...then camera 0's
+    r.play(500)
+    const ws = r.sock()
+    r.live.attach('pc2', { ws, nvrId: 'n', ch: 2, type: 0, source: r.mains[2].s, codec: 'h265' })
+    clearInterval(r.live.timer)
+    check('FULL_MAX reached by two conversions nobody is on: the one left longest is closed for a third camera, the one left last runs on for its stop delay', b?.closed && a && !a.closed && r.live.streams.get('n/2/0@full')?.clients.has(ws), `camera 0's ${a?.closed ? 'closed' : 'runs'}, camera 1's ${b?.closed ? 'closed' : 'runs'}`)
+  } finally {
+    r.restore()
+  }
+}
 /** Where a socket's frames come from in a fullRig: a level stream's key, or 'raw' (the camera's own stream). */
 const onStream = (r, ws, ch) => {
   for (const [k, s] of r.live.streams) if (!s.closed && s.clients.has(ws)) return k
