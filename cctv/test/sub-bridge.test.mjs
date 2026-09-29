@@ -152,12 +152,43 @@ const socket = () => {
   check('a tile closed before its sub-stream came: logged as such, with the bytes in MB', logs[1] === 'stand-in ended after 0.0 s (the tile closed): 5 frames, 1.20 MB sent, 0 held back', logs.join(' | '))
 }
 {
+  // A stand-in that never sends a frame is one line, at its end. The H.265 one repeats: the tile gets
+  // nothing, shows "no video" and reconnects every 8-16 s (review of 29 Sep: 14-16 held tiles on
+  // value4u, about 2 lines a second while the page was open); its end says why as the log's second
+  // argument, for live-attach.mjs to say it less often.
   const sub = new FakeStream()
   const main = new FakeStream()
   main.gop = [frame('m-k', true, 1)]
   const logs = []
-  bridgeSub(socket(), { sub, main, clientH265: false, log: (l) => logs.push(l), now: () => 0 })
-  check('an H.265 main for a browser without H.265: its end says why', logs[1] === 'stand-in ended after 0.0 s (the main stream is H.265, which this browser cannot play): 0 frames, 0.00 MB sent, 0 held back', logs.join(' | '))
+  bridgeSub(socket(), { sub, main, clientH265: false, log: (l, why) => logs.push([l, why]), now: () => 0 })
+  check('an H.265 main for a browser without H.265: one line, saying why', logs.length === 1 && logs[0][0] === 'stand-in ended after 0.0 s, having sent nothing (the main stream is H.265, which this browser cannot play)' && logs[0][1] === 'h265', JSON.stringify(logs))
+}
+{
+  // the main stream not playing yet (no keyframe to start from), and the sub-stream first
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  const ws = socket()
+  const logs = []
+  let t = 0
+  bridgeSub(ws, { sub, main, clientH265: true, log: (l, why) => logs.push([l, why]), now: () => t })
+  main.frame(frame('m-d0', false), false) // a delta: nothing to decode it from, not sent
+  check('nothing sent yet: nothing logged yet', logs.length === 0)
+  t = 1900
+  ws.send(frame('s-k', true))
+  check('... the sub-stream first: one line, with the frame its gate held back', logs.length === 1 && logs[0][0] === 'stand-in ended after 1.9 s, having sent nothing (the sub-stream came): 1 held back' && logs[0][1] === 'sub', JSON.stringify(logs))
+}
+{
+  // one that sends: its start at its first frame, its end with the count (one frame: "1 frame")
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  const ws = socket()
+  const logs = []
+  bridgeSub(ws, { sub, main, clientH265: true, log: (l) => logs.push(l), now: () => 0 })
+  const before = logs.length
+  main.frame(frame('m-k', true), true)
+  check('a main that starts later: the start is logged with its first frame, not before', before === 0 && logs.length === 1 && logs[0].startsWith('stand-in started'), logs.join(' | '))
+  ws.send(frame('s-k', true))
+  check('... and "1 frame", not "1 frames"', logs[1] === 'stand-in ended after 0.0 s (the sub-stream came): 1 frame, 0.00 MB sent, 0 held back', logs.join(' | '))
 }
 {
   const logs = []

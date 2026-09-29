@@ -16,6 +16,14 @@ import { bridgeSub } from './sub-bridge.mjs'
 
 // Conversions a phone's stand-in leaves free, for full-size views (phone-live.mjs caps them at 16)
 export const PHONE_SPARE = 4
+// An H.265 main standing in for a browser without H.265 sends nothing and ends at once, and the tile,
+// with no picture, asks again every 8-16 s: 14-16 held tiles on value4u were about 2 lines a second
+// for as long as the owner's page was open (review of 29 Sep). Its line is said once in this long for
+// the same camera and viewer, with how many were left out.
+export const H265_QUIET_MS = 10 * 60_000
+
+/** One key per browser, from the upgrade request: a page's /live and /live-mux sockets are one viewer. */
+const viewerOf = (req, currentUser) => createHash('sha1').update(`${currentUser(req) ?? '?'}|${req.headers['user-agent'] ?? ''}|${req.headers.cookie ?? ''}`).digest('hex')
 
 /**
  * What stands in for a sub-stream that is not running (sub-bridge.mjs): the camera's main stream,
@@ -40,13 +48,27 @@ function standIn(nvr, ch, main, { phone, held, clientH265, phoneLive }) {
 /**
  * @param {{ can: Function, currentUser: (req: object) => string|null,
  *   adaptiveLive: { attach: Function }, phoneLive: { attach: Function }, track?: Function,
- *   log?: (line: string) => void }} o
+ *   log?: (line: string) => void, now?: () => number }} o
  *   can: rights.mjs can; currentUser: the request's signed-in user; track: access-watch.mjs's, which
- *   asks the live right again while the socket or channel is open; log: the stand-ins' lines
+ *   asks the live right again while the socket or channel is open; log: the stand-ins' lines; now:
+ *   the clock (tests)
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
  *   clientH265: boolean, phone15: boolean }) => void} attachLive
  */
-export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track = () => {}, log = (line) => console.log(line) }) {
+export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track = () => {}, log = (line) => console.log(line), now = Date.now }) {
+  const quiet = new Map() // camera and viewer -> { at, left }: its H.265 stand-in line last said, and those left out since
+  /** The H.265 stand-in line for a camera and viewer, or null when it was said less than H265_QUIET_MS ago. */
+  const h265Line = (line, key) => {
+    const t = now()
+    const q = quiet.get(key)
+    if (q && t - q.at < H265_QUIET_MS) {
+      q.left++
+      return null
+    }
+    for (const [k, v] of quiet) if (t - v.at >= H265_QUIET_MS) quiet.delete(k) // (past their quiet: of no more use)
+    quiet.set(key, { at: t, left: 0 })
+    return `${line}; said once in ${H265_QUIET_MS / 60_000} min for this camera and viewer${q?.left ? `, ${q.left} left out since the last` : ''}`
+  }
   return function attachLive(ws, req, { nvr, who, ch, streamType, clientH265, phone15 }) {
     if (!can(who, 'live', { nvr: nvr.id, ch })) return ws.close(1008, 'not allowed')
     // live video: with a live worker, the worker's own login decides (it polls the camera list)
@@ -72,18 +94,22 @@ export function liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track 
     // a sub-stream that is not running yet (cold, refused by the NVR, or held at its limit): the
     // camera's main stream meanwhile, until the sub-stream's own first frame (sub-bridge.mjs). Its
     // start and end are logged with the camera and whether the viewer is remote: on 29 Sep a remote
-    // page's stand-ins could only be guessed from the code (stutter report 2.6, verify-6).
+    // page's stand-ins could only be guessed from the code (stutter report 2.6, verify-6). The H.265
+    // one that sends nothing, once in H265_QUIET_MS for the camera and viewer.
     if (streamType === 1 && !(stream.gop?.length > 0)) {
       const main = nvr.getStream(ch, 0)
       const stand = standIn(nvr, ch, main, { phone, held, clientH265, phoneLive })
-      const who = `[sub-bridge] ${nvr.id}/${ch + 1}, ${remote ? 'remote' : 'local'} viewer${held ? ", sub-stream held at the NVR's limit" : ''}${stand !== main ? ', main converted for a phone' : ''}:`
-      bridgeSub(ws, { sub: stream, main: stand, clientH265, log: (line) => log(`${who} ${line}`) })
+      const tag = `[sub-bridge] ${nvr.id}/${ch + 1}, ${remote ? 'remote' : 'local'} viewer${held ? ", sub-stream held at the NVR's limit" : ''}${stand !== main ? ', main converted for a phone' : ''}:`
+      const say = (line, why) => {
+        const text = why === 'h265' ? h265Line(line, `${nvr.id}/${ch}|${viewerOf(req, currentUser)}`) : line
+        if (text) log(`${tag} ${text}`)
+      }
+      bridgeSub(ws, { sub: stream, main: stand, clientH265, log: say })
     }
-    // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry. One key
-    // per browser, from the upgrade request: a page's /live and /live-mux sockets are one viewer.
+    // a remote viewer (through Tailscale): the frame rate its link and the uplink can carry, per
+    // browser (viewerOf)
     if (remote) {
-      const viewer = `${currentUser(req) ?? '?'}|${req.headers['user-agent'] ?? ''}|${req.headers.cookie ?? ''}`
-      adaptiveLive.attach(createHash('sha1').update(viewer).digest('hex'), { ws, nvrId: nvr.id, ch, type: streamType, source: stream, clientH265 })
+      adaptiveLive.attach(viewerOf(req, currentUser), { ws, nvrId: nvr.id, ch, type: streamType, source: stream, clientH265 })
       return
     }
     // a phone asking for 15 fps gets the shared thinned stream (phone-live.mjs), when there is room.

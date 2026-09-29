@@ -17,7 +17,7 @@ import { REPLAY_MAX_BYTES } from '../gop-replay.mjs'
 import { bridgeSub } from '../sub-bridge.mjs'
 import { AdaptiveLive, PRESSURE_BYTES, SETTLE_MS } from '../adaptive-live.mjs'
 import { TranscodePool } from '../transcode.mjs'
-import { PHONE_SPARE, liveAttacher } from '../live-attach.mjs'
+import { H265_QUIET_MS, PHONE_SPARE, liveAttacher } from '../live-attach.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -778,11 +778,14 @@ const fanOut = (c, buf, isKey, type, now) => {
   const cold = x.nvr.getStream(3, 1)
   const stand = [...x.nvr.getStream(3, 0).viewers]
   check('... a cold sub-stream: the main stream stands in (sub-bridge), the viewer waits on its sub-stream', cold.viewers.has(x.w) && stand.length === 1 && stand[0].background === true)
-  // every stand-in is logged, with its camera and whether the viewer is remote (stutter report 2.6)
+  // every stand-in is logged, with its camera and whether the viewer is remote (stutter report 2.6),
+  // from its first frame sent
+  stand[0].send(frame(true))
   check('... logged with its camera and "local"', attachLogs.at(-1) === "[sub-bridge] n1/4, local viewer: stand-in started: the main stream until the sub-stream's first frame", attachLogs.join(' | '))
   x.w.send(frame(true))
-  check('... and its end', /^\[sub-bridge\] n1\/4, local viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): 0 frames, 0\.00 MB sent, 0 held back$/.test(attachLogs.at(-1)), attachLogs.at(-1))
-  run({ streamType: 1, nvr: mkNvr({ subCold: true }) }, req('127.0.0.1'))
+  check('... and its end', /^\[sub-bridge\] n1\/4, local viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): 1 frame, 0\.00 MB sent, 0 held back$/.test(attachLogs.at(-1)), attachLogs.at(-1))
+  x = run({ streamType: 1, nvr: mkNvr({ subCold: true }) }, req('127.0.0.1'))
+  for (const s of x.nvr.getStream(3, 0).viewers) s.send(frame(true))
   check('... a remote viewer\'s stand-in is logged as remote', attachLogs.at(-1) === "[sub-bridge] n1/4, remote viewer: stand-in started: the main stream until the sub-stream's first frame", attachLogs.at(-1))
   adaptive.calls.length = 0
   x = run({ clientH265: true }, req('127.0.0.1'))
@@ -849,7 +852,8 @@ const fanOut = (c, buf, isKey, type, now) => {
   const conv = x.phone.calls.find((c) => c.key === KEY)
   check('held sub, phone, H.265 main that plays: the stand-in is the main converted for phones, a conversion of its own asking in the background', conv && conv.stream === x.main && conv.type === 0 && conv.opts?.background === true && conv.ws.background === true && x.main.viewers.size === 0, JSON.stringify(x.phone.calls.map((c) => c.key)))
   check('... its conversion names its camera in the log', conv?.opts?.camera === 'v4/4', JSON.stringify(conv?.opts))
-  check('... its stand-in logged as held, and converted for a phone', heldLogs.at(-1) === "[sub-bridge] v4/4, local viewer, sub-stream held at the NVR's limit, main converted for a phone: stand-in started: the main stream until the sub-stream's first frame", heldLogs.join(' | '))
+  conv.ws.send(frame(true)) // the conversion's first frame
+  check('... its stand-in logged as held, and converted for a phone', heldLogs.at(-1) ==="[sub-bridge] v4/4, local viewer, sub-stream held at the NVR's limit, main converted for a phone: stand-in started: the main stream until the sub-stream's first frame", heldLogs.join(' | '))
   check('... the held sub-stream itself is not thinned (nothing to thin; no conversion place held for it)', !x.phone.calls.some((c) => c.key === 'v4/3/1') && x.sub.viewers.has(x.w))
   x.w.send(frame(true)) // the sub-stream's first frame (there is room now): the stand-in ends
   check('... its first frame ends the stand-in, and the converted stream is let go', x.phone.detached.length === 1 && x.phone.detached[0].key === KEY && x.phone.detached[0].ws === conv.ws)
@@ -883,6 +887,45 @@ const fanOut = (c, buf, isKey, type, now) => {
     const mains = sent.filter((m) => m.t === 'want' && m.ch === 3 && m.type === 0)
     check('... real hub + phone-live: the stand-in\'s conversion asks the worker for the main as background, never foreground', mains.length === 1 && mains[0].background === true && phoneLive.has(KEY), JSON.stringify(sent))
   }
+}
+
+// ---- live-attach.mjs: an H.265 main standing in for a browser without H.265 is said once in
+// H265_QUIET_MS per camera and viewer. It sends nothing and ends at once, and the tile, with no
+// picture, asks again every 8-16 s: 14-16 held tiles on value4u were about 2 lines a second for as
+// long as the owner's page was open (review of 29 Sep) ----
+{
+  // a main stream as stream-hub.mjs has it: add replays its GOP (here an H.265 keyframe) at once
+  const mkStream = (gop) => ({ gop, viewers: new Set(), add(w) { this.viewers.add(w); for (const m of this.gop) w.send(m) }, remove(w) { this.viewers.delete(w) } })
+  const h265Key = () => { const b = frame(true); b[1] = 1; return b }
+  const mkNvr = () => ({
+    id: 'v4', liveOnline: true, streams: new Map(),
+    subHeld: () => true,
+    getStream(ch, type) {
+      const k = `${ch}/${type}`
+      if (!this.streams.has(k)) this.streams.set(k, mkStream(type === 1 ? [] : [h265Key()]))
+      return this.streams.get(k)
+    }
+  })
+  const fakeWs = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, sent: [], send(d) { this.sent.push(d) }, on() { return this }, close() {} })
+  const deskReq = (cookie = 'c=1') => ({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'user-agent': 'Desktop', cookie } })
+  const logs = []
+  let t = 0
+  const attach = liveAttacher({ can: () => true, currentUser: () => 'ann', adaptiveLive: { attach() {} }, phoneLive: {}, log: (l) => logs.push(l), now: () => t })
+  const nvr = mkNvr()
+  const open = (ch = 19, r = deskReq()) => attach(fakeWs(), r, { nvr, who: { user: 'ann' }, ch, streamType: 1, clientH265: false, phone15: false })
+  open()
+  check('an H.265 stand-in for a browser without H.265: one line, saying it is said once in 10 min', logs.length === 1 && logs[0] === "[sub-bridge] v4/20, remote viewer, sub-stream held at the NVR's limit: stand-in ended after 0.0 s, having sent nothing (the main stream is H.265, which this browser cannot play); said once in 10 min for this camera and viewer", JSON.stringify(logs))
+  for (let i = 1; i <= 50; i++) {
+    t = i * 10_000 // the tile asking again every 10 s, for 500 s
+    open()
+  }
+  check('... asked again every 10 s for 500 s: nothing more', logs.length === 1, `${logs.length} lines`)
+  open(20)
+  open(19, deskReq('c=2'))
+  check('... another camera, or another viewer: its own line', logs.length === 3 && logs[1].startsWith('[sub-bridge] v4/21, ') && logs[2].startsWith('[sub-bridge] v4/20, '), JSON.stringify(logs.slice(1)))
+  t = H265_QUIET_MS
+  open()
+  check('... 10 min on: said again, with how many were left out', logs.length === 4 && logs[3].endsWith('; said once in 10 min for this camera and viewer, 50 left out since the last'), logs.at(-1))
 }
 
 // ---- server.mjs wiring (source shape: importing server.mjs starts the NVRs) ----
