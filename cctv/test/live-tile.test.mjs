@@ -65,6 +65,18 @@ clearTimeout(t.retry)
 // the player times each frame as it arrives, and a long decode queue is not a slow decoder unless it is
 // really behind (player.js arrivalClock; test/player-burst.test.mjs)
 check('a live tile\'s player times frames as they arrive (arrivalClock)', t.player.arrivalClock === true)
+// a page through the tunnel (viewer.js) keeps up to 2 s of decoded frames for its bigger buffer
+// (playout.js REMOTE_CLOCK, player.js REMOTE_QUEUED_FRAMES); a local page the player's usual 45
+{
+  const { REMOTE_QUEUED_FRAMES } = await import('../public/player.js')
+  const { REMOTE_CLOCK } = await import('../public/playout.js')
+  const far = new LiveTile(tileEl, { nvr: 'n1', ch: 3 }, 1, 0, { now: () => now, clock: REMOTE_CLOCK, maxQueuedFrames: REMOTE_QUEUED_FRAMES })
+  check('a tile given the remote profile passes its clock and its decoded-frame limit to its player', far.player.clock.opts.stretchLate === true && far.player.maxQueued === REMOTE_QUEUED_FRAMES && REMOTE_QUEUED_FRAMES === 75, `${far.player.maxQueued}`)
+  check('... a tile without it keeps the player\'s own (45)', t.player.maxQueued === 45 && t.player.clock.opts.stretchLate === false)
+  clearInterval(far.statusTimer)
+  clearTimeout(far.retry)
+  far.close()
+}
 t.player.push = () => {} // no decoding here
 t.connect()
 const ws = sockets.at(-1)

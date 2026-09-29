@@ -5,9 +5,10 @@
 //   node cctv/test/live-replay.test.mjs
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import {
-  FIXTURES, FIXTURE_DIR, NETS, arrivals, decoderFor, fixtureTrace, frameRateOf, modelTrace, play, playTile, segments, traceProblem, traceText
+  FIXTURES, FIXTURE_DIR, NETS, REMOTE_LIVE, arrivals, decoderFor, fixtureTrace, frameRateOf, modelTrace, play, playTile, segments, traceProblem, traceText
 } from './live-replay.mjs'
 import { FrameTrace } from '../public/frame-trace.js'
+import { REMOTE_CLOCK } from '../public/playout.js'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -192,6 +193,43 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
   check('baseline, Chrome-like decoder: tunnel with other tiles\' keyframes ahead: 98.9%, 2.0 freezes a minute [96.5%, 3.5]', near(r, 98.9, 2.0), brief(r))
   r = await chrome('tunnel-stall', 0)
   check('baseline, Chrome-like decoder: tunnel with a 1.2 s stall every ~20 s: 97.3%, 3.1 freezes a minute [90.7%, 5.6]', near(r, 97.3, 3.1), brief(r))
+}
+
+// ---- a page through the tunnel: the remote profile (report 2.4 with verify-4's corrections, 29 Sep) ----
+// viewer.js gives a page not opened on the local network (device.js isLocalHost) the remote playout
+// clock (playout.js REMOTE_CLOCK: a late frame grows the buffer by its lateness, up to 2 s, coming down
+// over a minute) and a player that keeps up to 2 s of decoded frames (player.js REMOTE_QUEUED_FRAMES).
+// What it shows on the modelled tunnel traces, on both decoder models (Task 2's proof: frames shown
+// about 100%, freezes of 200 ms or more at most about 0.5 a minute, median delay about 1.2-2 s where
+// the link stalls; the numbers in brackets are the local profile's, above). Local pages are not
+// touched: the baseline above is theirs, unchanged.
+{
+  const remote = async (name, i, decoder = {}) => {
+    const tile = fixtureTrace(name).tiles[i]
+    return playTile(tile, { ...REMOTE_LIVE, decoder: { ...decoderFor(tile), ...decoder } })
+  }
+  const pin = (r, shown, freezes, lat) => Math.abs(r.shownPct - shown) <= 0.1 && Math.abs(r.freezesPerMin - freezes) <= 0.1 && Math.abs(r.medLatencyMs - lat) <= 50
+  check('remote profile: the player keeps 2 s of decoded frames at 30 fps and 15 spare (75), not the usual 45', REMOTE_LIVE.playerOptions.maxQueuedFrames === 75 && REMOTE_LIVE.clock === REMOTE_CLOCK)
+  const page = (f) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8')
+  check('... playback and the wall keep theirs: no remote clock, no decoded-frame limit of their own', ['playback.js', 'wall.js'].every((f) => !/REMOTE_|maxQueuedFrames|stretchLate|shrinkWindowMs/.test(page(f))))
+  for (const decoder of [{}, { inFlight: 5 }]) {
+    const on = decoder.inFlight ? ', Chrome-like decoder' : ''
+    let r = await remote('tunnel-stall', 0, decoder)
+    check(`remote profile${on}: tunnel with a 1.2 s stall every ~20 s: 100% of frames, one freeze in 2 minutes (the first stall), median delay 1.57 s [97.3%, 3.1 a minute, 0.78 s]`, pin(r, 100, 0.5, 1567) && r.skipEventsPerMin === 0, brief(r))
+    r = await remote('tunnel-hol', 0, decoder)
+    check(`remote profile${on}: tunnel with other tiles' keyframes ahead: 100%, one freeze of about 200 ms, median delay 1.18 s [98.9%, 2.0, 1.03 s]`, pin(r, 100, 0.5, 1184) && r.maxStillMs < 250, brief(r))
+    r = await remote('tunnel-nvr', 0, decoder)
+    check(`remote profile${on}: tunnel with the NVR's pauses: 100%, one still of about 200 ms, median delay 0.77 s [99.7%, 0, 0.65 s]`, pin(r, 100, 0.5, 767) && r.maxStillMs < 250, brief(r))
+    r = await remote('lan', 0, decoder)
+    check(`remote profile${on}: a clean link (the local model): every frame, no freeze, median delay 0.42 s (350 ms for the first minute, then down to 150) [100%, 0, 0.37 s]`, r.shownPct === 100 && r.freezesPerMin === 0 && pin(r, 100, 0, 417), brief(r))
+  }
+  // 30 fps decoded in software (no picture limit): at 1.1-1.5 s of buffer the player holds more than
+  // 45 decoded frames, and the usual limit threw frames away (verify-4: 2.8 a minute)
+  const arr = arrivals({ fps: 30, durMs: 120_000, ...NETS['tunnel+stall'], seed: 11 })
+  const soft = { pool: Infinity, decodeMs: 3 }
+  const kept = await play(arr, { ...REMOTE_LIVE, decoder: soft })
+  const cut = await play(arr, { clock: REMOTE_CLOCK, decoder: soft })
+  check('remote profile, 30 fps decoded in software, 1.2 s stalls: every frame with 75 decoded frames kept, frames thrown away with 45', kept.shownPct === 100 && kept.skipEventsPerMin === 0 && cut.skipEventsPerMin > 5, `${brief(kept)} with 45: ${brief(cut)}`)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

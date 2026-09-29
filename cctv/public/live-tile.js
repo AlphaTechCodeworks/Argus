@@ -93,9 +93,11 @@ export class LiveTile {
    * @param {{ nvr: string, ch: number }} cam
    * @param {number} streamType
    * @param {number} startDelayMs tiles open slightly staggered so a big grid doesn't hit the NVR all at once
-   * @param {{ pacing?: boolean, clock?: object, statsVisible?: () => boolean, onDisconnect?: () => void,
+   * @param {{ pacing?: boolean, clock?: object, maxQueuedFrames?: number, statsVisible?: () => boolean, onDisconnect?: () => void,
    *   onFirstFrame?: () => void, onUnsupported?: (codecId: number) => void }} [opts]
-   *   clock: PlayoutClock options (the "Smooth" setting); onFirstFrame: the first frame is on screen;
+   *   clock: PlayoutClock options (the "Smooth" setting; a page through the tunnel's REMOTE_CLOCK);
+   *   maxQueuedFrames: decoded frames the player keeps (the tunnel's bigger buffer: viewer.js);
+   *   onFirstFrame: the first frame is on screen;
    *   recording: tells the dot whether the server is also recording this camera (red rather than
    *   green); leave it out where that is not known. onUnsupported: replaces the built-in handling (main -> sub fallback, message) when the
    *   browser can't play the stream
@@ -130,6 +132,7 @@ export class LiveTile {
       // keyframe as if the decoder could not keep up (player.js; stutter report 2.2, 29 Sep)
       arrivalClock: true,
       clock: opts.clock,
+      maxQueuedFrames: opts.maxQueuedFrames,
       maxFps: opts.maxFps,
       onUnsupported: (codecId) => (opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)),
       onFrame: () => {

@@ -16,10 +16,18 @@
 //    decoded, without the playout clock. Stills never skip: turning them on ends a skipUntil.
 //  - seekReset(): a seek keeps the decoder set up (reset + configure with the same config), so it
 //    needs no isConfigSupported round trip.
-import { PlayoutClock } from './playout.js'
+import { PlayoutClock, REMOTE_CLOCK } from './playout.js'
 import { pictureSize, videoInfo } from './sps.js'
 
 const MAX_QUEUED_FRAMES = 45
+/**
+ * Decoded frames a live player keeps on a page through the tunnel (viewer.js, with REMOTE_CLOCK): its
+ * buffer grows up to 2 s, 60 frames at 30 fps (the fastest cameras here), and 15 spare. With 45 a
+ * software-decoded 30 fps tile threw frames away once the buffer passed 1.5 s (verify-4: 2.8 a
+ * minute). A hardware decoder's own few pictures stay the limit there. Playback, the wall and local
+ * pages keep 45.
+ */
+export const REMOTE_QUEUED_FRAMES = Math.ceil((REMOTE_CLOCK.maxDelayMs / 1000) * 30) + 15
 const MAX_PAUSED_FRAMES = 90 // frames that may arrive after a pause request reaches the NVR
 const MAX_DECODE_QUEUE = 12
 // Live (arrivalClock): a queue past MAX_DECODE_QUEUE is a decoder that cannot keep up only when the
@@ -129,13 +137,15 @@ function track(player) {
 export class VideoPlayer {
   /**
    * @param {HTMLCanvasElement} canvas
-   * @param {{ pacing?: boolean, clock?: object, arrivalClock?: boolean, onUnsupported?: (codecId: number) => void, onFrame?: (tsMs: number) => void, onPoster?: (tsMs: number) => void }} [options]
+   * @param {{ pacing?: boolean, clock?: object, arrivalClock?: boolean, maxQueuedFrames?: number, onUnsupported?: (codecId: number) => void, onFrame?: (tsMs: number) => void, onPoster?: (tsMs: number) => void }} [options]
    *   pacing: false draws frames as soon as they decode (for comparison only)
    *   clock: PlayoutClock options (playback uses a larger buffer than live)
    *   arrivalClock: live -- each frame is timed on the playout clock as it arrives rather than once
    *     decoded (push), and a long decode queue drops to the next keyframe only when it is really
    *     behind (#decode). Playback and the wall keep the clock as it was: with it, playback held a
    *     frame 67 ms at a 4x -> 1x change (verify-2, 29 Sep)
+   *   maxQueuedFrames: decoded frames kept waiting for display, at most (45; a page through the
+   *     tunnel keeps REMOTE_QUEUED_FRAMES for its bigger buffer)
    *   onFrame: called with the capture time of each frame as it is shown
    *   onPoster: called when a preroll's keyframe is drawn as a poster (skipUntil; onFrame is not)
    *   maxFps: draw at most this many frames a second (a phone gains nothing above 15); the frames
@@ -153,6 +163,7 @@ export class VideoPlayer {
     this.minDrawGapMs = options.maxFps > 0 ? 1000 / options.maxFps - 4 : 0 // -4: one display refresh of slack
     this.lastDrawAt = 0
     this.clock = new PlayoutClock(options.clock)
+    this.maxQueued = options.maxQueuedFrames ?? MAX_QUEUED_FRAMES
     this.arrivalClock = options.arrivalClock === true && this.pacing // (without pacing there is no clock)
     this.fed = [] // arrivalClock: { ts (µs), at } of each frame handed to the decoder and not back yet, oldest first
     this.paused = false
@@ -412,7 +423,7 @@ export class VideoPlayer {
       this.onFrame?.(ts)
     }
     this.queue.push({ frame, ts })
-    while (this.queue.length > (this.paused ? MAX_PAUSED_FRAMES : MAX_QUEUED_FRAMES)) {
+    while (this.queue.length > (this.paused ? MAX_PAUSED_FRAMES : this.maxQueued)) {
       this.queue.shift().frame.close()
       this.stats.dropped++
     }

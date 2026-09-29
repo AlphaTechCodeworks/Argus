@@ -31,14 +31,23 @@
 // From the command line, one row per tile (the fixtures when no file is named):
 //   node cctv/test/live-replay.mjs [trace.json ...] [--player path/to/player.js] [--pool N]
 //     [--decode-ms N] [--in-flight N] [--clock '{"startDelayMs":350}'] [--max-fps 15]
-//     [--player-options '{"arrivalClock":false}']
+//     [--player-options '{"arrivalClock":false}'] [--remote]
+//   --remote: as a page through the tunnel plays it (REMOTE_LIVE); --clock and --player-options go over it
 //   node cctv/test/live-replay.mjs --write-fixtures   (makes the fixtures again from FIXTURES)
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+import { REMOTE_CLOCK } from '../public/playout.js'
+import { REMOTE_QUEUED_FRAMES } from '../public/player.js'
 
 export const REPO_PLAYER = new URL('../public/player.js', import.meta.url).href
 export const FIXTURE_DIR = new URL('./fixtures/live-replay/', import.meta.url)
 const TRACE_FORMAT = 'argus-frame-trace' // public/frame-trace.js
+/**
+ * What a page opened through the tunnel or the tailnet gives its tiles (viewer.js, device.js
+ * isLocalHost): the remote playout clock and room for 2 s of decoded frames. Spread into play() or
+ * playTile() to replay a trace as such a page plays it; a local page's is the default (nothing).
+ */
+export const REMOTE_LIVE = Object.freeze({ clock: REMOTE_CLOCK, playerOptions: Object.freeze({ maxQueuedFrames: REMOTE_QUEUED_FRAMES }) })
 const TS0 = 1_700_000_000_000 // capture times handed to the player are epoch ms, as the camera's are
 const REFRESH_MS = 1000 / 60
 const STEP_MS = 0.5
@@ -570,6 +579,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const clock = opt('--clock')
   const maxFps = opt('--max-fps')
   const playerOptions = opt('--player-options')
+  const remote = args.includes('--remote') ? REMOTE_LIVE : { playerOptions: {} }
   const files = args.filter((a) => !a.startsWith('--'))
   const traces = files.length ? files.map((f) => [f, readTrace(f)]) : Object.keys(FIXTURES).map((n) => [`${n} (fixture)`, fixtureTrace(n)])
   const rows = []
@@ -577,7 +587,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     for (const tile of trace.tiles) {
       if (!tile.frames.length) continue
       const decoder = { ...decoderFor(tile), ...(pool && { pool: Number(pool) }), ...(decodeMs && { decodeMs: Number(decodeMs) }), ...(inFlight && { inFlight: Number(inFlight) }) }
-      const r = await playTile(tile, { decoder, player: player && pathToFileURL(player).href, clock: clock && JSON.parse(clock), maxFps: maxFps && Number(maxFps), playerOptions: playerOptions && JSON.parse(playerOptions) })
+      const r = await playTile(tile, { decoder, player: player && pathToFileURL(player).href, clock: clock ? JSON.parse(clock) : remote.clock, maxFps: maxFps && Number(maxFps), playerOptions: { ...remote.playerOptions, ...(playerOptions && JSON.parse(playerOptions)) } })
       rows.push({ trace: name, tile: `${tile.camera} ${tile.stream}`, fps: +frameRateOf(tileArrivals(tile)).toFixed(1), pool: decoder.pool, ...r })
     }
   }
