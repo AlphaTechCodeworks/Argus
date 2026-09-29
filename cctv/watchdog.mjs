@@ -11,6 +11,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
+import { startLoopLag } from './loop-lag.mjs'
 import { callInFlight, discountPause, sdkStats } from './sdk.mjs'
 
 const env = (name, fallback) => Number(process.env[name] ?? fallback) // overridable for tests
@@ -273,6 +274,7 @@ function released(stats, now) {
 }
 
 export function startWatchdog() {
+  startLoopLag() // "[loop] blocked N ms" for every pause over 250 ms, main process and workers (loop-lag.mjs)
   let lastCheck = Date.now()
   let quietUntil = 0
   setInterval(() => {

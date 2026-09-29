@@ -49,6 +49,30 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   void readFileSync
 }
 
+// ---- Task 0 of the perf report (2026-09-29): a process running the watchdog says when its loop was held
+{
+  const { spawn } = await import('node:child_process')
+  const dir = mkdtempSync(join(tmpdir(), 'wdl-'))
+  const code = `
+    import { startWatchdog } from '${new URL('../watchdog.mjs', import.meta.url).href}'
+    startWatchdog()
+    const busy = (ms) => { const t = Date.now(); while (Date.now() - t < ms); }
+    setTimeout(() => busy(1000), 300)             // one 1 s busy loop
+    setTimeout(() => process.exit(0), 300 + 1000 + 700)
+  `
+  for (const [who, env] of [['a worker', { CCTV_WORKER_NVR: 'w8' }], ['the main process', { CCTV_WORKER_NVR: '' }]]) {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, DATA_DIR: dir, ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.stderr.on('data', (d) => (out += d))
+    await new Promise((r) => child.on('exit', r))
+    const lines = out.split('\n').filter((l) => /^\[loop\] blocked \d+ ms/.test(l))
+    const ms = Number(lines[0]?.match(/blocked (\d+) ms/)?.[1])
+    check(`watchdog in ${who}: a 1 s busy loop logs exactly one "[loop] blocked" line, of about 1000 ms`, lines.length === 1 && ms >= 950 && ms <= 1100, out.trim().split('\n').join(' | '))
+    if (typeof process.threadCpuUsage === 'function') check(`watchdog in ${who}: ...saying the thread computed through it`, /computed for (\d+) ms of it$/.test(lines[0] ?? '') && Number(lines[0].match(/computed for (\d+) ms/)[1]) >= 900, lines[0])
+  }
+}
+
 // ---- Task 3: the worker process on its own
 {
   const child = fork(new URL('../nvr-worker.mjs', import.meta.url), [], { serialization: 'advanced', stdio: ['ignore', 'pipe', 'inherit', 'ipc'], env: { ...process.env, CCTV_WORKER_NVR: 'w1' } })
@@ -57,6 +81,15 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   child.stdout.on('data', (d) => (wout += d))
   child.on('message', (m) => got.push(m))
   check('worker says ready', await until(() => got.some((m) => m.t === 'ready')))
+  // perf report Task 0 (2026-09-29): each 5 s STATS carries the worker's memory and its loop's worst pause
+  check('STATS arrive (every 5 s)', await until(() => got.some((m) => m.t === 'stats'), 7000))
+  {
+    const st = got.find((m) => m.t === 'stats')
+    const mem = st?.mem ?? {}
+    check('STATS carry process.memoryUsage() of the worker', mem.pid === child.pid && [mem.rss, mem.heapTotal, mem.heapUsed, mem.external, mem.arrayBuffers].every((v) => Number.isFinite(v) && v >= 0) && mem.rss > 0, JSON.stringify(mem))
+    if (process.platform === 'linux') check('STATS carry VmRSS and its parts (anon, file, shmem), the peak and the threads', mem.vmRss > 0 && mem.rssAnon > 0 && Number.isFinite(mem.rssFile) && mem.vmHwm >= mem.vmRss && mem.threads > 1, JSON.stringify(mem))
+    check("STATS carry the worst pause of the worker's loop in the last minute", Number.isInteger(st?.loop?.worstMs) && st.loop.worstMs >= 0, JSON.stringify(st?.loop))
+  }
   child.send({ t: 'want', ch: 2, type: 1 })
   check('frames arrive for the wanted stream', await until(() => got.some((m) => m.t === 'frame' && m.key === '2:1')))
   const first = got.find((m) => m.t === 'frame')

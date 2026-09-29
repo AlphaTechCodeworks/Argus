@@ -137,6 +137,8 @@ import { runStorageJobs } from './storage-jobs.mjs'
 import { detectEncoder } from './transcode.mjs'
 import { httpsOptions } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
+import { loopWorstMs } from './loop-lag.mjs'
+import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
 
 const {
@@ -148,6 +150,14 @@ const {
 const PUBLIC_DIR = join(import.meta.dirname, 'public')
 
 startWatchdog()
+// One line per process an hour: this one and each NVR worker (from its 5 s STATS), so a day of the
+// journal says whose memory grows and whether it is JavaScript or native (perf report Task 0, 2026-09-29)
+startMemoryLog({
+  sources: () => [
+    { name: 'main', mem: memoryNow() },
+    ...[...nvrs.values()].filter((n) => n.worker).map((n) => ({ name: `worker ${n.id}`, mem: n.worker.stats()?.mem ?? null }))
+  ]
+})
 {
   const hang = lastHang()
   if (hang) console.warn(`Previous run was restarted by the watchdog at ${hang.at}: ${hang.reason}`)
@@ -541,6 +551,9 @@ const handleRequest = async (req, res) => {
       online: list.filter((n) => n.online).length,
       streams,
       sdk: { inFlight: s.inFlight, cap: s.cap, queued: s.queued, late: s.late, oldestMs: s.oldestMs, oldest: s.oldest },
+      // the longest pause of this process's event loop in the last minute, in ms (loop-lag.mjs): the
+      // live video, pages and alarms all waited that long; "[loop] blocked" lines have the details
+      loop: { worstMs: loopWorstMs() },
       // network shares as last checked (never checked here): the outside watcher remounts one that
       // stopped answering, which the server itself, no longer frozen by it, would otherwise hide
       shares: listLocations().filter((l) => l.type === 'network').map((l) => ({ path: l.path, ok: l.health.ok, reason: l.health.reason }))
@@ -552,7 +565,7 @@ const handleRequest = async (req, res) => {
           .filter((n) => n.worker)
           .map((n) => {
             const w = n.worker.stats()
-            return [n.id, { state: n.worker.state(), status: w?.status ?? null, late: w?.sdk?.late ?? null, inFlight: w?.sdk?.inFlight ?? null }]
+            return [n.id, { state: n.worker.state(), status: w?.status ?? null, late: w?.sdk?.late ?? null, inFlight: w?.sdk?.inFlight ?? null, loopWorstMs: w?.loop?.worstMs ?? null }]
           })
       )
     }

@@ -6,7 +6,9 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
+import { loopWorstMs } from './loop-lag.mjs'
 import { recentRefusals } from './nvr-health.mjs'
+import { memoryNow } from './proc-memory.mjs'
 import { allowAllCloses } from './segment-writer.mjs'
 import { LIMIT_ERROR, subCap } from './sub-cap.mjs'
 import { MSG, frameMsg, streamKey } from './worker-ipc.mjs'
@@ -336,8 +338,10 @@ const sendStats = (sent) => {
     // subCap: the NVR's sub-stream limit (null: none known), the viewers' sub-streams held at it, every
     // sub-stream held (their pictures in the parent are old now), and whether it is at the limit;
     // mainPlaying: cameras whose main stream delivers video (a held tile's stand-in joins only those)
+    // loop: the longest pause of this worker's event loop in the last minute (loop-lag.mjs, /healthz);
+    // mem: this process's memory, logged by the parent once an hour (proc-memory.mjs; perf report Task 0)
     const mainPlaying = [...nvr.streams.values()].filter((s) => s.streamType === 0 && s.state === 'playing' && s.gotVideo).map((s) => s.ch)
-    process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, streams: nvr.streams.size, refusals: recentRefusals(nvr.streams.values(), Date.now()), channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), subCap: { limit: cap.known(), held: heldNow(), parked: parkedNow(), full: fullNow() }, mainPlaying, sdk: sdkStats(), rec: recorder.status() }, typeof sent === 'function' ? () => sent() : undefined)
+    process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, streams: nvr.streams.size, refusals: recentRefusals(nvr.streams.values(), Date.now()), channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), subCap: { limit: cap.known(), held: heldNow(), parked: parkedNow(), full: fullNow() }, mainPlaying, sdk: sdkStats(), rec: recorder.status(), loop: { worstMs: loopWorstMs() }, mem: memoryNow() }, typeof sent === 'function' ? () => sent() : undefined)
     return true
   } catch {
     return false
