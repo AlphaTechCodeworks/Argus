@@ -44,6 +44,7 @@ import { DATA_DIR } from './auth.mjs'
 import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, Transcoder, clientCanDecodeH265, lightPool, pool as transcodePool } from './transcode.mjs'
 import { bind, codecOf, coolingLeftMs, encodeFrame, errorText, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
 import { lastHang } from './watchdog.mjs'
+import { SdWait, hdOnlyStore } from './hd-only.mjs'
 
 // FindNext* result codes continue the SDK error enum: NET_SDK_FILE_SUCCESS is 85 (one more item).
 // A file walk is complete only when it ends with 86 NET_SDK_FILE_NOFIND or 87 NET_SDK_NOMOREFILE;
@@ -64,7 +65,6 @@ const SESSION_HOURS = 6 // each request asks the NVR for up to this much footage
 const PAUSE_ABOVE = 8 * 1024 * 1024 // bytes queued to a slow client before playback is paused
 const RESUME_BELOW = 1024 * 1024
 const IDLE_END_MS = 8000 // no frames for this long while playing = end of recording
-const SD_FALLBACK_MS = 4000 // some cameras record HD only: no SD frames by then -> switch to HD
 // Server-side pacing. The SDK paces only one playback at a time; others arrive as fast
 // as the NVR can send. Frames are therefore buffered and released at their capture
 // timing (x speed), and the NVR is paused while the buffer holds more than BUFFER_HIGH_MS.
@@ -416,34 +416,9 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
   // ---- playback sessions --------------------------------------------------
 
   const sessions = new Set()
-  // channels found to record no SD stream: skip the SD attempt next time (kept across restarts)
-  const HD_ONLY_FILE = join(DATA_DIR, 'hd-only.json')
-  const readHdOnly = () => {
-    try {
-      const all = JSON.parse(readFileSync(HD_ONLY_FILE, 'utf8'))
-      return Array.isArray(all?.[nvr.id]) ? all[nvr.id].filter(Number.isInteger) : []
-    } catch {
-      return []
-    }
-  }
-  const hdOnly = new Set(readHdOnly())
-  const saveHdOnly = () => {
-    try {
-      let all = {}
-      try {
-        all = JSON.parse(readFileSync(HD_ONLY_FILE, 'utf8')) ?? {}
-      } catch {}
-      all[nvr.id] = [...hdOnly].sort((a, b) => a - b)
-      writeFileSync(HD_ONLY_FILE, `${JSON.stringify(all)}\n`, { mode: 0o600 })
-    } catch (e) {
-      console.warn(`[${nvr.id}] could not save the HD-only list: ${e.message}`)
-    }
-  }
-  const markHdOnly = (ch) => {
-    if (hdOnly.has(ch)) return
-    hdOnly.add(ch)
-    saveHdOnly()
-  }
+  // channels found to record no SD stream: asked for main at once next time (hd-only.mjs: marked only
+  // once main frames came after a switch, cleared by an SD frame, trusted for a week; kept across restarts)
+  const hdOnly = hdOnlyStore({ file: join(DATA_DIR, 'hd-only.json'), nvrId: nvr.id })
 
   class PlaybackSession {
     constructor(ws, ch, mainStream, start, clientH265 = true) {
@@ -470,6 +445,8 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       this.lastFrameAt = Date.now()
       this.gotFrames = false
       this.openedAt = 0
+      this.sdWait = new SdWait() // no SD frame in 4 s of the NVR really playing: HD only (hd-only.mjs)
+      this.markOnFrames = false // switched to main: marked HD-only when its first frame comes
       this.onFrame = this.#onFrame.bind(this)
       sessions.add(this)
       ws.on('message', (data, isBinary) => {
@@ -580,6 +557,15 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       }
       if (info.frameType !== 1 || info.length === 0) return
       this.lastFrameAt = Date.now()
+      if (!this.gotFrames) {
+        // the first frame: an SD one proves the camera is not HD only (a mark from a slow NVR heals);
+        // the first main one after a switch is the proof that it is, and only now is it marked
+        if (!this.mainStream) hdOnly.unmark(this.ch)
+        else if (this.markOnFrames) {
+          this.markOnFrames = false
+          hdOnly.mark(this.ch)
+        }
+      }
       this.gotFrames = true
       if (info.keyFrame) {
         // trust the bitstream over the NVR's format notes, which can be empty or late in playback
@@ -666,7 +652,12 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       const run = !this.paused && !this.throttled && !this.buffered
       if (run === this.nvrRunning) return
       this.nvrRunning = run
-      if (run) this.lastFrameAt = Date.now()
+      if (run) {
+        this.lastFrameAt = Date.now()
+        // playing again before any frame came (opened paused, then played): the 4 s for an SD
+        // picture start again, rather than having run out while nothing could come
+        if (!this.gotFrames) this.sdWait.restart()
+      }
       await this.#control(run ? PLAYCTRL.RESUME : PLAYCTRL.PAUSE)
     }
 
@@ -702,9 +693,10 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
 
     async #watch() {
       if (this.closed || this.handle <= 0) return
-      if (!this.gotFrames && !this.mainStream && !this.paused && Date.now() - this.openedAt > SD_FALLBACK_MS) {
-        return this.#switchToMain()
-      }
+      // no SD frame after 4 s of the NVR really playing this session (hd-only.mjs SdWait: not before it
+      // has started, not while it is paused): this camera records HD only
+      const running = this.openedAt > 0 && this.nvrRunning && !this.paused
+      if (!this.gotFrames && !this.mainStream && this.sdWait.tick(Date.now(), running)) return this.#switchToMain()
       // flow control: pause the NVR while the viewer's connection is backed up
       const queued = this.ws.bufferedAmount
       if (!this.throttled && queued > PAUSE_ABOVE) {
@@ -725,6 +717,9 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       const old = this.handle
       this.handle = 0
       this.mainStream = true
+      // marked HD-only once main frames have come (#onFrame): a switch alone proves nothing
+      this.markOnFrames = true
+      this.sdWait.restart()
       playFrames.release(old)
       await op(() => call(StopPlayBack, old), PRIORITY.HIGH).catch(() => {})
       this.queue = []
@@ -734,7 +729,6 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       this.xcode?.reset()
       if (this.closed) return this.#unregister()
       console.log(`[${nvr.id}] playback ch${this.ch + 1}: no SD recording, switching to HD`)
-      markHdOnly(this.ch)
       this.send({ type: 'stream', stream: 0 })
       await this.#open()
     }
@@ -811,7 +805,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
     connect,
     stopAll,
     isHdOnly: (ch) => hdOnly.has(ch),
-    markHdOnly
+    markHdOnly: (ch) => hdOnly.mark(ch)
   }
 }
 
