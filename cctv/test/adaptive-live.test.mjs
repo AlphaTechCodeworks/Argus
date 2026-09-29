@@ -30,6 +30,33 @@ const T = 1_000_000
   check('the camera\'s own stream is the top', nextLevel(v, { pressure: false, now: T + 999_999 }).level === 0)
   check('over the budget: down even without pressure', nextLevel({ level: 0, changedAt: T, cleanSince: T }, { pressure: false, overBudget: true, now: T + SETTLE_MS }).level === 1)
 }
+{
+  // A climb that fails (a step down within 30 s of it) doubles the wait before the next, up to 80 s,
+  // and 5 minutes with nothing piling up puts it back to 20 s. On 29 Sep a climb at 04:07:46 was
+  // stepped down again at 04:08:08. Only a failed climb: one burst must not keep a page low (verify-1).
+  let v = nextLevel({ level: 1, changedAt: T - 30_000, cleanSince: T - CLIMB_AFTER_MS }, { pressure: null, now: T })
+  check('clean for 20 s: up', v.level === 0 && v.why === 'clean for 20 s', JSON.stringify(v))
+  v = nextLevel(v, { pressure: true, now: T + 10_000 })
+  check('down 10 s after that climb: the next one waits 40 s clean', v.level === 1 && v.climbAfterMs === 40_000, JSON.stringify(v))
+  check('... not after 20 s', nextLevel(v, { pressure: null, now: T + 30_000 }).level === 1)
+  v = nextLevel(v, { pressure: null, now: T + 50_000 })
+  check('... after 40 s: up', v.level === 0 && v.why === 'clean for 40 s', JSON.stringify(v))
+  v = nextLevel(v, { pressure: true, now: T + 55_000 })
+  v = nextLevel(v, { pressure: null, now: T + 135_000 })
+  check('down again 5 s after it: 80 s clean before the next', v.level === 0 && v.why === 'clean for 80 s', JSON.stringify(v))
+  v = nextLevel(v, { pressure: true, now: T + 140_000 })
+  check('... and again: still 80 s, no more', v.level === 1 && v.climbAfterMs === 80_000, JSON.stringify(v))
+  v = nextLevel(v, { pressure: null, now: T + 140_000 + 5 * 60_000 - 1 })
+  check('... 5 minutes with nothing piling up, less 1 ms: still 80 s', v.climbAfterMs === 80_000 && v.level === 0)
+  v = nextLevel({ ...v, level: 1 }, { pressure: null, now: T + 140_000 + 5 * 60_000 })
+  check('... at 5 minutes: back to 20 s', v.climbAfterMs === CLIMB_AFTER_MS, JSON.stringify(v))
+  // down 31 s after a climb: the climb held
+  const up = nextLevel({ level: 2, changedAt: T - 30_000, cleanSince: T - CLIMB_AFTER_MS }, { pressure: null, now: T })
+  check('down 31 s after a climb: that climb held, the wait stays 20 s', nextLevel(up, { pressure: true, now: T + 31_000 }).climbAfterMs === CLIMB_AFTER_MS)
+  // two steps down after one climb: the second follows a step, not a climb
+  const once = nextLevel(nextLevel(up, { pressure: true, now: T + 5000 }), { pressure: true, now: T + 9000 })
+  check('two steps down after one climb: doubled once', once.level === 3 && once.climbAfterMs === 40_000, JSON.stringify(once))
+}
 
 // ---- moving viewers between streams ----
 function fakeSource(name) {
@@ -467,6 +494,10 @@ function onPage(key, n = 2) {
   check('the 03:55 page open over 5 Mbit/s: no step down in 60 s (it stepped full -> 15 at 4 s, 1.48 MB queued, 2.4 s)', open.downs.length === 0, open.downs.join(' | '))
   const slow = openPage({ tiles, linkMbps: 3, durMs: 60_000 })
   check('... the same page on 3 Mbit/s, less than its 4 Mbit/s: it still steps down', slow.downs.length > 0, slow.lines.join(' | '))
+  // on 4 Mbit/s full is just too much: each climb back to it fails 4 s later. It tried every 24 s.
+  const edge = openPage({ tiles, linkMbps: 4, durMs: 250_000 })
+  const climbs = edge.lines.filter((l) => l.includes('-> full')).map((l) => l.match(/\(clean for (\d+) s;/)?.[1])
+  check('... on 4 Mbit/s, where full fails each time: 20, 40, 80, 80 s clean before each climb back', climbs.join() === '20,40,80,80', edge.lines.join(' | '))
 }
 {
   // A real overload: 16 sub tiles of 0.5 Mbit/s (25 fps) into a 2 Mbit/s link, four times what it carries

@@ -86,8 +86,18 @@ export const HELD_MS = 2000
  */
 export const GRACE_MS = 8000
 export const OPENING_MS = 1000
-/** Clean for this long before a viewer is tried one level up. */
+/** Clean for this long before a viewer is tried one level up... */
 export const CLIMB_AFTER_MS = 20_000
+/**
+ * ...twice as long after a climb that failed (a step down within CLIMB_FAILED_MS of it), up to
+ * MAX_CLIMB_AFTER_MS, and back to CLIMB_AFTER_MS after CLIMB_RESET_MS with nothing piling up. On 29
+ * Sep a climb at 04:07:46 was stepped down again at 04:08:08, and a page on a link just too slow for a
+ * level tried it again every 24 s, each try a burst of new streams. Only a climb that failed counts: a
+ * page knocked down by one burst must not wait minutes to come back (verify-1).
+ */
+export const CLIMB_FAILED_MS = 30_000
+export const MAX_CLIMB_AFTER_MS = 80_000
+export const CLIMB_RESET_MS = 5 * 60_000
 /** A level change is given this long to show its effect before another. */
 export const SETTLE_MS = 4000
 
@@ -115,26 +125,36 @@ export const startLevel = () => 0
 
 /**
  * The next level for one viewer, from what its sockets showed this tick. Pure: the tests drive it.
- * @param {{ level: number, changedAt: number, cleanSince: number }} v
+ * @param {{ level: number, changedAt: number, cleanSince: number, climbAfterMs?: number, climbedAt?: number|null,
+ *   pressedAt?: number|null }} v
+ *   climbAfterMs: how long clean before its next climb (CLIMB_AFTER_MS, doubled by each that failed);
+ *   climbedAt: its last climb, while no step down has come after it; pressedAt: its last look not clean
  * @param {{ pressure: boolean|string|null, now: number, overBudget?: boolean, starved?: boolean }} o
  *   pressure: true, or why (for the log); starved: more than half its tiles are on the camera's own
  *   stream for want of a conversion slot, which a level lower would not find either
- * @returns {{ level: number, changedAt: number, cleanSince: number, why?: string, stays?: string }}
- *   stays: why it would have gone down, when starved kept it where it is
+ * @returns {{ level: number, changedAt: number, cleanSince: number, climbAfterMs: number, climbedAt: number|null,
+ *   pressedAt: number|null, why?: string, stays?: string }} stays: why it would have gone down, when starved kept it
  */
 export function nextLevel(v, { pressure, now, overBudget = false, starved = false }) {
   const settled = now - v.changedAt >= SETTLE_MS
   const worst = LEVELS.length - 1
-  if ((pressure || overBudget) && settled && v.level < worst) {
+  const trouble = Boolean(pressure) || overBudget
+  // five minutes with nothing piling up: the climbs that failed before no longer count
+  let climbAfterMs = v.climbAfterMs ?? CLIMB_AFTER_MS
+  if (climbAfterMs > CLIMB_AFTER_MS && now - (v.pressedAt ?? -Infinity) >= CLIMB_RESET_MS) climbAfterMs = CLIMB_AFTER_MS
+  const n = { level: v.level, changedAt: v.changedAt, cleanSince: v.cleanSince, climbAfterMs, climbedAt: v.climbedAt ?? null, pressedAt: trouble ? now : (v.pressedAt ?? null) }
+  if (trouble && settled && v.level < worst) {
     const why = !pressure ? 'the uplink budget is used up' : typeof pressure === 'string' ? pressure : 'video backing up on its link'
-    if (starved) return { ...v, cleanSince: pressure ? now : v.cleanSince, stays: why }
-    return { level: v.level + 1, changedAt: now, cleanSince: now, why }
+    if (starved) return { ...n, cleanSince: pressure ? now : v.cleanSince, stays: why }
+    // down within CLIMB_FAILED_MS of a climb: that climb was one too many, and the next waits twice as long
+    const failed = n.climbedAt != null && now - n.climbedAt <= CLIMB_FAILED_MS
+    return { ...n, level: v.level + 1, changedAt: now, cleanSince: now, climbedAt: null, climbAfterMs: failed ? Math.min(MAX_CLIMB_AFTER_MS, climbAfterMs * 2) : climbAfterMs, why }
   }
-  if (pressure) return { ...v, cleanSince: now }
-  if (v.level > 0 && settled && now - v.cleanSince >= CLIMB_AFTER_MS && !overBudget) {
-    return { level: v.level - 1, changedAt: now, cleanSince: now, why: 'clean for 20 s' }
+  if (pressure) return { ...n, cleanSince: now }
+  if (v.level > 0 && settled && now - v.cleanSince >= climbAfterMs && !overBudget) {
+    return { ...n, level: v.level - 1, changedAt: now, cleanSince: now, climbedAt: now, why: `clean for ${climbAfterMs / 1000} s` }
   }
-  return v
+  return n
 }
 
 /** One remote browser: its sockets and the level they are on. */
@@ -144,6 +164,9 @@ class Viewer {
     this.level = startLevel()
     this.changedAt = now
     this.cleanSince = now
+    this.climbAfterMs = CLIMB_AFTER_MS // (nextLevel)
+    this.climbedAt = null
+    this.pressedAt = null
     this.stayedAt = null // the level it last said it stays at for want of conversion slots (said once a level)
     this.overLooks = 0 // looks in a row with its queue over QUEUE_S
     // its own start-up going out (GRACE_MS): marks, per socket, the bytes its link will have written
@@ -404,6 +427,9 @@ export class AdaptiveLive {
       }
       v.changedAt = n.changedAt
       v.cleanSince = n.cleanSince
+      v.climbAfterMs = n.climbAfterMs
+      v.climbedAt = n.climbedAt
+      v.pressedAt = n.pressedAt
     }
     this.lastTotalBps = total
   }
