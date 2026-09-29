@@ -24,7 +24,7 @@
 // Viewers on the same level share one conversion per camera, so the cost follows the number of
 // cameras being watched remotely, not the number of people watching. Conversions have their own cap
 // (phone-live.mjs maxPhoneStreams); a viewer who cannot get a slot gets the camera's own stream.
-import { PhoneStream, maxPhoneStreams } from './phone-live.mjs'
+import { PhoneStream, RATE_SAMPLES, keepEveryFor, maxPhoneStreams } from './phone-live.mjs'
 import { PLAYBACK_LIMITS, TranscodePool } from './transcode.mjs'
 
 export const LEVELS = Object.freeze([
@@ -116,6 +116,12 @@ export function wanBudgetBps(env = process.env) {
   return (Number.isFinite(m) && m > 0 ? m : 20) * 1e6 / 8
 }
 
+/** A frame's header (sdk.mjs encodeFrame): keyframe or not, codec, capture time in ms; null for anything else. */
+function header(buf) {
+  if (!(buf instanceof Uint8Array) || buf.length <= 16) return null
+  return { isKey: (buf[0] & 1) === 1, codec: buf[1], ts: Number(new DataView(buf.buffer, buf.byteOffset, 16).getBigInt64(8, true)) / 1000 }
+}
+
 /** Whether this address is a remote viewer (through Tailscale), not the local network. */
 export function isRemoteAddress(addr) {
   const a = String(addr ?? '').replace(/^::ffff:/, '')
@@ -195,6 +201,7 @@ export class AdaptiveLive {
     this.viewers = new Map() // key -> Viewer
     this.gone = new Map() // key -> { level, at }: viewers whose last socket closed, for REMEMBER_MS
     this.streams = new Map() // `${nvr}/${ch}/${type}@${level}` -> PhoneStream
+    this.rates = new Map() // `${nvr}/${ch}/${type}` -> the frame rate last read or learnt of that camera stream (#rateOf)
     this.timer = null
   }
 
@@ -215,7 +222,41 @@ export class AdaptiveLive {
     // the camera's own stream where this device can play it: H.264 always; H.265 only for a device
     // that said it can (&h265=1) -- half the data of H.264 for the same picture. Otherwise an H.265
     // camera is converted at full too (every frame kept), never sent raw to a laptop that would show black.
-    return level > 0 || (this.#h265(entry) && !entry.clientH265)
+    if (level === 0) return this.#h265(entry) && !entry.clientH265
+    return !this.#passes(entry, level)
+  }
+
+  /**
+   * Whether a sub-stream goes out as it is at this level: at or under its rate, nothing to thin (a
+   * level's stream would pass it through: phone-live.mjs). It used to be put on that level's stream all
+   * the same, and lost its picture until the camera's next keyframe: 0-2.5 s on the 11 tiles of 26 sent
+   * as they were at 04:18:05 on 29 Sep (verify-5). Such a sub stays on the camera's own stream. Decided
+   * once a level from the rate its camera stream already knows (#rateOf), so a reading a little either
+   * side of the line (22.5 fps at 15) does not move it back and forth; not known yet, the level's stream
+   * learns it as before.
+   */
+  #passes(entry, level) {
+    if (entry.type === 0) return false // a main: a level always scales it down
+    if (entry.passAt?.level === level) return entry.passAt.passes
+    const fps = this.#rateOf(entry)
+    if (!(fps > 0)) return false
+    entry.passAt = { level, passes: keepEveryFor(fps, LEVELS[level].fps) === 1 }
+    return entry.passAt.passes
+  }
+
+  /**
+   * A camera stream's frame rate: from the GOP it holds, once that is 12 frames or 1 s of them (as a
+   * level's stream learns it, phone-live.mjs); else the one read or learnt last (a look just after a
+   * keyframe has one frame to go on); 0 when not known yet.
+   */
+  #rateOf(entry) {
+    const key = `${entry.nvrId}/${entry.ch}/${entry.type}`
+    const gop = entry.source.gop ?? []
+    const first = header(gop[0])
+    const last = header(gop.at(-1))
+    const span = first && last ? last.ts - first.ts : 0
+    if (span > 0 && (gop.length >= RATE_SAMPLES || span >= REMOTE_CONVERSION.learnMs)) this.rates.set(key, ((gop.length - 1) * 1000) / span)
+    return this.rates.get(key) ?? 0
   }
 
   /** Where a socket's frames come from at this level: a shared converted stream, or the camera's own. */
@@ -230,7 +271,9 @@ export class AdaptiveLive {
       // level full is only ever for browsers that cannot play H.265 (#converts), so an H.265 stream
       // there is converted even with nothing to thin (h264Only); the other levels are shared with
       // browsers that can
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      // (the rate it learns is remembered for this camera stream: #passes)
+      const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
     }
     return s

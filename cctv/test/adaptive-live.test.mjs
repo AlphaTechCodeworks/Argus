@@ -1,7 +1,8 @@
 // Tests for the remote viewers' frame-rate levels (adaptive-live.mjs), with fake streams: no ffmpeg.
 //   node cctv/test/adaptive-live.test.mjs
 import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, TICK_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
-import { encodeFrame } from '../phone-live.mjs'
+import { encodeFrame, parseFrame } from '../phone-live.mjs'
+import { HubStream } from '../stream-hub.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
 import { camera, openPage } from './remote-page.mjs'
 
@@ -706,6 +707,133 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   for (const i of [0, 1]) for (const v of [...src.viewers]) v.send(encodeFrame(Buffer.from([0, 0, 1, 1]), true, 1, i * 1250))
   check('REMOTE_CONVERSION: a source under 10 fps is converted picture by picture', REMOTE_CONVERSION.slowFps === 10 && made.length === 1 && made[0].o.lowDelay === true, JSON.stringify(REMOTE_CONVERSION))
   clearInterval(live.timer)
+}
+
+// ---- level changes without a freeze or a jump back (stutter report 2.5, verify-5) ----
+/**
+ * A remote viewer's tiles on real camera streams (stream-hub.mjs HubStream: its GOP replay, its gate)
+ * under the level controller, in virtual time (ms from T). Camera i sends `fps` frames a second, a
+ * keyframe every `gopS` s (at whole multiples of it), from 6 s before the viewer comes (its GOP so far
+ * is there to replay); `type` 1 a sub-stream, 0 a main. The converter hands back each picture it keeps
+ * `lag` frames after it went in (ffmpeg's parser and decoder hold pictures back), a keyframe every
+ * o.gop pictures out. The controller looks every TICK_MS, `phase` ms into each 2 s: 1000, mid-GOP;
+ * 0, just as a keyframe comes. Every frame a socket is sent is noted: when, its capture time,
+ * keyframe or not, converted or the camera's own.
+ */
+function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
+  let now = T - 6000
+  let pressAt = null
+  const logs = []
+  const made = []
+  const makeTranscoder = (o) => {
+    const x = {
+      o, closed: false, inputs: 0, outs: 0, pending: [],
+      push(ts) {
+        const i = this.inputs++
+        if (i % o.keepEvery === 0) this.pending.push({ i, ts })
+        while (this.pending.length && this.pending[0].i <= i - lag) {
+          const p = this.pending.shift()
+          o.onFrame(p.ts, this.outs++ % Math.max(1, o.gop || 50) === 0, Buffer.alloc(3))
+        }
+      },
+      endPicture() {},
+      close() { this.closed = true }
+    }
+    made.push(x)
+    return x
+  }
+  const live = new AdaptiveLive({ pool: new TranscodePool(pool), makeTranscoder, log: (l) => logs.push(`${((now - T) / 1000).toFixed(2)} ${l}`), budgetBps: 1e9, now: () => now })
+  const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
+  const tiles = cams.map((c, ch) => {
+    const stream = new HubStream(hub, ch, c.type ?? 1)
+    const ws = { ...fakeWs(), overSince: null }
+    ws.send = (b) => { const f = parseFrame(b); ws.got.push({ at: now - T, ts: f.ts, key: f.isKey, converted: f.payload.length === 3 }) }
+    return { ...c, ch, stream, ws, next: 0, every: 1000 / c.fps, keyEvery: Math.max(1, Math.round((c.gopS ?? 2) * c.fps)) }
+  })
+  // (capture times in ms from T, as the camera's clock; a tile's `every` may be changed as it runs)
+  const frames = (upTo) => {
+    for (const t of tiles) {
+      t.ts ??= -6000
+      while (t.ts <= upTo) {
+        const isKey = t.next % t.keyEvery === 0
+        t.stream.onFrame(encodeFrame(Buffer.alloc(isKey ? 40 : 8), isKey, 0, t.ts), isKey)
+        t.next++
+        t.ts += t.every
+      }
+    }
+  }
+  /** Runs to `ms`, a millisecond at a time: the cameras' frames, then the controller's looks. */
+  const to = (ms) => {
+    for (let at = now - T + 1; at <= ms; at++) {
+      now = T + at
+      frames(at)
+      if (at > 0 && (at - phase) % TICK_MS === 0) {
+        // the look `down` asked for: every tile held over its cap for 3 s, as plainly as a link shows it
+        const press = at === pressAt
+        if (press) for (const t of tiles) t.ws.overSince = now - 3000
+        live.tick()
+        if (press) for (const t of tiles) t.ws.overSince = null
+      }
+    }
+  }
+  to(0)
+  for (const t of tiles) live.attach(key, { ws: t.ws, nvrId: 'n1', ch: t.ch, type: t.type ?? 1, source: t.stream })
+  clearInterval(live.timer)
+  const v = live.viewers.get(key)
+  const entry = (t) => [...v.sockets].find((e) => e.ws === t.ws)
+  /** Runs to the first look at or after `ms`, which finds the link backed up: one level down. */
+  const down = (ms) => {
+    pressAt = ms + ((((phase - ms) % TICK_MS) + TICK_MS) % TICK_MS)
+    to(pressAt)
+    return pressAt
+  }
+  return { live, v, tiles, logs, made, to, down, entry }
+}
+/** A socket's frames: whether any was older than one before it, and the longest wait between two, from `from` ms on. */
+const seen = (got, from = 0) => {
+  const g = got.filter((f) => f.at >= from)
+  let back = 0
+  let gap = 0
+  for (let i = 1; i < g.length; i++) {
+    back = Math.max(back, g[i - 1].ts - g[i].ts)
+    gap = Math.max(gap, g[i].at - g[i - 1].at)
+  }
+  return { back, gap, n: g.length }
+}
+{
+  // (b) A grid sub-stream at or under a level's rate is sent as it is there, but it was put on a
+  // stream of that level all the same: it lost the picture it had until the camera's next keyframe,
+  // 0-2.5 s, on 11 of 26 tiles at 04:18:05 (verify-5). The camera's stream already knows its rate from
+  // the GOP it holds: such a sub stays where it is.
+  const r = rig({ cams: [{ fps: 20 }] })
+  const [t] = r.tiles
+  r.down(5000)
+  check('(b) a 20 fps sub at 15 (its camera\'s GOP shows its rate): stays on the camera\'s own stream, no stream made for it', LEVELS[r.v.level].id === '15' && r.entry(t).stream === t.stream && r.live.streams.size === 0, `${LEVELS[r.v.level].id} ${[...r.live.streams.keys()]}`)
+  r.to(8000)
+  const s = seen(t.ws.got, 3000)
+  check('  its picture goes on: every frame once, in order, none missed at the step', s.back === 0 && s.gap <= 51 && s.n === 101, JSON.stringify(s))
+  r.down(9000)
+  check('  at 8 (1 in 3) it is converted', LEVELS[r.v.level].id === '8' && r.live.streams.has('n1/0/1@8') && r.made.at(-1)?.o.keepEvery === 3, `${[...r.live.streams.keys()]}`)
+}
+{
+  // Its rate not known yet (a look just as a keyframe comes: one frame to go on): a level's stream
+  // learns it, as before, and hands it on, so the next time it is known
+  const r = rig({ cams: [{ fps: 20 }], phase: 0 })
+  const [t] = r.tiles
+  r.down(6000)
+  check('the rate not known yet: a level\'s stream learns it, as before', LEVELS[r.v.level].id === '15' && r.entry(t).stream !== t.stream && r.live.streams.has('n1/0/1@15'), `${LEVELS[r.v.level].id} ${[...r.live.streams.keys()]}`)
+  r.down(10_000)
+  r.to(40_000) // clean for 20 s: back up to 15, again at a look just as a keyframe comes
+  check('... and the next time it is known: back at 15 the sub is on the camera\'s own stream, no stream of 15 made', LEVELS[r.v.level].id === '15' && r.entry(t).stream === t.stream && !r.live.streams.has('n1/0/1@15'), `${LEVELS[r.v.level].id} ${[...r.live.streams.keys()]}`)
+}
+{
+  // decided once for the level: a later reading of the rate does not move it back and forth
+  const r = rig({ cams: [{ fps: 20 }] })
+  const [t] = r.tiles
+  r.down(5000)
+  t.every = 1000 / 30 // the camera now reads 30 fps, which 15 would convert
+  r.to(11_000)
+  check('(b) decided for the level: the looks after it, reading another rate, leave it where it is', LEVELS[r.v.level].id === '15' && r.entry(t).stream === t.stream && r.live.streams.size === 0, `${[...r.live.streams.keys()]}`)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

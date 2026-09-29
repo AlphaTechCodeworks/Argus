@@ -24,7 +24,7 @@ const HEADER_SIZE = 16 // sdk.mjs encodeFrame: key flag, codec, size, time (us);
 const MAX_GOP_FRAMES = 200
 const STOP_DELAY_MS = 10_000
 /** Frames looked at to learn the stream's frame rate before converting. */
-const RATE_SAMPLES = 12
+export const RATE_SAMPLES = 12
 
 /** The cap, from the environment; a bad or missing value means 16. */
 export function maxPhoneStreams(env = process.env) {
