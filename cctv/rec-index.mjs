@@ -70,6 +70,34 @@ CREATE TABLE IF NOT EXISTS backfill_gaps (
   UNIQUE (nvr, ch, from_ms, to_ms));
 CREATE INDEX IF NOT EXISTS backfill_state ON backfill_gaps (state, from_ms);
 `
+/**
+ * The bytes and files each storage location holds, kept by triggers as rows come and go (locationUse).
+ * A location's space limit is enforced against this every 5 minutes (housekeeping.mjs), and the Storage
+ * page shows it. SUM(bytes) over the main drive's rows reads every one of them, however it is indexed:
+ * 102 ms for 440,000 synthetic rows on the development PC (about 20 ms on production's VM, which scans
+ * 4-5 times faster), and the index grows to about 3.7 million rows at 30 days (perf report 1): a main
+ * thread stall every time it was asked. Here it is one row. The triggers are in the file, so a row
+ * written by any connection counts; REPLACE (addSegment of a file already indexed: a time-lapse rewrite)
+ * takes the old row off only with recursive_triggers on, which openRecIndex sets. A row with no location
+ * counts under ''. Created, and filled from the rows already there, the first time this code opens an
+ * index (one read of every row, once). To rebuild it, drop the table: the next open fills it again.
+ * (2026-09-29, perf report Task 3 and the owner's 12 TB limit)
+ */
+const TOTALS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS loc_totals (loc TEXT PRIMARY KEY NOT NULL, bytes INTEGER NOT NULL, segments INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS loc_totals_add AFTER INSERT ON segments BEGIN
+  INSERT INTO loc_totals (loc, bytes, segments) VALUES (IFNULL(NEW.loc, ''), NEW.bytes, 1)
+    ON CONFLICT (loc) DO UPDATE SET bytes = bytes + excluded.bytes, segments = segments + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS loc_totals_remove AFTER DELETE ON segments BEGIN
+  UPDATE loc_totals SET bytes = bytes - OLD.bytes, segments = segments - 1 WHERE loc = IFNULL(OLD.loc, '');
+END;
+CREATE TRIGGER IF NOT EXISTS loc_totals_change AFTER UPDATE OF loc, bytes ON segments BEGIN
+  UPDATE loc_totals SET bytes = bytes - OLD.bytes, segments = segments - 1 WHERE loc = IFNULL(OLD.loc, '');
+  INSERT INTO loc_totals (loc, bytes, segments) VALUES (IFNULL(NEW.loc, ''), NEW.bytes, 1)
+    ON CONFLICT (loc) DO UPDATE SET bytes = bytes + excluded.bytes, segments = segments + 1;
+END;
+`
 
 /**
  * Bookmarks (phase 3, bookmarks.mjs): stretches someone marked as mattering. They live in this
@@ -163,15 +191,28 @@ export const CAMERA_SQL = {
 }
 /**
  * The lookups on one storage location: locationUse() (the RAM spool's rows, every 30 s on the main
- * thread: nvrs.mjs watchSpool, ram-spool.mjs) and the oldest files on one location (housekeeping and
- * thinning, every 5 min per location; ram-spool.mjs). Kept here as text so rec-index-scans.test.mjs
- * can check each one's query plan.
+ * thread: nvrs.mjs watchSpool, ram-spool.mjs; each location's against its space limit, every 5 min:
+ * housekeeping.mjs) and the oldest files on one location (housekeeping and thinning, every 5 min per
+ * location; ram-spool.mjs). Kept here as text so rec-index-scans.test.mjs can check each one's query plan.
  */
 export const LOCATION_SQL = {
-  locBytes: 'SELECT COALESCE(SUM(bytes), 0) AS b, COUNT(*) AS n FROM segments WHERE loc = ?',
-  oldestAt: `SELECT ${SEG_COLS} FROM segments WHERE loc = ? ORDER BY start_ms LIMIT ?`,
-  oldestOf: `SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND loc = ? ORDER BY start_ms LIMIT ?`
+  locBytes: 'SELECT bytes AS b, segments AS n FROM loc_totals WHERE loc = ?',
+  oldestAt: `SELECT ${SEG_COLS} FROM segments WHERE loc = ? AND start_ms >= ? ORDER BY start_ms LIMIT ?`,
+  // (INDEXED BY: with the start bound SQLite chose segments_loc (loc=? AND start_ms>?), a walk of every
+  // camera's rows on the drive to find one camera's; segments_cam finds them directly)
+  oldestOf: `SELECT ${SEG_COLS} FROM segments INDEXED BY segments_cam WHERE nvr = ? AND ch = ? AND loc = ? AND start_ms >= ? ORDER BY start_ms LIMIT ?`,
+  // Each camera's oldest `limit` rows on one location, in one statement: the deletion jobs' first look
+  // at a location every 5 minutes (housekeeping.mjs). The cameras come as a JSON list of [nvr, ch]; the
+  // subquery is oldestOf's, searched once per camera (CROSS JOIN keeps the list the outer loop). Asking
+  // 87 cameras one by one was 87 statements, and asking them again for every file deleted was the 22.8 ms
+  // pick that froze the main thread 12-15 s a run once the NAS is full (perf report R2).
+  oldestPerCamera: `SELECT s.nvr, s.ch, s.path, s.start_ms AS startMs, s.end_ms AS endMs, s.bytes, s.keyframes, s.loc, s.source, s.filled_ms AS filledMs
+    FROM json_each(?) AS c CROSS JOIN segments AS s
+    WHERE s.rowid IN (SELECT rowid FROM segments INDEXED BY segments_cam WHERE nvr = json_extract(c.value, '$[0]') AND ch = json_extract(c.value, '$[1]') AND loc = ? ORDER BY start_ms LIMIT ?)
+    ORDER BY c.key, s.start_ms, s.rowid`
 }
+/** "From the start" for oldestOf / oldest: earlier than any start_ms. */
+const NO_START = Number.MIN_SAFE_INTEGER
 /** lastSegmentEnd() without a bound: later than any start. */
 const NO_BOUND = Number.MAX_SAFE_INTEGER
 const plain = (r) => ({ ...r }) // node:sqlite rows have a null prototype
@@ -195,6 +236,24 @@ export function openRecIndex(file) {
     if (!have.has('source')) db.exec('ALTER TABLE segments ADD COLUMN source TEXT')
     if (!have.has('filled_ms')) db.exec('ALTER TABLE segments ADD COLUMN filled_ms INTEGER')
   }
+  // The totals per location (TOTALS_SCHEMA above). REPLACE takes the old row off through the delete
+  // trigger only with recursive_triggers on; no other trigger in this file calls itself.
+  db.exec('PRAGMA recursive_triggers = ON')
+  if (db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = 'loc_totals'").get()) db.exec(TOTALS_SCHEMA)
+  else {
+    // first open with this code: create and fill in one transaction, asked again inside it, so a row
+    // written meanwhile by another connection is counted exactly once
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      const had = db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = 'loc_totals'").get()
+      db.exec(TOTALS_SCHEMA)
+      if (!had) db.exec("INSERT INTO loc_totals (loc, bytes, segments) SELECT IFNULL(loc, ''), SUM(bytes), COUNT(*) FROM segments GROUP BY IFNULL(loc, '')")
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+  }
   const q = {
     add: db.prepare('INSERT OR REPLACE INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc, source, filled_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
     // the ledger: a hole seen again keeps the state and the attempt count it already had
@@ -215,6 +274,7 @@ export function openRecIndex(file) {
     oldest: db.prepare(`SELECT ${SEG_COLS} FROM segments ORDER BY start_ms LIMIT ?`),
     oldestAt: db.prepare(LOCATION_SQL.oldestAt),
     oldestOf: db.prepare(LOCATION_SQL.oldestOf),
+    oldestPerCamera: db.prepare(LOCATION_SQL.oldestPerCamera),
     olderThan: db.prepare(CAMERA_SQL.olderThan),
     remove: db.prepare('DELETE FROM segments WHERE path = ?'),
     // ram-spool.mjs: a segment copied from memory to a drive keeps its row, with its new place
@@ -321,25 +381,42 @@ export function openRecIndex(file) {
     /** The segment row of a file (its primary key), or null (not indexed: still open, or removed). */
     byPath: (path) => one(q.byPath.get(String(path))),
     gaps: (nvr, ch, fromMs, toMs) => q.gaps.all(String(nvr), Number(ch), fromMs, toMs).map(plain),
-    /** The oldest segments (all locations, or one location id). */
     /** A segment now lives elsewhere (same footage, new file). */
     moveSegment(oldPath, newPath, loc) {
       q.moveSeg.run(String(newPath), loc, String(oldPath))
     },
-    /** { bytes, segments } held at one location. */
+    /** { bytes, segments } held at one location (the totals kept by triggers: one row read). */
     locationUse: (loc) => {
       const r = q.locBytes.get(String(loc))
-      return { bytes: Number(r.b), segments: Number(r.n) }
+      return { bytes: Number(r?.b ?? 0), segments: Number(r?.n ?? 0) }
     },
-    oldest: (limit, { loc } = {}) => (loc ? q.oldestAt.all(loc, limit) : q.oldest.all(limit)).map(plain),
-    /** One camera's oldest segments on one location. */
-    oldestOf: (nvr, ch, loc, limit) => q.oldestOf.all(String(nvr), Number(ch), loc, limit).map(plain),
+    /** The oldest segments (all locations; or one location id, those starting at or after fromMs). */
+    oldest: (limit, { loc, fromMs = NO_START } = {}) => (loc ? q.oldestAt.all(loc, fromMs, limit) : q.oldest.all(limit)).map(plain),
+    /** One camera's oldest segments on one location (those starting at or after fromMs). */
+    oldestOf: (nvr, ch, loc, limit, fromMs = NO_START) => q.oldestOf.all(String(nvr), Number(ch), loc, fromMs, limit).map(plain),
+    /**
+     * Each camera's oldest `limit` segments on one location, in one statement: cams [{ nvr, ch }]; the
+     * rows come camera by camera in the order given, each camera's oldest first.
+     */
+    oldestPerCamera: (loc, cams, limit) => q.oldestPerCamera.all(JSON.stringify(cams.map((c) => [String(c.nvr), Number(c.ch)])), String(loc), Number(limit)).map(plain),
     /** One camera's segments that ended before ms (oldest first). */
     olderThan: (nvr, ch, ms, limit) => q.olderThan.all(String(nvr), Number(ch), ms, ms, limit).map(plain),
     /** Whether a segment file has a row. */
     has: (path) => q.has.get(String(path)) !== undefined,
     remove(path) {
       q.remove.run(String(path))
+    },
+    /** Removes the rows of many files in one transaction (a batch the share helper has deleted). */
+    removeMany(paths) {
+      if (!paths?.length) return
+      db.exec('BEGIN')
+      try {
+        for (const p of paths) q.remove.run(String(p))
+        db.exec('COMMIT')
+      } catch (e) {
+        db.exec('ROLLBACK')
+        throw e
+      }
     },
     /** Every camera with a row, as { nvr, ch }, ordered by nvr then ch. */
     cameras() {

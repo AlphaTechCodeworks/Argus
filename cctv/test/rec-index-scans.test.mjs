@@ -210,12 +210,82 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   // plans: both a search of segments_loc, oldest on one location in start_ms order (an index on loc
   // alone, or on (loc, bytes), made the main drive's oldest(50) sort its 377,000 rows: 0.3-1.3 s here)
   const planOf = (sql, ...p) => old.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...p).map((r) => r.detail).join(' | ')
+  const oldest = planOf(LOCATION_SQL.oldestAt, 'L1', -1e15, 50)
+  check('oldest on one location is a search of segments_loc in start_ms order (no sort)', /^SEARCH segments USING INDEX segments_loc \(loc=\? AND start_ms>\?\)$/.test(oldest), oldest)
+  const ofCam = planOf(LOCATION_SQL.oldestOf, 'n1', 0, 'L1', -1e15, 50)
+  check('one camera\'s oldest on one location still searches segments_cam, with no sort', /^SEARCH segments USING INDEX segments_cam \(nvr=\? AND ch=\? AND start_ms>\?\)$/.test(ofCam), ofCam)
+}
+
+// ---- what the deletion jobs walk (housekeeping.mjs, thinning.mjs runRetention; perf report Task 3) --------
+// A location's bytes are what its space limit is enforced against, every 5 minutes, and what the Storage
+// page shows. SUM(bytes) over the main drive's rows reads every one of them however it is indexed: 102 ms
+// for 440,000 synthetic rows on the development PC, and the index grows to about 3.7 million rows at 30
+// days (perf report 1). So a table of totals per location is kept by triggers, and locationUse() reads
+// one row of it. Here it must always say what reading every row says, whatever changes the rows.
+{
+  const oldUse = old.prepare('SELECT COALESCE(SUM(bytes), 0) AS b, COUNT(*) AS n FROM segments NOT INDEXED WHERE loc = ?')
+  const same = () => {
+    const bad = []
+    for (const loc of ['L1', 'L2', 'L3', 'ram-spool', 'nowhere']) {
+      const w = oldUse.get(loc)
+      const g = index.locationUse(loc)
+      if (g.bytes !== Number(w.b) || g.segments !== Number(w.n)) bad.push(`${loc}: ${J(g)} vs ${w.b}/${w.n}`)
+    }
+    return bad
+  }
+  const p = (i) => `/rec/L2/${i}.h264`
+  index.addSegment({ nvr: 'n9', ch: 0, path: p(5), startMs: T0, endMs: T0 + MIN, bytes: 123, keyframes: 1, loc: 'L2' }) // the same file again, now thinner (a time-lapse rewrite)
+  const again = same()
+  index.moveSegment(p(6), '/rec/L3/6.h264', 'L3') // ram-spool.mjs moving a file to a drive
+  index.remove(p(7))
+  index.removeMany([p(8), p(9), p(10), '/rec/not-a-row.h264'])
+  const later = same()
+  const raw = new DatabaseSync(file) // a row written by another connection counts as well (the triggers are in the file)
+  raw.prepare("INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES ('/rec/L3/x.h264', 'n9', 1, 1, 2, 77, 1, 'L3')").run()
+  raw.close()
+  check('locationUse is always what reading every row says: after a file written again, moved, removed, removed in a batch, and a row from another connection', again.length === 0 && later.length === 0 && same().length === 0, [...again, ...later, ...same()].join('; ') || J(index.locationUse('L3')))
+  check('... a file written again counts once, with its new size', index.locationUse('L2').segments === 300 - 5 && index.byPath(p(5)).bytes === 123, J(index.locationUse('L2')))
+  const planOf = (sql, ...params) => old.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params).map((r) => r.detail).join(' | ')
   const use = planOf(LOCATION_SQL.locBytes, 'L1')
-  check('locationUse is a search of segments_loc (loc=?), never a scan', /^SEARCH segments USING INDEX segments_loc \(loc=\?\)$/.test(use), use)
-  const oldest = planOf(LOCATION_SQL.oldestAt, 'L1', 50)
-  check('oldest on one location is a search of segments_loc in start_ms order (no sort)', /^SEARCH segments USING INDEX segments_loc \(loc=\?\)$/.test(oldest), oldest)
-  const ofCam = planOf(LOCATION_SQL.oldestOf, 'n1', 0, 'L1', 50)
-  check('one camera\'s oldest on one location still searches segments_cam, with no sort', /^SEARCH segments USING INDEX segments_cam \(nvr=\? AND ch=\?\)$/.test(ofCam), ofCam)
+  check('locationUse reads one row of the totals, never the segments', /^SEARCH loc_totals USING INDEX sqlite_autoindex_loc_totals_1 \(loc=\?\)$/.test(use), use)
+
+  // removeMany: one transaction for a batch the share helper confirmed
+  const before = index.locationUse('L1').segments
+  const gone = index.oldest(4, { loc: 'L1' }).map((r) => r.path)
+  index.removeMany(gone)
+  check('removeMany removes exactly those rows', index.locationUse('L1').segments === before - 4 && gone.every((x) => index.byPath(x) === null), J(index.locationUse('L1')))
+  index.removeMany([])
+
+  // each camera's oldest rows on one location in one statement (the deletion jobs' first look), the same
+  // rows as asking each camera in turn (oldestOf); and oldestOf / oldest from a start time on (their next look)
+  const every = [...cams, ['n9', 0], ['n9', 1], ['n9', 2], ['nobody', 4]]
+  const wantOf = (loc, limit, fromMs = -1e15) => every.map(([nvr, ch]) => index.oldestOf(nvr, ch, loc, limit, fromMs).map((r) => r.path).join(','))
+  const bad = []
+  for (const loc of ['L1', 'L2', 'nowhere']) {
+    for (const limit of [1, 3, 50]) {
+      const rows = index.oldestPerCamera(loc, every.map(([nvr, ch]) => ({ nvr, ch })), limit)
+      const got = every.map(([nvr, ch]) => rows.filter((r) => r.nvr === nvr && r.ch === ch).map((r) => r.path).join(','))
+      const want = wantOf(loc, limit)
+      for (let i = 0; i < every.length; i++) if (got[i] !== want[i]) bad.push(`${loc} ${every[i].join('/')} limit ${limit}: ${got[i].split(',').length} vs ${want[i].split(',').length}`)
+    }
+  }
+  check('oldestPerCamera gives each camera\'s oldest rows on a location, as oldestOf does camera by camera', bad.length === 0, bad.slice(0, 4).join('; ') || `${every.length} cameras`)
+  const oldOf = old.prepare('SELECT path FROM segments NOT INDEXED WHERE nvr = ? AND ch = ? AND loc = ? AND start_ms >= ? ORDER BY start_ms, rowid LIMIT ?')
+  const oldAt = old.prepare('SELECT path FROM segments NOT INDEXED WHERE loc = ? AND start_ms >= ? ORDER BY start_ms, rowid LIMIT ?')
+  const bad2 = []
+  for (const [nvr, ch] of every) {
+    for (const from of [T0 - 1, T0 + 100 * MIN, T0 + 100 * MIN + 1, T0 + 2 * 24 * 60 * MIN]) {
+      if (index.oldestOf(nvr, ch, 'L1', 7, from).map((r) => r.path).join() !== oldOf.all(nvr, ch, 'L1', from, 7).map((r) => r.path).join()) bad2.push(`${nvr}/${ch} from ${from}`)
+    }
+  }
+  for (const from of [T0 - 1, T0 + 100 * MIN, T0 + 3 * 24 * 60 * MIN]) {
+    if (index.oldest(20, { loc: 'L1', fromMs: from }).map((r) => r.path).join() !== oldAt.all('L1', from, 20).map((r) => r.path).join()) bad2.push(`oldest from ${from}`)
+  }
+  check('oldestOf and oldest from a start time on: the rows starting at or after it, oldest first', bad2.length === 0, bad2.slice(0, 4).join('; '))
+  const perCam = planOf(LOCATION_SQL.oldestPerCamera, '[["n1",0]]', 'L1', 8)
+  check('oldestPerCamera searches segments_cam once per camera it is given, never a scan of the segments', /SEARCH segments USING INDEX segments_cam \(nvr=\? AND ch=\?/.test(perCam) && !/SCAN segments/.test(perCam), perCam)
+  const at = planOf(LOCATION_SQL.oldestAt, 'L1', -1e15, 50)
+  check('oldest on one location from a start time: segments_loc, in start_ms order', /^SEARCH segments USING INDEX segments_loc \(loc=\? AND start_ms>\?\)$/.test(at), at)
 }
 
 // ---- an index written before segments_loc gains it when it is opened ----------------------------------
@@ -290,14 +360,15 @@ index.close()
     ['lastSegmentEnd before a time', () => lastEndBefore.get('big', 0, T0 + 99_000 * MIN), () => ix.lastSegmentEnd('big', 0, T0 + 99_000 * MIN)],
     ['olderThan with nothing that old', () => olderThan.all('big', 0, T0, 200), () => ix.olderThan('big', 0, T0, 200)],
     ['cameras', () => distinct.all(), () => ix.cameras()],
-    ['locationUse of an empty RAM spool', () => locUse.get('ram-spool'), () => ix.locationUse('ram-spool')]
+    ['locationUse of an empty RAM spool', () => locUse.get('ram-spool'), () => ix.locationUse('ram-spool')],
+    ['locationUse of the drive holding every row', () => locUse.get('L1'), () => ix.locationUse('L1')]
   ]
   for (const [name, before, after] of pairs) {
     const b = time(before)
     const a = time(after)
     check(`${name}: at least 10x quicker than reading every row`, a * 10 < b, `${a.toFixed(3)} ms vs ${b.toFixed(3)} ms`)
   }
-  check('... and the same answers there too', ix.lastSegmentEnd('big', 0) === T0 + 100_000 * MIN && ix.olderThan('big', 0, T0, 200).length === 0 && ix.cameras().length === 2)
+  check('... and the same answers there too', ix.lastSegmentEnd('big', 0) === T0 + 100_000 * MIN && ix.olderThan('big', 0, T0, 200).length === 0 && ix.cameras().length === 2 && J(ix.locationUse('L1')) === J({ bytes: 200_000_000, segments: 200_000 }))
   raw.close()
   ix.close()
 }
