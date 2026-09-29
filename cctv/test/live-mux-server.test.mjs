@@ -716,7 +716,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   const inWs = fakeWs()
   const inReq = req()
   watched(inWs, inReq, { ...base, nvr: mkNvr() })
-  check('... let in: tracked with the live right on its camera and its own request; refused (rights, offline, bad channel): not', tracked.length === 1 && tracked[0].w === inWs && tracked[0].r === inReq && JSON.stringify(tracked[0].what) === '{"actions":["live"],"nvr":"n1","ch":3}', JSON.stringify(tracked.map((t) => t.what)))
+  check('... let in: tracked with the live rights of the main stream (Live, Live HD) on its camera and its own request; refused (rights, offline, bad channel): not', tracked.length === 1 && tracked[0].w === inWs && tracked[0].r === inReq && JSON.stringify(tracked[0].what) === '{"actions":["live","live-hd"],"nvr":"n1","ch":3}', JSON.stringify(tracked.map((t) => t.what)))
 }
 
 // ---- live-attach.mjs: a sub-stream held at the NVR's sub-stream limit (value4u: 15, sub-cap.mjs) ----
@@ -784,6 +784,85 @@ const fanOut = (c, buf, isKey, type, now) => {
   }
 }
 
+// ---- live-attach.mjs: Live HD (stream rights) ----
+{
+  const mkStream = (gop) => ({ gop, viewers: new Set(), add(w) { this.viewers.add(w) }, remove(w) { this.viewers.delete(w) } })
+  const mkNvr = ({ held = false, full = false } = {}) => ({
+    id: 'n1', liveOnline: true, streams: new Map(),
+    subHeld: (ch) => held && ch === 3, subFull: () => full, mainPlaying: () => true,
+    codecSeen: new Map([['3:0', { codec: 'h265' }], ['3:1', { codec: 'h264' }]]),
+    getStream(ch, type) {
+      const k = `${ch}/${type}`
+      if (!this.streams.has(k)) this.streams.set(k, mkStream(type === 1 ? [] : [frame(true)]))
+      return this.streams.get(k)
+    }
+  })
+  const fakeWs = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, closedWith: null, handlers: {}, sent: [], send(d) { this.sent.push(d) }, on(e, f) { (this.handlers[e] ??= []).push(f); return this }, close(code, reason) { this.closedWith = { code, reason }; this.readyState = 3 } })
+  const texts = (w) => w.sent.filter((d) => typeof d === 'string').map((d) => JSON.parse(d))
+  const req = (addr = '192.168.1.20', ua = 'Desktop') => ({ socket: { remoteAddress: addr }, headers: { 'user-agent': ua, cookie: 'c=1' } })
+  let rights = { live: true }
+  const asked = []
+  const tracked = []
+  const adaptive = { calls: [], attach(key, o) { this.calls.push(o) } }
+  const phone = { calls: [], attach(key, stream, type, ws, opts) { this.calls.push({ key, type, opts }); return true }, detach() {}, room: () => 16, has: () => false }
+  const timers = []
+  const waitTimers = { every: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t }, clear: (t) => { t.cleared = true }, now: () => 0 }
+  const attach = liveAttacher({ can: (who, action) => { asked.push(action); return rights[action] === true }, currentUser: () => 'ann', adaptiveLive: adaptive, phoneLive: phone, track: (w, r, what) => tracked.push({ w, what }), waitTimers })
+  const run = (o = {}, r = req()) => { const w = fakeWs(); const nvr = o.nvr ?? mkNvr(); attach(w, r, { nvr, who: { user: 'ann' }, ch: 3, streamType: 1, clientH265: true, phone15: false, ...o }); return { w, nvr } }
+
+  let x = run({ streamType: 0 })
+  check('Live HD: the main stream without it is 1008 "hd not allowed", Live asked first', x.w.closedWith?.code === 1008 && x.w.closedWith.reason === 'hd not allowed' && asked.join() === 'live,live-hd', asked.join())
+  check('... nothing tracked, no stream touched', tracked.length === 0 && x.nvr.streams.size === 0)
+  rights = { 'live-hd': true }
+  x = run({ streamType: 0 })
+  check('... Live HD without Live: "not allowed" (HD is an add-on)', x.w.closedWith?.reason === 'not allowed')
+  rights = { live: true, 'live-hd': true }
+  x = run({ streamType: 0 })
+  check('... with both: the main stream, tracked for Live and Live HD', x.nvr.getStream(3, 0).viewers.has(x.w) && JSON.stringify(tracked.at(-1).what) === '{"actions":["live","live-hd"],"nvr":"n1","ch":3}', JSON.stringify(tracked.at(-1)?.what))
+  x = run({ streamType: Number.NaN })
+  check('... no stream at all (stream-param.mjs NaN): "bad channel or stream"', x.w.closedWith?.reason === 'bad channel or stream')
+
+  // the stand-in for a sub-stream with no picture yet
+  tracked.length = 0
+  x = run()
+  const stand = [...x.nvr.getStream(3, 0).viewers]
+  check('cold sub with Live HD: the main stream stands in; the stand-in is tracked apart, for Live and Live HD', stand.length === 1 && stand[0].background === true && tracked.length === 2 && JSON.stringify(tracked[1].what.actions) === '["live","live-hd"]' && tracked[1].w !== x.w)
+  tracked[1].w.close(1008, 'hd not allowed') // what the watch does when Live HD goes
+  check('... closing that handle ends the stand-in only: the viewer stays on its sub-stream', x.nvr.getStream(3, 0).viewers.size === 0 && x.w.closedWith === null && x.nvr.getStream(3, 1).viewers.has(x.w))
+  rights = { live: true }
+  tracked.length = 0
+  timers.length = 0
+  x = run()
+  check('cold sub without Live HD: the main stream is never asked for (asking starts it)', !x.nvr.streams.has('3/0') && x.nvr.getStream(3, 1).viewers.has(x.w))
+  check('... the tile is told at once: {"op":"wait","why":"starting"}', JSON.stringify(texts(x.w)) === '[{"op":"wait","why":"starting"}]', JSON.stringify(texts(x.w)))
+  check('... again every 4 s', timers.length === 1 && timers[0].ms === 4000)
+  timers[0].fn()
+  check('... repeated', texts(x.w).length === 2)
+  x.nvr.getStream(3, 1).gop.push(frame(true))
+  timers[0].fn()
+  check('... until the sub-stream has a picture', texts(x.w).length === 2 && timers[0].cleared === true)
+  check('... tracked for Live only (nothing of the main stream to watch)', tracked.length === 1 && JSON.stringify(tracked[0].what.actions) === '["live"]')
+  x = run({ nvr: mkNvr({ held: true }) })
+  check('held at the NVR\'s sub-stream limit: "held"', texts(x.w)[0]?.why === 'held')
+  timers.length = 0
+  x = run({ nvr: mkNvr({ full: true }) })
+  timers[0].fn()
+  check('the NVR full, this sub-stream not held by it (value4u refuses 19-29 outright): "held" at once, not after', JSON.stringify(texts(x.w).map((t) => t.why)) === '["held","starting"]', JSON.stringify(texts(x.w)))
+  x = run({ nvr: mkNvr({ held: true }), phone15: true, clientH265: false }, req('192.168.1.30', 'Mozilla/5.0 (iPhone)'))
+  check('held, a phone: no converted stand-in either (no /standin conversion, no main)', !phone.calls.some((c) => c.key === 'n1/3/0/standin') && !x.nvr.streams.has('3/0'))
+  adaptive.calls.length = 0
+  x = run({}, req('127.0.0.1'))
+  check('a remote viewer: adaptive-live on its own sub-stream, no raw main before it', adaptive.calls.length === 1 && adaptive.calls[0].type === 1 && !x.nvr.streams.has('3/0') && texts(x.w)[0]?.op === 'wait')
+  // on a mux channel the notice goes through the channel, with its id
+  const m = setup({ attach: (channel, s) => attach(channel, req(), { nvr: mkNvr(), who: { user: 'ann' }, ch: s.ch, streamType: s.stream, clientH265: true, phone15: false }) })
+  m.ws.msg(sub(8))
+  check('a mux channel without Live HD: {"op":"wait","why":"starting","id":8} on the page\'s socket', JSON.stringify(m.ws.texts()) === '[{"op":"wait","why":"starting","id":8}]', JSON.stringify(m.ws.texts()))
+  m.ws.msg(sub(9, { stream: 0 }))
+  check('... the main stream asked on a channel: "end" 1008 "hd not allowed" for that id, the socket stays', m.ws.texts().some((t) => t.op === 'end' && t.id === 9 && t.code === 1008 && t.reason === 'hd not allowed') && m.ws.readyState === 1)
+  m.ws.msg('{"op":"sub","id":10,"nvr":"n1","ch":3,"stream":-0}') // raw text: JSON.stringify writes -0 as 0
+  check('... "stream":-0 passes the channel check as 0: the main stream all the same, "hd not allowed"', m.ws.texts().some((t) => t.op === 'end' && t.id === 10 && t.code === 1008 && t.reason === 'hd not allowed'), JSON.stringify(m.ws.texts()))
+}
+
 // ---- server.mjs wiring (source shape: importing server.mjs starts the NVRs) ----
 {
   const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
@@ -794,6 +873,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('/live-mux is served right after meterSocket, before the NVR lookup', /meterSocket\(ws, [^)]*\)\n[\s\S]*?if \(url\.pathname === '\/live-mux'\) \{\n\s*serveMux\(ws,/.test(conn) && conn.indexOf("'/live-mux'") < conn.indexOf('nvrs.get('))
   check('/live and every mux channel go through the same attachLive (live-attach.mjs)', (src.match(/attachLive\((ws|channel), req,/g) ?? []).length === 2 && /const attachLive = liveAttacher\(\{ can, currentUser, adaptiveLive, phoneLive, track: watch\.track \}\)/.test(src) && !/function attachLive/.test(src))
   check('the session is checked again for each sub', /session: \(\) => currentUser\(req\)/.test(src))
+  check('/live parses its stream once, strictly (stream-param.mjs)', /streamType: streamParam\(url\.searchParams\.get\('stream'\)\)/.test(src) && !/Number\(url\.searchParams\.get\('stream'\)/.test(src))
 }
 
 // ---- over a real ws socket ----

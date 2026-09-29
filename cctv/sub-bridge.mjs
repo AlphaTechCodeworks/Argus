@@ -48,7 +48,7 @@ export function bridgeSub(ws, { sub, main, clientH265, cap = CAP_BYTES[0], log =
     // (ws.send is left wrapped, passing straight through from now on: other layers wrap it after
     // us -- adaptive-live.mjs counts the bytes it sends -- and putting ours back would drop theirs)
     main.remove(tap)
-    if (sent) log(`${sent} frames of the main stream shown ${why === 'sub' ? 'until the sub-stream came' : 'until the tile closed'}`)
+    if (sent) log(`${sent} frames of the main stream shown ${why === 'sub' ? 'until the sub-stream came' : why === 'rights' ? 'until Live HD was taken away' : 'until the tile closed'}`)
   }
   const tap = {
     OPEN: 1,

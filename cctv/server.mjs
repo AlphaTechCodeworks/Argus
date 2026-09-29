@@ -122,6 +122,7 @@ import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
 import { can, canPlayAnyOn, handleRights, onRightsSaved, sitesFor } from './rights.mjs'
+import { streamParam } from './stream-param.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
@@ -1003,12 +1004,13 @@ const onConnection = (ws, req) => {
     motionScan(nvr, ws, url)
     return
   }
-  // /live (a missing ch reads as 0, a missing stream as 1, as always)
+  // /live (a missing ch reads as 0, a missing stream as 1, as always; stream-param.mjs: anything but
+  // exactly 0 or 1 is no stream, which attachLive refuses -- '', '0.0' and the like were main)
   attachLive(ws, req, {
     nvr,
     who,
     ch: target.ch,
-    streamType: Number(url.searchParams.get('stream') ?? 1),
+    streamType: streamParam(url.searchParams.get('stream')),
     clientH265: url.searchParams.get('h265') === '1',
     phone15: url.searchParams.get('fps') === '15'
   })

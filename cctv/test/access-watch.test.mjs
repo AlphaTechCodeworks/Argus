@@ -10,7 +10,7 @@ import { join } from 'node:path'
 const DIR = mkdtempSync(join(tmpdir(), 'access-watch-'))
 process.env.DATA_DIR = DIR
 writeFileSync(join(DIR, 'users.json'), JSON.stringify({ boss: { hash: 'x', role: 'admin' }, alice: { hash: 'x', role: 'viewer' } }))
-const ALICE = { live: ['nvr-2/5', 'nvr-2/6'], 'playback-server': ['nvr-2/5'], 'playback-nvr': ['nvr-2/5'] }
+const ALICE = { live: ['nvr-2/5', 'nvr-2/6'], 'live-hd': ['nvr-2/5', 'nvr-2/6'], 'playback-server': ['nvr-2/5'], 'playback-nvr': ['nvr-2/5'] }
 writeFileSync(join(DIR, 'rights.json'), JSON.stringify({ version: 1, users: { alice: { grants: ALICE } } }))
 
 const auth = await import('../auth.mjs')
@@ -111,7 +111,7 @@ rights.saveRights('alice', { grants: { ...ALICE, live: ['nvr-2/6'], 'playback-nv
 await tick()
 check('(b) NVR playback taken away: a server playback filling its gaps from the NVR is closed 1008 "not allowed"', srvLegs.closedWith?.code === 1008 && srvLegs.closedWith.reason === 'not allowed', J(srvLegs.closedWith))
 check('(b) ... one playing the server\'s recordings only stays open', srvOnly.closedWith === null)
-rights.saveRights('alice', { grants: { live: ['nvr-2/6'] } })
+rights.saveRights('alice', { grants: { live: ['nvr-2/6'], 'live-hd': ['nvr-2/6'] } })
 await tick()
 check('(b) server playback taken away too: closed 1008 "not allowed"', srvOnly.closedWith?.code === 1008 && srvOnly.closedWith.reason === 'not allowed')
 
@@ -229,6 +229,41 @@ check('(f) nothing closed is left in the watch', watch.size() === 1, `${watch.si
   g.sweep()
   check('(g) track keeps its own copy of a group', kept.closedWith === null)
   await tick()
+}
+
+// ---- (h) Live HD taken away, Live kept: the main stream goes, the sub-stream stays (real rights) -------
+{
+  const mk = (gop) => ({ gop, viewers: new Set(), add(w) { this.viewers.add(w) }, remove(w) { this.viewers.delete(w) } })
+  const cams = new Map()
+  // ch 5's sub-stream is not running (cold): with Live HD its main stream stands in
+  const NVR2 = { id: 'nvr-2', liveOnline: true, getStream(ch, type) { const k = `${ch}/${type}`; if (!cams.has(k)) cams.set(k, mk(type === 1 && ch === 5 ? [] : [frame()])); return cams.get(k) } }
+  rights.saveRights('alice', { grants: ALICE })
+  const hreq = reqWith(auth.createSession('alice'))
+  const attachAs = (ch, streamType) => { const ws = new FakeWs(); attachLive(ws, hreq, { nvr: NVR2, who: whoOf('alice'), ch, streamType, clientH265: true, phone15: false }); return ws }
+  const main6 = attachAs(6, 0)
+  const sub6 = attachAs(6, 1)
+  const cold5 = attachAs(5, 1)
+  // and a page's /live-mux channel on the same cold sub-stream
+  const page2 = new FakeWs()
+  serveMux(page2, {
+    session: () => currentUser(hreq),
+    attach: (channel, sub, user) => attachLive(channel, hreq, { nvr: NVR2, who: whoOf(user), ch: sub.ch, streamType: sub.stream, clientH265: true, phone15: false }),
+    log: () => {}
+  })
+  page2.msg({ op: 'sub', id: 21, nvr: 'nvr-2', ch: 5, stream: 1 })
+  await tick()
+  check('(h) with Live HD: the main stream plays, and a cold sub-stream (a socket, a mux channel) is shown the main stream meanwhile, no wait notice', cams.get('6/0').viewers.has(main6) && cams.get('5/0').viewers.size === 2 && cold5.texts().length === 0 && page2.texts().length === 0, J(page2.texts()))
+  rights.saveRights('alice', { grants: { ...ALICE, 'live-hd': [] } })
+  await tick()
+  await tick()
+  check('(h) Live HD taken away: the main socket closes 1008 "hd not allowed"', main6.closedWith?.code === 1008 && main6.closedWith.reason === 'hd not allowed', J(main6.closedWith))
+  check('(h) ... the sub-stream socket stays open', sub6.closedWith === null && cams.get('6/1').viewers.has(sub6))
+  check('(h) ... both stand-ins end; the socket and the mux channel stay on their own sub-stream', cams.get('5/0').viewers.size === 0 && cold5.closedWith === null && cams.get('5/1').viewers.has(cold5) && cams.get('5/1').viewers.size === 2 && !page2.texts().some((t) => t.op === 'end'), J(page2.texts()))
+  check('(h) ... and each is told why it waits from then on, as a tile without Live HD is (live-wait.mjs)', J(cold5.texts()) === '[{"op":"wait","why":"starting"}]' && J(page2.texts()) === '[{"op":"wait","why":"starting","id":21}]', J([cold5.texts(), page2.texts()]))
+  rights.saveRights('alice', { grants: { live: [] } })
+  await tick()
+  await tick()
+  check('(h) Live taken away too: the rest close "not allowed"', sub6.closedWith?.reason === 'not allowed' && cold5.closedWith?.reason === 'not allowed' && page2.texts().some((t) => t.op === 'end' && t.id === 21 && t.reason === 'not allowed'), J(page2.texts()))
 }
 
 // ---- server.mjs wiring (source shape: importing server.mjs starts the NVRs)

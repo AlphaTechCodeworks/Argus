@@ -30,6 +30,11 @@
 //     TEXT    {"op":"end","id":N,"code":C,"reason":"..."}: the server ended channel N with the code
 //             and reason /live would have closed its socket with (1008 not allowed, 1013 NVR
 //             offline, 1011 NVR removed, ...). N is free again.
+//     TEXT    {"op":"wait","id":N,"why":"held"|"starting"|"unavailable"}: channel N's sub-stream has
+//             no picture yet, and this viewer is shown no main stream meanwhile (no Live HD,
+//             live-wait.mjs); repeated every 4 s until its first frame. A page that does not know
+//             the op ignores it. 1008 "hd not allowed" in an "end": the main stream refused for want
+//             of Live HD (live-attach.mjs, access-watch.mjs).
 //   Per socket: at most 128 open channels (another "sub" is answered "end" 1008 "too many channels").
 //   Rates, as token buckets (a burst, then a steady rate; past either the socket is closed 1008 "too
 //   many requests"): 200 subs at once, then 20 a second; 1000 messages of any kind at once, then 100
@@ -215,6 +220,12 @@ class MuxChannel {
   close(code = 1000, reason = '') {
     if (!this.end()) return
     this.#mux.sendText({ op: 'end', id: this.id, code, reason: String(reason) })
+  }
+
+  /** A note for this channel's tile, as text with its id (live-wait.mjs): send() carries frames only. */
+  notice(obj) {
+    if (!this.#open || this.#mux.ws.readyState !== OPEN) return
+    this.#mux.sendText({ ...obj, id: this.id })
   }
 
   // gateSend gives up on a channel held over its cap for STUCK_MS. On a /live socket of its own
