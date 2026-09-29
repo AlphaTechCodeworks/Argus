@@ -52,13 +52,15 @@ answer instead of the reviewer's, with the reason.
   (`currentUser(req)`, then `mayHd` with the account's role now), never the `who` built at the upgrade:
   a demoted admin's switch minutes later is not waved through. The session asks it when the 4 s run
   out and **again after `StopPlayBack`**, before it says `{type:'stream'}`, calls `onMain` or opens
-  main; a no then is a refusal. `onMain` re-tracks the socket and runs a sweep at once (sections 2.2,
-  2.5).
+  main; a no then is a refusal, in words about the right ("Playing this camera in HD from the NVR
+  needs Playback HD or Live HD.", F1). `onMain` re-tracks the socket and runs a sweep at once
+  (sections 2.2, 2.5).
 - **D2. A camera marked HD-only is still tried in SD for a viewer who cannot switch** (security F2).
   Only a viewer who may see main goes straight to main on a marked camera. Anyone else opens on SD: an
   SD frame clears the mark, and with no SD frame after `SD_REFUSE_MS` (6 s) of the NVR playing the
   session is refused with neutral words ("No SD recording of this camera came from the NVR (it may keep
-  this camera only in HD) …"). An older release's `[ch, …]` marks were written by the faulty rule and
+  this camera only in HD) …"), on a marked camera only: on an unmarked one it says `{type:'end'}`
+  after 8 s, as for any gap (F1). An older release's `[ch, …]` marks were written by the faulty rule and
   are not read, so each such camera is tried in SD once more (section 2.4).
   Ruling: 6 s, not longer: `playback.mjs` tells the page the recording ended after 8 s without a frame
   (`IDLE_END_MS`), so a longer wait would show "end of recording" instead of the reason.
@@ -67,7 +69,8 @@ answer instead of the reviewer's, with the reason.
   rights.json, then the shadow as the new rows. A shadow that cannot be written refuses the save
   before rights.json is touched (section 3.3).
 - **D4. A picture older than its event's row is not served, whole or as the SD copy** (security F4): it
-  belonged to an earlier event with the same id, maybe of another camera (section 2.3 S1).
+  belonged to an earlier event with the same id, maybe of another camera (section 2.3 S1). Nor is a
+  picture taken again after it was looked at, or an SD copy of any picture but the one there now (F3).
 - **D5. The SD copies have their own one-at-a-time ffmpeg queue, and a copy that failed is not tried
   again for 5 minutes** (security F6), so they never delay the picture of a new crossing.
   Ruling: no per-user cap on SD copies. A viewer can only ask for pictures of cameras they may play
@@ -106,6 +109,25 @@ answer instead of the reviewer's, with the reason.
   stream asked for without the right, and no SD recording (section 5).
 - **D14.** The review's `'refused'` wait reason (map-critic Q9) has no source: the worker does not
   report a refused sub-stream. The 15 s `'unavailable'` rule stands in for it (section 4.1).
+
+### After the final reviews (2026-09-29)
+
+Two fix rounds after the branch's final reviews narrowed the behaviour below; the sections named say
+it where it applies. Each is the code as committed (ledger: "Fix round after the final reviews" and
+"Fix round 2").
+- **F1. The SD refusal is for a camera marked HD only** (controller's ruling). On an unmarked camera
+  no frame is no footage there (the camera off that day, a motion-only schedule, before the NVR's
+  retention): the session says `{type:'end'}` after `IDLE_END_MS` (8 s), as for any gap, never a 1008
+  refusal, which the camera wall keeps for the tile's life (D2, P4, 2.4, 4.2). The D1 refusal (the
+  right gone during `StopPlayBack`) stays a refusal on any camera, since the SD playback is already
+  stopped; its words are about the right, not "No SD recording" (P4).
+- **F2. The upgrade fails closed** (controller's ruling). A row that already carries a `live-hd` key
+  keeps its own list, cut to its Live; a shadow that is there but cannot be used gives Live HD to
+  nobody and is named in the audit row and on the console, with the accounts to give it back to
+  (3.1-3.3, section 6).
+- **F3. Event pictures are served only as the picture that was looked at** (controller's ruling and
+  review). An SD copy bears its picture's time and is served only while that picture is there; a
+  picture is read through one handle whose time must be the one looked at (S1).
 
 ## 1. The rights model
 
@@ -184,7 +206,7 @@ One row per surface found by the four maps and the review. "Refusal" is what the
 | P1 | `/playback` upgrade gate | server.mjs:985 | either | unchanged: either playback right | 1008 `'not allowed'` |
 | P2 | NVR playback stream parse | rec-playback.mjs:223-231; playback.mjs:785 | n/a | parsed **once** in `connectPlayback` with `streamParam`; `main = stream === 0`. playback.mjs stops reading `stream` from the URL: `nvr.playback.connect(ws, url, { main, allowMain, onMain })` | NaN: 1008 `'bad parameters'` |
 | P3 | NVR playback asked for main | rec-playback.mjs:229-240 | main | `main && !mayHd(who, nvr, ch)`; the `allowedMain` server.mjs hands in reads the session again on every call (D1) | `{type:'error', message:'Playing this camera in HD from the NVR needs Playback HD or Live HD.'}`, then 1008 `'hd not allowed'`; no NVR session |
-| P4 | NVR camera known to be HD-only, and the 4 s switch | playback.mjs:419-446, 703-707, 724-740, 783-794 | main on a sub socket | known HD-only: main at once only if `allowMain()`; anyone else opens on SD (a mark can be wrong; an SD frame clears it). No SD frame after 4 s of the NVR playing: the switch runs only if `allowMain()`, asked then **and again after `StopPlayBack`**, before `{type:'stream'}`, `onMain` or the main open (a right removed meanwhile counts, D1); a viewer without it is refused after `SD_REFUSE_MS` (6 s) of playing (`noSdAction`, hd-only.mjs, D2). The switch itself is fixed first (section 2.4) | `{type:'error', message:'No SD recording of this camera came from the NVR (it may keep this camera only in HD). Playing it in HD needs Playback HD or Live HD.'}`, then 1008 `'hd not allowed'` |
+| P4 | NVR camera known to be HD-only, and the 4 s switch | playback.mjs:419-446, 703-707, 724-740, 783-794 | main on a sub socket | known HD-only: main at once only if `allowMain()`; anyone else opens on SD (a mark can be wrong; an SD frame clears it). No SD frame after 4 s of the NVR playing: the switch runs only if `allowMain()`, asked then **and again after `StopPlayBack`**, before `{type:'stream'}`, `onMain` or the main open (a right removed meanwhile counts, D1); a viewer without it is refused after `SD_REFUSE_MS` (6 s) of playing on a camera marked HD only (`noSdAction`, hd-only.mjs, D2), and on any other camera gets `{type:'end'}` after 8 s without a frame, as for any gap (F1). The switch itself is fixed first (section 2.4) | on a marked camera `{type:'error', message:'No SD recording of this camera came from the NVR (it may keep this camera only in HD). Playing it in HD needs Playback HD or Live HD.'}`, then 1008 `'hd not allowed'`; the right gone during `StopPlayBack` (D1): `{type:'error', message:'Playing this camera in HD from the NVR needs Playback HD or Live HD.'}`, then 1008 `'hd not allowed'` |
 | P5 | Tracking of `/playback` sockets | server.mjs:992-993 | n/a | from what `connectPlayback` decided (never a second read of the URL): NVR sub `['playback-nvr']`; NVR main `['playback-nvr', ['live-hd','playback-server']]` (an any-of group, section 2.5); server `['playback-server']`, with legs `['playback-server','playback-nvr']`. An NVR session that switches to main is tracked again with the main list and swept at once (`onMain`: `watch.track`, then `watch.sweepSoon()`) | the sweep: `'hd not allowed'` if only the HD group failed |
 | P6 | Server playback (`src=auto`) and every command in it | rec-playback.mjs:243-272, 306-391 and the commands | as recorded (normally main) | unchanged: `playback-server` | a rights refusal becomes `{type:'error', message:'You may not play back this camera from the server\'s recordings.'}` then **1008** `'not allowed'` (was 1011, rec-playback.mjs:258-262); "no index" or "no footage" stays 1011 `'server recordings not available'` |
 | P7 | NVR legs in server playback | rec-playback.mjs:271, rec-fallback.mjs:131-276 | NVR main | unchanged: legs only with `playback-nvr` (the session already holds `playback-server`, so `mayHd` is true). rec-fallback passes `{ main: stream === 0, allowMain: () => true }` explicitly | n/a |
@@ -196,7 +218,7 @@ One row per surface found by the four maps and the review. "Refusal" is what the
 
 | # | Surface | Where | Picture | Check | Refusal |
 |---|---|---|---|---|---|
-| S1 | Event snapshot `GET /api/events/:id/snapshot` | event-snapshot.mjs:287-308 | still from main, <=1280 wide | gate unchanged: either playback right on the event's camera (:299). A stored picture older than the event's row (`seen_ms`, set once at insert: an earlier event's picture under a reused id, the rule takeSnapshot already uses) is not this event's: 404 whole and as a copy (D4). Then `mayHd(who, nvr, ch)`: the full JPEG; otherwise the **SD copy** `<id>-sd.jpg`, at most 704 wide, made on first request from the stored JPEG through a one-at-a-time ffmpeg queue of its own (never ahead of or behind a new event's picture), remade when older than the full one; a copy that failed is not tried again for `SD_RETRY_MS`, 5 min (D5). Never the full bytes as a fallback | a copy that cannot be made: 404 (as for a missing picture). Every 200 is `cache-control: private, no-store` (was `private, max-age=300`: the browser cache handed one user's picture to the next user of the same browser, M3) |
+| S1 | Event snapshot `GET /api/events/:id/snapshot` | event-snapshot.mjs:287-308 | still from main, <=1280 wide | gate unchanged: either playback right on the event's camera (:299). A stored picture older than the event's row (`seen_ms`, set once at insert: an earlier event's picture under a reused id, the rule takeSnapshot already uses) is not this event's: 404 whole and as a copy (D4). Then `mayHd(who, nvr, ch)`: the full JPEG; otherwise the **SD copy** `<id>-sd.jpg`, at most 704 wide, made on first request from the stored JPEG through a one-at-a-time ffmpeg queue of its own (never ahead of or behind a new event's picture), stamped with the full one's time and served only while it bears the time of the picture there now (else made again); a copy of a picture taken again or removed while it was made is not kept; a copy that failed is not tried again for `SD_RETRY_MS`, 5 min (D5). The picture, whole or for its copy, is read through one handle whose time must be the one the D4 look saw: one taken again in between is 404 (F3). Never the full bytes as a fallback | a copy that cannot be made: 404 (as for a missing picture). Every 200 is `cache-control: private, no-store` (was `private, max-age=300`: the browser cache handed one user's picture to the next user of the same browser, M3) |
 | S2 | Snapshot housekeeping | event-snapshot.mjs:311-360 | n/a | `forgetSnapshots` removes `<id>.jpg` and `<id>-sd.jpg`; `sweepSnapshots` matches `^(\d{1,15})(-sd)?\.jpg$` | n/a |
 | X1 | Exports (pack, MP4, stills) | export-api.mjs:21, 32-35; export-job.mjs:320 | as recorded | unchanged (owner: "as now"); the editor says "Exports are always the full-quality recording" | as now |
 | C1 | `GET /api/cameras` | server.mjs:871 | metadata | filter unchanged (`live`); each camera gains `hd` (`can(who,'live-hd',…)`) and `playback` (either playback right). Built by `liveCameras(who, list)` in rights.mjs; an admin (`who.admin`) gets every camera with every flag, without a check per camera, as the old route did (D12) | n/a |
@@ -245,7 +267,9 @@ depends on it (plan Task 4):
 
 Then the rights (plan Task 5, P4): the switch needs `allowMain()`, asked when the 4 s run out and
 again once the SD playback has stopped (D1); a viewer without it waits for SD up to `SD_REFUSE_MS`
-(6 s of playing) and is then refused (`noSdAction`, D2).
+(6 s of playing) and is then refused (`noSdAction`, D2) on a camera marked HD only. On an unmarked
+camera no frame is no footage there: the session says `{type:'end'}` after 8 s, as it always did for a
+gap, until a viewer who may see main plays the camera and marks it (F1).
 
 ### 2.5 The access watch (access-watch.mjs)
 
@@ -274,13 +298,18 @@ version counts as 1. Files are handled as follows:
 | no file | `migrateRights()`: admins `{admin:true}`; viewers `live`, `live-hd`, `playback-nvr` on `'*'`; version 2 | yes (as today, only with accounts), plus the shadow |
 | unparseable JSON | nobody has stored rights (deny, logged), as today | never |
 | `users` not a plain object | nobody has stored rights, as today | never |
-| version 1 (or missing) with a plain `users` | upgraded (3.2) | yes, once (3.4) |
+| version 1 (or missing, or not a whole number: `"2"`, `2.5`) with a plain `users` | upgraded (3.2); a row that already carries a `live-hd` key keeps its own list, cut to Live (F2) | yes, once (3.4) |
 | version 2 | as stored | no |
 | version > 2 | read as far as version 2 understands it (unknown actions dropped in memory), a warning logged and audited once per process | never rewritten: editor saves and `saveRights` refused (R3); an account removed or made again (users-api, adduser.mjs) takes out only its own row from the file as it is (version and unknown rights kept), audited (D8) |
 
 ### 3.2 The rule
 
-For every account row in a version 1 file, after `cleanRights`:
+For every account row in a version 1 file, after `cleanRights`, the first rule that applies:
+- when a shadow is there but cannot be used (3.3): `live-hd = []` for every account (an admin keeps
+  everything: admin is the role), F2;
+- when the row already carries a `live-hd` key (a version 2 file whose version was mangled into a
+  string or a fraction, read as version 1): `live-hd = intersect(its own list, live)`, a value that is
+  not a list being `[]`, as a version 2 read gives it; never widened by Live or by the shadow, F2;
 - when the shadow (3.3) holds this account and the account was not created after the shadow was
   written (`users.json` `since` > shadow `writtenAt`): `live-hd = intersect(shadow live-hd, live)`;
 - otherwise: `live-hd = live`, target for target.
@@ -310,6 +339,18 @@ upgrade and `migrateRights` fall back to memory as for any write failure); the l
 logged and leaves the cut shadow, which errs on the side of less. The upgrade and a first file write
 the shadow once, before rights.json: a crash between the two repeats them with the same result. An
 older release never reads or writes it.
+
+A shadow that is there but cannot be used is not "no shadow", which would give every account Live HD
+= Live, back to every account it had been taken from (F2). Unusable: it cannot be read, is not JSON or
+not an object, its `users` is not an object, or its `writtenAt` is not a time in the Date range
+(±8.64e15 ms) or is before 2026 (the shadow came with this release; an earlier time, 0 or a wrong clock,
+would make every account with `since` count as made after it). The upgrade then gives every account
+`live-hd: []`, keeps a copy of its bytes as `rights.v2.json.unreadable`, and leaves the file itself in
+its place until the new shadow (no Live HD for anyone) is renamed over it: there is never a moment
+without a shadow, which a crash, or `adduser.mjs` upgrading at the same moment, would find beside a
+version 1 file. If the copy cannot be kept, or the file could not be read at all, nothing is written
+and the rights come from memory with Live HD for nobody. An account's entry that is not a list holds no
+Live HD (it is still remembered).
 
 Why: an older release that writes rights.json (an editor save, an account added or removed,
 `adduser.mjs`) drops `live-hd` and writes version 1. Without the shadow, rolling forward again would
@@ -377,9 +418,11 @@ Argus: reload it (the access was not saved)', outdated: true }`, never `stale`. 
 - `stream` parsed strictly (absent = 1; `'0'`, `'1'`; else 1008 `'bad parameters'`), for NVR and server
   sessions alike.
 - An NVR session asked for main without the right: `{type:'error', message}` then 1008
-  `'hd not allowed'`, at once. One that gets no SD frame (a camera kept only in HD, marked or not) and
-  whose viewer may not see main: the same after 6 s of the NVR playing (D2). `{type:'stream', stream:0}`
-  is sent only to a session that may see main, asked at that moment (D1).
+  `'hd not allowed'`, at once. One that gets no SD frame on a camera marked HD only, and whose viewer
+  may not see main: the same after 6 s of the NVR playing (D2); on an unmarked camera `{type:'end'}`
+  after 8 s without a frame, as for any gap (F1). `{type:'stream', stream:0}` is sent only to a session
+  that may see main, asked at that moment (D1); the right gone by the second ask is the same refusal,
+  in words about the right.
 - Server playback refused for rights: `{type:'error', message}` then 1008 `'not allowed'` (was 1011).
 - `nvr.playback.connect(ws, url, { main, allowMain, onMain })` (internal API, playback.mjs) returns
   `{ main }` or `null` (bad parameters; the socket is closing). `allowMain` is a function asked each
@@ -398,7 +441,7 @@ Argus: reload it (the access was not saved)', outdated: true }`, never `stale`. 
 | `GET /api/admin/rights` | `actions` gains `'live-hd'`; every row's `grants` gains `'live-hd'` |
 | `POST /api/admin/rights` | the body must carry `grants['live-hd']` (else 409 `outdated`); refused with 409 `newer` while the file on disk is from a newer release |
 | `GET /api/rights/me` | removed (it was never reachable) |
-| `GET /api/events/:id/snapshot` | the SD copy for viewers without an HD right; 404 for a picture older than its event; `cache-control: private, no-store` |
+| `GET /api/events/:id/snapshot` | the SD copy for viewers without an HD right; 404 for a picture older than its event, or taken again while it was asked for (F3); `cache-control: private, no-store` |
 
 ### 4.5 Internal API names (for the plan)
 
@@ -456,14 +499,15 @@ the page's back-off or watchdog, and neither touches a stream:
   reason and stops asking (1008 is final).
 - **Playback page (playback.js, pb-sources.js):** the camera list is `/api/cameras?for=playback`, and
   each camera's `sd`/`hd`/`nvrHd` shape the page: no "HD" in NVR mode without `nvrHd` (the socket asks
-  `stream=1`); no "SD (NVR)" in the server menu without `sd`; without `sd` no NVR mode at all (a day with
-  no server footage says so), no NVR-side loads (`/now`, `/dates`, `/recordings`), no NAS-outage
+  `stream=1`); no "SD (NVR)" in the server menu without `sd`; without `sd` no NVR mode at all (a day
+  with no server footage says so), no NVR-side loads (`/now`, `/dates`, `/recordings`), no NAS-outage
   fallback to the NVR and no motion search. `{type:'stream'}` no longer changes the viewer's own choice,
-  so a camera marked HD-only does not make later cameras ask for main. 1008 `'hd not allowed'` shows
-  "Playing this from the NVR needs its HD stream here, which needs Playback HD or Live HD on this
-  camera. An admin can give you either." and stops: one text for both refusals (main asked for without
-  the right, after a rights change inside the 30 s list refresh; and no SD recording), since the
-  server's own `{type:'error'}` words and the close can reach the page in either order (D13).
+  so a camera marked HD-only does not make later cameras ask for main (the Quality menu shows "HD" while
+  that camera plays on main, and goes back to what the next socket asks for when it opens). 1008
+  `'hd not allowed'` shows "Playing this from the NVR needs its HD stream here, which needs Playback HD or
+  Live HD on this camera. An admin can give you either." and stops: one text for both refusals (main
+  asked for without the right, after a rights change inside the 30 s list refresh; and no SD recording),
+  since the server's own `{type:'error'}` words and the close can reach the page in either order (D13).
 - **Alarms page (alarms.js):** unchanged; the server picks the full or SD picture.
 - **Sign-in page (login.js):** clears the browser's `argus-stills` cache (stills.js keeps 480-wide
   stills per camera, not per user) so the next user of the browser starts clean.
@@ -485,10 +529,17 @@ the page's back-off or watchdog, and neither touches a stream:
 - **Migration** (once per upgrade): `{ user: 'system', action: 'rights-change', target: '*', detail:
   'rights.json upgraded from version 1 to 2: Live HD given wherever Live was granted for N account(s)
   (a, b); Live HD restored from rights.v2.json (written <ISO>) for M account(s) (c); K account(s) (d)
-  have Playback SD on cameras without Live: there the NVR's recordings and event pictures are now SD
-  only (HD needs Live HD or Playback HD); the stored playback, export and admin rights are unchanged;
-  the old file is kept as rights.v1.json' }` (each clause only when it has names; names cut to 8 then
-  "and K more"; the same line on the console, D6).
+  have Playback SD on cameras without Live HD or Playback HD: there the NVR's recordings and event
+  pictures are now SD only; the stored playback, export and admin rights are unchanged; the old file is
+  kept as rights.v1.json' }` (each clause only when it has names; D6). Two more clauses (F2): first of
+  all, for a shadow that cannot be used, `rights.v2.json could not be used (<why>) and a copy of it is
+  kept as rights.v2.json.unreadable, so Live HD was given to nobody; re-grant it in the access editor
+  (Users & audit, Edit access) to whoever should have it: N account(s) with Live have none now (a, b)`
+  (or `no account but an admin has Live`), logged as a warning; and `Live HD kept as the file had it
+  (cut to Live) for N account(s) (…)`, with `(the file said version "2")` after `version 1` when the
+  file's own version field was there but not a whole number. In the audit row the names are cut to 8
+  then "and K more" (the 500-character cap cuts names, never a clause's instruction); the console line
+  is the same text with every name.
   A newer file: `'rights.json is version V, newer than this release (2): read as far as version 2
   understands it; editor saves refused, and an account removed or made again takes out only its own
   row'`, once per process; and for each such removal `{ user: 'system', action: 'rights-change',
@@ -534,7 +585,9 @@ the page's back-off or watchdog, and neither touches a stream:
 7. Cameras falsely marked "HD only" on the NVR (a slow NVR, the wall opening paused) are no longer
    marked that way; old marks are tried in SD again at once, a viewer without HD on a marked camera is
    still tried in SD (an SD picture clears the mark), and every mark is re-tested weekly. A viewer who
-   may not see main and whose camera really records no SD is told so after 6 s of trying.
+   may not see main is told after 6 s of trying that a camera marked HD only has no SD recording; on
+   a camera not marked, no picture from the NVR is read as no footage there (the page moves on), until
+   someone who may see main plays that camera and it is marked.
 8. Event pictures (Alarms) follow their own rule, as today: either playback right shows them, at full
    size only with Live HD or Playback HD, otherwise a smaller copy (up to 704 wide).
 9. A rights.json written by a newer release after a rollback is never rewritten by this one: access
@@ -577,10 +630,11 @@ the native SDK (koffi) or ffmpeg; the rest runs on the private server copy (plan
   `connect` calls), `playback-hd-switch.test.mjs` (new; first without rights, then with them: a
   `SetPlayDataCallBack` stalled past 500 ms does not switch; a session paused at open and resumed
   switches only after 4 s of running; without `allowMain` the session is refused 1008 `'hd not allowed'`
-  after 6 s of playing; with it the client gets `{type:'stream'}` and `onMain` runs, `allowMain` asked
-  twice; a right gone during `StopPlayBack` ends in a refusal with no `{type:'stream'}`; a marked camera
-  opens on main only with `allowMain`, and on SD without it; no HD-only mark is written before main
-  frames); `event-snapshot-ffmpeg.test.mjs` (the SD copy really is at most 704 wide);
+  after 6 s of playing on a marked camera, and says `{type:'end'}` after 8 s on an unmarked one; with it
+  the client gets `{type:'stream'}` and `onMain` runs, `allowMain` asked twice; a right gone during
+  `StopPlayBack` ends in a refusal with no `{type:'stream'}`; a marked camera opens on main only with
+  `allowMain`, and on SD without it; no HD-only mark is written before main frames);
+  `event-snapshot-ffmpeg.test.mjs` (the SD copy really is at most 704 wide);
   `transcode-ffmpeg.test.mjs`, `playback-dates.test.mjs`, `rec-timeline.test.mjs`,
   `rec-fallback.test.mjs` (real PlaybackSession part), `users-api.test.mjs`; then the whole suite.
 - **Known environmental failures:** on Windows, `rec-fallback.test.mjs` "16x during a leg" (2 checks, a
