@@ -291,8 +291,10 @@ export class AdaptiveLive {
   /**
    * Where a socket's frames come from at this level: a shared converted stream, or the camera's own.
    * One it had to make is left in #made (null: none), for #retarget.
+   * @param {{ fps?: number }} [o] fps: the camera stream's rate, for a stream made at its keyframe that
+   *   converts from there (#handOver: PhoneStream srcFps); 0, not given: the stream learns it
    */
-  #streamFor(entry, level) {
+  #streamFor(entry, level, { fps = 0 } = {}) {
     this.#made = null
     if (!this.#converts(entry, level)) return entry.source
     const L = LEVELS[level]
@@ -307,7 +309,7 @@ export class AdaptiveLive {
       // where that socket switches to it (fromNextKey, #switchTo); the rate it learns is remembered
       // for this camera stream (#passes).
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
       this.#made = s
     }
@@ -328,8 +330,11 @@ export class AdaptiveLive {
    *  - onto a level's stream made for it (it starts at the camera's next keyframe, fromNextKey): it keeps
    *    its stream until then too -- at a step down for at most SWITCH_WAIT_MS, the link being backed up;
    *  - no slot free for that stream while its own conversion holds one, and nobody else is on that: it
-   *    closes, the new one takes its slot, and the socket moves at once (verify-1: a slot given back
-   *    before it is taken). It then waits for the new one's first keyframe, the camera's next;
+   *    keeps that one until the camera's next keyframe too, where it closes and the new one is made with
+   *    its slot, converting from that very keyframe (#handOver; verify-1: a slot given back before it is
+   *    taken). It used to close at once, and the tile waited for the camera's next keyframe with nothing
+   *    on screen: up to 3.07 s, 1.68 s on average on a page of 16 converted tiles, the usual case (no slot
+   *    was free at 3 of 29 Sep's steps down; the review of ef43e60);
    *  - onto a stream that runs already (another viewer's): at once, and nothing until that stream's next
    *    keyframe at or past what it had.
    * @param {{ down?: boolean }} [o] down: to send less (a step down; a tile that finds a slot at last)
@@ -337,10 +342,17 @@ export class AdaptiveLive {
   #retarget(e, level, { down = false } = {}) {
     let want = this.#streamFor(e, level)
     let made = this.#made
-    // no slot for its level's stream while its own conversion holds one: that one gives its slot up
+    // no slot for its level's stream while its own conversion holds one: that one hands its slot over
     // (not one another socket is on or waits for: closing it would free nothing, and cost its picture)
     const own = e.stream && e.stream !== e.source && !e.stream.passthrough && e.stream.clients.size === 1 && !this.#awaited(e.stream)
     if (want === e.source && own && this.#converts(e, level)) {
+      // with a picture: at the camera's next keyframe, the rate it has now handed to the new stream
+      if (e.lastTs !== null) {
+        if (e.switch?.to === null && e.switch.level === level) return
+        this.#cancelSwitch(e)
+        return this.#switchTo(e, null, { waitMs: down ? SWITCH_WAIT_MS : SWITCH_MAX_MS, level, fps: this.#rateOf(e) })
+      }
+      // nothing on screen yet: now
       this.#cancelSwitch(e)
       this.#leaveStream(e)
       want = this.#streamFor(e, level)
@@ -360,27 +372,35 @@ export class AdaptiveLive {
    * A socket switches to `to` at its first picture (report 2.5 (a), verify-5), meanwhile on its stream
    * as it was. Onto the camera's own stream: a tap on it watches for its next keyframe at or past what
    * the socket has, and the socket goes over as that keyframe goes out (#swap), nothing replayed. Onto a
-   * level's stream made for it (PhoneStream fromNextKey, its converter already running): the socket
-   * goes over at the keyframe it starts from, when its own stream reaches it (#pass: on the camera's own
-   * stream that keyframe itself; from a conversion the first of its frames at or past it, as the new one
-   * starts). Past waitMs it goes over at once, and waits there.
+   * level's stream made for it (PhoneStream fromNextKey): the socket goes over at the keyframe it starts
+   * from, when its own stream reaches it (#pass: on the camera's own stream that keyframe itself; from a
+   * conversion the first of its frames at or past it, as the new one starts). `to` null: no slot free for
+   * its new level's stream, and its own conversion hands its slot over at the camera's next keyframe
+   * (#handOver), the same tap watching for it; fps: the rate that stream is then made with. Past waitMs
+   * it goes over at once, and waits there.
    */
-  #switchTo(e, to, { waitMs, level }) {
-    const sw = { to, at: this.now(), waitMs, level, tap: null }
+  #switchTo(e, to, { waitMs, level, fps = 0 }) {
+    const sw = { to, at: this.now(), waitMs, level, fps, tap: null }
     e.switch = sw
-    if (to !== e.source) return
+    if (to !== e.source && to !== null) return
     // (what the camera's stream replays to the tap as it joins is the past: only what comes after counts)
     let joining = true
     sw.tap = {
       OPEN: 1,
       readyState: 1,
       bufferedAmount: 0,
-      background: true, // not a viewer: the socket it stands for is one already
+      // Not a viewer: the socket it stands for is one already, through a conversion of this very stream.
+      // At a hand-over it stands in for one: that conversion closes before the new one opens, and the
+      // camera's stream is never left without a viewer for that moment (the worker told it is background:
+      // at a sub-stream limit, one a viewer's may displace; #swap).
+      background: to !== null,
       send: (buf) => {
         if (joining || e.switch !== sw) return
         const f = header(buf)
-        if (f?.isKey && f.ts >= e.lastTs) this.#swap(e)
-        else if (this.now() - sw.at > sw.waitMs) this.#cutOver(e)
+        if (f?.isKey && f.ts >= e.lastTs) {
+          if (to === null) this.#handOver(e, { atKey: true })
+          else this.#swap(e)
+        } else if (this.now() - sw.at > sw.waitMs) this.#cutOver(e)
       }
     }
     e.source.add(sw.tap)
@@ -406,9 +426,35 @@ export class AdaptiveLive {
     this.#leaveStream(e, from)
   }
 
+  /**
+   * No slot free for its new level's stream, and its own conversion hands its slot over (#retarget): at
+   * the camera's keyframe going out now (atKey, the tap of #switchTo) that conversion closes, the new
+   * level's stream is made with its slot and converts from this very keyframe (fromNextKey, the rate
+   * given: made inside the keyframe's fan-out, its tap is reached by it), and the socket goes onto it at
+   * once. Its picture holds for the frames the old conversion still had in hand, and the new one's start
+   * and lag; never more than the cap of conversions running. Waited SWITCH_WAIT_MS for the keyframe (not
+   * atKey): the same, and the new stream starts at the camera's next one. Its conversion shared by then
+   * (another socket joined it, or waits for it): closing it frees nothing, and the socket goes onto the
+   * camera's own stream, from this keyframe.
+   */
+  #handOver(e, { atKey }) {
+    const sw = e.switch
+    e.switch = null
+    this.#leaveStream(e)
+    const to = this.#streamFor(e, sw.level, { fps: sw.fps })
+    if (to === e.source && atKey) {
+      e.stream = to
+      this.#guard(e)
+      e.ws.waitForKey = true
+      to.add(e.ws, { replay: false })
+    } else this.#join(e, to)
+    e.source.remove(sw.tap)
+  }
+
   /** A switch done at the new stream's start (#pass), or given up waiting for it: onto the new stream now. */
   #cutOver(e) {
     const sw = e.switch
+    if (sw.to === null) return this.#handOver(e, { atKey: false })
     e.switch = null
     if (sw.tap) e.source.remove(sw.tap)
     this.#leaveStream(e)
@@ -444,7 +490,7 @@ export class AdaptiveLive {
     if (!sw) return
     e.switch = null
     if (sw.tap) e.source.remove(sw.tap)
-    if (sw.to !== e.source && sw.to !== e.stream && sw.to.clients.size === 0 && !this.#awaited(sw.to)) sw.to.close()
+    if (sw.to && sw.to !== e.source && sw.to !== e.stream && sw.to.clients.size === 0 && !this.#awaited(sw.to)) sw.to.close()
   }
 
   /** Whether a socket waits to switch to this stream. */
@@ -567,8 +613,9 @@ export class AdaptiveLive {
     // Not off it: a socket already on this level's stream, and one with a picture, which keeps it until
     // the new one has its first (#retarget). A conversion kept so holds its slot for that while, at most
     // one keyframe interval: so the tiles that need a slot of their own go onto the new level first, and
-    // those still on a conversion after them -- one that finds none free gives its own up for the new one
-    // (#retarget), as the first pass did. A switch the last move left waiting is dropped first.
+    // those still on a conversion after them -- one that finds none free hands its own over to the new
+    // one at the camera's next keyframe (#retarget, #handOver). A switch the last move left waiting is
+    // dropped first.
     const left = new Set(v.left)
     v.left.clear()
     for (const e of v.sockets) {

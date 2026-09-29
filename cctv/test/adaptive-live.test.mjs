@@ -4,7 +4,7 @@ import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, SWI
 import { encodeFrame, parseFrame } from '../phone-live.mjs'
 import { HubStream } from '../stream-hub.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
-import { play } from './live-replay.mjs'
+import { REMOTE_LIVE, play } from './live-replay.mjs'
 import { camera, openPage } from './remote-page.mjs'
 
 let failures = 0
@@ -737,25 +737,40 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
  * keyframe every `gopS` s (at whole multiples of it), from 6 s before the viewer comes (its GOP so far
  * is there to replay); `type` 1 a sub-stream, 0 a main. The converter hands back each picture it keeps
  * `lag` frames after it went in (ffmpeg's parser and decoder hold pictures back), a keyframe every
- * o.gop pictures out. The controller looks every TICK_MS, `phase` ms into each 2 s: 1000, mid-GOP;
+ * o.gop pictures out; and, as ffmpeg does, no picture sooner than `startMs` after its first frame went
+ * in (it starts then: its process, the probe, the decoder and x264), each frame in taking a frame's time
+ * over `speed` (0: none). The controller looks every TICK_MS, `phase` ms into each 2 s: 1000, mid-GOP;
  * 0, just as a keyframe comes. Every frame a socket is sent is noted: when, its capture time,
- * keyframe or not, converted or the camera's own.
+ * keyframe or not, converted or the camera's own. running(): the converters running now, peak(): the
+ * most at any one time.
  */
-function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
+function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig', startMs = 0, speed = 0 }) {
   let now = T - 6000
   let pressAt = null
   const logs = []
   const made = []
   const makeTranscoder = (o) => {
     const x = {
-      o, closed: false, inputs: 0, outs: 0, pending: [], firstIn: null,
+      o, closed: false, inputs: [], next: 0, outs: 0, firstIn: null, ready: null, done: -Infinity,
       push(ts) {
+        if (this.closed) return
         this.firstIn ??= ts
-        const i = this.inputs++
-        if (i % o.keepEvery === 0) this.pending.push({ i, ts })
-        while (this.pending.length && this.pending[0].i <= i - lag) {
-          const p = this.pending.shift()
-          o.onFrame(p.ts, this.outs++ % Math.max(1, o.gop || 50) === 0, Buffer.alloc(3))
+        this.ready ??= now + startMs
+        this.inputs.push({ ts, at: now })
+        this.pump()
+      },
+      // frame j out once frame j + lag is in, the converter is up, and the frame before has had its time
+      pump() {
+        while (!this.closed && this.next < this.inputs.length) {
+          const j = this.next
+          const gate = this.inputs[j + lag]
+          if (!gate) return
+          const cost = speed > 0 && j > 0 ? (this.inputs[j].ts - this.inputs[j - 1].ts) / speed : 0
+          const done = Math.max(this.ready, gate.at, this.done + cost)
+          if (done > now) return
+          this.done = done
+          this.next++
+          if (j % o.keepEvery === 0) o.onFrame(this.inputs[j].ts, this.outs++ % Math.max(1, o.gop || 50) === 0, Buffer.alloc(3))
         }
       },
       endPicture() {},
@@ -764,6 +779,8 @@ function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
     made.push(x)
     return x
   }
+  const running = () => made.filter((x) => x.ready !== null && !x.closed).length
+  let peak = 0
   const live = new AdaptiveLive({ pool: new TranscodePool(pool), makeTranscoder, log: (l) => logs.push(`${((now - T) / 1000).toFixed(2)} ${l}`), budgetBps: 1e9, now: () => now })
   const told = [] // what the camera streams told the NVR worker (want: foreground or background)
   const hub = { send: (m) => told.push({ at: now - T, ...m }), streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
@@ -791,6 +808,8 @@ function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
     for (let at = now - T + 1; at <= ms; at++) {
       now = T + at
       frames(at)
+      if (startMs > 0 || speed > 0) for (const x of made) x.pump()
+      peak = Math.max(peak, running())
       if (at > 0 && (at - phase) % TICK_MS === 0) {
         // the look `down` asked for: its sockets held over their cap for 3 s, as plainly as a link shows it
         const press = at === pressAt ? pressed : []
@@ -812,7 +831,7 @@ function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
     to(pressAt)
     return pressAt
   }
-  return { live, v, tiles, logs, made, to, down, entry, socket: recorder, told }
+  return { live, v, tiles, logs, made, to, down, entry, socket: recorder, told, running, peak: () => peak }
 }
 /** A socket's frames: whether any was older than one before it, and the longest wait between two, from `from` ms on. */
 const seen = (got, from = 0) => {
@@ -930,25 +949,67 @@ const brief = (got, from, to) => got.filter((f) => f.at >= from && f.at <= to).m
     raw.at(-1)?.at <= 7000 + SWITCH_WAIT_MS + 34 && raw.at(-1).at >= 7000 + SWITCH_WAIT_MS - 34 && s.back === 0 && t.ws.got.find((f) => f.converted)?.ts === 10_000, `${JSON.stringify(s)} ${brief(t.ws.got, 9400, 10_100)}`)
 }
 {
-  // no slot for the new level's stream while the old one holds the only one: the old one gives it up
-  // first (verify-1), and the socket waits for the new one's first keyframe
+  // No slot for the new level's stream while its own conversion holds the only one. It gave that up at
+  // once (verify-1: a slot given back before it is taken) and joined the new one, which starts at the
+  // camera's next keyframe: nothing on screen for up to a keyframe interval. Now it keeps its own to
+  // that keyframe, and there hands its slot over: the new stream is made then, and converts from it.
   const r = rig({ cams: [{ fps: 30 }], pool: 1 })
   const [t] = r.tiles
   r.down(5000)
   const b15 = r.entry(t).switch?.to
   r.down(9000)
-  check('(a) a step down with no slot free: off its conversion at once, which closes there and then; the new one has its slot', b15?.closed && r.entry(t).stream.fps === 8 && !r.entry(t).switch && r.live.streams.size === 1, `${[...r.live.streams.keys()]}`)
+  check('(a) a step down with no slot free: it keeps its own conversion (the only slot) until the camera\'s next keyframe, no stream made yet', !b15?.closed && r.entry(t).stream === b15 && r.entry(t).switch && r.live.streams.size === 1 && r.live.pool.active === 1, `${[...r.live.streams.keys()]}`)
   r.to(10_500)
   const s8 = seen(t.ws.got, 8000)
-  check('  it converts from the camera\'s next keyframe (10 s): the first picture there, nothing older, no wait longer than that keyframe\'s (1 s), the converter\'s lag and a frame',
-    s8.back === 0 && s8.gap <= 1000 + 101 && r.made.at(-1)?.firstIn === 10_000 && t.ws.got.filter((f) => f.at > 9000)[0]?.ts === 10_000, `${JSON.stringify(s8)} ${brief(t.ws.got, 8900, 10_100)}`)
+  check('  there (10 s) that one closes and the new one takes its slot, converting from that very keyframe',
+    b15.closed && r.entry(t).stream.fps === 8 && !r.entry(t).switch && r.live.streams.size === 1 && r.made.at(-1)?.firstIn === 10_000 && t.ws.got.find((f) => f.converted && f.ts >= 10_000)?.ts === 10_000, `${[...r.live.streams.keys()]} ${brief(t.ws.got, 9900, 10_100)}`)
+  check('  nothing older than it had, and no wait longer than the two conversions\' lag (the frames the old one still held) and a frame',
+    s8.back === 0 && s8.gap <= 4 * 34 + 34, `${JSON.stringify(s8)} ${brief(t.ws.got, 9900, 10_100)}`)
   r.to(29_000) // 8 -> 15
-  const s = seen(t.ws.got, 28_000)
-  check('(a) a climb with no slot free: the old conversion closes first, the new one takes its slot; nothing older than it had',
-    r.entry(t).stream.fps === 15 && r.live.streams.size === 1 && s.back === 0, `${JSON.stringify(s)} ${[...r.live.streams.keys()]}`)
+  let s = seen(t.ws.got, 28_000)
+  check('(a) a climb with no slot free: the same, its own conversion kept until the camera\'s next keyframe',
+    LEVELS[r.v.level].id === '15' && r.entry(t).stream.fps === 8 && r.entry(t).switch && r.live.streams.size === 1 && s.back === 0, `${JSON.stringify(s)} ${[...r.live.streams.keys()]}`)
   r.to(31_000)
-  const after = seen(t.ws.got, 28_000)
-  check('  its first picture there: the camera\'s next keyframe (30 s), converted', after.back === 0 && t.ws.got.filter((f) => f.at > 29_000)[0]?.ts === 30_000 && after.gap <= 1000 + 101, `${JSON.stringify(after)} ${brief(t.ws.got, 28_900, 30_100)}`)
+  s = seen(t.ws.got, 28_000)
+  check('  its first picture there: that keyframe (30 s), converted; no wait longer than a frame at 8, the lag and a frame', s.back === 0 && t.ws.got.find((f) => f.converted && f.ts >= 30_000 && f.at > 29_000)?.ts === 30_000 && r.entry(t).stream.fps === 15 && s.gap <= 134 + 4 * 34, `${JSON.stringify(s)} ${brief(t.ws.got, 29_800, 30_100)}`)
+}
+{
+  // ...and as it is on the owner's pages. A page of 9 or more converted tiles fills the 16 slots at 15 (a
+  // switch made before it is broken takes two a tile), and every step down after that finds none free:
+  // 0 at 03:55:28, 04:08:13 and 04:08:17 on 29 Sep, 12 of whose 15 level changes were steps down
+  // (verify-5). Each tile gave its conversion up at once and waited for its new one's first keyframe:
+  // this page (the review of ef43e60, played as a remote page, ffmpeg taking 250 ms to start and
+  // converting at 2.5x) held for up to 3.07 s, 1.68 s on average. Now each keeps its own to the camera's
+  // next keyframe and hands its slot over there: a hold of ffmpeg's start and the lag, never more than
+  // 16 conversions running. At most SWITCH_WAIT_MS on its own, as every step down: a camera whose next
+  // keyframe is further off than that is still held for what is left of the wait.
+  const cams = Array.from({ length: 16 }, (_, i) => ({ fps: [30, 25, 30, 25][i % 4], gopS: [2, 2.5, 3, 2][i % 4] }))
+  const startMs = 250
+  const r = rig({ cams, startMs, speed: 2.5 })
+  r.down(5000)
+  r.to(8990)
+  check('16 converted tiles at 15: every slot taken, each tile on its own conversion', r.tiles.every((t) => r.entry(t).stream.fps === 15 && !r.entry(t).switch) && r.live.pool.active === 16, `${r.live.pool.active} slots`)
+  const at = r.down(9000)
+  check('  15 -> 8 with no slot free: each keeps its own conversion for now', LEVELS[r.v.level].id === '8' && r.tiles.every((t) => r.entry(t).stream.fps === 15 && !r.entry(t).stream.closed && r.entry(t).switch), r.logs.at(-1))
+  r.to(16_000)
+  const rows = []
+  for (const t of r.tiles) {
+    const every = 1000 / t.fps
+    const keyMs = t.keyEvery * every
+    const key = -6000 + Math.ceil((at + 1 + 6000) / keyMs) * keyMs // the camera's next keyframe
+    const waited = Math.min(key - at, SWITCH_WAIT_MS + every)
+    const s = seen(t.ws.got, at - 1000)
+    const p = await play(t.ws.got.map((f) => ({ at: f.at, ts: f.ts, isKey: f.key })), { fps: t.fps, decoder: { pool: 16, decodeMs: 3 }, ...REMOTE_LIVE })
+    const first = t.ws.got.find((f) => f.converted && f.at > at + waited)
+    rows.push({ fps: t.fps, key: Math.round(key), first: Math.round(first?.ts), fps8: r.entry(t).stream.fps, back: s.back, gap: s.gap, bound: Math.round(key - at - waited + startMs + 4 * every), still: p.maxStillMs, played: p.maxBackMs })
+  }
+  const bad = rows.filter((x) => x.fps8 !== 8 || x.back > 0 || x.first !== x.key || x.gap > x.bound || x.played > 0 || x.still > x.bound + 40)
+  check('  each hands its slot over at that keyframe: converted at 8 from it, nothing older, no wait longer than ffmpeg\'s start and the lag (and a wait cut short: what was left of it)', bad.length === 0, JSON.stringify(bad.length ? bad : rows.slice(0, 4)))
+  const mean = Math.round(rows.reduce((a, x) => a + x.still, 0) / rows.length)
+  check(`  played as a remote page: never a step back, the longest still ${Math.max(...rows.map((x) => x.still))} ms, ${mean} ms on average (the code before, here: 3067, 1363)`, rows.every((x) => x.played === 0) && mean <= startMs + 200, JSON.stringify(rows.map((x) => x.still)))
+  check('  never more than the 16 conversions running at once, and 16 now, at 8', r.peak() <= 16 && r.running() === 16 && r.live.pool.active === 16, `peak ${r.peak()}, now ${r.running()}`)
+  const told = r.told.filter((m) => m.at >= at)
+  check('  the cameras\' streams are not told they are background for a moment as a conversion hands its slot over', told.every((m) => m.background !== true), JSON.stringify(told.slice(0, 3)))
 }
 {
   // onto a stream that runs already (another viewer's, at the level this one steps down to): its GOP
