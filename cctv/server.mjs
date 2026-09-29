@@ -89,7 +89,7 @@ import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
 import { PhoneLive } from './phone-live.mjs'
-import { AdaptiveLive } from './adaptive-live.mjs'
+import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher } from './live-attach.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
@@ -941,7 +941,9 @@ const onConnection = (ws, req) => {
     // server recordings (src=auto) or the NVR as before; the "NVR offline" refusal is for NVR
     // sessions only (server playback runs without the NVR), see rec-playback.mjs
     if (!can(who, 'playback-server', target) && !can(who, 'playback-nvr', target)) return ws.close(1008, 'not allowed')
-    connectPlayback({ nvr, ws, url, who, index: recIndex() })
+    // remote by live view's rule (live-attach.mjs): the socket's own address, where the Cloudflare
+    // tunnel arrives from 127.0.0.1. Its server playback is converted to fit the tunnel.
+    connectPlayback({ nvr, ws, url, who, index: recIndex(), remote: isRemoteAddress(req.socket.remoteAddress) })
     return
   }
   if (url.pathname === '/motion') {

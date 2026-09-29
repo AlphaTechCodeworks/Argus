@@ -74,6 +74,20 @@
 //    once; over that the viewer is told plainly and the socket closes, rather than joining a queue.
 //    The ffmpeg is killed on close, on error and on every seek: recording always wins. NVR legs are
 //    told the same (h265), so the NVR's own playback is converted for this browser too.
+//  - A remote viewer (`remote`: server.mjs asks adaptive-live.mjs isRemoteAddress of the socket, the
+//    rule live view uses; the Cloudflare tunnel arrives from 127.0.0.1): one tunnel connection
+//    carried 3.5-6.5 Mbit/s, and a 4.2 Mbit/s main stream through it froze 22 times a minute
+//    (smoothness report, cause 3). So a recording over the cap (2.5 Mbit/s by the index, times the
+//    speed; keyframe speeds always) goes, every frame, H.264 or H.265, through the same conversion
+//    within PLAYBACK_LIMITS (measured on three 3.7-5.2 Mbit/s recordings: 2.2-2.5 Mbit/s) while one
+//    of its slots is free ({type:'fit', on:true}); one within it is sent as it is ({type:'fit',
+//    on:false, fits:true}), until a faster speed takes it over the cap. This is decided at the first
+//    file of each run (a start, a seek, a restart in another mode), so it falls on a keyframe and
+//    before the run picks its mode; with both slots taken the run sends the recording itself, as
+//    before, rather than refusing ({type:'fit', on:false, busy:true}), and the next jump asks again.
+//    &original=1 (the page's "Original (server)"; the camera wall's tiles) is the recording itself:
+//    never converted, unless it is H.265 for a browser that cannot decode it. The local network is
+//    not touched.
 //  - Parsed files are kept per session (an LRU of 64 open readers, closed after 60 s unused), so
 //    scrubbing and seeking back and forth do not read an .idx twice.
 import * as fsp from 'node:fs/promises'
@@ -182,12 +196,13 @@ const note = (who, nvr, ch, source, start) => {
 /**
  * Handles a /playback WebSocket: server recordings (src=auto) or the NVR, see the top.
  * @param {{ nvr: object, ws: object, url: URL, who: {user?: string, admin?: boolean}|null,
- *           index: object|null, allowed?: Function, legs?: object|null, opts?: object }} args
+ *           index: object|null, allowed?: Function, legs?: object|null, remote?: boolean, opts?: object }} args
  *   index: rec-index.mjs (null: CCTV_LIVE_WORKER off); allowed: the access hook (rights.mjs);
+ *   remote: the viewer is remote (adaptive-live.mjs isRemoteAddress of the socket; see the top);
  *   opts: ServerPlayback options (tests)
  * @returns {ServerPlayback|null}
  */
-export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlayServer, legs = defaultLegs, opts = {} }) {
+export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlayServer, legs = defaultLegs, remote = false, opts = {} }) {
   const p = url.searchParams
   if (p.get('src') !== 'auto') {
     // today's NVR playback, exactly as before
@@ -224,7 +239,9 @@ export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlaySer
   // The page tells us what it can decode (&h265=0 when canDecodeH265() said no). Nothing else may
   // switch the conversion on, so H.264 can never reach a client that did not ask for it.
   const clientH265 = clientCanDecodeH265(p)
-  return new ServerPlayback({ ws, nvr, ch, start, stream, index, legs, clientH265, ...opts })
+  // a remote viewer who chose "Original (server)": the recording itself, not the capped conversion
+  const original = p.get('original') === '1'
+  return new ServerPlayback({ ws, nvr, ch, start, stream, index, legs, clientH265, remote: Boolean(remote), original, ...opts })
 }
 
 /** HH:MM:SS of a server time, in the NVR's time zone when known (else the server's). */
@@ -254,6 +271,9 @@ export class ServerPlayback {
    *   NVR's coverage; legSpanMs: a start with no server footage after it asks the NVR this far;
    *   prefetchMs: the coverage of a hole is asked for when the reader is this close to it;
    *   clientH265: the browser can decode H.265 (false: its H.265 frames are converted, transcode.mjs);
+   *   remote: a remote viewer, whose frames all go through the capped conversion while a slot is
+   *   free; original: that viewer asked for the recording itself instead (see the top);
+   *   fitAboveKbps: only a recording over this rate is converted for a remote viewer (the cap);
    *   pool, makeTranscoder: the concurrency cap and the converter, injectable for tests
    */
   constructor({
@@ -281,6 +301,9 @@ export class ServerPlayback {
     legSpanMs = 6 * 3_600_000,
     prefetchMs = 10_000,
     clientH265 = true,
+    remote = false,
+    original = false,
+    fitAboveKbps = PLAYBACK_LIMITS.maxKbps,
     pool = transcodePool,
     makeTranscoder = (o) => new Transcoder(o),
     log = (line) => console.log(line)
@@ -289,6 +312,12 @@ export class ServerPlayback {
     this.xcode = null // the running conversion (H.265 recordings, a browser that cannot decode them)
     this.slot = null // its place under the concurrency cap
     this.converts = false // this viewer's frames are converted (#noteCodec): 2x and 4x are keyframes only
+    // a remote viewer's frames all go through the conversion, capped for the tunnel (see the top)
+    this.fit = Boolean(remote) && !original
+    this.fitAboveKbps = fitAboveKbps
+    this.fitOn = false // they do: a slot was had at a run's first file (kept for the session, as the slot is)
+    this.fitAsked = false // this run has decided (at its first file): the next jump decides again
+    this.fitFits = null // this run is sent as it is because it fitted: the recording's 1x rate (kbit/s)
     Object.assign(this, { ws, nvr, ch, start, index, legs, fs, now, readAheadMs, maxQueueBytes, pauseAbove, resumeBelow, gapMs, lagMs, maxKeysPerS, tailPollMs, endGraceMs, noticeGapMs, legWaitMs, legSpanMs, prefetchMs, log })
     this.leg = null // { handle, gen, fromMs, toMs, keyMode }: an NVR leg is playing (the pacer is idle)
     this.closed = false
@@ -328,6 +357,8 @@ export class ServerPlayback {
     })
     ws.on('close', () => this.close())
     if (stream !== 0) this.#send({ type: 'stream', stream: 0 }) // server footage is the main stream (R17)
+    // (the page offers "Original (server)" only to a viewer the server calls remote: this says so)
+    if (remote && original) this.#send({ type: 'fit', on: false, original: true })
     this.pacer = setInterval(() => this.#pace(), tickMs)
     this.#fill()
   }
@@ -350,10 +381,72 @@ export class ServerPlayback {
    * Called for every file opened: the first one this viewer's browser cannot decode (H.265 with
    * &h265=0) makes the session a converting one for good, as the conversion itself is. It is known
    * here, before a start or restart picks its mode, so a start at 2x is keyframes only from its first
-   * frame rather than switching once the first converted frame has gone out.
+   * frame rather than switching once the first converted frame has gone out. A remote viewer's run
+   * is decided here too, at its first file (#fitRun).
    */
-  #noteCodec(codec) {
+  #noteCodec(codec, seg) {
     if (!this.converts && wantsTranscode({ clientH265: this.clientH265, codec })) this.converts = true
+    if (this.fit && !this.fitOn && !this.fitAsked) {
+      this.fitAsked = true
+      this.#fitRun(seg)
+    }
+  }
+
+  /**
+   * A remote viewer's run, decided at its first file: a start, a seek or a restart in another mode
+   * each begin at a keyframe with nothing queued, and the run's mode is picked after this (2x and 4x
+   * are keyframes only when converting). Never in the middle of a run: the converter would begin at
+   * the next keyframe and the frames queued before it would be lost.
+   *  - A recording within the cap (fitAboveKbps, the index's rate times the speed) is sent as it
+   *    is: converted, a 2.2 Mbit/s camera came out at 2.15 with a busier second than before (3.74
+   *    against 3.35 Mbit), for a slot and 0.74 of a core; half the H.264 cameras record under 0.75
+   *    Mbit/s. Not at keyframe speeds (reverse, 8x-32x): up to maxKeysPerS keyframes a second, of
+   *    which the 1x rate says nothing (the conversion holds them to the cap per second, picturesPerS).
+   *  - Otherwise a slot: kept for the session, as for a browser without H.265 (one that H.265 took
+   *    meanwhile serves here too). None free: this run sends the recording itself, as before, since
+   *    a stuttering picture beats a refusal.
+   * Either way the next jump decides again (#reset), and so does a faster speed that takes a run
+   * sent as it is over the cap (#setSpeed).
+   */
+  #fitRun(seg) {
+    const kbps = this.#recordedKbps(seg)
+    const keys = this.speed < 0 || this.speed >= 8
+    if (!keys && kbps !== null && kbps * Math.abs(this.speed) <= this.fitAboveKbps) {
+      this.fitFits = kbps
+      this.#send({ type: 'fit', on: false, fits: true })
+      return
+    }
+    this.slot ??= this.pool.acquire()
+    if (this.slot) {
+      this.fitOn = true
+      this.converts = true
+      this.#send({ type: 'fit', on: true })
+      return
+    }
+    this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: remote viewer, no conversion free (${this.pool.active} running): sending the original recording`)
+    this.#send({ type: 'fit', on: false, busy: true })
+  }
+
+  /**
+   * The recording's rate at seg in kbit/s (bits per ms), from the index: its bytes over its span. The
+   * file being written has no size there yet, so the one before it stands in. null: not known (then
+   * a remote viewer's run is converted).
+   */
+  #recordedKbps(seg) {
+    const rate = (s) => (s?.bytes > 0 && s.endMs > s.startMs ? (s.bytes * 8) / (s.endMs - s.startMs) : null)
+    try {
+      return rate(seg) ?? rate(this.index.prev(this.nvr.id, this.ch, seg.startMs))
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Whether a frame goes through the conversion: H.265 this browser cannot decode, or any frame for a
+   * remote viewer whose run began converted.
+   */
+  #convertsFrame(codec) {
+    return wantsTranscode({ clientH265: this.clientH265, codec }) || this.fitOn
   }
 
   /**
@@ -404,6 +497,8 @@ export class ServerPlayback {
     this.atEnd = false
     this.revEnd = false
     this.endSent = false
+    this.fitAsked = false // a remote viewer's next run decides again (#fitRun)
+    this.fitFits = null
   }
 
   #seek(t, gen) {
@@ -475,12 +570,17 @@ export class ServerPlayback {
     const phase = this.cur.phase
     if (phase === 'scrub' || phase === 'scrubbed' || phase === 'end') return
     if (phase === 'start') {
-      // not started yet: start again in the new mode
+      // not started yet: start again in the new mode (a remote viewer's run decided again at this speed)
       this.#bumpEpoch()
       this.cur = { ...this.cur }
+      this.fitAsked = false
+      this.fitFits = null
       return this.#fill()
     }
-    if (!wasKey && !this.#keyMode()) {
+    // A remote viewer's run sent as it is because it fitted at the old speed, and over the cap at
+    // this one (#fitRun): it restarts at the position like a change of mode, and is decided again.
+    const outgrown = this.fitFits !== null && this.fitFits * Math.abs(s) > this.fitAboveKbps
+    if (!wasKey && !this.#keyMode() && !outgrown) {
       // 1x/2x/4x: the same frames, a new rate from here
       if (this.anchor) this.anchor = { wall: now, media }
       return
@@ -555,10 +655,11 @@ export class ServerPlayback {
   #deliver(item) {
     if (item.text) return this.#send(item.text)
     if (this.ws.readyState !== this.ws.OPEN) return
-    if (wantsTranscode({ clientH265: this.clientH265, codec: item.codec })) {
-      // The browser cannot decode what was recorded: ffmpeg turns it into H.264 and the converted
-      // frame is sent from the callback below, in this same wire format and at this same time. The
-      // position is moved on here all the same, so pacing does not wait on the encoder.
+    if (this.#convertsFrame(item.codec)) {
+      // The browser cannot decode what was recorded, or a remote viewer's link cannot carry it:
+      // ffmpeg turns it into H.264 and the converted frame is sent from the callback below, in this
+      // same wire format and at this same time. The position is moved on here all the same, so
+      // pacing does not wait on the encoder.
       if (this.#transcode(item)) {
         if (this.#oneAtATime()) this.xcode.endPicture()
         this.lastTs = item.ts
@@ -576,13 +677,15 @@ export class ServerPlayback {
   // ---- H.265 -> H.264 conversion (transcode.mjs) -----------------------------------------------
 
   /**
-   * Feeds one H.265 frame to the conversion, starting it the first time. False means the server is
+   * Feeds one frame to the conversion, starting it the first time. False means the server is
    * already converting as many streams as it will (the cap): the viewer is told so plainly and the
-   * session ends, because a queue for something this heavy is a page that waits for ever.
+   * session ends, because a queue for something this heavy is a page that waits for ever. (Only H.265
+   * for a browser that cannot decode it gets here without a slot: a remote viewer who found none is
+   * sent the recording itself, #fitRun.)
    */
   #transcode(item) {
     if (!this.xcode) {
-      this.slot = this.pool.acquire()
+      this.slot ??= this.pool.acquire()
       if (!this.slot) {
         this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: H.265 conversion refused, ${this.pool.active} already running`)
         this.#send({
@@ -597,6 +700,8 @@ export class ServerPlayback {
         return false
       }
       this.xcode = this.makeTranscoder({
+        // what ffmpeg reads: H.265, or for a remote viewer H.264 too (switched below)
+        inCodec: item.codec,
         // at most 1920 wide and 2.5 Mbit/s: a 4K conversion at full size ran slower than real time
         // and came out bigger than a tunnel carries (the measurements are at PLAYBACK_LIMITS)
         ...PLAYBACK_LIMITS,
@@ -616,7 +721,16 @@ export class ServerPlayback {
         log: this.log
       })
       this.converts = true // (a scrub opens its file without #openSeg)
-      this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: converting H.265 to H.264 for this browser`)
+      const why = this.fitOn ? `for a remote viewer, at most ${PLAYBACK_LIMITS.maxWidth} wide and ${PLAYBACK_LIMITS.maxKbps} kbit/s` : 'H.265 to H.264 for this browser'
+      this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: converting ${why}`)
+    } else if (this.xcode.inCodec !== item.codec) {
+      // A remote viewer's footage changed codec between two files (the recorder on the sub-stream,
+      // a camera reconfigured). ffmpeg is told the format it reads when it starts, so the running
+      // one ends and the next starts on this frame, the new file's first keyframe; the last two or
+      // three pictures of the file before (inside the old ffmpeg, or out of it but not yet proved
+      // whole) are lost with it.
+      this.xcode.reset()
+      this.xcode.inCodec = item.codec
     }
     this.xcode.push(item.ts, item.isKey, item.buf)
     return true
@@ -634,15 +748,15 @@ export class ServerPlayback {
    * recorder, so it is killed rather than allowed to drain.
    */
   #stopTranscode(final) {
-    if (!this.xcode) return
     if (final) {
-      this.xcode.close()
+      this.xcode?.close()
       this.xcode = null
+      // (also a slot with no conversion yet: a remote viewer's is taken at the first file, #fitRun)
       this.slot?.release()
       this.slot = null
       return
     }
-    this.xcode.reset() // the slot is kept: the same viewer plays on from the new position
+    this.xcode?.reset() // the slot is kept: the same viewer plays on from the new position
   }
 
   /** The newest frame reached faster than 1x; the end of the footage. Checked when the queue is empty. */
@@ -1225,7 +1339,7 @@ export class ServerPlayback {
       try {
         const reader = await this.#reader(seg)
         if (!(reader.rows.length === 0 && !reader.growing)) {
-          this.#noteCodec(reader.codec)
+          this.#noteCodec(reader.codec, seg)
           return { seg, reader }
         }
         if (stale()) return null

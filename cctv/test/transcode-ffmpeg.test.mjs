@@ -436,5 +436,84 @@ for (const [label, codec, inCodec] of [['H.265', 'h265', CODEC_H265], ['H.264', 
   IDX.close()
 }
 
+// ---- a remote viewer: the whole path, H.264 then H.265, within PLAYBACK_LIMITS (smoothness report, cause 3) ----
+// Through the tunnel every frame goes through the conversion, H.264 as well (rec-playback.mjs
+// `remote`), so a busy main stream fits one tunnel connection. A recording whose codec changes
+// between two files restarts ffmpeg for the new codec on that file's first keyframe (#transcode): the
+// pictures after the switch must come out too. Lost at the switch: the one or two inside the old
+// ffmpeg (its parser and its second decoder thread) and at most one out of it but not yet proved whole.
+{
+  const ROOT = mkdtempSync(join(tmpdir(), 'cctv-xcode-ffmpeg-remote-'))
+  const IDX = openRecIndex(join(process.env.DATA_DIR, 'recordings-remote.db'))
+  const CH = 6
+  const FPS = 20
+  const N = 60 // 3 s a file, a keyframe a second
+  let n = 0
+  const parts = []
+  for (const [codec, rc] of [['h264', CODEC.h264], ['h265', CODEC.h265]]) {
+    // grain in every picture: 2560x1440 recorded far above the cap, so the cap has work to do
+    const clip = testVideo({ size: '2560x1440', codec, frames: N, gop: FPS, rate: FPS, noise: true })
+    const units = splitUnits(clip, rc).units
+    const w = new SegmentWriter({ root: ROOT, nvrId: 'n1', ch: CH, codec })
+    const segs = []
+    w.on('segment', (s) => segs.push(s))
+    const times = []
+    for (const u of units) {
+      const ts = T0 + n++ * (1000 / FPS)
+      times.push(ts)
+      w.write(clip.subarray(u.start, u.end), { isKey: u.isKey, ts })
+      if (w.queueStatus().queuedBytes > 1 << 20) await w.drained()
+    }
+    await w.close()
+    for (const s of segs) IDX.addSegment({ nvr: 'n1', ch: CH, ...s, loc: 'L1' })
+    parts.push({ codec, units, times, bytes: clip.length, segs })
+  }
+  check('footage: an H.264 file, then an H.265 one straight after it, 60 pictures each', parts.every((p) => p.units.length === N && p.segs.length === 1) && /\.h264$/.test(parts[0].segs[0].path) && /\.h265$/.test(parts[1].segs[0].path), parts.map((p) => `${p.units.length} ${p.segs.length}`).join(' | '))
+
+  const sock = { OPEN: 1, readyState: 1, bufferedAmount: 0, bins: [], texts: [], handlers: {} }
+  sock.send = (m) => {
+    if (typeof m === 'string') return sock.texts.push(JSON.parse(m))
+    sock.bins.push({ at: performance.now(), key: (m[0] & 1) === 1, codec: m[1], tsMs: Number(m.readBigInt64LE(8)) / 1000, buf: Buffer.from(m.subarray(16)) })
+  }
+  sock.on = (event, fn) => (sock.handlers[event] = fn)
+  sock.close = () => {
+    if (sock.readyState !== 1) return
+    sock.readyState = 3
+    sock.handlers.close?.()
+  }
+  const spawned = []
+  const nvr = { id: 'n1', name: 'NVR n1', online: true, playback: { connect: () => { throw new Error('the NVR must not be used') } } }
+  const s = rp.connectPlayback({
+    nvr, ws: sock, url: new URL(`ws://x/playback?nvr=n1&ch=${CH}&stream=0&start=${T0}&src=auto&h265=1`), who: { user: 'admin', admin: true }, index: IDX, legs: null, remote: true,
+    opts: { pool: new TranscodePool(2), makeTranscoder: (o) => new Transcoder({ ...o, spawn: (bin, args, opt) => (spawned.push(args.join(' ')), spawn(bin, args, opt)) }), log: () => {} }
+  })
+  const switchTs = parts[1].times[0]
+  const t0 = performance.now()
+  await until(() => sock.bins.filter((b) => b.tsMs >= switchTs).length >= N - DECODE_THREADS, 30_000)
+  await sleep(QUIET_MS)
+  s.close()
+  const a = sock.bins.filter((b) => b.tsMs < switchTs)
+  const b = sock.bins.filter((b) => b.tsMs >= switchTs)
+  const lost = N - a.length
+  check('remote, played at 1x: the page is told it is converted to fit ({type:"fit", on:true})', sock.texts.some((t) => t.type === 'fit' && t.on === true), J(sock.texts.filter((t) => t.type === 'fit')))
+  check('  every picture sent is H.264, each at a recorded time, in order', sock.bins.length > 0 && sock.bins.every((f, i) => f.codec === 0 && (i === 0 || f.tsMs > sock.bins[i - 1].tsMs)) && sock.bins.every((f) => parts.some((p) => p.times.some((t) => Math.abs(t - f.tsMs) < 0.5))), `${sock.bins.length} pictures`)
+  check(`  the H.264 file: converted, its first picture a keyframe, at most ${DECODE_THREADS + 1} lost at the switch`, a.length > 0 && a[0].key && Math.abs(a[0].tsMs - T0) < 0.5 && lost >= 0 && lost <= DECODE_THREADS + 1, `${a.length} of ${N}`)
+  check(`  the H.265 file after it: converted from its first keyframe on, all but the last ${DECODE_THREADS} at most (held in ffmpeg at the end)`, b.length >= N - DECODE_THREADS && b[0].key && Math.abs(b[0].tsMs - switchTs) < 0.5, `${b.length} of ${N}, first at ${b[0]?.tsMs - switchTs}`)
+  check('  two ffmpegs: one reading H.264, then one reading H.265', spawned.length === 2 && spawned[0].includes(' -f h264 -i pipe:0') && spawned[1].includes(' -f hevc -i pipe:0'), spawned.map((x) => x.slice(x.indexOf(' -f '), x.indexOf(' -i ') + 3)).join(' | '))
+  const pa = a.length ? probe(Buffer.concat(a.map((f) => f.buf))) : {}
+  const pb = b.length ? probe(Buffer.concat(b.map((f) => f.buf))) : {}
+  check('  both parts decode, 1920x1080 (at most 1920 wide), every picture sent', pa.width === '1920' && pa.height === '1080' && Number(pa.nb_read_frames) === a.length && pb.width === '1920' && pb.height === '1080' && Number(pb.nb_read_frames) === b.length, `${J(pa)} ${J(pb)}`)
+  const bufBytes = (PLAYBACK_LIMITS.maxKbps * 1000 * PLAYBACK_LIMITS.bufSeconds) / 8
+  const secs = (N / FPS) * 2
+  const allowed = 1.1 * ((PLAYBACK_LIMITS.maxKbps * 1000 * secs) / 8 + 2 * bufBytes) // (each ffmpeg starts with a full buffer)
+  const sent = sock.bins.reduce((sum, f) => sum + f.buf.length, 0)
+  const recorded = parts.reduce((sum, p) => sum + p.bytes, 0)
+  const mbit = (bytes) => ((bytes * 8) / secs / 1e6).toFixed(2)
+  info(`remote viewer, grainy 2560x1440 at 20 fps: recorded ${mbit(recorded)} Mbit/s, sent ${mbit(sent)} Mbit/s converted; the first picture out ${Math.round(sock.bins[0]?.at - t0)} ms after the start; ${lost} lost at the codec switch`)
+  check('  what is sent stays within the cap (2.5 Mbit/s and a 1 s buffer per ffmpeg)', sent <= allowed, `${sent} B, allowed ${Math.round(allowed)} B`)
+  check('  (the recording itself is far above it: the conversion is what holds the rate down)', recorded > 3 * allowed, `${recorded} B`)
+  IDX.close()
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
