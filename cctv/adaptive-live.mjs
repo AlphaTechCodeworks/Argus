@@ -388,17 +388,20 @@ export class AdaptiveLive {
   /**
    * The camera's keyframe going out now (the tap of #switchTo): the socket leaves its stream and joins
    * the camera's own from this keyframe on. Added as the fan-out goes (HubStream.add replay: false), it is
-   * reached by it: this keyframe is its first frame there, sent once.
+   * reached by it: this keyframe is its first frame there, sent once. On before the tap and the old
+   * conversion's own come off: the camera's stream is never left without a viewer for a moment, which
+   * would tell the NVR worker it is background (at a sub-stream limit, one a viewer's may displace).
    */
   #swap(e) {
     const sw = e.switch
+    const from = e.stream
     e.switch = null
-    e.source.remove(sw.tap)
-    this.#leaveStream(e)
     e.stream = e.source
     this.#guard(e)
     e.ws.waitForKey = true
     e.source.add(e.ws, { replay: false })
+    e.source.remove(sw.tap)
+    this.#leaveStream(e, from)
   }
 
   /** A switch done at the new stream's start (#pass), or given up waiting for it: onto the new stream now. */
@@ -425,10 +428,9 @@ export class AdaptiveLive {
     e.afterAt = this.now()
   }
 
-  /** Off its stream; a level's stream left with nobody on it or on the way to it closes there and then (its slot). */
-  #leaveStream(e) {
-    const s = e.stream
-    e.stream = null
+  /** Off its stream (or `s`); a level's stream left with nobody on it or on the way to it closes there and then (its slot). */
+  #leaveStream(e, s = e.stream) {
+    if (s === e.stream) e.stream = null
     if (!s) return
     s.remove(e.ws)
     if (s !== e.source && s.clients.size === 0 && !this.#awaited(s)) s.close()

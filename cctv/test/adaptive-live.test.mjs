@@ -765,7 +765,8 @@ function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
     return x
   }
   const live = new AdaptiveLive({ pool: new TranscodePool(pool), makeTranscoder, log: (l) => logs.push(`${((now - T) / 1000).toFixed(2)} ${l}`), budgetBps: 1e9, now: () => now })
-  const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
+  const told = [] // what the camera streams told the NVR worker (want: foreground or background)
+  const hub = { send: (m) => told.push({ at: now - T, ...m }), streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
   const recorder = () => {
     const ws = { ...fakeWs(), overSince: null }
     ws.send = (b) => { const f = parseFrame(b); ws.got.push({ at: now - T, ts: f.ts, key: f.isKey, converted: f.payload.length === 3 }) }
@@ -811,7 +812,7 @@ function rig({ cams, pool = 16, lag = 2, phase = 1000, key = 'rig' }) {
     to(pressAt)
     return pressAt
   }
-  return { live, v, tiles, logs, made, to, down, entry, socket: recorder }
+  return { live, v, tiles, logs, made, to, down, entry, socket: recorder, told }
 }
 /** A socket's frames: whether any was older than one before it, and the longest wait between two, from `from` ms on. */
 const seen = (got, from = 0) => {
@@ -911,6 +912,10 @@ const brief = (got, from, to) => got.filter((f) => f.at >= from && f.at <= to).m
   const at50 = t.ws.got.filter((f) => f.at === k50?.at)
   check('  and goes over there (50 s), nothing replayed: nothing older, no wait, at most the conversion\'s last picture and that keyframe at once',
     s.back === 0 && s.gap <= 67 && r.entry(t).stream === t.stream && c15.closed && r.live.streams.size === 0 && at50.length <= 2 && at50.at(-1)?.ts === 50_000 && !at50.at(-1).converted, `${JSON.stringify(s)} ${brief(t.ws.got, 49_900, 50_100)}`)
+  // the camera's stream never goes without a viewer on it at the swap: at an NVR's sub-stream limit a
+  // background stream may give way to a viewer's (nvr-worker.mjs), so it is not told it is one for a moment
+  const told = r.told.filter((m) => m.at >= 49_000 && m.at <= 51_000)
+  check('  the camera\'s stream is not told it is background for a moment as the conversion closes', told.every((m) => m.background !== true), JSON.stringify(told))
 }
 {
   // A step down waits at most SWITCH_WAIT_MS on the camera's stream for its keyframe: the link is
