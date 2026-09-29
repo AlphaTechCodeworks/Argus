@@ -107,12 +107,14 @@ function subFields({ nvr, ch, stream, fps, h265 }) {
 }
 
 /**
- * The drain rate of one socket (see DRAIN_WINDOW_MS): add(n) when bytes are handed to ws, done(n)
- * from its send callback; bps() is the rate in bytes a second, or null, and written every byte done.
+ * The drain rate of one socket (see DRAIN_WINDOW_MS): add(n) when bytes are handed to ws, done(n, ok)
+ * from its send callback (ok false: called back with an error, the socket gone); bps() is the rate in
+ * bytes a second, or null; written and lost count every byte done.
  */
 function drainMeter(now) {
   let queued = 0
   let written = 0 // bytes written, ever
+  let lost = 0 // bytes ws gave up on (the socket died with them queued)
   let busy = 0 // ms with something queued, ever, up to busyFrom
   let busyFrom = null // since when something has been queued (null: nothing is)
   // what had been written and how long it had been busy, every DRAIN_MARK_MS or so (taken on each
@@ -130,9 +132,10 @@ function drainMeter(now) {
       queued += n
       mark(t)
     },
-    done(n) {
+    done(n, ok = true) {
       const t = now()
-      written += n
+      if (ok) written += n
+      else lost += n
       queued -= n
       if (queued <= 0 && busyFrom !== null) {
         busy += t - busyFrom
@@ -149,6 +152,9 @@ function drainMeter(now) {
     },
     get written() {
       return written
+    },
+    get lost() {
+      return lost
     }
   }
 }
@@ -249,12 +255,12 @@ class MuxChannel {
     // the frame as it is. A copy with the id in front cost an allocation and a copy of every frame
     // for every viewer, and held a copy per channel in the queue.
     mux.ws.send(this.#idBuf, { binary: true, fin: false })
-    mux.ws.send(data, { binary: true, fin: true }, () => {
-      // written (or the socket gone): no longer queued
+    mux.ws.send(data, { binary: true, fin: true }, (err) => {
+      // written (or the socket gone: an error): no longer queued
       this.#queued -= n
       mux.queued -= n
       mux.progressAt = mux.now()
-      mux.drain.done(n)
+      mux.drain.done(n, !err)
     })
   }
 
@@ -403,9 +409,11 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
     }
   })
   // Every close is logged, once: its code and reason, why (the keep-alive, backpressure.mjs, marks
-  // the sockets it cuts), how many tiles it carried, and how far behind it was. On 29 Sep a remote
-  // page was forgotten and restarted at full twice, and nothing said whether its socket had been cut
-  // or by what (stutter report 2.10). One line per page, never per frame.
+  // the sockets it cuts), how many tiles it carried, and how far behind it was: the bytes it never
+  // wrote, whether still queued or already called back with an error (ws does that to the queued
+  // sends of a socket that died, perhaps before its 'close'). On 29 Sep a remote page was forgotten
+  // and restarted at full twice, and nothing said whether its socket had been cut or by what
+  // (stutter report 2.10). One line per page, never per frame.
   let logged = false
   ws.on('close', (code, reason) => {
     done = true
@@ -419,7 +427,7 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
     const mb = (n) => (n / 1e6).toFixed(2)
     const mbit = (perS) => ((perS * 8) / 1e6).toFixed(1)
     log(`[live-mux] a ${who ? `${who} ` : ''}page's socket closed after ${Math.round(secs)} s: code ${code}${why ? ` "${why}"` : ''}${because ? ` (${because})` : ''}; ` +
-      `${channelsAtEnd} channels, ${mb(mux.queued)} MB still queued, ${bps === null ? 'draining: idle' : `draining at ${mbit(bps)} Mbit/s`}; ` +
+      `${channelsAtEnd} channels, ${mb(mux.queued + mux.drain.lost)} MB never written, ${bps === null ? 'draining: idle' : `draining at ${mbit(bps)} Mbit/s`}; ` +
       `${mb(mux.drain.written)} MB written in all (${mbit(secs > 0 ? mux.drain.written / secs : 0)} Mbit/s on average)`)
   })
   // a frame ws cannot read (bad UTF-8, a bad opcode, over maxPayload) closes the socket by itself;

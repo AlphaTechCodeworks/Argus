@@ -410,7 +410,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('the socket closing: the channel reads as closed and sends nothing', c.readyState === 3 && ws.sent.length === 0)
 }
 
-// ---- every close of a page's socket is logged: its code and reason, why, and what was still queued.
+// ---- every close of a page's socket is logged: its code and reason, why, and what it never wrote.
 // On 29 Sep a remote page was forgotten and restarted at full twice, and nothing said whether its
 // socket had been cut, by what, or how far behind it was (stutter report 2.10) ----
 {
@@ -423,10 +423,24 @@ const fanOut = (c, buf, isKey, type, now) => {
   state.t = 812_000
   ws.readyState = 3
   ws.emit('close', 1001, Buffer.from('going away'))
-  check('a page\'s socket closing is logged: remote or local, how long it was open, code and reason, channels, still queued, drain rate, bytes written',
-    logs.at(-1) === '[live-mux] a remote page\'s socket closed after 812 s: code 1001 "going away"; 3 channels, 2.00 MB still queued, draining at 0.0 Mbit/s; 1.00 MB written in all (0.0 Mbit/s on average)', logs.at(-1))
+  check('a page\'s socket closing is logged: remote or local, how long it was open, code and reason, channels, what was never written, drain rate, bytes written',
+    logs.at(-1) === '[live-mux] a remote page\'s socket closed after 812 s: code 1001 "going away"; 3 channels, 2.00 MB never written, draining at 0.0 Mbit/s; 1.00 MB written in all (0.0 Mbit/s on average)', logs.at(-1))
   ws.emit('close', 1006)
   check('... once', logs.filter((l) => l.includes('socket closed')).length === 1)
+}
+{
+  // the socket dies with a backlog: ws calls the queued sends back with an error, maybe before its
+  // 'close'. Those bytes were never written: not counted as written, and still in the line.
+  const { ws, state, attached, logs } = setup()
+  ws.msg(sub(1))
+  attached[0].channel.send(frame(false, 1, 999_996))
+  state.t = 1000
+  const lost = ws.queue.shift()
+  ws.bufferedAmount -= lost.bytes
+  lost.cb(new Error('socket gone'))
+  ws.readyState = 3
+  ws.emit('close', 1006, Buffer.alloc(0))
+  check('... a send called back with an error (the socket gone): never written, not written', /; 1 channels, 1\.00 MB never written, draining at 0\.0 Mbit\/s; 0\.00 MB written in all/.test(logs.at(-1)), logs.at(-1))
 }
 {
   // the keep-alive (backpressure.mjs) cut it: the line says so, not just 1006
@@ -435,7 +449,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   ws.closeCause = 'keep-alive: no answer to the last ping'
   ws.readyState = 3
   ws.emit('close', 1006, Buffer.alloc(0))
-  check('... cut by the keep-alive: the line says so', /: code 1006 \(keep-alive: no answer to the last ping\); 1 channels, 0\.00 MB still queued, draining: idle;/.test(logs.at(-1)), logs.at(-1))
+  check('... cut by the keep-alive: the line says so', /: code 1006 \(keep-alive: no answer to the last ping\); 1 channels, 0\.00 MB never written, draining: idle;/.test(logs.at(-1)), logs.at(-1))
 }
 {
   // closed by the server itself (too many requests, bad messages, signed out): the reason it gave
@@ -667,7 +681,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   await tick()
   await tick()
   check('... their handlers run once, also after the socket\'s own close', counts.every((n) => n.v === 1))
-  check('... and the close is logged as that, with the channels it had', /: code 1006 \(nothing written for 30 s\); 2 channels, 0\.00 MB still queued, draining at 0\.0 Mbit\/s;/.test(logs.at(-1)), logs.at(-1))
+  check('... and the close is logged as that, with the channels it had', /: code 1006 \(nothing written for 30 s\); 2 channels, 0\.00 MB never written, draining at 0\.0 Mbit\/s;/.test(logs.at(-1)), logs.at(-1))
 }
 
 // ---- in the real pipeline: HubStream, gateSend, sub-bridge ----
