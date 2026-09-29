@@ -42,8 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgraded to version 2 with Live HD wherever Live was (the old file kept as rights.v1.json, a shadow
   rights.v2.json keeps Live HD removals across a rollback and return); an account whose Playback SD
   reaches cameras without Live gets the NVR's recordings and event pictures there in SD only, and the
-  upgrade's audit row names it. A rights.json from a newer release is never rewritten. Taking Live HD
-  away ends a full-quality stream already playing; the page drops to the sub-stream. `/api/cameras`
+  upgrade's audit row names it. A shadow that cannot be read is kept as rights.v2.json.unreadable and
+  the upgrade then gives Live HD to nobody (admins keep everything), naming in its audit row the
+  accounts to give it back to; a row that already has a Live HD list keeps it, cut to its Live. A
+  rights.json from a newer release is never rewritten. Taking Live HD away ends a full-quality stream
+  already playing; the page drops to the sub-stream. `/api/cameras`
   says per camera what the viewer may do (`hd`, `playback`; `?for=playback`: `sd`, `hd`, `nvrHd`,
   `legs`), and the pages offer only that.
 

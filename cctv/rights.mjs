@@ -60,6 +60,8 @@ export const RIGHTS_FILE = join(DATA_DIR, 'rights.json')
 export const RIGHTS_V1_BACKUP = join(DATA_DIR, 'rights.v1.json')
 /** Every account's Live HD as this version last wrote it: what an upgrade after a rollback restores. */
 export const RIGHTS_SHADOW = join(DATA_DIR, 'rights.v2.json')
+/** Where an upgrade keeps a shadow it could not use (it then gives Live HD to nobody: upgradeToV2). */
+export const RIGHTS_SHADOW_UNREADABLE = `${RIGHTS_SHADOW}.unreadable`
 const VERSION = 2
 
 /** The six things a person can be allowed to do. Anything not in here is refused outright. */
@@ -158,7 +160,7 @@ function readRights() {
     return { version: VERSION, users, newer: from }
   }
   // Never a file whose users is not an object: that stays on disk for a human to fix, and denies.
-  if (from < VERSION && plain) return upgradeToV2(users, text, from)
+  if (from < VERSION && plain) return upgradeToV2(users, text, from, src, raw.version)
   return { version: VERSION, users }
 }
 
@@ -171,21 +173,29 @@ function noteNewer(from) {
   audit(DATA_DIR, { user: 'system', action: 'rights-change', target: '*', detail })
 }
 
-/** The shadow as { writtenAt, users: { name: [targets] } }, or null (none, or unreadable: logged). */
+/**
+ * The shadow as { writtenAt, users: { name: [targets] } }; null when there is none; { unreadable: why }
+ * when there is one that cannot be used (unreadable, not JSON, not a shadow, a writtenAt that is no
+ * time a Date can hold), which the upgrade must not take for "none": that would give Live HD = Live to
+ * everyone, back to every account it had been taken from (upgradeToV2 fails closed instead). An
+ * account's entry that is not a list holds no Live HD, for the same reason (it is still remembered).
+ */
 function readShadow() {
   if (!existsSync(RIGHTS_SHADOW)) return null
   try {
     const raw = JSON.parse(readFileSync(RIGHTS_SHADOW, 'utf8'))
-    if (!Number.isFinite(raw?.writtenAt) || !raw.users || typeof raw.users !== 'object' || Array.isArray(raw.users)) throw new Error('not a rights shadow')
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('not a rights shadow')
+    // within the Date range (+-8.64e15 ms): the upgrade's audit row prints it, and toISOString throws past it
+    if (!Number.isFinite(raw.writtenAt) || Math.abs(raw.writtenAt) > 8.64e15) throw new Error('its writtenAt is not a time')
+    if (!raw.users || typeof raw.users !== 'object' || Array.isArray(raw.users)) throw new Error('it has no users')
     const users = Object.create(null)
     for (const [name, list] of Object.entries(raw.users)) {
-      if (!isString(name) || !name || name === '__proto__' || !Array.isArray(list)) continue
-      users[name] = [...new Set(list.map(cleanTarget).filter(Boolean))].sort()
+      if (!isString(name) || !name || name === '__proto__') continue
+      users[name] = Array.isArray(list) ? [...new Set(list.map(cleanTarget).filter(Boolean))].sort() : []
     }
     return { writtenAt: raw.writtenAt, users }
   } catch (e) {
-    console.error(`[rights] ${RIGHTS_SHADOW} is unreadable (${e.message}); upgrading as if there were none`)
-    return null
+    return { unreadable: e.message }
   }
 }
 
@@ -230,40 +240,93 @@ const someNames = (list) => (list.length > 8 ? `${list.slice(0, 8).join(', ')} a
  * Not quite nothing changes: an account whose Playback SD reaches cameras its Live does not (live
  * n1/0, playback-nvr n1) played the NVR's HD stream and saw full-size event pictures there, which now
  * need Live HD or Playback HD (mayHd). They are not given (default deny); the audit row names them.
+ *
+ * Two cases fail closed. A row that already carries a live-hd list (a version 2 file whose version was
+ * mangled into a string or a fraction, read as version 1) keeps that list, cut to its Live: never
+ * widened to Live or by the shadow, as a version 2 file is read as it is. A shadow that is there but
+ * cannot be used is not "no shadow" (that would give everyone Live HD = Live, back to every account it
+ * had been taken from): it is moved aside as rights.v2.json.unreadable, every account gets no Live HD
+ * (an admin keeps everything: admin is the role), and the audit row and the console say so, with the
+ * accounts to give it back to. If it cannot be moved aside nothing is written (it would be written
+ * over) and the rights are used from memory, with Live HD for nobody.
+ * @param {object} raw the file's own rows (which of them already carry a live-hd list)
+ * @param {*} said the file's own version field (named in the audit row when it is not `from`)
  */
-function upgradeToV2(users, text, from) {
+function upgradeToV2(users, text, from, raw = {}, said = from) {
   const shadow = readShadow()
+  const bad = shadow?.unreadable ?? null // why the shadow there cannot be used: then Live HD for nobody
   const accounts = loadUsers()
   const restored = []
   const copied = []
+  const kept = []
+  const withheld = [] // viewers with Live that the unusable shadow left without Live HD
   const sdOnly = []
+  const viewer = (name) => Object.hasOwn(accounts, name) && accounts[name]?.role !== 'admin'
   for (const name of Object.keys(users).sort()) {
     const row = users[name]
-    const since = Object.hasOwn(accounts, name) ? accounts[name]?.since : undefined
-    const remembered = shadow !== null && Object.hasOwn(shadow.users, name) && !(Number.isFinite(since) && since > shadow.writtenAt)
-    row.grants['live-hd'] = remembered ? intersectTargets(shadow.users[name], row.grants.live) : [...row.grants.live]
-    ;(remembered ? restored : copied).push(name)
+    const own = Object.hasOwn(raw, name) ? raw[name]?.grants?.['live-hd'] : undefined
+    if (bad !== null) {
+      row.grants['live-hd'] = []
+      if (viewer(name) && row.grants.live.length) withheld.push(name)
+    } else if (Array.isArray(own)) {
+      // what the file already says (cleanRights kept it in the row), only ever narrowed: to Live
+      row.grants['live-hd'] = intersectTargets(row.grants['live-hd'], row.grants.live)
+      kept.push(name)
+    } else {
+      const since = Object.hasOwn(accounts, name) ? accounts[name]?.since : undefined
+      const remembered = shadow !== null && Object.hasOwn(shadow.users, name) && !(Number.isFinite(since) && since > shadow.writtenAt)
+      row.grants['live-hd'] = remembered ? intersectTargets(shadow.users[name], row.grants.live) : [...row.grants.live]
+      ;(remembered ? restored : copied).push(name)
+    }
     const hd = [...row.grants['live-hd'], ...row.grants['playback-server']]
-    if (Object.hasOwn(accounts, name) && accounts[name]?.role !== 'admin' && row.grants['playback-nvr'].some((t) => !coversAll(hd, t))) sdOnly.push(name)
+    if (viewer(name) && row.grants['playback-nvr'].some((t) => !coversAll(hd, t))) sdOnly.push(name)
   }
   const store = { version: VERSION, users }
+  let aside = false
   try {
+    if (bad !== null) {
+      // kept for a person to look at, out of the way of the shadow writeStore writes in its place
+      renameSync(RIGHTS_SHADOW, RIGHTS_SHADOW_UNREADABLE)
+      aside = true
+    }
     const tmp = `${RIGHTS_V1_BACKUP}.tmp-${process.pid}`
     writeFileSync(tmp, text, { mode: 0o600 })
     renameSync(tmp, RIGHTS_V1_BACKUP)
     writeStore(store)
   } catch (e) {
-    console.error(`[rights] could not write the upgraded ${RIGHTS_FILE} (${e.message}); using it upgraded from memory`)
+    // put back, so the next try fails closed the same way (a shadow gone missing would mean Live HD = Live)
+    if (aside) {
+      try {
+        renameSync(RIGHTS_SHADOW_UNREADABLE, RIGHTS_SHADOW)
+      } catch (e2) {
+        console.error(`[rights] could not put ${RIGHTS_SHADOW_UNREADABLE} back (${e2.message})`)
+      }
+    }
+    const none = bad !== null ? `, with Live HD for nobody (${RIGHTS_SHADOW} cannot be used: ${bad})` : ''
+    console.error(`[rights] could not write the upgraded ${RIGHTS_FILE} (${e.message}); using it upgraded from memory${none}`)
     return store
   }
-  const said = []
-  if (copied.length) said.push(`Live HD given wherever Live was granted for ${copied.length} account(s) (${someNames(copied)})`)
-  if (restored.length) said.push(`Live HD restored from rights.v2.json (written ${new Date(shadow.writtenAt).toISOString()}) for ${restored.length} account(s) (${someNames(restored)})`)
-  if (!said.length) said.push('no account had rights stored')
-  if (sdOnly.length) said.push(`${sdOnly.length} account(s) (${someNames(sdOnly)}) have Playback SD on cameras without Live: there the NVR's recordings and event pictures are now SD only (HD needs Live HD or Playback HD)`)
-  const detail = `rights.json upgraded from version ${from} to ${VERSION}: ${said.join('; ')}; the stored playback, export and admin rights are unchanged; the old file is kept as rights.v1.json`
-  console.log(`[rights] ${detail}`)
-  audit(DATA_DIR, { user: 'system', action: 'rights-change', target: '*', detail })
+  // rights.json is rewritten: from here nothing may throw, or the audit row of what was done is lost
+  let detail
+  try {
+    const lines = []
+    // first, so the audit row's 500-character cap never cuts it; the names last, for the same reason
+    if (bad !== null) lines.push(`rights.v2.json could not be used (${String(bad).slice(0, 80)}) and is kept as rights.v2.json.unreadable, so Live HD was given to nobody; re-grant it in the access editor (Users & audit, Edit access) to whoever should have it: ${withheld.length ? `${withheld.length} account(s) with Live have none now (${someNames(withheld)})` : 'no account but an admin has Live'}`)
+    if (kept.length) lines.push(`Live HD kept as the file had it (cut to Live) for ${kept.length} account(s) (${someNames(kept)})`)
+    if (copied.length) lines.push(`Live HD given wherever Live was granted for ${copied.length} account(s) (${someNames(copied)})`)
+    if (restored.length) lines.push(`Live HD restored from rights.v2.json (written ${new Date(shadow.writtenAt).toISOString()}) for ${restored.length} account(s) (${someNames(restored)})`)
+    if (!lines.length) lines.push('no account had rights stored')
+    if (sdOnly.length) lines.push(`${sdOnly.length} account(s) (${someNames(sdOnly)}) have Playback SD on cameras without Live HD or Playback HD: there the NVR's recordings and event pictures are now SD only`)
+    // (a missing version is an ordinary version 1 file; a string or a fraction is worth saying)
+    const version = said === undefined || said === from ? '' : ` (the file said version ${String(JSON.stringify(said)).slice(0, 20)})`
+    detail = `rights.json upgraded from version ${from}${version} to ${VERSION}: ${lines.join('; ')}; the stored playback, export and admin rights are unchanged; the old file is kept as rights.v1.json`
+  } catch (e) {
+    detail = `rights.json upgraded from version ${from} to ${VERSION} (its summary failed: ${e.message}); the old file is kept as rights.v1.json`
+  }
+  try {
+    ;(bad !== null ? console.warn : console.log)(`[rights] ${detail}`)
+  } catch {}
+  audit(DATA_DIR, { user: 'system', action: 'rights-change', target: '*', detail }) // (never throws)
   return store
 }
 
