@@ -13,13 +13,24 @@
 // first "no" closes it 1008: "not allowed", or "signed out" when there is no session any more. A
 // /live-mux channel's close is an "end" for that one tile; the page's other tiles carry on.
 //
+// A need is an action, or a list of actions any one of which will do: the NVR's main stream in
+// playback needs playback-nvr and one of Live HD or Playback HD, ['playback-nvr', ['live-hd',
+// 'playback-server']]. When only the full-quality needs fail (Live HD, or a group Live HD can meet),
+// the close says 'hd not allowed' (stream-param.mjs): the page drops to the sub-stream instead of
+// asking for the main stream again. Anything else failing is 'not allowed'.
+//
 // Pure (no SDK, no server): server.mjs hands in how to read the session and the rights.
+
+import { HD_NOT_ALLOWED } from './stream-param.mjs'
 
 export const SWEEP_MS = 15_000
 
 // ws readyState: a socket already closing or closed has had (or is about to have) its 'close' event,
 // and one tracked after that would never be let go
 const OPEN = 1
+
+/** A need about full quality only: Live HD, or a group that Live HD can meet. */
+const isHdNeed = (need) => need === 'live-hd' || (Array.isArray(need) && need.includes('live-hd'))
 
 /**
  * @param {{ currentUser: (req: object) => string|null, isAdmin: (user: string) => boolean,
@@ -49,7 +60,7 @@ export function accessWatch({ currentUser, isAdmin, can, everyMs = SWEEP_MS, eve
     let closed = 0
     for (const [ws, e] of [...open]) {
       const who = whoOf(e.req)
-      // every right it was opened with must still hold; a check that throws is a no (default deny)
+      // every need it was opened with must still be met; a check that throws is a no (default deny)
       const may = (action) => {
         try {
           return can(who, action, { nvr: e.nvr, ch: e.ch }) === true
@@ -57,11 +68,16 @@ export function accessWatch({ currentUser, isAdmin, can, everyMs = SWEEP_MS, eve
           return false
         }
       }
-      if (who && e.actions.every(may)) continue
+      const meets = (need) => (Array.isArray(need) ? need.some(may) : may(need))
+      // each need asked once (a check that throws counts once too)
+      const failing = who ? e.actions.filter((need) => !meets(need)) : e.actions
+      if (who && failing.length === 0) continue
       open.delete(ws)
       closed++
+      // only the full-quality needs failing: the page drops to the sub-stream rather than retrying
+      const reason = !who ? 'signed out' : failing.every(isHdNeed) ? HD_NOT_ALLOWED : 'not allowed'
       try {
-        ws.close(1008, who ? 'not allowed' : 'signed out')
+        ws.close(1008, reason)
       } catch {}
     }
     return closed
@@ -87,14 +103,14 @@ export function accessWatch({ currentUser, isAdmin, can, everyMs = SWEEP_MS, eve
      * Watches one socket or mux channel from now until it closes.
      * @param {object} ws the socket or channel (closed with ws.close(1008, reason))
      * @param {object} req the request that opened it (its cookie is the session)
-     * @param {{ actions: string[], nvr: string, ch: number }} what the rights it needs, every one of
-     *   them, on that camera
+     * @param {{ actions: Array<string|string[]>, nvr: string, ch: number }} what the rights it needs
+     *   on that camera, every one of them (a list inside: any one of those)
      * @returns {() => void} stops watching it
      */
     track(ws, req, { actions, nvr, ch }) {
       const stop = () => open.delete(ws)
       if (ws.readyState !== undefined && ws.readyState !== OPEN) return stop
-      open.set(ws, { req, actions: [...actions], nvr, ch })
+      open.set(ws, { req, actions: actions.map((a) => (Array.isArray(a) ? [...a] : a)), nvr, ch })
       ws.on('close', stop)
       return stop
     },

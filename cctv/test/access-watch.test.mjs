@@ -193,6 +193,44 @@ check('(e) another session of hers is not signed out with it', auth.verifySessio
 await tick()
 check('(f) nothing closed is left in the watch', watch.size() === 1, `${watch.size()} (the admin's tile)`)
 
+// ---- (g) needs any one of which will do, and why a socket is closed (stream rights) -----------------
+{
+  let allowed = {}
+  const g = accessWatch({ currentUser: (r) => r.user, isAdmin: () => false, can: (who, a) => allowed[a] === true, every: () => null })
+  const ann = { user: 'ann' }
+  const nvrMain = new FakeWs()
+  g.track(nvrMain, ann, { actions: ['playback-nvr', ['live-hd', 'playback-server']], nvr: 'n', ch: 1 })
+  const liveMain = new FakeWs()
+  g.track(liveMain, ann, { actions: ['live', 'live-hd'], nvr: 'n', ch: 1 })
+  const sub = new FakeWs()
+  g.track(sub, ann, { actions: ['live'], nvr: 'n', ch: 1 })
+  allowed = { live: true, 'playback-nvr': true, 'playback-server': true }
+  g.sweep()
+  check('(g) an any-of group is met by one of its actions (Playback HD for the NVR\'s main stream)', nvrMain.closedWith === null)
+  check('(g) Live HD gone, Live kept: the live main socket closes 1008 "hd not allowed"', liveMain.closedWith?.code === 1008 && liveMain.closedWith.reason === 'hd not allowed', J(liveMain.closedWith))
+  check('(g) ... the sub-stream socket stays', sub.closedWith === null)
+  allowed = { live: true, 'playback-nvr': true }
+  g.sweep()
+  check('(g) neither action of the group: the NVR main socket closes "hd not allowed"', nvrMain.closedWith?.reason === 'hd not allowed', J(nvrMain.closedWith))
+  const both = new FakeWs()
+  g.track(both, ann, { actions: ['playback-nvr', ['live-hd', 'playback-server']], nvr: 'n', ch: 1 })
+  allowed = {}
+  g.sweep()
+  check('(g) a plain need gone as well: "not allowed", not "hd not allowed"', both.closedWith?.reason === 'not allowed' && sub.closedWith?.reason === 'not allowed', J([both.closedWith, sub.closedWith]))
+  const gone = new FakeWs()
+  g.track(gone, { user: null }, { actions: ['live', 'live-hd'], nvr: 'n', ch: 1 })
+  g.sweep()
+  check('(g) no session: "signed out", whatever the needs', gone.closedWith?.reason === 'signed out')
+  const group = ['live-hd', 'playback-server']
+  const kept = new FakeWs()
+  g.track(kept, ann, { actions: ['playback-nvr', group], nvr: 'n', ch: 1 })
+  group.pop() // the caller changing its array afterwards
+  allowed = { 'playback-nvr': true, 'playback-server': true }
+  g.sweep()
+  check('(g) track keeps its own copy of a group', kept.closedWith === null)
+  await tick()
+}
+
 // ---- server.mjs wiring (source shape: importing server.mjs starts the NVRs)
 {
   const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
