@@ -9,7 +9,7 @@
 // overlapping files, files longer than MAX_SEGMENT_MS, files that end before they start, empty
 // cameras. And each rewritten statement must be an index search, never a scan of every row.
 // Run: node cctv/test/rec-index-scans.test.mjs
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -32,7 +32,10 @@ const rand = () => {
 }
 const between = (a, b) => a + Math.floor(rand() * (b - a + 1))
 
-const file = join(mkdtempSync(join(tmpdir(), 'cctv-rix-')), 'recordings.db')
+// every database lives in one folder, removed on the way out: the big one is about 24 MB
+const ROOT = mkdtempSync(join(tmpdir(), 'cctv-rix-'))
+process.on('exit', () => { try { rmSync(ROOT, { recursive: true, force: true }) } catch {} })
+const file = join(ROOT, 'recordings.db')
 const index = openRecIndex(file)
 let n = 0
 const seg = (nvr, ch, startMs, endMs) => index.addSegment({ nvr, ch, path: `/rec/${nvr}/${ch}/${++n}.h264`, startMs, endMs, bytes: 1000, keyframes: 1, loc: 'L1' })
@@ -171,7 +174,7 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   const got = index.cameras().map((r) => `${r.nvr}/${r.ch}`)
   check('cameras() lists the same cameras in the same order as SELECT DISTINCT', got.join('|') === want.join('|'), `${got.length} vs ${want.length}: ${got.slice(0, 6).join('|')}`)
   check('cameras() rows are plain { nvr, ch }', index.cameras().every((r) => Object.keys(r).join() === 'nvr,ch' && typeof r.ch === 'number'))
-  const empty = openRecIndex(join(mkdtempSync(join(tmpdir(), 'cctv-rix-')), 'empty.db'))
+  const empty = openRecIndex(join(ROOT, 'empty.db'))
   check('cameras() of an empty index is empty', empty.cameras().length === 0)
   check('lastSegmentEnd of an empty index is null', empty.lastSegmentEnd('x', 0) === null && empty.lastSegmentEnd('x', 0, T0) === null)
   empty.close()
@@ -209,7 +212,7 @@ index.close()
 // every row of the camera (or of the index) each time; the new ones must be at least ten times
 // quicker. The real margin is a few hundred times, so a busy machine does not make this flaky.
 {
-  const big = join(mkdtempSync(join(tmpdir(), 'cctv-rix-')), 'big.db')
+  const big = join(ROOT, 'big.db')
   const ix = openRecIndex(big)
   const raw = new DatabaseSync(big)
   const ins = raw.prepare('INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES (?, ?, ?, ?, ?, 1000, 1, ?)')
