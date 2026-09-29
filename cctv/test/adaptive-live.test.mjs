@@ -953,16 +953,25 @@ const brief = (got, from, to) => got.filter((f) => f.at >= from && f.at <= to).m
 {
   // onto a stream that runs already (another viewer's, at the level this one steps down to): its GOP
   // replay is older than what the socket has; it is sent nothing until that stream's next keyframe
-  const r = rig({ cams: [{ fps: 30 }] })
+  const r = rig({ cams: [{ fps: 30 }], pool: 1 })
   const [t] = r.tiles
-  r.down(5000) // the first viewer: at 15, on its conversion from 6 s
+  r.down(5000) // the first viewer: at 15, on its conversion from 6 s (the one slot)
+  const c15 = r.entry(t).switch?.to
   const other = r.socket()
   r.live.attach('other', { ws: other, nvrId: 'n1', ch: 0, type: 1, source: t.stream })
+  const mine = () => [...r.live.viewers.get('other').sockets][0]
   r.down(11_000, [other]) // the second viewer, on the camera's own stream, down to 15: the first one's conversion
-  const s = seen(other.got, 10_000)
-  const first = other.got.find((f) => f.converted)
-  check('(a) onto another viewer\'s running conversion: nothing older than it had (not its replay), from that stream\'s next keyframe on',
-    s.back === 0 && [...r.live.viewers.get('other').sockets][0].stream === r.entry(t).stream && (r.to(14_000), seen(other.got, 10_000).back === 0) && other.got.find((f) => f.converted)?.key, `${JSON.stringify(seen(other.got, 10_000))} ${brief(other.got, 10_900, 12_200)} ${first?.ts}`)
+  r.to(14_000)
+  let s = seen(other.got, 10_000)
+  check('(a) onto another viewer\'s running conversion: at once, nothing older than it had (not its replay), from that stream\'s next keyframe on',
+    s.back === 0 && mine().stream === c15 && other.got.find((f) => f.converted)?.key && other.got.find((f) => f.converted).ts >= 11_000, `${JSON.stringify(s)} ${brief(other.got, 10_900, 12_200)}`)
+  // the second viewer on down to 8: no slot free, and the conversion it is on is not its alone to give
+  // up: onto the camera's own stream, at that stream's next keyframe (16 s), keeping its picture till then
+  r.down(15_000, [other])
+  check('(a) no slot free, and its conversion another viewer\'s too: it keeps that until the camera\'s next keyframe', LEVELS[r.live.viewers.get('other').level].id === '8' && mine().stream === c15 && mine().switch?.to === t.stream && !c15.closed, `${mine().switch?.to === t.stream}`)
+  r.to(17_000)
+  s = seen(other.got, 14_000)
+  check('  then the camera\'s own stream from there, nothing replayed: nothing older, no wait; the other viewer\'s conversion runs on', s.back === 0 && s.gap <= 67 && mine().stream === t.stream && !c15.closed && r.entry(t).stream === c15, `${JSON.stringify(s)} ${brief(other.got, 15_900, 16_100)}`)
 }
 {
   // a socket closing while it waits to switch: the conversion made for it closes, and its slot is back

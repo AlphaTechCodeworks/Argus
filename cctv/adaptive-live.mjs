@@ -327,9 +327,9 @@ export class AdaptiveLive {
    *    keeps its stream until the camera's next keyframe and goes over there, nothing replayed (#switchTo);
    *  - onto a level's stream made for it (it starts at the camera's next keyframe, fromNextKey): it keeps
    *    its stream until then too -- at a step down for at most SWITCH_WAIT_MS, the link being backed up;
-   *  - no slot free for that stream while its own conversion holds one: that one closes, the new one
-   *    takes its slot, and it moves at once (verify-1: a slot given back before it is taken). It then
-   *    waits for the new one's first keyframe, the camera's next;
+   *  - no slot free for that stream while its own conversion holds one, and nobody else is on that: it
+   *    closes, the new one takes its slot, and the socket moves at once (verify-1: a slot given back
+   *    before it is taken). It then waits for the new one's first keyframe, the camera's next;
    *  - onto a stream that runs already (another viewer's): at once, and nothing until that stream's next
    *    keyframe at or past what it had.
    * @param {{ down?: boolean }} [o] down: to send less (a step down; a tile that finds a slot at last)
@@ -338,7 +338,9 @@ export class AdaptiveLive {
     let want = this.#streamFor(e, level)
     let made = this.#made
     // no slot for its level's stream while its own conversion holds one: that one gives its slot up
-    if (want === e.source && e.stream && e.stream !== e.source && this.#converts(e, level)) {
+    // (not one another socket is on or waits for: closing it would free nothing, and cost its picture)
+    const own = e.stream && e.stream !== e.source && !e.stream.passthrough && e.stream.clients.size === 1 && !this.#awaited(e.stream)
+    if (want === e.source && own && this.#converts(e, level)) {
       this.#cancelSwitch(e)
       this.#leaveStream(e)
       want = this.#streamFor(e, level)
