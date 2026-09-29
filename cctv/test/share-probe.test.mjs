@@ -287,6 +287,61 @@ calls._test.setHelper(null)
 }
 calls._test.setAnswerMs(SHARE_ANSWER_MS)
 
+// ---- a helper that ends by itself ----------------------------------------------------------------------
+// Review of p1-helper (2026-09-29): nothing tested the check being asked again of a new helper. The
+// real helper, made to exit in the middle of a check: once (the "exit-once" file, taken away as it
+// goes), or every time ("exit-always", as after a bad deploy). One that ends once says nothing about
+// the share: the check is asked again of a new one and the share stays up. One that ends every time is
+// "share check failed", never "not answering" (the outside watcher would remount a share that is
+// fine); and from the second check on it is started once a check, not twice: each start is a fork of
+// this process, about 25-40 ms of the main thread in a production-sized one (verify-6).
+const exitOnce = join(base, 'exit-once')
+const exitAlways = join(base, 'exit-always')
+const exitHelper = join(base, 'exit-helper.mjs')
+writeFileSync(
+  exitHelper,
+  `import { existsSync, rmSync } from 'node:fs'
+process.on('message', (m) => {
+  if (m?.op !== 'probe') return
+  if (existsSync(${JSON.stringify(exitAlways)})) process.exit(3)
+  if (existsSync(${JSON.stringify(exitOnce)})) {
+    rmSync(${JSON.stringify(exitOnce)})
+    process.exit(3)
+  }
+})
+await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'share-helper.mjs')).href)})
+`
+)
+calls._test.setHelper(exitHelper)
+calls.stopShareHelpers()
+await checkHealth()
+{
+  const pid = calls._test.pidOf(loc)
+  writeFileSync(exitOnce, '1')
+  const n0 = started.length
+  await checkHealth()
+  const h = listLocations().find((l) => l.id === 'loc-good').health
+  check('a helper that ends in the middle of a check: the share stays up, answered by a new helper', h.ok === true && !existsSync(exitOnce) && pid > 0 && calls._test.pidOf(loc) > 0 && calls._test.pidOf(loc) !== pid && (await until(() => !alive(pid))), `${h.reason || 'ok'}, pid ${pid} -> ${calls._test.pidOf(loc)}`)
+  check('...one process started for it: the new helper', started.length - n0 === 1, JSON.stringify(started.slice(n0)))
+}
+calls.stopShareHelpers() // a location's helper history goes with it
+{
+  writeFileSync(exitAlways, '1')
+  const n0 = started.length
+  await checkHealth()
+  const h = listLocations().find((l) => l.id === 'loc-good').health
+  check('a helper that ends every time: "share check failed", not "not answering"', !h.ok && /^share check failed: the share helper stopped \(exit code 3\)/.test(h.reason) && !/not answering/.test(h.reason), h.reason)
+  check('...at the first check, asked twice: the helper, and one more', started.length - n0 === 2, JSON.stringify(started.slice(n0)))
+  const n1 = started.length
+  await checkHealth()
+  const h2 = listLocations().find((l) => l.id === 'loc-good').health
+  check('...at the next check, its helper having ended less than a minute before: started once, not twice', started.length - n1 === 1 && !h2.ok && /^share check failed: /.test(h2.reason) && !/not answering/.test(h2.reason), `${started.length - n1} started, ${h2.reason}`)
+  rmSync(exitAlways)
+  await checkHealth()
+  check('...and once a helper stays up, the share is back at the next check', listLocations().find((l) => l.id === 'loc-good').health.ok === true)
+}
+calls._test.setHelper(null)
+
 // ---- a share taken off the list: its helper goes --------------------------------------------------
 {
   const pid = calls._test.pidOf(loc)

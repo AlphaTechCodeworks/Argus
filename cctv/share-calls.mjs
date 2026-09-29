@@ -12,16 +12,21 @@
 // the main thread, minutes of it per run once the NAS is full or fullDays is lowered. Now one helper
 // per location answers the check every 30 s, and does those jobs' file calls. Measured on the
 // production VM in a test process of about production's size (330 MB of JS heap, 275 MB of Buffers,
-// but without the server's threads and libraries): the longest main-thread stretch of one check went
-// from 10-11 ms (p50; max 12.8) with a fork to 0.8 ms (max 2.6) with the helper. The helper itself is
-// 54 MB and 11 threads.
+// but without the server's threads and libraries): each fork held the main thread about 25-40 ms
+// (22-40 ms p50 for the call, a heartbeat's longest gap 25-41 ms; verify-6 put it at 30-40 ms on
+// production itself), and a check through the helper holds it 0.8 ms (max 2.6). Starting the helper
+// is the same fork, so that cost is now paid once when the server starts and once each time a helper
+// is replaced, not every 30 s. The helper itself is 54 MB and 11 threads. (A first figure here, 10-11
+// ms a fork, was too low: review of p1-helper, 2026-09-29.)
 //
 // The rules, from 2026-09-26 and verify-6 (6a):
 //  - no answer within the answer time (SHARE_ANSWER_MS by default: the time ONE file call may take;
 //    the helper reports each one that comes back, and that restarts the clock; the health check keeps
-//    its budget for the whole check, `whole`) -> the share is "not
-//    answering": every call in flight fails, the helper gets SIGKILL, and the share is announced
-//    stuck (storage.mjs marks it down at once, and the outside watcher remounts it: healthz shares);
+//    its budget for the whole check, `whole`) -> the share is "not answering": every call in flight
+//    fails, the helper gets SIGKILL, and the share is announced stuck (storage.mjs marks it down at
+//    once, and the outside watcher remounts it: healthz shares). One helper makes all the calls on its
+//    share, so a call can fail this way because ANOTHER call on the same helper got no answer: the
+//    check, say, while a rewrite was half done;
 //  - SIGKILL does not end a process inside a call on a stale share. Until the old helper has really
 //    exited, no call goes to that share and no new helper is started (each would get stuck the same
 //    way, one more per timeout): calls fail at once, "a check has been stuck for N s";
@@ -47,7 +52,7 @@ export const shareAnswerMs = () => answerMs
 
 const LABEL = { probe: 'check', statfs: 'free-space check', stat: 'file check', readdir: 'folder listing', unlink: 'deletion', rmdir: 'folder removal', thin: 'time-lapse rewrite', thinSwap: 'time-lapse rewrite', thinCommit: 'time-lapse rewrite', thinAbort: 'time-lapse rewrite', thinRecover: 'time-lapse recovery' }
 
-const helpers = new Map() // key -> { key, id, root, child, calls: Map(n -> call), stuck: { since, op, child }|null }
+const helpers = new Map() // key -> { key, id, root, child, calls: Map(n -> call), stuck: { since, op, child }|null, exits: [ms] }
 const stuckListeners = new Set()
 
 const keyOf = (loc) => `${loc.id}\n${resolve(loc.path)}`
@@ -56,7 +61,7 @@ const fail = (code, message) => Object.assign(new Error(message), { code })
 function helperFor(loc) {
   const key = keyOf(loc)
   let h = helpers.get(key)
-  if (!h) helpers.set(key, (h = { key, id: loc.id, root: resolve(loc.path), child: null, calls: new Map(), stuck: null }))
+  if (!h) helpers.set(key, (h = { key, id: loc.id, root: resolve(loc.path), child: null, calls: new Map(), stuck: null, exits: [] }))
   return h
 }
 
@@ -137,6 +142,7 @@ function ended(h, child, code, signal, err) {
   }
   if (child !== h.child) return
   h.child = null
+  h.exits = [...h.exits.slice(-4), Date.now()]
   const why = err ? `could not be started: ${err.message}` : `stopped (${signal ? `signal ${signal}` : `exit code ${code}`})`
   if (h.calls.size) console.warn(`[storage] ${h.root}: its share helper (pid ${child.pid}) ${why}; ${h.calls.size} call${h.calls.size === 1 ? '' : 's'} failed`)
   for (const x of [...h.calls.values()]) {
@@ -153,6 +159,13 @@ function ended(h, child, code, signal, err) {
  * ended by itself; else the helper's own code when it refused (EOUTSIDE, EMARKER, EBADOP, ...).
  * whole: timeoutMs is for the whole call, not for each file call in it (the health check's rule
  * since 2026-09-26, which the outside watcher's remount goes by).
+ *
+ * ESHARESTUCK and ESHAREGONE may come from ANOTHER call on the same helper: every call in flight
+ * fails when any one of them gets no answer (the check, over its whole-check budget on a share that is
+ * slow but still answering, kills a deletion or a rewrite with it), and when the helper is stopped (its
+ * location taken off the list). Either way the state on the share is not known: a deletion is simply
+ * sent again (it is idempotent), and after any thin* call rejected so, thinRecover for that path
+ * before its file or its index row is trusted.
  * @returns {Promise<any>}
  */
 export function shareCall(loc, op, args = {}, { timeoutMs = answerMs, whole = false } = {}) {
@@ -189,6 +202,15 @@ export function shareCall(loc, op, args = {}, { timeoutMs = answerMs, whole = fa
 export function onShareStuck(cb) {
   stuckListeners.add(cb)
   return () => stuckListeners.delete(cb)
+}
+
+/**
+ * How many of the location's helpers ended by themselves in the last `ms` (a crash; not one stopped
+ * here, nor one given up on as stuck): the check asks a new helper again only after the first.
+ */
+export function shareHelperExits(loc, ms) {
+  const since = Date.now() - ms
+  return helpers.get(keyOf(loc))?.exits.filter((t) => t >= since).length ?? 0
 }
 
 /** { since, op } while the location's helper is stuck and has not exited yet, else null. */

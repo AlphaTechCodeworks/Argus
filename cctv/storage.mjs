@@ -16,7 +16,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { MARKER, _setStatfs, freePercent, healthOf, markerId, probeWriteSpeed } from './location-health.mjs'
 import { HttpError, isPlainObject } from './nvr-xml.mjs'
 import { cameraRecording, getSettings, saveSettings } from './settings.mjs'
-import { SHARE_ANSWER_MS, keepShareHelpers, onShareStuck, shareAnswerMs, shareCall } from './share-calls.mjs'
+import { SHARE_ANSWER_MS, keepShareHelpers, onShareStuck, shareAnswerMs, shareCall, shareHelperExits } from './share-calls.mjs'
 
 export { MARKER, freePercent, probeWriteSpeed }
 // the file calls the deletion and time-lapse jobs make on a share go through its helper too
@@ -41,6 +41,7 @@ const writeMBps = new Map() // id -> last write-speed probe (MB/s)
 // replaced by the next check.
 
 const netHealth = new Map() // id -> last health
+const GONE_AGAIN_MS = 60_000 // a share helper ending again within this: not asked again in the same check
 
 const downHealth = (reason) => ({ ok: false, reason, marker: false, writable: false, freeBytes: 0, totalBytes: 0, writeMBps: null })
 
@@ -56,7 +57,11 @@ async function probeShare(loc, floor, speed) {
   } catch (e) {
     if (e.code === 'ESHARESTUCK') return downHealth(e.message)
     // a helper that ended by itself (a crash, the kernel's OOM killer) says nothing about the share:
-    // asked once more, of a new one, rather than calling the share down for 30 s
+    // asked once more, of a new one, rather than calling the share down for 30 s. Not when another
+    // ended within the minute before it: one that ends every time (a bad deploy) would be started twice
+    // a check, and each start is a fork of this process, about 25-40 ms of the main thread (verify-6;
+    // review of p1-helper, 2026-09-29). Then the next check starts one, as the old checker did.
+    if (e.code === 'ESHAREGONE' && shareHelperExits(loc, GONE_AGAIN_MS) > 1) return downHealth(`share check failed: ${e.message}; another had stopped less than a minute before, so a new one is started at the next check`)
     if (e.code === 'ESHAREGONE') {
       try {
         return await ask()
