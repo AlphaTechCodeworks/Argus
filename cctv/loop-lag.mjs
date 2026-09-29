@@ -17,8 +17,10 @@
 // beats the thread was busy for gap - idle, which is the pause plus the little else it did then.
 // Why not faster, or monitorEventLoopDelay (all measured on the production VM, 2026-09-29): each
 // wake-up of a process there costs 80-270 us of CPU, so a 20 ms beat cost 0.4-1.3% of a core per
-// process (100 ms: 0.03-0.2%); monitorEventLoopDelay wakes as often, and read and reset every 5 s it
-// loses the interval after each reset (a 1 s busy loop read as 32 ms).
+// process. This 100 ms one: 1.9-3.4 ms of CPU a second in an idle process, and nothing measurable
+// in one the loop already wakes 250 times a second, as the main process and the workers are.
+// monitorEventLoopDelay wakes as often as its resolution, and read and reset every 5 s it loses the
+// interval after each reset (a 1 s busy loop read as 32 ms).
 //
 // Started by watchdog.mjs startWatchdog(), which the main process and every NVR worker run.
 import { performance } from 'node:perf_hooks'
