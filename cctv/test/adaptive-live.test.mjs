@@ -877,6 +877,24 @@ const brief = (got, from, to) => got.filter((f) => f.at >= from && f.at <= to).m
   check('... and the next time it is known: back at 15 the sub is on the camera\'s own stream, no stream of 15 made', LEVELS[r.v.level].id === '15' && r.entry(t).stream === t.stream && !r.live.streams.has('n1/0/1@15'), `${LEVELS[r.v.level].id} ${[...r.live.streams.keys()]}`)
 }
 {
+  // A tile on a stream of 15 that passes the camera's frames on (its rate was not known at the step, and
+  // the stream learnt it), climbing back to full, onto the camera's own stream. It kept that stream to the
+  // camera's next keyframe, but the stream passing it on had sent it that very keyframe already: twice
+  // (the review of ef43e60). The same frames: it goes over now, and each comes once.
+  const r = rig({ cams: [{ fps: 20 }], phase: 0 })
+  const [t] = r.tiles
+  r.down(6000)
+  r.to(25_990)
+  const p15 = r.entry(t).stream
+  check('a tile on a stream of 15 that passes its camera\'s frames on', LEVELS[r.v.level].id === '15' && p15?.passthrough && p15.clients.has(t.ws), `${p15?.passthrough}`)
+  r.to(26_000) // clean for 20 s: back to full
+  check('  back to full: onto the camera\'s own stream at once, the stream of 15 closed', r.v.level === 0 && r.entry(t).stream === t.stream && !r.entry(t).switch && p15.closed, `${r.v.level} ${r.entry(t).switch ? 'switching' : ''}`)
+  r.to(31_000)
+  const s = seen(t.ws.got, 25_000)
+  const ts = t.ws.got.filter((f) => f.at >= 25_000).map((f) => Math.round(f.ts))
+  check('  every frame once, in order, none missed: the keyframe at 28 s once', s.back === 0 && s.gap <= 51 && new Set(ts).size === ts.length && ts.filter((x) => x === 28_000).length === 1 && s.n === 121, `${JSON.stringify(s)} ${brief(t.ws.got, 27_950, 28_050)}`)
+}
+{
   // decided once for the level: a later reading of the rate does not move it back and forth
   const r = rig({ cams: [{ fps: 20 }] })
   const [t] = r.tiles

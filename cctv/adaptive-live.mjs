@@ -327,6 +327,7 @@ export class AdaptiveLive {
    *  - with nothing on screen yet (no frame it can show), it moves at once;
    *  - onto the camera's own stream (a climb to full, a sub a level passes through, no slot free): it
    *    keeps its stream until the camera's next keyframe and goes over there, nothing replayed (#switchTo);
+   *    from a level's stream that passes the camera's frames on, at once: they are the very same frames;
    *  - onto a level's stream made for it (it starts at the camera's next keyframe, fromNextKey): it keeps
    *    its stream until then too -- at a step down for at most SWITCH_WAIT_MS, the link being backed up;
    *  - no slot free for that stream while its own conversion holds one, and nobody else is on that: it
@@ -365,6 +366,16 @@ export class AdaptiveLive {
     if (want === e.stream) return this.#cancelSwitch(e)
     if (e.switch?.to === want) return
     this.#cancelSwitch(e)
+    // From a level's stream passing the camera's frames on, back onto the camera's own: the very same
+    // frames, so now, nothing replayed, nothing held back; the next frame is the one after the last it
+    // had. Kept to the camera's next keyframe, it was sent that keyframe twice: the stream passing it on
+    // reached it first (the review of ef43e60).
+    if (want === e.source && e.stream?.passthrough) {
+      const from = e.stream
+      e.stream = e.source
+      e.source.add(e.ws, { replay: false })
+      return this.#leaveStream(e, from)
+    }
     // Onto a level's stream that runs already, from the camera's own frames (its stream, or one passing
     // them on): at once. A conversion runs behind the camera, so none of its keyframes is past what the
     // socket has while it stays; there it waits for the first past what it had at the move (#guard).
