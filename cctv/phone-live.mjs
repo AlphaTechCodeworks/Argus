@@ -104,12 +104,16 @@ export class PhoneStream {
    *   viewer's: see #onSource); 0, not given (a phone): 12 frames, and nothing sent until then
    *   slowFps: a source slower than this is converted picture by picture: low_delay, and each picture
    *   ended as it goes in (a remote viewer's: a camera that trickles); 0, not given: as lowDelay says
+   *   fromNextKey: made for sockets a level change moves off a picture (adaptive-live.mjs): converted
+   *   from the camera's next keyframe as it comes, not the one held from the replay as it joined (older
+   *   than what they have on screen); startTs then says which keyframe that is
+   *   onRate: told the frame rate once it is decided (adaptive-live.mjs remembers it)
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, background = false, camera = '?' }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, onRate = () => {}, background = false, camera = '?' }) {
     // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
-    // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps: how its conversion runs and starts
-    // (a phone on the local network gives none: the converter's own, as always)
-    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs, slowFps })
+    // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps / fromNextKey: how its conversion
+    // runs and starts (a phone on the local network gives none: the converter's own, as always)
+    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs, slowFps, fromNextKey, onRate })
     // Every line names its camera. On 29 Sep they named none, and the 15-24 conversions a remote
     // viewer's level change started at once could only be matched to cameras by their timing
     // (stutter report 2.10).
@@ -118,6 +122,12 @@ export class PhoneStream {
     this.gop = []
     this.samples = []
     this.held = null // frames since the last keyframe, while the frame rate is being learned
+    this.heldLive = false // ... that keyframe came as the camera sent it, not in the replay as it joined
+    this.ownTs = null // capture time of the last of the camera's own frames it sent on as they came (learnMs)
+    this.awaitKey = false // converting from the camera's next keyframe (fromNextKey)
+    // capture time of the keyframe its first picture out is (or will be, once converted): a socket a
+    // level change moves here switches at it (adaptive-live.mjs)
+    this.startTs = null
     this.xcode = null
     this.eachPicture = false // each picture ended as it goes in (slowFps)
     this.passthrough = false
@@ -154,12 +164,18 @@ export class PhoneStream {
     if (this.closed || !(buf instanceof Uint8Array) || buf.length <= HEADER_SIZE) return
     if (!Buffer.isBuffer(buf)) buf = Buffer.from(buf.buffer, buf.byteOffset, buf.length)
     const f = parseFrame(buf)
-    if (this.passthrough) return this.#fanOut(buf, f.isKey)
+    if (this.passthrough) {
+      if (f.isKey && !this.joining) this.startTs ??= f.ts
+      return this.#fanOut(buf, f.isKey)
+    }
     if (!this.xcode) {
       // Learn the frame rate from the frames at hand, keeping them from the last keyframe on: the
       // normal stream replays its current GOP to a new viewer, so this is usually over at once and
       // the conversion starts from that keyframe instead of waiting seconds for the next one.
-      if (f.isKey) this.held = []
+      if (f.isKey) {
+        this.held = []
+        this.heldLive = !this.joining
+      }
       if (this.held) this.held.push(f)
       // A remote viewer's stream (learnMs) decides after a second of capture time when that comes
       // before 12 frames: a camera trickling at 0.8 fps was 15 s learning its 12, and nothing went out
@@ -176,11 +192,12 @@ export class PhoneStream {
         // the normal stream replays as this stream joins: a socket moved here by a level change was
         // shown it already, and a step down moved 11 pass-through tiles at once (04:18:05) on a link
         // that was backed up -- sent again, that is up to a sub-stream's GOP (99-195 KB) per tile.
-        if (this.learnMs > 0 && !this.joining && this.type !== 0 && f.codec === CODEC_H264) this.#fanOut(buf, f.isKey)
+        if (this.learnMs > 0 && !this.joining && this.type !== 0 && f.codec === CODEC_H264) this.#own(buf, f)
         return
       }
       // the 12 frames; or those of the first second, with this one that ends it
       const fps = frameRate(this.samples.length < RATE_SAMPLES ? [...this.samples, f.ts] : this.samples)
+      this.onRate(fps)
       const keepEvery = this.fps > 0 ? keepEveryFor(fps, this.fps) : 1
       if (keepEvery === 1 && this.type !== 0 && !(this.h264Only && f.codec === CODEC_H265)) {
         this.held = null
@@ -188,6 +205,7 @@ export class PhoneStream {
         this.passthrough = true
         this.slot.release() // costs nothing: the slot is for streams that cost a core
         this.log(`${this.who} a sub stream at ${fps.toFixed(1)} fps: sent as it is`)
+        if (f.isKey && !this.joining) this.startTs ??= f.ts
         return this.#fanOut(buf, f.isKey)
       }
       // the camera's own frames sent while learning are not for anyone joining from now on: a socket
@@ -220,10 +238,42 @@ export class PhoneStream {
       this.log(`${this.who} converting a ${this.type === 0 ? 'main' : 'sub'} stream at ${fps.toFixed(1)} fps ${what}${this.eachPicture ? ', each picture out as it comes' : ''}`)
       const held = this.held ?? []
       this.held = null
+      // Made for sockets a level change moves off a picture (fromNextKey): the keyframe held from the
+      // replay as it joined is older than what they have on screen, by up to a keyframe interval, and so
+      // is one it has already sent on as it came while learning. Converted from there, their picture
+      // stepped back (1.4 s in the stutter investigation's replay) and ffmpeg first caught up through
+      // seconds they had seen: at a step down, 14-20 such catch-ups at once (29 Sep 04:08:08; stutter
+      // report 2.5, verify-5). From the camera's next keyframe instead, its converter already running.
+      if (this.fromNextKey && (!this.heldLive || (this.ownTs !== null && held[0] && held[0].ts <= this.ownTs))) {
+        this.awaitKey = true
+        return this.#awaiting(buf, f)
+      }
+      if (held[0]?.isKey) this.startTs ??= held[0].ts
       for (const h of held) this.#push(h)
       if (held.at(-1) === f) return
     }
+    if (this.awaitKey) {
+      if (!f.isKey || this.joining) return this.#awaiting(buf, f)
+      this.awaitKey = false
+      this.startTs ??= f.ts
+    }
     this.#push(f)
+  }
+
+  /**
+   * A frame before the camera's next keyframe, the conversion waiting for it (fromNextKey): not
+   * converted. The camera's own frames it was sending on as they came while it learnt go on up to it,
+   * so its sockets keep a moving picture until the converted one takes over.
+   */
+  #awaiting(buf, f) {
+    if (this.ownTs !== null && !this.joining) this.#own(buf, f)
+  }
+
+  /** One of the camera's own frames sent on as it came (learnMs; see #onSource). */
+  #own(buf, f) {
+    if (f.isKey) this.startTs ??= f.ts
+    this.ownTs = f.ts
+    this.#fanOut(buf, f.isKey)
   }
 
   #push(f) {

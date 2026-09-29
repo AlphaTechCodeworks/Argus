@@ -244,6 +244,31 @@ const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, s
   // a phone on the local network is not a remote viewer: as before, by the local-network rule
   const phone = feed({}, { n: 14 })
   check('a phone on the local network: as before, nothing sent until 12 frames have been seen (15 s at 0.8 fps)', phone.out[0]?.at === 15000 && phone.logs[0]?.at === 15000, show(phone))
+
+  // ---- a stream made for sockets a level change moves off a picture (stutter report 2.5, verify-5) ----
+  // It learnt its rate from the camera's replay as it joined and converted from the keyframe it held,
+  // up to a keyframe interval older than what those sockets had on screen: their picture stepped back
+  // (1.4 s in the replay) and the conversion caught up through seconds it had already shown, a burst of
+  // CPU and bytes at every step. fromNextKey: learnt from the replay all the same, and converted from
+  // the camera's next keyframe, newer than anything they had; startTs says which (adaptive-live.mjs
+  // switches them there).
+  const rates = []
+  const next = feed({ fps: 8, crf: 27, subKbps: 450, ...REMOTE, fromNextKey: true, onRate: (r) => rates.push(r) }, { fps: 20, keyEvery: 40, replay: 20, n: 40 })
+  const x = next.xs[0]
+  check('fromNextKey: decided at the join on the replay (20 fps, 1 in 3) and its converter started then, nothing converted from the replay', next.logs[0]?.at === 950 && x?.o.keepEvery === 3 && x.pushed === 20, show(next))
+  check('  converted from the camera\'s next keyframe (2 s): its first picture that keyframe, and none older', next.out.length > 0 && next.out[0].key && next.out[0].ts === 2000 && next.out.every((o) => o.converted && o.ts >= 2000) && next.s.startTs === 2000, show(next))
+  check('  the rate it learnt is handed on (onRate: adaptive-live remembers it)', rates.length === 1 && rates[0] === 20, JSON.stringify(rates))
+  const held = feed({ fps: 8, crf: 27, subKbps: 450, ...REMOTE }, { fps: 20, keyEvery: 40, replay: 20, n: 40 })
+  check('  without it (a tile just opened, nothing on screen): from the keyframe it held, at once, as before', held.out[0]?.key && held.out[0].ts === 0 && held.out[0].at === 950 && held.s.startTs === 0, show(held))
+  // a running sub whose replay was too short to decide on: it learns on the camera's live frames and
+  // sends them on as they come (report 2.9); the keyframe it then holds is one it has sent already
+  const learnt = feed({ fps: 8, crf: 27, subKbps: 450, ...REMOTE, fromNextKey: true }, { fps: 20, keyEvery: 8, replay: 2, n: 30 })
+  const steps = learnt.out.map((o) => o.ts)
+  check('fromNextKey, learning on live frames: never a frame older than one sent (its own, then converted from the next keyframe)', steps.length > 0 && steps.every((t, i) => i === 0 || t >= steps[i - 1]), show({ out: learnt.out.slice(0, 12), logs: learnt.logs }))
+  check('  the camera\'s own frames go on up to that keyframe (no hold while the conversion waits for it), then only converted ones',
+    learnt.out.filter((o) => !o.converted).map((o) => o.ts).join() === '400,450,500,550,600,650,700,750' && learnt.out.filter((o) => o.converted)[0]?.ts === 800 && learnt.out.filter((o) => o.converted)[0].key && learnt.s.startTs === 400, show({ out: learnt.out.slice(0, 12), logs: learnt.logs }))
+  const pass = feed({ fps: 15, ...REMOTE, fromNextKey: true }, { fps: 20, keyEvery: 40, replay: 20, n: 42 })
+  check('fromNextKey, sent as it is: its first keyframe out is the camera\'s next one (startTs)', pass.s.passthrough && pass.s.startTs === 2000 && pass.out[0]?.ts === 2000 && pass.out[0].key, show(pass))
 }
 
 // ---- a trickle's conversion: each picture out as it goes in ----
