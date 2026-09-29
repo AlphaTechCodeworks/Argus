@@ -21,7 +21,10 @@
 // temp name and renamed, so a half-written picture is never served. A picture goes when its event
 // goes (sweepSnapshots, from the server's 5-minute housekeeping).
 //
-//   GET /api/events/:id/snapshot -> the JPEG, for a user who may play that camera back (rights.mjs)
+//   GET /api/events/:id/snapshot -> the JPEG, for a user who may play that camera back (rights.mjs):
+//        the picture itself for Live HD or Playback HD on the camera (rights.mjs mayHd: it is from the
+//        main stream), else an SD copy at most SD_WIDTH wide, made on first request and kept as
+//        <id>-sd.jpg (never the picture itself instead). Never cached by the browser.
 //
 // Nothing here imports sdk.mjs: the tests run on any machine (ffmpeg's own part on the server).
 import { spawn as nodeSpawn } from 'node:child_process'
@@ -32,7 +35,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { DATA_DIR } from './auth.mjs'
 import { getEvent } from './events-db.mjs'
 import { CODEC, SegmentReader, codecOfPath, keyAtOrAfter } from './rec-reader.mjs'
-import { can } from './rights.mjs'
+import { can, mayHd } from './rights.mjs'
 import { securityHeaders } from './security.mjs'
 import { niceWrap } from './transcode.mjs'
 
@@ -63,6 +66,16 @@ export function snapPath(eventId) {
   return join(SNAP_DIR, `${id}.jpg`)
 }
 
+/** The SD copy's width at most: the sub-streams this site's cameras send (704x396, 704x576). */
+export const SD_WIDTH = 704
+
+/** The SD copy of one event's picture, for a viewer without Live HD or Playback HD on the camera. */
+export function sdPath(eventId) {
+  const id = Number(eventId)
+  if (!isEventId(id)) throw new Error(`not an event id: ${eventId}`)
+  return join(SNAP_DIR, `${id}-sd.jpg`)
+}
+
 /**
  * ffmpeg's arguments: one keyframe in on stdin (raw Annex B), one JPEG out on stdout, scaled down to
  * 1280 wide when the picture is wider (the height follows and is kept even; a smaller picture is
@@ -83,15 +96,27 @@ export function snapArgs(codec) {
   ]
 }
 
+/** ffmpeg's arguments for the SD copy: the stored JPEG in on stdin, one JPEG at most SD_WIDTH wide out. */
+export function sdArgs() {
+  return [
+    '-hide_banner', '-loglevel', 'error',
+    '-f', 'image2pipe', '-c:v', 'mjpeg', '-i', 'pipe:0',
+    '-frames:v', '1',
+    '-vf', `scale='min(${SD_WIDTH},iw)':-2`,
+    '-q:v', '4',
+    '-f', 'image2pipe', '-c:v', 'mjpeg', 'pipe:1'
+  ]
+}
+
 const isJpeg = (b) => b.length > 4 && b[0] === 0xff && b[1] === 0xd8 && b[b.length - 2] === 0xff && b[b.length - 1] === 0xd9
 
-/** One keyframe through ffmpeg: resolves the JPEG bytes, rejects with why not. */
-function toJpeg(keyBuf, codec, { ffmpeg, spawn, platform, timeoutMs }) {
+/** One picture through ffmpeg (args: snapArgs or sdArgs): resolves the JPEG bytes, rejects with why not. */
+function toJpeg(input, args, { ffmpeg, spawn, platform, timeoutMs }) {
   return new Promise((resolve, reject) => {
-    const { bin, args } = niceWrap(ffmpeg, snapArgs(codec), { platform, hasIonice: platform === 'linux' })
+    const { bin, args: wrapped } = niceWrap(ffmpeg, args, { platform, hasIonice: platform === 'linux' })
     let proc
     try {
-      proc = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+      proc = spawn(bin, wrapped, { stdio: ['pipe', 'pipe', 'pipe'] })
     } catch (e) {
       reject(e)
       return
@@ -138,17 +163,24 @@ function toJpeg(keyBuf, codec, { ffmpeg, spawn, platform, timeoutMs }) {
     })
     // an ffmpeg that quits early gives EPIPE here; its exit code says why
     proc.stdin.on('error', () => {})
-    proc.stdin.end(keyBuf)
+    proc.stdin.end(input)
   })
 }
 
-// ffmpeg one at a time: a burst of crossings takes turns rather than starting a process each
-let turn = Promise.resolve()
-function oneAtATime(fn) {
-  const run = turn.then(fn)
-  turn = run.catch(() => {})
-  return run
+/** A queue of ffmpeg jobs taken one at a time: a burst takes turns rather than starting a process each. */
+function turns() {
+  let turn = Promise.resolve()
+  return (fn) => {
+    const run = turn.then(fn)
+    turn = run.catch(() => {})
+    return run
+  }
 }
+// the pictures of new events
+const oneAtATime = turns()
+// the SD copies, on a queue of their own: a viewer asking for many of them, or again and again for one
+// that fails, never holds back the picture of a crossing seen now
+const sdOneAtATime = turns()
 
 /** A reader for one index row; the file being written is read as growing (rec-reader.mjs). */
 const openReader = (seg) => new SegmentReader({ path: seg.path, endMs: seg.endMs ?? null, growing: Boolean(seg.open) }).open()
@@ -211,7 +243,7 @@ async function snap(event, id, file, o) {
   for (;;) {
     const found = await findKeyframe(o.index, String(event.nvr), Number(event.ch), t, o.readerFor)
     if (found.key) {
-      const jpeg = await oneAtATime(() => toJpeg(found.key.buf, found.key.codec, o))
+      const jpeg = await oneAtATime(() => toJpeg(found.key.buf, snapArgs(found.key.codec), o))
       await mkdir(SNAP_DIR, { recursive: true })
       const tmp = `${file}.${process.pid}.tmp`
       try {
@@ -275,16 +307,83 @@ export async function takeSnapshot(event, { index, readerFor = openReader, ffmpe
   return job
 }
 
+const sdInFlight = new Map() // event id -> its SD copy being made
+/** A copy that could not be made is not tried again for this long (each try is up to SNAP_FFMPEG_MS). */
+export const SD_RETRY_MS = 5 * 60_000
+const sdFailed = new Map() // `${id}@${the picture's mtime}` -> when making its copy failed
+
+/**
+ * The event's stored picture, if it is this event's: one older than the event's row belonged to an
+ * earlier event with the same id (SQLite can hand out the id of a deleted newest row again;
+ * takeSnapshot takes it afresh), maybe of another camera, and is not shown whole or as a copy.
+ * @param {{ id: number, seenMs?: number }} ev an events-db row
+ * @returns {import('node:fs').Stats|null}
+ */
+function pictureOf(ev) {
+  const st = statSync(snapPath(ev.id), { throwIfNoEntry: false })
+  return st && !(st.mtimeMs < Number(ev.seenMs)) ? st : null
+}
+
+/**
+ * The SD copy of an event's picture, made the first time it is asked for, on its own one-at-a-time
+ * ffmpeg queue, and kept beside the picture (made again when the picture is newer: taken again). Rejects
+ * when there is no picture of this event or the copy cannot be made (and then, for SD_RETRY_MS, without
+ * trying again): the route then answers 404, never with the picture itself.
+ * @param {{ id: number, seenMs?: number }} ev an events-db row
+ * @param {{ ffmpeg?: string, spawn?: Function, platform?: string, timeoutMs?: number }} [deps] (tests)
+ * @returns {Promise<Buffer>}
+ */
+export async function sdSnapshot(ev, { ffmpeg = 'ffmpeg', spawn = nodeSpawn, platform = process.platform, timeoutMs = SNAP_FFMPEG_MS } = {}) {
+  const id = Number(ev?.id)
+  const full = snapPath(id)
+  const sd = sdPath(id)
+  const fullSt = pictureOf({ id, seenMs: ev?.seenMs })
+  if (!fullSt) throw new Error('no picture of this event')
+  const sdSt = statSync(sd, { throwIfNoEntry: false })
+  if (sdSt && sdSt.mtimeMs >= fullSt.mtimeMs) return readFile(sd)
+  const key = `${id}@${fullSt.mtimeMs}`
+  if (Date.now() - (sdFailed.get(key) ?? -Infinity) < SD_RETRY_MS) throw new Error('the SD copy could not be made a moment ago')
+  if (sdInFlight.has(id)) return sdInFlight.get(id)
+  const job = (async () => {
+    const input = await readFile(full)
+    let jpeg
+    try {
+      jpeg = await sdOneAtATime(() => toJpeg(input, sdArgs(), { ffmpeg, spawn, platform, timeoutMs }))
+    } catch (e) {
+      const now = Date.now()
+      for (const [k, at] of sdFailed) if (now - at >= SD_RETRY_MS) sdFailed.delete(k)
+      sdFailed.set(key, now)
+      throw e
+    }
+    const tmp = `${sd}.${process.pid}.tmp`
+    try {
+      await writeFile(tmp, jpeg)
+      await rename(tmp, sd)
+    } catch (e) {
+      console.warn(`[snapshot] could not keep the SD copy of event ${id}: ${e.message}`)
+    } finally {
+      await rm(tmp, { force: true })
+    }
+    return jpeg
+  })().finally(() => sdInFlight.delete(id))
+  sdInFlight.set(id, job)
+  return job
+}
+
 /**
  * GET /api/events/:id/snapshot: the event's picture, for someone who may play that camera back (from
  * the server or the NVR: the same rule as the /playback socket). Everything else is a bare 404, an
- * event on a camera the user may not see included: that it exists is not theirs to know either.
+ * event on a camera the user may not see included: that it exists is not theirs to know either. The
+ * picture is from the recording, normally the main stream: itself only for someone who may see main
+ * pictures of the camera (rights.mjs mayHd: Live HD or Playback HD), the SD copy for anyone else; a
+ * picture older than the event's row (an earlier event's, pictureOf) for nobody.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {number|string} eventId from the URL
  * @param {{ user: string, admin: boolean }} who from the session (server.mjs), never from the request
+ * @param {object} [deps] sdSnapshot's (tests)
  */
-export async function handleSnapshot(req, res, eventId, who) {
+export async function handleSnapshot(req, res, eventId, who, deps = {}) {
   const answer = (status, body, headers) => {
     res.writeHead(status, { ...SECURITY_HEADERS, ...headers })
     res.end(body)
@@ -299,21 +398,25 @@ export async function handleSnapshot(req, res, eventId, who) {
   if (!cam || !(can(who, 'playback-server', cam) || can(who, 'playback-nvr', cam))) return missing()
   let jpeg
   try {
-    jpeg = await readFile(snapPath(id))
+    if (!mayHd(who, cam.nvr, cam.ch)) jpeg = await sdSnapshot(ev, deps)
+    else if (pictureOf(ev)) jpeg = await readFile(snapPath(id))
+    else return missing() // not taken (yet, or at all), or an earlier event's picture (pictureOf)
   } catch {
-    return missing() // not taken (yet, or at all)
+    return missing() // no SD copy: never the picture itself instead
   }
-  // private: the next user of this browser may not be allowed this camera
-  answer(200, jpeg, { 'content-type': 'image/jpeg', 'content-length': String(jpeg.length), 'cache-control': 'private, max-age=300' })
+  // no-store: the browser's cache (per browser, not per user) would show it to the next person signed
+  // in here, who may be allowed only the SD copy or nothing, and after a right was taken away
+  answer(200, jpeg, { 'content-type': 'image/jpeg', 'content-length': String(jpeg.length), 'cache-control': 'private, no-store' })
 }
 
-/** Removes these events' pictures. Anything that is not an event id is skipped; a missing picture is fine. */
+/** Removes these events' pictures and their SD copies. Anything that is not an event id is skipped; a missing picture is fine. */
 export function forgetSnapshots(eventIds) {
   for (const raw of eventIds ?? []) {
     const id = Number(raw)
     if (!isEventId(id)) continue
     try {
       rmSync(snapPath(id), { force: true })
+      rmSync(sdPath(id), { force: true })
     } catch (e) {
       console.warn(`[snapshot] could not remove the picture of event ${id}: ${e.message}`)
     }
@@ -336,12 +439,12 @@ export async function sweepSnapshots({ exists = (id) => getEvent(id) !== null, n
   } catch {
     return { removed: 0 } // no picture taken yet
   }
-  const gone = []
+  const gone = new Set()
   for (const name of names) {
-    const m = /^(\d{1,15})\.jpg$/.exec(name)
+    const m = /^(\d{1,15})(-sd)?\.jpg$/.exec(name) // the picture or its SD copy
     if (m) {
       try {
-        if (!exists(Number(m[1]))) gone.push(Number(m[1]))
+        if (!exists(Number(m[1]))) gone.add(Number(m[1]))
       } catch (e) {
         // the events could not be read: nothing is removed on a guess
         console.warn(`[snapshot] sweep stopped: ${e.message}`)
@@ -354,7 +457,7 @@ export async function sweepSnapshots({ exists = (id) => getEvent(id) !== null, n
       } catch {}
     }
   }
-  forgetSnapshots(gone)
-  if (gone.length) console.log(`[snapshot] removed ${gone.length} picture(s) of events that are gone`)
-  return { removed: gone.length }
+  forgetSnapshots([...gone])
+  if (gone.size) console.log(`[snapshot] removed the pictures of ${gone.size} event(s) that are gone`)
+  return { removed: gone.size }
 }

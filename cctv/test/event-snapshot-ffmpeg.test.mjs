@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-snap-ffmpeg-test-'))
-const { snapPath, takeSnapshot } = await import('../event-snapshot.mjs')
+const { sdSnapshot, snapPath, takeSnapshot } = await import('../event-snapshot.mjs')
 const { CODEC, splitUnits } = await import('../rec-reader.mjs')
 
 let failures = 0
@@ -100,6 +100,14 @@ const oneKey = (buf, path) => ({
   check('a segment file: the keyframe after start + 1 s becomes a JPEG', got === snapPath(3), logs.join(' | '))
   check('  1920x1080 comes back 1280x720 (the scale filter works as quoted)', size === '1280x720', size)
   check('  taken from the keyframe 2 s in (start + 1.5 s)', logs.some((l) => /event 3: taken 1\.5 s after the start/.test(l)), logs.join(' | '))
+}
+
+// ---- the SD copy (stream rights): a 1280-wide picture comes back at most 704 wide ------------------------
+{
+  const key = testVideo({ size: '1920x1080' })
+  const got = await takeSnapshot({ id: 7, nvr: 'nvr1', ch: 0, startMs: T0 }, oneKey(key, '/x/nvr1/0/14-00.h264'))
+  const sd = got ? await sdSnapshot({ id: 7 }).catch((e) => e) : null
+  check('the SD copy of the 1280x720 picture is 704x396', Buffer.isBuffer(sd) && jpegSize(sd) === '704x396', Buffer.isBuffer(sd) ? jpegSize(sd) : String(sd?.message ?? logs.join(' | ')))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

@@ -13,20 +13,22 @@ import { join } from 'node:path'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-snap-test-'))
 // (every rights row below has an account: a row without one grants nothing, rights.mjs rightsOf)
-writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ alice: { hash: 'x', role: 'admin' }, bob: { hash: 'x', role: 'viewer' }, carol: { hash: 'x', role: 'viewer' }, dave: { hash: 'x', role: 'viewer' } }))
-// bob may watch live only; carol may play nvr1/3 back from the server; dave may play all of nvr1 back from the NVR
+writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ alice: { hash: 'x', role: 'admin' }, bob: { hash: 'x', role: 'viewer' }, carol: { hash: 'x', role: 'viewer' }, dave: { hash: 'x', role: 'viewer' }, erin: { hash: 'x', role: 'viewer' } }))
+// bob may watch live only; carol may play nvr1/3 back from the server; dave may play all of nvr1 back
+// from the NVR; erin may too, and watch nvr1 live (the version 1 file is upgraded: Live HD = Live)
 writeFileSync(join(process.env.DATA_DIR, 'rights.json'), JSON.stringify({
   version: 1,
   users: {
     bob: { grants: { live: ['*'] } },
     carol: { grants: { 'playback-server': ['nvr1/3'] } },
-    dave: { grants: { 'playback-nvr': ['nvr1'] } }
+    dave: { grants: { 'playback-nvr': ['nvr1'] } },
+    erin: { grants: { 'playback-nvr': ['nvr1'], live: ['nvr1'] } }
   }
 }))
 
 const {
-  SNAP_AFTER_MS, SNAP_DIR, SNAP_LATE_MS, SNAP_POLL_MS, SNAP_WAIT_MS,
-  forgetSnapshots, handleSnapshot, snapArgs, snapPath, sweepSnapshots, takeSnapshot
+  SD_RETRY_MS, SD_WIDTH, SNAP_AFTER_MS, SNAP_DIR, SNAP_LATE_MS, SNAP_POLL_MS, SNAP_WAIT_MS,
+  forgetSnapshots, handleSnapshot, sdArgs, sdPath, snapArgs, snapPath, sweepSnapshots, takeSnapshot
 } = await import('../event-snapshot.mjs')
 const { addEvent, closeEvents } = await import('../events-db.mjs')
 const { CODEC } = await import('../rec-reader.mjs')
@@ -337,25 +339,29 @@ const fakeRes = () => ({
   writeHead(s, h) { this.status = s; this.headers = h; return this },
   end(b) { this.body = b }
 })
-const call = async (id, who, method = 'GET') => {
+const call = async (id, who, method = 'GET', deps = { spawn: spawnAs('ok'), platform: 'linux' }) => {
   const res = fakeRes()
-  await handleSnapshot({ method }, res, id, who)
+  await handleSnapshot({ method }, res, id, who, deps)
   return res
 }
+const erin = { user: 'erin', admin: false }
 const alice = { user: 'alice', admin: true }
 const bob = { user: 'bob', admin: false }
 const carol = { user: 'carol', admin: false }
 const dave = { user: 'dave', admin: false }
-const { event: shown } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0, source: 'test' })
-const { event: other } = addEvent({ nvr: 'nvr2', ch: 0, type: 'motion', startMs: T0, source: 'test' })
-const { event: bare } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 60_000, source: 'test' })
+// the rows are older than their pictures, as takeSnapshot's always are (it waits for the recording);
+// a picture older than its row is an earlier event's (handleSnapshot answers 404)
+const SEEN = Date.now() - 60_000
+const { event: shown } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0, source: 'test' }, SEEN)
+const { event: other } = addEvent({ nvr: 'nvr2', ch: 0, type: 'motion', startMs: T0, source: 'test' }, SEEN)
+const { event: bare } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 60_000, source: 'test' }, SEEN)
 mkdirSync(SNAP_DIR, { recursive: true })
 writeFileSync(snapPath(shown.id), JPEG)
 writeFileSync(snapPath(other.id), JPEG)
 {
   const a = await call(shown.id, alice)
   check('an admin gets the JPEG', a.status === 200 && a.headers['content-type'] === 'image/jpeg' && Buffer.from(a.body).equals(JPEG) && a.headers['content-length'] === String(JPEG.length))
-  check('  with the security headers, cached privately', a.headers['x-content-type-options'] === 'nosniff' && /^private/.test(a.headers['cache-control']))
+  check('  with the security headers, never cached (the next user of the browser may be allowed less)', a.headers['x-content-type-options'] === 'nosniff' && a.headers['cache-control'] === 'private, no-store')
   check('server playback of that camera is enough', (await call(shown.id, carol)).status === 200)
   check('  but not for another camera', (await call(other.id, carol)).status === 404)
   check('NVR playback of the whole NVR is enough too', (await call(String(shown.id), dave)).status === 200)
@@ -366,6 +372,47 @@ writeFileSync(snapPath(other.id), JPEG)
   check('an event whose picture is not there (yet): 404, never cached', n.status === 404 && n.headers['cache-control'] === 'no-store')
   const p = await call(shown.id, alice, 'POST')
   check('anything but GET: 405', p.status === 405 && p.headers.allow === 'GET')
+}
+
+// ---- the full picture or the SD copy, by right (stream rights) --------------------------------------------
+{
+  const { event: pic } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 120_000, source: 'test' }, SEEN)
+  const FULL = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(200, 9), Buffer.from([0xff, 0xd9])])
+  writeFileSync(snapPath(pic.id), FULL)
+  const before = procs.length
+  const c = await call(pic.id, carol)
+  check('Playback HD: the full picture, no ffmpeg', c.status === 200 && Buffer.from(c.body).equals(FULL) && procs.length === before)
+  const e = await call(pic.id, erin)
+  check('Playback SD with Live HD (every viewer after the upgrade): the full picture', e.status === 200 && Buffer.from(e.body).equals(FULL) && procs.length === before)
+  const d = await call(pic.id, dave)
+  const p = procs.at(-1)
+  check('Playback SD only: the SD copy, made from the stored picture', d.status === 200 && procs.length === before + 1 && p.input.equals(FULL) && Buffer.from(d.body).equals(JPEG), `${d.status} ${procs.length - before}`)
+  check('... at most 704 wide, a JPEG from a JPEG (quoted for the filter parser; no shell)', SD_WIDTH === 704 && p.args.includes("scale='min(704,iw)':-2") && p.args.join(' ').includes('-f image2pipe -c:v mjpeg -i pipe:0') && sdArgs().includes("scale='min(704,iw)':-2"), p.args.join(' '))
+  check('... kept beside it as <id>-sd.jpg', existsSync(sdPath(pic.id)) && sdPath(pic.id) === join(SNAP_DIR, `${pic.id}-sd.jpg`))
+  check('... never cached by the browser', d.headers['cache-control'] === 'private, no-store')
+  await call(pic.id, dave)
+  check('asked again: the kept copy, no second ffmpeg', procs.length === before + 1)
+  const later = new Date(Date.now() + 60_000)
+  utimesSync(snapPath(pic.id), later, later) // the full picture taken again (an event id used again)
+  await call(pic.id, dave)
+  check('the full picture newer than the copy: the copy is made again', procs.length === before + 2)
+  const { event: failPic } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 180_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(failPic.id), FULL)
+  const f = await call(failPic.id, dave, 'GET', { spawn: spawnAs('fail'), platform: 'linux' })
+  check('the copy cannot be made: 404, never the full picture', f.status === 404 && !existsSync(sdPath(failPic.id)), String(f.status))
+  const f2 = await call(failPic.id, dave)
+  check('... asked again at once: 404 without trying again (for SD_RETRY_MS, 5 minutes)', f2.status === 404 && procs.length === before + 3 && SD_RETRY_MS === 300_000)
+  check('live only: still 404, and no ffmpeg for it', (await call(pic.id, bob)).status === 404 && procs.length === before + 3)
+  // a picture older than its event's row belonged to an earlier event with the same id (SQLite can
+  // hand out a deleted newest row's id again), maybe of another camera
+  const { event: reused } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 240_000, source: 'test' })
+  writeFileSync(snapPath(reused.id), FULL)
+  const old = new Date(Date.now() - 600_000)
+  utimesSync(snapPath(reused.id), old, old)
+  check('a picture older than its event (an id used again): 404 whole and as the SD copy, and no copy made of it', (await call(reused.id, carol)).status === 404 && (await call(reused.id, dave)).status === 404 && procs.length === before + 3 && !existsSync(sdPath(reused.id)))
+  const src = readFileSync(new URL('../event-snapshot.mjs', import.meta.url), 'utf8')
+  check('the SD copies take turns on a queue of their own, never ahead of or behind a new event\'s picture', /sdOneAtATime\(\(\) => toJpeg\(input, sdArgs\(\)/.test(src) && /= await oneAtATime\(\(\) => toJpeg\(found\.key\.buf, snapArgs\(found\.key\.codec\), o\)\)/.test(src))
+  check('sdPath refuses what is not an event id', (() => { try { sdPath('../x'); return false } catch { return true } })())
 }
 
 // ---- pictures go with their events ---------------------------------------------------------------------
@@ -383,12 +430,17 @@ writeFileSync(snapPath(other.id), JPEG)
   const old = new Date(Date.now() - 2 * 3_600_000)
   utimesSync(stale, old, old)
   writeFileSync(join(SNAP_DIR, 'readme.txt'), 'not a picture')
+  writeFileSync(sdPath(424243), JPEG) // an SD copy whose event is gone (its full picture already went)
+  writeFileSync(sdPath(other.id), JPEG)
   const { removed } = await sweepSnapshots()
   check('sweepSnapshots: a picture whose event is gone is removed, one whose event is there stays',
     !existsSync(snapPath(424242)) && existsSync(snapPath(other.id)) && removed >= 1, `removed ${removed}`)
   check('  an old temp file is removed, a fresh one (a write in progress) stays, other files stay', !existsSync(stale) && existsSync(fresh) && existsSync(join(SNAP_DIR, 'readme.txt')))
   const kept = await sweepSnapshots({ exists: () => { throw new Error('database locked') } })
   check('  events that cannot be read: nothing removed, nothing thrown', kept.removed === 0 && existsSync(snapPath(other.id)))
+  check('sweepSnapshots: an SD copy goes with its event, and stays while the event is there', !existsSync(sdPath(424243)) && existsSync(sdPath(other.id)))
+  forgetSnapshots([other.id])
+  check('forgetSnapshots removes the SD copy with the picture', !existsSync(sdPath(other.id)) && !existsSync(snapPath(other.id)))
 }
 
 closeEvents()
