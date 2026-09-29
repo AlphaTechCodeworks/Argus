@@ -4,7 +4,7 @@
 //
 // The point of this file is the refusals. A permission test that only proves "the admin can" has
 // proved nothing: every case below that matters is a case where the answer must be false.
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -69,6 +69,8 @@ const auditRowsAll = () => readFileSync(join(DATA, 'audit.jsonl'), 'utf8').trim(
   check('a viewer keeps live everywhere, as before', store.users.jo.grants.live.join() === '*')
   check('a viewer keeps NVR playback everywhere, as before', store.users.jo.grants['playback-nvr'].join() === '*')
   check('a viewer keeps full screen at full quality everywhere (Live HD *), as before', store.users.jo.grants['live-hd']?.join() === '*')
+  check('rights.json is written as version 2', JSON.parse(readFileSync(R.RIGHTS_FILE, 'utf8')).version === 2)
+  check('...with its shadow: every account\'s Live HD', JSON.parse(readFileSync(R.RIGHTS_SHADOW, 'utf8')).users.jo.join() === '*')
   check('a viewer gains NO server playback (canPlayServer refused them)', store.users.jo.grants['playback-server'].length === 0)
   check('a viewer gains NO export', store.users.jo.grants.export.length === 0 && store.users.jo.formats.length === 0)
   check('adminList names both admins', R.adminList().join() === 'boss,legacy', R.adminList().join())
@@ -522,6 +524,100 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   check('with the live-hd list: saved, and the audit row starts with the change', s2 === 200 && /^removed live-hd: n1 \| now: live=n1 live-hd=none /.test(lastRightsRow('jo').detail), lastRightsRow('jo')?.detail)
   check('rightsChangeDetail: nothing changed says so', R.rightsChangeDetail(R.rightsOf('jo'), R.rightsOf('jo')).startsWith('no changes | now: '))
   check('rightsChangeDetail: formats too', /added formats: mp4/.test(R.rightsChangeDetail(R.rightsOf('jo'), { ...R.rightsOf('jo'), formats: ['mp4'] })))
+}
+
+// ---- rights.json version 1 -> 2 -----------------------------------------------------------------------
+{
+  const disk = () => JSON.parse(readFileSync(R.RIGHTS_FILE, 'utf8'))
+  const systemRows = () => auditRowsAll().filter((r) => r.user === 'system' && r.action === 'rights-change')
+  auth.saveUsers({ boss: { hash: 'x', role: 'admin' }, jo: { hash: 'x', role: 'viewer' }, sam: { hash: 'x', role: 'viewer' } })
+  rmSync(R.RIGHTS_SHADOW, { force: true })
+  const v1 = JSON.stringify({ version: 1, users: { jo: { grants: { live: ['n1', 'n2/3'], 'playback-nvr': ['*'] } }, sam: { grants: { 'playback-server': ['n1'] } } } })
+  writeFileSync(R.RIGHTS_FILE, v1)
+  const before = systemRows().length
+  check('upgrade: Live HD wherever Live is', R.can(VIEWER, 'live-hd', { nvr: 'n2', ch: 3 }) === true && J(R.rightsOf('jo').grants['live-hd']) === J(['n1', 'n2/3']))
+  check('upgrade: nothing else changes (playback, export, formats)', J(R.rightsOf('jo').grants['playback-nvr']) === J(['*']) && J(R.rightsOf('sam').grants['playback-server']) === J(['n1']) && R.rightsOf('sam').grants['live-hd'].length === 0)
+  check('upgrade: written back as version 2', disk().version === 2 && J(disk().users.jo.grants['live-hd']) === J(['n1', 'n2/3']))
+  check('upgrade: the file it replaced is kept byte for byte as rights.v1.json', readFileSync(R.RIGHTS_V1_BACKUP, 'utf8') === v1)
+  check('upgrade: one system audit row saying what it did', systemRows().length === before + 1 && /upgraded from version 1 to 2/.test(systemRows().at(-1).detail) && /jo/.test(systemRows().at(-1).detail), systemRows().at(-1)?.detail)
+  check('upgrade: ... it names who has Playback SD beyond Live (there the NVR\'s HD now needs Live HD or Playback HD), and only them', /; 1 account\(s\) \(jo\) have Playback SD on cameras without Live/.test(systemRows().at(-1).detail) && /the stored playback, export and admin rights are unchanged/.test(systemRows().at(-1).detail), systemRows().at(-1)?.detail)
+  check('upgrade: the shadow now holds every account\'s Live HD', J(JSON.parse(readFileSync(R.RIGHTS_SHADOW, 'utf8')).users.jo) === J(['n1', 'n2/3']))
+  R.loadRights()
+  R.loadRights()
+  check('upgrade: a version 2 file is never upgraded again', systemRows().length === before + 1)
+
+  rmSync(R.RIGHTS_SHADOW, { force: true })
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ users: { jo: { grants: { live: ['n4'] } } } }))
+  check('a file with no version is upgraded as version 1', J(R.rightsOf('jo').grants['live-hd']) === J(['n4']) && disk().version === 2)
+
+  writeFileSync(R.RIGHTS_FILE, '{ not json')
+  R.loadRights()
+  check('an unreadable file is left as it is (never written over)', readFileSync(R.RIGHTS_FILE, 'utf8') === '{ not json')
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 1, users: ['jo'] }))
+  R.loadRights()
+  check('a file whose users is not an object is left as it is', disk().version === 1 && Array.isArray(disk().users))
+
+  const v3 = JSON.stringify({ version: 3, users: { jo: { grants: { live: ['n1'], 'live-hd': ['n1'], 'live-4k': ['n1'] } }, sam: { grants: { 'live-4k': ['n2'] } } } })
+  writeFileSync(R.RIGHTS_FILE, v3)
+  check('version 3: read as far as version 2 understands it', R.can(VIEWER, 'live-hd', { nvr: 'n1', ch: 0 }) === true && !('live-4k' in R.rightsOf('jo').grants))
+  check('version 3: not written, not upgraded', readFileSync(R.RIGHTS_FILE, 'utf8') === v3)
+  check('version 3: reported once (one system audit row)', systemRows().filter((r) => /version 3, newer/.test(r.detail)).length === 1)
+  const [s3, b3] = await R.handleRights('POST', '/api/admin/rights', async () => ({ user: 'jo', rights: v2({ grants: { live: ['n2'] } }), seen: R.rightsToken(R.rightsOf('jo')) }), ADMIN)
+  check('version 3: an editor save is refused 409 newer, nothing written', s3 === 409 && b3.newer === true && !b3.stale && readFileSync(R.RIGHTS_FILE, 'utf8') === v3, J(b3))
+  check('version 3: saveRights refuses as well (never rewritten as version 2)', threw(() => R.saveRights('jo', { grants: { live: ['n2'] } }))?.status === 409 && readFileSync(R.RIGHTS_FILE, 'utf8') === v3)
+  const rows3 = systemRows().length
+  check('version 3: an account removed (or made again) takes out its own row only; the version and what this release does not know stay', R.forgetRights('sam') === true && disk().version === 3 && !('sam' in disk().users) && J(disk().users.jo.grants['live-4k']) === J(['n1']), J(disk()))
+  check('... and says so in the audit', systemRows().length === rows3 + 1 && /version 3, from a newer release\): the row of sam removed/.test(systemRows().at(-1).detail), systemRows().at(-1)?.detail)
+}
+
+// ---- a rollback and back: the shadow keeps the Live HD taken away before it -------------------------------
+{
+  auth.saveUsers({ boss: { hash: 'x', role: 'admin' }, jo: { hash: 'x', role: 'viewer' }, sam: { hash: 'x', role: 'viewer' } })
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 2, users: {} }))
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1/0'] } }) // HD on one camera only
+  // an older release rewrites the file: version 1, live-hd dropped; it also gave jo Live on n2, and sam Live
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 1, users: { jo: { grants: { live: ['n1', 'n2'] } }, sam: { grants: { live: ['n5'] } } } }))
+  check('back again: an account the shadow remembers keeps the Live HD it had, not all of its Live', J(R.rightsOf('jo').grants['live-hd']) === J(['n1/0']))
+  check('... a camera given Live meanwhile gets no HD (default deny)', R.can(VIEWER, 'live-hd', { nvr: 'n2', ch: 0 }) === false && R.can(VIEWER, 'live', { nvr: 'n2', ch: 0 }) === true)
+  check('... an account the shadow does not know gets Live HD = Live, as a first upgrade', J(R.rightsOf('sam').grants['live-hd']) === J(['n5']))
+  check('... the audit row says which were restored', /restored from rights\.v2\.json/.test(auditRowsAll().filter((r) => r.user === 'system').at(-1).detail))
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1'] } })
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 1, users: { jo: { grants: { live: ['n1/2'] } } } }))
+  check('back again: the remembered HD is cut to the Live there is now (shadow ∩ live)', J(R.rightsOf('jo').grants['live-hd']) === J(['n1/2']))
+  // a name removed and made again while the older release ran is a new person
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': [] } })
+  const sh = JSON.parse(readFileSync(R.RIGHTS_SHADOW, 'utf8'))
+  writeFileSync(R.RIGHTS_SHADOW, JSON.stringify({ ...sh, writtenAt: Date.now() - 60_000 }))
+  auth.saveUsers({ ...auth.loadUsers(), jo: { hash: 'y', role: 'viewer', since: Date.now() } })
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 1, users: { jo: { grants: { live: ['n1'] } } } }))
+  check('an account made after the shadow was written is not given the old holder\'s Live HD', J(R.rightsOf('jo').grants['live-hd']) === J(['n1']))
+}
+
+// ---- the shadow never holds Live HD that rights.json has not got (written first, cut to old and new) --------
+{
+  auth.saveUsers({ boss: { hash: 'x', role: 'admin' }, jo: { hash: 'x', role: 'viewer' } })
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 2, users: {} }))
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1/0'] } })
+  const shadowHd = () => JSON.parse(readFileSync(R.RIGHTS_SHADOW, 'utf8')).users.jo
+  const was = readFileSync(R.RIGHTS_FILE, 'utf8')
+  // rights.json cannot be written (a folder where its temp file goes): the save fails after the shadow's first write
+  const blocker = `${R.RIGHTS_FILE}.tmp-${process.pid}`
+  mkdirSync(blocker)
+  const e1 = threw(() => R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1'] } }))
+  check('a grant that could not be saved: refused, rights.json as it was', e1 !== null && readFileSync(R.RIGHTS_FILE, 'utf8') === was, e1?.message)
+  check('... and the shadow holds only the Live HD the old and the new row both have, never the grant', J(shadowHd()) === J(['n1/0']), J(shadowHd()))
+  rmSync(blocker, { recursive: true, force: true })
+  R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': ['n1'] } })
+  check('saved: the shadow holds the new Live HD', J(shadowHd()) === J(['n1']))
+  // the shadow cannot be written (a folder in its place): refused before rights.json is touched
+  const now = readFileSync(R.RIGHTS_FILE, 'utf8')
+  rmSync(R.RIGHTS_SHADOW, { force: true })
+  mkdirSync(R.RIGHTS_SHADOW)
+  const e2 = threw(() => R.saveRights('jo', { grants: { live: ['n1'], 'live-hd': [] } }))
+  check('a shadow that cannot be written: the save is refused, rights.json as it was', e2 !== null && /rights\.v2\.json/.test(e2.message) && readFileSync(R.RIGHTS_FILE, 'utf8') === now, e2?.message)
+  const [s4, b4] = await R.handleRights('POST', '/api/admin/rights', async () => ({ user: 'jo', rights: v2({ grants: { live: ['n1'] } }), seen: R.rightsToken(R.rightsOf('jo')) }), ADMIN)
+  check('... through the editor: an error, and nothing saved', s4 === 400 && /rights\.v2\.json/.test(b4.error) && J(R.rightsOf('jo').grants['live-hd']) === J(['n1']), J(b4))
+  rmSync(R.RIGHTS_SHADOW, { recursive: true, force: true })
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

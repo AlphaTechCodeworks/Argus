@@ -21,8 +21,14 @@
 //
 // Storage: data/rights.json, written 0600 by temp-file-and-rename like settings.mjs.
 //
-//   { version: 1, users: { alice: { admin: false, grants: { live: ['*'], 'live-hd': ['nvr1'],
+//   { version: 2, users: { alice: { admin: false, grants: { live: ['*'], 'live-hd': ['nvr1'],
 //     'playback-server': ['nvr1', 'nvr2/3'], 'playback-nvr': [], export: ['nvr1/0'] }, formats: ['pack'] } } }
+//
+// A version 1 file (before Live HD) is upgraded when first read: Live HD wherever Live is, except for
+// an account the shadow data/rights.v2.json remembers (upgradeToV2). The file replaced is kept as
+// data/rights.v1.json. A file from a newer release is read as far as this one understands it and
+// never rewritten: the access editor's saves are refused, and an account removed or made again takes
+// out only its own row (forgetInNewer).
 //
 // A target in a grant list is one of:
 //   '*'        every camera on every NVR ("site-wide" in the plan's words)
@@ -37,19 +43,24 @@
 //                                         access someone else already took away while it sat open;
 //                                         409 { error, outdated: true } when rights.grants['live-hd']
 //                                         is missing: an editor page from before Live HD would store
-//                                         it empty
+//                                         it empty; 409 { error, newer: true } when rights.json is
+//                                         from a newer release
 // The pages learn what they may do per camera from /api/cameras (liveCameras, playbackCameras), not
 // from their rights row.
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DATA_DIR, loadUsers, saveUsers } from './auth.mjs'
 import { fileCache } from './file-cache.mjs'
 import { audit, useRights } from './audit.mjs'
 
 export const RIGHTS_FILE = join(DATA_DIR, 'rights.json')
-const VERSION = 1
+/** The version 1 file an upgrade replaced, byte for byte: a manual rollback is a copy back. */
+export const RIGHTS_V1_BACKUP = join(DATA_DIR, 'rights.v1.json')
+/** Every account's Live HD as this version last wrote it: what an upgrade after a rollback restores. */
+export const RIGHTS_SHADOW = join(DATA_DIR, 'rights.v2.json')
+const VERSION = 2
 
 /** The six things a person can be allowed to do. Anything not in here is refused outright. */
 export const ACTIONS = Object.freeze(['live', 'live-hd', 'playback-server', 'playback-nvr', 'export', 'admin'])
@@ -124,20 +135,136 @@ export function loadRights() {
 
 function readRights() {
   if (!existsSync(RIGHTS_FILE)) return migrateRights()
+  let text
   let raw
   try {
-    raw = JSON.parse(readFileSync(RIGHTS_FILE, 'utf8'))
+    text = readFileSync(RIGHTS_FILE, 'utf8')
+    raw = JSON.parse(text)
   } catch (e) {
     console.error(`[rights] ${RIGHTS_FILE} is unreadable (${e.message}); nobody has stored rights until it is fixed`)
-    return { version: VERSION, users: {} }
+    return { version: VERSION, users: Object.create(null) }
   }
   // A null prototype, deliberately: with an ordinary object, looking up the user name
   // "constructor" or "toString" would find something on Object.prototype and hand can() a
   // "rights row" that is really a function. Default deny has to mean deny for every name.
   const users = Object.create(null)
-  const src = raw?.users && typeof raw.users === 'object' ? raw.users : {}
+  const plain = raw?.users !== null && typeof raw?.users === 'object' && !Array.isArray(raw.users)
+  const src = plain ? raw.users : {}
   for (const [name, row] of Object.entries(src)) if (isString(name) && name && name !== '__proto__') users[name] = cleanRights(row)
+  // a missing or odd version is 1: the files before Live HD, tests and hand edits leave it out
+  const from = Number.isInteger(raw?.version) && raw.version >= 1 ? raw.version : 1
+  if (from > VERSION) {
+    noteNewer(from)
+    return { version: VERSION, users, newer: from }
+  }
+  // Never a file whose users is not an object: that stays on disk for a human to fix, and denies.
+  if (from < VERSION && plain) return upgradeToV2(users, text, from)
   return { version: VERSION, users }
+}
+
+let newerNoted = 0 // the newer on-disk version this process has already reported
+function noteNewer(from) {
+  if (newerNoted === from) return
+  newerNoted = from
+  const detail = `rights.json is version ${from}, newer than this release (${VERSION}): read as far as version ${VERSION} understands it; editor saves refused, and an account removed or made again takes out only its own row`
+  console.warn(`[rights] ${detail}`)
+  audit(DATA_DIR, { user: 'system', action: 'rights-change', target: '*', detail })
+}
+
+/** The shadow as { writtenAt, users: { name: [targets] } }, or null (none, or unreadable: logged). */
+function readShadow() {
+  if (!existsSync(RIGHTS_SHADOW)) return null
+  try {
+    const raw = JSON.parse(readFileSync(RIGHTS_SHADOW, 'utf8'))
+    if (!Number.isFinite(raw?.writtenAt) || !raw.users || typeof raw.users !== 'object' || Array.isArray(raw.users)) throw new Error('not a rights shadow')
+    const users = Object.create(null)
+    for (const [name, list] of Object.entries(raw.users)) {
+      if (!isString(name) || !name || name === '__proto__' || !Array.isArray(list)) continue
+      users[name] = [...new Set(list.map(cleanTarget).filter(Boolean))].sort()
+    }
+    return { writtenAt: raw.writtenAt, users }
+  } catch (e) {
+    console.error(`[rights] ${RIGHTS_SHADOW} is unreadable (${e.message}); upgrading as if there were none`)
+    return null
+  }
+}
+
+/**
+ * Every account's Live HD, beside rights.json: an older release never touches this file. With
+ * `before` (the rows as they were), each account's list is cut to what the old row had too
+ * (writeStore's first write: the shadow never holds Live HD that rights.json has not got yet).
+ * @throws {Error} when it cannot be written
+ */
+function writeShadow(users, before = null) {
+  const hd = (name) => (before ? intersectTargets(before[name]?.grants?.['live-hd'], users[name].grants['live-hd']) : users[name].grants['live-hd'])
+  const shadow = { version: VERSION, writtenAt: Date.now(), users: Object.fromEntries(Object.keys(users).sort().map((n) => [n, hd(n)])) }
+  const tmp = `${RIGHTS_SHADOW}.tmp-${process.pid}`
+  try {
+    writeFileSync(tmp, `${JSON.stringify(shadow, null, 1)}\n`, { mode: 0o600 })
+    renameSync(tmp, RIGHTS_SHADOW)
+  } catch (e) {
+    try {
+      rmSync(tmp, { force: true })
+    } catch {}
+    throw new Error(`could not write rights.v2.json (${e.code ?? e.message})`)
+  }
+}
+
+/** Whether a grant list covers every camera of target t: '*' covers all, a site all of its cameras. */
+const coversAll = (list, t) => list.includes('*') || list.includes(t) || (t.includes('/') && list.includes(t.slice(0, t.indexOf('/'))))
+
+/** "a, b, c", or the first eight "and 3 more": names in an audit row, which is cut at 500 characters. */
+const someNames = (list) => (list.length > 8 ? `${list.slice(0, 8).join(', ')} and ${list.length - 8} more` : list.join(', '))
+
+/**
+ * A version 1 file (before Live HD) as version 2: Live HD wherever Live is, which is what everyone
+ * with Live has always had (full screen went to the main stream for anyone who could open the grid).
+ * An account the shadow remembers gets the Live HD it had when this version last wrote the file,
+ * limited to its Live as it is now: without that, an older release writing the file (an editor save,
+ * an account added or removed) and this one coming back would give Live HD back to everyone it had
+ * been taken from. An account made after the shadow was written (users.json `since`) is a new person
+ * and gets Live HD = Live, as in any first upgrade. Written back once, with the file it replaced kept
+ * as rights.v1.json and one audit row; if that cannot be written, the upgraded rights are used from
+ * memory and the upgrade is tried again on the next read.
+ *
+ * Not quite nothing changes: an account whose Playback SD reaches cameras its Live does not (live
+ * n1/0, playback-nvr n1) played the NVR's HD stream and saw full-size event pictures there, which now
+ * need Live HD or Playback HD (mayHd). They are not given (default deny); the audit row names them.
+ */
+function upgradeToV2(users, text, from) {
+  const shadow = readShadow()
+  const accounts = loadUsers()
+  const restored = []
+  const copied = []
+  const sdOnly = []
+  for (const name of Object.keys(users).sort()) {
+    const row = users[name]
+    const since = Object.hasOwn(accounts, name) ? accounts[name]?.since : undefined
+    const remembered = shadow !== null && Object.hasOwn(shadow.users, name) && !(Number.isFinite(since) && since > shadow.writtenAt)
+    row.grants['live-hd'] = remembered ? intersectTargets(shadow.users[name], row.grants.live) : [...row.grants.live]
+    ;(remembered ? restored : copied).push(name)
+    const hd = [...row.grants['live-hd'], ...row.grants['playback-server']]
+    if (Object.hasOwn(accounts, name) && accounts[name]?.role !== 'admin' && row.grants['playback-nvr'].some((t) => !coversAll(hd, t))) sdOnly.push(name)
+  }
+  const store = { version: VERSION, users }
+  try {
+    const tmp = `${RIGHTS_V1_BACKUP}.tmp-${process.pid}`
+    writeFileSync(tmp, text, { mode: 0o600 })
+    renameSync(tmp, RIGHTS_V1_BACKUP)
+    writeStore(store)
+  } catch (e) {
+    console.error(`[rights] could not write the upgraded ${RIGHTS_FILE} (${e.message}); using it upgraded from memory`)
+    return store
+  }
+  const said = []
+  if (copied.length) said.push(`Live HD given wherever Live was granted for ${copied.length} account(s) (${someNames(copied)})`)
+  if (restored.length) said.push(`Live HD restored from rights.v2.json (written ${new Date(shadow.writtenAt).toISOString()}) for ${restored.length} account(s) (${someNames(restored)})`)
+  if (!said.length) said.push('no account had rights stored')
+  if (sdOnly.length) said.push(`${sdOnly.length} account(s) (${someNames(sdOnly)}) have Playback SD on cameras without Live: there the NVR's recordings and event pictures are now SD only (HD needs Live HD or Playback HD)`)
+  const detail = `rights.json upgraded from version ${from} to ${VERSION}: ${said.join('; ')}; the stored playback, export and admin rights are unchanged; the old file is kept as rights.v1.json`
+  console.log(`[rights] ${detail}`)
+  audit(DATA_DIR, { user: 'system', action: 'rights-change', target: '*', detail })
+  return store
 }
 
 /**
@@ -215,12 +342,7 @@ export function onRightsSaved(fn) {
   return () => savedHooks.delete(fn)
 }
 
-function writeStore(store) {
-  mkdirSync(dirname(RIGHTS_FILE), { recursive: true })
-  const tmp = `${RIGHTS_FILE}.tmp-${process.pid}`
-  writeFileSync(tmp, `${JSON.stringify(store, null, 1)}\n`, { mode: 0o600 })
-  renameSync(tmp, RIGHTS_FILE)
-  rightsCache.forget()
+const saved = () => {
   for (const fn of savedHooks) {
     try {
       fn()
@@ -228,6 +350,56 @@ function writeStore(store) {
       console.error(`[rights] a listener for saved rights failed: ${e.message}`)
     }
   }
+}
+
+/**
+ * Writes rights.json and the shadow beside it (every account's Live HD: what an upgrade after a
+ * rollback restores, upgradeToV2). The shadow must never hold Live HD that rights.json has not got,
+ * or a save that failed half way, then a rollback and a return, would give back HD that was taken
+ * away or never given. So, given the rows as they were (`before`): first the shadow with each
+ * account's Live HD cut to what the old row had too, then rights.json, then the shadow as the new
+ * rows. A shadow that cannot be written refuses the save before rights.json is touched; the last
+ * write failing leaves the cut shadow, which errs on the side of less. Without `before` (a first
+ * file, or the upgrade itself, which a crash repeats with the same result) the shadow is the new rows.
+ * @param {{ version: number, users: object, newer?: number }} store
+ * @param {object|null} [before] the rows before this change
+ * @throws {Error} a store read from a newer release's file (it would lose what this one does not know)
+ */
+function writeStore(store, before = null) {
+  if (store.newer) throw new Error(`rights.json is version ${store.newer}, from a newer release: this one does not rewrite it`)
+  mkdirSync(dirname(RIGHTS_FILE), { recursive: true })
+  writeShadow(store.users, before)
+  const tmp = `${RIGHTS_FILE}.tmp-${process.pid}`
+  writeFileSync(tmp, `${JSON.stringify({ version: VERSION, users: store.users }, null, 1)}\n`, { mode: 0o600 })
+  renameSync(tmp, RIGHTS_FILE)
+  rightsCache.forget()
+  if (before) {
+    try {
+      writeShadow(store.users)
+    } catch (e) {
+      console.error(`[rights] ${e.message}; it keeps the Live HD the old and the new rows both have`)
+    }
+  }
+  saved()
+}
+
+/**
+ * forgetRights on a rights.json from a newer release: only that account's row is taken out, and the
+ * file is written back as it was otherwise (its version, and every right this release does not know).
+ * Rewriting it as version 2 would drop those; leaving the row would hand it to the next account of
+ * that name. Audited, since the newer release will read a file this one changed.
+ */
+function forgetInNewer(name) {
+  const raw = JSON.parse(readFileSync(RIGHTS_FILE, 'utf8'))
+  if (!raw?.users || typeof raw.users !== 'object' || Array.isArray(raw.users) || !Object.hasOwn(raw.users, name)) return false
+  delete raw.users[name]
+  const tmp = `${RIGHTS_FILE}.tmp-${process.pid}`
+  writeFileSync(tmp, `${JSON.stringify(raw, null, 1)}\n`, { mode: 0o600 })
+  renameSync(tmp, RIGHTS_FILE)
+  rightsCache.forget()
+  audit(DATA_DIR, { user: 'system', action: 'rights-change', target: name, detail: `rights.json (version ${raw.version}, from a newer release): the row of ${name} removed with the account; the rest kept as it was` })
+  saved()
+  return true
 }
 
 /** The stored rows of accounts that exist, in a fresh null-prototype object (never the cached one). */
@@ -253,12 +425,14 @@ export function saveRights(name, raw) {
   const accounts = loadUsers()
   if (!Object.hasOwn(accounts, name)) throw bad(400, `there is no account called ${name}`)
   const store = loadRights()
+  if (store.newer) throw bad(409, `rights.json was written by a newer version of Argus (version ${store.newer}); this version will not change it`)
   const row = cleanRights(raw)
   // Count admins as they will be: every account's role, with this one's as it is being saved.
   const admins = Object.keys(accounts).filter((u) => (u === name ? row.admin : accounts[u]?.role === 'admin'))
   if (admins.length === 0) throw bad(400, 'there must be at least one admin; make someone else an admin first')
+  const before = store.users
   store.users = Object.assign(rowsOfAccounts(store.users, accounts), { [name]: row })
-  writeStore(store)
+  writeStore(store, before)
   if (row.admin !== (accounts[name]?.role === 'admin')) saveUsers({ ...accounts, [name]: { ...accounts[name], role: row.admin ? 'admin' : 'viewer' } })
   return row
 }
@@ -274,10 +448,12 @@ export function forgetRights(name) {
   if (!isString(name) || !name || name === '__proto__') return false
   const store = loadRights()
   if (!Object.hasOwn(store.users, name)) return false
+  if (store.newer) return forgetInNewer(name)
+  const before = store.users
   const users = Object.assign(Object.create(null), store.users) // never change the cached object
   delete users[name]
   store.users = users
-  writeStore(store)
+  writeStore(store, before)
   return true
 }
 
@@ -521,6 +697,9 @@ export async function handleRights(method, pathname, readJson, who) {
     if (!Array.isArray(body?.rights?.grants?.['live-hd'])) {
       return [409, { error: 'This page is from an older version of Argus: reload it (the access was not saved)', outdated: true }]
     }
+    // rights.json from a newer release: saving here would drop every right this version does not know
+    const newer = loadRights().newer
+    if (newer) return [409, { error: `rights.json was written by a newer version of Argus (version ${newer}); this version will not change it`, newer: true }]
     // Compare-and-swap (STALE EDITOR): the access editor's GET handed out this row's `seen` token.
     // If it does not match the row as it is right now, somebody else changed this person's access
     // while the editor sat open, and saving the whole row it opened with would silently put that
