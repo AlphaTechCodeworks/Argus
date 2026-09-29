@@ -412,8 +412,8 @@ export class AdaptiveLive {
    *  - onto one from the camera's own frames (its stream, or one passing them on): at once, and nothing
    *    until that stream's next keyframe at or past what it had (#guard);
    *  - no slot free, the conversion it is on not its own to hand over, and a camera stream its browser
-   *    cannot play (H.265): it stays on that conversion (#slotless), as a main past FULL_MAX stays on
-   *    level 15's, and every look tries again.
+   *    cannot play (H.265): it stays on that conversion (entry.slotless), as a main past FULL_MAX stays
+   *    on level 15's, and every look tries again.
    * @param {{ down?: boolean }} [o] down: to send less (a step down; a tile that finds a slot at last)
    */
   #retarget(e, level, { down = false } = {}) {
