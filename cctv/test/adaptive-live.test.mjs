@@ -543,18 +543,20 @@ function onPage(key, n = 2) {
   // those (cams 10, 17, 21) the stand-in's replay: keyframes of 634, 499 and 243 KB, GOPs of 1279, 950
   // and 690 KB (ev-remote, verify-6), 2.6 MB at once. Each sub 250 kbit/s at 18-30 fps, a keyframe every
   // 2 s: 4 Mbit/s once all 16 run, which the link carries with a fifth to spare, as the tunnel carried
-  // the page at full for 11 minutes that night. Left out: the stand-ins' frames after their replay,
+  // the page at full for 11 minutes that night. Left out here: the stand-ins' frames after their replay,
   // 2-5 Mbit/s each for up to 27 s, more than this link carries at any level (a level cannot thin a
-  // stand-in; verify-6: that is the stand-ins' question, report 2.6).
+  // stand-in; verify-6). The last checks put them back as a remote viewer's stand-in has them now.
   const cold = [1.05, 2.16, 3.35, 4.72, 6.51, 8.58, 10.27, 12.25, 24.38, 27.13, 29.32]
   const coldCh = [2, 3, 4, 6, 7, 9, 16, 18, 19, 20, 21] // cams 3, 4, 5, 7, 8, 10, 17, 19, 20, 21, 22
   const warmCh = [0, 1, 5, 17, 22] // cams 1, 2, 6, 18, 23
   const fps = [20.6, 20.6, 30, 30, 18.3, 20.6, 30, 25.4, 30, 30, 20, 20, 25.4, 27.5, 30, 20]
   const standIn = { 9: [634, 1279], 16: [499, 950], 20: [243, 690] }
-  const tiles = [
+  /** The page's tiles, `more(ch)` added to each cold one's. */
+  const page = (more) => [
     ...warmCh.map((ch, i) => ({ ch, cam: camera({ fps: fps[i], kbps: 250, from: -5000 - i * 413 }) })),
-    ...coldCh.map((ch, i) => ({ ch, cam: camera({ fps: fps[5 + i], kbps: 250, from: cold[i] * 1000 }), standIn: standIn[ch] }))
+    ...coldCh.map((ch, i) => ({ ch, cam: camera({ fps: fps[5 + i], kbps: 250, from: cold[i] * 1000 }), ...more(ch) }))
   ]
+  const tiles = page((ch) => ({ standIn: standIn[ch] }))
   const open = openPage({ tiles, linkMbps: 5, durMs: 60_000 })
   check('the 03:55 page open over 5 Mbit/s: no step down in 60 s (it stepped full -> 15 at 4 s, 1.48 MB queued, 2.4 s)', open.downs.length === 0, open.downs.join(' | '))
   const slow = openPage({ tiles, linkMbps: 3, durMs: 60_000 })
@@ -575,6 +577,24 @@ function onPage(key, n = 2) {
     else if (upAt !== null && l.includes('full -> 15')) held.push(t - upAt)
   }
   check('... on 4 Mbit/s, just too much: full holds over 30 s after each climb (it failed 4 s after, on the climb\'s own burst)', held.length >= 2 && held.every((s) => s > 30), `${held.join(', ')} s | ${just.lines.join(' | ')}`)
+  // The stand-ins as they are now (sub-bridge.mjs): the three mains running (5.18, 3.99 and 2.25 Mbit/s,
+  // 20 fps, as measured), each sent for as long as its stand-in wants it, and a remote viewer's stand-in
+  // taking only their keyframes, each only if the page's queue with it goes within ROOM_S -- under the
+  // controller's line, as no level thins them. Their GOPs are about TICK_MS long, so where their
+  // keyframes fall against the controller's looks decides: 10 phases, on the tunnel's 4.5 to 6.5
+  // Mbit/s. With the keyframes let through while the page had less than RESUME_BELOW queued, 11 of 20
+  // phases stepped down on 5 Mbit/s, 4 of 20 on 6.5, from 4-10 s after the page opened (review of t8).
+  const mains = (phase) => ({ 9: [5.18, 634, 1279, -10_000 - phase], 16: [3.99, 499, 950, -10_700 - phase], 20: [2.25, 243, 690, -11_300 - phase] })
+  const stepped = []
+  for (const linkMbps of [4.5, 5, 6.5]) {
+    for (let phase = 0; phase < 2000; phase += 200) {
+      const r = openPage({ tiles: page((ch) => ({ main: mains(phase)[ch] })), linkMbps, durMs: 40_000 })
+      if (r.downs.length) stepped.push(`${linkMbps} Mbit/s, keyframes ${phase} ms on: ${r.downs.join(' | ')}`)
+    }
+  }
+  check('... its stand-ins\' mains sending as they do now, a remote viewer\'s taking keyframes as its page has room: no step down at any of 10 phases on 4.5, 5 and 6.5 Mbit/s', stepped.length === 0, stepped.join(' || '))
+  const every = openPage({ tiles: page((ch) => ({ main: mains(0)[ch] })), linkMbps: 5, durMs: 40_000, remote: false })
+  check('... every frame of them instead (a local viewer\'s stand-in, a remote one\'s on 29 Sep): it steps down', every.downs.length > 0, every.lines.join(' | '))
 }
 {
   // A real overload: 16 sub tiles of 0.5 Mbit/s (25 fps) into a 2 Mbit/s link, four times what it carries

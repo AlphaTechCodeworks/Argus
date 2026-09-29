@@ -2,14 +2,15 @@
 // stream goes to the viewer until the sub-stream's first frame does, then only the sub-stream.
 // Fake streams and sockets; no SDK.
 //   node cctv/test/sub-bridge.test.mjs
+import { QUEUE_S } from '../adaptive-live.mjs'
 import { RESUME_BELOW } from '../backpressure.mjs'
-import { bridgeSub } from '../sub-bridge.mjs'
+import { ROOM_S, bridgeSub } from '../sub-bridge.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
 
-const frame = (tag, key, codec = 0) => {
-  const b = Buffer.alloc(40)
+const frame = (tag, key, codec = 0, size = 40) => {
+  const b = Buffer.alloc(size)
   b[0] = key ? 1 : 0
   b[1] = codec
   b.write(tag, 20)
@@ -241,14 +242,16 @@ const socket = () => {
   check('a local viewer: every frame of the main stream, as before', ws.got.join() === 'm-k1,m-d1,m-d2', ws.got.join())
 }
 {
-  // Each keyframe only while the viewer's page keeps up: less than RESUME_BELOW queued on its socket --
-  // for a channel of a /live-mux page, the whole page's queue, which every tile waits behind. Keyframes
-  // alone are still about half of these mains (nvr-2/10: 634 KB of a 1279 KB GOP every 2 s, 2.6 Mbit/s),
-  // and under the stand-in's own cap (4 MB of its own) three of them backed the 03:55 page up 5.06 MB
-  // over 5 Mbit/s, its tiles 7.4 s behind (live-mux-server.test.mjs replays it).
+  // Each keyframe only while the viewer's page keeps up. Keyframes alone are still about half of these
+  // mains (nvr-2/10: 634 KB of a 1279 KB GOP every 2 s, 2.6 Mbit/s), and under the stand-in's own cap
+  // (4 MB of its own) three of them backed the 03:55 page up over 4 MB, its tiles over 6 s behind
+  // (live-mux-server.test.mjs replays it). A page whose drain rate is not measured yet (live-mux.mjs
+  // drainBps null: idle, or a burst queued just now) keeps up while it has less than RESUME_BELOW
+  // queued: the whole page's queue, which every tile waits behind.
   const sub = new FakeStream()
   const main = new FakeStream()
   const ws = socket()
+  ws.drainBps = null
   ws.sharedBufferedAmount = RESUME_BELOW // other tiles' frames: this channel has nothing of its own queued
   const logs = []
   let t = 0
@@ -282,7 +285,44 @@ const socket = () => {
   check('remote: once the sub-stream runs, no more of the main: its own keyframe is next', ws.got.join() === 'm-k1' && b.active(), ws.got.join())
 }
 {
-  // a /live socket of its own (no page): its own queue
+  // A /live-mux page's socket drains at a rate it measures (live-mux.mjs drainBps), and the level
+  // controller counts what the page has queued as its link not keeping up once that takes more than
+  // QUEUE_S (1 s) to go at that rate, on two looks in a row (adaptive-live.mjs). No level thins a
+  // stand-in, so its keyframe goes only if, with it, the page's queue goes within ROOM_S: under that
+  // line, with room for the meter's error. With less than RESUME_BELOW queued as the only rule,
+  // nvr-2/10's 634 KB keyframes -- 1 s by themselves at 5 Mbit/s, one every 2 s like the controller's
+  // looks -- stepped the 03:55 page down in 11 of 20 replays (review of t8; adaptive-live.test.mjs).
+  const sub = new FakeStream()
+  const main = new FakeStream()
+  const ws = socket()
+  ws.drainBps = 625_000 // 5 Mbit/s
+  ws.sharedBufferedAmount = 0
+  const room = ROOM_S * ws.drainBps // 375 KB
+  bridgeSub(ws, { sub, main, clientH265: true, remote: true })
+  check('ROOM_S: 0.6 s, under the controller\'s line (QUEUE_S)', ROOM_S === 0.6 && ROOM_S < QUEUE_S, String(ROOM_S))
+  main.frame(frame('m-k1', true, 0, 634_000), true)
+  check('remote, its page draining 5 Mbit/s with nothing queued: nvr-2/10\'s 634 KB keyframe (1 s by itself) is held back', ws.got.length === 0, ws.got.join())
+  ws.sharedBufferedAmount = room - 243_000
+  main.frame(frame('m-k2', true, 0, 243_000), true)
+  check('... /21\'s 243 KB, the page\'s queue ROOM_S with it: it goes', ws.got.join() === 'm-k2', ws.got.join())
+  ws.sharedBufferedAmount = room - 243_000 + 1
+  main.frame(frame('m-k3', true, 0, 243_000), true)
+  check('... a byte more queued: it waits', ws.got.join() === 'm-k2', ws.got.join())
+  ws.sharedBufferedAmount = 100_000
+  ws.drainBps = 1_250_000 // 10 Mbit/s
+  main.frame(frame('m-k4', true, 0, 634_000), true)
+  check('... the page draining 10 Mbit/s, 100 KB queued: /10\'s 634 KB goes (0.59 s with it)', ws.got.join() === 'm-k2,m-k4', ws.got.join())
+  ws.sharedBufferedAmount = 0
+  ws.drainBps = 0 // busy, and nothing written
+  main.frame(frame('m-k5', true, 0, 1000), true)
+  check('... a page whose socket writes nothing: not even a small one', ws.got.join() === 'm-k2,m-k4', ws.got.join())
+  ws.drainBps = null
+  ws.sharedBufferedAmount = RESUME_BELOW - 1
+  main.frame(frame('m-k6', true, 0, 634_000), true)
+  check('... a rate not measured yet: less than RESUME_BELOW queued, as before', ws.got.join() === 'm-k2,m-k4,m-k6', ws.got.join())
+}
+{
+  // a /live socket of its own (no page): its own queue, and no rate to go by: less than RESUME_BELOW
   const sub = new FakeStream()
   const main = new FakeStream()
   const ws = socket()

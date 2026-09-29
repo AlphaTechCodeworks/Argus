@@ -1061,11 +1061,16 @@ const fanOut = (c, buf, isKey, type, now) => {
   }
   const mb = (n) => (n / 1e6).toFixed(2)
   const said = (a, b) => `remote: ${mb(a.maxQueue)} MB queued at most, sub frames waiting up to ${a.subWaitMs} ms, ${mb(a.standIn)} MB of stand-ins; every frame: ${mb(b.maxQueue)} MB, ${b.subWaitMs} ms, ${mb(b.standIn)} MB`
-  /** A stand-in's pictures: how many, all keyframes, the first (ms after its tile asked), and the longest without one until `until`. */
+  /**
+   * A stand-in's pictures: how many, all keyframes, the first (ms after its tile asked), and the longest
+   * without one until `until`: from its tile asking (gap), and once it had one (apart: what its tile
+   * counts as no video, live-tile.js; one with no picture yet waits without saying so).
+   */
   const shown = (o, ch, askedAt, until) => {
     const p = (o.pictures.get(ch) ?? []).filter((x) => x.at <= until)
     const edges = [askedAt, ...p.map((x) => x.at), until]
-    return { ch, n: p.length, keys: p.every((x) => x.key), first: p.length ? p[0].at - askedAt : null, gap: Math.max(...edges.slice(1).map((x, i) => x - edges[i])) }
+    const gaps = edges.slice(1).map((x, i) => x - edges[i])
+    return { ch, n: p.length, keys: p.every((x) => x.key), first: p.length ? p[0].at - askedAt : null, gap: Math.max(...gaps), apart: p.length ? Math.max(...gaps.slice(1)) : null }
   }
 
   // The 03:55 page of 29 Sep (stutter report 2.6, verify-6; the page adaptive-live.test.mjs replays for
@@ -1097,20 +1102,31 @@ const fanOut = (c, buf, isKey, type, now) => {
   const gatedSaid = `${mb(gated.maxQueue)} MB queued at most, sub frames waiting up to ${gated.subWaitMs} ms, ${mb(gated.standIn)} MB of stand-ins`
   console.log(`INFO  ... keyframes only under the stand-in's own cap: ${gatedSaid}`)
   check('... keyframes only, under the stand-in\'s own 4 MB cap: still over 4 MB queued, its tiles over 6 s behind', gated.maxQueue > 4e6 && gated.subWaitMs > 6000, gatedSaid)
-  // a stand-in's keyframe goes into a page with less than RESUME_BELOW queued: at most that and the
-  // biggest keyframe (634 KB), with the frames the page's tiles send meanwhile
+  // a stand-in's keyframe goes only if the page's queue with it goes within ROOM_S (0.6 s) at the rate
+  // its socket drains, or, that rate not measured yet, into less than RESUME_BELOW: at most that and
+  // the biggest keyframe (634 KB), with the frames the page's tiles send meanwhile
   check('... a remote viewer\'s: under 1.1 MB queued, and no tile\'s frame waits 2 s', after.maxQueue < 1.1e6 && after.subWaitMs < 2000, said(after, before))
+  // ROOM_S of 5 Mbit/s is 375 KB with what the page has queued. /21's 243 KB keyframes fit, one a GOP
+  // once the page's opening replays have gone; /10's 634 KB and /17's 499 KB never do. /10's first
+  // went as its tile asked, the page's rate not measured yet, and its tile held that picture until its
+  // own sub-stream came, 8.4 s on; /17's showed nothing until its own.
   const shows = [9, 16, 20].map((ch) => shown(after, ch, p0355.subs.findIndex((t) => t.ch === ch) * 15, cold[coldCh.indexOf(ch)] * 1000))
-  check('... its stand-ins: keyframes only, the first at once (nvr-2/10\'s as its tile asked)', shows.every((s) => s.n > 0 && s.keys) && shows[0].first === 0, JSON.stringify(shows))
-  check('... its log lines say keyframes', after.logs.some((l) => /^\[sub-bridge\] nvr-2\/10, remote viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): \d+ keyframes, [\d.]+ MB sent, \d+ held back$/.test(l)), after.logs.join(' | '))
-  // (Three stand-ins on a link this full take turns as its room comes: nvr-2/17's keyframes kept
-  // coming just after /10's had taken it, and it showed its first picture at 10.2 s, as its own
-  // sub-stream came. With every frame it showed at once, 7 s behind like every tile of the page.)
+  const [s10, s17, s21] = shows
+  check('... its stand-ins: keyframes that fit the page\'s room: /21\'s one a GOP (2.45 s) from 3.2 s, /17\'s none, /10\'s first alone, as its tile asked', shows.every((s) => s.keys) && s21.n >= 8 && s21.first < 3500 && s21.apart <= 2450 && s17.n === 0 && s10.n === 1 && s10.first === 0, JSON.stringify(shows))
+  check('... its log lines say keyframes', after.logs.some((l) => /^\[sub-bridge\] nvr-2\/10, remote viewer: stand-in ended after [\d.]+ s \(the sub-stream came\): \d+ keyframes?, [\d.]+ MB sent, \d+ held back$/.test(l)), after.logs.join(' | '))
+  // (With every frame all three showed at once, 7 s behind like every tile of the page. With keyframes
+  // let through while the page had less than RESUME_BELOW queued, /10's came at least every 4 s, but
+  // they stepped the whole page down in about half the phases of its keyframes: adaptive-live.test.mjs.
+  // That is the cost: a main whose keyframe is more than ROOM_S of the link shows nothing, or at a
+  // page's opening its first picture held, until its own sub-stream comes, as with no stand-in. Held
+  // 8.4 s, as /10's here, its tile says "no video" from 5 s and may reconnect at 8 (live-tile.js looks
+  // once a second).)
 
   // A tile held at the NVR's sub-stream limit (value4u holds 14-16 for minutes; verify-6), its main as
   // nvr-2/21's (2.25 Mbit/s, 243 KB keyframes every 2.45 s), on a page of 15 running sub-streams (3.75
-  // Mbit/s): a picture a GOP, never long enough without one for its tile to say "no video" (5 s,
-  // live-tile.js NO_VIDEO_MS), and the page keeps up. With every frame the page carries 6 Mbit/s.
+  // Mbit/s): its first picture once the page's opening replays have gone, then one a GOP, never long
+  // enough without one for its tile to say "no video" (5 s, live-tile.js NO_VIDEO_MS), and the page
+  // keeps up. With every frame the page carries 6 Mbit/s.
   const pHeld = {
     subs: [
       ...Array.from({ length: 15 }, (_, ch) => ({ ch, cam: camera({ fps: 20 + (ch % 3) * 5, kbps: 250, from: -3000 - ch * 211 }) })),
@@ -1124,7 +1140,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   const heldAfter = playPage('127.0.0.1', pHeld)
   console.log(`INFO  a held tile's stand-in for 60 s, ${said(heldAfter, heldBefore)}`)
   const h = shown(heldAfter, 15, 15 * 15, pHeld.durMs)
-  check('a held tile\'s stand-in on a remote page: a keyframe a GOP (2.45 s), none more than 5 s apart', h.keys && h.n >= 20 && h.gap < 5000, JSON.stringify(h))
+  check('a held tile\'s stand-in on a remote page: its first within 6 s, then a keyframe a GOP (2.45 s)', h.keys && h.n >= 20 && h.first < 6000 && h.apart <= 2450, JSON.stringify(h))
   check('... and the page keeps up: under 1 MB queued, no tile\'s frame waits 1.5 s (every frame: over 4 MB, 6 s)', heldAfter.maxQueue < 1e6 && heldAfter.subWaitMs < 1500 && heldBefore.maxQueue > 4e6 && heldBefore.subWaitMs > 6000, said(heldAfter, heldBefore))
   check('... its lines say it is held, and keyframes', heldAfter.logs[0] === "[sub-bridge] nvr-2/16, remote viewer, sub-stream held at the NVR's limit: stand-in started: the main stream's keyframes until the sub-stream's first frame", heldAfter.logs.join(' | '))
 }
