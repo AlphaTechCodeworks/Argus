@@ -304,6 +304,12 @@ check('and says yes once a check found the marker', storage.markerMatches({ id: 
 
 calls.stopShareHelpers()
 await sleep(200)
-rmSync(base, { recursive: true, force: true })
+// a helper just killed can still hold its folder for a moment (Windows): retried, and a leftover
+// temp folder is said, not a crash after the last check
+try {
+  rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+} catch (e) {
+  console.warn(`(could not remove ${base}: ${e.code || e.message})`)
+}
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
