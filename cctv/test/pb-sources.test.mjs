@@ -405,6 +405,62 @@ check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any
   check('  without Playback SD: no NVR side, no going over to the NVR', /if \(!rightsNow\(\)\.sd\) return/.test(fn('loadNvrSide')) && /if \(!rightsNow\(\)\.sd \|\| !nvrFallback\.take\(sock\.cam\)\) return false/.test(fn('fallBackToNvr')))
 }
 
+// ---- the Quality menu after an HD-only camera (its {type:'stream'} switch), on the next NVR socket ---------
+// The page's own open() and onStatus(), run against stand-ins for the page (no DOM here): the select must
+// say what the next socket asks for, not the "HD" an HD-only camera's switch put there (the next camera
+// then played SD under "HD", and choosing "HD" fired no change)
+{
+  const page = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const fn = (name) => {
+    const at = page.indexOf(`function ${name}(`)
+    return page.slice(at, page.indexOf('\n}\n', at) + 2)
+  }
+  const pageRig = ({ kind, nvrHd, stream }) => {
+    const values = kind === 'nvr' ? nvrQualityOptions({ nvrHd }).map(([v]) => String(v)) : ['server', 'sd-nvr']
+    const sel = { dataset: { kind }, value: kind === 'nvr' ? String(nvrHd ? stream : 1) : 'sd-nvr', options: values.map((v) => ({ value: v, textContent: v === 'sd-nvr' ? 'SD (NVR)' : v, disabled: false })) }
+    const r = { sel, state: { stream, nvrMain: false, ch: 2, speed: 1, h265: true, ranges: [], position: 0, nvrNow: 0 }, urls: [], relabels: 0 }
+    const deps = {
+      state: r.state,
+      qualitySel: sel,
+      ws: null,
+      rightsNow: () => ({ sd: true, hd: true, nvrHd, legs: true }),
+      // the page's updateModeUi, as far as the NVR option's label goes (it relabels from state.nvrMain)
+      updateModeUi: () => {
+        r.relabels++
+        const o = sel.options.find((x) => x.value === 'sd-nvr')
+        if (o) o.textContent = r.state.nvrMain ? 'HD (NVR)' : 'SD (NVR)'
+      },
+      WebSocket: class { constructor(u) { r.urls.push(u) } close() {} send() {} },
+      location: { protocol: 'http:', host: 'argus' },
+      nvrQ: () => 'nvr=n1',
+      pushFrame: () => {},
+      refusedMessage: () => null,
+      showMessage: () => {},
+      seek: () => {}
+    }
+    Object.assign(r, new Function(...Object.keys(deps), `${fn('open')}\n${fn('onStatus')}\nreturn { open, onStatus }`)(...Object.values(deps)))
+    return r
+  }
+  const a = pageRig({ kind: 'nvr', nvrHd: true, stream: 1 })
+  a.open(1000)
+  a.onStatus({ type: 'stream', stream: 0 })
+  check('page: an HD-only camera switched to main: the select says "HD", the viewer\'s own choice (SD) stays', a.sel.value === '0' && a.state.stream === 1 && a.state.nvrMain === true, a.sel.value)
+  a.open(2000)
+  check('  the next NVR socket (another camera or moment): the select back on the SD it asks for, so "HD" is a change again', a.sel.value === '1' && /[?&]stream=1&/.test(a.urls.at(-1)) && a.state.nvrMain === false, `${a.sel.value} ${a.urls.at(-1)}`)
+  const b = pageRig({ kind: 'nvr', nvrHd: true, stream: 0 })
+  b.open(1000)
+  check('  a viewer who chose HD: "HD", and the socket asks for it', b.sel.value === '0' && /[?&]stream=0&/.test(b.urls.at(-1)))
+  const c = pageRig({ kind: 'nvr', nvrHd: false, stream: 0 })
+  c.open(1000)
+  check('  without NVR HD on this camera: "SD", whatever was chosen before, and the socket asks for SD', c.sel.value === '1' && /[?&]stream=1&/.test(c.urls.at(-1)))
+  const d = pageRig({ kind: 'server', nvrHd: true, stream: 1 })
+  d.open(1000)
+  d.onStatus({ type: 'stream', stream: 0 })
+  check('  "SD (NVR)" chosen with server recordings: relabelled "HD (NVR)" while the HD-only camera plays', d.sel.options.find((o) => o.value === 'sd-nvr').textContent === 'HD (NVR)')
+  d.open(2000)
+  check('  ... and "SD (NVR)" again on the next NVR socket', d.sel.options.find((o) => o.value === 'sd-nvr').textContent === 'SD (NVR)' && d.sel.value === 'sd-nvr')
+}
+
 // ---- the camera wall (stream rights) -----------------------------------------------------------------------
 {
   const J = JSON.stringify

@@ -654,7 +654,12 @@ function seek(t) {
 }
 
 function open(start) {
+  // a new NVR socket says again what it plays ({type:'stream'}, onStatus); until then the Quality menu
+  // shows what this one asks for, not the "HD" (or "HD (NVR)") an HD-only camera's switch left there:
+  // the next camera played SD under "HD", and choosing "HD" then was no change
   state.nvrMain = false
+  if (qualitySel.dataset.kind === 'nvr') qualitySel.value = String(rightsNow().nvrHd ? state.stream : 1)
+  else updateModeUi()
   if (ws) {
     ws.onclose = null
     ws.close()
