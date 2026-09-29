@@ -1,7 +1,7 @@
 // Offline tests for the recording settings store and its admin routes (settings.mjs,
 // settings-api.mjs). Temp data folder only; nothing is sent anywhere.
 //   node cctv/test/settings.test.mjs
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -206,5 +206,8 @@ check('null removes an NVR override', !('nvr-2' in getSettings().recording.nvrs)
   check('a non-admin cannot change the recording days', p3 === 403)
 }
 
+// The data folder goes with the run: the runs of 2026-09-29 left six in the production server's
+// /tmp (test users.json, settings.json and audit.jsonl only; review 2026-09-29).
+rmSync(DATA, { recursive: true, force: true })
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

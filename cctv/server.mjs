@@ -175,7 +175,9 @@ startWatchdog()
 function thinAndRetain() {
   const index = recIndex()
   return runStorageJobs({
-    mode: getSettings().storage?.thinning,
+    // a function: read again before each job, so Off or Dry run set during a long thinning run holds
+    // for retention in the same round (storage-jobs.mjs)
+    mode: () => getSettings().storage?.thinning,
     index,
     jobs: { thinning: runThinning, retention: runRetention },
     args: () => ({ index, settings: getSettings(), protectedRanges, present: markerMatches }),

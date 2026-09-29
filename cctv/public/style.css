@@ -942,6 +942,7 @@ body.phone-full #grid > .lines-panel { z-index: 92; }
 .se-num { width: 80px; }
 .se-danger { margin: 0; padding: 10px 12px; border-radius: 6px; background: #3a1214; color: #ff8a8a; font-weight: 600; }
 /* Settings > Storage: the time-lapse and retention switch, and what the two jobs last did (storage.js) */
+.sj-now { margin: 0; font-size: 13px; font-weight: 600; }
 .sj-choices { margin: 0; padding: 8px 10px 10px; border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .sj-choices legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .sj-choices label { display: flex; align-items: center; gap: 8px; }

@@ -182,5 +182,82 @@ for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
   check('...and retention still ran (it asks the bookmarks itself)', r.retention.calls.length === 1)
 }
 
+// ---- the switch is read again before each job (review round 2, 2026-09-29) ----------------------------
+// With the switch On a thinning run can take minutes (up to 2000 files read, rewritten, fsynced and
+// read back over SMB). An admin who sets Off or Dry run meanwhile must not see "Saved: Off" and then
+// retention delete up to 2000 files in the same round because the switch was read once at the start.
+{
+  _test.reset()
+  let sw = 'on'
+  const thinning = fakeJob('thinned')
+  const flip = async (o) => {
+    const r = await thinning(o)
+    sw = 'dry-run' // set by an admin while thinning ran
+    return r
+  }
+  const retention = fakeJob('deleted')
+  await runStorageJobs({ mode: () => sw, index: INDEX, jobs: { thinning: flip, retention }, args: () => ({}), clock: () => T0, log: () => {}, warn: () => {} })
+  check('switched On -> Dry run while thinning ran: thinning ran for real, retention as a dry run', thinning.calls[0]?.dryRun === false && retention.calls[0]?.dryRun === true, JSON.stringify([thinning.calls, retention.calls]))
+  check('...each remembered with the mode it really ran in', lastRuns().thinning.mode === 'on' && lastRuns().retention.mode === 'dry-run' && lastRuns().retention.dryRun === true, JSON.stringify(lastRuns()))
+}
+{
+  _test.reset()
+  let sw = 'on'
+  const retention = fakeJob('deleted')
+  const flip = async (o) => {
+    sw = 'off'
+    return fakeJob('thinned')(o)
+  }
+  const logs = []
+  await runStorageJobs({ mode: () => sw, index: INDEX, jobs: { thinning: flip, retention }, args: () => ({}), clock: () => T0, log: (l) => logs.push(l), warn: (l) => logs.push(l) })
+  check('switched On -> Off while thinning ran: retention not called at all', retention.calls.length === 0)
+  check('...and remembered and logged as switched off', lastRuns().retention.mode === 'off' && logs.some((l) => /^\[retention\] switched off/.test(l)), JSON.stringify(logs))
+}
+{
+  // A save is an HTTP request: it can only be handled when the event loop is free, which is not
+  // during runThinning's loop (synchronous file work). Between the jobs the loop is let go once, so a
+  // save that arrived meanwhile is in the settings before retention reads the switch.
+  _test.reset()
+  let sw = 'on'
+  const retention = fakeJob('deleted')
+  const thinning = async (o) => {
+    setImmediate(() => (sw = 'off')) // the admin's POST, waiting for the loop
+    return fakeJob('thinned')(o)
+  }
+  await runStorageJobs({ mode: () => sw, index: INDEX, jobs: { thinning, retention }, args: () => ({}), clock: () => T0, log: () => {}, warn: () => {} })
+  check('a save waiting on the event loop while thinning ran is read before retention', retention.calls.length === 0 && lastRuns().retention.mode === 'off', JSON.stringify(lastRuns().retention))
+}
+{
+  _test.reset()
+  const thinning = fakeJob('thinned')
+  const retention = fakeJob('deleted')
+  await runStorageJobs({ mode: () => { throw new Error('settings unreadable') }, index: INDEX, jobs: { thinning, retention }, args: () => ({}), clock: () => T0, log: () => {}, warn: () => {} })
+  check('a switch that cannot be read is a dry run, never on', thinning.calls[0]?.dryRun === true && retention.calls[0]?.dryRun === true && lastRuns().thinning.mode === 'dry-run')
+}
+{
+  _test.reset()
+  let reads = 0
+  const r = await run(() => (reads++, 'off'))
+  check('a getter that says off: neither job is called', r.thinning.calls.length === 0 && r.retention.calls.length === 0 && reads >= 1)
+}
+
+// ---- server.mjs hands the jobs what makes the switch real (review round 2, 2026-09-29) ---------------------
+// The jobs are fakes above and settings.test.mjs stops at the store: this is the one place that
+// checks the wiring. Dropping protectedRanges would stop protecting bookmarks, dropping present
+// would stop checking the location's marker, and reading the wrong key would leave the switch
+// with nothing behind it; every other suite would still pass.
+{
+  const { readFileSync } = await import('node:fs')
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const body = server.match(/\nfunction thinAndRetain\(\) \{\n[\s\S]*?\n\}\n/)?.[0] ?? ''
+  check('server.mjs has thinAndRetain calling runStorageJobs', /runStorageJobs\(\{/.test(body), body ? '' : 'no thinAndRetain found')
+  check('...the switch read from settings.storage.thinning, each time it is asked', /\bmode: \(\) => getSettings\(\)\.storage\?\.thinning,/.test(body), body.match(/mode:[^\n]*/)?.[0])
+  check('...the real jobs', /jobs: \{ thinning: runThinning, retention: runRetention \}/.test(body), body.match(/jobs:[^\n]*/)?.[0])
+  const args = body.match(/args: \(\) => \(\{([^}]*)\}\)/)?.[1] ?? ''
+  check('...the bookmarks asked (protectedRanges) and the location markers checked (present: markerMatches)', /\bprotectedRanges\b/.test(args) && /\bpresent: markerMatches\b/.test(args) && /\bsettings: getSettings\(\)/.test(args) && /\bindex\b/.test(args), args)
+  check('...protectedRanges from bookmarks.mjs, markerMatches from storage.mjs, the jobs from thinning.mjs',
+    /import \{[^}]*\bprotectedRanges\b[^}]*\} from '\.\/bookmarks\.mjs'/.test(server) && /import \{[^}]*\bmarkerMatches\b[^}]*\} from '\.\/storage\.mjs'/.test(server) && /import \{[^}]*\brunRetention, runThinning\b[^}]*\} from '\.\/thinning\.mjs'/.test(server))
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

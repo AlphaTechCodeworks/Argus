@@ -327,6 +327,18 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   check('Save: Off and Dry run are always sent, never asked about', ['off', 'dry-run'].every((m) => saveSteps(m).send === true && saveSteps(m).ask === false), JSON.stringify(saveSteps('off')))
   check('Save: On is always asked about first, then sent', saveSteps('on').send === true && saveSteps('on').ask === true)
   check('Save: nothing picked, or a value that is not a choice, sends nothing', saveSteps(undefined).send === false && saveSteps('ON').send === false)
+
+  // The server's value in words, and an unsaved choice said to be one (review round 2, 2026-09-29):
+  // an admin who clicked Off and left without Save came back to Off checked, with the server On.
+  const { switchNote } = await import('../public/storage.js')
+  const on = switchNote('on', null)
+  check('the switch as the server has it, in words', on.now === 'Now: On — converts and deletes as set' && on.unsaved === '', JSON.stringify(on))
+  check('...for each position', switchNote('dry-run', null).now === 'Now: Dry run — shows what it would do, changes nothing' && switchNote('off', null).now === 'Now: Off', switchNote('off', null).now)
+  const pend = switchNote('on', 'off')
+  check('a choice clicked but not saved says so, and what the switch still is', pend.unsaved === 'Not saved yet: the switch is still On until you press Save' && pend.now === on.now, JSON.stringify(pend))
+  check('...Dry run picked on a server that is Off, too', switchNote('off', 'dry-run').unsaved === 'Not saved yet: the switch is still Off until you press Save')
+  check('the saved value picked again is not "not saved"', switchNote('on', 'on').unsaved === '' && switchNote('dry-run', 'dry-run').unsaved === '')
+  check('an older server without the switch: nothing invented', switchNote(null, null).now === '' && switchNote(null, 'on').unsaved === '')
 }
 
 // ---- the page's files ---------------------------------------------------------------------------
@@ -335,7 +347,9 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   const html = readFileSync(new URL('../public/settings.html', import.meta.url), 'utf8')
   check('the page loads storage.js and has the ids it paints into', /storage\.js/.test(html) && ['sr-locations', 'sr-warnings', 'sr-totals'].every((id) => html.includes(`id="${id}"`)))
   const tl = html.match(/<section[^>]*data-tab="storage"[^>]*aria-labelledby="sj-title"[\s\S]*?<\/section>/)?.[0] ?? ''
-  check('Settings > Storage has the time-lapse and retention switch, its plan and its last runs', ['sj-title', 'sj-form', 'sj-choices', 'sj-plan', 'sj-runs', 'sj-msg'].every((id) => tl.includes(`id="${id}"`)), tl.slice(0, 200))
+  check('Settings > Storage has the time-lapse and retention switch, its plan and its last runs', ['sj-title', 'sj-form', 'sj-choices', 'sj-plan', 'sj-runs', 'sj-msg', 'sj-now'].every((id) => tl.includes(`id="${id}"`)), tl.slice(0, 200))
+  // repainted every minute: as a live region a screen reader read both lines out again each time
+  check('the last-runs list is not a live region (#sj-msg announces saves)', /<ul id="sj-runs"[^>]*>/.test(tl) && !/<ul id="sj-runs"[^>]*aria-live/.test(tl), tl.match(/<ul id="sj-runs"[^>]*>/)?.[0])
   const note = tl.match(/<p class="hp-note">[\s\S]*?<\/p>/)?.[0] ?? ''
   check('the note under the switch says the clean-up rules delete past the total days, bookmarked or not', /clean-up rules/.test(note) && /total days, bookmarked or not/.test(note), note)
 }

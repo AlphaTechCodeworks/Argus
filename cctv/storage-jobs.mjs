@@ -6,7 +6,9 @@
 //   lastRuns() -> { thinning, retention }   what the Storage page shows (storage-report.mjs)
 //
 // mode is settings.storage.thinning, set by an admin on Settings > Storage (settings.mjs checks
-// it and the change is audited there):
+// it and the change is audited there). server.mjs passes a function that reads it, and it is read
+// again before each job, so a switch to Off or Dry run during a long thinning run holds for the
+// retention run straight after it:
 //   'off'      neither job runs;
 //   'dry-run'  both run and work out exactly what they would do, and touch nothing (the default);
 //   'on'       they convert and delete as the recording settings say.
@@ -106,17 +108,29 @@ function keep(r, { log, warn }) {
   ;(r.error || r.unprotected ? warn : log)(summaryLine(r))
 }
 
+/** The switch as it is right now: 'on' | 'off' | 'dry-run'. One that cannot be read is a dry run. */
+function switchNow(mode) {
+  let v
+  try {
+    v = typeof mode === 'function' ? mode() : mode
+  } catch {
+    v = null
+  }
+  return v === 'on' || v === 'off' ? v : 'dry-run'
+}
+
 /**
  * Runs thinning, then retention, as the switch says, and remembers each.
- * @param {{ mode: string, index: object|null, jobs: { thinning: Function, retention: Function },
+ * @param {{ mode: string|(() => string), index: object|null, jobs: { thinning: Function, retention: Function },
  *           args: () => object, limit?: number|null, clock?: () => number,
  *           log?: (line: string) => void, warn?: (line: string) => void }} o
+ *   mode:   the switch, or better a function that reads it: it is read again before each job
  *   args(): what both jobs are called with besides dryRun (index, settings, protectedRanges, present)
  *   limit:  the most files one run of a job takes on (thinning.mjs MAX_SEGMENTS_PER_RUN)
  */
 export async function runStorageJobs({ mode, index, jobs, args, limit = null, clock = Date.now, log = console.log, warn = console.warn }) {
   const out = { log, warn }
-  const m = mode === 'on' || mode === 'off' ? mode : 'dry-run'
+  const m = switchNow(mode)
   if (m === 'off') {
     for (const job of JOBS) keep(record(job, 'off', null, { at: clock() }), out)
     return
@@ -125,17 +139,32 @@ export async function runStorageJobs({ mode, index, jobs, args, limit = null, cl
     for (const job of JOBS) keep(record(job, m, null, { at: clock(), error: 'the recordings index is not open' }), out)
     return
   }
-  const dryRun = m !== 'on'
   for (const job of JOBS) {
+    // Read again before each job (review 2026-09-29): with the switch On a thinning run can take
+    // minutes (up to 2000 files read, rewritten, fsynced and read back over SMB), and an admin who
+    // set Off or Dry run meanwhile was told "Saved: Off" while retention went on to delete up to
+    // 2000 files in the same round. runThinning's file work is synchronous, so the save (an HTTP
+    // request) cannot even be handled until it is done: the event loop is let go once first, and a
+    // save that was waiting is in the settings before the switch is read.
+    let sw = m
+    if (job !== JOBS[0]) {
+      await new Promise((r) => setImmediate(r))
+      sw = switchNow(mode)
+    }
+    if (sw === 'off') {
+      keep(record(job, 'off', null, { at: clock() }), out)
+      continue
+    }
+    const dryRun = sw !== 'on'
     const t0 = clock()
     try {
       const result = await jobs[job]({ ...args(), dryRun })
-      keep(record(job, m, result, { at: clock(), tookMs: clock() - t0, limit }), out)
+      keep(record(job, sw, result, { at: clock(), tookMs: clock() - t0, limit }), out)
     } catch (e) {
-      keep(record(job, m, null, { at: clock(), tookMs: clock() - t0, limit, error: String(e?.message ?? e) }), out)
+      keep(record(job, sw, null, { at: clock(), tookMs: clock() - t0, limit, error: String(e?.message ?? e) }), out)
       // As before 2026-09-29: an unexpected failure stops this round, and retention waits for the
       // next one rather than deleting after a job that went wrong in a way nobody foresaw.
-      for (const rest of JOBS.slice(JOBS.indexOf(job) + 1)) keep(record(rest, m, null, { at: clock(), error: `${job} failed first, so this waits for the next round` }), out)
+      for (const rest of JOBS.slice(JOBS.indexOf(job) + 1)) keep(record(rest, sw, null, { at: clock(), error: `${job} failed first, so this waits for the next round` }), out)
       return
     }
   }

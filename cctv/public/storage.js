@@ -187,6 +187,25 @@ export function switchOnWarning(jobs) {
 }
 
 /**
+ * The switch as the server has it, in words, and whether the choice clicked is still unsaved. An
+ * admin once clicked Off, went to another tab without Save and came back to Off still checked (a
+ * picked choice survives the minute's repaint on purpose) with the server On, and nothing on the
+ * page said so (review 2026-09-29).
+ * @param {string|null} mode   /api/storage jobs.mode (null: an older server, nothing is said)
+ * @param {string|null} picked the choice clicked and not saved yet
+ * @returns {{ now: string, unsaved: string }}
+ */
+export function switchNote(mode, picked) {
+  const choice = THINNING_CHOICES.find((c) => c.value === mode)
+  if (!choice) return { now: '', unsaved: '' }
+  const short = choice.text.split(' — ')[0]
+  return {
+    now: `Now: ${choice.text}`,
+    unsaved: picked && picked !== mode ? `Not saved yet: the switch is still ${short} until you press Save` : ''
+  }
+}
+
+/**
  * What Save does with the choice picked: always sent, and On always asked about first. The page's
  * idea of the switch can be a minute old (another admin, another tab), and saying "No change" on
  * that once left the switch On while the admin believed they had set it Off (review 2026-09-29).
@@ -267,6 +286,22 @@ if (typeof document !== 'undefined') {
     m.textContent = text
     m.className = bad ? 'st-error' : 'st-meta'
   }
+  let unsavedSaid = '' // the "Not saved yet" words #sj-msg holds, so they are taken back, and nothing else is
+  let runsSaid = '' // what #sj-runs shows: rebuilt only when that changes, not every minute
+
+  /** "Now: On — ..." from the server, and "Not saved yet" while the choice clicked differs from it. */
+  function noteSwitch() {
+    const n = switchNote(jobs?.mode ?? null, picked)
+    document.getElementById('sj-now').textContent = n.now
+    const m = document.getElementById('sj-msg')
+    if (n.unsaved) {
+      if (m.textContent !== n.unsaved) {
+        m.textContent = n.unsaved
+        m.className = 'st-warn-text'
+      }
+    } else if (unsavedSaid && m.textContent === unsavedSaid) say('')
+    unsavedSaid = n.unsaved
+  }
 
   function paintJobs(data) {
     const form = document.getElementById('sj-form')
@@ -278,15 +313,24 @@ if (typeof document !== 'undefined') {
     if (!box.querySelector('input')) {
       for (const c of THINNING_CHOICES) {
         const input = el('input', { type: 'radio', name: 'sj-mode', value: c.value })
-        input.addEventListener('change', () => (picked = input.value))
+        input.addEventListener('change', () => {
+          picked = input.value
+          noteSwitch()
+        })
         const label = el('label')
         label.append(input, c.text)
         box.append(label)
       }
     }
+    // picked again, or the server moved to it: nothing is left unsaved
+    if (picked === v.mode) picked = null
     const show = picked ?? v.mode
     for (const r of box.querySelectorAll('input')) r.checked = r.value === show
     form.querySelector('button[type="submit"]').disabled = v.mode === null
+    noteSwitch()
+    const said = JSON.stringify(v.lines)
+    if (said === runsSaid) return
+    runsSaid = said
     document.getElementById('sj-runs').replaceChildren(
       ...v.lines.map((l) => {
         const li = el('li')
