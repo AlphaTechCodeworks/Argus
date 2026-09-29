@@ -318,7 +318,9 @@ export class VideoPlayer {
    * from the display time alone (verify-2's rule), a 1.0 s hiccup against the 350 ms buffer still
    * dropped to the keyframe, and so did a tile opening 1 s after one, still for 1.2 s where it had been
    * 0.5 s; this way the late frames are decoded, passed over by present(), and the picture carries on
-   * (the replay, 29 Sep: a 1.2 s stall every 20 s 90.7% of frames shown -> 97.3%, never worse elsewhere).
+   * (the replay, 29 Sep: equal or better on every fixture; a 1.2 s stall every 20 s 90.7% of frames
+   * shown -> 97.3%). A backlog the decoder cannot get through in 250 ms still drops, only later: a tile
+   * opening 1.9 s after a keyframe at 30 fps on a 6-picture decoder then misses the keyframe just after.
    */
   #behind() {
     if (!this.arrivalClock || this.decoder.decodeQueueSize > HARD_DECODE_QUEUE) return true
