@@ -101,12 +101,17 @@ export class AdaptiveLive {
     this.timer = null
   }
 
-  /** Where a socket's frames come from at this level: a shared thinned stream, or the camera's own. */
-  #streamFor(entry, level) {
+  /** The level a socket's stream is converted at on this level: 0 for the camera's own stream. */
+  #wanted(entry, level) {
     // the camera's own stream where this device can play it: H.264 always; H.265 only for a device
     // that said it can (&h265=1) -- half the data of H.264 for the same picture. Otherwise an H.265
     // camera is converted at the next level, never sent raw to a laptop that would show black.
-    if (level === 0 && entry.source.gop?.[0]?.[1] === 1 && !entry.clientH265) level = 1
+    return level === 0 && entry.source.gop?.[0]?.[1] === 1 && !entry.clientH265 ? 1 : level
+  }
+
+  /** Where a socket's frames come from at this level: a shared thinned stream, or the camera's own. */
+  #streamFor(entry, level) {
+    level = this.#wanted(entry, level)
     if (level === 0) return entry.source
     const key = `${entry.nvrId}/${entry.ch}/${entry.type}@${LEVELS[level].id}`
     let s = this.streams.get(key)
@@ -148,6 +153,7 @@ export class AdaptiveLive {
 
   #move(v, level, why) {
     const from = LEVELS[v.level].id
+    const link = this.#link(v) // what made it move, before the move changes it
     v.level = level
     for (const e of v.sockets) {
       const next = this.#streamFor(e, level)
@@ -156,7 +162,33 @@ export class AdaptiveLive {
       e.stream = next
       next.add(e.ws)
     }
-    this.log(`[adaptive] ${v.key.slice(0, 8)}: ${from} -> ${LEVELS[level].id} (${why}; ${v.sockets.size} camera${v.sockets.size === 1 ? '' : 's'})`)
+    // ...and what the move got: the tiles that wanted a conversion and found no free slot
+    const raw = [...v.sockets].filter((e) => this.#wanted(e, level) > 0 && e.stream === e.source).length
+    this.log(`[adaptive] ${v.key.slice(0, 8)}: ${from} -> ${LEVELS[level].id} (${why}; ${v.sockets.size} camera${v.sockets.size === 1 ? '' : 's'}; ${link}; ${raw} on the raw stream for want of a conversion slot, ${this.pool.max - this.pool.active} of ${this.pool.max} free)`)
+  }
+
+  /**
+   * A viewer's link as a level change sees it, for the log: its page's queue (the largest, as the
+   * pressure test reads it), how fast that drains and so how long the queue takes to go (live-mux.mjs
+   * drainBps; a plain /live socket has none), and the channels held over their cap. On 29 Sep all 12
+   * steps down said only "video backing up on its link", and nobody could tell which were real
+   * (verify-1, correction 5).
+   */
+  #link(v) {
+    let top = null
+    let queued = -1
+    let over = 0
+    for (const e of v.sockets) {
+      const q = e.ws.sharedBufferedAmount ?? e.ws.bufferedAmount ?? 0
+      if (q > queued) [top, queued] = [e, q]
+      if (e.ws.overSince != null) over++
+    }
+    let text = `${(Math.max(0, queued) / 1e6).toFixed(2)} MB queued`
+    const bps = top?.ws.drainBps
+    if (bps === null) text += ', draining: idle'
+    else if (typeof bps === 'number') text += `, draining at ${((bps * 8) / 1e6).toFixed(1)} Mbit/s${bps > 0 ? ` (${(queued / bps).toFixed(1)} s)` : ''}`
+    if (over) text += `, ${over} held over ${over === 1 ? 'its' : 'their'} cap`
+    return text
   }
 
   /** One look at every remote viewer. */

@@ -133,5 +133,40 @@ function fakeWs() {
   clearInterval(live.timer)
 }
 
+{
+  // Every level change says what the link looked like: the page's queue, how fast it drains (so how
+  // long that queue takes), channels held over their cap, and how many tiles were left on the raw
+  // stream for want of a conversion slot. On 29 Sep 12 steps down said only "video backing up", and
+  // nobody could tell which were real (verify-1, correction 5).
+  let now = T
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(1), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => now })
+  const page = { sharedBufferedAmount: 0, drainBps: null } // the page's one socket, as its channels see it
+  const channel = () => ({ ...fakeWs(), get sharedBufferedAmount() { return page.sharedBufferedAmount }, get drainBps() { return page.drainBps }, overSince: null })
+  const ws = [channel(), channel(), channel()]
+  ws.forEach((w, i) => live.attach('link', { ws: w, nvrId: 'nvr-2', ch: i, type: 1, source: fakeSource(`cam${i}`) }))
+  page.sharedBufferedAmount = 1_900_000
+  page.drainBps = 600_000 // 4.8 Mbit/s
+  ws[2].overSince = T
+  now += SETTLE_MS
+  live.tick()
+  check('a step down logs the queue, its drain rate and how long it takes, those held over their cap, and the tiles left raw for want of a slot',
+    logs.at(-1) === '[adaptive] link: full -> 15 (video backing up on its link; 3 cameras; 1.90 MB queued, draining at 4.8 Mbit/s (3.2 s), 1 held over its cap; 2 on the raw stream for want of a conversion slot, 0 of 1 free)', logs.at(-1))
+  page.sharedBufferedAmount = 0
+  page.drainBps = null
+  ws[2].overSince = null
+  now += CLIMB_AFTER_MS
+  live.tick()
+  check('a climb logs the same, with an idle link', logs.at(-1) === '[adaptive] link: 15 -> full (clean for 20 s; 3 cameras; 0.00 MB queued, draining: idle; 0 on the raw stream for want of a conversion slot, 0 of 1 free)', logs.at(-1))
+  // a viewer on plain /live sockets (no page socket to measure): the queue, and no rate
+  const solo = fakeWs()
+  live.attach('solo', { ws: solo, nvrId: 'n1', ch: 9, type: 1, source: fakeSource('cam9') })
+  solo.bufferedAmount = 300_000
+  now += SETTLE_MS
+  live.tick()
+  check('... a plain /live socket: its queue, no drain rate', logs.some((l) => l.startsWith('[adaptive] solo: full -> 15 (video backing up on its link; 1 camera; 0.30 MB queued; ')), logs.join(' | '))
+  clearInterval(live.timer)
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
