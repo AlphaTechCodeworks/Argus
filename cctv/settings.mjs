@@ -160,6 +160,23 @@ const needObject = (v, where) => {
   return v
 }
 
+/**
+ * A location's own free-space marks (storage.mjs sets them; location-health.mjs freeMarks reads them):
+ * each a whole number from 1 to 50 or absent (the default applies), and the floor below the low mark,
+ * its own or the default. Since 2026-09-29: the owner's NAS needs its low mark near 7 % (perf report D1).
+ */
+const MARK_FIELDS = { lowFreePct: 'low mark', floorFreePct: 'hard floor' }
+const locationName = (l) => (typeof l?.path === 'string' ? l.path : String(l?.id))
+function checkLocationMarks(storage) {
+  for (const l of storage.locations) {
+    if (!isPlainObject(l)) continue
+    for (const [k, name] of Object.entries(MARK_FIELDS)) if (l[k] !== undefined && l[k] !== null) int(`${locationName(l)}: the ${name} (% free)`, 1, 50)(l[k])
+    const low = l.lowFreePct ?? storage.lowFreePct
+    const floor = l.floorFreePct ?? storage.floorFreePct
+    if (floor >= low) throw new HttpError(400, `${locationName(l)}: the hard floor (${floor}% free) must be below the low mark (${low}% free)`)
+  }
+}
+
 /** Checks the whole settings object (throws HttpError 400). */
 function validate(s) {
   const d = s.recording.defaults
@@ -189,6 +206,7 @@ function validate(s) {
   int('Hard floor (% free)', 1, 50)(s.storage.floorFreePct)
   if (s.storage.floorFreePct >= s.storage.lowFreePct) throw new HttpError(400, 'the hard floor must be below the low-space threshold')
   if (!Array.isArray(s.storage.locations)) throw new HttpError(400, 'storage.locations must be a list')
+  checkLocationMarks(s.storage)
   if (!Array.isArray(s.storage.netshares)) throw new HttpError(400, 'storage.netshares must be a list')
   oneOf('storage.thinning', THINNING)(s.storage.thinning)
   if (isPlainObject(s.backfill)) for (const [k, f] of Object.entries(BACKFILL_FIELDS)) f(s.backfill[k])
@@ -240,6 +258,22 @@ function fromFile(j) {
     const floor = j.storage.floorFreePct
     if (Number.isInteger(low) && Number.isInteger(floor) && floor >= 1 && floor < low && low <= 50) Object.assign(s.storage, { lowFreePct: low, floorFreePct: floor })
     if (Array.isArray(j.storage.locations)) s.storage.locations = j.storage.locations.filter(isPlainObject)
+    // a location's own marks that cannot be used are dropped (its default applies), or no save could
+    // pass validate() again
+    for (const l of s.storage.locations) {
+      for (const [k, name] of Object.entries(MARK_FIELDS)) {
+        if (!(k in l)) continue
+        if (!(Number.isInteger(l[k]) && l[k] >= 1 && l[k] <= 50)) {
+          if (l[k] !== null) console.warn(`[settings] ${locationName(l)}: its ${name} ${JSON.stringify(l[k])} is not a whole number from 1 to 50: the default is used`)
+          delete l[k]
+        }
+      }
+      if ((l.floorFreePct ?? s.storage.floorFreePct) >= (l.lowFreePct ?? s.storage.lowFreePct)) {
+        console.warn(`[settings] ${locationName(l)}: its hard floor is not below its low mark: the defaults are used for both`)
+        delete l.lowFreePct
+        delete l.floorFreePct
+      }
+    }
     if (Array.isArray(j.storage.netshares)) s.storage.netshares = j.storage.netshares.filter(isPlainObject)
     // Anything but the three words is a dry run: a hand-edited typo must never arm the jobs.
     if ('thinning' in j.storage) {

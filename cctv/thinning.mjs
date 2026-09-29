@@ -27,9 +27,12 @@
 // feature-detected: no module, no export, we skip nothing and carry on. If it is there but
 // throws, the run STOPS instead, because then we do not know what is protected and guessing
 // would delete evidence.
-import { closeSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, statfsSync, unlinkSync, writeSync } from 'node:fs'
-import { dirname, join, resolve, sep } from 'node:path'
+import { closeSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { join, resolve, sep } from 'node:path'
+import { freeMarks } from './location-health.mjs'
+import { checkFreeRose, freeingStalled, makeDeleter } from './segment-delete.mjs'
 import { parseIdx } from './segment-writer.mjs'
+import { shareCall } from './share-calls.mjs'
 import { markerPresent } from './storage-report.mjs'
 import { THIN_SUFFIX as suffix, buildThinned, checkThinned, codecOf, planThin, thinNames as names } from './thin-file.mjs'
 
@@ -52,10 +55,6 @@ export const MAX_SEGMENT_BYTES = 512 * 1024 * 1024
 export const PROTECT_MARGIN_MS = 60_000
 
 const camRec = (settings, nvr, ch) => ({ ...settings.recording.defaults, ...(settings.recording.cameras?.[`${nvr}/${ch}`] ?? {}) })
-const defaultFreeOf = (loc) => {
-  const s = statfsSync(loc.path)
-  return { freeBytes: Number(s.bavail) * Number(s.bsize), totalBytes: Number(s.blocks) * Number(s.bsize) }
-}
 const pct = (f) => (f.totalBytes > 0 ? (f.freeBytes / f.totalBytes) * 100 : 100)
 
 // ---- protected stretches -------------------------------------------------------------------
@@ -91,8 +90,9 @@ const overlaps = (ranges, fromMs, toMs) => ranges.some(([a, b]) => fromMs <= b &
  * A guard object for one run: .protected(seg) says whether a segment must be left alone.
  * `mode` is 'none' (no bookmarks module yet) or 'ranges'. A run's `protection` can also be
  * 'unread': asking threw, and the run stopped before any file (the two catches below).
+ * housekeeping.mjs asks through this too since 2026-09-29.
  */
-async function protectionFor(fromMs, toMs, { protectedRanges } = {}) {
+export async function protectionFor(fromMs, toMs, { protectedRanges } = {}) {
   const fn = protectedRanges === undefined ? await loadProtectedRanges() : protectedRanges
   if (typeof fn !== 'function') return { mode: 'none', ranges: [], protected: () => false }
   // A throw here is fatal for the run: we cannot tell bookmarked footage from the rest, and the
@@ -394,6 +394,9 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
 
 // ---- the retention job ---------------------------------------------------------------------------
 
+/** Rows asked for at a time while walking a location's oldest footage below the floor. */
+const FLOOR_WALK = 200
+
 /**
  * Deletes whole segments: past the camera's retentionDays first, then, on any location still
  * below the free-space floor, its oldest footage first whatever the camera.
@@ -402,13 +405,22 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
  * the per-camera days and the floor only, it goes oldest first, and it never touches a protected
  * stretch.
  *
+ * Its file calls go to each location's helper since 2026-09-29 (segment-delete.mjs; perf report Task 3),
+ * in batches, and the rows go only for the files the helper confirmed. Free space too comes from the
+ * helper (the default freeOf), read once per location and counted on with the bytes deleted, not read
+ * off the share after every file on the main thread. Because the run now waits on the helper, a save of
+ * the switch is answered while it runs: `armed()` (storage-jobs.mjs) is asked before each batch, and Off
+ * or Dry run stops it there.
+ *
+ * @param {{ share?: Function, armed?: () => boolean, sleep?: Function }} o (and the rest as before)
  * @returns {Promise<{ dryRun, deleted: {path, why, bytes}[], skipped: {path, why}[],
  *                     warnings: string[], freedBytes: number, protection: 'ranges'|'none'|'unread' }>}
  */
-export async function runRetention({ index, settings = null, now = Date.now(), dryRun = true, present = markerPresent, freeOf = defaultFreeOf, protectedRanges, maxDeletes = MAX_SEGMENTS_PER_RUN } = {}) {
+export async function runRetention({ index, settings = null, now = Date.now(), dryRun = true, present = markerPresent, freeOf = null, protectedRanges, maxDeletes = MAX_SEGMENTS_PER_RUN, share = shareCall, armed = null, sleep } = {}) {
   settings ??= await currentSettings()
   const out = { dryRun, deleted: [], skipped: [], warnings: [], freedBytes: 0, protection: 'none' }
   if (!index) return out
+  freeOf ??= (loc) => share(loc, 'statfs')
   const warn = (w) => {
     out.warnings.push(w)
     console.warn(`[retention] ${w}`)
@@ -425,103 +437,129 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
   }
   out.protection = guard.mode
 
-  const refused = new Set() // tried and could not: never tried again in this run
-  const del = (seg, why) => {
+  const refused = new Set() // seen in this run (taken, or tried and could not): never offered again
+  let switched = false
+  const deleters = new Map() // location id -> the location's deleter (on only)
+  const deleterFor = (loc) => {
+    if (!deleters.has(loc.id)) {
+      deleters.set(
+        loc.id,
+        makeDeleter({
+          share,
+          loc,
+          index,
+          beforeBatch: () => {
+            if (switched || !armed || armed()) return switched ? 'the switch was set to Off or Dry run during this run' : null
+            switched = true
+            warn('the switch was set to Off or Dry run during this run: stopped before the next batch')
+            return 'the switch was set to Off or Dry run during this run'
+          },
+          onDeleted: (seg, why) => {
+            out.deleted.push({ path: seg.path, why, bytes: seg.bytes ?? null })
+            out.freedBytes += Number(seg.bytes) || 0
+          },
+          onFailed: (seg, error) => warn(`cannot delete ${seg.path}: ${error}`),
+          onStop: (message, code) => code !== 'EHALT' && warn(`${loc.path}: ${message}`)
+        })
+      )
+    }
+    return deleters.get(loc.id)
+  }
+  const flushAll = async () => {
+    for (const d of deleters.values()) await d.flush()
+  }
+  /** Takes a segment: dry run, recorded; on, queued for its location's helper. false when it may not go. */
+  const del = async (seg, why) => {
     if (refused.has(seg.path)) return false
+    refused.add(seg.path)
     if (guard.protected(seg)) {
       out.skipped.push({ path: seg.path, why: 'bookmarked or exported' })
-      refused.add(seg.path)
       return false
     }
     const may = mayTouch(seg, locs, here)
     if (!may.ok) {
       out.skipped.push({ path: seg.path, why: may.why })
-      refused.add(seg.path)
       return false
     }
-    out.deleted.push({ path: seg.path, why, bytes: seg.bytes ?? null })
-    out.freedBytes += Number(seg.bytes) || 0
     if (dryRun) {
-      refused.add(seg.path) // so a dry run does not report the same file twice
+      out.deleted.push({ path: seg.path, why, bytes: seg.bytes ?? null })
+      out.freedBytes += Number(seg.bytes) || 0
       return true
     }
-    for (const f of [resolve(seg.path), `${resolve(seg.path)}.idx`]) {
-      try {
-        unlinkSync(f)
-      } catch (e) {
-        if (e.code !== 'ENOENT') {
-          warn(`cannot delete ${f}: ${e.code || e.message}`)
-          out.deleted.pop()
-          out.freedBytes -= Number(seg.bytes) || 0
-          refused.add(seg.path)
-          return false
-        }
-      }
-    }
-    index.remove(seg.path)
-    for (let d = dirname(resolve(seg.path)); d.startsWith(may.root + sep); d = dirname(d)) {
-      try {
-        rmdirSync(d)
-      } catch {
-        break
-      }
-    }
-    return true
+    const d = deleterFor(locs.get(seg.loc))
+    if (d.stopped) return false
+    await d.add(seg, why)
+    return !d.stopped
   }
 
   // 1. per-camera retention days, oldest first (olderThan is ordered by start_ms)
   let n = 0
   for (const { nvr, ch } of index.cameras()) {
+    if (switched) break
     const rec = camRec(settings, nvr, ch)
     if (!Number.isFinite(rec.retentionDays)) {
       warn(`${nvr}/${ch}: retentionDays not set: skipped`)
       continue
     }
     const cutoff = now - rec.retentionDays * DAY
-    for (let loop = 0; loop < 100 && n < maxDeletes; loop++) {
+    for (let loop = 0; loop < 100 && n < maxDeletes && !switched; loop++) {
       const batch = index.olderThan(nvr, ch, cutoff, BATCH).filter((s) => !refused.has(s.path))
       if (!batch.length) break
       let any = false
       for (const s of batch) {
-        if (n >= maxDeletes) break
-        if (del(s, 'past its retention days')) {
+        if (n >= maxDeletes || switched) break
+        if (await del(s, 'past its retention days')) {
           any = true
           n++
         }
       }
+      // (rows queued and not sent yet are still in the index, and refused: the next look passes them)
       if (!any) break
     }
   }
+  await flushAll()
 
-  // 2. the free-space floor, per location, oldest first
-  const { floorFreePct = 5 } = settings.storage ?? {}
+  // 2. the free-space floor, per location, oldest first: free space from the location's helper, then
+  // counted on with the bytes deleted
   for (const loc of locs.values()) {
-    if (!here.has(loc.id)) continue
+    if (!here.has(loc.id) || switched) continue
+    const { floorFreePct } = freeMarks(settings, loc)
     let free
     try {
-      free = freeOf(loc)
+      free = await freeOf(loc)
     } catch {
       continue // storage.mjs reports an unreadable location
     }
+    if (!(free?.totalBytes > 0) || !Number.isFinite(free?.freeBytes)) continue
     if (pct(free) >= floorFreePct) continue
+    const stall = dryRun ? null : freeingStalled(loc.id)
+    if (stall && now < stall.retryAt) {
+      warn(`${loc.path}: below the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%), but deleting files did not free space on it (a recycle bin or snapshots on the NAS?): nothing deleted on it for free space (housekeeping tries again at ${new Date(stall.retryAt).toISOString()})`)
+      continue
+    }
     warn(`${loc.path}: below the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%): ${dryRun ? 'would delete' : 'deleting'} the oldest footage, even inside its retention`)
-    for (let loop = 0; loop < maxDeletes && n < maxDeletes && pct(free) < floorFreePct; loop++) {
-      const oldest = index.oldest(50, { loc: loc.id }).find((s) => !refused.has(s.path))
-      if (!oldest) break
-      if (!del(oldest, 'below the free-space floor')) continue
-      n++
-      if (dryRun) {
-        // Nothing was really freed, so the loop would never end: count the bytes we would have
-        // freed towards the floor instead.
-        free = { freeBytes: free.freeBytes + (Number(oldest.bytes) || 0), totalBytes: free.totalBytes }
-        continue
-      }
-      try {
-        free = freeOf(loc)
-      } catch {
-        break
+    const floorB = (free.totalBytes * floorFreePct) / 100
+    const d = dryRun ? null : deleterFor(loc)
+    const base = d ? d.doneBytes : 0
+    let dryFreed = 0
+    const counted = () => free.freeBytes + (d ? d.doneBytes - base + d.pendingBytes : dryFreed)
+    let fromMs
+    walk: for (let loop = 0; loop < 1000 && n < maxDeletes && counted() < floorB; loop++) {
+      const rows = index.oldest(FLOOR_WALK, { loc: loc.id, fromMs }).filter((s) => !refused.has(s.path))
+      if (!rows.length) break
+      for (const s of rows) {
+        fromMs = s.startMs
+        if (n >= maxDeletes || counted() >= floorB || d?.stopped || switched) break walk
+        if (await del(s, 'below the free-space floor')) {
+          n++
+          if (!d) dryFreed += Number(s.bytes) || 0
+        }
       }
     }
+    if (!d) continue
+    await d.flush()
+    const r = await checkFreeRose({ loc, before: free, deletedBytes: d.doneBytes - base, freeOf, now, sleep })
+    if (r.warning) warn(`FREE SPACE DOES NOT RISE: ${r.warning}`)
   }
   // No line of its own here: storage-jobs.mjs writes one summary for the run (every run that changed
   // footage; in dry run at most once an hour, where a line every 5 minutes said the same thing).

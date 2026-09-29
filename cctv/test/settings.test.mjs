@@ -206,6 +206,43 @@ check('null removes an NVR override', !('nvr-2' in getSettings().recording.nvrs)
   check('a non-admin cannot change the recording days', p3 === 403)
 }
 
+// ---- each location's own free-space marks (storage.mjs sets them; the owner's NAS, 2026-09-29) ----------
+{
+  const loc = (extra) => ({ id: 'nas-1', path: '/srv/cctv-net/nas', type: 'network', role: 'main', limitGB: 12000, ...extra })
+  saveSettings({ storage: { locations: [loc({ lowFreePct: 7, floorFreePct: 4 })] } }, 'storage.mjs', { internal: true })
+  check('a location\'s own marks are kept', getSettings().storage.locations[0].lowFreePct === 7 && getSettings().storage.locations[0].floorFreePct === 4)
+  // (a location with a floor of its own does not use the default one)
+  saveSettings({ storage: { locations: [loc({ lowFreePct: 7 })] } }, 'storage.mjs', { internal: true })
+  check('a default floor at or above a location\'s own low mark is refused, naming the location', refused({ storage: { lowFreePct: 20, floorFreePct: 7 } }, /nas-1|\/srv\/cctv-net\/nas/))
+  saveSettings({ storage: { locations: [loc({ lowFreePct: 7, floorFreePct: 4 })] } }, 'storage.mjs', { internal: true })
+  saveSettings({ storage: { locations: [loc({ lowFreePct: 7, floorFreePct: 4 }), { id: 'usb-2', path: '/srv/cctv-rec/usb2', type: 'usb', role: 'overflow', limitGB: null, floorFreePct: 4 }] } }, 'storage.mjs', { internal: true })
+  check('a default low mark at or below a location\'s own floor is refused', refused({ storage: { lowFreePct: 4, floorFreePct: 2 } }, /usb2.*floor|floor.*usb2/))
+  saveSettings({ storage: { locations: [loc({ lowFreePct: 7, floorFreePct: 4 })] } }, 'storage.mjs', { internal: true })
+  check('bad own marks refused on a save too (7.5, 0, 51, floor >= low)', [{ lowFreePct: 7.5 }, { lowFreePct: 0 }, { floorFreePct: 51 }, { lowFreePct: 6, floorFreePct: 6 }].every((m) => {
+    try {
+      saveSettings({ storage: { locations: [loc(m)] } }, 'storage.mjs', { internal: true })
+      return false
+    } catch (e) {
+      return e.status === 400
+    }
+  }))
+  check('... and nothing changed', getSettings().storage.locations[0].lowFreePct === 7 && getSettings().storage.locations[0].floorFreePct === 4)
+  // a hand-edited file: a bad own mark is dropped (the default applies), everything else kept; saving
+  // anything afterwards is not refused because of it
+  writeFileSync(SETTINGS_FILE, JSON.stringify({ storage: { lowFreePct: 15, floorFreePct: 5, locations: [loc({ lowFreePct: 'seven', floorFreePct: 4 }), { id: 'usb-1', path: '/srv/cctv-rec/usb1', type: 'usb', role: 'overflow', limitGB: null, lowFreePct: 10, floorFreePct: 12 }] } }))
+  const ls = getSettings().storage.locations
+  check('from the file: a bad own mark is dropped, the good one kept', !('lowFreePct' in ls[0]) && ls[0].floorFreePct === 4 && ls[0].limitGB === 12000, JSON.stringify(ls[0]))
+  check('from the file: own marks that contradict each other are both dropped', !('lowFreePct' in ls[1]) && !('floorFreePct' in ls[1]), JSON.stringify(ls[1]))
+  let saved = true
+  try {
+    saveSettings({ thumbnails: 'off' }, 'boss')
+  } catch {
+    saved = false
+  }
+  check('... and the next save is not refused because of them', saved)
+  saveSettings({ storage: { locations: [] } }, 'storage.mjs', { internal: true })
+}
+
 // The data folder goes with the run: the runs of 2026-09-29 left six in the production server's
 // /tmp (test users.json, settings.json and audit.jsonl only; review 2026-09-29).
 rmSync(DATA, { recursive: true, force: true })

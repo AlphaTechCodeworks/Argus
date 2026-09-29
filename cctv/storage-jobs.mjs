@@ -156,10 +156,9 @@ export async function runStorageJobs({ mode, index, jobs, args, limit = null, cl
     // 2000 files in the same round. runThinning's file work is synchronous, so the save (an HTTP
     // request) cannot even be handled until it is done: the event loop is let go round first, and a
     // save that was waiting on a connection already open is in the settings before the switch is
-    // read. (A save on a brand-new connection needs more turns than that. While retention's file
-    // work is synchronous too, such a save is not answered "Saved" until retention has finished; once
-    // that work waits on a helper, saves are answered during it, and the job itself must then look
-    // at the switch between files, not only here.)
+    // read. (A save on a brand-new connection needs more turns than that. Retention's file work waits
+    // on the locations' helpers since 2026-09-29, so saves are answered during it, and it asks armed()
+    // before each batch of files as well: thinning.mjs runRetention.)
     let sw = m
     if (job !== JOBS[0]) {
       await letTheLoopTurn()
@@ -172,7 +171,9 @@ export async function runStorageJobs({ mode, index, jobs, args, limit = null, cl
     const dryRun = sw !== 'on'
     const t0 = clock()
     try {
-      const result = await jobs[job]({ ...args(), dryRun })
+      // armed(): the switch as it is when the job asks. A job that waits on a share helper (retention,
+      // since 2026-09-29) lets saves be answered while it runs, and asks before each batch of files.
+      const result = await jobs[job]({ ...args(), dryRun, armed: () => switchNow(mode) === 'on' })
       keep(record(job, sw, result, { at: clock(), tookMs: clock() - t0, limit }), out)
     } catch (e) {
       keep(record(job, sw, null, { at: clock(), tookMs: clock() - t0, limit, error: String(e?.message ?? e) }), out)

@@ -49,7 +49,8 @@ export function buildSnapshot(deps, nowMs) {
       }
     })(),
     // lowFreePct rides on each location so the rules stay pure: they compare, they do not read settings.
-    locations: deps.locationState().map((l) => ({ ...l, lowFreePct })),
+    // A location's own low mark wins (storage.mjs, since 2026-09-29: the NAS's near 7 %).
+    locations: deps.locationState().map((l) => ({ ...l, lowFreePct: Number.isInteger(l.lowFreePct) ? l.lowFreePct : lowFreePct })),
     nvrs: deps.listNvrs().map((n) => ({
       id: n.id,
       name: n.name,

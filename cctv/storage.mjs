@@ -4,7 +4,12 @@
 // must not fill up the system disk.
 //
 //   location: { id, path, type: 'internal'|'usb'|'network', role: 'main'|'overflow'|'archive',
-//               limitGB: number|null, sameDisk?: true, added, addedBy }
+//               limitGB: number|null, lowFreePct?, floorFreePct?, sameDisk?: true, added, addedBy }
+//     limitGB: the most Argus's recordings may take there (as the index counts them), in GB of
+//       1,000,000,000 bytes, at most the drive's or share's size; ENFORCED by housekeeping.mjs since
+//       2026-09-29 (the owner's 12,000 GB of the shared NAS)
+//     lowFreePct / floorFreePct: its own free-space marks, else storage.lowFreePct / floorFreePct
+//       (location-health.mjs freeMarks)
 //   <path>/.cctv-recordings: { id, created }   (the marker)
 //   health:   { ok, reason, marker, writable, freeBytes, totalBytes, writeMBps }
 //
@@ -13,7 +18,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { MARKER, _setStatfs, freePercent, healthOf, markerId, probeWriteSpeed } from './location-health.mjs'
+import { MARKER, _setStatfs, freeMarks, freePercent, healthOf, markerId, probeWriteSpeed, sizeOfFolder } from './location-health.mjs'
 import { HttpError, isPlainObject } from './nvr-xml.mjs'
 import { cameraRecording, getSettings, saveSettings } from './settings.mjs'
 import { SHARE_ANSWER_MS, keepShareHelpers, onShareStuck, shareAnswerMs, shareCall, shareHelperExits } from './share-calls.mjs'
@@ -108,30 +113,73 @@ export function freeOf(loc) {
   return { freeBytes: h.freeBytes, totalBytes: h.totalBytes }
 }
 
-const withHealth = (loc, floor) => ({
+/** A location with its health, judged by its own hard floor (its own, else the settings'). */
+const withHealth = (loc, s) => ({
   id: loc.id,
   path: loc.path,
   type: loc.type,
   role: loc.role,
   limitGB: loc.limitGB ?? null,
+  // its own marks, null where the default applies
+  lowFreePct: loc.lowFreePct ?? null,
+  floorFreePct: loc.floorFreePct ?? null,
   ...(loc.sameDisk ? { sameDisk: true } : {}),
-  health: locationHealth(loc, floor)
+  health: locationHealth(loc, freeMarks(s, loc).floorFreePct)
 })
 
 /** Every location with its current health. Never waits on a network share. */
 export function listLocations() {
   const s = getSettings()
-  return s.storage.locations.map((l) => withHealth(l, s.storage.floorFreePct))
+  return s.storage.locations.map((l) => withHealth(l, s))
 }
 
 const cleanRole = (v) => {
   if (!ROLES.includes(v)) throw new HttpError(400, `role must be one of: ${ROLES.join(', ')}`)
   return v
 }
-const cleanLimit = (v) => {
+
+const GB = 1e9
+/**
+ * The size of a location's drive or share in bytes, or null when it is not known now: a share's is its
+ * helper's last check (never asked of the share from here), a drive's is read off it.
+ */
+function sizeOf(loc) {
+  if (loc.type === 'network') {
+    const h = netHealth.get(loc.id)
+    return h?.marker && h.totalBytes > 0 ? h.totalBytes : null
+  }
+  // a drive not mounted: its mount point is on the system disk, whose size is not the drive's
+  return markerId(loc.path) === loc.id ? sizeOfFolder(loc.path) : null
+}
+/**
+ * A space limit: a positive number of GB (1 GB = 1,000,000,000 bytes, as the Storage page says) and at
+ * most the size of the drive or share, since housekeeping.mjs enforces it (2026-09-29): a limit above
+ * the size would read as a promise it cannot keep. null, undefined or '' is no limit.
+ */
+const cleanLimit = (v, sizeNow) => {
   if (v === null || v === undefined || v === '') return null
-  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 1e7) throw new HttpError(400, 'limitGB must be a positive number of GB, or empty for no limit')
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 1e7) throw new HttpError(400, 'limitGB must be a positive number of GB (1 GB = 1,000,000,000 bytes), or empty for no limit')
+  const size = sizeNow()
+  if (!(size > 0)) throw new HttpError(400, 'the size of this drive or share is not known right now (a share not checked yet, or not mounted), so the limit cannot be checked against it: set it once the location shows its size')
+  if (v * GB > size) throw new HttpError(400, `limitGB must be at most the size of the drive or share: ${Math.floor(size / GB).toLocaleString('en-GB')} GB here (1 GB = 1,000,000,000 bytes)`)
   return v
+}
+/** A location's own marks from `fields` (a whole number from 1 to 50; null or '' for the default), checked together. */
+function withMarks(loc, fields, s) {
+  const next = { ...loc }
+  for (const [k, name] of [['lowFreePct', 'the low mark'], ['floorFreePct', 'the hard floor']]) {
+    if (!(k in fields)) continue
+    const v = fields[k]
+    if (v === null || v === '') {
+      delete next[k]
+      continue
+    }
+    if (!Number.isInteger(v) || v < 1 || v > 50) throw new HttpError(400, `${name} must be a whole number from 1 to 50 (% free), or empty for the default`)
+    next[k] = v
+  }
+  const m = freeMarks(s, next)
+  if (m.floorFreePct >= m.lowFreePct) throw new HttpError(400, `the hard floor (${m.floorFreePct}% free) must be below the low mark (${m.lowFreePct}% free)`)
+  return next
 }
 
 function saveLocations(locations, user) {
@@ -148,7 +196,6 @@ export function addLocation({ path, type, role, limitGB = null, sameDisk = false
   path = resolve(path)
   if (!TYPES.includes(type)) throw new HttpError(400, `type must be one of: ${TYPES.join(', ')}`)
   cleanRole(role)
-  limitGB = cleanLimit(limitGB)
   const s = getSettings()
   if (s.storage.locations.some((l) => l.path === path)) throw new HttpError(409, `${path} is already a location`)
   let st
@@ -176,26 +223,36 @@ export function addLocation({ path, type, role, limitGB = null, sameDisk = false
         : `${path} is on the system disk: the ${type === 'usb' ? 'drive' : 'share'} is not mounted there`
     )
   }
+  // a share's size is not known until its helper has checked it: its limit is set after that
+  limitGB = cleanLimit(limitGB, () => (type === 'network' ? null : sizeOfFolder(path)))
   const id = existing ?? `loc-${randomBytes(4).toString('hex')}`
   if (!existing) writeFileSync(join(path, MARKER), `${JSON.stringify({ id, created: new Date().toISOString() })}\n`, { flag: 'wx' })
   const loc = { id, path, type, role, limitGB, ...(sameAsSystem ? { sameDisk: true } : {}), added: new Date().toISOString(), addedBy: user ?? '?' }
   saveLocations([...s.storage.locations, loc], user)
   if (type === 'network') checkHealth().catch(() => {}) // its health is not known until checked
-  console.log(`[storage] ${user} added ${id} at ${path} (${type}, ${role})${sameAsSystem ? ' on the system disk' : ''}`)
-  return withHealth(loc, s.storage.floorFreePct)
+  console.log(`[storage] ${user} added ${id} at ${path} (${type}, ${role})${sameAsSystem ? ' on the system disk' : ''}${limitGB ? `, limit ${limitGB} GB` : ''}`)
+  return withHealth(loc, s)
 }
 
-/** Changes role and/or space limit. */
+/** Changes role, space limit and/or its own free-space marks (lowFreePct, floorFreePct; null: the default). */
 export function updateLocation(id, fields, user) {
   if (!isPlainObject(fields)) throw new HttpError(400, 'bad fields')
   const s = getSettings()
   const loc = s.storage.locations.find((l) => l.id === id)
   if (!loc) throw new HttpError(404, 'No such location')
   if ('role' in fields) loc.role = cleanRole(fields.role)
-  if ('limitGB' in fields) loc.limitGB = cleanLimit(fields.limitGB)
+  if ('limitGB' in fields) loc.limitGB = cleanLimit(fields.limitGB, () => sizeOf(loc))
+  if ('lowFreePct' in fields || 'floorFreePct' in fields) {
+    const m = withMarks(loc, fields, s)
+    for (const k of ['lowFreePct', 'floorFreePct']) {
+      if (k in m) loc[k] = m[k]
+      else delete loc[k]
+    }
+  }
   saveLocations(s.storage.locations, user)
-  console.log(`[storage] ${user} changed ${id}: role ${loc.role}, limit ${loc.limitGB ?? 'none'}`)
-  return withHealth(loc, s.storage.floorFreePct)
+  const marks = freeMarks(s, loc)
+  console.log(`[storage] ${user} changed ${id}: role ${loc.role}, limit ${loc.limitGB ? `${loc.limitGB} GB (enforced)` : 'none'}, low mark ${marks.lowFreePct}%${loc.lowFreePct ? '' : ' (default)'}, floor ${marks.floorFreePct}%${loc.floorFreePct ? '' : ' (default)'}`)
+  return withHealth(loc, s)
 }
 
 /** Removes a location from the list. Its files and marker stay where they are. */
@@ -248,13 +305,12 @@ function tellListeners(list) {
 /** Checks every location now (with probe: also measures write speed) and tells listeners of changes. */
 export async function checkHealth({ probe = false } = {}) {
   const s = getSettings()
-  const floor = s.storage.floorFreePct
   // a location taken off the list: its helper goes (any type: the jobs may use one for a drive too)
   keepShareHelpers(s.storage.locations)
   const shares = s.storage.locations.filter((l) => l.type === 'network')
   // shares all at once, each by its own helper; a stuck one costs the answer time, not the server
   await Promise.all(shares.map(async (l) => {
-    const h = await probeShare(l, floor, probe)
+    const h = await probeShare(l, freeMarks(s, l).floorFreePct, probe)
     if (h.writeMBps == null) h.writeMBps = netHealth.get(l.id)?.writeMBps ?? null
     netHealth.set(l.id, h)
   }))

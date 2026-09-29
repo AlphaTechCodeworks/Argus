@@ -1,27 +1,51 @@
-// Tests for housekeeping.mjs: retention and low-space deletion of server recordings.
+// Tests for housekeeping.mjs: retention, low-space deletion and each location's space limit.
 // Temp dirs, synthetic segment files, a fake free-space function. Run: node cctv/test/housekeeping.test.mjs
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+// The file calls go through the location's share helper (share-calls.mjs) since 2026-09-29 (perf report
+// Task 3): most cases here hand runHousekeeping the helper's own ops run in this process
+// (share-ops.mjs, the same marker and inside-the-folder refusals), a few the real helper process, and
+// the timing case a fake share taking 3 ms a file call.
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { monitorEventLoopDelay } from 'node:perf_hooks'
+import { DatabaseSync } from 'node:sqlite'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const data = mkdtempSync(join(tmpdir(), 'cctv-hk-'))
 process.env.DATA_DIR = data
-const { runHousekeeping } = await import('../housekeeping.mjs')
+const { runHousekeeping, housekeepingCandidates, _test: hk } = await import('../housekeeping.mjs')
 const { openRecIndex } = await import('../rec-index.mjs')
 const { segmentPath } = await import('../segment-writer.mjs')
+const { makeShareOps } = await import('../share-ops.mjs')
+const { stopShareHelpers } = await import('../share-calls.mjs')
+const { markerPresent } = await import('../storage-report.mjs')
 
 const DAY = 86_400_000
+const HOUR = 3_600_000
+const GB = 1e9
 const NOW = Date.UTC(2026, 8, 24, 12, 0, 0)
 const DEFAULTS = { mode: 'continuous', fullDays: 30, after: 'timelapse', timelapseS: 10, retentionDays: 183, preS: 10, postS: 20 }
 const settingsWith = (locs, cameras = {}, storage = {}) => ({ recording: { defaults: DEFAULTS, cameras }, storage: { locations: locs, lowFreePct: 15, floorFreePct: 5, ...storage } })
 
-function setup() {
+/** The helper's own ops, run in this process: what the helper would do, without the process. */
+const ops = new Map()
+const localShare = (loc, op, args) => {
+  const key = `${loc.id}\n${loc.path}`
+  if (!ops.has(key)) ops.set(key, makeShareOps({ id: loc.id, root: loc.path }))
+  const o = ops.get(key)
+  if (!Object.hasOwn(o, op)) return Promise.reject(Object.assign(new Error(`EBADOP: ${op}`), { code: 'EBADOP' }))
+  return o[op](args ?? {}, () => {})
+}
+/** runHousekeeping with this file's defaults: the local helper ops, the marker read off the folder, no bookmarks module. */
+const run = (o) => runHousekeeping({ share: localShare, present: markerPresent, protectedRanges: null, now: NOW, log: () => {}, warn: () => {}, ...o })
+
+function setup({ id = 'L1', limitGB = null, marks = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'hk-loc-'))
-  writeFileSync(join(root, '.cctv-recordings'), '{"id":"L1"}')
-  const loc = { id: 'L1', path: root, type: 'usb', role: 'main', limitGB: null }
+  writeFileSync(join(root, '.cctv-recordings'), JSON.stringify({ id }))
+  const loc = { id, path: root, type: 'usb', role: 'main', limitGB, ...marks }
   const index = openRecIndex(join(mkdtempSync(join(tmpdir(), 'hk-db-')), 'r.db'))
   const add = (nvr, ch, ageDays, bytes = 1000) => {
     const startMs = NOW - ageDays * DAY
@@ -29,30 +53,33 @@ function setup() {
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, Buffer.alloc(10))
     writeFileSync(`${path}.idx`, Buffer.alloc(16))
-    index.addSegment({ nvr, ch, path, startMs, endMs: startMs + 59_000, bytes, keyframes: 1, loc: 'L1' })
+    index.addSegment({ nvr, ch, path, startMs, endMs: startMs + 59_000, bytes, keyframes: 1, loc: id })
     return path
   }
   return { root, loc, index, add }
 }
 // free space: totalBytes 100_000; free = base + bytes of deleted segments
-const fakeFree = (base) => {
-  const f = { freed: 0, calls: 0, fn: () => ({ freeBytes: base + f.freed, totalBytes: 100_000 }) }
+const fakeFree = (base, total = 100_000) => {
+  const f = { freed: 0, calls: 0, fn: () => (f.calls++, { freeBytes: base + f.freed, totalBytes: total }) }
   return f
 }
+const tail = (p) => p.split(/[\\/]/).slice(-5).join('/')
 
-// ---- retention
+// ---- retention (through the real helper process: the default share) ------------------------------------
 {
   const { loc, index, add } = setup()
   const old = add('n1', 0, 200)
   const keep = add('n1', 0, 100)
   const shortOld = add('n1', 1, 40) // this camera keeps 30 days only
   const shortKeep = add('n1', 1, 20)
-  const r = await runHousekeeping({ index, settings: settingsWith([loc], { 'n1/1': { retentionDays: 30, fullDays: 10 } }), freeOf: fakeFree(90_000).fn, now: NOW })
-  check('retention: older than the camera retention is deleted', !existsSync(old) && !existsSync(`${old}.idx`) && !existsSync(shortOld))
+  // no `share`: the default, shareCall, forks the location's helper
+  const r = await runHousekeeping({ index, settings: settingsWith([loc], { 'n1/1': { retentionDays: 30, fullDays: 10 } }), freeOf: fakeFree(90_000).fn, now: NOW, present: markerPresent, protectedRanges: null, log: () => {}, warn: () => {} })
+  check('retention: older than the camera retention is deleted (by the location\'s helper process)', !existsSync(old) && !existsSync(`${old}.idx`) && !existsSync(shortOld))
   check('retention: newer kept', existsSync(keep) && existsSync(shortKeep))
   check('retention: removed from the index', index.segments('n1', 0, 0, NOW).length === 1 && index.segments('n1', 1, 0, NOW).length === 1)
   check('retention: empty folders removed', !existsSync(dirname(old)) && !existsSync(dirname(dirname(old))))
   check('retention: result lists the deletions', r.deleted.length === 2 && r.deleted.every((d) => d.why === 'retention'), JSON.stringify(r.deleted))
+  stopShareHelpers()
 }
 
 // ---- low space: oldest first, camera furthest past its full-days target first; full days protected
@@ -65,14 +92,13 @@ const fakeFree = (base) => {
   const e = add('n1', 1, 2) // inside cam1 full days
   const free = fakeFree(12_000) // 12% free, low mark 15% -> 3000 bytes to free
   const deletedOrder = []
-  const r = await runHousekeeping({
+  const r = await run({
     index,
     settings: settingsWith([loc], { 'n1/1': { fullDays: 5 } }),
     freeOf: free.fn,
-    now: NOW,
     onDelete: (seg) => { deletedOrder.push(seg.path); free.freed += seg.bytes }
   })
-  check('low space: deletes furthest past full-days target first', deletedOrder.join() === [a, c, b].join(), deletedOrder.map((p) => p.split(/[\\/]/).slice(-5).join('/')).join(' '))
+  check('low space: deletes furthest past full-days target first', deletedOrder.join() === [a, c, b].join(), deletedOrder.map(tail).join(' '))
   check('low space: stops once above the low mark', existsSync(d) && existsSync(e))
   check('low space: result', r.deleted.filter((x) => x.why === 'low space').length === 3 && r.warnings.length === 0, JSON.stringify(r))
 }
@@ -82,7 +108,7 @@ const fakeFree = (base) => {
   const { loc, index, add } = setup()
   const d = add('n1', 0, 10)
   const free = fakeFree(10_000) // 10%: low but above the 5% floor
-  const r = await runHousekeeping({ index, settings: settingsWith([loc]), freeOf: free.fn, now: NOW, onDelete: (s) => (free.freed += s.bytes) })
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: free.fn, onDelete: (s) => (free.freed += s.bytes) })
   check('floor: footage inside full days is kept above the floor', existsSync(d))
   check('floor: a warning says so', r.warnings.length === 1 && /full-video days/.test(r.warnings[0]), JSON.stringify(r.warnings))
 }
@@ -93,9 +119,24 @@ const fakeFree = (base) => {
   const d1 = add('n1', 0, 10)
   const d2 = add('n1', 0, 3)
   const free = fakeFree(4000) // 4% < 5% floor: 1000 bytes to reach the floor; the low mark would need 11000
-  const r = await runHousekeeping({ index, settings: settingsWith([loc]), freeOf: free.fn, now: NOW, onDelete: (s) => (free.freed += s.bytes) })
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: free.fn, onDelete: (s) => (free.freed += s.bytes) })
   check('floor: below the floor, the oldest full-days footage is deleted', !existsSync(d1) && existsSync(d2))
   check('floor: warning logged', r.warnings.some((w) => /below the hard floor/.test(w)), JSON.stringify(r.warnings))
+}
+
+// ---- each location's own marks (the owner's NAS: a low mark near 7 % so 12 TB is usable, 2026-09-29)
+{
+  const { loc, index, add } = setup({ marks: { lowFreePct: 7, floorFreePct: 3 } })
+  const old = add('n1', 0, 60)
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: fakeFree(10_000).fn })
+  check('a location\'s own low mark (7 %): at 10 % free nothing is deleted, though the default is 15 %', existsSync(old) && r.deleted.length === 0, JSON.stringify(r.deleted))
+  const f = fakeFree(6_000)
+  const r2 = await run({ index, settings: settingsWith([loc]), freeOf: f.fn, onDelete: (s) => (f.freed += s.bytes) })
+  check('... and below it (6 %) the footage past its full-video days goes', !existsSync(old) && r2.deleted.length === 1 && r2.deleted[0].why === 'low space', JSON.stringify(r2.deleted))
+  const { loc: l2, index: i2, add: add2 } = setup({ marks: { floorFreePct: 2 } })
+  const inside = add2('n1', 0, 3)
+  const r3 = await run({ index: i2, settings: settingsWith([l2]), freeOf: fakeFree(4000).fn })
+  check('a location\'s own floor (2 %): at 4 % free, footage inside its full-video days is kept', existsSync(inside) && r3.deleted.length === 0 && r3.warnings.some((w) => /full-video days/.test(w)), JSON.stringify(r3.warnings))
 }
 
 // ---- safety: a path outside the location root is never deleted
@@ -104,53 +145,74 @@ const fakeFree = (base) => {
   const outside = join(mkdtempSync(join(tmpdir(), 'hk-out-')), 'x.h264')
   writeFileSync(outside, 'keep me')
   index.addSegment({ nvr: 'n1', ch: 0, path: outside, startMs: NOW - 300 * DAY, endMs: NOW - 300 * DAY + 1000, bytes: 7, keyframes: 1, loc: 'L1' })
-  const r = await runHousekeeping({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn, now: NOW })
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn })
   check('safety: file outside its location is not deleted', existsSync(outside) && r.warnings.some((w) => /outside/.test(w)), JSON.stringify(r.warnings))
+  // ... nor when a caller's check were ever wrong: the helper refuses it on its own
+  const refused = await localShare(loc, 'unlink', { paths: [outside], withIdx: true })
+  check('safety: the helper refuses a path outside the location too', existsSync(outside) && refused[0]?.error === 'EOUTSIDE', JSON.stringify(refused))
 }
 
 // ---- no index (recording never started): nothing happens
 {
-  const r = await runHousekeeping({ index: null, settings: settingsWith([]), now: NOW })
+  const r = await run({ index: null, settings: settingsWith([]) })
   check('no index: no-op', r.deleted.length === 0)
 }
 
 // ---- a drive that is not mounted: its mount point is an empty folder (no marker) on the system disk
 for (const [name, marker] of [['marker missing (drive unplugged)', null], ['marker of another drive', '{"id":"OTHER"}']]) {
   const { root, loc, index, add } = setup()
-  const old = add('n1', 0, 200)
-  const p2 = add('n1', 0, 100)
-  const { rmSync, unlinkSync } = await import('node:fs')
+  add('n1', 0, 200)
+  add('n1', 0, 100)
   // unplugged: the files are on the drive, not here; only the empty mount point is left
   rmSync(join(root, 'n1'), { recursive: true, force: true })
   unlinkSync(join(root, '.cctv-recordings'))
   if (marker) writeFileSync(join(root, '.cctv-recordings'), marker)
   let statfsCalls = 0
-  const r = await runHousekeeping({ index, settings: settingsWith([loc]), freeOf: () => (statfsCalls++, { freeBytes: 1, totalBytes: 100_000 }), now: NOW })
+  const calls = []
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: () => (statfsCalls++, { freeBytes: 1, totalBytes: 100_000 }), share: (l, op, a) => (calls.push(op), localShare(l, op, a)) })
   check(`not mounted (${name}): index rows kept (no ENOENT clean-up)`, index.segments('n1', 0, 0, NOW).length === 2 && r.deleted.length === 0, JSON.stringify(r.deleted))
-  check(`not mounted (${name}): free space never read (it would be the system disk's)`, statfsCalls === 0)
+  check(`not mounted (${name}): free space never read (it would be the system disk's), nothing asked of its helper`, statfsCalls === 0 && calls.length === 0, calls.join())
   check(`not mounted (${name}): a warning says it was skipped`, r.warnings.some((w) => /skipped/.test(w) && w.includes(root)), JSON.stringify(r.warnings))
-  void old, p2
 }
-// the default check really reads the marker (storage.mjs markerMatches)
+// the marker went after the check said it was there (a share unmounted a second ago): the helper reads it
+// again before it deletes anything, and refuses
 {
   const { root, loc, index, add } = setup()
   const old = add('n1', 0, 200)
-  const { unlinkSync } = await import('node:fs')
-  unlinkSync(join(root, '.cctv-recordings'))
-  await runHousekeeping({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn, now: NOW })
-  check('default marker check: no marker -> nothing deleted', existsSync(old) && index.segments('n1', 0, 0, NOW).length === 1)
-  writeFileSync(join(root, '.cctv-recordings'), '{"id":"L1"}')
-  await runHousekeeping({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn, now: NOW })
-  check('default marker check: marker back -> retention runs again', !existsSync(old) && index.segments('n1', 0, 0, NOW).length === 0)
+  writeFileSync(join(root, '.cctv-recordings'), '{"id":"OTHER"}')
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn, present: () => true })
+  check('marker of another location, though the check said mounted: the helper refuses, the file and its row stay', existsSync(old) && index.byPath(old) !== null && r.deleted.length === 0 && r.warnings.some((w) => /marker/.test(w)), JSON.stringify(r.warnings))
+}
+// the default check really reads the marker (storage.mjs markerMatches), with the real helper process;
+// storage.mjs needs the SDK build (it loads settings.mjs -> nvr-xml.mjs -> sdk.mjs): server only
+{
+  let storageLoads = true
+  try {
+    await import('../storage.mjs')
+  } catch {
+    storageLoads = false
+  }
+  if (!storageLoads) console.log('SKIP  default marker check (storage.mjs cannot be loaded without the SDK build: run on the server)')
+  else {
+    const { root, loc, index, add } = setup()
+    const old = add('n1', 0, 200)
+    unlinkSync(join(root, '.cctv-recordings'))
+    const o = { index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn, now: NOW, protectedRanges: null, log: () => {}, warn: () => {} }
+    await runHousekeeping(o)
+    check('default marker check: no marker -> nothing deleted', existsSync(old) && index.segments('n1', 0, 0, NOW).length === 1)
+    writeFileSync(join(root, '.cctv-recordings'), '{"id":"L1"}')
+    await runHousekeeping(o)
+    check('default marker check: marker back -> retention runs again', !existsSync(old) && index.segments('n1', 0, 0, NOW).length === 0)
+    stopShareHelpers()
+  }
 }
 // mounted and healthy, a file already gone (ENOENT): its row is removed
 {
   const { loc, index, add } = setup()
   const gone = add('n1', 0, 200)
-  const { unlinkSync } = await import('node:fs')
   unlinkSync(gone)
   unlinkSync(`${gone}.idx`)
-  const r = await runHousekeeping({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn, now: NOW })
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn })
   check('healthy location, file already gone: row removed', index.segments('n1', 0, 0, NOW).length === 0 && r.deleted.length === 1)
 }
 {
@@ -161,15 +223,353 @@ for (const [name, marker] of [['marker missing (drive unplugged)', null], ['mark
   gap(190, 1)
   gap(100)
   gap(1)
-  await runHousekeeping({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn, now: NOW })
+  await run({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn })
   const left = [...index.gaps('n1', 0, 0, NOW), ...index.gaps('n1', 1, 0, NOW)]
   check('gaps older than the retention (183 days) are pruned, newer ones kept', left.length === 2 && left.every((g) => g.toMs >= NOW - 183 * DAY), JSON.stringify(left.map((g) => (NOW - g.toMs) / DAY)))
   const { loc: loc2, index: idx2 } = setup()
   idx2.addGap({ nvr: 'n1', ch: 0, fromMs: NOW - 300 * DAY - 1, toMs: NOW - 300 * DAY, reason: 'x' })
   idx2.addGap({ nvr: 'n1', ch: 0, fromMs: NOW - 500 * DAY - 1, toMs: NOW - 500 * DAY, reason: 'x' })
-  await runHousekeeping({ index: idx2, settings: settingsWith([loc2], { 'n2/4': { retentionDays: 400 } }), freeOf: fakeFree(90_000).fn, now: NOW })
+  await run({ index: idx2, settings: settingsWith([loc2], { 'n2/4': { retentionDays: 400 } }), freeOf: fakeFree(90_000).fn })
   check('a camera keeping 400 days: gaps kept up to 400 days', idx2.gaps('n1', 0, 0, NOW).length === 1)
 }
 
+// ---- bookmarked and exported stretches (bookmarks.mjs protectedRanges): kept by every rule here ---------
+{
+  const { loc, index, add } = setup()
+  const booked = add('n1', 0, 200)
+  const other = add('n1', 1, 210)
+  const lowBooked = add('n1', 0, 60)
+  const lowOther = add('n1', 0, 50)
+  const f = fakeFree(13_500) // 1500 bytes short of the low mark: 1000 come from retention, the rest from low space
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: f.fn, onDelete: (s) => (f.freed += s.bytes), protectedRanges: () => [[NOW - 200 * DAY, NOW - 200 * DAY + 1000], [NOW - 60 * DAY, NOW - 60 * DAY + 1000]] })
+  check('bookmarked: kept past its retention days, while the rest goes', existsSync(booked) && !existsSync(other) && index.byPath(booked) !== null)
+  check('bookmarked: kept at low space too, the next oldest goes instead', existsSync(lowBooked) && !existsSync(lowOther), JSON.stringify(r.deleted.map((d) => tail(d.path))))
+  check('bookmarked: listed as skipped', r.skipped.some((s) => s.path === booked && /bookmark/.test(s.why)), JSON.stringify(r.skipped))
+  const { loc: l2, index: i2, add: add2 } = setup()
+  const s = add2('n1', 0, 200)
+  const r2 = await run({ index: i2, settings: settingsWith([l2]), freeOf: fakeFree(1000).fn, protectedRanges: () => { throw new Error('bookmarks table locked') } })
+  check('BOOKMARKS UNREADABLE: NOTHING DELETED, however old or full', existsSync(s) && r2.deleted.length === 0 && r2.warnings.some((w) => /bookmarks could not be read/.test(w)), JSON.stringify(r2.warnings))
+}
+
+// ---- the space limit (location.limitGB, 1 GB = 1,000,000,000 bytes; the owner's 12 TB on the NAS) --------
+// A NAS with room that frees the space of what is deleted (else the rise check would, rightly, stop
+// deleting for free space on it: see below)
+const roomy = () => {
+  const f = fakeFree(900 * GB, 1000 * GB)
+  return { freeOf: f.fn, onDelete: (s) => (f.freed += s.bytes) }
+}
+hk.reset()
+{
+  const { loc, index, add } = setup({ limitGB: 3 })
+  const d10 = add('n1', 0, 10, GB)
+  const d9 = add('n1', 0, 9, GB)
+  const d8 = add('n1', 1, 8, GB)
+  const d3 = add('n1', 0, 3, GB)
+  const d2 = add('n1', 1, 2, GB)
+  const h1 = add('n1', 0, 1 / 24, GB)
+  const lines = []
+  const r = await run({ index, settings: settingsWith([loc]), ...roomy(), log: (l) => lines.push(l) })
+  check('over the limit: the oldest go until it is met (6 GB held, 3 GB allowed)', !existsSync(d10) && !existsSync(d9) && !existsSync(d8) && existsSync(d3) && existsSync(d2) && existsSync(h1), JSON.stringify(r.deleted.map((d) => tail(d.path))))
+  check('... listed as over the limit, and the index agrees; nothing to warn about', r.deleted.length === 3 && r.deleted.every((d) => d.why === 'over the limit') && index.locationUse('L1').bytes === 3 * GB && r.warnings.length === 0, JSON.stringify(r.warnings))
+  const oldestNow = new Date(NOW - 3 * DAY).toISOString().slice(0, 16).replace('T', ' ')
+  check('... one line for the run: "over the 3 GB limit on <folder>: deleted 3 files, 3.0 GB, oldest now <date>"', lines.length === 1 && lines[0] === `[housekeeping] over the 3 GB limit on ${loc.path}: deleted 3 files, 3.0 GB, oldest now ${oldestNow} UTC`, JSON.stringify(lines))
+  const again = await run({ index, settings: settingsWith([loc]), ...roomy() })
+  check('... and at the limit, nothing more goes', again.deleted.length === 0 && existsSync(d3))
+}
+{
+  // the same scoring as low space: footage furthest past its camera's full-video days first, so a camera
+  // keeping 5 full days loses its 8-day-old footage before another camera's 10-day-old full video
+  const { loc, index, add } = setup({ limitGB: 2 })
+  const a10 = add('n1', 0, 10, GB) // fullDays 30: 20 days short of its time-lapse
+  const b8 = add('n1', 1, 8, GB) // fullDays 5: 3 days past
+  add('n1', 1, 3, GB)
+  const r = await run({ index, settings: settingsWith([loc], { 'n1/1': { fullDays: 5 } }), ...roomy() })
+  check('over the limit: by the same scoring (past its camera\'s full-video days first), not simply oldest', !existsSync(b8) && existsSync(a10) && r.deleted.length === 1, JSON.stringify(r.deleted.map((d) => tail(d.path))))
+}
+{
+  const { loc, index, add } = setup({ limitGB: 1 })
+  const booked = add('n1', 0, 10, GB)
+  const next = add('n1', 0, 9, GB)
+  add('n1', 0, 3, GB)
+  const r = await run({ index, settings: settingsWith([loc]), ...roomy(), protectedRanges: () => [[NOW - 10 * DAY, NOW - 10 * DAY + 1000]] })
+  check('over the limit: a bookmarked stretch is kept, the next oldest goes', existsSync(booked) && !existsSync(next) && r.skipped.some((s) => s.path === booked), JSON.stringify(r.deleted.map((d) => tail(d.path))))
+}
+{
+  const { loc, index, add } = setup({ limitGB: 1 })
+  const a = add('n1', 0, 20 / 24, GB)
+  const b = add('n1', 1, 10 / 24, GB)
+  const c = add('n1', 0, 1 / 24, GB)
+  const warned = []
+  const r = await run({ index, settings: settingsWith([loc]), ...roomy(), warn: (w) => warned.push(w) })
+  check('over the limit, but everything is from the newest 24 h: nothing deleted', existsSync(a) && existsSync(b) && existsSync(c) && r.deleted.length === 0)
+  check('... and it says so loudly', warned.some((w) => /limit/.test(w) && /newest 24 h/.test(w)) && r.warnings.some((w) => /newest 24 h/.test(w)), JSON.stringify(warned))
+  const cands = housekeepingCandidates()
+  check('... and it is an alert (drive-full, which pages the owner) until a run can meet the limit', cands.length === 1 && cands[0].kind === 'drive-full' && cands[0].key === 'drive-full/L1/limit-blocked' && /over its space limit/.test(cands[0].title) && /newest 24 h/.test(cands[0].detail), JSON.stringify(cands))
+}
+{
+  // a marker of another location: nothing on it is touched for the limit either
+  const { root, loc, index, add } = setup({ limitGB: 1 })
+  const old = add('n1', 0, 10, GB)
+  add('n1', 0, 9, GB)
+  writeFileSync(join(root, '.cctv-recordings'), '{"id":"OTHER"}')
+  const r = await run({ index, settings: settingsWith([loc]), ...roomy() })
+  check('over the limit on a location whose marker is another\'s: nothing touched, rows kept', existsSync(old) && index.locationUse('L1').segments === 2 && r.deleted.length === 0 && r.warnings.some((w) => /skipped/.test(w)), JSON.stringify(r.warnings))
+  const r2 = await run({ index, settings: settingsWith([loc]), ...roomy(), present: () => true })
+  check('... nor when the check was out of date: the helper reads the marker and refuses', existsSync(old) && index.locationUse('L1').segments === 2 && r2.deleted.length === 0, JSON.stringify(r2.warnings))
+}
+
+// ---- deleting through the helper: batches, a file that will not go, a helper that stops answering --------
+{
+  const { loc, index, add } = setup()
+  const paths = []
+  for (let i = 0; i < 250; i++) paths.push(add('n1', i % 3, 200 + i / 1440))
+  const stuck = paths[7]
+  const calls = []
+  const share = async (l, op, a) => {
+    calls.push({ op, n: a?.paths?.length ?? a?.dirs?.length ?? 0 })
+    const res = await localShare(l, op, a)
+    return op === 'unlink' ? res.map((x) => (x.path === stuck ? { path: x.path, ok: false, error: 'EACCES', file: x.path } : x)) : res
+  }
+  let removeMany = 0
+  const counted = new Proxy(index, { get: (t, k) => (k === 'removeMany' ? (p) => (removeMany++, t.removeMany(p)) : t[k]) })
+  const r = await run({ index: counted, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn, share })
+  const unlinks = calls.filter((c) => c.op === 'unlink')
+  check('250 files past retention: 3 calls to the helper (at most 100 files each), 3 index transactions', unlinks.length === 3 && unlinks.every((c) => c.n <= 100) && removeMany === 3, JSON.stringify(unlinks))
+  check('... a file the helper could not delete keeps its row, with a warning; the rest go', r.deleted.length === 249 && index.byPath(stuck) !== null && index.locationUse('L1').segments === 1 && r.warnings.some((w) => w.includes('EACCES')), JSON.stringify(r.warnings))
+}
+{
+  const { loc, index, add } = setup()
+  for (let i = 0; i < 250; i++) add('n1', 0, 200 + i / 1440)
+  let unlinks = 0
+  const share = async (l, op, a) => {
+    if (op === 'unlink' && ++unlinks === 2) throw Object.assign(new Error('share not answering'), { code: 'ESHARESTUCK' })
+    return localShare(l, op, a)
+  }
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn, share })
+  check('a helper that stops answering: the run stops on that location, the rows of the batch not confirmed stay', r.deleted.length === 100 && index.locationUse('L1').segments === 150 && r.warnings.some((w) => /not answering/.test(w)) && unlinks === 2, `${r.deleted.length} deleted, ${index.locationUse('L1').segments} left: ${JSON.stringify(r.warnings)}`)
+}
+
+// ---- free space that does not rise when files are deleted (a recycle bin or snapshots on the NAS) --------
+{
+  hk.reset()
+  const { loc, index, add } = setup()
+  for (let i = 0; i < 20; i++) add('n1', 0, 60 - i, 2 * GB)
+  // 100 TB share, 14.99 % free: 10 GB to reach the 15 % low mark, and free space that never moves
+  const total = 100_000 * GB
+  const stuckFree = () => ({ freeBytes: 0.15 * total - 10 * GB, totalBytes: total })
+  const warned = []
+  const waits = []
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: stuckFree, warn: (w) => warned.push(w), sleep: async (ms) => waits.push(ms) })
+  check('low space: 10 GB to free, 5 files of 2 GB deleted', r.deleted.length === 5, String(r.deleted.length))
+  check('... an alert too: deleting does not free space', housekeepingCandidates().some((c) => c.key === 'drive-full/L1/not-freeing' && c.kind === 'drive-full' && /does not free space/.test(c.title)), JSON.stringify(housekeepingCandidates()))
+  check('... free space did not rise: asked again later (a NAS may report it late), then a loud warning', waits.length >= 2 && warned.some((w) => /free space/.test(w) && /recycle bin|snapshots/.test(w)), `${waits.join()} ${JSON.stringify(warned)}`)
+  const r2 = await run({ index, settings: settingsWith([loc]), freeOf: stuckFree, now: NOW + 5 * 60_000, sleep: async () => {} })
+  check('... so the next run deletes nothing for free space on it (no runaway deletion), and says why', r2.deleted.length === 0 && r2.warnings.some((w) => /free space/.test(w)), JSON.stringify(r2.warnings))
+  // an hour on, one small try: at most 2 GB; free space now rises with it, and deletion goes on as before
+  let freed = 0
+  const risingFree = () => ({ freeBytes: 0.15 * total - 10 * GB + freed, totalBytes: total })
+  const r3 = await run({ index, settings: settingsWith([loc]), freeOf: risingFree, now: NOW + 65 * 60_000, onDelete: (s) => (freed += s.bytes), sleep: async () => {} })
+  check('... an hour later one small try (at most 2 GB), and free space seen to rise clears it', r3.deleted.length === 1 && hk.stalled('L1') === null, `${r3.deleted.length} deleted, ${JSON.stringify(hk.stalled('L1'))}`)
+  hk.reset()
+}
+{
+  // the NAS freed the space late: at a later run's start free space is up by more than half of what was
+  // deleted, so the stall ends there (it would otherwise last, with its alert, until the next deletion)
+  hk.reset()
+  const { loc, index, add } = setup()
+  for (let i = 0; i < 20; i++) add('n1', 0, 60 - i, 2 * GB)
+  const total = 100_000 * GB
+  let free = 0.15 * total - 10 * GB
+  await run({ index, settings: settingsWith([loc]), freeOf: () => ({ freeBytes: free, totalBytes: total }), sleep: async () => {} })
+  const stalledFirst = hk.stalled('L1') !== null
+  free += 10 * GB // the 10 GB show up late; the location is above its low mark now
+  const lines = []
+  const r = await run({ index, settings: settingsWith([loc]), freeOf: () => ({ freeBytes: free, totalBytes: total }), now: NOW + 5 * 60_000, log: (l) => lines.push(l), sleep: async () => {} })
+  check('deleted space that shows up late ends the stall at the next run, and says so', stalledFirst && hk.stalled('L1') === null && r.deleted.length === 0 && lines.some((l) => /free space of the files deleted earlier has come back/.test(l)) && housekeepingCandidates().length === 0, `${stalledFirst} ${JSON.stringify(hk.stalled('L1'))} ${JSON.stringify(lines)}`)
+  hk.reset()
+}
+
+// ---- the main thread while it deletes: 87 cameras x 1,000 segments, a share taking 3 ms a file call -------
+// Perf report R2 / Task 3 (2026-09-29): at the NAS's floor each 5-minute run deletes what 5 minutes
+// recorded, about 470 files, and the old loop picked each one by asking all 87 cameras again (22.8 ms)
+// and made 3-4 SMB calls per file on the main thread: 12-15 s frozen every run. Here the pick is made
+// once per run and the file calls wait on the helper (a fake here, 3 ms a file call, answering
+// asynchronously as the helper process does), so the longest stretch the main thread is busy must stay
+// under 50 ms, and the index is asked at most once per 50 files deleted. Twice: on a fake index (the
+// task's proof: housekeeping's own work), and on the real one (rec-index.mjs, SQLite) with its rows in
+// the order recording writes them (minute by minute, the cameras in turn).
+{
+  const CAMS = 87
+  const PER = 1000
+  const SEG = 12_000_000 // an average production segment, 12 MB
+  const TOTAL = 16_630 * GB
+  const WANT = 470
+  const root = mkdtempSync(join(tmpdir(), 'hk-nas-'))
+  const loc = { id: 'NAS', path: root, type: 'network', role: 'main', limitGB: null }
+  const camsList = Array.from({ length: CAMS }, (_, c) => ({ nvr: `nvr${c % 4}`, ch: c }))
+  const startOf = (k) => NOW - 20 * DAY + k * 60_000
+  const rowOf = (c, k) => ({ nvr: camsList[c].nvr, ch: c, path: segmentPath(root, camsList[c].nvr, c, startOf(k), 'h265'), startMs: startOf(k), endMs: startOf(k) + 59_900, bytes: SEG, keyframes: 60, loc: 'NAS' })
+  const firstMinutes = new Set() // each camera's first 6 minute files: the oldest 522
+  for (let c = 0; c < CAMS; c++) for (let k = 0; k < 6; k++) firstMinutes.add(rowOf(c, k).path)
+
+  /** The index as housekeeping asks it, in memory: per camera its rows oldest first, and the ones removed. */
+  // built once: 87,000 rows made just before a round were collected by the garbage collector during it
+  const byCam = camsList.map((_, c) => Array.from({ length: PER }, (_, k) => rowOf(c, k)))
+  function fakeIndex() {
+    const gone = new Set()
+    let goneBytes = 0
+    const from = (c, fromMs, limit) => {
+      const out = []
+      for (const r of byCam[c]) {
+        if (out.length >= limit) break
+        if (r.startMs >= fromMs && !gone.has(r.path)) out.push({ ...r })
+      }
+      return out
+    }
+    const camNo = (nvr, ch) => (camsList[ch]?.nvr === nvr ? ch : -1)
+    return {
+      cameras: () => camsList.map((c) => ({ ...c })),
+      locationUse: () => ({ bytes: CAMS * PER * SEG - goneBytes, segments: CAMS * PER - gone.size }),
+      oldest: (limit, { fromMs = -Infinity } = {}) => byCam.flatMap((_, c) => from(c, fromMs, limit)).sort((a, b) => a.startMs - b.startMs).slice(0, limit),
+      oldestPerCamera: (_loc, cams, limit) => cams.flatMap((x) => (camNo(x.nvr, x.ch) >= 0 ? from(x.ch, -Infinity, limit) : [])),
+      oldestOf: (nvr, ch, _loc, limit, fromMs = -Infinity) => (camNo(nvr, ch) >= 0 ? from(ch, fromMs, limit) : []),
+      removeMany: (paths) => {
+        for (const p of paths) {
+          if (gone.has(p)) continue
+          gone.add(p)
+          goneBytes += SEG
+        }
+      },
+      forgetGapsBefore: () => {},
+      backfillForgetBefore: () => {},
+      close: () => {}
+    }
+  }
+  // the real index, its rows written minute by minute with the cameras in turn, as recording writes them
+  const bigDir = mkdtempSync(join(tmpdir(), 'hk-big-'))
+  const template = join(bigDir, 'template.db')
+  {
+    openRecIndex(template).close()
+    const raw = new DatabaseSync(template)
+    const ins = raw.prepare('INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    raw.exec('BEGIN')
+    for (let k = 0; k < PER; k++) {
+      for (let c = 0; c < CAMS; c++) {
+        const r = rowOf(c, k)
+        ins.run(r.path, r.nvr, r.ch, r.startMs, r.endMs, r.bytes, r.keyframes, r.loc)
+      }
+    }
+    raw.exec('COMMIT')
+    raw.close() // the last connection: the log is written back into the file, which is copied per round
+  }
+  let copies = 0
+  const realIndex = () => {
+    const f = join(bigDir, `copy${copies++}.db`)
+    copyFileSync(template, f)
+    const ix = openRecIndex(f)
+    ix.file = f
+    return ix
+  }
+
+  const settings = { recording: { defaults: { ...DEFAULTS, fullDays: 7 }, cameras: {} }, storage: { locations: [loc], lowFreePct: 15, floorFreePct: 5 } }
+  /** The main thread's longest busy stretch: between two runs of a 5 ms timer, the time that passed less the loop's idle time. */
+  const beat = () => {
+    let last = performance.now()
+    let lastIdle = performance.nodeTiming.idleTime
+    let worst = 0
+    const step = () => {
+      const now = performance.now()
+      const idle = performance.nodeTiming.idleTime
+      worst = Math.max(worst, now - last - (idle - lastIdle))
+      last = now
+      lastIdle = idle
+    }
+    const t = setInterval(step, 5)
+    return () => (clearInterval(t), step(), worst)
+  }
+  const writes = new Set(['removeMany', 'remove', 'forgetGapsBefore', 'backfillForgetBefore', 'addSegment'])
+  async function once(make) {
+    const index = make()
+    const before = index.locationUse('NAS').segments
+    const calls = {}
+    const counted = new Proxy(index, { get: (t, k) => (typeof t[k] === 'function' ? (...a) => ((calls[k] = (calls[k] ?? 0) + 1), t[k](...a)) : t[k]) })
+    let freed = 0
+    const fileCalls = { unlink: 0, rmdir: 0, statfs: 0 }
+    const free0 = (TOTAL * 15) / 100 - WANT * SEG + 1 // 470 files short of the low mark
+    const share = async (l, op, a) => {
+      if (op === 'statfs') {
+        fileCalls.statfs++
+        await sleep(3)
+        return { freeBytes: free0 + freed, totalBytes: TOTAL }
+      }
+      if (op === 'unlink') {
+        fileCalls.unlink += a.paths.length * 2
+        await sleep(3 * a.paths.length * 2) // each file and its .idx, one call each
+        freed += a.paths.length * SEG
+        return a.paths.map((path) => ({ path, ok: true }))
+      }
+      if (op === 'rmdir') {
+        fileCalls.rmdir += a.dirs.length
+        await sleep(3 * a.dirs.length)
+        return a.dirs.map((dir) => ({ dir, removed: [dir] }))
+      }
+      throw new Error(`unexpected ${op}`)
+    }
+    const eld = monitorEventLoopDelay({ resolution: 1 })
+    eld.enable()
+    const stop = beat()
+    const t0 = performance.now()
+    const r = await runHousekeeping({ index: counted, settings, share, present: () => true, protectedRanges: () => [], now: NOW, log: () => {}, warn: () => {}, sleep: async () => {} })
+    const took = performance.now() - t0
+    const busy = stop()
+    eld.disable()
+    const reads = Object.entries(calls).filter(([k]) => !writes.has(k)).reduce((a, [, n]) => a + n, 0)
+    let walPages = null
+    if (index.file) {
+      try {
+        walPages = Math.round(statSync(`${index.file}-wal`).size / (4096 + 24))
+      } catch {}
+    }
+    const out = { busy, eld: eld.max / 1e6, took, deleted: r.deleted.length, left: before - index.locationUse('NAS').segments, reads, calls, fileCalls, first: r.deleted[0]?.path, r, walPages }
+    index.close()
+    return out
+  }
+  // the lowest of up to 3 rounds, each from the same rows: a synchronous stretch shows in every round,
+  // while this PC being busy with other programs stretches one now and then (as in share-helper.test.mjs)
+  async function quietest(make) {
+    const rounds = []
+    for (let round = 0; round < 3; round++) {
+      rounds.push(await once(make))
+      if (rounds.at(-1).busy < 50 && rounds.at(-1).eld < 50) break
+    }
+    return { best: rounds.reduce((a, b) => (b.busy < a.busy ? b : a)), text: rounds.map((x) => `${x.busy.toFixed(1)} / ${x.eld.toFixed(1)} ms`).join(', ') }
+  }
+  for (const [name, make] of [['a fake index', fakeIndex], ['the real index (SQLite)', realIndex]]) {
+    const { best, text } = await quietest(make)
+    check(`${name}: 470 files deleted from 87 x 1,000 segments at a share taking 3 ms a file call, and the main thread's longest busy stretch is under 50 ms (the old loop: about 12-15 s)`, best.deleted === WANT && best.left === WANT && best.busy < 50, `${best.deleted} deleted in ${Math.round(best.took)} ms; longest busy stretch ${best.busy.toFixed(1)} ms; rounds (busy / event-loop delay): ${text}`)
+    check(`${name}: ... monitorEventLoopDelay agrees, no delay of 50 ms or more`, best.eld < 50, `${best.eld.toFixed(1)} ms`)
+    check(`${name}: ... the index asked at most once per 50 files deleted`, best.reads <= Math.ceil(WANT / 50), `${best.reads} reads: ${JSON.stringify(best.calls)}`)
+    check(`${name}: ... its rows removed in one transaction per batch of at most 100`, (best.calls.removeMany ?? 0) <= Math.ceil(WANT / 100) && !best.calls.remove, JSON.stringify(best.calls))
+    check(`${name}: ... the oldest first (each camera's first minutes)`, best.r.deleted.every((d) => d.why === 'low space' && firstMinutes.has(d.path)), best.first)
+    check(`${name}: ... folders tried only where the index says one was emptied (here none: each camera's next file is in the same hour)`, best.fileCalls.rmdir === 0, JSON.stringify(best.fileCalls))
+    // Not this path's work, but on its thread: SQLite writes the database file back from its log (a
+    // checkpoint) in whichever write takes the log past 1,000 pages, about 63 ms on production and
+    // every ~90 s from recording alone (perf report R11). The pages these deletions add bring about one
+    // more a run; moving checkpoints off the main thread is Task 12's.
+    if (best.walPages !== null) console.log(`NOTE  ${name}: the 470 deletions wrote about ${best.walPages} pages to SQLite's log (a checkpoint every 1,000 pages: perf report R11, Task 12)`)
+  }
+}
+
+// ---- server.mjs hands housekeeping the bookmarks and the marker check ------------------------------------
+{
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const call = server.match(/runHousekeeping\(\{[^}]*\}\)/)?.[0] ?? ''
+  check('server.mjs: runHousekeeping is asked with the bookmarks (protectedRanges) and the location markers (present: markerMatches)', /\bprotectedRanges\b/.test(call) && /\bpresent: markerMatches\b/.test(call) && /\bindex: recIndex\(\)/.test(call), call || 'no call found')
+}
+
+stopShareHelpers()
+try {
+  rmSync(data, { recursive: true, force: true, maxRetries: 5 })
+} catch {}
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

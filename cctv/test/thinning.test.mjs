@@ -395,6 +395,73 @@ function world() {
   rmSync(outside, { recursive: true, force: true })
   w.index.close()
 }
+// ---- retention's file calls go to the location's helper (perf report Task 3, 2026-09-29) --------------------
+// The helper's own ops, run in this process; a real helper process does the cases above.
+const { makeShareOps } = await import('../share-ops.mjs')
+const helperOps = (loc, log) => {
+  const o = makeShareOps({ id: loc.id, root: loc.path })
+  return async (l, op, a) => {
+    log.push({ op, n: a?.paths?.length ?? a?.dirs?.length ?? 0 })
+    return o[op](a ?? {}, () => {})
+  }
+}
+{
+  const w = world()
+  const olds = []
+  for (let i = 0; i < 250; i++) olds.push(w.add('n1', i % 2, 200 + i / 1440, { gops: 2, pFrames: 0 }))
+  const keep = w.add('n1', 0, 20, { gops: 2, pFrames: 0 })
+  const calls = []
+  let removeMany = 0
+  const counted = new Proxy(w.index, { get: (t, k) => (k === 'removeMany' ? (p) => (removeMany++, t.removeMany(p)) : t[k]) })
+  const r = await runRetention({ index: counted, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share: helperOps(w.loc, calls), freeOf: () => ({ freeBytes: 90, totalBytes: 100 }) })
+  const unlinks = calls.filter((c) => c.op === 'unlink')
+  check('retention on: 250 files through the helper, at most 100 a call, their rows in one transaction a call', r.deleted.length === 250 && unlinks.length === 3 && unlinks.every((c) => c.n <= 100) && removeMany === 3 && olds.every((p) => !existsSync(p.path)) && existsSync(keep.path), `${r.deleted.length} deleted; ${JSON.stringify(unlinks)}; ${removeMany} transactions`)
+  check('... and their empty folders removed through it too', calls.some((c) => c.op === 'rmdir') && !existsSync(dirname(olds[0].path)), JSON.stringify(calls.filter((c) => c.op === 'rmdir')))
+  w.index.close()
+}
+{
+  // the switch set to Off or Dry run while a run deletes: saves are answered during it now that it waits
+  // on the helper, so it looks again between batches (p0-see's note, 2026-09-29)
+  const w = world()
+  for (let i = 0; i < 250; i++) w.add('n1', 0, 200 + i / 1440, { gops: 2, pFrames: 0 })
+  const calls = []
+  let asked = 0
+  const r = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share: helperOps(w.loc, calls), freeOf: () => ({ freeBytes: 90, totalBytes: 100 }), armed: () => ++asked < 2 })
+  check('SWITCHED OFF DURING A RUN: it stops before the next batch', r.deleted.length === 100 && w.index.locationUse('L1').segments === 150 && r.warnings.some((x) => /switch/.test(x)), `${r.deleted.length} deleted, ${asked} asked: ${JSON.stringify(r.warnings)}`)
+  w.index.close()
+}
+{
+  // free space from the helper, never statfs on the main thread; below the floor it is read once and
+  // counted on with the bytes deleted (the old loop read the share after every file)
+  const w = world()
+  const a = w.add('n1', 0, 10, { gops: 5 })
+  const b = w.add('n1', 1, 9, { gops: 5 })
+  const c = w.add('n1', 0, 1, { gops: 5 })
+  const calls = []
+  const ops = helperOps(w.loc, calls)
+  let statfs = 0
+  // 100,000 bytes, the 5 % floor at 5,000: free space one byte more than the two oldest files short of it
+  const share = async (l, op, x) => (op === 'statfs' ? (statfs++, { freeBytes: 5000 - a.bytes - b.bytes + 1, totalBytes: 100_000 }) : ops(l, op, x))
+  const r = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share })
+  check('below the floor: free space asked of the helper once, then counted with the bytes deleted: the two oldest go', statfs === 1 && r.deleted.length === 2 && !existsSync(a.path) && !existsSync(b.path) && existsSync(c.path), `${statfs} statfs, ${r.deleted.length} deleted`)
+  const dry = []
+  const r2 = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, share: async (l, op, x) => (dry.push(op), op === 'statfs' ? { freeBytes: 1, totalBytes: 100 } : ops(l, op, x)) })
+  check('dry run: nothing but free space is asked of the helper', dry.every((op) => op === 'statfs') && r2.deleted.length >= 1 && existsSync(c.path), dry.join())
+  w.index.close()
+}
+{
+  // a location where deleting did not free space (housekeeping found it: a recycle bin or snapshots) is
+  // not deleted from for free space by this job either
+  const { _test: deleting } = await import('../segment-delete.mjs')
+  const w = world()
+  const a = w.add('n1', 0, 10, { gops: 5 })
+  deleting.setStall('L1', { since: NOW - 60_000, retryAt: NOW + 3_600_000, deletedBytes: 5e9, roseBytes: 0 })
+  const r = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, freeOf: () => ({ freeBytes: 1, totalBytes: 100 }), share: helperOps(w.loc, []) })
+  check('below the floor where deleting did not free space: nothing deleted, and it says why', existsSync(a.path) && r.deleted.length === 0 && r.warnings.some((x) => /free space/.test(x)), JSON.stringify(r.warnings))
+  deleting.reset()
+  w.index.close()
+}
+
 {
   const w = world()
   const r = await runRetention({ index: null, settings: w.settings(), now: NOW, dryRun: false })
@@ -404,6 +471,8 @@ function world() {
   w.index.close()
 }
 
+// the helper processes the cases above started (runRetention's default share)
+;(await import('../share-calls.mjs')).stopShareHelpers()
 // (Windows keeps the sqlite file the bookmarks module opened locked until the process ends)
 try {
   rmSync(dataDir, { recursive: true, force: true, maxRetries: 5 })

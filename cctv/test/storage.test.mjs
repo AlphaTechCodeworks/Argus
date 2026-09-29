@@ -152,6 +152,57 @@ writeFileSync(join(mainPath, MARKER), JSON.stringify({ id: main.id, created: mar
 // ---- change and remove -----------------------------------------------------------------------------------
 check('set role', updateLocation(over.id, { role: 'archive' }, 'boss').role === 'archive' && byId(over.id).role === 'archive')
 check('set limit', updateLocation(over.id, { limitGB: 500 }, 'boss').limitGB === 500)
+// the space limit is enforced since 2026-09-29 (housekeeping deletes down to it): it must be a size the
+// drive can hold, in GB of 1,000,000,000 bytes (the fake drives here are 1,000 GB)
+const why = (fn) => {
+  try {
+    fn()
+    return ''
+  } catch (e) {
+    return `${e.status} ${e.message}`
+  }
+}
+check('limit: the whole drive (1,000 GB) is allowed', updateLocation(over.id, { limitGB: 1000 }, 'boss').limitGB === 1000)
+check('limit: more than the drive holds refused, saying its size and what a GB is', /^400 /.test(why(() => updateLocation(over.id, { limitGB: 1000.5 }, 'boss'))) && /1,000 GB/.test(why(() => updateLocation(over.id, { limitGB: 1001 }, 'boss'))) && /1,000,000,000 bytes/.test(why(() => updateLocation(over.id, { limitGB: 1001 }, 'boss'))), why(() => updateLocation(over.id, { limitGB: 1001 }, 'boss')))
+check('limit: zero, negative, text and not-a-number refused', [0, -5, '12000', NaN, Infinity].every((v) => /^400 /.test(why(() => updateLocation(over.id, { limitGB: v }, 'boss')))))
+check('limit: empty or null means none', updateLocation(over.id, { limitGB: null }, 'boss').limitGB === null && updateLocation(over.id, { limitGB: '' }, 'boss').limitGB === null)
+check('limit at add: more than the drive holds refused too', status(() => addLocation({ path: dir('other-big'), type: 'usb', role: 'overflow', limitGB: 5000 }, 'boss')) === 400 && !existsSync(join(base, 'other-big', MARKER)))
+{
+  // a share: its size is its helper's last check; before the first one it is not known, and a limit is
+  // refused rather than taken on trust
+  const nas = dir('other-nas')
+  writeFileSync(join(nas, MARKER), JSON.stringify({ id: 'nas-1', created: '2026-09-01T00:00:00Z' }))
+  saveSettings({ storage: { locations: [...getSettings().storage.locations, { id: 'nas-1', path: nas, type: 'network', role: 'main', limitGB: null }] } }, 'boss', { internal: true })
+  _test.setShareHealth('nas-1', null)
+  check('limit on a share not checked yet: refused, saying why', /not known|not checked/.test(why(() => updateLocation('nas-1', { limitGB: 12000 }, 'boss'))), why(() => updateLocation('nas-1', { limitGB: 12000 }, 'boss')))
+  _test.setShareHealth('nas-1', { ok: true, reason: '', marker: true, writable: true, freeBytes: 7.7e12, totalBytes: 16.63e12, writeMBps: null })
+  check('limit on a share of 16,630 GB: 12,000 GB allowed (the owner\'s)', updateLocation('nas-1', { limitGB: 12000 }, 'boss').limitGB === 12000)
+  check('... 17,000 GB refused', /16,630 GB/.test(why(() => updateLocation('nas-1', { limitGB: 17000 }, 'boss'))), why(() => updateLocation('nas-1', { limitGB: 17000 }, 'boss')))
+
+  // each location's own free-space marks (the owner's NAS: a low mark near 7 % so 12 TB is usable)
+  const set = updateLocation('nas-1', { lowFreePct: 7, floorFreePct: 4 }, 'boss')
+  check('own marks: set, and listed with the location', set.lowFreePct === 7 && set.floorFreePct === 4 && byId('nas-1').lowFreePct === 7 && byId('nas-1').floorFreePct === 4, JSON.stringify(set))
+  check('own marks: other locations keep none (the defaults)', byId(main.id).lowFreePct === null && byId(main.id).floorFreePct === null)
+  check('own marks: not whole numbers from 1 to 50 refused', [0, 51, 7.5, '7', -1].every((v) => /^400 /.test(why(() => updateLocation('nas-1', { lowFreePct: v }, 'boss')))))
+  check('own marks: a floor at or above the low mark refused (its own or the default)', /^400 .*floor/.test(why(() => updateLocation('nas-1', { floorFreePct: 7 }, 'boss'))) && /^400 .*floor/.test(why(() => updateLocation(main.id, { floorFreePct: 15 }, 'boss'))) && /^400 .*floor/.test(why(() => updateLocation(main.id, { lowFreePct: 5 }, 'boss'))))
+  check('own marks: nothing was saved by the refusals', byId('nas-1').lowFreePct === 7 && byId('nas-1').floorFreePct === 4 && byId(main.id).floorFreePct === null)
+  // (with a floor of its own the default floor is not its; without, it is)
+  check('a location with its own floor: the default floor may go above its low mark', saveSettings({ storage: { lowFreePct: 20, floorFreePct: 7 } }, 'boss').storage.floorFreePct === 7)
+  saveSettings({ storage: { lowFreePct: 15, floorFreePct: 5 } }, 'boss')
+  updateLocation('nas-1', { floorFreePct: null }, 'boss')
+  check('... without one, the default floor cannot be raised to its own low mark', status(() => saveSettings({ storage: { lowFreePct: 20, floorFreePct: 7 } }, 'boss')) === 400 && getSettings().storage.floorFreePct === 5)
+  updateLocation('nas-1', { floorFreePct: 4 }, 'boss')
+  // its own floor is what makes it unfit to record to
+  space.set(mainPath, [40e9, 1000e9]) // 4 %
+  check('4 % free: below the default floor (5 %), unhealthy', !byId(main.id).health.ok)
+  updateLocation(main.id, { floorFreePct: 3 }, 'boss')
+  check('... with its own floor of 3 %: healthy', byId(main.id).health.ok, byId(main.id).health.reason)
+  check('own marks: null goes back to the default', updateLocation(main.id, { floorFreePct: null }, 'boss').floorFreePct === null && !byId(main.id).health.ok)
+  space.delete(mainPath)
+  const [pm, pmb] = await handleSettings('POST', '/api/admin/storage', async () => ({ action: 'set', id: 'nas-1', lowFreePct: 8, floorFreePct: null, limitGB: 11000 }), 'boss')
+  check('POST set: the limit and the own marks through the route', pm === 200 && pmb.location?.lowFreePct === 8 && pmb.location?.floorFreePct === null && pmb.location?.limitGB === 11000, JSON.stringify(pmb))
+  saveSettings({ storage: { locations: getSettings().storage.locations.filter((l) => l.id !== 'nas-1') } }, 'boss', { internal: true })
+}
 check('bad role refused on update', status(() => updateLocation(over.id, { role: 'x' }, 'boss')) === 400)
 check('unknown id: 404', status(() => updateLocation('nope', { role: 'main' }, 'boss')) === 404 && status(() => removeLocation('nope', 'boss')) === 404)
 removeLocation(over.id, 'boss')

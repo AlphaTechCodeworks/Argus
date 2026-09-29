@@ -16,6 +16,31 @@ export const _setStatfs = (fn) => {
 
 export const freePercent = (h) => (h.totalBytes > 0 ? (h.freeBytes / h.totalBytes) * 100 : 0)
 
+/**
+ * A location's free-space marks: its own (location.lowFreePct / floorFreePct) where set, else the
+ * settings' (storage.lowFreePct / floorFreePct). Each location's own since 2026-09-29: the NAS is a share
+ * with 3.44 TB of other backups on it, and the owner's 12 TB for Argus is usable only with its low mark
+ * near 7 %, where a USB drive of Argus's own is better at the default 15 % (perf report D1).
+ * settings.mjs keeps floor < low for every location.
+ * @returns {{ lowFreePct: number, floorFreePct: number }}
+ */
+export function freeMarks(settings, loc) {
+  const s = settings?.storage ?? {}
+  const own = (v) => (Number.isInteger(v) ? v : null)
+  return { lowFreePct: own(loc?.lowFreePct) ?? s.lowFreePct ?? 15, floorFreePct: own(loc?.floorFreePct) ?? s.floorFreePct ?? 5 }
+}
+
+/** The size in bytes of the filesystem holding `path`, or null. Synchronous: local drives only. */
+export function sizeOfFolder(path) {
+  try {
+    const s = statfs(path)
+    const t = Number(s.blocks) * Number(s.bsize)
+    return t > 0 ? t : null
+  } catch {
+    return null
+  }
+}
+
 /** The marker's id, or null (missing or unreadable). */
 export function markerId(path) {
   try {

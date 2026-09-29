@@ -8,7 +8,9 @@
 //                              too: Settings > Storage, storage.js; audited by settings.mjs)
 //   GET  /api/admin/storage    -> { locations (with health), lowFreePct, floorFreePct, types, roles }
 //   POST /api/admin/storage    { action: 'add', path, type, role, limitGB?, sameDisk? } -> { location }
-//                              { action: 'set', id, role?, limitGB? } -> { location }
+//                              { action: 'set', id, role?, limitGB?, lowFreePct?, floorFreePct? } -> { location }
+//                              (limitGB: GB of 1,000,000,000 bytes, at most the drive's size, ENFORCED by
+//                              housekeeping.mjs; the marks: the location's own, null for the default)
 //                              { action: 'remove', id } -> { id }   (files and marker stay)
 //   GET  /api/admin/storage/folders?path= -> { path, parent, folders } (read-only), see folders.mjs
 //   POST /api/admin/storage/folders { path, name } -> { path }   "New folder" inside path
@@ -96,6 +98,9 @@ export async function handleSettings(method, pathname, readJson, user, admin = i
         const fields = {}
         if ('role' in body) fields.role = body.role
         if ('limitGB' in body) fields.limitGB = body.limitGB
+        // its own free-space marks (null: the default); storage.mjs checks them with the limit
+        if ('lowFreePct' in body) fields.lowFreePct = body.lowFreePct
+        if ('floorFreePct' in body) fields.floorFreePct = body.floorFreePct
         return [200, { location: updateLocation(String(body.id ?? ''), fields, user) }]
       }
       if (body.action === 'remove') {

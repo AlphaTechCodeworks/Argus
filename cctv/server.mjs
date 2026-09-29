@@ -106,7 +106,7 @@ import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
 import { ADMIN_LINKS_PATH, BODY_LIMIT as LINKS_BODY_LIMIT, LINKS_PATH, handleCameraLinks } from './camera-links.mjs'
 import { LIVE_WORKER, P2P_ENABLED, REC_DB, allCameras, nvrs, readConfig, recIndex, startNvrs, stopNvrs } from './nvrs.mjs'
-import { runHousekeeping } from './housekeeping.mjs'
+import { housekeepingAlarms, housekeepingCandidates, runHousekeeping } from './housekeeping.mjs'
 import { playbackApi } from './playback.mjs'
 import { timelineApi } from './rec-api.mjs'
 import { downloadExport, handleExports } from './export-api.mjs'
@@ -195,13 +195,15 @@ function thinAndRetain() {
   })
 }
 
-// server recording (CCTV_LIVE_WORKER=on only): retention and low-space deletion every 5 minutes
+// server recording (CCTV_LIVE_WORKER=on only): retention, each location's space limit and low-space
+// deletion every 5 minutes. Its file calls go to each location's helper (housekeeping.mjs); it keeps
+// bookmarked and exported stretches and checks each location's marker, as the switch's jobs do.
 if (LIVE_WORKER) {
   let busy = false
   setInterval(() => {
     if (busy) return
     busy = true
-    runHousekeeping({ index: recIndex() })
+    runHousekeeping({ index: recIndex(), protectedRanges, present: markerMatches })
       .then(() => pruneAudit(auth.DATA_DIR)) // a year of audit is kept; older rows go with the rest
       .then(() => thinAndRetain())
       // pictures of events that are gone (event-snapshot.mjs; it never throws)
@@ -212,7 +214,8 @@ if (LIVE_WORKER) {
 
   // The storage forecast is built from free-space samples taken over time, so it has nothing to say
   // until it has been running a while -- and it says that, rather than extrapolating from one point.
-  setStorageContext({ index: recIndex, dataDir: auth.DATA_DIR })
+  // (alarms: a location over its space limit with nothing it may delete, or not freeing space)
+  setStorageContext({ index: recIndex, dataDir: auth.DATA_DIR, alarms: housekeepingAlarms })
 
   // Backfill: pulling stretches the server missed from the NVR that still has them. It resumes a
   // job interrupted by a restart, and stands down for live recording and exports -- nothing here
@@ -255,7 +258,9 @@ const locationState = () =>
     // not checked yet since the server started is unknown (null), not missing: saying "not mounted"
     // for the half-minute after every restart was a false alarm.
     mounted: l.health.reason === 'not checked yet' ? null : l.health.marker,
-    freePct: l.health.marker ? freePercent(l.health) : 0
+    freePct: l.health.marker ? freePercent(l.health) : 0,
+    // its own low mark, or null for the default (alert-checks.mjs)
+    lowFreePct: l.lowFreePct
   }))
 
 /** When each camera last had footage written: its newest closed segment, or the file being written. */
@@ -339,10 +344,15 @@ const alerts = startAlerts({
   // "This drive will be full in under a week", from the free-space samples storage-report keeps.
   // It stays quiet for a drive that has already reached its retention and is overwriting, because
   // a cycling recorder is permanently full and an alert that fires every night is one nobody reads.
-  extraCandidates: () => driveFullCandidates(
-    buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf }),
-    { days: 7 }
-  ),
+  // And housekeeping's own alarms (housekeeping.mjs, 2026-09-29): a location over its space limit with
+  // only the newest 24 h or bookmarked footage left, or one where deleting does not free space.
+  extraCandidates: () => [
+    ...driveFullCandidates(
+      buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf }),
+      { days: 7 }
+    ),
+    ...housekeepingCandidates()
+  ],
   listNvrs: () =>
     [...nvrs.values()].map((n) => ({
       id: n.id,

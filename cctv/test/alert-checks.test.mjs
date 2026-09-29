@@ -40,6 +40,9 @@ const fakeSender = (sent = [], pending = {}) => ({
 {
   const s = buildSnapshot(deps(), T0)
   check('the snapshot carries the location with its lowFreePct', s.locations[0].lowFreePct === 15, JSON.stringify(s.locations))
+  // a location with a low mark of its own (the NAS's near 7 %, 2026-09-29): the alert goes by that one
+  const own = buildSnapshot(deps({ locationState: () => [{ id: 'nas', name: 'NAS', mounted: true, freePct: 10, lowFreePct: 7 }, { id: 'usb', name: 'USB drive', mounted: true, freePct: 59, lowFreePct: null }] }), T0)
+  check('a location\'s own low mark rides on it; one without keeps the default', own.locations[0].lowFreePct === 7 && own.locations[1].lowFreePct === 15, JSON.stringify(own.locations))
   check('an online NVR is online', s.nvrs[0].online === true)
   check('a camera carries its last segment time', s.cameras[0].lastSegmentMs === T0)
   check('no disk reader means no storage, not a fake one', s.nvrs[0].storage === null)

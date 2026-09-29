@@ -52,6 +52,24 @@ check('nothing remembered before the first run', lastRuns().thinning === null &&
   const r = await run('on')
   check('on: both jobs run with dryRun: false', r.thinning.calls[0].dryRun === false && r.retention.calls[0].dryRun === false)
 }
+{
+  // a job that waits on a share helper is still running when an admin's save arrives (perf report Task
+  // 3, 2026-09-29): it is handed armed(), the switch as it is at the moment it asks
+  _test.reset()
+  let sw = 'on'
+  const seen = []
+  const retention = async (o) => {
+    seen.push(o.armed())
+    sw = 'off' // Off saved while it deletes
+    seen.push(o.armed())
+    return { dryRun: o.dryRun, deleted: [], skipped: [], warnings: [], freedBytes: 0, protection: 'ranges' }
+  }
+  await runStorageJobs({ mode: () => sw, index: INDEX, jobs: { thinning: fakeJob('thinned'), retention }, args: () => ({ index: INDEX }), clock: () => T0, log: () => {}, warn: () => {} })
+  check('each job gets armed(): the switch now, read again each time it asks (on, then off once Off is saved)', seen.join() === 'true,false', seen.join())
+  sw = 'garbled'
+  const r = await run(() => sw)
+  check('... and a switch that cannot be read is not armed', r.retention.calls[0]?.armed() === false)
+}
 for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
   _test.reset()
   const r = await run(odd)
