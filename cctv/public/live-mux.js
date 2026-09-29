@@ -12,6 +12,9 @@
 //                           {"op":"unsub","id":N}
 //   server -> page, binary: the channel id (4 bytes, little-endian), then the frame exactly as /live sends it
 //   server -> page, text:   {"op":"end","id":N,"code":..,"reason":".."} (the server ended that channel)
+//   server -> page, text:   {"op":"wait","id":N,"why":".."} (that channel's sub-stream has no picture yet,
+//                           and this viewer is shown no main stream meanwhile: live-wait.mjs). Handed
+//                           to the tile as a text message, as a /live socket's tile gets it
 // The server allows 128 channels on one connection, and subs at a burst of 200, then 20 a second;
 // past that it closes the whole connection, every tile with it: this side paces its subs (flush).
 // Unsubs cost nothing there (they only free what a sub took) and go at once.
@@ -332,7 +335,15 @@ function control(text) {
   } catch {
     return
   }
-  if (m?.op !== 'end' || !Number.isInteger(m.id)) return
+  if (!Number.isInteger(m?.id)) return
+  if (m.op === 'wait') {
+    const ch = channels.get(m.id)
+    if (!ch) return
+    if (ch.opening) opened(ch)
+    if (ch.readyState === 1) ch.onmessage?.({ data: text })
+    return
+  }
+  if (m.op !== 'end') return
   const ch = channels.get(m.id)
   if (!ch) {
     // closed here already, and its unsub still waiting to go: the server has let the id go itself

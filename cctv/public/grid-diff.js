@@ -32,7 +32,8 @@ const siteCount = (cameras) => new Set(cameras.map((c) => c.site)).size
  * full: the grid has to be rebuilt (the cameras on the page or their order changed, the page
  * count changed, or the site prefix of the labels comes or goes).
  * changed: otherwise, the tiles to update: { index (tile position), cam (new entry),
- * online, name, remote (true when that field changed) }.
+ * online, name, remote, hd (true when that field changed; hd: Live HD given or taken away, which
+ * rebuilds the full-size view) }.
  */
 export function diffCameras(oldList, newList, view) {
   const a = visibleCameras(oldList, view)
@@ -48,8 +49,8 @@ export function diffCameras(oldList, newList, view) {
   const changed = []
   b.visible.forEach((cam, index) => {
     const was = a.visible[index]
-    const d = { online: was.online !== cam.online, name: was.name !== cam.name, remote: Boolean(was.remote) !== Boolean(cam.remote) }
-    if (d.online || d.name || d.remote) changed.push({ index, cam, ...d })
+    const d = { online: was.online !== cam.online, name: was.name !== cam.name, remote: Boolean(was.remote) !== Boolean(cam.remote), hd: Boolean(was.hd) !== Boolean(cam.hd) }
+    if (d.online || d.name || d.remote || d.hd) changed.push({ index, cam, ...d })
   })
   return { full: false, changed }
 }

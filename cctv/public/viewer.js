@@ -340,7 +340,9 @@ function syncSingle(keep) {
     }
     // offline with the panel open: most likely a camera restart the panel asked for; the view
     // and panel stay (its tiles reconnect by themselves), so the change's result is shown
-    if (keep) {
+    // Live HD given or taken away: the view is built again, upgraded to the main stream or back on the
+    // sub-stream with its SD badge (the server's sweep ends a main stream no longer allowed anyway)
+    if (keep && Boolean(singleCam?.hd) === Boolean(cam.hd)) {
       for (const t of gridTiles) t.suspend()
       singleCam = cam
     } else openSingle(cam)
@@ -601,12 +603,15 @@ function openSingle(cam, { fromTap = false } = {}) {
   // links sit next to the name (not in it): a long name is cut short, the links never are
   const links = document.createElement('span')
   links.className = 'links'
-  const link = document.createElement('a')
-  link.className = 'pb-link'
-  link.href = `/playback.html?nvr=${encodeURIComponent(cam.nvr)}&ch=${cam.ch}`
-  link.textContent = 'Recordings'
-  link.addEventListener('click', (e) => e.stopPropagation())
-  links.append(link)
+  // Recordings only for someone who may play this camera back (/api/cameras playback)
+  if (cam.playback !== false) {
+    const link = document.createElement('a')
+    link.className = 'pb-link'
+    link.href = `/playback.html?nvr=${encodeURIComponent(cam.nvr)}&ch=${cam.ch}`
+    link.textContent = 'Recordings'
+    link.addEventListener('click', (e) => e.stopPropagation())
+    links.append(link)
+  }
   if (isAdmin) {
     const pic = document.createElement('button')
     pic.type = 'button'
@@ -704,8 +709,11 @@ function openSingle(cam, { fromTap = false } = {}) {
   const sub = new LiveTile(overlay, cam, SUB_STREAM, 0, { ...opts, borrowFrom: lenderFor(cam) })
   singleTiles.push(sub)
   startAhead(cam)
-  // cameras reached through TVT P2P stay on the sub stream (the relay has little bandwidth)
-  if (!noMain.has(single) && !cam.remote) upgradeToMain(overlay, cam, sub, opts)
+  // full screen at full quality (the main stream) only with Live HD on the camera (/api/cameras hd;
+  // the server refuses it anyway); cameras reached through TVT P2P or a VPN stay on the sub stream
+  // (the relay has little bandwidth), as do browsers that could not play this main stream
+  if (cam.hd !== false && !noMain.has(single) && !cam.remote) upgradeToMain(overlay, cam, sub, opts)
+  else if (cam.hd === false) overlay.querySelector('.name').after(sdBadge())
   syncTiles()
   updatePager()
 }
@@ -740,6 +748,15 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   updatePager()
 }
 
+/** The full-size view's note that it stays on the sub-stream: no Live HD on this camera. */
+function sdBadge() {
+  const b = document.createElement('span')
+  b.className = 'sd-badge'
+  b.textContent = 'SD'
+  b.title = 'Full screen at full quality needs Live HD on this camera'
+  return b
+}
+
 function upgradeToMain(tile, cam, sub, opts) {
   const layer = document.createElement('div')
   // full size but invisible until its first frame (a hidden element would give the canvas no size)
@@ -763,6 +780,14 @@ function upgradeToMain(tile, cam, sub, opts) {
       rememberNoMain(camKey(cam))
       main.close()
       layer.remove()
+    },
+    // refused for want of Live HD before it showed anything: this layer goes, the sub-stream under it
+    // stays; once shown (its sub-stream closed), the tile goes over to the sub-stream itself (live-tile.js)
+    onHdRefused: () => {
+      if (!layer.classList.contains('pending')) return false
+      main.close()
+      layer.remove()
+      return true
     }
   })
   singleTiles.push(main)

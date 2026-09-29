@@ -38,7 +38,7 @@ const dotEl = { className: '', title: '' }
 const parts = { '.status': el(), '.stats': el(), '.name': el(), '.dot': dotEl, canvas }
 const tileEl = { querySelector: (s) => parts[s], append() {} }
 
-const { LiveTile, NO_VIDEO_MS, STALL_RECONNECT_MS, TILE_HTML, tileDot } = await import('../public/live-tile.js')
+const { LiveTile, MAIN_STREAM, NO_VIDEO_MS, STALL_RECONNECT_MS, SUB_STREAM, TILE_HTML, tileDot, waitText } = await import('../public/live-tile.js')
 
 // ---- the tile state dot (pure: no DOM needed)
 {
@@ -239,6 +239,56 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   full.updateStatus()
   check('source closed: the full-size view opens its own connection', full.source === null && sockets.length === before + 1, `sockets ${sockets.length - before}`)
   full.close()
+}
+// ---- stream rights: the server's wait notes, and the main stream refused for want of Live HD ----------
+{
+  const nameEl = { textContent: 'Gate', append(s) { this.textContent += s } }
+  const st = el()
+  const tileHd = { querySelector: (s) => (s === '.name' ? nameEl : s === '.status' ? st : parts[s]), append() {} }
+  const tw = new LiveTile(tileHd, { nvr: 'n1', ch: 7 }, SUB_STREAM, 0, { now: () => now })
+  clearTimeout(tw.retry)
+  tw.player.push = () => {}
+  tw.connect()
+  const ww = sockets.at(-1)
+  ww.readyState = 1
+  ww.onmessage({ data: '{"op":"wait","why":"held"}' })
+  check('a wait note: the tile says why it waits', st.textContent === 'Waiting for room at the NVR (SD streams)', st.textContent)
+  check('waitText for each reason', waitText('starting') === 'Starting…' && /not available/.test(waitText('unavailable')) && waitText('held') === st.textContent && waitText('anything') === 'Starting…')
+  for (let i = 0; i < 5; i++) {
+    now += 4000
+    ww.onmessage({ data: '{"op":"wait","why":"held"}' })
+    tw.updateStatus()
+  }
+  check('... notes every 4 s count as activity: 20 s on, no "no video" and no reconnect', !ww.closed && st.textContent === 'Waiting for room at the NVR (SD streams)', st.textContent)
+  ww.onmessage({ data: 'not json' })
+  ww.onmessage({ data: '{"op":"other"}' })
+  check('... other text is ignored', !ww.closed && st.textContent === 'Waiting for room at the NVR (SD streams)')
+  tw.close()
+
+  const tm = new LiveTile(tileHd, { nvr: 'n1', ch: 8 }, MAIN_STREAM, 0, { now: () => now })
+  clearTimeout(tm.retry)
+  tm.player.push = () => {}
+  tm.connect()
+  const wm = sockets.at(-1)
+  const before = sockets.length
+  wm.readyState = 3
+  wm.onclose({ code: 1008, reason: 'hd not allowed' })
+  const w2 = sockets.at(-1)
+  check('main refused "hd not allowed": the sub-stream at once, on a new socket', sockets.length === before + 1 && tm.streamType === SUB_STREAM && /stream=1/.test(w2.url), w2?.url)
+  check('... and the name says so', /SD: full quality needs Live HD/.test(nameEl.textContent), nameEl.textContent)
+  w2.readyState = 3
+  w2.onclose({ code: 1008, reason: 'hd not allowed' })
+  check('... the same close on the sub-stream is an ordinary close: a retry later, not another fallback', tm.streamType === SUB_STREAM && sockets.length === before + 1 && Boolean(tm.retry))
+  tm.close()
+  let handled = 0
+  const tl = new LiveTile(tileHd, { nvr: 'n1', ch: 9 }, MAIN_STREAM, 0, { now: () => now, onHdRefused: () => { handled++; return true } })
+  clearTimeout(tl.retry)
+  tl.connect()
+  const wl = sockets.at(-1)
+  const n = sockets.length
+  wl.onclose({ code: 1008, reason: 'hd not allowed' })
+  check('onHdRefused handling it (viewer.js drops a layer not shown yet): no new socket, no fallback', handled === 1 && sockets.length === n && tl.streamType === MAIN_STREAM)
+  tl.close()
 }
 t.close()
 console.log(failures ? `\n${failures} failed` : '\nall passed')
