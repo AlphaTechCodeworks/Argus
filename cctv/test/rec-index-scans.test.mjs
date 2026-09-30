@@ -355,7 +355,8 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   const add = (ch, i, extra = {}) => ix.addSegment({ nvr: 't1', ch, path: `/rec/t1/${ch}/${i}.h265`, startMs: T0 + i * MIN, endMs: T0 + i * MIN + 59_000, bytes: 12_000_000, keyframes: 30, loc: 'L1', ...extra })
   for (let i = 0; i < 20; i++) add(0, i)
   for (let i = 0; i < 20; i++) add(1, i, { loc: i < 5 ? 'L2' : 'L1' })
-  check('a new row is full video, not looked at yet (thinned null)', ix.byPath('/rec/t1/0/0.h265').thinned === null, J(ix.byPath('/rec/t1/0/0.h265')))
+  check('a new row is full video, not looked at yet (thinned null)', ix.thinRow('/rec/t1/0/0.h265').thinned === null, J(ix.thinRow('/rec/t1/0/0.h265')))
+  check('... playback\'s rows keep the shape they had (the mark only in thinRow and the walk)', !('thinned' in ix.byPath('/rec/t1/0/0.h265')) && !('thinned' in ix.at('t1', 0, T0 + 1000)) && J(Object.keys(ix.thinRow('/rec/t1/0/0.h265'))) === J([...Object.keys(ix.byPath('/rec/t1/0/0.h265')), 'thinned']), J(ix.byPath('/rec/t1/0/0.h265')))
   check('THIN names the two marks', THIN.timelapse === 1 && THIN.kept === 2)
 
   // thinning: the swap's index half, with the rewrite in flight kept in its own table
@@ -364,7 +365,7 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   ix.thinBegin({ path: '/rec/t1/0/9.h265', loc: 'L1', bytes: 12_000_000, keyframes: 30 }, T0 + 1)
   check('rewrites begun (a few at once, or one) are in flight, with what each file was', J(ix.thinInflight().map((r) => [r.path, r.wasBytes, r.wasKeyframes])) === J([['/rec/t1/0/0.h265', 12_000_000, 30], ['/rec/t1/0/1.h265', 12_000_000, 30], ['/rec/t1/0/9.h265', 12_000_000, 30]]), J(ix.thinInflight()))
   ix.thinSwapped('/rec/t1/0/0.h265', { bytes: 1_300_000, keyframes: 6 })
-  const row = ix.byPath('/rec/t1/0/0.h265')
+  const row = ix.thinRow('/rec/t1/0/0.h265')
   check('swapped: the row says time-lapse, with the new size and keyframes', row.thinned === THIN.timelapse && row.bytes === 1_300_000 && row.keyframes === 6 && row.startMs === T0, J(row))
   check('... the location\'s total follows the new size (the triggers)', ix.locationUse('L1').bytes === before - 10_700_000, J(ix.locationUse('L1')))
   ix.thinEnd(['/rec/t1/0/0.h265', '/rec/t1/0/9.h265'])
@@ -372,8 +373,8 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   ix.setThin('/rec/t1/0/1.h265', null, { bytes: 12_000_000, keyframes: 30 })
   ix.thinEnd('/rec/t1/0/1.h265')
   ix.setThin('/rec/t1/0/2.h265', THIN.kept)
-  check('setThin: a row marked as left as it was keeps its size; null puts a row back as full video', ix.byPath('/rec/t1/0/2.h265').thinned === THIN.kept && ix.byPath('/rec/t1/0/2.h265').bytes === 12_000_000 && ix.byPath('/rec/t1/0/1.h265').thinned === null)
-  check('... a row written again (the recorder, backfill) is full video again unless it says otherwise', (add(0, 2), ix.byPath('/rec/t1/0/2.h265').thinned === null) && (add(0, 2, { thinned: THIN.kept }), ix.byPath('/rec/t1/0/2.h265').thinned === THIN.kept))
+  check('setThin: a row marked as left as it was keeps its size; null puts a row back as full video', ix.thinRow('/rec/t1/0/2.h265').thinned === THIN.kept && ix.thinRow('/rec/t1/0/2.h265').bytes === 12_000_000 && ix.thinRow('/rec/t1/0/1.h265').thinned === null)
+  check('... a row written again (the recorder, backfill) is full video again unless it says otherwise', (add(0, 2), ix.thinRow('/rec/t1/0/2.h265').thinned === null) && (add(0, 2, { thinned: THIN.kept }), ix.thinRow('/rec/t1/0/2.h265').thinned === THIN.kept))
 
   // the walk: only rows still full video, older than the cutoff, from a start time on
   const cutoff = T0 + 10 * MIN
@@ -451,7 +452,7 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   const idx = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'segments_full'").get()
   const tab = raw.prepare("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = 'thin_inflight'").get()
   raw.close()
-  check('an existing index gains thinned, segments_full (full-video rows only) and thin_inflight at open; its rows are full video', /WHERE thinned IS NULL/.test(idx?.sql ?? '') && tab?.one === 1 && ix.fullOlderThan([{ nvr: 'a', ch: 0 }], 200_000, 10).length === 2 && ix.byPath('/a/1.h264').thinned === null, idx?.sql ?? 'no segments_full')
+  check('an existing index gains thinned, segments_full (full-video rows only) and thin_inflight at open; its rows are full video', /WHERE thinned IS NULL/.test(idx?.sql ?? '') && tab?.one === 1 && ix.fullOlderThan([{ nvr: 'a', ch: 0 }], 200_000, 10).length === 2 && ix.thinRow('/a/1.h264').thinned === null, idx?.sql ?? 'no segments_full')
   ix.close()
 }
 

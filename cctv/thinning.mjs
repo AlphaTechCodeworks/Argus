@@ -577,10 +577,10 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
         out.stopped = late
         break
       }
-      // in flight before the helper may make a file beside it (with the next few read that could go, in one
-      // transaction)
+      // in flight before the helper may make a file beside it: when it is not noted yet, it and the next few
+      // read that could go, in one transaction (so one commit for every few files, not one each)
       try {
-        note([s, ...st.buf.filter((r) => mayTouch(r, locs, here).ok && !stopLoc.has(r.loc) && !held.has(r.path) && !guard.stretchOf(r)).slice(0, NOTE_AHEAD)])
+        if (!noted.has(s.path)) note([s, ...st.buf.filter((r) => mayTouch(r, locs, here).ok && !stopLoc.has(r.loc) && !held.has(r.path) && !guard.stretchOf(r)).slice(0, NOTE_AHEAD)])
       } catch (e) {
         warn(`${s.path}: not converted: the index could not note it (${e.message})`)
         out.stopped = `the index could not be written (${e.message})`
@@ -744,7 +744,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
       out.stopped ??= `the bookmarks could not be read (${e.message})`
       return 'the bookmarks could not be read: the rewrite was thrown away'
     }
-    const row = index.byPath(s.path)
+    const row = index.thinRow(s.path)
     if (!row || row.bytes !== s.bytes || row.startMs !== s.startMs || row.thinned != null) return 'its index row changed while it was rewritten: the rewrite was thrown away'
     return null
   }
@@ -815,7 +815,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
     const ended = []
     for (const r of rows) {
       const p = r.path
-      const cur = index.byPath(p)
+      const cur = index.thinRow(p)
       if (res.left.includes(p)) {
         // the segment or its .idx is missing and nothing beside it could be put back: a person must look
         out.left.push(p)

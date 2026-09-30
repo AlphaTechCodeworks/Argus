@@ -199,7 +199,9 @@ CREATE TABLE IF NOT EXISTS thin_inflight (
   path TEXT PRIMARY KEY, loc TEXT, was_bytes INTEGER NOT NULL, was_keyframes INTEGER NOT NULL, at_ms INTEGER NOT NULL);
 `
 
-const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, keyframes, loc, source, filled_ms AS filledMs, thinned'
+const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, keyframes, loc, source, filled_ms AS filledMs'
+// (thinning's rows only: playback's keep the shape they had)
+const THIN_COLS = `${SEG_COLS}, thinned`
 const BF_COLS = 'id, nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason, kind, state, attempts, last_try_ms AS lastTryMs, last_error AS lastError, filled_ms AS filledMs, note, first_seen_ms AS firstSeenMs'
 /** Fields of a backfill ledger row a job may change, and the column each one is stored in. */
 const BF_SET = { state: 'state', attempts: 'attempts', lastTryMs: 'last_try_ms', lastError: 'last_error', filledMs: 'filled_ms', note: 'note', reason: 'reason', kind: 'kind', toMs: 'to_ms' }
@@ -265,7 +267,7 @@ export const LOCATION_SQL = {
 const IN_CAMS = "(nvr || '/' || ch) IN (SELECT value FROM json_each(?))"
 export const THIN_SQL = {
   // the job's walk: some cameras' full-video rows (those with one cutoff) that ended before it, oldest first
-  fullOlderThan: `SELECT ${SEG_COLS} FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ? AND end_ms < ? AND ${IN_CAMS} ORDER BY start_ms LIMIT ?`,
+  fullOlderThan: `SELECT ${THIN_COLS} FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ? AND end_ms < ? AND ${IN_CAMS} ORDER BY start_ms LIMIT ?`,
   // where those cameras' next full-video row starts (the sums below skip hours with none)
   firstFull: `SELECT start_ms AS s FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ? AND ${IN_CAMS} ORDER BY start_ms LIMIT 1`,
   // the dry run's figures and the backlog, a stretch of time at a time, by camera and location: files,
@@ -285,11 +287,18 @@ const one = (r) => (r === undefined ? null : plain(r))
 const camKey = (nvr, ch) => `${nvr}/${Number(ch)}`
 const codecOf = (path) => /\.(h26[45])$/.exec(String(path))?.[1] ?? null
 
-/** Opens (creating if needed) the index at `file`. */
-export function openRecIndex(file) {
+/**
+ * Opens (creating if needed) the index at `file`.
+ * walAutocheckpoint: SQLite's automatic checkpoint, every 1,000 WAL pages by default (the server keeps
+ * that). Only the tests that measure a job's own main-thread work set it (0: off), because a checkpoint
+ * lands in whichever commit crosses the mark, recording's included, and takes 12-124 ms on the production
+ * VM: moving checkpoints off the main thread is perf report R11 / Task 12 (2026-09-29, p3-thin).
+ */
+export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
   mkdirSync(dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
   db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;')
+  if (Number.isInteger(walAutocheckpoint) && walAutocheckpoint >= 0) db.exec(`PRAGMA wal_autocheckpoint = ${walAutocheckpoint}`)
   db.exec(SCHEMA)
   db.exec(BOOKMARKS_SCHEMA)
   db.exec(EVENTS_SCHEMA)
@@ -331,6 +340,7 @@ export function openRecIndex(file) {
     setThin: db.prepare('UPDATE segments SET thinned = ?, bytes = IFNULL(?, bytes), keyframes = IFNULL(?, keyframes) WHERE path = ?'),
     thinBegin: db.prepare('INSERT OR REPLACE INTO thin_inflight (path, loc, was_bytes, was_keyframes, at_ms) VALUES (?, ?, ?, ?, ?)'),
     thinEnd: db.prepare('DELETE FROM thin_inflight WHERE path = ?'),
+    thinRow: db.prepare(`SELECT ${THIN_COLS} FROM segments WHERE path = ?`),
     thinAll: db.prepare('SELECT path, loc, was_bytes AS wasBytes, was_keyframes AS wasKeyframes, at_ms AS atMs FROM thin_inflight ORDER BY at_ms, path'),
     // the ledger: a hole seen again keeps the state and the attempt count it already had
     bfAdd: db.prepare('INSERT OR IGNORE INTO backfill_gaps (nvr, ch, from_ms, to_ms, reason, kind, first_seen_ms) VALUES (?, ?, ?, ?, ?, ?, ?)'),
@@ -465,6 +475,8 @@ export function openRecIndex(file) {
     },
     /** The rewrites in flight: [{ path, loc, wasBytes, wasKeyframes, atMs }]. */
     thinInflight: () => q.thinAll.all().map(plain),
+    /** A file's row with its `thinned` mark (byPath's fields and that), or null. */
+    thinRow: (path) => one(q.thinRow.get(String(path))),
 
     // ---- the backfill ledger (phase 2b; see backfill.mjs)
     /** Records a hole worth filling, or returns the row already there (state and attempts kept). */

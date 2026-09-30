@@ -122,7 +122,7 @@ function world(prefix = 'thin-loc-') {
   check('... and what waits: one file, since its full-video days ended', r.backlog?.files === 1 && r.backlog.bytes === s.bytes && r.backlog.oldestMs === s.startMs, JSON.stringify(r.backlog))
   check('DRY RUN CHANGED NOTHING ON DISK', readFileSync(s.path).equals(before) && statSync(s.path).size === s.bytes)
   check('dry run left no temp files', readdirSync(dirname(s.path)).sort().join() === 'seg.h264,seg.h264.idx', readdirSync(dirname(s.path)).join())
-  check('dry run left the index row alone', w.index.byPath(s.path).bytes === s.bytes)
+  check('dry run left the index row alone', w.index.thinRow(s.path).bytes === s.bytes)
   w.index.close()
 }
 
@@ -140,8 +140,8 @@ function world(prefix = 'thin-loc-') {
   const buf = readFileSync(old.path)
   const { units } = splitUnits(buf, CODEC.h264, { final: true, keyOffsets: new Set(rows.map((x) => x.offset)) })
   check('every frame left is a keyframe and every index row lands on one', units.length === rows.length && units.every((u) => u.isKey) && rows.every((x, i) => x.offset === units[i].start))
-  check('the index row was updated to match the file', w.index.byPath(old.path).bytes === buf.length && w.index.byPath(old.path).keyframes === rows.length)
-  check('... and marked as time-lapse', w.index.byPath(old.path).thinned === THIN.timelapse && w.index.byPath(recent.path).thinned === null)
+  check('the index row was updated to match the file', w.index.thinRow(old.path).bytes === buf.length && w.index.thinRow(old.path).keyframes === rows.length)
+  check('... and marked as time-lapse', w.index.thinRow(old.path).thinned === THIN.timelapse && w.index.thinRow(recent.path).thinned === null)
   check('... nothing left in flight', w.index.thinInflight().length === 0)
   check('the times still line up with the original recording', rows[0].tsMs === old.startMs && rows.at(-1).tsMs === old.startMs + 50_000)
   check('no temp or backup files were left behind', readdirSync(dirname(old.path)).sort().join() === 'seg.h264,seg.h264.idx', readdirSync(dirname(old.path)).join())
@@ -405,7 +405,7 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
     const w = world('thin-SLOW-')
     const s = w.add('n1', 0, 60)
     const orig = { seg: readFileSync(s.path), idx: readFileSync(`${s.path}.idx`) }
-    const rowBefore = JSON.stringify(w.index.byPath(s.path))
+    const rowBefore = JSON.stringify(w.index.thinRow(s.path))
     const n = _test.names(s.path)
     let killed = null
     const kill = () => {
@@ -421,10 +421,10 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
     clearInterval(poll)
     const left = readdirSync(dirname(s.path)).sort().join()
     check(`HELPER KILLED DURING THE ${moment.toUpperCase()}: the original footage is intact, byte for byte`, killed && readFileSync(s.path).equals(orig.seg) && readFileSync(`${s.path}.idx`).equals(orig.idx) && r.thinned.length === 0, `killed ${killed}; ${left}; ${JSON.stringify(r.warnings)}`)
-    check(`... its index row is as it was`, JSON.stringify(w.index.byPath(s.path)) === rowBefore, `${JSON.stringify(w.index.byPath(s.path))} vs ${rowBefore}`)
+    check(`... its index row is as it was`, JSON.stringify(w.index.thinRow(s.path)) === rowBefore, `${JSON.stringify(w.index.thinRow(s.path))} vs ${rowBefore}`)
     check(`... nothing half done beside it, nothing left in flight`, left === 'seg.h264,seg.h264.idx' && w.index.thinInflight().length === 0, `${left}; ${JSON.stringify(w.index.thinInflight())}`)
     const next = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT })
-    check(`... and the next run converts it`, next.thinned.length === 1 && statSync(s.path).size < s.bytes && w.index.byPath(s.path).thinned === THIN.timelapse && w.index.byPath(s.path).bytes === statSync(s.path).size, JSON.stringify(next.skipped))
+    check(`... and the next run converts it`, next.thinned.length === 1 && statSync(s.path).size < s.bytes && w.index.thinRow(s.path).thinned === THIN.timelapse && w.index.thinRow(s.path).bytes === statSync(s.path).size, JSON.stringify(next.skipped))
     w.index.close()
   }
   shareCalls._test.setHelper(null)
@@ -448,12 +448,12 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   check('the share stuck at the swap: nothing converted, the rewrite kept in flight for the next run', first.thinned.length === 0 && w.index.thinInflight().map((x) => x.path).join() === s.path && existsSync(`${s.path}.thin-new`) && readFileSync(s.path).equals(orig), `${JSON.stringify(w.index.thinInflight())} ${JSON.stringify(first.warnings)}`)
   // housekeeping and retention leave a file in flight alone, however old
   const del = await runRetention({ index: w.index, settings: w.settings({}, {}), now: NOW + 400 * DAY, present: w.present, dryRun: false, freeOf: () => ({ freeBytes: 90, totalBytes: 100 }) })
-  check('RETENTION LEAVES A FILE WHOSE REWRITE IS IN FLIGHT ALONE, however old', existsSync(s.path) && w.index.byPath(s.path) !== null && !del.deleted.some((d) => d.path === s.path) && del.skipped.some((x) => x.path === s.path && /rewrite/.test(x.why)), JSON.stringify(del.skipped))
+  check('RETENTION LEAVES A FILE WHOSE REWRITE IS IN FLIGHT ALONE, however old', existsSync(s.path) && w.index.thinRow(s.path) !== null && !del.deleted.some((d) => d.path === s.path) && del.skipped.some((x) => x.path === s.path && /rewrite/.test(x.why)), JSON.stringify(del.skipped))
   // a dry run touches nothing, leftovers included, and says so
   const dry = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present })
   check('a dry run leaves it too, and says it waits for the switch', existsSync(`${s.path}.thin-new`) && w.index.thinInflight().length === 1 && dry.warnings.some((x) => /half done|left in flight|put right/.test(x)), JSON.stringify(dry.warnings))
   const next = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT })
-  check('THE NEXT RUN PUTS IT RIGHT FIRST (the leftover rewrite swept, the row checked), then converts it', next.recovered?.sweptUp === 1 && next.thinned.length === 1 && w.index.thinInflight().length === 0 && w.index.byPath(s.path).thinned === THIN.timelapse && readdirSync(dirname(s.path)).sort().join() === 'seg.h264,seg.h264.idx', JSON.stringify({ recovered: next.recovered, warnings: next.warnings }))
+  check('THE NEXT RUN PUTS IT RIGHT FIRST (the leftover rewrite swept, the row checked), then converts it', next.recovered?.sweptUp === 1 && next.thinned.length === 1 && w.index.thinInflight().length === 0 && w.index.thinRow(s.path).thinned === THIN.timelapse && readdirSync(dirname(s.path)).sort().join() === 'seg.h264,seg.h264.idx', JSON.stringify({ recovered: next.recovered, warnings: next.warnings }))
   w.index.close()
 }
 {
@@ -474,7 +474,7 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   w.index.thinSwapped(s.path, { bytes: 9, keyframes: 1 })
   const r = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT, maxSegments: 0 })
   check('SERVER STOPPED MID-SWAP, ROW ALREADY UPDATED: the original comes back, byte for byte', readFileSync(s.path).equals(orig.seg) && readFileSync(`${s.path}.idx`).equals(orig.idx) && r.recovered?.rolledBack === 1, JSON.stringify(r.recovered))
-  check('... and its row says full video again, with its size', w.index.byPath(s.path).thinned === null && w.index.byPath(s.path).bytes === s.bytes && w.index.byPath(s.path).keyframes === s.keyframes && w.index.thinInflight().length === 0, JSON.stringify(w.index.byPath(s.path)))
+  check('... and its row says full video again, with its size', w.index.thinRow(s.path).thinned === null && w.index.thinRow(s.path).bytes === s.bytes && w.index.thinRow(s.path).keyframes === s.keyframes && w.index.thinInflight().length === 0, JSON.stringify(w.index.thinRow(s.path)))
   w.index.close()
 }
 
@@ -503,7 +503,7 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   let asks = 0
   // the run's first question (every bookmark) finds none; one is made while the file is being rewritten
   const r = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT, protectedRanges: () => (asks++ === 0 ? [] : [[s.startMs + 5000, s.startMs + 6000]]) })
-  check('A BOOKMARK MADE WHILE A FILE IS REWRITTEN: the rewrite is thrown away, the original kept', asks >= 2 && readFileSync(s.path).equals(orig) && r.thinned.length === 0 && r.skipped.some((x) => x.path === s.path && /bookmark/.test(x.why)) && readdirSync(dirname(s.path)).sort().join() === 'seg.h264,seg.h264.idx' && w.index.byPath(s.path).thinned === null && w.index.thinInflight().length === 0, JSON.stringify(r.skipped))
+  check('A BOOKMARK MADE WHILE A FILE IS REWRITTEN: the rewrite is thrown away, the original kept', asks >= 2 && readFileSync(s.path).equals(orig) && r.thinned.length === 0 && r.skipped.some((x) => x.path === s.path && /bookmark/.test(x.why)) && readdirSync(dirname(s.path)).sort().join() === 'seg.h264,seg.h264.idx' && w.index.thinRow(s.path).thinned === null && w.index.thinInflight().length === 0, JSON.stringify(r.skipped))
   w.index.close()
 }
 {
@@ -557,44 +557,69 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
 
 // ---- the main thread while it converts: 87 cameras, three files at a time through a helper -----------------
 // A share helper that answers like the real one after a few ms (its work is in its own process): what is
-// measured is this process's part -- the walk, the checks, the rows, the pace.
-{
+// measured is this process's part -- the walk, the checks, the rows, the pace. SQLite's automatic WAL
+// checkpoint is off for this index (openRecIndex walAutocheckpoint 0): it lands in whichever commit crosses
+// 1,000 pages, recording's included, and took 12-124 ms on the production VM (on this PC too), which is
+// perf report R11 / Task 12, not this job. What this job adds to it is how many WAL pages it writes a file:
+// counted below, and the same run with checkpoints on is reported next to it.
+const { DatabaseSync } = await import('node:sqlite')
+const convertWorld = (walAutocheckpoint) => {
   const w = world()
-  const CAMS = 87
-  for (let c = 0; c < CAMS; c++) {
+  w.index.close()
+  const f = join(mkdtempSync(join(tmpdir(), 'thin-db-')), 'r.db')
+  w.index = walAutocheckpoint === null ? openRecIndex(f) : openRecIndex(f, { walAutocheckpoint })
+  w.file = f
+  for (let c = 0; c < 87; c++) {
     for (let i = 0; i < 6; i++) {
       const startMs = NOW - 40 * DAY + i * 60_000
       w.index.addSegment({ nvr: 'n1', ch: c, path: join(w.root, 'n1', String(c), `${startMs}.h265`), startMs, endMs: startMs + 59_000, bytes: 12_000_000, keyframes: 30, loc: 'L1' })
     }
   }
-  let inFlight = 0
-  let most = 0
-  const camsBusy = new Map()
-  let camsTwice = 0
-  const after = (ms, v) => new Promise((r) => setTimeout(() => r(v), ms))
-  const share = async (loc, op, a) => {
-    if (op === 'thin') {
-      const cam = a.path.split(/[\\/]/).at(-2)
-      if (camsBusy.get(cam)) camsTwice++
-      camsBusy.set(cam, true)
-      most = Math.max(most, ++inFlight)
-      await after(6)
-      return { outcome: 'thinned', swapped: false, wasBytes: 12_000_000, bytes: 1_300_000, keyframes: 6, droppedKeyframes: 24, cursor: 1 }
+  return w
+}
+{
+  const w = convertWorld(0)
+  const CAMS = 87
+  const raw = new DatabaseSync(w.file)
+  raw.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() // the log empty: what is in it after the run is the run's
+  const fake = () => {
+    const s = { inFlight: 0, most: 0, camsBusy: new Map(), camsTwice: 0 }
+    const after = (ms, v) => new Promise((r) => setTimeout(() => r(v), ms))
+    s.share = async (loc, op, a) => {
+      if (op === 'thin') {
+        const cam = a.path.split(/[\\/]/).at(-2)
+        if (s.camsBusy.get(cam)) s.camsTwice++
+        s.camsBusy.set(cam, true)
+        s.most = Math.max(s.most, ++s.inFlight)
+        await after(6)
+        return { outcome: 'thinned', swapped: false, wasBytes: 12_000_000, bytes: 1_300_000, keyframes: 6, droppedKeyframes: 24, cursor: 1 }
+      }
+      if (op === 'thinSwap') return after(2, { swapped: true })
+      if (op === 'thinCommit') {
+        s.inFlight--
+        s.camsBusy.set(a.path.split(/[\\/]/).at(-2), false)
+        return after(2, { committed: true })
+      }
+      throw new Error(`unexpected ${op}`)
     }
-    if (op === 'thinSwap') return after(2, { swapped: true })
-    if (op === 'thinCommit') {
-      inFlight--
-      camsBusy.set(a.path.split(/[\\/]/).at(-2), false)
-      return after(2, { committed: true })
-    }
-    throw new Error(`unexpected ${op}`)
+    return s
   }
   const pace = { mbps: 1e6, atOnce: 3, night: { from: 20 * 60, to: 6 * 60 } }
-  const m = await mainThread(() => runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT, share, pace, protectedRanges: () => [] }))
+  const f1 = fake()
+  const m = await mainThread(() => runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT, share: f1.share, pace, protectedRanges: () => [] }))
   const r = m.value
-  check('87 cameras x 6 files converted through the helper, every row marked', r.thinned.length === CAMS * 6 && w.index.fullOlderThan([{ nvr: 'n1', ch: 0 }], NOW, 10).length === 0 && w.index.byPath(join(w.root, 'n1', '5', `${NOW - 40 * DAY}.h265`))?.thinned === THIN.timelapse, `${r.thinned.length}; ${JSON.stringify(r.warnings.slice(0, 3))}`)
-  check('... at most three at a time, and one at a time per camera (its spacing carries from file to file)', most === 3 && camsTwice === 0, `${most} at once, ${camsTwice} twice`)
-  check('THE MAIN THREAD WHILE IT CONVERTS: NO STRETCH OVER 50 MS', m.worstMs < 50, `longest stretch ${m.worstMs.toFixed(1)} ms, event-loop delay max ${m.delayMaxMs.toFixed(1)} ms, ${(m.busyMs / r.thinned.length).toFixed(2)} ms of main thread a file`)
+  const pages = raw.prepare('PRAGMA wal_checkpoint(PASSIVE)').get().log
+  raw.close()
+  // the same run on an index with SQLite's own checkpoints (as the server has it): reported, not judged here
+  const w2 = convertWorld(null)
+  const m2 = await mainThread(() => runThinning({ index: w2.index, settings: w2.settings(), now: NOW, present: w2.present, dryRun: false, ...AT_NIGHT, share: fake().share, pace, protectedRanges: () => [] }))
+  w2.index.close()
+  check('87 cameras x 6 files converted through the helper, every row marked', r.thinned.length === CAMS * 6 && w.index.fullOlderThan([{ nvr: 'n1', ch: 0 }], NOW, 10).length === 0 && w.index.thinRow(join(w.root, 'n1', '5', `${NOW - 40 * DAY}.h265`))?.thinned === THIN.timelapse, `${r.thinned.length}; ${JSON.stringify(r.warnings.slice(0, 3))}`)
+  check('... at most three at a time, and one at a time per camera (its spacing carries from file to file)', f1.most === 3 && f1.camsTwice === 0, `${f1.most} at once, ${f1.camsTwice} twice`)
+  check('THE MAIN THREAD WHILE IT CONVERTS: NO STRETCH OVER 50 MS (its own work; SQLite\'s checkpoints are Task 12\'s)', m.worstMs < 50 && m.delayMaxMs < 50, `longest stretch ${m.worstMs.toFixed(1)} ms, event-loop delay max ${m.delayMaxMs.toFixed(1)} ms, ${(m.busyMs / r.thinned.length).toFixed(2)} ms of main thread a file; with SQLite's own checkpoints: ${m2.worstMs.toFixed(1)} / ${m2.delayMaxMs.toFixed(1)} ms`)
+  // at 3.3 files a second (40 MB/s of 12 MB files) this is what thinning adds to the WAL, and so to how often
+  // a checkpoint lands on the main thread: recording writes about 10 pages a second (1.4 files a second, 7 each)
+  check('... and it writes at most 4 WAL pages a file (one commit a file for its row, the in-flight notes a few files at a time)', pages / r.thinned.length <= 4, `${pages} pages for ${r.thinned.length} files: ${(pages / r.thinned.length).toFixed(2)} a file`)
   w.index.close()
 }
 
@@ -606,7 +631,7 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   const r = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, freeOf: () => ({ freeBytes: 90, totalBytes: 100 }) })
   check('retention DRY RUN IS THE DEFAULT', r.dryRun === true)
   check('dry run lists what it would delete', r.deleted.length === 1 && r.deleted[0].path === veryOld.path && /retention/.test(r.deleted[0].why), JSON.stringify(r.deleted))
-  check('DRY RUN DELETED NOTHING', existsSync(veryOld.path) && existsSync(keep.path) && w.index.byPath(veryOld.path) !== null)
+  check('DRY RUN DELETED NOTHING', existsSync(veryOld.path) && existsSync(keep.path) && w.index.thinRow(veryOld.path) !== null)
   w.index.close()
 }
 
@@ -628,7 +653,7 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   check('past its retention days: gone, with its .idx', !existsSync(veryOld.path) && !existsSync(`${veryOld.path}.idx`) && !existsSync(shortOld.path))
   check('ONLY WHAT IS PAST ITS RETENTION: the rest is still there', existsSync(keep.path) && existsSync(shortKeep.path))
   check('the per-camera days are honoured, not one global number', r.deleted.length === 2 && r.deleted.some((d) => d.path === shortOld.path))
-  check('the index rows went with the files', w.index.byPath(veryOld.path) === null && w.index.byPath(keep.path) !== null)
+  check('the index rows went with the files', w.index.thinRow(veryOld.path) === null && w.index.thinRow(keep.path) !== null)
   check('the empty folders were tidied up, the location folder was not', !existsSync(dirname(veryOld.path)) && existsSync(w.root))
   w.index.close()
 }
@@ -733,7 +758,7 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   const s = w.add('n1', 0, 200)
   rmSync(join(w.root, '.cctv-recordings'))
   const r = await runRetention({ index: w.index, settings: w.settings(), now: NOW, dryRun: false, freeOf: () => ({ freeBytes: 1, totalBytes: 100 }) })
-  check('AN UNMOUNTED DRIVE LOSES NOTHING', existsSync(s.path) && r.deleted.length === 0 && w.index.byPath(s.path) !== null)
+  check('AN UNMOUNTED DRIVE LOSES NOTHING', existsSync(s.path) && r.deleted.length === 0 && w.index.thinRow(s.path) !== null)
   w.index.close()
 }
 {
