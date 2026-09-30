@@ -227,46 +227,71 @@ export const afterStretch = (st) => Math.floor(st[1]) + 1
 
 /**
  * Where a deletion job's walk of one location can start: the first row, oldest first, that no protected
- * stretch covers (`row`, null when there is none).
+ * stretch of its own camera covers (`row`, null when there is none). Every row that starts before `row`
+ * is protected.
  * Bookmarked footage is never deleted, so it stays the oldest there for good; walking it row by row was
- * every run's cost (review of p2-delete, 2026-09-29). Here a stretch costs one look: the rows that start
- * inside it are all protected and are not read. A file that starts before a stretch and runs into it
- * is protected too, and passed by itself. Every row that starts before `row` is protected.
- * `passed`: the first row of each stretch stepped over.
- * @param {{ index: object, locId: string, guard: { stretchOf: Function }, pace?: () => Promise<void> }} o
+ * every run's cost (review of p2-delete, 2026-09-29). Here a stretch costs a look at most: the rows that
+ * start inside it are all protected and are not read. A file that starts before a stretch and runs into
+ * it is protected too, and passed by itself.
+ *
+ * Camera by camera since 2026-09-30 (a bookmark keeps the cameras it names; thinning.mjs protectionFor).
+ * The walk took the oldest rows of the whole location and jumped each stretch for every camera, which is
+ * right only for a stretch that keeps every camera (guard.commonOf: those are still jumped for every
+ * camera in one statement). A camera's own stretch is stepped over by that camera alone (CameraCursors:
+ * its next rows read after the stretch, MORE_ROWS at a time), oldest first across the cameras (a heap).
+ * So the cost is one look per MORE_ROWS of a camera's bookmarked rows at the oldest end, or one per
+ * stretch when they are long: a 16-camera 24-hour bookmark 16 looks where a walk of the location's rows
+ * would read its 23,040 rows every run, and one camera's line-crossing bookmarks (4 files each) a look
+ * per dozen crossings, where the jumps took one each (the review of the final round: "grows by one look
+ * per crossing"). Automatic bookmarks end after their camera's days kept (line-actions.mjs), which bounds
+ * how many there are.
+ * `passed`: the first row of each stretch stepped over (once per camera and stretch).
+ * @param {{ index: object, locId: string, guard: { stretchOf: Function, commonOf?: Function }, pace?: () => Promise<void>,
+ *           cams?: { nvr, ch }[] }} o  cams: every camera with rows (index.cameras(), asked here when not given)
  * @returns {Promise<{ row: object|null, passed: { path, stretch }[] }>}
  */
-export async function firstUnprotected({ index, locId, guard, pace = null, look = 100 }) {
+export async function firstUnprotected({ index, locId, guard, pace = null, cams = null }) {
   const passed = []
-  let fromMs = null
-  let atStart = new Set() // rows at fromMs already passed (files that run into a stretch)
-  // the first look is one row: with no bookmark at the oldest end (the usual case) that is all it takes
-  for (let want = 1; ; want = look) {
-    const raw = fromMs === null ? index.oldest(want, { loc: locId }) : index.oldest(want, { loc: locId, fromMs })
-    // (a full look made only of rows already passed -- more than `look` files starting in the same
-    // millisecond, all running into a stretch, never written on purpose -- ends the walk: nothing found,
-    // which only ever deletes less)
-    const rows = raw.filter((r) => !(r.startMs === fromMs && atStart.has(r.path)))
-    if (!rows.length) return { row: null, passed }
-    let jumped = false
-    for (const r of rows) {
-      const st = guard.stretchOf(r)
-      if (!st) return { row: r, passed }
-      if (r.startMs >= st[0]) {
-        passed.push({ path: r.path, stretch: st })
-        fromMs = afterStretch(st)
-        atStart = new Set()
-        jumped = true
-        break
-      }
-      // protected, but it starts before the stretch: passed by itself
-      if (r.startMs !== fromMs) atStart = new Set()
-      fromMs = r.startMs
-      atStart.add(r.path)
+  const list = cams ?? index.cameras()
+  const said = new Set() // camera and stretch already in `passed`
+  const pass = (c, r, st) => {
+    const k = `${c.key}|${st[0]}`
+    if (said.has(k)) return
+    said.add(k)
+    passed.push({ path: r.path, stretch: st })
+  }
+  const byStart = (a, b) => a.s.startMs < b.s.startMs || (a.s.startMs === b.s.startMs && a.c.order < b.c.order)
+  const start = (fromMs) => {
+    // (each camera's oldest row first, in one statement: with no bookmark at the oldest end, the usual case,
+    // that is all it takes)
+    const cur = new CameraCursors({ index, locId, cams: list, fromMs, first: 1 })
+    const heap = new Heap(byStart)
+    for (const c of cur.list) {
+      const s = cur.head(c)
+      if (s) heap.push({ c, s })
     }
-    if (!jumped && raw.length < want) return { row: null, passed }
+    return { cur, heap }
+  }
+  let { cur, heap } = start(null)
+  while (heap.size) {
+    const { c, s } = heap.pop()
+    const st = guard.stretchOf(s)
+    if (!st) return { row: s, passed }
+    pass(c, s, st)
+    // a stretch of every camera's that this row starts in: every camera's rows before its end are in it (this
+    // row is the oldest of all not yet passed), so every camera starts again after it, in one statement
+    const common = guard.commonOf?.(s) ?? null
+    if (common && s.startMs >= common[0]) {
+      ;({ cur, heap } = start(afterStretch(common)))
+    } else {
+      if (s.startMs >= st[0]) cur.skipTo(c, afterStretch(st))
+      else cur.next(c) // protected, but it starts before the stretch: passed by itself
+      const n = cur.head(c)
+      if (n) heap.push({ c, s: n })
+    }
     await pace?.()
   }
+  return { row: null, passed }
 }
 
 /**

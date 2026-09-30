@@ -233,6 +233,67 @@ function world(prefix = 'thin-loc-') {
   check('the bookmarks module is feature-detected, never assumed', fn === null || typeof fn === 'function', String(typeof fn))
 }
 
+// ---- a bookmark keeps the cameras it names, not every camera (final fix round, 2026-09-30) -------------------
+// Since p2-delete the bookmarks govern every deletion rule, and protectedRanges gave [from, to] only: the guard
+// took every camera's footage in a bookmarked stretch for bookmarked, and widened it by a minute on top of
+// bookmarks.mjs's own minute. Production bookmarks every line crossing on one camera (Maingate Roadway): each
+// crossing kept about 7 minutes of all 87 cameras (about 7 GB), for good.
+{
+  const { protectionFor } = await import('../thinning.mjs')
+  const seg = (nvr, ch, s, e = s) => ({ nvr, ch, startMs: s, endMs: e })
+  const g = await protectionFor(0, NOW, { protectedRanges: () => [[1000, 2000, 'n1/0'], [5000, 6000, null], [8000, 9000]] })
+  check('THE GUARD: A STRETCH OF ONE CAMERA KEEPS THAT CAMERA', g.protected(seg('n1', 0, 1500, 1600)) && g.stretchOf(seg('n1', 0, 1500, 1600))?.join() === '1000,2000')
+  check('  AND NOT ANOTHER CAMERA AT THE SAME TIME', !g.protected(seg('n1', 1, 1500, 1600)) && g.stretchOf(seg('n1', 1, 1500, 1600)) === null)
+  check('  a stretch with no camera (null, or a plain [from, to]) keeps every camera, as before', g.protected(seg('n1', 1, 5500)) && g.protected(seg('n9', 4, 8500)) && g.protected(seg('n1', 0, 8500)))
+  check('  those are its common stretches (a walk over every camera may jump them); one camera\'s are not', g.commonOf(seg('n1', 1, 5500))?.join() === '5000,6000' && g.commonOf(seg('n1', 0, 1500)) === null)
+  check('  THE STRETCHES AS GIVEN, NOT WIDENED AGAIN (the minute either side is bookmarks.mjs\'s, once)', !g.protected(seg('n1', 0, 2001, 2500)) && !g.protected(seg('n1', 0, 400, 999)) && g.protected(seg('n1', 0, 400, 1000)))
+  const o = await protectionFor(0, NOW, { protectedRanges: () => [{ fromMs: 1000, toMs: 2000, cameras: ['n1/0', 'n1/2'] }, { fromMs: 3000, toMs: 4000, cameras: [] }, { fromMs: 7000, toMs: 7100, camera: 'n1/3' }] })
+  check('  as objects: the cameras listed; none listed (every camera); one camera', o.protected(seg('n1', 2, 1500)) && !o.protected(seg('n1', 1, 1500)) && o.protected(seg('n1', 1, 3500)) && o.protected(seg('n1', 3, 7050)) && !o.protected(seg('n1', 0, 7050)))
+  check('  a camera\'s own stretch and a common one that meet are one stretch for it', (await protectionFor(0, NOW, { protectedRanges: () => [[1000, 2000, 'n1/0'], [2000, 3000]] })).stretchOf(seg('n1', 0, 1500))?.join() === '1000,3000')
+  check('  a row that names no camera is kept by any camera\'s stretch (never less than before)', g.protected({ startMs: 1500, endMs: 1600 }))
+  let threw = null
+  try {
+    await protectionFor(0, NOW, { protectedRanges: () => [[1, 2, 42]] })
+  } catch (e) {
+    threw = e
+  }
+  check('  a camera it cannot read stops the run (a throw), rather than guessing', threw !== null && /cannot read/.test(threw.message), String(threw?.message))
+
+  // with the real bookmarks.mjs: its minute either side, once (it was two: bookmarks.mjs's and PROTECT_MARGIN_MS)
+  const bm = await import('../bookmarks.mjs')
+  const B = NOW - 20 * DAY
+  bm.createBookmark({ cameras: ['n1/0'], startMs: B, endMs: B + 90_000, title: 'Line crossing — Maingate Roadway' }, 'system', { now: NOW })
+  const real = await protectionFor(0, NOW, { protectedRanges: bm.protectedRanges })
+  check('WITH BOOKMARKS.MJS: A 90 S BOOKMARK KEEPS ITS CAMERA FROM A MINUTE BEFORE TO A MINUTE AFTER, ONCE', real.protected(seg('n1', 0, B - 90_000, B - 60_000)) && real.protected(seg('n1', 0, B + 150_000, B + 200_000)) && !real.protected(seg('n1', 0, B - 121_000, B - 61_000)) && !real.protected(seg('n1', 0, B + 151_000, B + 210_000)))
+  check('  and none of another camera\'s footage in it', !real.protected(seg('n1', 1, B, B + 59_000)))
+  bm.closeBookmarks()
+}
+{
+  // thinning, both ways: the bookmarked camera's file kept, another camera's file at the same time converted
+  const w = world()
+  const booked = w.add('n1', 0, 60)
+  const beside = w.add('n1', 1, 60)
+  const ranges = () => [[booked.startMs + 1000, booked.startMs + 2000, 'n1/0']]
+  const dry = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, protectedRanges: ranges })
+  check('THE DRY RUN COUNTS ANOTHER CAMERA\'S FILE IN A BOOKMARKED STRETCH (only the bookmarked camera\'s is kept)', dry.files === 1 && dry.bytes === beside.bytes, JSON.stringify({ files: dry.files, skipped: dry.skipped }))
+  const r = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT, protectedRanges: ranges })
+  check('THINNING: THE BOOKMARKED CAMERA\'S FILE KEPT, ANOTHER CAMERA\'S AT THE SAME TIME CONVERTED', statSync(booked.path).size === booked.bytes && r.thinned.length === 1 && r.thinned[0].path === beside.path && statSync(beside.path).size < beside.bytes, JSON.stringify({ thinned: r.thinned.map((t) => t.path), skipped: r.skipped }))
+  w.index.close()
+}
+{
+  // a camera's walk past its own stretch: several files of the bookmarked camera inside it, the other
+  // camera's all converted, each camera in its order
+  const w = world()
+  const mine = [60.004, 60.003, 60.002, 60.001].map((d) => w.add('n1', 0, d))
+  const theirs = [60.004, 60.003, 60.002, 60.001].map((d) => w.add('n1', 1, d))
+  const ranges = () => [[mine[0].startMs, mine.at(-1).endMs, 'n1/0']]
+  const r = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT, protectedRanges: ranges })
+  const thinned = new Set(r.thinned.map((t) => t.path))
+  check('... a stretch of four files on one camera: its four kept, the other camera\'s four at the same times converted', mine.every((s) => statSync(s.path).size === s.bytes && !thinned.has(s.path)) && theirs.every((s) => thinned.has(s.path)), JSON.stringify({ thinned: r.thinned.length, skipped: r.skipped.map((x) => x.why) }))
+  check('... and the walk says the stretch once, not once a file', r.skipped.filter((x) => /bookmark/.test(x.why) && mine.some((s) => s.path === x.path)).length === 1, JSON.stringify(r.skipped))
+  w.index.close()
+}
+
 // ---- thinning: an unmounted drive --------------------------------------------------------------------
 {
   const w = world()
@@ -896,6 +957,85 @@ const convertWorld = (walAutocheckpoint) => {
   w.index.close()
 }
 
+// ---- bookmarks of one camera each, the line crossings' kind (final fix round, 2026-09-30) ---------------------
+// A day of 87 cameras waiting (125,280 minute files) with a line-crossing bookmark on one camera every 10
+// minutes (144 of them, 90 s each, as bookmarks.mjs gives them: a minute either side) and a person's 6-hour
+// bookmark of 16 cameras. Each camera keeps its own: the dry run counts the rest, every camera's, and the
+// real run converts other cameras' files in those stretches. The main thread stays under 50 ms at a stretch.
+{
+  const f = join(tmp('thin-db-'), 'r.db')
+  openRecIndex(f).close()
+  const w = world()
+  w.index.close()
+  const MIN = 60_000
+  const base = NOW - 8 * DAY // a day of files, all past the 7 full-video days
+  const raw = new DatabaseSync(f)
+  raw.exec('PRAGMA synchronous = OFF')
+  raw.exec('BEGIN')
+  raw.prepare(`WITH RECURSIVE m(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM m WHERE k < 1439), c(ch) AS (SELECT 0 UNION ALL SELECT ch + 1 FROM c WHERE ch < 86)
+    INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) SELECT ? || '/n1/' || ch || '/' || (? + k * 60000) || '.h265', 'n1', ch, ? + k * 60000, ? + k * 60000 + 59000, 12000000, 30, 'L1' FROM m CROSS JOIN c`).run(w.root, base, base, base)
+  raw.exec('COMMIT')
+  raw.close()
+  w.index = openRecIndex(f)
+  const GATE = 40 // the line-crossing camera
+  const islands = Array.from({ length: 144 }, (_, i) => [base + i * 10 * MIN + 20_000 - MIN, base + i * 10 * MIN + 110_000 + MIN, `n1/${GATE}`])
+  const person = Array.from({ length: 16 }, (_, c) => [base + 2 * 60 * MIN - MIN, base + 8 * 60 * MIN + MIN, `n1/${c}`])
+  const ranges = () => [...islands, ...person]
+  const kept = (ch, k) => {
+    const s = base + k * MIN
+    const e = s + 59_000
+    return ranges().some(([a, b, cam]) => cam === `n1/${ch}` && s <= b && e >= a)
+  }
+  let keptFiles = 0
+  for (let ch = 0; ch < 87; ch++) for (let k = 0; k < 1440; k++) if (kept(ch, k)) keptFiles++
+  const settings = { ...w.settings(), recording: { defaults: { ...DEFAULTS, fullDays: 7, retentionDays: 30 }, cameras: {} } }
+  const dry = () => runThinning({ index: w.index, settings, now: NOW, present: w.present, protectedRanges: ranges })
+  await dry()
+  const m = await bestOf(3, () => mainThread(dry))
+  check('ONE CAMERA\'S LINE-CROSSING BOOKMARKS AND A PERSON\'S 16-CAMERA ONE: THE DRY RUN COUNTS EVERY OTHER CAMERA\'S FILES IN THOSE STRETCHES', m.value.files === 87 * 1440 - keptFiles && keptFiles === 143 * 4 + 3 + 16 * 363, JSON.stringify({ files: m.value.files, want: 87 * 1440 - keptFiles, kept: keptFiles }))
+  check('... with no stretch of main thread over 50 ms', m.worstMs < 50 && m.delayMaxMs < 50, `longest stretch ${m.worstMs.toFixed(1)} ms, event-loop delay max ${m.delayMaxMs.toFixed(1)} ms, busy ${m.busyMs.toFixed(0)} ms in all`)
+  const share = async (loc, op) => {
+    if (op === 'thin') {
+      await new Promise((r) => setTimeout(r, 1))
+      return { outcome: 'thinned', swapped: false, wasBytes: 12_000_000, bytes: 1_300_000, keyframes: 6, droppedKeyframes: 24, cursor: 1 }
+    }
+    if (op === 'thinSwap') return { swapped: true }
+    if (op === 'thinCommit') return { committed: true }
+    throw new Error(`unexpected ${op}`)
+  }
+  const pace = { mbps: 1e6, atOnce: 3, night: { from: 20 * 60, to: 6 * 60 } }
+  // the real run as the converting case above measures it: SQLite's own checkpoints off (they land in whichever
+  // commit crosses 1,000 WAL pages: Task 12's), each index call timed, the best of three runs of 150 files
+  // (each goes on where the last stopped), every run's figures printed
+  w.index.close()
+  w.index = openRecIndex(f, { walAutocheckpoint: 0 })
+  let longest = { ms: 0, name: '' }
+  const timed = new Proxy(w.index, {
+    get: (t, k) =>
+      typeof t[k] !== 'function'
+        ? t[k]
+        : (...a) => {
+            const t0 = performance.now()
+            const v = t[k](...a)
+            const ms = performance.now() - t0
+            if (ms > longest.ms) longest = { ms, name: String(k) }
+            return v
+          }
+  })
+  const runs = []
+  for (let i = 0; i < 3; i++) {
+    longest = { ms: 0, name: '' }
+    const m = await mainThread(() => runThinning({ index: timed, settings, now: NOW, present: w.present, protectedRanges: ranges, dryRun: false, share, pace, ...AT_NIGHT, maxSegments: 150 }))
+    runs.push({ ...m, longest })
+  }
+  const on = runs.reduce((a, b) => (Math.max(b.worstMs, b.delayMaxMs) < Math.max(a.worstMs, a.delayMaxMs) ? b : a))
+  const done = runs.flatMap((x) => x.value.thinned.map((t) => t.path.split(/[\\/]/)))
+  const of = (p) => ({ ch: Number(p.at(-2)), k: (Number(p.at(-1).replace('.h265', '')) - base) / MIN })
+  check('... the real run: 450 of the oldest converted, none of them its own camera\'s bookmarked footage, the line-crossing camera\'s other files among them', done.length === 450 && done.every((p) => !kept(of(p).ch, of(p).k)) && done.some((p) => of(p).ch === GATE) && done.some((p) => of(p).ch !== GATE && of(p).k <= 2), JSON.stringify({ n: done.length, bad: done.filter((p) => kept(of(p).ch, of(p).k)).length }))
+  check('... no stretch over 50 ms (its own work; the best of three)', on.worstMs < 50 && on.delayMaxMs < 50, runs.map((x) => `${x.value.thinned.length} converted; longest stretch ${x.worstMs.toFixed(1)} ms, event-loop delay max ${x.delayMaxMs.toFixed(1)} ms, longest statement ${x.longest.ms.toFixed(1)} ms (${x.longest.name}), busy ${x.busyMs.toFixed(0)} ms`).join(' | '))
+  w.index.close()
+}
+
 // ---- retention: dry run by default -------------------------------------------------------------------
 {
   const w = world()
@@ -972,6 +1112,25 @@ const convertWorld = (walAutocheckpoint) => {
   check('A BOOKMARKED SEGMENT IS NEVER DELETED, however old', existsSync(booked.path) && r.skipped.some((s) => s.path === booked.path))
   check('...while the rest goes', !existsSync(other.path))
   w.index.close()
+}
+{
+  // a bookmark keeps the cameras it names (final fix round, 2026-09-30): another camera's footage at the same
+  // time is past its days like any other, and below the floor it is the oldest
+  const w = world()
+  const booked = w.add('n1', 0, 200)
+  const beside = w.add('n1', 1, 200)
+  const later = w.add('n1', 1, 100)
+  const ranges = () => [[booked.startMs, booked.startMs + 1000, 'n1/0']]
+  const r = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, freeOf: () => ({ freeBytes: 90, totalBytes: 100 }), protectedRanges: ranges })
+  check('RETENTION: THE BOOKMARKED CAMERA\'S FILE KEPT, ANOTHER CAMERA\'S AT THE SAME TIME DELETED', existsSync(booked.path) && !existsSync(beside.path) && existsSync(later.path) && r.deleted.map((d) => d.path).join() === beside.path, JSON.stringify(r.deleted))
+  const w2 = world()
+  const b2 = w2.add('n1', 0, 200)
+  const s2 = w2.add('n1', 1, 200)
+  w2.add('n1', 1, 100)
+  const f = await runRetention({ index: w2.index, settings: { ...w2.settings(), recording: { defaults: { ...DEFAULTS, retentionDays: 365 }, cameras: {} } }, now: NOW, present: w2.present, freeOf: () => ({ freeBytes: 1, totalBytes: 100 }), protectedRanges: () => [[b2.startMs, b2.startMs + 1000, 'n1/0']] })
+  check('BELOW THE FLOOR: the oldest is another camera\'s file in the bookmarked stretch, not the next one after it', f.deleted[0]?.path === s2.path && !f.deleted.some((d) => d.path === b2.path), JSON.stringify(f.deleted.map((d) => d.path)))
+  w.index.close()
+  w2.index.close()
 }
 {
   // A 2-hour bookmark on 87 cameras (bookmarks protect every camera), 200 days old: past the days kept,

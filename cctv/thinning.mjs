@@ -70,8 +70,9 @@ export const MAX_SEGMENTS_PER_RUN = 2000
 const BATCH = 500
 /** A segment bigger than this is not rewritten in one buffer. One minute of 4K is far under it. */
 export const MAX_SEGMENT_BYTES = 512 * 1024 * 1024
-/** Margin around a protected stretch, so the keyframe before a bookmark survives too. */
-export const PROTECT_MARGIN_MS = 60_000
+// (PROTECT_MARGIN_MS, a minute more around every stretch, went on 2026-09-30: bookmarks.mjs protectedRanges
+// already grows each bookmark by a minute either side, and with both a bookmark kept two. Whole files that
+// touch a stretch are kept, so the keyframe before a bookmark is kept with the file that has it.)
 
 const camRec = (settings, nvr, ch) => ({ ...settings.recording.defaults, ...(settings.recording.cameras?.[`${nvr}/${ch}`] ?? {}) })
 const pct = (f) => (f.totalBytes > 0 ? (f.freeBytes / f.totalBytes) * 100 : 100)
@@ -91,14 +92,27 @@ export async function loadProtectedRanges() {
   }
 }
 
-/** Normalises whatever protectedRanges answers into [[from, to]] pairs. Unparseable -> throws. */
+/**
+ * Normalises whatever protectedRanges answers into { span: [from, to], cameras: string[]|null } (null:
+ * every camera). A stretch is [from, to] (every camera), [from, to, camera] (bookmarks.mjs since
+ * 2026-09-30: a camera key, or null for every camera), [from, to, [cameras]], or an object with
+ * fromMs/toMs and `camera` or `cameras`; no camera, or an empty list, is every camera. The stretch is
+ * taken as it is: bookmarks.mjs has grown it by its minute either side already. Unparseable -> throws.
+ */
 function normaliseRanges(raw) {
   const out = []
+  const bad = (r) => new Error(`protectedRanges gave a range we cannot read: ${JSON.stringify(r)}`)
   for (const r of raw ?? []) {
     const from = Array.isArray(r) ? r[0] : r?.fromMs ?? r?.startMs ?? r?.from
     const to = Array.isArray(r) ? r[1] : r?.toMs ?? r?.endMs ?? r?.to
-    if (!Number.isFinite(from) || !Number.isFinite(to)) throw new Error(`protectedRanges gave a range we cannot read: ${JSON.stringify(r)}`)
-    out.push([Math.min(from, to) - PROTECT_MARGIN_MS, Math.max(from, to) + PROTECT_MARGIN_MS])
+    if (!Number.isFinite(from) || !Number.isFinite(to)) throw bad(r)
+    const which = Array.isArray(r) ? r[2] : r?.camera ?? r?.cameras
+    let cameras = null
+    if (typeof which === 'string') cameras = [which]
+    else if (Array.isArray(which) && which.length) cameras = which
+    else if (which !== undefined && which !== null && !(Array.isArray(which) && which.length === 0)) throw bad(r)
+    if (cameras && !cameras.every((k) => typeof k === 'string' && k.includes('/'))) throw bad(r)
+    out.push({ span: [Math.min(from, to), Math.max(from, to)], cameras })
   }
   return out
 }
@@ -114,40 +128,85 @@ function mergeRanges(ranges) {
   return out
 }
 
+/** The first of these merged stretches the segment overlaps, or null: looked up by halving. */
+function overlapIn(ranges, s) {
+  const from = s.startMs
+  const to = s.endMs ?? s.startMs
+  // the first stretch that ends at or after the segment's start; the segment overlaps it if it
+  // starts no later than the segment ends (every later stretch starts later still)
+  let lo = 0
+  let hi = ranges.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (ranges[mid][1] < from) lo = mid + 1
+    else hi = mid
+  }
+  return lo < ranges.length && ranges[lo][0] <= to ? ranges[lo] : null
+}
+
+/** A row's camera, as bookmarks name it ("<nvr>/<channel>", rec-index.mjs camKey); null for a row that names none. */
+const cameraOf = (s) => (s?.nvr === undefined || s?.nvr === null || s?.ch === undefined || s?.ch === null ? null : `${s.nvr}/${Number(s.ch)}`)
+
 /**
  * A guard object for one run: .protected(seg) says whether a segment must be left alone.
  * `mode` is 'none' (no bookmarks module yet) or 'ranges'. A run's `protection` can also be
  * 'unread': asking threw, and the run stopped before any file (the two catches below).
  * housekeeping.mjs asks through this too since 2026-09-29.
  *
- * .stretchOf(seg) is the protected stretch [from, to] the segment overlaps, or null. The deletion jobs
- * use it to step over a stretch in one look: every row that STARTS inside a stretch is in it, whatever
- * the camera (protectedRanges does not look at the camera), so none of them needs reading. Passing them
- * one by one on the main thread was 120-136 ms for a 2-hour bookmark on the production VM, and about
- * 1.5 s for a 24-hour one, every run, since bookmarked footage is never deleted and so stays the oldest
- * (review of p2-delete, 2026-09-29). The ranges are merged and looked up by halving, not one by one.
+ * A bookmark keeps the cameras it names (since 2026-09-30, final fix round of the storage work). The
+ * guard took every stretch for every camera: production bookmarks every line crossing on one camera
+ * (Maingate Roadway), so each crossing kept about 7 minutes of all 87 cameras, about 7 GB, for good,
+ * and the 12,000 GB limit deleted other cameras' newer footage instead; once only such footage was left
+ * the limit and the floor could free nothing, and the shared NAS would fill. Now a segment is protected
+ * by the stretches of its own camera, and by the common ones: stretches that name no camera (a
+ * bookmark whose cameras cannot be read, or a caller's plain [from, to]), which keep every camera.
+ *
+ * .stretchOf(seg) is the protected stretch [from, to] of the segment's camera (its own and the common
+ * ones, merged) that it overlaps, or null. The deletion jobs use it to step over a stretch in one look:
+ * every row of THAT CAMERA that starts inside it is in it, so none of them needs reading (housekeeping's
+ * CameraCursors.skipTo, runRetention's per-camera walk). Passing them one by one on the main thread was
+ * 120-136 ms for a 2-hour bookmark on the production VM, and about 1.5 s for a 24-hour one, every run,
+ * since bookmarked footage is never deleted and so stays the oldest (review of p2-delete, 2026-09-29).
+ * .commonOf(seg) is the common stretch it overlaps, or null: only those may be stepped over by a walk of
+ * every camera's rows at once (segment-delete.mjs firstUnprotected, runRetention's floor, thinning's walk).
+ * The ranges are merged and looked up by halving, not one by one.
  */
 export async function protectionFor(fromMs, toMs, { protectedRanges } = {}) {
   const fn = protectedRanges === undefined ? await loadProtectedRanges() : protectedRanges
-  if (typeof fn !== 'function') return { mode: 'none', ranges: [], protected: () => false, stretchOf: () => null }
+  if (typeof fn !== 'function') return { mode: 'none', common: [], cameras: [], listOf: () => [], ownOf: () => [], protected: () => false, stretchOf: () => null, commonOf: () => null }
   // A throw here is fatal for the run: we cannot tell bookmarked footage from the rest, and the
   // only safe thing to do with footage you cannot identify is nothing.
-  const ranges = mergeRanges(normaliseRanges(await fn(fromMs, toMs)))
-  const stretchOf = (s) => {
-    const from = s.startMs
-    const to = s.endMs ?? s.startMs
-    // the first stretch that ends at or after the segment's start; the segment overlaps it if it
-    // starts no later than the segment ends (every later stretch starts later still)
-    let lo = 0
-    let hi = ranges.length
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (ranges[mid][1] < from) lo = mid + 1
-      else hi = mid
+  const all = normaliseRanges(await fn(fromMs, toMs))
+  const common = mergeRanges(all.filter((x) => !x.cameras).map((x) => x.span))
+  const own = new Map() // camera -> its own stretches, as given
+  for (const x of all) {
+    for (const k of x.cameras ?? []) {
+      if (!own.has(k)) own.set(k, [])
+      own.get(k).push(x.span)
     }
-    return lo < ranges.length && ranges[lo][0] <= to ? ranges[lo] : null
   }
-  return { mode: 'ranges', ranges, protected: (s) => stretchOf(s) !== null, stretchOf }
+  const any = mergeRanges(all.map((x) => x.span)) // every stretch, whatever its camera
+  const lists = new Map() // camera -> its own merged with the common ones, made when first asked
+  /** A camera's stretches (its own and the common ones, merged), oldest first; null: every stretch of any camera. */
+  const listOf = (k) => {
+    if (k === null) return any // a row that names no camera: kept by any stretch, as every row was before
+    if (!own.has(k)) return common
+    if (!lists.has(k)) lists.set(k, mergeRanges([...common, ...own.get(k)]))
+    return lists.get(k)
+  }
+  const stretchOf = (s) => overlapIn(listOf(cameraOf(s)), s)
+  return {
+    mode: 'ranges',
+    common,
+    /** The cameras with stretches of their own. */
+    cameras: [...own.keys()],
+    listOf,
+    /** A camera's own stretches alone, merged (for saying which were passed). */
+    ownOf: (k) => mergeRanges(own.get(k) ?? []),
+    protected: (s) => stretchOf(s) !== null,
+    stretchOf,
+    commonOf: (s) => overlapIn(common, s)
+  }
 }
 
 // ---- the safety net around every file operation ---------------------------------------------
@@ -374,6 +433,7 @@ class FullStream {
     this.from = Number.MIN_SAFE_INTEGER // where the next look starts
     this.atFrom = new Set() // rows already read that start exactly there
     this.done = false
+    this.past = new Map() // camera -> the end of its own bookmarked stretch the walk is in (skipCam)
   }
   /** Reads the next rows (at most LOOK), a window at a time, the loop let go round between windows; false when there are none. */
   async more() {
@@ -393,6 +453,8 @@ class FullStream {
           if (r.startMs !== this.from) this.atFrom = new Set()
           this.from = r.startMs
           this.atFrom.add(r.path)
+          // (a row of a camera inside its own bookmarked stretch: skipCam)
+          if (r.startMs < (this.past.get(`${r.nvr}/${r.ch}`) ?? -Infinity)) continue
           this.buf.push(r)
         }
         return true
@@ -415,15 +477,16 @@ class FullStream {
       if (r) return r
       // as many rows read as three looks and every one of a busy camera: wait for one to be free
       if (this.buf.length >= 3 * LOOK || !(await this.more())) return null
+      await this.tick() // (the rows read may all have been a camera's own bookmarked stretch: skipCam)
     }
   }
   take(r) {
     this.buf.splice(this.buf.indexOf(r), 1)
   }
   /**
-   * Past a bookmarked stretch [a, ms) (it covers every camera): the rows read that start in it go, and the
-   * next look starts after it (the stretch holds the row just taken, so every row not read yet starts in or
-   * after it). Rows read that start before it stay.
+   * Past a common bookmarked stretch [a, ms) (one that keeps every camera: thinning.mjs protectionFor's
+   * commonOf): the rows read that start in it go, and the next look starts after it (the stretch holds the
+   * row just taken, so every row not read yet starts in or after it). Rows read that start before it stay.
    */
   skipTo(a, ms) {
     this.buf = this.buf.filter((x) => x.startMs < a || x.startMs >= ms)
@@ -431,6 +494,16 @@ class FullStream {
       this.from = ms
       this.atFrom = new Set()
     }
+  }
+  /**
+   * Past one camera's own bookmarked stretch [a, ms) (since 2026-09-30 a bookmark keeps the cameras it names):
+   * that camera's rows read that start in it go, and its rows read later that start before ms are passed as
+   * they are read (every row not read yet starts at or after the row just taken, so in or after the stretch).
+   * The other cameras' rows of that time are not its bookmark's: the walk reads on through them.
+   */
+  skipCam(key, a, ms) {
+    this.buf = this.buf.filter((x) => `${x.nvr}/${x.ch}` !== key || x.startMs < a || x.startMs >= ms)
+    this.past.set(key, Math.max(this.past.get(key) ?? -Infinity, ms))
   }
 }
 
@@ -659,12 +732,16 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
       }
       const { st, s } = pick
       st.take(s)
-      // a row starting inside a bookmarked stretch: so does every row to the stretch's end, whatever the
-      // camera (one look); a file that starts before it and runs into it is passed by itself
+      // a row starting inside its camera's bookmarked stretch: so does every row of that camera to the
+      // stretch's end, and they are passed as they are read (skipCam); inside a common one (every camera's),
+      // every camera's row to its end, in one look (skipTo). A file that starts before a stretch and runs
+      // into it is passed by itself. Other cameras' rows of a camera's own stretch are not its bookmark's.
       const stretch = guard.stretchOf(s)
       if (stretch) {
         out.skipped.push({ path: s.path, why: 'bookmarked or exported' })
-        if (s.startMs >= stretch[0]) st.skipTo(stretch[0], afterStretch(stretch))
+        if (s.startMs >= stretch[0]) st.skipCam(`${s.nvr}/${s.ch}`, stretch[0], afterStretch(stretch))
+        const common = guard.commonOf(s)
+        if (common && s.startMs >= common[0]) st.skipTo(common[0], afterStretch(common))
         continue
       }
       const may = mayTouch(s, locs, here)
@@ -744,47 +821,109 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   /**
    * What waits, from segments_full: per group, between bookmarked stretches, a window at a time
    * (WINDOW_ROWS; windows with none of the group's rows passed with one look each). No row objects, no files.
+   *
+   * A bookmark keeps the cameras it names (since 2026-09-30): the group's cameras with no bookmark of their
+   * own are summed together between the common stretches, as before; each camera with bookmarks of its own
+   * alone, between its own stretches and the common ones, from its first full-video file none of them
+   * keeps, through its own rows (THIN_SQL.fullSummaryOf, camera first: a day of them a statement). Its
+   * bookmarked files are full video for good (never converted), so the oldest waiting file, and with it
+   * FALLING BEHIND, would otherwise be a bookmarked one. Summing each such camera through segments_full
+   * would pass every other camera's rows once more per camera.
    */
   async function backlogOf(list) {
     const b = { files: 0, bytes: 0, weighted: 0, oldestMs: null, lagMs: 0 }
     const off = new Map() // why -> files on a location that is not usable now
-    const ranges = guard.ranges ?? []
-    for (const g of list) {
-      let lo = Number.MIN_SAFE_INTEGER
-      const spans = []
-      for (const [a, z] of ranges) {
-        if (a >= g.cutoff) break
-        spans.push([lo, a])
-        lo = Math.floor(z) + 1
+    const common = guard.common ?? []
+    const owners = new Set(guard.cameras ?? []) // cameras with bookmarks of their own
+    const add = (g, r) => {
+      const loc = locs.get(r.loc)
+      if (!loc || !here.has(loc.id)) {
+        const why = loc ? `${loc.path} is not mounted` : `unknown location ${r.loc}`
+        off.set(why, (off.get(why) ?? 0) + r.files)
+        return
       }
-      spans.push([lo, g.cutoff])
-      for (const [from, to] of spans) {
-        if (from >= to) continue
-        for (let t = await nextFull(g.cams, from, to); t !== null && t < to; ) {
-          await tick()
-          const end = win.end(t, to)
-          for (const r of index.fullSummary(g.cams, { fromMs: t, toMs: end, endBefore: to, stepMs: g.timelapseS * 1000 })) {
-            const loc = locs.get(r.loc)
-            if (!loc || !here.has(loc.id)) {
-              const why = loc ? `${loc.path} is not mounted` : `unknown location ${r.loc}`
-              off.set(why, (off.get(why) ?? 0) + r.files)
-              continue
-            }
-            b.files += r.files
-            b.bytes += r.bytes
-            b.weighted += r.weighted
-            if (b.oldestMs === null || r.firstMs < b.oldestMs) b.oldestMs = r.firstMs
-            b.lagMs = Math.max(b.lagMs, g.cutoff - r.firstMs)
+      b.files += r.files
+      b.bytes += r.bytes
+      b.weighted += r.weighted
+      if (b.oldestMs === null || r.firstMs < b.oldestMs) b.oldestMs = r.firstMs
+      b.lagMs = Math.max(b.lagMs, g.cutoff - r.firstMs)
+    }
+    const said = []
+    for (const g of list) {
+      const stepMs = g.timelapseS * 1000
+      const rest = g.cams.filter((c) => !owners.has(`${c.nvr}/${c.ch}`))
+      if (rest.length) {
+        for (const [from, to] of between(common, g.cutoff)) {
+          for (let t = await nextFull(rest, from, to); t !== null && t < to; ) {
+            await tick()
+            const end = win.end(t, to)
+            for (const r of index.fullSummary(rest, { fromMs: t, toMs: end, endBefore: to, stepMs })) add(g, r)
+            t = end < to ? await nextFull(rest, end, to) : null
           }
-          t = end < to ? await nextFull(g.cams, end, to) : null
+        }
+      }
+      for (const c of g.cams.filter((x) => owners.has(`${x.nvr}/${x.ch}`))) {
+        const key = `${c.nvr}/${c.ch}`
+        const ranges = guard.listOf(key)
+        for (const [a, z] of guard.ownOf(key)) if (a < g.cutoff) said.push(`${utc(a)} to ${utc(z)} (${key})`)
+        const first = await firstWaiting(c, ranges, g.cutoff)
+        if (first === null) continue
+        for (const [from, to] of between(ranges, g.cutoff, first)) {
+          for (let t = from; t < to; t += DAY) {
+            await tick()
+            for (const r of index.fullSummaryOf(c, { fromMs: t, toMs: Math.min(t + DAY, to), endBefore: to, stepMs })) add(g, r)
+          }
         }
       }
     }
     // one line per reason and per stretch, not per row (a drive unplugged with a week on it is 900,000 rows)
     for (const [why, files] of off) out.skipped.push({ path: `${files.toLocaleString('en-GB')} files`, why, files })
     const latest = Math.max(...list.map((g) => g.cutoff), -Infinity)
-    for (const [a, z] of ranges) if (a < latest) out.skipped.push({ path: `${utc(a)} to ${utc(z)}`, why: 'bookmarked or exported' })
+    for (const [a, z] of common) if (a < latest) out.skipped.push({ path: `${utc(a)} to ${utc(z)}`, why: 'bookmarked or exported' })
+    for (const path of new Set(said)) out.skipped.push({ path, why: 'bookmarked or exported' })
     return b
+  }
+
+  /** The spans between these stretches, from `lo` up to the cutoff: [from, to) each, to exclusive. */
+  function between(ranges, cutoff, lo = Number.MIN_SAFE_INTEGER) {
+    const spans = []
+    for (const [a, z] of ranges) {
+      if (a >= cutoff) break
+      if (z < lo) continue
+      if (a > lo) spans.push([lo, a])
+      lo = Math.max(lo, Math.floor(z) + 1)
+    }
+    if (lo < cutoff) spans.push([lo, cutoff])
+    return spans
+  }
+
+  /**
+   * Where one camera's first full-video file waiting to be converted (ended before the cutoff) starts that
+   * none of these stretches keeps, or null: its full video read in time order, LOOK rows a window at a time,
+   * the rows in a stretch passed as they come. (Full video before it is only bookmarked footage, which is
+   * never converted: sparse in segments_full, so passed quickly.)
+   */
+  async function firstWaiting(c, ranges, cutoff) {
+    for (let at = Number.MIN_SAFE_INTEGER; ; ) {
+      const t = await nextFull([c], at, cutoff)
+      if (t === null || t >= cutoff) return null
+      const rows = index.fullOlderThan([c], cutoff, LOOK, t, win.end(t, cutoff))
+      // (none: its next file runs past the cutoff, so it does not wait yet; the next after it)
+      if (!rows.length) {
+        at = t + 1
+        continue
+      }
+      let next = rows.at(-1).startMs + 1
+      for (const r of rows) {
+        const st = overlapIn(ranges, r)
+        if (!st) return r.startMs
+        next = Math.max(next, r.startMs >= st[0] ? afterStretch(st) : r.startMs + 1)
+      }
+      // (two of one camera's files starting in the same millisecond at a look's end, never written on purpose:
+      // the second is passed too, which only ever counts less)
+      at = next
+      await tick()
+    }
   }
 
   /** One file: rewritten by the helper, checked here, swapped by the helper, the row, the commit. */
@@ -1005,11 +1144,13 @@ const FLOOR_WALK = 200
  * or Dry run stops it there.
  *
  * Bookmarked stretches are stepped over in one look each (review of p2-delete, 2026-09-29): each camera's
- * walk starts at the oldest row no bookmark covers on a mounted location (firstUnprotected), and a
- * camera's walk, or the floor's, that comes to a row starting inside a stretch goes on after its end. A
- * bookmark past the days kept is never deleted, so it stays the oldest for good, and passing its rows one
- * by one was every run's cost, dry run included. `skipped` lists such a stretch once per walk, not once
- * per row.
+ * walk starts at the oldest row no bookmark of its camera covers on a mounted location (firstUnprotected),
+ * and a camera's walk that comes to a row starting inside its camera's stretch goes on after its end; the
+ * floor's walk, which reads every camera's rows at once, steps over the common stretches (every camera's)
+ * that way and passes one camera's bookmarked rows by themselves (a bookmark keeps the cameras it names
+ * since 2026-09-30). A bookmark past the days kept is never deleted, so it stays the oldest for good, and
+ * passing its rows one by one was every run's cost, dry run included. `skipped` lists such a stretch once
+ * per walk, not once per row.
  *
  * @param {{ share?: Function, armed?: () => boolean, sleep?: Function }} o (and the rest as before)
  * @returns {Promise<{ dryRun, deleted: {path, why, bytes}[], skipped: {path, why}[],
@@ -1101,10 +1242,11 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
   // where each mounted location's footage stops being bookmarked (everything before is): the walks below
   // start there
   const pace = makePacer()
-  const firstFree = new Map() // location id -> the start of its oldest row no bookmark covers
+  const cams = here.size ? index.cameras() : []
+  const firstFree = new Map() // location id -> the start of its oldest row no bookmark of its camera covers
   for (const loc of locs.values()) {
     if (!here.has(loc.id)) continue
-    const g = await firstUnprotected({ index, locId: loc.id, guard, pace })
+    const g = await firstUnprotected({ index, locId: loc.id, guard, pace, cams })
     for (const p of g.passed) out.skipped.push({ path: p.path, why: 'bookmarked or exported' })
     if (g.row) firstFree.set(loc.id, g.row.startMs)
   }
@@ -1113,7 +1255,7 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
 
   // 1. per-camera retention days, oldest first (olderThan is ordered by start_ms)
   let n = 0
-  for (const { nvr, ch } of startAt === null ? [] : index.cameras()) {
+  for (const { nvr, ch } of startAt === null ? [] : cams) {
     if (switched) break
     const rec = camRec(settings, nvr, ch)
     if (!Number.isFinite(rec.retentionDays)) {
@@ -1185,8 +1327,10 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
         fromMs = s.startMs
         if (n >= maxDeletes || counted() >= floorB || d?.stopped || switched) break walk
         await pace()
-        // a row starting inside a bookmarked stretch: so does every row here to its end, whatever the camera
-        const st = guard.stretchOf(s)
+        // a row starting inside a common bookmarked stretch (every camera's): so does every row here to its
+        // end, whatever the camera. One camera's own stretch keeps that camera's rows only: del() passes each
+        // (since 2026-09-30; the other cameras' footage of that time is the oldest like any other)
+        const st = guard.commonOf(s)
         if (st && s.startMs >= st[0]) {
           out.skipped.push({ path: s.path, why: 'bookmarked or exported' })
           fromMs = afterStretch(st)

@@ -297,6 +297,60 @@ for (const [name, marker] of [['marker missing (drive unplugged)', null], ['mark
   hk.reset()
 }
 
+// ---- a bookmark keeps the cameras it names, not every camera (final fix round, 2026-09-30) ------------------
+// Since p2-delete the bookmarks govern retention, the limit, the low mark and the floor. protectedRanges gave
+// [from, to] only, so a bookmark kept every camera's footage in its stretch, widened twice (a minute in
+// bookmarks.mjs, a minute more in thinning.mjs). Production bookmarks every line crossing on one camera
+// (Maingate Roadway, 30 s before to 60 s after): each crossing kept about 7 minutes of all 87 cameras, about
+// 7 GB, for good, and the 12,000 GB limit deleted other cameras' newer footage instead. The review's case (its
+// scratch test 2b): a 90 s bookmark on n1/0 kept all 7 of n1/1's files from 20 days ago, and the limit deleted
+// 7 of n1/1's files from 2 days ago instead. Here with the real bookmarks.mjs.
+const bookmarks = await import('../bookmarks.mjs')
+{
+  hk.reset()
+  const MIN = 60_000
+  const t0 = NOW - 20 * DAY
+  const B = t0 + 150_000 // 02:30 to 04:00 into the 20-day-old minutes; kept from 01:30 to 05:00 with its minute either side
+  bookmarks.createBookmark({ cameras: ['n1/0'], startMs: B, endMs: B + 90_000, title: 'Line crossing — Maingate Roadway' }, 'system', { now: NOW })
+  const world = (limitGB = null) => {
+    const w = setup({ limitGB })
+    const at = (nvr, ch, s) => {
+      const path = segmentPath(w.root, nvr, ch, s, 'h264')
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, Buffer.alloc(10))
+      writeFileSync(`${path}.idx`, Buffer.alloc(16))
+      w.index.addSegment({ nvr, ch, path, startMs: s, endMs: s + 59_000, bytes: GB, keyframes: 1, loc: w.loc.id })
+      return path
+    }
+    const old0 = Array.from({ length: 7 }, (_, k) => at('n1', 0, t0 + k * MIN))
+    const old1 = Array.from({ length: 7 }, (_, k) => at('n1', 1, t0 + k * MIN))
+    const new1 = Array.from({ length: 7 }, (_, k) => at('n1', 1, NOW - 2 * DAY + k * MIN))
+    return { ...w, old0, old1, new1 }
+  }
+  const names = (r) => r.deleted.map((d) => tail(d.path)).join(', ')
+  // (a NAS with room that frees the space of what is deleted, as `roomy` below)
+  const room = () => {
+    const f = fakeFree(900 * GB, 1000 * GB)
+    return { freeOf: f.fn, onDelete: (s) => (f.freed += s.bytes) }
+  }
+  // the limit: 21 GB held, 14 GB allowed
+  const l = world(14)
+  const r = await run({ index: l.index, settings: settingsWith([l.loc]), ...room(), protectedRanges: bookmarks.protectedRanges })
+  check('THE LIMIT (the review\'s case): the 7 oldest files no bookmark of their own camera keeps go, all 20 days old; none from 2 days ago', r.deleted.length === 7 && l.new1.every((p) => existsSync(p)) && r.deleted.every((d) => l.old0.includes(d.path) || l.old1.includes(d.path)), names(r))
+  check('... the bookmarked camera keeps its minutes 1 to 5 (the bookmark and a minute either side, once)', [1, 2, 3, 4, 5].every((k) => existsSync(l.old0[k])), l.old0.map((p) => existsSync(p)).join())
+  check('... AND ANOTHER CAMERA\'S FOOTAGE IN THAT STRETCH IS NOT KEPT BY IT', [1, 2, 3, 4, 5].every((k) => !existsSync(l.old1[k])), l.old1.map((p) => existsSync(p)).join())
+  // retention: n1/1 keeps 10 days, n1/0 10 days too
+  const t = world()
+  const rt = await run({ index: t.index, settings: settingsWith([t.loc], { 'n1/0': { retentionDays: 10 }, 'n1/1': { retentionDays: 10 } }), freeOf: fakeFree(90_000).fn, protectedRanges: bookmarks.protectedRanges })
+  check('RETENTION: past its days, another camera\'s footage in a bookmarked stretch goes; the bookmarked camera keeps its own', t.old1.every((p) => !existsSync(p)) && [1, 2, 3, 4, 5].every((k) => existsSync(t.old0[k])) && !existsSync(t.old0[0]) && !existsSync(t.old0[6]) && rt.deleted.length === 9, names(rt))
+  // below the floor: 21 files of 1 GB on a 1,000 GB share at 4.9 % free, 1 GB short of the 5 % floor
+  const f = world()
+  const ff = fakeFree(49 * GB, 1000 * GB)
+  const rf = await run({ index: f.index, settings: settingsWith([f.loc], {}, { lowFreePct: 5, floorFreePct: 5 }), freeOf: ff.fn, onDelete: (s) => (ff.freed += s.bytes), protectedRanges: bookmarks.protectedRanges, sleep: async () => {} })
+  check('BELOW THE FLOOR: the oldest file no bookmark of its own camera keeps goes first (here the other camera\'s first minute)', rf.deleted.length >= 1 && (rf.deleted[0].path === f.old0[0] || rf.deleted[0].path === f.old1[0]) && !rf.deleted.some((d) => [1, 2, 3, 4, 5].some((k) => d.path === f.old0[k])), names(rf))
+  hk.reset()
+}
+
 // ---- the space limit (location.limitGB, 1 GB = 1,000,000,000 bytes; the owner's 12 TB on the NAS) --------
 // A NAS with room that frees the space of what is deleted (else the rise check would, rightly, stop
 // deleting for free space on it: see below)
@@ -363,9 +417,9 @@ hk.reset()
   check('... and it is an alert (drive-full, which pages the owner) until a run can meet the limit', cands.length === 1 && cands[0].kind === 'drive-full' && cands[0].key === 'drive-full/L1/limit-blocked' && /over its space limit/.test(cands[0].title) && /newest 24 h/.test(cands[0].detail), JSON.stringify(cands))
 }
 {
-  // a bookmarked stretch in the middle of the oldest footage (bookmarks protect every camera): the limit
-  // deletes what is before it and after it, each camera stepping over it in one look, and keeps all of
-  // it; a file that starts before the stretch and runs into it is kept too (review of p2-delete)
+  // a bookmarked stretch in the middle of the oldest footage (a stretch that names no camera keeps every
+  // camera): the limit deletes what is before it and after it, each camera stepping over it in one look, and
+  // keeps all of it; a file that starts before the stretch and runs into it is kept too (review of p2-delete)
   hk.reset()
   const { loc, index } = setup({ limitGB: 1 })
   const t0 = NOW - 20 * DAY
@@ -375,7 +429,9 @@ hk.reset()
   // (a second file in minute 48: a name of its own)
   const crossing = segmentPath(loc.path, 'n1', 0, t0 + 48 * MIN, 'h265')
   put(0, t0 + 48 * MIN + 30_000, t0 + 49 * MIN + 30_000, crossing) // runs into the stretch (with its 1-minute margin, from minute 49)
-  const stretch = [t0 + 50 * MIN, t0 + 149 * MIN] // kept with the margin: minutes 49 to 150 of each camera
+  // a bookmark of minutes 50 to 149 as bookmarks.mjs gives it, a minute either side (the guard adds none of its
+  // own since 2026-09-30): minutes 49 to 150 of each camera kept
+  const stretch = [t0 + 49 * MIN, t0 + 150 * MIN]
   const kept = (s) => s.startMs <= t0 + 150 * MIN && s.endMs >= t0 + 49 * MIN
   let reads = 0
   const counted = new Proxy(index, { get: (t, k) => (['oldest', 'oldestOf', 'oldestPerCamera'].includes(k) ? (...a) => (reads++, t[k](...a)) : t[k]) })
@@ -518,11 +574,12 @@ hk.reset()
   const rowOf = (c, k) => ({ nvr: camsList[c].nvr, ch: c, path: segmentPath(root, camsList[c].nvr, c, startOf(k), 'h265'), startMs: startOf(k), endMs: startOf(k) + 59_900, bytes: SEG, keyframes: 60, loc: 'NAS' })
   const firstMinutes = new Set() // each camera's first 6 minute files: the oldest 522
   for (let c = 0; c < CAMS; c++) for (let k = 0; k < 6; k++) firstMinutes.add(rowOf(c, k).path)
-  // A 2-hour bookmark at the oldest end (review of p2, 2026-09-29): bookmarks protect every camera, so
-  // with the 1-minute margin each camera's first 122 minute files (10,614 rows) are kept, and the 470 go
-  // from the 6 minutes after it. Passing those rows one by one on the main thread was 120-136 ms on the
-  // production VM, and every run walked them again (261 index reads with nothing to delete).
-  const BOOKED = [startOf(0), startOf(120)]
+  // A 2-hour bookmark at the oldest end (review of p2, 2026-09-29) that names no camera, so it keeps every
+  // camera: with its 1-minute margin (bookmarks.mjs's, as given here) each camera's first 122 minute files
+  // (10,614 rows) are kept, and the 470 go from the 6 minutes after it. Passing those rows one by one on the
+  // main thread was 120-136 ms on the production VM, and every run walked them again (261 index reads with
+  // nothing to delete).
+  const BOOKED = [startOf(0) - 60_000, startOf(120) + 60_000]
   const afterBooked = new Set()
   for (let c = 0; c < CAMS; c++) for (let k = 122; k < 128; k++) afterBooked.add(rowOf(c, k).path)
 
@@ -681,6 +738,33 @@ hk.reset()
     check(`... (${name}) what was passed over is said once per stretch, not once per row (10,614 rows)`, best.r.skipped.length >= 1 && best.r.skipped.length <= CAMS && best.r.skipped.every((s) => /bookmark/.test(s.why)), String(best.r.skipped.length))
   }
 
+  // Bookmarks of their own cameras only (final fix round, 2026-09-30), as bookmarks.mjs gives them (a minute
+  // either side): a line-crossing bookmark on one camera every 10 minutes (Maingate Roadway's kind: 90 s
+  // each, 100 of them) and a person's 2-hour bookmark of 16 cameras, both at the oldest end. Each keeps its
+  // own cameras; the other 71 cameras' oldest minutes go, the line-crossing camera's between its crossings too.
+  const key = (c) => `${camsList[c].nvr}/${c}`
+  const GATE = 40
+  const OWN = [
+    ...Array.from({ length: 16 }, (_, c) => [startOf(0) - 60_000, startOf(120) + 60_000, key(c)]),
+    ...Array.from({ length: 100 }, (_, i) => [startOf(10 * i) + 20_000 - 60_000, startOf(10 * i) + 110_000 + 60_000, key(GATE)])
+  ]
+  const rowByPath = new Map()
+  for (let c = 0; c < CAMS; c++) for (const r of byCam[c]) rowByPath.set(r.path, { c, r })
+  const ownKept = (path) => {
+    const x = rowByPath.get(path)
+    return Boolean(x) && OWN.some(([a, b, k]) => k === key(x.c) && x.r.startMs <= b && x.r.endMs >= a)
+  }
+  const firstFree = new Set() // every row of the oldest 6 minutes that no bookmark of its own camera keeps: 423
+  for (let c = 0; c < CAMS; c++) for (let k = 0; k < 6; k++) if (!ownKept(rowOf(c, k).path)) firstFree.add(rowOf(c, k).path)
+  for (const [name, make] of [['a fake index', fakeIndex], ['the real index (SQLite)', realIndex]]) {
+    const { best, text } = await quietest(make, OWN)
+    const got = new Set(best.r.deleted.map((d) => d.path))
+    check(`ONE CAMERA'S LINE-CROSSING BOOKMARKS AND A 16-CAMERA ONE AT THE OLDEST END (${name}): 470 FILES DELETED, NONE KEPT BY A BOOKMARK OF ITS OWN CAMERA`, best.deleted === WANT && best.left === WANT && !best.r.deleted.some((d) => ownKept(d.path)), `${best.deleted} deleted, ${best.r.deleted.filter((d) => ownKept(d.path)).length} of them bookmarked`)
+    check(`... (${name}) the other cameras' oldest minutes go, the line-crossing camera's between its crossings too (${firstFree.size} files of the oldest 6 minutes)`, firstFree.size === 423 && [...firstFree].every((p) => got.has(p)) && best.r.deleted.some((d) => d.path === rowOf(GATE, 3).path), `${[...firstFree].filter((p) => !got.has(p)).length} of them kept`)
+    check(`... (${name}) the main thread's longest busy stretch under 50 ms, and monitorEventLoopDelay agrees`, best.busy < 50 && best.eld < 50, `rounds (busy / event-loop delay): ${text}`)
+    check(`... (${name}) each camera steps over its own stretch with a look: at most two looks per bookmarked camera, not a row at a time`, best.reads <= 2 * 17 + 10, `${best.reads} reads: ${JSON.stringify(best.calls)}`)
+  }
+
   // Nothing to delete but a 2-hour bookmark 40 days old, past the 30 days kept (the review's rewalk.mjs):
   // bookmarked footage is never deleted, so it stays the oldest for good, and every 5-minute run walked
   // all 10,440 of its rows again (165-199 ms on Windows; about 1.5 s for a 24-hour bookmark). Now each
@@ -712,6 +796,39 @@ hk.reset()
     check('... and says so once per stretch, not once per row', runs.every((x) => x.skipped <= CAMS), runs.map((x) => x.skipped).join())
     check('... the main thread\'s longest busy stretch well under 50 ms, each run', runs.every((x) => x.busy < 50), runs.map((x) => x.busy.toFixed(1)).join(', '))
   }
+  // The same with one camera's line-crossing bookmarks (final fix round, 2026-09-30): 300 crossings 40 days
+  // old, 4 files each, kept past the 30 days (their own camera's only: the other cameras' footage of that day
+  // is gone). Every run walks from the oldest end: with the stretches taken for every camera it was one look a
+  // crossing (the review: "grows by one look per crossing"); a camera stepping over its own is one look per
+  // 50 of its files.
+  {
+    const f = join(bigDir, 'rewalk-own.db')
+    openRecIndex(f).close()
+    const raw = new DatabaseSync(f)
+    const ins = raw.prepare('INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    const b0 = NOW - 40 * DAY
+    const put = (c, s) => ins.run(segmentPath(root, camsList[c].nvr, c, s, 'h265'), camsList[c].nvr, c, s, s + 59_000, 1000, 1, 'NAS')
+    const crossings = Array.from({ length: 300 }, (_, i) => b0 + i * 10 * 60_000 + 20_000)
+    raw.exec('BEGIN')
+    for (const t of crossings) for (let k = -1; k <= 2; k++) put(GATE, t - 20_000 + k * 60_000)
+    for (let k = 0; k < 60; k++) for (let c = 0; c < CAMS; c++) put(c, NOW - 2 * DAY + k * 60_000)
+    raw.exec('COMMIT')
+    raw.close()
+    const index = openRecIndex(f)
+    const own = crossings.map((t) => [t - 60_000, t + 90_000 + 60_000, key(GATE)])
+    const rs = { recording: { defaults: { ...DEFAULTS, fullDays: 7, retentionDays: 30 }, cameras: {} }, storage: { locations: [loc], lowFreePct: 15, floorFreePct: 5 } }
+    const runs = []
+    for (let run = 1; run <= 3; run++) {
+      const calls = {}
+      const counted = new Proxy(index, { get: (t, k) => (typeof t[k] === 'function' ? (...a) => ((calls[k] = (calls[k] ?? 0) + 1), t[k](...a)) : t[k]) })
+      const stop = beat()
+      const r = await runHousekeeping({ index: counted, settings: rs, share: async () => { throw new Error('no file call expected') }, freeOf: () => ({ freeBytes: 90, totalBytes: 100 }), present: () => true, protectedRanges: () => own, now: NOW + run * 300_000, log: () => {}, warn: () => {} })
+      runs.push({ busy: stop(), deleted: r.deleted.length, reads: Object.entries(calls).filter(([k]) => !writes.has(k) && k !== 'cameras').reduce((a, [, n]) => a + n, 0), calls })
+    }
+    index.close()
+    check('ONE CAMERA\'S 300 LINE-CROSSING BOOKMARKS PAST THE DAYS KEPT, nothing else to delete: each run steps over them a look per 50 files (1,200), not a look per crossing', runs.every((x) => x.deleted === 0 && x.reads <= 1200 / 50 + 5), JSON.stringify(runs.map((x) => x.calls)))
+    check('... the main thread\'s longest busy stretch well under 50 ms, each run', runs.every((x) => x.busy < 50), runs.map((x) => x.busy.toFixed(1)).join(', '))
+  }
   // the databases of this block are 50-100 MB a run: not left in the temp folder (they were, 1.8 GB of
   // them by 2026-09-29)
   try {
@@ -728,6 +845,7 @@ hk.reset()
 }
 
 stopShareHelpers()
+bookmarks.closeBookmarks() // (its database is in DATA_DIR, removed below)
 for (const ix of opened) {
   try {
     ix.close()

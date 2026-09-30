@@ -334,6 +334,40 @@ const SEE = seeOnly(['nvr1/0', 'nvr2/1']) // every camera the bookmarks above ar
   check('the form is checked before it is sent', /checkBookmark\(/.test(js))
 }
 
+// ---- a bookmark keeps the cameras it names, not every camera (final fix round, 2026-09-30) ----------------
+// protectedRanges gave [from, to] only, the cameras dropped, so housekeeping and thinning kept every camera's
+// footage in a bookmarked stretch. Production bookmarks every line crossing on one camera (Maingate Roadway,
+// since 2026-09-28): each crossing kept about 7 minutes of all 87 cameras, about 7 GB, for good.
+{
+  const { protectedByCamera } = await import('../public/bookmarks-view.js')
+  const J = JSON.stringify
+  const p = protectedByCamera([
+    { startMs: 1000, endMs: 2000, cameras: ['n1/0'] },
+    { startMs: 1500, endMs: 3000, cameras: ['n1/0', 'n1/1'] },
+    { startMs: 9000, endMs: 9100, cameras: '["n1/1"]' }
+  ], 0)
+  check('protectedByCamera: each camera its own stretches, merged per camera only, oldest first', J(p) === J([[1000, 3000, 'n1/0'], [1500, 3000, 'n1/1'], [9000, 9100, 'n1/1']]), J(p))
+  check('  the margin at both ends', J(protectedByCamera([{ startMs: 1000, endMs: 2000, cameras: ['n1/0'] }], 500)) === '[[500,2500,"n1/0"]]')
+  // (a bookmark whose cameras cannot be read is not turned into a bookmark of no cameras: that would widen
+  // what the deletion jobs may take; it keeps every camera, as all bookmarks did before)
+  check('  a row whose cameras cannot be read keeps every camera (null), never none', J(protectedByCamera([{ startMs: 1, endMs: 2, cameras: '{oops' }], 0)) === '[[1,2,null]]')
+  check('  and one naming no camera, or something that is not a camera key', J(protectedByCamera([{ startMs: 1, endMs: 2, cameras: '[]' }, { startMs: 5, endMs: 6, cameras: [7] }], 0)) === '[[1,2,null],[5,6,null]]')
+  check('  anything that is not a time is left out', protectedByCamera([{ startMs: null, endMs: 5, cameras: ['n1/0'] }], 0).length === 0)
+
+  const B = Date.parse('2026-09-20T09:00:00Z')
+  const M = DEFAULT_MARGIN_MS
+  createBookmark({ cameras: ['nvr5/0'], startMs: B, endMs: B + 90_000, title: 'Line crossing — Maingate Roadway' }, 'system', { now: NOW })
+  createBookmark({ cameras: ['nvr5/2', 'nvr5/1'], startMs: B + 30_000, endMs: B + 60_000, title: 'Van at the gate, two cameras' }, 'alice', { now: NOW })
+  const got = protectedRanges(B - 3600_000, B + 3600_000)
+  check('PROTECTEDRANGES NAMES EACH STRETCH\'S CAMERA: a bookmark keeps the cameras it names, a minute either side', J(got) === J([[B - M, B + 90_000 + M, 'nvr5/0'], [B + 30_000 - M, B + 60_000 + M, 'nvr5/1'], [B + 30_000 - M, B + 60_000 + M, 'nvr5/2']]), J(got))
+  check('  and destructured as before, [from, to] first', got.every(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && a < b))
+  const raw = new DatabaseSync(BOOKMARKS_DB)
+  raw.prepare('INSERT INTO bookmarks (cameras, start_ms, end_ms, title, user, created_ms) VALUES (?, ?, ?, ?, ?, ?)').run('{oops', B + 7200_000, B + 7260_000, 'damaged', 'alice', NOW)
+  raw.close()
+  check('  a stored bookmark whose cameras cannot be read keeps every camera', J(protectedRanges(B + 7200_000, B + 7260_000)) === J([[B + 7200_000 - M, B + 7260_000 + M, null]]), J(protectedRanges(B + 7200_000, B + 7260_000)))
+
+}
+
 closeBookmarks()
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

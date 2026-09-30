@@ -235,7 +235,9 @@ const MARK = [OLDEST, OLDEST + 2 * HOUR - 1] // the bookmark
 }
 const index = openRecIndex(dbFile)
 const settings = settingsOf({ defaults: { fullDays: 4 } })
-const protectedRanges = () => [{ fromMs: MARK[0], toMs: MARK[1], cameras: [] }]
+// (as bookmarks.mjs gives it: a minute either side; no cameras named: every camera. Since the final fix round
+// of 2026-09-30 the guard takes the stretches as given, where it added a minute of its own)
+const protectedRanges = () => [{ fromMs: MARK[0] - MIN, toMs: MARK[1] + MIN, cameras: [] }]
 {
   const cache = new Map()
   const facts = await measureRetention({ index, settings, now: NOW, protectedRanges, cache })
@@ -245,8 +247,12 @@ const protectedRanges = () => [{ fromMs: MARK[0], toMs: MARK[1], cameras: [] }]
   raw.close()
   const got = facts.days.map((d) => ({ n: d.rows.reduce((a, r) => a + r.files, 0), b: d.rows.reduce((a, r) => a + r.bytes, 0) }))
   check('MEASURED: each whole day\'s files and bytes exactly as SUM over the rows says, per camera', J(got) === J(want) && facts.days.every((d) => d.rows.length === CAMS), J({ got, want }))
-  // (a bookmark keeps a minute either side, thinning.mjs PROTECT_MARGIN_MS: the file of its last minute's next minute is kept too)
+  // (a bookmark keeps a minute either side: the file of its last minute's next minute is kept too)
   check('... the oldest footage is the first file after the bookmarked stretch; the oldest file of all is its first', loc.oldestMs === OLDEST + 2 * HOUR + MIN && loc.anyOldestMs === OLDEST && facts.protection === 'ranges', J({ oldest: new Date(loc.oldestMs).toISOString(), any: new Date(loc.anyOldestMs).toISOString() }))
+  // a bookmark keeps the cameras it names (final fix round, 2026-09-30): the same stretch on one camera leaves
+  // the other 86 cameras' footage of those hours the oldest, and the days kept are counted from it
+  const oneCam = await measureRetention({ index, settings, now: NOW, protectedRanges: () => [{ fromMs: MARK[0] - MIN, toMs: MARK[1] + MIN, cameras: ['nvr1/0'] }], cache })
+  check('A BOOKMARK OF ONE CAMERA: THE OLDEST FOOTAGE IS STILL THE OTHER CAMERAS\' FIRST FILE', oneCam.locations.NAS.oldestMs === OLDEST, new Date(oneCam.locations.NAS.oldestMs ?? 0).toISOString())
   check('... the time-lapse from the first hour after the bookmark to the last hour before the cutoff (to the hour)', loc.timelapse?.oldestMs === OLDEST + 2 * HOUR && loc.timelapse.newestMs === CUT - HOUR, J(loc.timelapse && { oldest: new Date(loc.timelapse.oldestMs).toISOString(), newest: new Date(loc.timelapse.newestMs).toISOString() }))
   check('... full video from the cutoff on (the first full-video file after the newest time-lapse)', loc.fullFromMs === CUT, new Date(loc.fullFromMs ?? 0).toISOString())
   // where full video begins is looked for up to FULL_LOOK_MS past the newest time-lapse sample, however many

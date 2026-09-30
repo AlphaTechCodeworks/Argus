@@ -22,7 +22,11 @@ export const MAX_BOOKMARK_MS = 24 * 3600_000
 export const EARLIEST_MS = Date.parse('2000-01-01T00:00:00Z')
 /** A camera clock may run a little fast; further ahead than this is not a real moment. */
 export const FUTURE_SLACK_MS = 24 * 3600_000
-/** The stretch kept around a bookmark when housekeeping decides what it may delete. */
+/**
+ * The stretch kept around a bookmark when housekeeping decides what it may delete. Applied here once
+ * (protectedByCamera, through bookmarks.mjs protectedRanges): the jobs' guard (thinning.mjs protectionFor)
+ * added a minute of its own on top until 2026-09-30, so a bookmark kept two minutes either side.
+ */
 export const DEFAULT_MARGIN_MS = 60_000
 /** "<nvr>/<channel>", the camera key used everywhere else in the app. */
 export const CAMERA_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/\d{1,4}$/
@@ -199,6 +203,60 @@ export function mergeProtected(ranges, marginMs = DEFAULT_MARGIN_MS) {
     else out.push([s, e])
   }
   return out
+}
+
+/**
+ * The cameras a stored bookmark keeps, or null for every camera: a list of camera keys, as an array or as
+ * the JSON text the database holds. A list that cannot be read, is empty, or holds anything that is not a
+ * camera key is null -- every camera, as every bookmark kept before 2026-09-30 -- never no camera: a
+ * bookmark taken for one of no cameras would quietly widen what the deletion jobs may take.
+ */
+function camerasKept(raw) {
+  let list = raw
+  if (typeof raw === 'string') {
+    try {
+      list = JSON.parse(raw)
+    } catch {
+      return null
+    }
+  }
+  if (!Array.isArray(list) || list.length === 0) return null
+  return list.every((k) => typeof k === 'string' && CAMERA_KEY_RE.test(k)) ? [...new Set(list)] : null
+}
+
+/**
+ * What the deletion jobs must leave alone, camera by camera: `[[from, to, camera], ...]`, each bookmark
+ * grown by `marginMs` at both ends and merged with the same camera's others (touching counts), oldest
+ * first. `camera` is a camera key ("<nvr>/<channel>"), or null: every camera (a bookmark whose cameras
+ * cannot be read). [from, to] first, so a caller destructuring pairs reads them as before.
+ *
+ * Per camera since 2026-09-30 (final fix round of the storage work). mergeProtected above drops the
+ * cameras, and the jobs took every camera's footage in a stretch for bookmarked: production bookmarks
+ * every line crossing on one camera (Maingate Roadway), and each crossing kept about 7 minutes of all 87
+ * cameras (about 7 GB at 1.02 GB a minute), for good, while the 12,000 GB limit deleted other cameras'
+ * newer footage instead. A bookmark names its cameras (the dialog's list, an alarm's camera, a crossing's):
+ * those are what it keeps.
+ *
+ * @param {Array<{ startMs: number, endMs: number, cameras: string[]|string }>} ranges
+ * @returns {Array<[number, number, string|null]>}
+ */
+export function protectedByCamera(ranges, marginMs = DEFAULT_MARGIN_MS) {
+  const margin = Number.isFinite(marginMs) && marginMs > 0 ? Math.round(marginMs) : 0
+  const byCamera = new Map() // camera key, or null for every camera -> [from, to][]
+  const time = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v)) // (Number(null) is 0)
+  for (const r of ranges ?? []) {
+    const s = time(r?.startMs)
+    const e = time(r?.endMs)
+    if (!Number.isFinite(s) || !Number.isFinite(e)) continue
+    const span = [Math.round(Math.min(s, e)) - margin, Math.round(Math.max(s, e)) + margin]
+    for (const k of camerasKept(r?.cameras) ?? [null]) {
+      if (!byCamera.has(k)) byCamera.set(k, [])
+      byCamera.get(k).push(span)
+    }
+  }
+  const out = []
+  for (const [k, spans] of byCamera) for (const [a, b] of mergeProtected(spans.map(([startMs, endMs]) => ({ startMs, endMs })), 0)) out.push([a, b, k])
+  return out.sort((x, y) => x[0] - y[0] || String(x[2]).localeCompare(String(y[2])))
 }
 
 /** Does [fromMs, toMs] touch any of these protected stretches? (Housekeeping: "may I delete this file?") */

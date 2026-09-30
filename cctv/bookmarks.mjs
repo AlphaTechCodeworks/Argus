@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { DATA_DIR, isAdmin } from './auth.mjs'
 import { BOOKMARKS_SCHEMA } from './rec-index.mjs'
-import { DEFAULT_MARGIN_MS, checkBookmark, checkPatch, mergeProtected } from './public/bookmarks-view.js'
+import { DEFAULT_MARGIN_MS, checkBookmark, checkPatch, protectedByCamera } from './public/bookmarks-view.js'
 
 export const BOOKMARKS_DB = join(DATA_DIR, 'recordings.db')
 /** One page of results. A site accumulates bookmarks slowly; this is a guard, not a paging scheme. */
@@ -57,7 +57,7 @@ function open() {
     all: db.prepare(`SELECT ${COLS} FROM bookmarks ORDER BY start_ms DESC`),
     // overlapping, not contained: a search for an hour must still find the bookmark that straddles it
     inWindow: db.prepare(`SELECT ${COLS} FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC`),
-    protect: db.prepare('SELECT start_ms AS startMs, end_ms AS endMs FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms'),
+    protect: db.prepare('SELECT start_ms AS startMs, end_ms AS endMs, cameras FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms'),
     update: db.prepare('UPDATE bookmarks SET cameras = ?, start_ms = ?, end_ms = ?, title = ?, description = ? WHERE id = ?'),
     remove: db.prepare('DELETE FROM bookmarks WHERE id = ?')
   }
@@ -212,16 +212,22 @@ export function deleteBookmark(id, who) {
 }
 
 /**
- * The stretches housekeeping and thinning must not touch, within [fromMs, toMs]: every bookmark
- * overlapping the window, grown by `marginMs` at each end and merged.
+ * The stretches housekeeping and thinning must not touch, within [fromMs, toMs], camera by camera:
+ * every bookmark overlapping the window, grown by `marginMs` at each end, and merged with the same
+ * camera's others (public/bookmarks-view.js protectedByCamera).
  *
  * The margin is the point. A bookmark of the moment itself is no use if the minute leading up to it
- * has been deleted, and that is usually the minute that explains what happened.
+ * has been deleted, and that is usually the minute that explains what happened. It is applied here,
+ * once: the jobs take these stretches as they are (thinning.mjs protectionFor).
+ *
+ * A bookmark keeps the cameras it names, not every camera (since 2026-09-30): each stretch says its
+ * camera, null for every camera (a bookmark whose cameras cannot be read). Before, a line-crossing
+ * bookmark of one camera kept all 87 cameras' footage of its minutes.
  *
  * The answer is not clipped to the window: a caller asking about a day wants the true edges of the
  * protected stretches, so that a segment reaching past midnight is still seen as protected.
  *
- * @returns {Array<[number, number]>} oldest first, none overlapping another
+ * @returns {Array<[number, number, string|null]>} oldest first, none overlapping another of its camera
  */
 export function protectedRanges(fromMs, toMs, { marginMs = DEFAULT_MARGIN_MS } = {}) {
   const from = Number(fromMs)
@@ -231,7 +237,7 @@ export function protectedRanges(fromMs, toMs, { marginMs = DEFAULT_MARGIN_MS } =
   // widened before the lookup as well as after it, or a bookmark just outside the window whose
   // margin reaches into it would be missed
   const rows = open().protect.all(Math.round(from) - margin, Math.round(to) + margin)
-  return mergeProtected(rows, margin)
+  return protectedByCamera(rows, margin)
 }
 
 /** Whether this person may edit or delete this bookmark. `who` is a name or { user, admin }. */

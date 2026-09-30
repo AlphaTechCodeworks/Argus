@@ -138,7 +138,8 @@ export async function measureRetention({ index, settings, now = Date.now(), prot
   const stepMs = Math.max(1, finite(settings.recording?.defaults?.timelapseS) ?? 10) * 1000
   const facts = { at: now, stepMs, keyframeShare: { ...KEYFRAME_SHARE }, protection: 'none', warnings: [], days: [], locations: {} }
   // Bookmarked footage is never deleted, so it stays the oldest there for good: the days kept are counted from
-  // the oldest file no bookmark covers (segment-delete.mjs firstUnprotected, one look a stretch).
+  // the oldest file no bookmark of its own camera covers (segment-delete.mjs firstUnprotected, a look a stretch
+  // at most).
   let guard = null
   try {
     guard = await protectionFor(0, now, { protectedRanges })
@@ -165,9 +166,12 @@ export async function measureRetention({ index, settings, now = Date.now(), prot
   }
   for (const d of days) facts.days.push({ ...d, rows: cache.get(keyOf(d)).rows })
 
+  // (a bookmark keeps the cameras it names since 2026-09-30: the gate asks camera by camera, so it needs them)
+  let cams = null
   for (const loc of settings.storage.locations ?? []) {
     const any = index.oldest(1, { loc: loc.id })[0] ?? null
-    const first = guard && any ? (await firstUnprotected({ index, locId: loc.id, guard, pace: pause })).row : any
+    if (guard && any) cams ??= index.cameras()
+    const first = guard && any ? (await firstUnprotected({ index, locId: loc.id, guard, pace: pause, cams })).row : any
     // the time-lapse's edges, to the hour; full video from the first full-video file at or after its newest
     const edges = index.timelapseEdges(loc.id)
     let fullFromMs = first?.startMs ?? null

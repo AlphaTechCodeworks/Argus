@@ -13,9 +13,11 @@
 //     with a warning).
 // Bookmarked and exported stretches (bookmarks.mjs protectedRanges) are never deleted by any of them
 // since 2026-09-29; bookmarks that cannot be read stop the run before any file (an alarm, which pages,
-// for a location below its low mark). A bookmarked stretch is stepped over in one look, not walked a
-// row at a time (segment-delete.mjs firstUnprotected, CameraCursors.skipTo), and the walks let the event
-// loop go round every 10 ms (makePacer).
+// for a location below its low mark). A bookmark keeps the cameras it names, not every camera (since
+// 2026-09-30: each line crossing's bookmark on one camera kept about 7 minutes of all 87 cameras, about
+// 7 GB, for good, and the limit deleted other cameras' newer footage instead). A bookmarked stretch is
+// stepped over in one look, not walked a row at a time (segment-delete.mjs firstUnprotected,
+// CameraCursors.skipTo), and the walks let the event loop go round every 10 ms (makePacer).
 // The .idx goes with its segment, the index row is removed, empty folders are removed. Only
 // files inside their location's folder are ever deleted, and only on a location whose marker
 // matches (storage.mjs): with a drive unplugged its mount point is an empty folder on the system
@@ -195,11 +197,12 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
     row.totalBytes = free?.totalBytes ?? null
     const retentionOf = new Map(cams.map((c) => [`${c.nvr}/${c.ch}`, camRec(settings, c.nvr, c.ch).retentionDays]))
     const shortest = Math.min(...[...retentionOf.values()].map(Number).filter(Number.isFinite))
-    // The oldest row no bookmark covers: everything before it is bookmarked, and every rule below starts
-    // there. Bookmarked footage is never deleted, so it stays the oldest for good; each run walked all of
-    // it again, row by row (review of p2-delete, 2026-09-29: 10,440 rows and 261 index reads a run for one
-    // 2-hour bookmark 40 days old, 120-136 ms of main thread on the production VM). Now one look a stretch.
-    const gate = await firstUnprotected({ index, locId: loc.id, guard, pace })
+    // The oldest row no bookmark of its own camera covers: everything before it is bookmarked, and every
+    // rule below starts there. Bookmarked footage is never deleted, so it stays the oldest for good; each run
+    // walked all of it again, row by row (review of p2-delete, 2026-09-29: 10,440 rows and 261 index reads a
+    // run for one 2-hour bookmark 40 days old, 120-136 ms of main thread on the production VM). Now a look a
+    // stretch at most, camera by camera (segment-delete.mjs firstUnprotected).
+    const gate = await firstUnprotected({ index, locId: loc.id, guard, pace, cams })
     for (const p of gate.passed) out.skipped.push({ path: p.path, why: 'bookmarked or exported' })
     const oldest = gate.row
     const retentionDue = Boolean(oldest && Number.isFinite(shortest) && oldest.startMs < now - shortest * DAY)
@@ -263,10 +266,11 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
       return true
     }
     /**
-     * Moves the camera past its row, and deletes it if it may be. A row in a bookmarked stretch is never
-     * deleted: if it starts inside the stretch, so does every row of the camera up to the stretch's end,
-     * and the camera steps over all of them at once (its next look starts after the stretch); a file that
-     * starts before the stretch and runs into it is passed by itself. Said once per stretch and camera.
+     * Moves the camera past its row, and deletes it if it may be. A row in a bookmarked stretch of its
+     * camera is never deleted: if it starts inside the stretch, so does every row of the camera up to the
+     * stretch's end, and the camera steps over all of them at once (its next look starts after the
+     * stretch); a file that starts before the stretch and runs into it is passed by itself. Said once per
+     * stretch and camera.
      */
     const take = async (c, s, why) => {
       await pace()
