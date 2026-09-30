@@ -336,6 +336,45 @@ check('the answer time is still 10 s', SHARE_ANSWER_MS === 10_000)
   const still = await settle(ops.thin({ path: join(dirname(p), '59.h264'), timelapseS: 10, cursor: null, maxBytes: 1e9, swap: false }, () => {}))
   check('... while with the marker there a file not there is still "cannot read it (ENOENT)"', still.v?.outcome === 'skipped' && /cannot read it \(ENOENT\)/.test(still.v.why), JSON.stringify(still.v ?? still.e?.message))
 }
+{
+  // thinRecover likewise (review of p3-thin, round 2, 2026-09-30). The helper killed mid-swap -- the journal, the
+  // original set aside as .thin-old, the rewrite as .thin-new, the segment missing -- then the share unmounted
+  // just after thinRecover read its marker: in the empty mount point it found nothing of the path and said
+  // nothing of it, and the server, whose stat then said ENOENT, dropped it from thin_inflight as "deleted
+  // meanwhile", with the journal, the original and the rewrite still on the share. Now EMARKER, nothing touched.
+  const { makeShareOps } = await import('../share-ops.mjs')
+  const { thinNames } = await import('../thin-file.mjs')
+  const loc = location('recover-unmounted', 'LR')
+  const p = join(loc.path, 'n1', '0', '2026-09-22', '06', '00.h264')
+  makeSegment(p, T0)
+  const orig = { seg: readFileSync(p), idx: readFileSync(`${p}.idx`) }
+  const n = thinNames(p)
+  writeFileSync(n.journal, '{"path":"x"}\n')
+  renameSync(n.seg, n.oldSeg)
+  renameSync(n.idx, n.oldIdx)
+  writeFileSync(n.newSeg, 'a rewrite')
+  writeFileSync(n.newIdx, Buffer.alloc(16))
+  const ops = makeShareOps({ id: loc.id, root: loc.path })
+  const aside = join(base, 'recover-unmounted-away')
+  let ticks = 0
+  const unmount = () => {
+    if (ticks++ === 0) {
+      renameSync(loc.path, aside) // the share's files go with it; an empty folder is left
+      mkdirSync(loc.path)
+    }
+  }
+  const r = await settle(ops.thinRecover({ paths: [p] }, unmount))
+  check('THINRECOVER WITH THE SHARE UNMOUNTED JUST AFTER ITS MARKER READ: EMARKER, not a path said nothing of', r.e?.code === 'EMARKER', JSON.stringify(r.v ?? r.e?.message))
+  rmSync(loc.path, { recursive: true, force: true })
+  renameSync(aside, loc.path)
+  check('... everything beside it on the share as it was', existsSync(n.journal) && readFileSync(n.oldSeg).equals(orig.seg) && readFileSync(n.oldIdx).equals(orig.idx) && existsSync(n.newSeg) && !existsSync(n.seg))
+  const back = await ops.thinRecover({ paths: [p] }, () => {})
+  check('... and with the share back, the original put back, byte for byte', back.rolledBack.join() === p && readFileSync(p).equals(orig.seg) && readFileSync(`${p}.idx`).equals(orig.idx) && readdirSync(dirname(p)).sort().join() === '00.h264,00.h264.idx', JSON.stringify(back))
+  // gone for good: nothing of it, nor beside it, with the marker there -- said so, for the server to stop keeping it
+  const g = join(dirname(p), '01.h264')
+  const gone = await ops.thinRecover({ paths: [g] }, () => {})
+  check('a path with nothing of it left, the marker there: said gone (the server stops keeping it in flight)', gone.gone?.join() === g && gone.rolledBack.length === 0 && gone.left.length === 0 && gone.sweptUp.length === 0, JSON.stringify(gone))
+}
 
 // ---- a swap that did not finish is never committed, and its original never swept up ----------------
 // Review of p1-helper (2026-09-29): thinCommit trusted that the swap had finished. After one that

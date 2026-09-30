@@ -484,13 +484,23 @@ export function makeShareOps({ id, root: rootIn }) {
      * .idx are both there. With either missing, what is beside them may be all that is left of that
      * footage (review of p1-helper, 2026-09-29): an original set aside (.thin-old) is put back, as
      * with a journal, even when the journal has gone; with nothing to put back, the files are left as
-     * they are, journal and all, and the path is listed in `left` for a person to look at.
-     * @returns {Promise<{ rolledBack: string[], sweptUp: string[], left: string[], refused: string[] }>}
+     * they are, journal and all, and the path is listed in `left` for a person to look at. With nothing of
+     * it at all, it is `gone` -- said only after the marker is read again: a share unmounted since the first
+     * read leaves an empty mount point, where every path is "not there" while the journal, the original and
+     * the rewrite are all still on the share, and the server, taking that for deleted, stopped keeping the
+     * path from every deletion and from being put right (review of p3-thin, round 2, 2026-09-30). The marker
+     * gone then is EMARKER, as for thin and unlink.
+     * @returns {Promise<{ rolledBack: string[], sweptUp: string[], left: string[], refused: string[], gone: string[] }>}
      */
     async thinRecover({ paths } = {}, tick) {
       list(paths, 'paths')
       await needMarker(tick)
-      const out = { rolledBack: [], sweptUp: [], left: [], refused: [] }
+      const out = { rolledBack: [], sweptUp: [], left: [], refused: [], gone: [] }
+      const stillMounted = async (p) => {
+        const m = await markerIdNow()
+        tick()
+        if (m !== id) throw refuse('EMARKER', `${root} lost its marker while ${basename(p)} was put right (unmounted?): nothing more touched`)
+      }
       for (const p of paths) {
         const r = changeable(p)
         if (!r) {
@@ -513,7 +523,10 @@ export function makeShareOps({ id, root: rootIn }) {
             }
           }
           if (!(await whole())) {
+            // not whole, nothing put back: first, is this still the share?
+            await stillMounted(p)
             if (journal || (await exists(n.newSeg, tick)) || (await exists(n.newIdx, tick))) out.left.push(p)
+            else if (!moved) out.gone.push(p)
             continue
           }
           await unlinkQuiet(n.newSeg, tick)
