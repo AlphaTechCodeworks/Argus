@@ -120,8 +120,17 @@ const fakeSender = (sent = [], pending = {}) => ({
 // sends it once, keeps it open while the NAS goes on recycling (the drive-filling forecast is quiet there by
 // design), and clears it once the target is met again.
 {
-  const { mkdtempSync: tmp } = await import('node:fs')
-  process.env.DATA_DIR ??= tmp(join(tmpdir(), 'cctv-ac-data-'))
+  // (retention-target.mjs loads auth.mjs, which writes a session secret into DATA_DIR: a folder of this run's, removed after)
+  const { mkdtempSync: tmp, rmSync } = await import('node:fs')
+  if (!process.env.DATA_DIR) {
+    const own = tmp(join(tmpdir(), 'cctv-ac-data-'))
+    process.env.DATA_DIR = own
+    process.on('exit', () => {
+      try {
+        rmSync(own, { recursive: true, force: true })
+      } catch {}
+    })
+  }
   const { retentionView, retentionCandidates, wholeDays } = await import('../retention-target.mjs')
   const DAY = 86_400_000
   let oldest = T0 - 8.2 * DAY
