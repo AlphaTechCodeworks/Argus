@@ -5,7 +5,8 @@
 //
 // Protocol: the NVR web client's line-crossing page (js/app/AlarmCfg/tripwireAlarmCfg.js):
 //   support  queryNodeList      the web client's own requireField list; <supportTripwire> per channel.
-//                               Asked of each NVR at most every 10 minutes: it changes only with the cameras
+//                               Asked of each NVR at most every 6 hours, and when its cameras change:
+//                               it changes only with the cameras
 //   read     queryTripwire      <condition><chlId>{id}</chlId></condition><requireField><param/><trigger/></requireField>
 //   write    editTripwire       the whole <chl> block every time, as the page's getSaveData builds it
 //                               (tripwire-xml.mjs buildEditTripwire), every value from a fresh read
@@ -33,6 +34,8 @@
 //
 //   GET  /api/admin/nvrs/:id/channels/:ch/lines   (ch 0-based, as in /api/cameras)
 //        -> { lines: { supported, cfg, schedules, device, seen, undo: { seq, at, by } | null, ntfy: { topicSet } } }
+//   GET  /api/admin/nvrs/:id/channels/:ch/lines?support=1   (the Live page's Lines button)
+//        -> { lines: { supported } }, from the support cache without the NVR while that holds
 //   POST /api/admin/nvrs/:id/channels/:ch/lines
 //        { device, seen, change, ack?, ackToken?, confirm: true }
 //        { device, undo: true, seq, ack?, ackToken?, confirm: true }
@@ -94,7 +97,10 @@ const OFFLINE_CODES = new Set(['536870935', '536870962']) // what the NVR's page
 /** Waits (ms). Tests shorten them. */
 export const TIMING = {
   verifyMs: [1500, 3000, 6000], // read back this long after the change, until it shows
-  supportMs: 10 * 60_000 // which cameras have line crossing: asked of an NVR at most this often
+  // which cameras have line crossing: asked of an NVR at most this often, and again when its cameras
+  // change (supportFresh). At 10 minutes the list (10.0 and 18.6 s on nvr-2, 28-29 Sep) was read
+  // about every 10 minutes an admin spent on the Live page, for an answer that changes with the cameras
+  supportMs: 6 * 3_600_000
 }
 
 const sameId = (a, b) => String(a).toUpperCase() === String(b).toUpperCase()
@@ -151,21 +157,59 @@ export function noteLinesOn(nvrId, ch, on) {
 
 // ---- NVR reads ------------------------------------------------------------------------------------
 
-const supportCache = new Map() // nvr id -> { at, device, map: chlId -> { tripwire, pea } }
+const supportCache = new Map() // nvr id -> { at, device, cams, offline, map: chlId -> { tripwire, pea } }
+const supportReads = new Map() // nvr id -> the support read in flight: opens meanwhile wait for it instead of asking again
 
-/** Whether the NVR says this camera has line crossing (its channel list, cached per NVR). */
-async function supported(ctx) {
-  const { nvr, chlId, gen, device, deps } = ctx
-  let hit = supportCache.get(nvr.id)
-  if (!hit || hit.device !== device || Date.now() - hit.at >= TIMING.supportMs) {
-    const xml = await deps.transparent(nvr, NODE_LIST_URL, NODE_LIST_REQUEST, 'line-crossing support', { gen, outBytes: NODE_LIST_BYTES })
-    const a = parseAnswer(xml)
-    if (a.status !== 'success') throw new HttpError(502, `The NVR refused to list its cameras' detections (${a.errorCode || a.status || 'no status'})`)
-    hit = { at: Date.now(), device, map: parseSupport(xml) }
-    supportCache.set(nvr.id, hit)
-  }
+/** Which camera sits in each of the NVR's channels (address, model): another camera there may have other detections. */
+const camerasOf = (nvr) => nvr.channels.map((c) => `${c.ch}|${c.configured !== false}|${c.ip ?? ''}|${c.model ?? ''}`).join('\n')
+/** The channels whose camera is offline now: an NVR may not know an offline camera's detections. */
+const offlineOf = (nvr) => new Set(nvr.channels.filter((c) => c.online === false).map((c) => c.ch))
+
+/**
+ * The cached support list while it still holds: the same device, the same cameras in the channels,
+ * none of the cameras that were offline at the read back online since (it is asked again for them),
+ * and under TIMING.supportMs old. A camera going offline, or renamed, does not change it. Else null.
+ */
+function supportFresh(nvr, device) {
+  const hit = supportCache.get(nvr.id)
+  if (!hit || hit.device !== device || Date.now() - hit.at >= TIMING.supportMs || hit.cams !== camerasOf(nvr)) return null
+  for (const c of nvr.channels) if (c.online !== false && hit.offline.has(c.ch)) return null
+  return hit
+}
+
+const tripwireOf = (hit, chlId) => {
   for (const [id, s] of hit.map) if (sameId(id, chlId)) return s.tripwire === true
   return false
+}
+
+/** Whether the NVR says this camera has line crossing (its channel list, cached per NVR: supportFresh). */
+async function supported(ctx) {
+  const { nvr, chlId, gen, device, deps } = ctx
+  const hit = supportFresh(nvr, device)
+  if (hit) return tripwireOf(hit, chlId)
+  // one read per NVR at a time: four full-size opens while nvr-2 took 10-18 s to list its cameras
+  // were four such reads, one after the other in the NVR's XML queue
+  let read = supportReads.get(nvr.id)
+  if (!read || read.device !== device) {
+    const cams = camerasOf(nvr)
+    const offline = offlineOf(nvr) // as they were when asked
+    const mine = { device, answer: null }
+    supportReads.set(nvr.id, mine) // (before the read starts: it takes itself out when done)
+    mine.answer = (async () => {
+      try {
+        const xml = await deps.transparent(nvr, NODE_LIST_URL, NODE_LIST_REQUEST, 'line-crossing support', { gen, outBytes: NODE_LIST_BYTES })
+        const a = parseAnswer(xml)
+        if (a.status !== 'success') throw new HttpError(502, `The NVR refused to list its cameras' detections (${a.errorCode || a.status || 'no status'})`)
+        const fresh = { at: Date.now(), device, cams, offline, map: parseSupport(xml) }
+        supportCache.set(nvr.id, fresh)
+        return fresh
+      } finally {
+        if (supportReads.get(nvr.id) === mine) supportReads.delete(nvr.id)
+      }
+    })()
+    read = mine
+  }
+  return tripwireOf(await read.answer, chlId)
 }
 
 /** The camera's line-crossing settings, read now (tripwire-xml.mjs parseTripwire's shape). */
@@ -399,10 +443,15 @@ function view(ctx, isSupported, cfg, schedules, log = readLog()) {
 
 /**
  * /api/admin/nvrs/:id/channels/:ch/lines.
+ * GET ?support=1 -> { lines: { supported } } only: the Live page's Lines button, asked on every admin
+ * full-size open (public/lines-panel.js linesSupportAsker). It asked the full GET, the camera's
+ * settings and the NVR's schedules (2.0-6.5 s each on a busy nvr-2, six of them 29 Sep 03:56-04:18),
+ * for this yes/no. Answered from the support cache without the NVR, busy, offline or not, while that
+ * holds (supportFresh); else the list is read as for the full GET.
  * @param {string} method
  * @param {string} nvrId
  * @param {number} ch  0-based
- * @param {URLSearchParams} params  (none are used yet; every camera route takes them)
+ * @param {URLSearchParams} params  support=1 (GET): only whether the camera has line crossing
  * @param {() => Promise<any>} readJson
  * @param {string} user  the admin, for the change log
  * @param {{ nvrs?: Map<string, object>, transparent?: Function, getSettings?: Function }} [deps]
@@ -416,8 +465,15 @@ export async function handleLines(method, nvrId, ch, params, readJson, user, dep
     // watcher reads linesOn), and during that import cycle its exports do not exist yet
     const d = { nvrs: deps.nvrs ?? nvrs, transparent: deps.transparent ?? transparent, getSettings: deps.getSettings ?? getSettings }
     const { nvr, chlId, name } = cameraOf(d.nvrs, nvrId, ch)
+    const device = deviceOf(nvr)
+    if (method === 'GET' && params?.get?.('support') === '1') {
+      const hit = supportFresh(nvr, device)
+      if (hit) return [200, { lines: { supported: tripwireOf(hit, chlId) } }]
+      requireOnline(nvr)
+      return [200, { lines: { supported: await supported({ nvr, ch, chlId, name, gen: nvr.gen, user, device, deps: d }) } }]
+    }
     requireOnline(nvr)
-    const ctx = { nvr, ch, chlId, name, gen: nvr.gen, user, device: deviceOf(nvr), deps: d }
+    const ctx = { nvr, ch, chlId, name, gen: nvr.gen, user, device, deps: d }
     if (method === 'GET') {
       if (!(await supported(ctx))) return [200, { lines: view(ctx, false, null, []) }]
       const cfg = await readCfg(ctx)

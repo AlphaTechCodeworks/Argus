@@ -6,7 +6,7 @@ import { enableGridDrag } from './grid-drag.js'
 import { activeTrace, downloadTrace, startTrace, stopTrace } from './frame-trace.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
 import { ImagePanel } from './image-panel.js'
-import { LinesPanel } from './lines-panel.js'
+import { LinesPanel, linesSupportAsker } from './lines-panel.js'
 import { muxState, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
@@ -100,25 +100,12 @@ const imagePanel = new ImagePanel({
 // line crossing (admins): lines drawn on the camera shown full-size, for the camera's own detection
 // (lines-panel.js). One panel at a time with Picture: both sit over the right of the picture.
 let linesPanel = null // the open Lines panel, or null
-const linesSupport = new Map() // camKey -> Promise<true | false | null>: asked once per camera while this page is open
 /**
- * Whether the camera has line-crossing detection of its own (GET .../lines: the NVR's own answer).
- * null when it could not be asked (camera offline, NVR busy): asked again the next time the view opens.
+ * Whether the camera has line-crossing detection of its own (the NVR's own answer, kept by the server
+ * and for this tab: lines-panel.js). null when it could not be asked (NVR busy or offline): asked
+ * again the next time the view opens.
  */
-function linesSupported(cam) {
-  const k = camKey(cam)
-  if (!linesSupport.has(k)) {
-    const ask = fetch(`/api/admin/nvrs/${encodeURIComponent(cam.nvr)}/channels/${cam.ch}/lines`, { cache: 'no-store' })
-      .then(async (res) => (res.ok ? (await res.json())?.lines?.supported === true : null))
-      .catch(() => null)
-      .then((ok) => {
-        if (ok === null) linesSupport.delete(k)
-        return ok
-      })
-    linesSupport.set(k, ask)
-  }
-  return linesSupport.get(k)
-}
+const linesSupported = linesSupportAsker()
 /** The Lines panel may go (it asks first when lines are drawn but not saved). */
 const linesDiscard = () => !linesPanel || linesPanel.confirmDiscard()
 

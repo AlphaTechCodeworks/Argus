@@ -225,5 +225,76 @@ check('undoText: when and by whom', /^Undo puts back the line settings from befo
   delete globalThis.caches
 }
 
+// ---- the Lines button: whether the camera has line crossing (linesSupportAsker) ------------------------------
+// Every admin full-size open asked the full GET .../lines (the camera's settings and the NVR's
+// schedules, 2.0-6.5 s each on a busy nvr-2) for a yes/no, and the page kept the answer only while it
+// was open. Now ?support=1 (answered from the server's cache), and the answer kept for the tab.
+{
+  const mod = await import('../public/lines-panel.js')
+  const linesSupportAsker = mod.linesSupportAsker ?? (() => async () => undefined)
+  check('lines-panel.js exports linesSupportAsker', typeof mod.linesSupportAsker === 'function')
+  const got = []
+  let answer = { ok: true, body: { lines: { supported: true } } }
+  let hold = null
+  const fetchFake = async (url, opts) => {
+    got.push({ url, opts })
+    if (hold) await hold
+    const a = answer
+    if (a.throws) throw new Error('network down')
+    return { ok: a.ok, json: async () => a.body }
+  }
+  const store = new Map()
+  const storage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)) }
+  let now = 1_000_000
+  const ask = linesSupportAsker({ fetch: fetchFake, storage, now: () => now })
+  const cam = { nvr: 'nvr 2', ch: 3 }
+  check('first open: asks ?support=1 once, never cached by the browser', (await ask(cam)) === true && got.length === 1 && got[0].url === '/api/admin/nvrs/nvr%202/channels/3/lines?support=1' && got[0].opts?.cache === 'no-store', JSON.stringify(got))
+  check('the next opens: no request', (await ask(cam)) === true && (await ask({ nvr: 'nvr 2', ch: 3 })) === true && got.length === 1)
+  const reloaded = linesSupportAsker({ fetch: fetchFake, storage, now: () => now })
+  check('the page loaded again in the same tab: the kept answer, no request', (await reloaded(cam)) === true && got.length === 1)
+
+  answer = { ok: true, body: { lines: { supported: false } } }
+  check('a camera without line crossing: false, kept too', (await ask({ nvr: 'x', ch: 0 })) === false && (await reloaded({ nvr: 'x', ch: 0 })) === false && got.length === 2)
+
+  answer = { ok: false, body: { error: 'busy' } }
+  check('could not be asked (the NVR busy): null, not kept', (await ask({ nvr: 'y', ch: 1 })) === null && (await ask({ nvr: 'y', ch: 1 })) === null && got.length === 4)
+  answer = { throws: true }
+  check('... the network down: null, asked again next time', (await ask({ nvr: 'y', ch: 1 })) === null && got.length === 5)
+  answer = { ok: true, body: { error: 'something else' } }
+  check('... an answer without a yes or no: null, not a "no" kept for hours', (await ask({ nvr: 'y', ch: 1 })) === null && got.length === 6)
+  answer = { ok: true, body: { lines: { supported: true } } }
+  check('... asked again once it can be: true', (await ask({ nvr: 'y', ch: 1 })) === true && got.length === 7)
+
+  let release
+  hold = new Promise((r) => (release = r))
+  const both = Promise.all([ask({ nvr: 'z', ch: 2 }), ask({ nvr: 'z', ch: 2 })])
+  release()
+  hold = null
+  check('two opens at once: one request', (await both).every((v) => v === true) && got.length === 8)
+
+  now += 6 * 3_600_000
+  check('after 6 hours: asked again (the server\'s cache is kept as long)', (await ask(cam)) === true && got.length === 9)
+  const fresh = linesSupportAsker({ fetch: fetchFake, storage, now: () => now })
+  check('... and what is kept for the tab renewed', (await fresh(cam)) === true && got.length === 9)
+
+  const broken = { getItem: () => { throw new Error('denied') }, setItem: () => { throw new Error('denied') } }
+  const noStore = linesSupportAsker({ fetch: fetchFake, storage: broken, now: () => now })
+  check('storage refused (private mode): answers all the same, kept in memory', (await noStore({ nvr: 'w', ch: 0 })) === true && (await noStore({ nvr: 'w', ch: 0 })) === true && got.length === 10)
+  const none = linesSupportAsker({ fetch: fetchFake, storage: null, now: () => now })
+  check('... no storage at all: the same', (await none({ nvr: 'v', ch: 0 })) === true && got.length === 11)
+  const keptKeys = () => Object.keys(JSON.parse(store.get('argus.linesSupport') ?? '{}')).sort().join()
+  check('what is kept for the tab: one entry per camera, the ones past 6 hours dropped at the next answer kept', keptKeys() === 'nvr 2/3', keptKeys())
+  store.set('argus.linesSupport', '{not json')
+  const bad = linesSupportAsker({ fetch: fetchFake, storage, now: () => now })
+  check('... a spoilt stored value: asked again, not a crash', (await bad({ nvr: 'u', ch: 0 })) === true && got.length === 12)
+  store.set('argus.linesSupport', '[1,2]')
+  const arr = linesSupportAsker({ fetch: fetchFake, storage, now: () => now })
+  check('... a stored list instead of a map: asked again, then kept properly', (await arr({ nvr: 't', ch: 0 })) === true && got.length === 13 && keptKeys() === 't/0', keptKeys())
+
+  const viewer = readFileSync(join(import.meta.dirname, '..', 'public', 'viewer.js'), 'utf8').replaceAll('\r\n', '\n')
+  check('viewer.js: the Lines button asks through linesSupportAsker', /import \{[^}]*\blinesSupportAsker\b[^}]*\} from '\.\/lines-panel\.js'/.test(viewer) && /const linesSupported = linesSupportAsker\(\)/.test(viewer))
+  check('viewer.js: no full GET .../lines of its own any more (the panel still reads it when opened)', !/channels\/\$\{cam\.ch\}\/lines/.test(viewer))
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

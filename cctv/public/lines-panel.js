@@ -64,6 +64,76 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 const copyLine = (l) => ({ direction: l.direction, start: { x: l.start.x, y: l.start.y }, end: { x: l.end.x, y: l.end.y } })
 const sameLine = (a, b) => Boolean(a && b) && a.direction === b.direction && a.start.x === b.start.x && a.start.y === b.start.y && a.end.x === b.end.x && a.end.y === b.end.y
 
+// ---- the Lines button: does this camera have line crossing? ------------------------------------
+
+const SUPPORT_KEY = 'argus.linesSupport' // sessionStorage: { "<nvr>/<ch>": { ok, at } }
+const SUPPORT_KEEP_MS = 6 * 3_600_000 // as long as the server keeps the NVR's answer (tripwire.mjs TIMING.supportMs)
+const sessionStore = () => {
+  try {
+    return globalThis.sessionStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether a camera has line-crossing detection of its own, for the admin's Lines button on every
+ * full-size open (viewer.js). It asked the full GET .../lines, the camera's settings and the NVR's
+ * schedules (2.0-6.5 s each on a busy nvr-2, 29 Sep 03:56-04:18), for this yes/no, and kept the
+ * answer only while the page was open. Now GET .../lines?support=1, which the server answers from its
+ * cache without the NVR (tripwire.mjs), each answer kept for this tab (sessionStorage) for 6 hours,
+ * one request for opens at the same time. null (could not be asked: the NVR busy or offline, the
+ * network down) is not kept: asked again at the next open.
+ * @param {{ fetch?: Function, storage?: Storage | null, now?: () => number }} [deps] (tests)
+ * @returns {(cam: { nvr: string, ch: number }) => Promise<true | false | null>}
+ */
+export function linesSupportAsker({ fetch: get = (...a) => globalThis.fetch(...a), storage = sessionStore(), now = Date.now } = {}) {
+  const asked = new Map() // "<nvr>/<ch>" -> { answer: Promise, at }
+  const fresh = (at) => typeof at === 'number' && at <= now() && now() - at < SUPPORT_KEEP_MS
+  const kept = () => {
+    try {
+      const all = JSON.parse(storage?.getItem(SUPPORT_KEY) ?? '{}')
+      return all && typeof all === 'object' && !Array.isArray(all) ? all : {}
+    } catch {
+      return {}
+    }
+  }
+  const keep = (key, ok) => {
+    try {
+      // (answers past their 6 hours go, so the kept list stays one line per camera at most)
+      const all = Object.fromEntries(Object.entries(kept()).filter(([, v]) => fresh(v?.at)))
+      all[key] = { ok, at: now() }
+      storage?.setItem(SUPPORT_KEY, JSON.stringify(all))
+    } catch {} // (storage refused: kept in memory only)
+  }
+  return (cam) => {
+    const key = `${cam.nvr}/${cam.ch}`
+    const mem = asked.get(key)
+    if (mem && fresh(mem.at)) return mem.answer
+    const saved = kept()[key]
+    if (saved && typeof saved.ok === 'boolean' && fresh(saved.at)) {
+      const answer = Promise.resolve(saved.ok)
+      asked.set(key, { answer, at: saved.at })
+      return answer
+    }
+    const entry = { answer: null, at: now() }
+    entry.answer = get(`/api/admin/nvrs/${encodeURIComponent(cam.nvr)}/channels/${cam.ch}/lines?support=1`, { cache: 'no-store' })
+      .then(async (res) => {
+        const v = res.ok ? (await res.json())?.lines?.supported : null
+        return typeof v === 'boolean' ? v : null
+      })
+      .catch(() => null)
+      .then((ok) => {
+        if (ok === null) {
+          if (asked.get(key) === entry) asked.delete(key)
+        } else keep(key, ok)
+        return ok
+      })
+    asked.set(key, entry)
+    return entry.answer
+  }
+}
+
 // ---- pure helpers (node-testable) -------------------------------------------------------------
 
 /**

@@ -13,6 +13,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-tripwire-test-'))
 // a lines-on file left by an earlier run, with one entry that is not `true`: only the good one counts
 writeFileSync(join(process.env.DATA_DIR, 'lines-on.json'), JSON.stringify({ 'old/4': true, 'old/5': 'yes' }))
 const { LINES_LOG, LINES_ON_FILE, TIMING, handleLines, linesOn, noteLinesOn } = await import('../tripwire.mjs')
+const DEFAULT_SUPPORT_MS = TIMING.supportMs // (the sections below shorten it for a moment)
 const { XML_HEADER, kid, parseXml } = await import('../xml.mjs')
 
 const dir = process.argv[2] ?? join(import.meta.dirname, 'fixtures', 'lines')
@@ -193,11 +194,11 @@ const MAINGATE = '{00000003-0000-0000-0000-000000000000}'
   check('GET: every call carries the session it was made on', sent.every((s) => s.gen === 1))
   const n = sent.filter((s) => s.url === 'queryNodeList').length
   await get(n2, 2)
-  check('support is cached per NVR: no second queryNodeList within 10 minutes', sent.filter((s) => s.url === 'queryNodeList').length === n)
+  check('support is cached per NVR: no second queryNodeList within TIMING.supportMs', sent.filter((s) => s.url === 'queryNodeList').length === n)
   TIMING.supportMs = 0
   await get(n2, 2)
   check('... and asked again once the cache is older than TIMING.supportMs', sent.filter((s) => s.url === 'queryNodeList').length === n + 1)
-  TIMING.supportMs = 10 * 60_000
+  TIMING.supportMs = DEFAULT_SUPPORT_MS
   settingsNow = { alerts: { ntfy: { url: 'https://ntfy.sh', topic: 'argus-abcdefghij0123456789' } } }
   const [, b2] = await get(n2, 2)
   check('GET: ntfy.topicSet follows the settings', b2.lines.ntfy.topicSet === true)
@@ -469,6 +470,107 @@ const enableAcross = async () => {
   check('... the size boxes echoed as read', cam.edits[0].xml.includes('<minDetectTarget><width>100</width><height>100</height></minDetectTarget>'))
   const [, other] = await get(n2, 2)
   check('Undo is per camera: this change is not offered on Maingate Roadway', b.lines.undo?.seq === b.result.seq && other.lines.undo?.seq !== b.result.seq)
+}
+
+// ---- the Lines button's question: ?support=1, answered from the cache -------------------------------------
+// The Live page asked the full GET (the camera's settings and the NVR's schedules) on every admin
+// full-size open, for a yes/no: 2.0-6.5 s a read on a busy nvr-2 (six of them 29 Sep 03:56-04:18 while
+// 9 cameras were opened full size), each holding every other NVR's XML reads, plus the support list
+// (10.0 and 18.6 s) every 10 minutes. ?support=1 answers only `supported`, from the support cache (6 h,
+// asked again when the NVR's cameras change), without the NVR while that is fresh.
+{
+  const { monitorEventLoopDelay } = await import('node:perf_hooks')
+  const withCams = (nvr) => {
+    nvr.channels.forEach((c, i) => Object.assign(c, { ip: `10.1.${nvr.id.length}.${i + 1}`, model: 'IPC6196W', configured: true }))
+    nodeLists.set(nvr.id, fixture('nodelist.xml'))
+    deps.nvrs.set(nvr.id, nvr)
+    return nvr
+  }
+  const ns = withCams(fakeNvr('ts', '192.168.9.5', [[0, 'A'], [1, 'B'], [2, 'C'], [3, 'D']]))
+  const S = () => new URLSearchParams('support=1')
+  const ask = (nvr, ch) => handleLines('GET', nvr.id, ch, S(), async () => ({}), 'tester', deps)
+  const callsTo = (nvr) => sent.filter((s) => s.nvr === nvr.id)
+  check('TIMING.supportMs: 6 hours by default', DEFAULT_SUPPORT_MS === 6 * 3_600_000, `${DEFAULT_SUPPORT_MS}`)
+
+  const [st, b] = await ask(ns, 2)
+  check('?support=1: only whether the camera has line crossing', st === 200 && JSON.stringify(b) === '{"lines":{"supported":true}}', JSON.stringify(b))
+  check('... one read: the NVR\'s support list, not the camera\'s settings or the schedules', callsTo(ns).map((s) => s.url).join() === 'queryNodeList', callsTo(ns).map((s) => s.url).join())
+  const before = sent.length
+  const loop = monitorEventLoopDelay({ resolution: 10 })
+  loop.enable()
+  const t0 = performance.now()
+  for (let i = 0; i < 18; i++) await ask(ns, i % 4) // the 03:56-04:18 session: 9 cameras, most opened twice
+  const took = performance.now() - t0
+  check('18 more opens: no call to the NVR at all (the full GET made 2 reads each: 36)', sent.length === before, `${sent.length - before} calls`)
+  const t1 = performance.now()
+  for (let i = 0; i < 200; i++) await ask(ns, i % 4)
+  const took200 = performance.now() - t1
+  await new Promise((r) => setTimeout(r, 30)) // (at least a few samples of the event-loop delay)
+  loop.disable()
+  check('... answered at once: 18 in under 50 ms, 200 more in under 50 ms all told (so no stretch near 50 ms), event loop never held 50 ms',
+    took < 50 && took200 < 50 && loop.max / 1e6 < 50, `${took.toFixed(1)} ms, ${took200.toFixed(1)} ms, loop max ${(loop.max / 1e6).toFixed(1)} ms`)
+
+  ns.degraded = true
+  const [sb, bb] = await ask(ns, 1)
+  const [sf] = await get(ns, 1)
+  check('the NVR busy: still answered from the cache (the full GET is refused, 409)', sb === 200 && bb.lines.supported === true && sf === 409 && sent.length === before, `${sb} ${sf}`)
+  ns.degraded = false
+  ns.status = 'offline'
+  const [so, bo] = await ask(ns, 1)
+  ns.status = 'online'
+  check('... offline too: a yes/no that does not need the NVR', so === 200 && bo.lines.supported === true && sent.length === before)
+  const [s404] = await ask(ns, 9)
+  check('... an unknown camera is still 404', s404 === 404)
+
+  // a cold cache on an NVR that is busy or offline: asked, so refused as the full GET is
+  const nb = withCams(fakeNvr('tb', '192.168.9.6', [[0, 'A']]))
+  nb.degraded = true
+  const [s409] = await ask(nb, 0)
+  check('nothing cached and the NVR busy: 409, nothing sent', s409 === 409 && callsTo(nb).length === 0)
+
+  // several full-size opens at once on a cold cache: one read for all of them
+  const nc = withCams(fakeNvr('tc', '192.168.9.7', [[0, 'A'], [1, 'B'], [2, 'C']]))
+  const all = await Promise.all([ask(nc, 0), ask(nc, 1), ask(nc, 2), ask(nc, 1)])
+  check('four opens at once, nothing cached: one support read shared by all', all.every(([s, x]) => s === 200 && x.lines.supported === true) && callsTo(nc).length === 1, `${callsTo(nc).length} reads`)
+
+  // a support read the NVR refuses: said so, nothing kept, asked again at the next open
+  const nr = withCams(fakeNvr('tr', '192.168.9.8', [[0, 'A']]))
+  nodeLists.set(nr.id, REFUSE('536870947'))
+  const [sr1, br1] = await ask(nr, 0)
+  nodeLists.set(nr.id, fixture('nodelist.xml'))
+  const [sr2, br2] = await ask(nr, 0)
+  check('a support read refused: 502, then asked again (not left waiting on the failed one)', sr1 === 502 && /refused to list/.test(br1.error) && sr2 === 200 && br2.lines.supported === true && callsTo(nr).length === 2, `${sr1} ${sr2} ${callsTo(nr).length}`)
+
+  // the answer changes only with the cameras
+  const n0 = callsTo(ns).length
+  ns.channels[3].online = false
+  await ask(ns, 3)
+  check('a camera goes offline: not asked again', callsTo(ns).length === n0)
+  ns.channels[1].ip = '10.9.9.9' // another camera in that channel
+  await ask(ns, 1)
+  check('a camera replaced (another address or model): asked again', callsTo(ns).length === n0 + 1)
+  await ask(ns, 0)
+  check('... once', callsTo(ns).length === n0 + 1)
+  ns.channels[3].online = true // it was offline at that read
+  await ask(ns, 3)
+  check('a camera offline at the last read is back: asked again', callsTo(ns).length === n0 + 2)
+  await ask(ns, 3)
+  check('... once', callsTo(ns).length === n0 + 2)
+  ns.channels[2].name = 'C renamed'
+  await ask(ns, 2)
+  check('a camera renamed: not asked again', callsTo(ns).length === n0 + 2)
+  TIMING.supportMs = 0
+  await ask(ns, 2)
+  TIMING.supportMs = DEFAULT_SUPPORT_MS
+  check('older than TIMING.supportMs: asked again', callsTo(ns).length === n0 + 3)
+
+  // the full GET (the Lines panel itself) still reads the camera and the schedules afresh, the support list from the cache
+  addCam(ns, 'tripwire-ch3.xml')
+  const m0 = callsTo(ns).length
+  const [sg, bg] = await get(ns, 2)
+  check('the Lines panel\'s GET: the camera\'s settings and the schedules read now, the support list from the cache', sg === 200 && bg.lines.cfg?.chlId === MAINGATE && callsTo(ns).slice(m0).map((s) => s.url).join() === 'queryTripwire,queryScheduleList', callsTo(ns).slice(m0).map((s) => s.url).join())
+  const [, nsx] = await ask(nx, 2)
+  check('a camera without line crossing: supported false', nsx.lines.supported === false)
 }
 
 // ---- server.mjs wiring (it loads the SDK, so it is read as text) ----------------------------------------
