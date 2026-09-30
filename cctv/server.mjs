@@ -131,7 +131,7 @@ import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
 import { handleSnapshot, sweepSnapshots } from './event-snapshot.mjs'
 import { handleAlarms } from './alarms.mjs'
-import { handleLineAlert } from './line-actions.mjs'
+import { forgetLineBookmarks, handleLineAlert } from './line-actions.mjs'
 import { handleOsd } from './osd.mjs'
 import { MAX_SEGMENTS_PER_RUN, runRetention, runThinning } from './thinning.mjs'
 import { runStorageJobs } from './storage-jobs.mjs'
@@ -212,7 +212,11 @@ if (LIVE_WORKER) {
     if (busy) return
     busy = true
     const roundStart = Date.now()
-    runHousekeeping({ index: recIndex(), protectedRanges, present: markerMatches })
+    // automatic line-crossing bookmarks that ended more than their camera's days kept ago are forgotten first,
+    // so their footage past its days goes in this round's housekeeping (line-actions.mjs; 2026-09-30)
+    forgetLineBookmarks()
+      .catch((e) => console.warn(`[lines] automatic bookmarks not forgotten this round: ${e.message}`))
+      .then(() => runHousekeeping({ index: recIndex(), protectedRanges, present: markerMatches }))
       .then(() => pruneAudit(auth.DATA_DIR)) // a year of audit is kept; older rows go with the rest
       .then(() => thinAndRetain(roundStart))
       // pictures of events that are gone (event-snapshot.mjs; it never throws)

@@ -9,10 +9,13 @@
 // - The ntfy topic: made the first time a camera is switched on, when there is none yet. It is a
 //   secret (anyone who knows it can push to the owner's phone), so it is random, never logged, and
 //   saved only in settings.json (settings.mjs logs and audits which settings changed, never values).
-// - Footage kept: a bookmark from 30 s before to 60 s after each crossing, filed under "system".
+// - Footage kept: a bookmark from 30 s before to 60 s after each crossing, filed under "system", of
+//   that camera alone (a bookmark keeps the cameras it names: bookmarks.mjs protectedRanges).
 //   Bookmarked stretches are never thinned or deleted by housekeeping. A crossing whose stretch
 //   overlaps the camera's previous automatic bookmark stretches that one instead of adding another,
-//   so a busy afternoon is one bookmark, not two hundred.
+//   so a busy afternoon is one bookmark, not two hundred. Since 2026-09-30 an automatic bookmark ends:
+//   it is forgotten once it ended more than its camera's days kept ago (forgetLineBookmarks, every 5
+//   minutes before housekeeping), unless a person changed it, which makes it theirs (bookmarks.mjs).
 // - Snapshot: handed to event-snapshot.mjs (injected by the caller), once per event.
 //
 //   POST /api/admin/lines/alert { nvr, ch, on }   (admins; ch 0-based, as in /api/cameras)
@@ -23,6 +26,7 @@ import { audit } from './audit.mjs'
 import { createRule, listRules, updateRule } from './events-db.mjs'
 import { cameraKey, eventWindow } from './event-rules.mjs'
 import { HttpError, errorAnswer } from './nvr-xml.mjs'
+import { AUTO_USER } from './public/bookmarks-view.js'
 import { getSettings, saveSettings } from './settings.mjs'
 
 export const LINE_RULE_NAME = 'Line crossing'
@@ -34,8 +38,11 @@ export const RULE_MIN_GAP_S = 30
 /** The same stretch a hand-made alarm bookmark covers (alarms.mjs CLIP_PRE_S / CLIP_POST_S). */
 export const BOOKMARK_PRE_S = 30
 export const BOOKMARK_POST_S = 60
-/** Who automatic bookmarks are filed under: no person made them, so only an admin may change them. */
-export const AUTO_USER = 'system'
+/**
+ * Who automatic bookmarks are filed under (public/bookmarks-view.js): no person made them, so only an admin
+ * may change them, and a person who does takes it over (bookmarks.mjs updateBookmark).
+ */
+export { AUTO_USER }
 export const TOPIC_PREFIX = 'argus-'
 export const TOPIC_RANDOM_CHARS = 20
 const TOPIC_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
@@ -163,6 +170,9 @@ async function bookmarkStore(log) {
   }
 }
 
+/** What a new automatic bookmark says of itself (the playback page shows it): how long it lasts, and how to keep it. */
+export const AUTO_DESCRIPTION = 'Kept automatically around line crossings on this camera; later crossings stretch it. It is forgotten after the camera\'s days kept, with the footage; edit it to keep it (it is then yours).'
+
 /** One of ours: filed by "system", of this camera alone, and titled as a line crossing. */
 const isAuto = (b, key) => b.user === AUTO_USER && b.cameras.length === 1 && b.cameras[0] === key && String(b.title).startsWith(LINE_RULE_NAME)
 
@@ -200,9 +210,53 @@ export async function autoBookmark(event, { store = null, nameOf = null, now = D
     startMs: from,
     endMs: to,
     title: `${LINE_RULE_NAME} — ${name}`.slice(0, 120),
-    description: 'Kept automatically around line crossings on this camera; later crossings stretch it.'
+    description: AUTO_DESCRIPTION
   }, AUTO_USER, { now })
   return res.ok ? { ok: true, bookmark: res.bookmark, merged: false } : { ok: false, error: res.error }
+}
+
+const DAY = 86_400_000
+/** Automatic bookmarks forgotten a round at most (listBookmarks' cap): the next round goes on. */
+export const FORGET_BATCH = 500
+
+/**
+ * Forgets the automatic line-crossing bookmarks that ended more than their camera's retentionDays ago
+ * (settings.recording: the camera's own, else the default), so their footage goes with the rest; one a
+ * person changed is theirs (bookmarks.mjs updateBookmark) and stays, as does anybody's own. Every 5
+ * minutes, before housekeeping (server.mjs).
+ *
+ * Why (final fix round of the storage work, 2026-09-30): every crossing is bookmarked, and since p2
+ * housekeeping never deletes bookmarked footage, so each crossing's minutes stayed past the camera's
+ * days kept for good, a bookmark more every crossing (Maingate Roadway, since 2026-09-28), and every
+ * deletion walk passes them at the oldest end each run. A person's bookmark is a decision about what
+ * matters; an automatic one is a guess that it might, worth keeping as long as the camera's footage is.
+ *
+ * @param {{ store?: object, settings?: object, now?: number, log?: Function, limit?: number }} [o]
+ *   store: bookmarks.mjs or a stand-in with listBookmarks and removeBookmarks
+ * @returns {Promise<{ forgotten: number, newestEndMs: number|null }>}
+ */
+export async function forgetLineBookmarks({ store = null, settings = null, now = Date.now(), log = console.log, limit = FORGET_BATCH } = {}) {
+  const none = { forgotten: 0, newestEndMs: null }
+  settings ??= getSettings()
+  const rec = settings?.recording ?? {}
+  const daysOf = (key) => Number({ ...(rec.defaults ?? {}), ...(rec.cameras?.[key] ?? {}) }.retentionDays)
+  const all = [rec.defaults?.retentionDays, ...Object.values(rec.cameras ?? {}).map((c) => c?.retentionDays)].map(Number).filter((d) => Number.isFinite(d) && d > 0)
+  if (!all.length) return none // (no days kept set anywhere: nothing to forget by)
+  const s = store ?? (await bookmarkStore(log))
+  if (!s || typeof s.removeBookmarks !== 'function') return none
+  // only bookmarks that started before the shortest days kept can have ended before their camera's
+  const before = now - Math.min(...all) * DAY
+  const due = (b) => {
+    if (!b.cameras.length || !isAuto(b, b.cameras[0])) return false
+    const days = daysOf(b.cameras[0])
+    return Number.isFinite(days) && days > 0 && b.endMs < now - days * DAY
+  }
+  const gone = s.listBookmarks({ toMs: before, keep: due, limit })
+  if (!gone.length) return none
+  const forgotten = s.removeBookmarks(gone.map((b) => b.id))
+  const newestEndMs = Math.max(...gone.map((b) => b.endMs))
+  log(`[lines] forgot ${forgotten} automatic line-crossing bookmark${forgotten === 1 ? '' : 's'} that ended more than their camera's days kept ago (the newest ended ${new Date(newestEndMs).toISOString().slice(0, 16).replace('T', ' ')} UTC): their footage goes with the rest`)
+  return { forgotten, newestEndMs }
 }
 
 // ---- one crossing --------------------------------------------------------------------------------

@@ -28,6 +28,12 @@ export const FUTURE_SLACK_MS = 24 * 3600_000
  * added a minute of its own on top until 2026-09-30, so a bookmark kept two minutes either side.
  */
 export const DEFAULT_MARGIN_MS = 60_000
+/**
+ * Who a bookmark no person made is filed under (line-actions.mjs: one for every line crossing). Only an
+ * admin may change one, and a person who does takes it over (bookmarks.mjs updateBookmark): it is then
+ * theirs, kept like their own, where an automatic one is forgotten after its camera's days kept.
+ */
+export const AUTO_USER = 'system'
 /** "<nvr>/<channel>", the camera key used everywhere else in the app. */
 export const CAMERA_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/\d{1,4}$/
 

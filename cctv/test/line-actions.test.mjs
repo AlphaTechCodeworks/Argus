@@ -365,6 +365,40 @@ const filesWith = (text) => readdirSync(DATA)
   check('a second crossing inside 30 s is kept but not sent', sent.length === 1)
 }
 
+// ---- automatic bookmarks end: forgotten after their camera's days kept (final fix round, 2026-09-30) ---------
+// Every crossing is bookmarked ("bookmarks grow"), and bookmarked footage is never deleted: without an end, each
+// crossing's minutes stayed past every camera's days kept, for good. Now an automatic line-crossing bookmark is
+// forgotten once it ended more than its camera's retentionDays ago, and its footage goes with the rest; one a
+// person has changed is theirs (bookmarks.mjs) and stays, as does anybody's own.
+{
+  const { forgetLineBookmarks } = await import('../line-actions.mjs')
+  const DAY = 86_400_000
+  const now = T + 40 * DAY
+  const settings = { recording: { defaults: { retentionDays: 30 }, cameras: { 'nvr-3/5': { retentionDays: 60 } } } }
+  const mk = (cam, startMs, user = AUTO_USER, title = `${LINE_RULE_NAME} — ${cam}`) => bookmarks.createBookmark({ cameras: [cam], startMs, endMs: startMs + 90 * S, title }, user, { now: startMs + MIN }).bookmark
+  const old = mk('nvr-3/1', now - 45 * DAY)
+  const edge = mk('nvr-3/1', now - 30 * DAY + 60 * S) // ends 30 s inside the 30 days
+  const young = mk('nvr-3/1', now - 10 * DAY)
+  const longer = mk('nvr-3/5', now - 45 * DAY) // its camera keeps 60 days
+  const hers = mk('nvr-3/1', now - 45 * DAY, 'alice', 'Van at the gate')
+  const taken = mk('nvr-3/1', now - 44 * DAY)
+  bookmarks.updateBookmark(taken.id, { title: `${LINE_RULE_NAME} — pallet taken` }, { user: 'alice' })
+  const lines = []
+  const r = await forgetLineBookmarks({ store: bookmarks, settings, now, log: (l) => lines.push(l) })
+  const has = (b) => bookmarks.getBookmark(b.id) !== null
+  check('AN AUTOMATIC BOOKMARK THAT ENDED MORE THAN ITS CAMERA\'S DAYS AGO IS FORGOTTEN', !has(old) && r.forgotten >= 1, JSON.stringify(r))
+  check('  one still inside them is kept', has(edge) && has(young))
+  check('  a camera\'s own days count (60 here)', has(longer))
+  check('  a person\'s own bookmark is never forgotten, however old', has(hers))
+  check('  NOR ONE A PERSON CHANGED (it is theirs now)', has(taken) && bookmarks.getBookmark(taken.id).user === 'alice')
+  check('  one line in the log, saying how many and why', lines.length === 1 && /forgot \d+ automatic line-crossing bookmark/.test(lines[0]) && /days kept/.test(lines[0]), JSON.stringify(lines))
+  const again = await forgetLineBookmarks({ store: bookmarks, settings, now, log: (l) => lines.push(l) })
+  check('  run again: nothing more, and nothing said', again.forgotten === 0 && lines.length === 1, JSON.stringify(again))
+  const none = await forgetLineBookmarks({ store: bookmarks, settings: { recording: { defaults: {}, cameras: {} } }, now, log: (l) => lines.push(l) })
+  check('  no days kept set anywhere: nothing forgotten', none.forgotten === 0 && has(edge))
+  check('  the description of a new one says so', /forgotten after/.test((await autoBookmark(crossing('nvr-3', 7, now - DAY), { store: bookmarks, now, log: () => {} })).bookmark.description))
+}
+
 closeEvents()
 bookmarks.closeBookmarks()
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

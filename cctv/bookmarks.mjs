@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { DATA_DIR, isAdmin } from './auth.mjs'
 import { BOOKMARKS_SCHEMA } from './rec-index.mjs'
-import { DEFAULT_MARGIN_MS, checkBookmark, checkPatch, protectedByCamera } from './public/bookmarks-view.js'
+import { AUTO_USER, DEFAULT_MARGIN_MS, checkBookmark, checkPatch, protectedByCamera } from './public/bookmarks-view.js'
 
 export const BOOKMARKS_DB = join(DATA_DIR, 'recordings.db')
 /** One page of results. A site accumulates bookmarks slowly; this is a guard, not a paging scheme. */
@@ -58,7 +58,7 @@ function open() {
     // overlapping, not contained: a search for an hour must still find the bookmark that straddles it
     inWindow: db.prepare(`SELECT ${COLS} FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC`),
     protect: db.prepare('SELECT start_ms AS startMs, end_ms AS endMs, cameras FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms'),
-    update: db.prepare('UPDATE bookmarks SET cameras = ?, start_ms = ?, end_ms = ?, title = ?, description = ? WHERE id = ?'),
+    update: db.prepare('UPDATE bookmarks SET cameras = ?, start_ms = ?, end_ms = ?, title = ?, description = ?, user = ? WHERE id = ?'),
     remove: db.prepare('DELETE FROM bookmarks WHERE id = ?')
   }
   return q
@@ -182,6 +182,12 @@ export function listBookmarks({ text = '', fromMs = null, toMs = null, camera = 
 /**
  * Changes a bookmark. The change is merged onto the stored row and the whole thing checked again,
  * so moving only the start cannot leave a bookmark that ends before it begins.
+ *
+ * A bookmark no person made (filed under AUTO_USER: a line crossing's, line-actions.mjs) that a person
+ * changes becomes theirs: the signed-in name goes on it. Since 2026-09-30 an automatic bookmark is
+ * forgotten after its camera's days kept (line-actions.mjs forgetLineBookmarks), and a person who took
+ * the trouble to change one -- a note of what happened, a longer stretch -- has kept it. Later crossings
+ * no longer stretch it either: what a person wrote about an incident is not grown by the system.
  * @returns {{ ok: true, bookmark: object } | { ok: false, status: number, error: string }}
  */
 export function updateBookmark(id, patch, who, { now = Date.now() } = {}) {
@@ -195,8 +201,10 @@ export function updateBookmark(id, patch, who, { now = Date.now() } = {}) {
   const checked = checkBookmark({ ...current, ...fields.value }, { now })
   if (!checked.ok) return { ok: false, status: 400, error: checked.error }
   const v = checked.value
+  const by = whoOf(who).user
+  const user = current.user === AUTO_USER && by && by !== AUTO_USER ? by : current.user
   const s = open()
-  s.update.run(JSON.stringify(v.cameras), v.startMs, v.endMs, v.title, v.description, n)
+  s.update.run(JSON.stringify(v.cameras), v.startMs, v.endMs, v.title, v.description, user, n)
   return { ok: true, bookmark: toBookmark(s.get.get(n)) }
 }
 
@@ -209,6 +217,29 @@ export function deleteBookmark(id, who) {
   if (!mayChange(current, who)) return { ok: false, status: 403, error: 'Only an admin or the person who made a bookmark can delete it' }
   open().remove.run(n)
   return { ok: true }
+}
+
+/**
+ * Deletes these bookmarks in one transaction, with no rights check: for the server's own jobs, which
+ * decide which (line-actions.mjs forgetLineBookmarks: automatic ones past their camera's days kept).
+ * One commit for the lot, not one each: each is WAL pages, and a checkpoint lands on the main thread.
+ * @param {number[]} ids
+ * @returns {number} how many there were
+ */
+export function removeBookmarks(ids) {
+  const list = [...new Set((ids ?? []).map(idFrom).filter((n) => n !== null))]
+  if (!list.length) return 0
+  const s = open()
+  let gone = 0
+  db.exec('BEGIN')
+  try {
+    for (const n of list) gone += Number(s.remove.run(n).changes)
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
+  return gone
 }
 
 /**

@@ -339,7 +339,7 @@ const SEE = seeOnly(['nvr1/0', 'nvr2/1']) // every camera the bookmarks above ar
 // footage in a bookmarked stretch. Production bookmarks every line crossing on one camera (Maingate Roadway,
 // since 2026-09-28): each crossing kept about 7 minutes of all 87 cameras, about 7 GB, for good.
 {
-  const { protectedByCamera } = await import('../public/bookmarks-view.js')
+  const { AUTO_USER, protectedByCamera } = await import('../public/bookmarks-view.js')
   const J = JSON.stringify
   const p = protectedByCamera([
     { startMs: 1000, endMs: 2000, cameras: ['n1/0'] },
@@ -356,7 +356,7 @@ const SEE = seeOnly(['nvr1/0', 'nvr2/1']) // every camera the bookmarks above ar
 
   const B = Date.parse('2026-09-20T09:00:00Z')
   const M = DEFAULT_MARGIN_MS
-  createBookmark({ cameras: ['nvr5/0'], startMs: B, endMs: B + 90_000, title: 'Line crossing — Maingate Roadway' }, 'system', { now: NOW })
+  createBookmark({ cameras: ['nvr5/0'], startMs: B, endMs: B + 90_000, title: 'Line crossing — Maingate Roadway' }, AUTO_USER, { now: NOW })
   createBookmark({ cameras: ['nvr5/2', 'nvr5/1'], startMs: B + 30_000, endMs: B + 60_000, title: 'Van at the gate, two cameras' }, 'alice', { now: NOW })
   const got = protectedRanges(B - 3600_000, B + 3600_000)
   check('PROTECTEDRANGES NAMES EACH STRETCH\'S CAMERA: a bookmark keeps the cameras it names, a minute either side', J(got) === J([[B - M, B + 90_000 + M, 'nvr5/0'], [B + 30_000 - M, B + 60_000 + M, 'nvr5/1'], [B + 30_000 - M, B + 60_000 + M, 'nvr5/2']]), J(got))
@@ -366,6 +366,24 @@ const SEE = seeOnly(['nvr1/0', 'nvr2/1']) // every camera the bookmarks above ar
   raw.close()
   check('  a stored bookmark whose cameras cannot be read keeps every camera', J(protectedRanges(B + 7200_000, B + 7260_000)) === J([[B + 7200_000 - M, B + 7260_000 + M, null]]), J(protectedRanges(B + 7200_000, B + 7260_000)))
 
+  // An automatic bookmark (filed under "system": line-actions.mjs) is forgotten after its camera's days kept
+  // (line-actions.mjs forgetLineBookmarks) unless a person has kept it: a person who changes one takes it over.
+  const auto = createBookmark({ cameras: ['nvr5/3'], startMs: B + 86_400_000, endMs: B + 86_490_000, title: 'Line crossing — Yard' }, AUTO_USER, { now: NOW }).bookmark
+  const stretched = updateBookmark(auto.id, { endMs: B + 86_520_000 }, { user: AUTO_USER, admin: true })
+  check('an automatic bookmark stretched by the system stays the system\'s', stretched.ok && stretched.bookmark.user === AUTO_USER, J(stretched))
+  check('  a viewer cannot change it', updateBookmark(auto.id, { title: 'mine now' }, { user: 'bob' }).status === 403)
+  const kept = updateBookmark(auto.id, { title: 'Line crossing — Yard: pallet taken' }, { user: 'alice' })
+  check('AN AUTOMATIC BOOKMARK A PERSON CHANGES BECOMES THEIRS (kept like their own, never forgotten by itself)', kept.ok && kept.bookmark.user === 'alice' && getBookmark(auto.id).user === 'alice', J(kept))
+  const bobs = createBookmark({ cameras: ['nvr5/4'], startMs: B, endMs: B + 1000, title: 'Bob saw it' }, 'bob', { now: NOW }).bookmark
+  const edited = updateBookmark(bobs.id, { title: 'Bob saw it (checked)' }, { user: 'alice' })
+  check('  a person\'s bookmark an admin changes stays the person\'s', edited.ok && edited.bookmark.user === 'bob', J(edited))
+  // forgetting many at once (line-actions.mjs forgetLineBookmarks): one transaction, whatever the rights (the
+  // server's own job decides which)
+  const { removeBookmarks } = await import('../bookmarks.mjs')
+  const a1 = createBookmark({ cameras: ['nvr5/6'], startMs: B, endMs: B + 1000, title: 'Line crossing — a' }, AUTO_USER, { now: NOW }).bookmark
+  const a2 = createBookmark({ cameras: ['nvr5/6'], startMs: B + 5000, endMs: B + 6000, title: 'Line crossing — b' }, AUTO_USER, { now: NOW }).bookmark
+  check('removeBookmarks: the ones named go, in one go, and it says how many', removeBookmarks([a1.id, a2.id, 999_999]) === 2 && getBookmark(a1.id) === null && getBookmark(a2.id) === null && getBookmark(bobs.id) !== null)
+  check('  nothing named, nothing done', removeBookmarks([]) === 0)
 }
 
 closeBookmarks()

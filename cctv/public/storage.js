@@ -65,7 +65,7 @@ export const wholeGB = (b) => `${Math.round(b / 1e9).toLocaleString('en-GB')} GB
 const LIMIT_PACE = 'from the next clean-up (every 5 minutes, at most about 240 GB each)'
 
 /** Under a location with a space limit: that it is enforced, and how (housekeeping.mjs, 2026-09-29). */
-export const LIMIT_TEXT = `The space limit is enforced: when Argus's recordings here go over it, the oldest are deleted down to it ${LIMIT_PACE}, footage past its full-video days first; never the newest 24 hours, nor bookmarked or exported stretches. 1 GB = 1,000,000,000 bytes.`
+export const LIMIT_TEXT = `The space limit is enforced: when Argus's recordings here go over it, the oldest are deleted down to it ${LIMIT_PACE}, footage past its full-video days first; never the newest 24 hours, nor bookmarked or exported stretches (of the cameras each bookmark names). 1 GB = 1,000,000,000 bytes.`
 
 /**
  * Argus's recordings on a location (as the index counts them) against its space limit. A limit saved
@@ -335,7 +335,9 @@ export function switchOnWarning(jobs) {
   const own = jobs?.camerasOwnDays ? `\n\n${cams(jobs.camerasOwnDays)} (Settings › Recording) and ${jobs.camerasOwnDays === 1 ? 'follows' : 'follow'} those.` : ''
   // housekeeping.mjs asks the bookmarks too since 2026-09-29; it deletes past the total days (and at low
   // space, and over a space limit) whatever this switch says
-  const kept = 'Bookmarked and exported stretches are kept, by these two jobs and by the clean-up rules on this tab, which delete footage past the total days whatever this switch says.'
+  // (a bookmark keeps the cameras it names since 2026-09-30, and a line crossing's own bookmark ends with its
+  // camera's days kept: line-actions.mjs)
+  const kept = 'Bookmarked and exported stretches are kept, by these two jobs and by the clean-up rules on this tab, which delete footage past the total days whatever this switch says. A bookmark keeps the cameras it names; the automatic ones around line crossings end with their camera\'s total days.'
   return `Switch time-lapse and retention ON?\n\n${what}\n\n${kept}${own}`
 }
 

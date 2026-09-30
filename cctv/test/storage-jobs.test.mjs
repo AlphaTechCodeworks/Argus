@@ -376,7 +376,9 @@ for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
   // housekeeping), so a long housekeeping shortens it and the next round is never pushed back (Task 4)
   check('...thinning\'s deadline: the round\'s start plus thin-pace.mjs RUN_MS', /\bdeadline: roundStart \+ THIN_RUN_MS\b/.test(args) && /function thinAndRetain\(roundStart = Date\.now\(\)\)/.test(body) && /import \{ RUN_MS as THIN_RUN_MS\b[^}]*\} from '\.\/thin-pace\.mjs'/.test(server), args)
   const tick = server.match(/setInterval\(\(\) => \{\n\s+if \(busy\) return[\s\S]*?\}, 5 \* 60_000\)/)?.[0] ?? ''
-  check('...the round\'s start taken before housekeeping, handed to thinAndRetain', /const roundStart = Date\.now\(\)\n\s+runHousekeeping\(/.test(tick) && /thinAndRetain\(roundStart\)/.test(tick), tick.slice(0, 300))
+  // (since 2026-09-30 the round forgets the automatic line-crossing bookmarks past their days first:
+  // line-actions.mjs forgetLineBookmarks; the start is still taken before either)
+  check('...the round\'s start taken before housekeeping, handed to thinAndRetain', /const roundStart = Date\.now\(\)\n(?:\s*\/\/[^\n]*\n)*\s+(?:forgetLineBookmarks\(\)[\s\S]*?\.then\(\(\) => )?runHousekeeping\(/.test(tick) && /thinAndRetain\(roundStart\)/.test(tick), tick.slice(0, 300))
   // "disk too slow" from the recorders reaches thin-pace.mjs (nvrs.mjs loads the SDK: its source is read here)
   const nvrs = readFileSync(new URL('../nvrs.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const onRec = nvrs.match(/const onRecording = \(m\) => \{\n[\s\S]*?\n\}\n/)?.[0] ?? ''

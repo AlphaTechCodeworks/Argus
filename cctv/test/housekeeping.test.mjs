@@ -842,6 +842,10 @@ hk.reset()
   const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const call = server.match(/runHousekeeping\(\{[^}]*\}\)/)?.[0] ?? ''
   check('server.mjs: runHousekeeping is asked with the bookmarks (protectedRanges) and the location markers (present: markerMatches)', /\bprotectedRanges\b/.test(call) && /\bpresent: markerMatches\b/.test(call) && /\bindex: recIndex\(\)/.test(call), call || 'no call found')
+  // automatic line-crossing bookmarks end (final fix round, 2026-09-30): forgotten first in the same 5-minute
+  // round, so their footage past its days goes in that round's housekeeping
+  const round = server.slice(server.indexOf('if (LIVE_WORKER) {'), server.indexOf('runHousekeeping({ index: recIndex()'))
+  check('server.mjs: the 5-minute round forgets the automatic bookmarks past their days (line-actions.mjs forgetLineBookmarks) before housekeeping', /forgetLineBookmarks\(/.test(round) && /import \{[^}]*\bforgetLineBookmarks\b[^}]*\} from '\.\/line-actions\.mjs'/.test(server), round.slice(-400))
 }
 
 stopShareHelpers()
