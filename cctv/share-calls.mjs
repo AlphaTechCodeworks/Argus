@@ -50,7 +50,7 @@ let seq = 0
 /** The answer time now (SHARE_ANSWER_MS; shorter only in tests). */
 export const shareAnswerMs = () => answerMs
 
-const LABEL = { probe: 'check', statfs: 'free-space check', stat: 'file check', readdir: 'folder listing', unlink: 'deletion', rmdir: 'folder removal', thin: 'time-lapse rewrite', thinSwap: 'time-lapse rewrite', thinCommit: 'time-lapse rewrite', thinAbort: 'time-lapse rewrite', thinRecover: 'time-lapse recovery' }
+const LABEL = { probe: 'check', statfs: 'free-space check', stat: 'file check', segInfo: 'file check', readdir: 'folder listing', unlink: 'deletion', rmdir: 'folder removal', thin: 'time-lapse rewrite', thinSwap: 'time-lapse rewrite', thinCommit: 'time-lapse rewrite', thinAbort: 'time-lapse rewrite', thinRecover: 'time-lapse recovery' }
 
 const helpers = new Map() // key -> { key, id, root, child, calls: Map(n -> call), stuck: { since, op, child }|null, exits: [ms] }
 const stuckListeners = new Set()
@@ -152,7 +152,7 @@ function ended(h, child, code, signal, err) {
 }
 
 /**
- * Asks the helper of `loc` ({ id, path }) to make a file call (share-ops.mjs: probe, statfs, stat,
+ * Asks the helper of `loc` ({ id, path }) to make a file call (share-ops.mjs: probe, statfs, stat, segInfo,
  * readdir, unlink, rmdir, thin, thinSwap, thinCommit, thinAbort, thinRecover). Never waits on the share:
  * it fails with .code 'ESHARESTUCK' ("share not answering") when a file call does not come back within
  * timeoutMs, or at once while the location's last helper is still stuck; 'ESHAREGONE' when the helper

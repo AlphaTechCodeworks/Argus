@@ -24,7 +24,7 @@ import { XML_HEADER, transparent, xmlSettled } from './nvr-xml.mjs'
 import { startWorker } from './worker-supervisor.mjs'
 import { openRecIndex } from './rec-index.mjs'
 import { createWarmer } from './rec-cache.mjs'
-import { downtimeGaps, recoverOrphans } from './rec-recover.mjs'
+import { downtimeGaps, recoverLocation } from './rec-recover.mjs'
 import { cameraRecording, getSettings, onSettingsChange } from './settings.mjs'
 import { spareWhile } from './watchdog.mjs'
 import { checkHealth, listLocations, onChange as onStorageChange, startHealthChecks } from './storage.mjs'
@@ -865,11 +865,17 @@ const onRecording = (m) => {
 }
 /**
  * A worker for nvrId has started: the files an earlier one had open are no longer being written
- * (dropOpen), and those it left without an index row are indexed now (rec-recover.mjs).
+ * (dropOpen), and those it left without an index row are indexed now (rec-recover.mjs): after a restart
+ * from the hour folders it can have left them in, listed by each location's share helper (perf report R8,
+ * 2026-09-30: every hour folder of the NVR, 15.7-30.3 s and about 3,000 listings each restart at 4-5 days).
  */
 const recoverFor = (nvrId, beforeMs) => {
   if (!index) return
+  // what the dead worker said it had open ('segopen'): where a camera with no row yet can have a file left
+  const opens = index.opensOf(nvrId)
   index.dropOpen(nvrId)
+  const prevSpawnMs = workerSpawns.get(nvrId) ?? null
+  workerSpawns.set(nvrId, beforeMs)
   let locs
   try {
     locs = listLocations().filter((l) => l.health.ok)
@@ -877,19 +883,24 @@ const recoverFor = (nvrId, beforeMs) => {
     return
   }
   // the outage buffer too: on disk it outlives a restart, and a segment left open there has to be
-  // indexed, or it would never be copied to a real location nor counted towards the buffer's size
+  // indexed, or it would never be copied to a real location nor counted towards the buffer's size.
+  // It is memory, not a share, and has no helper: it is read in this process (recoverLocation local).
+  let spoolId = null
   try {
     const sp = spoolLocation({ index })
-    if (sp && existsSync(sp.path) && !locs.some((l) => l.id === sp.id)) locs.push(sp)
+    if (sp && existsSync(sp.path) && !locs.some((l) => l.id === sp.id)) {
+      locs.push(sp)
+      spoolId = sp.id
+    }
   } catch {}
   const idx = index
   ;(async () => {
     for (const loc of locs) {
       try {
-        const got = await recoverOrphans({ index: idx, loc, nvrId, beforeMs })
-        if (got.length) console.log(`[rec ${nvrId}] recovered ${got.length} segment file${got.length === 1 ? '' : 's'} left open (crash or kill) on ${loc.id}`)
+        const r = await recoverLocation({ index: idx, loc, nvrId, beforeMs, prevSpawnMs, opens, local: loc.id === spoolId })
+        if (r.added.length) console.log(`[rec ${nvrId}] recovered ${r.added.length} segment file${r.added.length === 1 ? '' : 's'} left open (crash or kill) on ${loc.id} (${r.full ? 'every folder' : 'the recent hours'}: ${r.listed} folders listed in ${(r.ms / 1000).toFixed(1)} s)`)
       } catch (e) {
-        console.warn(`[rec ${nvrId}] recovery scan of ${loc.path} failed: ${e.message}`)
+        console.warn(`[rec ${nvrId}] recovery scan of ${loc.path} failed: ${e.message}; the next start of this worker lists every folder`)
       }
     }
     // then the time nothing was recorded because the service (first start) or this worker was down
@@ -904,6 +915,7 @@ const recoverFor = (nvrId, beforeMs) => {
   })()
 }
 const startedWorkers = new Set() // NVR ids whose worker has started since this process began
+const workerSpawns = new Map() // NVR id -> when its worker last started (this process): the dead one's start, at a restart
 /** The channels of nvrId that have footage and whose recording is on now (as recorder.mjs wanted()). */
 const recordingChannels = (nvrId, idx) => {
   const r = getSettings().recording

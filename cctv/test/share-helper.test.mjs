@@ -210,6 +210,28 @@ check('the answer time is still 10 s', SHARE_ANSWER_MS === 10_000)
   const refusedStat = await settle(shareCall(loc, 'stat', { paths: [outside] }))
   check('stat outside the location: refused, nothing read', refusedStat.v?.[0]?.error === 'EOUTSIDE', JSON.stringify(refusedStat.v ?? refusedStat.e?.message))
 
+  // segInfo: what crash recovery needs of a file left open (rec-recover.mjs), read by the helper so the
+  // server makes no file call on the share after a worker restart (perf report R8, 2026-09-30): its
+  // size and last change, and its .idx's keyframes within that size (a row past the end: torn, not counted)
+  {
+    const lone = join(loc.path, 'n1', '2', '2026-09-22', '06', '07.h264')
+    mkdirSync(dirname(lone), { recursive: true })
+    writeFileSync(lone, Buffer.alloc(300, 1)) // no .idx: the worker died between the two opens
+    const torn = join(loc.path, 'n1', '2', '2026-09-22', '06', '08.h264')
+    writeFileSync(torn, Buffer.alloc(200, 1))
+    const rows = Buffer.alloc(3 * 16 + 7)
+    ;[[0, T0], [150, T0 + 10_000], [900, T0 + 20_000]].forEach(([o, t], i) => (rows.writeBigUInt64LE(BigInt(o), i * 16), rows.writeBigInt64LE(BigInt(t), i * 16 + 8)))
+    writeFileSync(`${torn}.idx`, rows)
+    const info = await settle(shareCall(loc, 'segInfo', { paths: [seg, lone, torn, join(loc.path, 'nope.h264'), outside] }))
+    const [a, b, c, d, e] = info.v ?? []
+    const idx = parseIdx(readFileSync(`${seg}.idx`))
+    check('segInfo: size and last change of a segment, and its keyframes: how many, the first and the last', a?.size === readFileSync(seg).length && a.isFile === true && a.mtimeMs > 0 && a.keyframes === idx.length && a.firstKeyMs === idx[0].tsMs && a.lastKeyMs === idx.at(-1).tsMs, JSON.stringify(a ?? info.e?.message))
+    check('segInfo: no .idx is no keyframes, not an error', b?.size === 300 && b.keyframes === 0 && b.firstKeyMs === null && b.lastKeyMs === null, JSON.stringify(b))
+    check('segInfo: a torn last row and a row past the file\'s end are not counted', c?.keyframes === 2 && c.firstKeyMs === T0 && c.lastKeyMs === T0 + 10_000, JSON.stringify(c))
+    check('segInfo: a file not there is its code; one outside the location is refused, nothing read', d?.error === 'ENOENT' && e?.error === 'EOUTSIDE', JSON.stringify([d, e]))
+    rmSync(join(loc.path, 'n1', '2'), { recursive: true })
+  }
+
   const del = await shareCall(loc, 'unlink', { paths: [seg, join(loc.path, 'n1', '0', 'never-there.h264'), outside, join(loc.path, 'n1', '..', '..', 'not-ours.h264'), join(loc.path, MARKER), loc.path], withIdx: true })
   check('unlink: a segment and its .idx are gone', del[0].ok === true && !existsSync(seg) && !existsSync(`${seg}.idx`), JSON.stringify(del[0]))
   check('unlink: one already gone counts as gone', del[1].ok === true, JSON.stringify(del[1]))

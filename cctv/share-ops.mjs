@@ -262,6 +262,40 @@ export function makeShareOps({ id, root: rootIn }) {
       return out
     },
 
+    /**
+     * What crash recovery needs of a file a dead worker left without an index row (rec-recover.mjs),
+     * read here so the server makes no file call on the share after a worker restart (perf report R8,
+     * 2026-09-30): [{ path, size, mtimeMs, isFile, keyframes, firstKeyMs, lastKeyMs } | { path, error }].
+     * The keyframes are its .idx rows within its size (a torn last row, or one past the end, not counted);
+     * no .idx (the worker died between the two opens) is none, firstKeyMs and lastKeyMs null.
+     */
+    async segInfo({ paths } = {}, tick) {
+      const out = []
+      for (const p of list(paths, 'paths')) {
+        const r = readable(p)
+        if (!r) {
+          out.push({ path: p, error: 'EOUTSIDE' })
+          continue
+        }
+        let s
+        try {
+          s = await fsp.stat(r)
+        } catch (e) {
+          out.push({ path: p, error: e.code || e.message })
+          continue
+        } finally {
+          tick()
+        }
+        let rows = []
+        try {
+          rows = parseIdx(await fsp.readFile(`${r}.idx`)).filter((x) => x.offset <= s.size)
+        } catch {} // no .idx: none
+        tick()
+        out.push({ path: p, size: s.size, mtimeMs: s.mtimeMs, isFile: s.isFile(), keyframes: rows.length, firstKeyMs: rows[0]?.tsMs ?? null, lastKeyMs: rows.at(-1)?.tsMs ?? null })
+      }
+      return out
+    },
+
     /** [{ dir, entries: [{ name, file, dir }] } | { dir, error }] */
     async readdir({ dirs } = {}, tick) {
       const out = []
