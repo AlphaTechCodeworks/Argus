@@ -15,6 +15,16 @@ const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PAS
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const data = mkdtempSync(join(tmpdir(), 'cctv-hk-'))
+// Every folder this test makes, and the indexes in them, removed at its end: each run left about 57 hk-loc-* and
+// hk-db-* folders (~23 MB) in the temp folder, 2,158 of them by 2026-09-30 (review of p3-thin; thinning.test's
+// were fixed the same way in 966e6f4).
+const made = []
+const tmp = (prefix) => {
+  const d = mkdtempSync(join(tmpdir(), prefix))
+  made.push(d)
+  return d
+}
+const opened = [] // setup()'s indexes: closed at the end (Windows keeps an open database's file)
 process.env.DATA_DIR = data
 const { runHousekeeping, housekeepingCandidates, _test: hk } = await import('../housekeeping.mjs')
 const { openRecIndex } = await import('../rec-index.mjs')
@@ -43,11 +53,12 @@ const localShare = (loc, op, args) => {
 const run = (o) => runHousekeeping({ share: localShare, present: markerPresent, protectedRanges: null, now: NOW, log: () => {}, warn: () => {}, ...o })
 
 function setup({ id = 'L1', limitGB = null, marks = {} } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'hk-loc-'))
+  const root = tmp('hk-loc-')
   writeFileSync(join(root, '.cctv-recordings'), JSON.stringify({ id }))
   // (a limit is enforced once saved through storage.mjs, which stamps limitSetAt)
   const loc = { id, path: root, type: 'usb', role: 'main', limitGB, ...(limitGB ? { limitSetAt: '2026-09-29T12:00:00.000Z' } : {}), ...marks }
-  const index = openRecIndex(join(mkdtempSync(join(tmpdir(), 'hk-db-')), 'r.db'))
+  const index = openRecIndex(join(tmp('hk-db-'), 'r.db'))
+  opened.push(index)
   const add = (nvr, ch, ageDays, bytes = 1000) => {
     const startMs = NOW - ageDays * DAY
     const path = segmentPath(root, nvr, ch, startMs, 'h264')
@@ -160,7 +171,7 @@ const tail = (p) => p.split(/[\\/]/).slice(-5).join('/')
 // ---- safety: a path outside the location root is never deleted
 {
   const { loc, index } = setup()
-  const outside = join(mkdtempSync(join(tmpdir(), 'hk-out-')), 'x.h264')
+  const outside = join(tmp('hk-out-'), 'x.h264')
   writeFileSync(outside, 'keep me')
   index.addSegment({ nvr: 'n1', ch: 0, path: outside, startMs: NOW - 300 * DAY, endMs: NOW - 300 * DAY + 1000, bytes: 7, keyframes: 1, loc: 'L1' })
   const r = await run({ index, settings: settingsWith([loc]), freeOf: fakeFree(90_000).fn })
@@ -500,7 +511,7 @@ hk.reset()
   const SEG = 12_000_000 // an average production segment, 12 MB
   const TOTAL = 16_630 * GB
   const WANT = 470
-  const root = mkdtempSync(join(tmpdir(), 'hk-nas-'))
+  const root = tmp('hk-nas-')
   const loc = { id: 'NAS', path: root, type: 'network', role: 'main', limitGB: null }
   const camsList = Array.from({ length: CAMS }, (_, c) => ({ nvr: `nvr${c % 4}`, ch: c }))
   const startOf = (k) => NOW - 20 * DAY + k * 60_000
@@ -549,7 +560,7 @@ hk.reset()
     }
   }
   // the real index, its rows written minute by minute with the cameras in turn, as recording writes them
-  const bigDir = mkdtempSync(join(tmpdir(), 'hk-big-'))
+  const bigDir = tmp('hk-big-')
   const template = join(bigDir, 'template.db')
   {
     openRecIndex(template).close()
@@ -717,8 +728,17 @@ hk.reset()
 }
 
 stopShareHelpers()
-try {
-  rmSync(data, { recursive: true, force: true, maxRetries: 5 })
-} catch {}
+for (const ix of opened) {
+  try {
+    ix.close()
+  } catch {} // (closed already by its case)
+}
+for (const d of [data, ...made]) {
+  try {
+    rmSync(d, { recursive: true, force: true, maxRetries: 5 })
+  } catch {}
+}
+const leftBehind = made.filter((d) => existsSync(d))
+check('the test\'s temp folders are removed at its end', leftBehind.length === 0, `${made.length} made, ${leftBehind.length} left: ${leftBehind.slice(0, 3).join(', ')}`)
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
