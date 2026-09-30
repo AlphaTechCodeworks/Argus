@@ -11,13 +11,17 @@
 
 /** Every kind, in the order they are shown. */
 export const KINDS = Object.freeze([
-  'server-restart', 'drive-missing', 'drive-full', 'drive-filling', 'not-recording',
+  'server-restart', 'drive-missing', 'drive-full', 'drive-filling', 'retention-short', 'not-recording',
   'camera-offline', 'nvr-offline', 'nvr-disk', 'nvr-refusing', 'nvr-login', 'nvr-clock'
 ])
 // 'drive-filling' is a forecast, and deliberately a different kind from 'drive-full'. A recorder
 // that has reached its retention is permanently full and overwriting, which is the healthy steady
 // state here, so a forecast only speaks up about a drive that is still filling towards its first
 // time round -- see storage-report.mjs driveFullCandidates.
+// 'retention-short' (2026-09-30, p4-target): a location keeping fewer days than its cameras' target, or
+// forecast to (retention-target.mjs retentionCandidates). Overwriting is exactly when it matters: a
+// location recycling at 8 days against 30 is full "as designed" and still short, so it is not silenced
+// the way drive-filling is. Medium, like drive-filling: nothing stops recording.
 
 /** Kinds that open on the first sighting rather than after raiseMs. */
 const IMMEDIATE = new Set(['server-restart', 'nvr-login', 'nvr-refusing'])

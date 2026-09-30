@@ -115,6 +115,56 @@ const fakeSender = (sent = [], pending = {}) => ({
   a.stop()
 }
 
+// --- days kept short of the target (retention-target.mjs, 2026-09-30, p4-target) --------------------------
+// The NAS at its 12,000 GB limit keeps 8.2 days against 30, from the figures the watch measured: the check
+// sends it once, keeps it open while the NAS goes on recycling (the drive-filling forecast is quiet there by
+// design), and clears it once the target is met again.
+{
+  const { mkdtempSync: tmp } = await import('node:fs')
+  process.env.DATA_DIR ??= tmp(join(tmpdir(), 'cctv-ac-data-'))
+  const { retentionView, retentionCandidates, wholeDays } = await import('../retention-target.mjs')
+  const DAY = 86_400_000
+  let oldest = T0 - 8.2 * DAY
+  let t = T0
+  const facts = () => ({
+    at: t,
+    stepMs: 10_000,
+    keyframeShare: { low: 0.43, mid: 0.5, high: 0.56 },
+    protection: 'ranges',
+    warnings: [],
+    days: wholeDays(t).map((d) => ({ ...d, rows: [{ loc: 'nas', nvr: 'nvr1', ch: 0, files: 1440, bytes: 1.47e12, ms: 1440 * 59_000, weighted: 0.294e12 }] })),
+    locations: { nas: { id: 'nas', anyOldestMs: oldest, oldestMs: oldest, timelapse: null, fullFromMs: oldest, sample: [] } }
+  })
+  const row = { id: 'nas', path: '/srv/nas', mounted: true, argusBytes: 12_000e9, freeBytes: 1.19e12, totalBytes: 16.63e12, limitBytes: 12_000e9, limitEnforced: true, lowFreePct: 7, floorFreePct: 5 }
+  const settings = { recording: { defaults: { fullDays: 7, after: 'timelapse', timelapseS: 10, retentionDays: 30 }, cameras: {} }, storage: { thinning: 'dry-run', locations: [{ id: 'nas', path: '/srv/nas' }] } }
+  let space = { limitBytes: 12_000e9, freeBytes: 1.19e12, totalBytes: 16.63e12 }
+  const memory = new Set()
+  const extraCandidates = () => {
+    const r = { ...row, ...space }
+    return retentionCandidates({ retention: retentionView({ facts: facts(), settings, locations: [r], now: t, memory }), locations: [r] })
+  }
+  const sent = []
+  // (the camera records all along: only the storage figure is wrong)
+  const a = startAlerts({ ...deps({ listCameras: () => [{ nvrId: 'nvr1', ch: 0, name: 'Cashier Front', online: true, recording: true, lastSegmentMs: t }] }), extraCandidates, now: () => t, sender: fakeSender(sent), autoStart: false, log: () => {} })
+  a.tick()
+  t += 3 * MIN
+  a.tick()
+  check('DAYS KEPT SHORT OF THE TARGET WHILE RECYCLING: sent once it is due, kind retention-short', sent.length === 1 && sent[0].alerts[0].kind === 'retention-short' && /keeps 8\.2 days/.test(sent[0].alerts[0].title), JSON.stringify(sent.map((s) => s.alerts.map((x) => x.title))))
+  for (let i = 0; i < 20; i++) {
+    t += 30 * 60_000
+    a.tick()
+  }
+  check('... ten hours of checks later, still recycling at the limit: open, and not sent again', sent.length === 1 && a.health().open.some((x) => x.kind === 'retention-short'), String(sent.length))
+  // the owner buys space: a 70 TB share with a 50,000 GB limit holds the 30 days of full video (44.1 TB)
+  space = { limitBytes: 50_000e9, freeBytes: 55e12, totalBytes: 70e12 }
+  oldest = t - 30 * DAY
+  a.tick()
+  t += 2 * MIN
+  a.tick()
+  check('... the target met again: cleared, once', sent.length === 2 && sent[1].kind === 'cleared' && sent[1].alerts[0].kind === 'retention-short', JSON.stringify(sent.map((s) => s.kind)))
+  a.stop()
+}
+
 // --- a failure to read the state ---------------------------------------------------------------
 {
   const logged = []

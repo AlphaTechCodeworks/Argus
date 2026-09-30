@@ -1,8 +1,10 @@
 // What the Storage page shows, and the figures the thinning/retention jobs and the drive-full
 // forecast alert are decided from.
 //
-//   buildStorageReport({ settings, index, history, now, freeOf, present })
-//     -> { now, locations: [...], cameras: [...], warnings: [] }
+//   buildStorageReport({ settings, index, history, now, freeOf, present, retention })
+//     -> { now, locations: [...], cameras: [...], warnings: [], retention }
+//        (retention: the days kept against the target and the forecast of the days the space holds,
+//        retention-target.mjs retentionView, from the figures its own timer measured)
 //   forecast(samples, opts) -> { bytesPerDay, daysToFull, confident, reason }
 //   driveFullCandidates(report, opts) -> alert candidates for alerts.mjs to adopt
 //   handleStorage(method, pathname, readJson, user) -> [status, body] | null   (the report + jobs)
@@ -16,6 +18,7 @@ import { mkdirSync, readFileSync, renameSync, statfsSync, writeFileSync } from '
 import { join } from 'node:path'
 import { isAdmin } from './auth.mjs'
 import { freeMarks, spaceLimit } from './location-health.mjs'
+import { retentionFacts, retentionView } from './retention-target.mjs'
 import { lastRuns } from './storage-jobs.mjs'
 import { describePaceNow, thinPace } from './thin-pace.mjs'
 
@@ -183,11 +186,16 @@ const roundDays = (ms) => (Number.isFinite(ms) ? Math.round((ms / DAY) * 10) / 1
  * 2026-09-29 once saved through storage.mjs: limitEnforced), and housekeeping's alarms about it
  * (`alarms`: its housekeepingAlarms(), handed in so this module does not load the jobs).
  *
+ * `retention`: the days kept against the target, per location and for all of them, with the forecast of the
+ * days the space holds (retention-target.mjs retentionView, 2026-09-30): arithmetic on the figures its own
+ * timer measured from the index (retentionFacts(), passed in by the tests) and on this report's free space,
+ * Argus's bytes and limit for each location.
+ *
  * @param {{ settings?: object, index: object|null, history?: object, now?: number,
  *           freeOf?: (loc) => {freeBytes,totalBytes}, present?: (loc) => boolean,
- *           alarms?: { id, path, kind, text }[] }} o
+ *           alarms?: { id, path, kind, text }[], retention?: object|null }} o
  */
-export function buildStorageReport({ settings, index = null, history = {}, now = Date.now(), freeOf = defaultFreeOf, present = markerPresent, alarms = [] } = {}) {
+export function buildStorageReport({ settings, index = null, history = {}, now = Date.now(), freeOf = defaultFreeOf, present = markerPresent, alarms = [], retention = retentionFacts() } = {}) {
   if (!settings?.storage) throw new Error('buildStorageReport needs the settings object')
   const warnings = []
   const floorFreePct = settings.storage?.floorFreePct ?? 5
@@ -307,7 +315,10 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
     locations.push(row)
   }
 
-  return { now, floorFreePct, lowFreePct, locations, cameras: cams, warnings }
+  const days = retentionView({ facts: retention, settings, locations, now })
+  // (bookmarks that could not be read when the days were measured: the oldest counted may be a bookmarked stretch)
+  if (days.available) warnings.push(...days.warnings.map((w) => `days kept: ${w}`))
+  return { now, floorFreePct, lowFreePct, locations, cameras: cams, warnings, retention: days }
 }
 
 // ---- the alert candidate -----------------------------------------------------------------------
@@ -324,6 +335,9 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
  * other case: a drive whose usage is genuinely climbing and which has NOT yet started recycling,
  * so when it does hit the floor it will start eating footage the site is supposed to still have.
  * No forecast, no confidence, or a drive already cycling: nothing is raised.
+ * Quiet is right about "filling", and wrong about days: a location deleting to stay under its limit at 8 days,
+ * against a 30-day target, is not full "as designed". That is retention-target.mjs retentionCandidates (kind
+ * 'retention-short', 2026-09-30), which cycling does not silence.
  */
 export function driveFullCandidates(report, { days = ALERT_DAYS } = {}) {
   const out = []
@@ -331,7 +345,7 @@ export function driveFullCandidates(report, { days = ALERT_DAYS } = {}) {
     if (!l.mounted) continue // drive-missing covers it
     const f = l.forecast
     if (!f?.confident || !Number.isFinite(f.daysToFull)) continue // never guess
-    if (l.cycling === true) continue // overwriting its own oldest footage: normal, never alert
+    if (l.cycling === true) continue // overwriting its own oldest footage: normal, never a "filling" alert (days short of the target: retention-short)
     if (f.daysToFull >= days) continue
     const when = f.daysToFull < 1 ? 'today' : `in about ${Math.round(f.daysToFull)} ${Math.round(f.daysToFull) === 1 ? 'day' : 'days'}`
     out.push({
@@ -378,12 +392,18 @@ let indexRef = () => null
 let dataDirRef = null
 let settingsRef = null
 let alarmsRef = () => []
+let presentRef = null
+let freeOfRef = null
 /**
- * server.mjs: setStorageContext({ index, dataDir, alarms }) after the index is open; alarms: housekeeping.mjs
- * housekeepingAlarms (a location over its limit with nothing it may delete, or not freeing space).
+ * server.mjs: setStorageContext({ index, dataDir, alarms, present, freeOf }) after the index is open; alarms:
+ * housekeeping.mjs housekeepingAlarms (a location over its limit with nothing it may delete, or not freeing
+ * space); present and freeOf: storage.mjs markerMatches and freeOf, a share's answers from its last check.
+ * Without them the route read the share itself -- its marker (readFileSync) and free space (statfsSync), on the
+ * main thread at every Storage page's minute, and a share that hangs hangs the server (2026-09-26): the
+ * defaults are for a drive in the tests only (2026-09-30, p4-target).
  * `settingsOf` is only for the offline tests, where settings.mjs cannot be loaded at all.
  */
-export function setStorageContext({ index = null, dataDir = null, settingsOf = null, alarms = null } = {}) {
+export function setStorageContext({ index = null, dataDir = null, settingsOf = null, alarms = null, present = null, freeOf = null } = {}) {
   // `index` may be the recordings index itself or a function that returns it. The server has only
   // the getter to hand at start-up, because the index is not open yet then -- and handing the
   // getter straight through produced a page that threw "index.cameras is not a function" the first
@@ -392,11 +412,13 @@ export function setStorageContext({ index = null, dataDir = null, settingsOf = n
   dataDirRef = dataDir
   settingsRef = settingsOf
   alarmsRef = typeof alarms === 'function' ? alarms : () => []
+  presentRef = typeof present === 'function' ? present : null
+  freeOfRef = typeof freeOf === 'function' ? freeOf : null
 }
 
 /**
- * GET /api/storage -> the report plus `jobs` (jobsReport). Admins only: it names every location and
- * every camera.
+ * GET /api/storage -> the report (with `retention`: the days kept against the target) plus `jobs`
+ * (jobsReport). Admins only: it names every location and every camera.
  * @returns {Promise<[number, object]|null>} null when the path is not ours
  */
 export async function handleStorage(method, pathname, _readJson, user) {
@@ -404,10 +426,11 @@ export async function handleStorage(method, pathname, _readJson, user) {
   if (method !== 'GET') return [405, { error: 'Method not allowed' }]
   if (!admin(user)) return [403, { error: 'Only admins can see storage' }]
   const settings = settingsRef ? settingsRef() : (await import('./settings.mjs')).getSettings()
+  const asked = { ...(presentRef ? { present: presentRef } : {}), ...(freeOfRef ? { freeOf: freeOfRef } : {}) }
   let history = {}
   try {
     if (dataDirRef) {
-      const report = buildStorageReport({ settings, index: indexRef() })
+      const report = buildStorageReport({ settings, index: indexRef(), ...asked })
       history = recordSample(dataDirRef, report.locations, Date.now())
     }
   } catch (e) {
@@ -417,7 +440,7 @@ export async function handleStorage(method, pathname, _readJson, user) {
   try {
     alarms = alarmsRef() ?? []
   } catch {}
-  return [200, { ...buildStorageReport({ settings, index: indexRef(), history, alarms }), jobs: jobsReport(settings) }]
+  return [200, { ...buildStorageReport({ settings, index: indexRef(), history, alarms, ...asked }), jobs: jobsReport(settings) }]
 }
 
 export const _test = { HISTORY_FILE }

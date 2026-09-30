@@ -187,6 +187,50 @@ check('no forecast at all, no alert', driveFullCandidates(reportWith({ forecast:
 check('an unmounted drive is left to drive-missing', driveFullCandidates(reportWith({ mounted: false })).length === 0)
 check('cycling unknown (no footage indexed there) still alerts only on a confident forecast', driveFullCandidates(reportWith({ cycling: null })).length === 1)
 
+// ---- days kept against the target (retention-target.mjs, 2026-09-30, p4-target) -------------------------
+// The NAS at its 12,000 GB limit keeps 8.2 days; one camera is set to keep 7 days and has them, so the location
+// counts as "cycling", and the drive-filling forecast rightly stays quiet about a drive that is full and
+// overwriting. That line ("overwriting its own oldest footage: normal, never alert") must not hide that the
+// other camera wants 180 days and gets 8.2.
+const { retentionCandidates, wholeDays } = await import('../retention-target.mjs')
+const nasFacts = (now = NOW) => ({
+  at: now,
+  stepMs: 10_000,
+  keyframeShare: { low: 0.43, mid: 0.5, high: 0.56 },
+  protection: 'ranges',
+  warnings: [],
+  days: wholeDays(now).map((d) => ({ ...d, rows: [0, 1].map((ch) => ({ loc: 'L2', nvr: 'n1', ch, files: 1440, bytes: 0.735e12, ms: 1440 * 59_000, weighted: 0.147e12 })) })),
+  locations: { L2: { id: 'L2', anyOldestMs: now - 8.2 * DAY, oldestMs: now - 8.2 * DAY, timelapse: null, fullFromMs: now - 8.2 * DAY, sample: [] } }
+})
+const NAS12 = { ...L2, role: 'main', limitGB: 12_000, limitSetAt: '2026-09-29T12:00:00.000Z', lowFreePct: 7, floorFreePct: 5 }
+{
+  const cams = { 'n1/0': { retentionDays: 7, fullDays: 7 } }
+  const index = { ...fakeIndex([seg('n1', 0, 7.5, 'L2'), seg('n1', 1, 8.2, 'L2'), seg('n1', 0, 0, 'L2'), seg('n1', 1, 0, 'L2')]), locationUse: (loc) => ({ bytes: loc === 'L2' ? 12_000e9 : 0, segments: 4 }) }
+  const r = buildStorageReport({
+    settings: { ...settings([NAS12], cams), storage: { ...settings([NAS12]).storage, thinning: 'dry-run' } },
+    index,
+    history: { L2: series(48, { startUsed: 14.5e12, perDay: 0.2e12, total: 16.63e12 }) },
+    now: NOW,
+    freeOf: () => ({ freeBytes: 1.19e12, totalBytes: 16.63e12 }),
+    present: () => true,
+    retention: nasFacts()
+  })
+  const l = r.retention.locations.L2
+  check('THE REPORT CARRIES THE DAYS KEPT AGAINST THE TARGET: 8.2 days at the limit, against 180', r.retention.available && l.recycling === 'limit' && Math.abs(l.daysKept - 8.2) < 0.01 && l.targetDays === 180 && l.short.actual === true, JSON.stringify({ recycling: l.recycling, daysKept: l.daysKept, target: l.targetDays, short: l.short }))
+  check('... from the report\'s own figures for the location (Argus\'s bytes, free space, the limit)', l.capacity.heldBytes === 12_000e9 && l.capacity.limitBytes === 12_000e9 && Math.abs(l.capacity.lowBytes - (12_000e9 + 1.19e12 - 0.07 * 16.63e12)) < 1, JSON.stringify(l.capacity))
+  check('... the location counts as cycling (a camera has reached its own 7 days)', r.locations[0].cycling === true)
+  const wouldFill = driveFullCandidates({ ...r, locations: r.locations.map((x) => ({ ...x, cycling: false })) })
+  check('... its free space forecast would say "full" were it not cycling', wouldFill.length === 1, JSON.stringify(r.locations[0].forecast))
+  const df = driveFullCandidates(r)
+  const rc = retentionCandidates(r)
+  check('THE SHORTFALL IS NOT HIDDEN BY RECYCLING: drive-filling stays quiet, retention-short speaks', df.length === 0 && rc.length === 1 && rc[0].kind === 'retention-short' && rc[0].key === 'retention-short/L2' && /180-day target/.test(rc[0].title), JSON.stringify({ df, rc }))
+  const unread = { ...nasFacts(), protection: 'unread', warnings: ['the bookmarks could not be read (database is locked): the oldest footage counted may be a bookmarked stretch'] }
+  const withUnread = buildStorageReport({ settings: settings([NAS12], cams), index, history: {}, now: NOW, freeOf: () => ({ freeBytes: 1.19e12, totalBytes: 16.63e12 }), present: () => true, retention: unread })
+  check('... bookmarks that could not be read when it was measured: said in the page\'s warnings', withUnread.warnings.some((w) => /days kept: the bookmarks could not be read/.test(w)), JSON.stringify(withUnread.warnings))
+  const none = buildStorageReport({ settings: settings([NAS12]), index, history: {}, now: NOW, freeOf: () => ({ freeBytes: 1.19e12, totalBytes: 16.63e12 }), present: () => true, retention: null })
+  check('... nothing measured yet: the report says so, no candidate', none.retention.available === false && retentionCandidates(none).length === 0, JSON.stringify(none.retention.reason))
+}
+
 // ---- the route ------------------------------------------------------------------------------------
 {
   const json = async () => ({})
@@ -198,6 +242,18 @@ check('cycling unknown (no footage indexed there) still alerts only on a confide
   check('only GET', s405 === 405)
   const [s200, body] = await handleStorage('GET', '/api/storage', json, 'boss')
   check('admins get the report', s200 === 200 && Array.isArray(body.locations) && Array.isArray(body.warnings), JSON.stringify(body).slice(0, 120))
+  check('... with the days kept against the target (not measured yet here: said in words)', body.retention?.available === false && typeof body.retention.reason === 'string', JSON.stringify(body.retention))
+}
+{
+  // The route read the share itself: its marker (readFileSync) and its free space (statfsSync), on the main
+  // thread, at every Storage page's minute. server.mjs hands it storage.mjs's answers from the last check.
+  const json = async () => ({})
+  const share = { id: 'L9', path: join(data, 'no-such-share'), type: 'network', role: 'main' }
+  let asked = 0
+  setStorageContext({ index: null, dataDir: data, settingsOf: () => settings([share]), present: (l) => (asked++, l.id === 'L9'), freeOf: () => ({ freeBytes: 7e12, totalBytes: 16e12 }) })
+  const [, body] = await handleStorage('GET', '/api/storage', json, 'boss')
+  check('THE ROUTE ASKS STORAGE.MJS, NOT THE SHARE: the marker and free space from the context (the folder is not even there)', body.locations[0].mounted === true && body.locations[0].freeBytes === 7e12 && asked >= 1, JSON.stringify(body.locations[0]).slice(0, 200))
+  setStorageContext({ index: null, dataDir: data, settingsOf: () => settings([L1]) })
 }
 
 // ---- the time-lapse and retention switch, and what the jobs last did (storage-jobs.mjs) ---------------
@@ -317,6 +373,37 @@ check('days: null is words', days(null) === NOT_AVAILABLE && days(3) === '3 days
   check('edit: marks that are not whole numbers 1-50 refused on the page', /whole number/.test(locationEdit(nas, { lowFreePct: '7.5' }).error ?? '') && /whole number/.test(locationEdit(nas, { floorFreePct: '0' }).error ?? ''))
 }
 check('render: nothing configured is not a crash', renderStorage({}).empty === true && renderStorage(null).empty === true)
+{
+  // the days kept and the forecast on each location's panel, and one line for all of them
+  const { retentionView } = await import('../retention-target.mjs')
+  const row = { id: 'L2', path: NAS12.path, type: 'network', role: 'main', mounted: true, usedBytes: 15.44e12, freeBytes: 1.19e12, totalBytes: 16.63e12, usedPct: 92.8, freePct: 7.2, lowFreePct: 7, floorFreePct: 5, argusBytes: 12_000e9, limitBytes: 12_000e9, limitEnforced: true, cameras: [] }
+  const facts = nasFacts()
+  facts.locations.L2.sample = [0, 1].map((ch) => ({ nvr: 'n1', ch, files: 24, bytes: ((24 * 0.735e12) / 1440) * 0.104, ms: 24 * 59_000 }))
+  const s = { ...settings([NAS12], {}), recording: { defaults: { ...DEFAULTS, fullDays: 7, retentionDays: 30 }, cameras: {} } }
+  s.storage.thinning = 'dry-run'
+  const retention = retentionView({ facts, settings: s, locations: [row], now: NOW, memory: new Set() })
+  const r = renderStorage({ locations: [row], retention })
+  const l = r.locations[0]
+  check('render: days kept, against the target, bad when short at its limit', l.kept.value === '8.2 days' && l.kept.state === 'bad' && /target 30 days/.test(l.kept.note), JSON.stringify(l.kept))
+  check('render: the days that fit, with the volume, the date, and what time-lapse On would give', l.fit.value === 'about 8.2 days' && l.fit.state === 'bad' && /1\.5 TB a day/.test(l.fit.note) && /12,000 GB limit reached/.test(l.fit.note) && /With time-lapse On: about 18\.2 days/.test(l.fit.note), JSON.stringify(l.fit))
+  check('render: how the time-lapse was sized, in words', /time-lapse 10\.4 % of full video, measured from 48 real time-lapse files/.test(l.fit.note), l.fit.note)
+  check('render: "Recycling" says it recycles for space (its "cycling" only knows a camera at its target)', l.recycling === 'yes, for space' && l.recyclingNote === 'deleting to stay at its space limit' && l.recyclingState === 'bad', JSON.stringify([l.recycling, l.recyclingNote, l.recyclingState]))
+  // room enough: both answers the whole 30 days, so no "with time-lapse On" beside it, nor the time-lapse's size
+  const roomy = { ...row, cycling: false, argusBytes: 3e12, limitBytes: 50_000e9, freeBytes: 60e12, totalBytes: 70e12 }
+  const fits = renderStorage({ locations: [roomy], retention: retentionView({ facts: nasFacts(), settings: s, locations: [roomy], now: NOW, memory: new Set() }) }).locations[0]
+  check('render: where the target fits either way, neither "with time-lapse On" nor the time-lapse\'s size', fits.fit.value === 'all 30 days' && !/time-lapse On/.test(fits.fit.note) && !/of full video,/.test(fits.fit.note) && fits.recycling === 'not yet', JSON.stringify(fits.fit))
+  const est = { ...facts, locations: { L2: { ...facts.locations.L2, sample: [] } } }
+  const estNote = renderStorage({ locations: [row], retention: retentionView({ facts: est, settings: s, locations: [row], now: NOW, memory: new Set() }) }).locations[0].fit.note
+  check('render: an estimate says so, with its range', /time-lapse about 10 % of full video, an estimate from its keyframes \(8\.6-11\.2 %\)/.test(estNote), estNote)
+  check('render: one line for all locations', /Footage goes back 8\.2 days/.test(r.target) && /30-day target/.test(r.target) && /Short of it/.test(r.target) && r.target.includes(NAS12.path), r.target)
+  const notYet = renderStorage({ locations: [row], retention: { available: false, reason: 'not measured yet: every 5 minutes, the first a minute after the server starts', locations: {} } })
+  check('render: not measured yet: words, not a figure', notYet.locations[0].kept.value === NOT_AVAILABLE && /not measured yet/.test(notYet.locations[0].kept.note) && /not measured yet/.test(notYet.target), JSON.stringify(notYet.locations[0].kept))
+  const tlOnly = { ...facts, locations: { L2: { ...facts.locations.L2, timelapse: { oldestMs: NOW - 8.2 * DAY, newestMs: NOW - 2 * DAY }, fullFromMs: null } } }
+  const tlNote = renderStorage({ locations: [row], retention: retentionView({ facts: tlOnly, settings: s, locations: [row], now: NOW, memory: new Set() }) }).locations[0].kept.note
+  check('render: time-lapse with no full video after it (a location recording goes elsewhere now): said so', /time-lapse 6\.2 days, no full video after it/.test(tlNote), tlNote)
+  const older = renderStorage({ locations: [row] })
+  check('render: an older server (no retention in the answer): no crash, nothing claimed', older.locations[0].kept.value === NOT_AVAILABLE && older.target === '', JSON.stringify(older.locations[0].kept))
+}
 check('render: a camera whose days we cannot say gets no colour', renderStorage({ locations: [{ id: 'L', path: '/p', mounted: true, usedBytes: 1, freeBytes: 1, totalBytes: 2, usedPct: 50, freePct: 50, cameras: [{ camera: 'c', daysKept: null, targetDays: null, meetsTarget: null }] }] }).locations[0].cameras[0].state === '')
 
 // ---- the switch and the last runs, as the page says them ---------------------------------------------

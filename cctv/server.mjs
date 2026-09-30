@@ -121,6 +121,7 @@ import { probeTarget, tcpReachable } from './probe.mjs'
 import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
+import { retentionCandidates, startRetentionWatch } from './retention-target.mjs'
 import { can, canPlayAnyOn, handleRights, onRightsSaved, sitesFor } from './rights.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
@@ -222,8 +223,13 @@ if (LIVE_WORKER) {
 
   // The storage forecast is built from free-space samples taken over time, so it has nothing to say
   // until it has been running a while -- and it says that, rather than extrapolating from one point.
-  // (alarms: a location over its space limit with nothing it may delete, or not freeing space)
-  setStorageContext({ index: recIndex, dataDir: auth.DATA_DIR, alarms: housekeepingAlarms })
+  // (alarms: a location over its space limit with nothing it may delete, or not freeing space; present and
+  // freeOf: a share's marker and free space from its last check, never asked of the share on this thread)
+  setStorageContext({ index: recIndex, dataDir: auth.DATA_DIR, alarms: housekeepingAlarms, present: markerMatches, freeOf })
+  // Days kept against the target, and the forecast of the days each location's space holds (2026-09-30,
+  // p4-target): measured from the index every 5 minutes on its own timer, a statement a turn of the event
+  // loop, no file call; the page and the alert checks only read the figures (retention-target.mjs).
+  startRetentionWatch({ index: recIndex, settings: getSettings, protectedRanges })
 
   // Backfill: pulling stretches the server missed from the NVR that still has them. It resumes a
   // job interrupted by a restart, and stands down for live recording and exports -- nothing here
@@ -354,13 +360,12 @@ const alerts = startAlerts({
   // a cycling recorder is permanently full and an alert that fires every night is one nobody reads.
   // And housekeeping's own alarms (housekeeping.mjs, 2026-09-29): a location over its space limit with
   // only the newest 24 h or bookmarked footage left, or one where deleting does not free space.
-  extraCandidates: () => [
-    ...driveFullCandidates(
-      buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf }),
-      { days: 7 }
-    ),
-    ...housekeepingCandidates()
-  ],
+  // And days kept short of the target (retention-target.mjs, 2026-09-30), from the same report: a location
+  // recycling at 8 days against 30 is quiet for the forecast above and exactly what this one is for.
+  extraCandidates: () => {
+    const report = buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf })
+    return [...driveFullCandidates(report, { days: 7 }), ...retentionCandidates(report), ...housekeepingCandidates()]
+  },
   listNvrs: () =>
     [...nvrs.values()].map((n) => ({
       id: n.id,

@@ -199,7 +199,25 @@ const brokenDisk = { available: true, disks: [{ name: 'disk1', state: 'ok', stat
   check('a refusal count of null never fires nvr-refusing', e.step(unmeasured, T0 + 7 * MIN).opened.length === 0)
 }
 
-check('KINDS covers every kind used', ['server-restart', 'drive-missing', 'drive-full', 'not-recording', 'camera-offline', 'nvr-offline', 'nvr-disk', 'nvr-refusing', 'nvr-login', 'nvr-clock'].every(k => KINDS.includes(k)), KINDS.join())
+check('KINDS covers every kind used', ['server-restart', 'drive-missing', 'drive-full', 'not-recording', 'camera-offline', 'nvr-offline', 'nvr-disk', 'nvr-refusing', 'nvr-login', 'nvr-clock', 'retention-short'].every(k => KINDS.includes(k)), KINDS.join())
+
+// --- days kept short of the target (retention-target.mjs, 2026-09-30): handed in ready made, like the forecast ---
+{
+  const short = { key: 'retention-short/nas', kind: 'retention-short', title: '/srv/nas keeps 8.2 days of footage, short of its 30-day target', detail: 'At 1.47 TB a day ...' }
+  // (the camera keeps recording all along: only the storage figure is wrong)
+  const at = (ms, extra = []) => ok({ extra, cameras: [{ nvrId: 'nvr1', ch: 0, name: 'Cashier Front', online: true, recording: true, lastSegmentMs: ms }] })
+  const e = eng()
+  const first = e.step(at(T0 + 4 * MIN, [short]), T0 + 4 * MIN)
+  const due = e.step(at(T0 + 7 * MIN, [short]), T0 + 7 * MIN)
+  check('retention-short: not on the first sighting; opens once raiseMs has passed, as a medium alert', first.opened.length === 0 && due.opened.length === 1 && due.opened[0].kind === 'retention-short' && due.opened[0].severity === 'medium', JSON.stringify(due.opened))
+  const later = e.step(at(T0 + 60 * MIN, [{ ...short, title: '/srv/nas keeps 8.3 days of footage, short of its 30-day target' }]), T0 + 60 * MIN)
+  check('... never sent again while it holds, though its days move', later.opened.length === 0 && later.open.length === 1 && /8\.3 days/.test(later.open[0].title), JSON.stringify(later.open.map((a) => a.title)))
+  const gone = [e.step(at(T0 + 61 * MIN), T0 + 61 * MIN), e.step(at(T0 + 63 * MIN), T0 + 63 * MIN)].flatMap((r) => r.cleared)
+  check('... cleared once it no longer holds (clearMs after its last sighting), once', gone.length === 1 && gone[0].kind === 'retention-short', JSON.stringify(gone))
+  const m = eng({ muted: ['retention-short'] })
+  m.step(at(T0 + 4 * MIN, [short]), T0 + 4 * MIN)
+  check('... and can be muted like any other kind', m.step(at(T0 + 7 * MIN, [short]), T0 + 7 * MIN).opened.length === 0)
+}
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

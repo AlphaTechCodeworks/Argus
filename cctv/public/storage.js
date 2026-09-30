@@ -114,6 +114,64 @@ export function locationEdit(loc, form) {
   return { body, ask, error: null }
 }
 
+// ---- days kept against the target (retention-target.mjs, 2026-09-30) --------------------------------------
+// /api/storage `retention`: { available, reason, targetDays, camerasOwnTarget, locations: { [id]: ... }, overall }.
+// The figures are the server's (measured from the index every 5 minutes); these only say them.
+
+const targetOf = (l) => (l.targets?.length > 1 ? `${l.targets[0]}-${l.targets.at(-1)} days` : Number.isFinite(l.targetDays) ? days(l.targetDays) : NOT_AVAILABLE)
+const markName = (l, what) => (what === 'limit' ? `the ${Number.isFinite(l.capacity?.limitBytes) ? wholeGB(l.capacity.limitBytes) : ''} limit` : what === 'floor' ? 'the hard floor' : 'the low mark')
+const dayOf = (ms) => new Date(ms).toISOString().slice(0, 10)
+const pct1 = (x) => `${Math.round(x * 1000) / 10} %`
+const splitOf = (s) => (s.timelapseDays > 0 ? `${days(s.fullDays)} of full video + ${days(s.timelapseDays)} of time-lapse` : 'full video only')
+
+/** "Days kept" on a location's panel: how far back its footage goes, against the target. */
+export function keptCell(ret, id) {
+  const l = ret?.locations?.[id]
+  if (!ret) return { value: NOT_AVAILABLE, state: 'ok', note: '' }
+  if (!ret.available || !l?.available) return { value: NOT_AVAILABLE, state: 'ok', note: (ret.available ? l?.reason : ret.reason) || 'not measured yet' }
+  const parts = [`target ${targetOf(l)}`]
+  if (l.timelapse) parts.push(Number.isFinite(l.fullDaysKept) ? `full video ${days(l.fullDaysKept)}, then time-lapse ${days(l.timelapse.days)}` : `time-lapse ${days(l.timelapse.days)}, no full video after it`)
+  else if (Number.isFinite(l.daysKept)) parts.push('no time-lapse here')
+  return { value: Number.isFinite(l.daysKept) ? days(l.daysKept) : NOT_AVAILABLE, state: l.short?.actual ? 'bad' : l.short?.forecast ? 'warn' : 'ok', note: parts.join(' · ') }
+}
+
+/** "Days that fit": the forecast at the last whole days' volume under the location's limit and marks. */
+export function fitCell(ret, id) {
+  const l = ret?.locations?.[id]
+  if (!ret?.available || !l?.available) return { value: NOT_AVAILABLE, state: 'ok', note: '' }
+  const s = l.forecast?.now
+  if (!s) return { value: NOT_AVAILABLE, state: 'ok', note: l.forecastReason || '' }
+  const parts = [`${splitOf(s)}, at ${bytes(l.perDay)} a day (the last ${l.wholeDays.length} whole ${l.wholeDays.length === 1 ? 'day' : 'days'})`]
+  if (s.reach) parts.push(s.reach.reached ? `${markName(l, s.reach.what)} reached` : Number.isFinite(s.reach.ms) ? `${markName(l, s.reach.what)} reached about ${dayOf(s.reach.ms)}` : `${markName(l, s.reach.what)} not reached at this volume`)
+  const t = l.forecast.timelapse
+  if (t) parts.push(`With time-lapse On: about ${days(t.daysFit)} (${splitOf(t)})`)
+  if (l.share && (s.timelapseDays > 0 || t?.timelapseDays > 0)) parts.push(l.share.how === 'measured' ? `time-lapse ${pct1(l.share.value)} of full video, measured from ${l.share.files.toLocaleString('en-GB')} real time-lapse files` : `time-lapse about ${pct1(l.share.value)} of full video, an estimate from its keyframes (${Math.round(l.share.low * 1000) / 10}-${pct1(l.share.high)})`)
+  return { value: s.shortBy > 0 ? `about ${days(s.daysFit)}` : `all ${days(s.targetDays)}`, state: l.short?.forecast ? 'bad' : 'ok', note: parts.join(' · ') }
+}
+
+/**
+ * "Recycling" as the report's `cycling` has it (a camera there has reached its own target), or, where it deletes
+ * to stay at its space limit or low mark (the days kept, retention-target.mjs), that: a NAS recycling at 8 days
+ * against 30 said "not yet" beside "deleting to stay at its space limit" (seen in a browser, 2026-09-30).
+ */
+export function recyclingCell(l, ret) {
+  const r = ret?.available ? ret.locations?.[l.id] : null
+  if (r?.available && r.recycling) return { value: 'yes, for space', note: `deleting to stay at its ${r.recycling === 'limit' ? 'space limit' : 'low mark'}`, state: r.short?.actual ? 'bad' : 'ok' }
+  return { value: l.cycling === true ? 'yes — oldest footage is being overwritten as designed' : l.cycling === false ? 'not yet' : NOT_AVAILABLE, note: '', state: 'ok' }
+}
+
+/** One line for every location: how far back the footage goes, against the target, and who is short of it. */
+export function targetLine(ret) {
+  if (!ret) return ''
+  if (!ret.available) return `Days kept against the target: ${ret.reason || NOT_AVAILABLE}.`
+  const o = ret.overall ?? {}
+  const back = Number.isFinite(o.daysKept) ? `Footage goes back ${days(o.daysKept)}${Number.isFinite(o.fullDaysKept) && o.timelapseOldestMs ? ` (full video ${days(o.fullDaysKept)})` : ''}` : 'No footage yet'
+  const own = ret.camerasOwnTarget ? ` (${ret.camerasOwnTarget === 1 ? '1 camera has' : `${ret.camerasOwnTarget} cameras have`} its own)` : ''
+  const target = Number.isFinite(ret.targetDays) ? `the ${ret.targetDays}-day target${own}` : 'no target set'
+  const paths = (o.short ?? []).map((id) => ret.locations?.[id]?.path ?? id)
+  return `${back}, against ${target}. ${paths.length ? `Short of it: ${paths.join(', ')}.` : o.worst ? 'No location is short of it.' : 'No forecast yet.'}`
+}
+
 /** One camera row: days kept here against what the camera is meant to keep. */
 function cameraRow(c) {
   const target = Number.isFinite(c.targetDays) ? `${c.targetDays} days` : NOT_AVAILABLE
@@ -129,7 +187,7 @@ function cameraRow(c) {
 
 /**
  * @param {object} data the body of /api/storage
- * @returns {{ locations: object[], warnings: string[], totals: object, empty: boolean }}
+ * @returns {{ locations: object[], warnings: string[], totals: object, target: string, empty: boolean }}
  */
 export function renderStorage(data, { alertDays = 7 } = {}) {
   const d = data ?? {}
@@ -148,9 +206,13 @@ export function renderStorage(data, { alertDays = 7 } = {}) {
       usedState: !usable ? 'ok' : Number.isFinite(l.freePct) && l.freePct <= (l.floorFreePct ?? 5) ? 'bad' : Number.isFinite(l.freePct) && l.freePct <= (l.lowFreePct ?? 15) ? 'warn' : 'ok',
       growth: l.forecast && Number.isFinite(l.forecast.bytesPerDay) ? `${bytes(l.forecast.bytesPerDay)} a day` : NOT_AVAILABLE,
       forecast: forecastCell(l.forecast, { alertDays }),
-      recycling: l.cycling === true ? 'yes — oldest footage is being overwritten as designed' : l.cycling === false ? 'not yet' : NOT_AVAILABLE,
+      recycling: recyclingCell(l, d.retention).value,
+      recyclingNote: recyclingCell(l, d.retention).note,
+      recyclingState: recyclingCell(l, d.retention).state,
       limit: limitCell(l),
       limitText: Number.isFinite(l.limitBytes) && l.limitBytes > 0 && l.limitEnforced !== false ? LIMIT_TEXT : '',
+      kept: keptCell(d.retention, l.id),
+      fit: fitCell(d.retention, l.id),
       cameras: (l.cameras ?? []).map(cameraRow)
     }
   })
@@ -161,7 +223,7 @@ export function renderStorage(data, { alertDays = 7 } = {}) {
     used: bytes((d.locations ?? []).reduce((a, l) => (Number.isFinite(l.usedBytes) ? a + l.usedBytes : a), 0) || null),
     free: bytes((d.locations ?? []).reduce((a, l) => (Number.isFinite(l.freeBytes) ? a + l.freeBytes : a), 0) || null)
   }
-  return { locations, warnings: d.warnings ?? [], totals, empty: locations.length === 0 }
+  return { locations, warnings: d.warnings ?? [], totals, target: targetLine(d.retention), empty: locations.length === 0 }
 }
 
 // ---- time-lapse and retention: the switch and what the jobs last did ----------------------------
@@ -319,6 +381,8 @@ if (typeof document !== 'undefined') {
     document.getElementById('sr-totals').textContent = r.empty
       ? 'No storage locations are set up yet.'
       : `${r.totals.mounted} of ${r.totals.locations} locations mounted · ${r.totals.used} used · ${r.totals.free} free`
+    const target = document.getElementById('sr-target')
+    if (target) target.textContent = r.target
 
     // a camera table someone opened stays open across the minute's refresh (it was rebuilt closed)
     const openFolds = new Set([...document.querySelectorAll('#sr-locations details.sr-cams[open]')].map((x) => x.dataset.key))
@@ -336,7 +400,9 @@ if (typeof document !== 'undefined') {
           { label: "Argus's recordings", value: l.limit.value, state: l.limit.state, note: l.limit.note },
           { label: 'Growth', value: l.growth, state: 'ok', note: '' },
           { label: 'Forecast', value: l.forecast.value, state: l.forecast.state, note: l.forecast.note },
-          { label: 'Recycling', value: l.recycling, state: 'ok', note: '' }
+          { label: 'Recycling', value: l.recycling, state: l.recyclingState, note: l.recyclingNote },
+          { label: 'Days kept', value: l.kept.value, state: l.kept.state, note: l.kept.note },
+          { label: 'Days that fit', value: l.fit.value, state: l.fit.state, note: l.fit.note }
         ]) {
           const node = el('div', { className: `card ${c.state}` })
           node.append(el('div', { className: 'lbl', textContent: c.label }), el('div', { className: 'big', textContent: c.value }), el('div', { className: 'note', textContent: c.note }))
