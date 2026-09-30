@@ -54,6 +54,20 @@ export const whereIs = (cfg) => (cfg.sn ? `serial ${cfg.sn} (TVT P2P)` : `${cfg.
 const MAX_CHANNEL_FAILURES = 4 // ~2 minutes of failed channel refreshes -> log in again
 // camera list poll (tests with the fake SDK: CCTV_TEST_REFRESH_MS)
 const CHANNEL_REFRESH_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1' && Number(process.env.CCTV_TEST_REFRESH_MS)) || 30_000
+// The camera list is read at a turn only while something may have changed (#listHeld). Every worker
+// read it at every 30 s turn: about 600 of the workers' ~850 SDK calls an hour (27-29 Sep), to learn
+// what changes when a camera drops off. 40 of those reads came back late and each held that NVR's new
+// streams for 60 s (40 of the workers' 141 cool-downs), and 32 of the 40 were sent to an NVR whose
+// cameras had already gone quiet (a median 7 s before). So: while every stream of the NVR delivers
+// video and the list has not changed for CHANNEL_SETTLED_MS, a read every CHANNEL_QUIET_MS; a stream
+// with no video for SILENT_MS (a camera dropping off stops its stream first) brings the read back to
+// the next turn; and while most of them are silent at once (the NVR froze) none is sent at all.
+const CHANNEL_QUIET_MS = CHANNEL_REFRESH_MS * 4 // 2 minutes (from ~120 reads an hour per NVR to ~27)
+const CHANNEL_SETTLED_MS = CHANNEL_REFRESH_MS * 20 // 10 minutes after a change: a rebooting camera is seen back within a turn
+const SILENT_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1' && Number(process.env.CCTV_TEST_SILENT_MS)) || 3000
+const CHANNEL_LOG_MS = CHANNEL_REFRESH_MS * 120 // an hour: how often the list was read, and why not (#logListTurns)
+/** The camera list as far as a change to it matters (the order is the channels'). */
+const listSig = (list) => list.map((c) => `${c.ch}|${c.online}|${c.configured}|${c.name}|${c.ip}|${c.httpPort}|${c.model}|${c.maker}`).join('\n')
 const WORKER_LIST_FRESH_MS = Math.max(15_000, CHANNEL_REFRESH_MS * 3) // STATS come every 5 s
 const CONTROL_KEEPALIVE_MS = 5 * 60_000 // main's own poll while the worker polls
 /** ms +-20% (rnd: tests). */
@@ -401,13 +415,19 @@ export class Nvr {
     this.playback = createPlayback(this)
     this.loggedInAt = 0 // when the current session logged in (playback.mjs asks for no recording dates just after)
     this.lastOwnPoll = 0 // when this process last read the camera list itself
+    this.listReadAt = 0 // when the camera list was last read (the routine read, the stall probe, a login)
+    this.listChangedAt = 0 // when a read last found a camera added, gone, renamed, moved, offline or back
+    // the turns of the routine read since the last hourly line: read (failed: no answer), or not read
+    // because every stream flows (quiet), most are silent (frozen), or the NVR cools down or is busy
+    this.listTurns = { since: Date.now(), read: 0, failed: 0, quiet: 0, frozen: 0, busy: 0 }
     this.workerListAt = 0 // when the live worker last sent its camera list (STATS)
     this.refreshTimer = null
     this.#scheduleRefresh()
     this.#connect().catch((e) => this.#log('connect', e))
   }
 
-  // camera list every ~30 s, +-20% so NVRs (and processes) don't all ask in the same second
+  // a camera-list turn every ~30 s, +-20% so NVRs (and processes) don't all ask in the same second
+  // (whether a turn reads the list: #refresh)
   #scheduleRefresh() {
     if (this.stopped) return
     this.refreshTimer = setTimeout(() => {
@@ -526,8 +546,12 @@ export class Nvr {
     }
   }
 
-  /** Reads the camera list. Returns false if the NVR did not answer. */
-  async #queryChannels(priority = PRIORITY.LOW) {
+  /**
+   * Reads the camera list. Returns false if the NVR did not answer.
+   * background: nobody waits on this read (the routine one), so coming back late does not start the
+   * NVR's cool-down (sdk.mjs); the stall probe and liveFailed's check are not background.
+   */
+  async #queryChannels(priority = PRIORITY.LOW, { background = false } = {}) {
     const max = 64
     const size = koffi.sizeof(IPC_INFO)
     const buf = Buffer.alloc(size * max)
@@ -537,7 +561,7 @@ export class Nvr {
     const ok = await this.lane
       // one at a time per NVR: the refresh, the stall probe and liveFailed can all ask at once,
       // and two of these overlapping preceded a heap-corruption crash
-      .run(() => sdkCallT({ nvr: this.id, tag: 'channels', exclusive: `${this.id}/channels` }, NET_SDK.GetDeviceIPCInfo, userId, buf, buf.length, count), { priority })
+      .run(() => sdkCallT({ nvr: this.id, tag: 'channels', exclusive: `${this.id}/channels`, background }, NET_SDK.GetDeviceIPCInfo, userId, buf, buf.length, count), { priority })
       .catch(() => false)
     if (!ok || userId !== this.userId) return Boolean(ok)
     const n = Math.min(Number(count.readBigInt64LE(0)), max)
@@ -559,22 +583,80 @@ export class Nvr {
       const httpPort = Number(ipc.nHttpPort) || null
       list.push({ ch: ipc.channel, name: ipc.szChlname || `Camera ${ipc.channel + 1}`, online: ipc.status === 1, configured, model, maker, ip, httpPort })
     }
-    if (list.length > 0) this.channels = list.sort((a, b) => a.ch - b.ch)
+    if (list.length > 0) {
+      list.sort((a, b) => a.ch - b.ch)
+      // (the first list of this process is no change: there was nothing to compare it with)
+      if (this.channels.length > 0 && listSig(list) !== listSig(this.channels)) this.listChangedAt = Date.now()
+      this.channels = list
+    }
+    this.listReadAt = Date.now()
     return true
   }
 
+  /**
+   * Why this turn does not read the camera list (null: read it). Only this process's own streams
+   * tell (in the main process with live workers there are none, and its keepalive is not held here).
+   * - 'frozen': at least 3 of the streams that play, and at least half of them, have had no video for
+   *   SILENT_MS: the NVR itself has stopped answering, and a read would only be one more call to it
+   *   (checkStalled's probe reads the list once they have been stalled for STALL_MS). The 15 s
+   *   "stalled" alone would miss most: the late reads went out a median of 7 s into the freeze.
+   * - 'quiet': every stream plays and delivers video, the list has not changed for
+   *   CHANNEL_SETTLED_MS, and it was read under CHANNEL_QUIET_MS ago.
+   * With no stream at all nothing tells of a camera dropping off: read every turn, as before.
+   */
+  #listHeld(now = Date.now()) {
+    let playing = 0
+    let silent = 0
+    let other = 0
+    for (const s of this.streams.values()) {
+      if (s.stopped) continue
+      if (s.state !== 'playing') other++
+      else {
+        playing++
+        if (now - s.lastFrameAt >= SILENT_MS) silent++
+      }
+    }
+    if (silent >= 3 && silent >= playing * MASS_STALL_SHARE) return 'frozen'
+    if (playing === 0 || silent > 0 || other > 0) return null
+    if (now - this.listChangedAt < CHANNEL_SETTLED_MS || now - this.listReadAt >= CHANNEL_QUIET_MS) return null
+    return 'quiet'
+  }
+
+  /** Once an hour (this NVR's own streams only: its worker, or the main process without workers): how often the list was read, and why not. */
+  #logListTurns(now = Date.now()) {
+    const t = this.listTurns
+    if (this.worker || now - t.since < CHANNEL_LOG_MS) return
+    const held = t.quiet + t.frozen + t.busy
+    console.log(`[${this.id}] camera list read ${t.read} times in the last hour${t.failed ? ` (${t.failed} not answered)` : ''}; not read at ${held} turns (all streams flowing ${t.quiet}, NVR frozen ${t.frozen}, cooling down or busy ${t.busy})`)
+    this.listTurns = { since: now, read: 0, failed: 0, quiet: 0, frozen: 0, busy: 0 }
+  }
+
   async #refresh() {
+    this.#logListTurns()
+    const turns = this.listTurns
     // one at a time, and not while this NVR cools down after a late call (it would only add another and renew the cool-down),
     // nor while the SDK is stuck on any NVR's call (it would only queue behind it)
-    if (this.userId < 0 || this.relogging || this.connecting || this.refreshing || nvrCooling(this.id) || sdkStuck()) return
+    if (this.userId < 0 || this.relogging || this.connecting || this.refreshing || nvrCooling(this.id) || sdkStuck()) {
+      turns.busy++
+      return
+    }
     // the worker polls and sends the list: only a slow keepalive here (keeps this control login
     // checked for picture settings, playback and motion search)
     if (this.#workerPolls && Date.now() - this.lastOwnPoll < CONTROL_KEEPALIVE_MS) return
+    const held = this.#listHeld()
+    if (held) {
+      turns[held]++
+      return
+    }
     this.lastOwnPoll = Date.now()
     this.refreshing = true
     const gen = this.gen
     try {
-      const ok = await this.#queryChannels()
+      // background: a late one says only that the NVR had stopped answering, which its streams had
+      // mostly shown already; it must not hold the NVR's new streams for a minute after it recovered
+      const ok = await this.#queryChannels(PRIORITY.LOW, { background: true })
+      turns.read++
+      if (!ok) turns.failed++
       if (gen !== this.gen) return // the session changed meanwhile
       if (ok) {
         this.health.channelFailures = 0
