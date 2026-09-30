@@ -127,6 +127,8 @@ function world(prefix = 'thin-loc-') {
   // from the index alone since 2026-09-29 (verify-1: it read every file, ~24 GB over SMB a run)
   check('dry run reports what it would do: the files and their bytes, from the index', r.files === 1 && r.bytes === s.bytes && r.thinned.length === 0, JSON.stringify({ files: r.files, bytes: r.bytes }))
   check('dry run says how much it would free, as an estimate with its range', r.freedBytes > 0 && r.freedBytes < s.bytes && r.estimate?.thinBytes > 0 && r.estimate.low <= r.estimate.thinBytes && r.estimate.thinBytes <= r.estimate.high, JSON.stringify(r.estimate))
+  // (it read "43-56.00000000000001 %" on GET /api/storage: review of p3-thin, 2026-09-29)
+  check('... and its note says the share of keyframes in whole percent', /keyframes taken as 43-56 % of a file's bytes/.test(r.estimate?.note ?? ''), r.estimate?.note)
   check('... and what waits: one file, since its full-video days ended', r.backlog?.files === 1 && r.backlog.bytes === s.bytes && r.backlog.oldestMs === s.startMs, JSON.stringify(r.backlog))
   check('DRY RUN CHANGED NOTHING ON DISK', readFileSync(s.path).equals(before) && statSync(s.path).size === s.bytes)
   check('dry run left no temp files', readdirSync(dirname(s.path)).sort().join() === 'seg.h264,seg.h264.idx', readdirSync(dirname(s.path)).join())
@@ -457,11 +459,25 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   // housekeeping and retention leave a file in flight alone, however old
   const del = await runRetention({ index: w.index, settings: w.settings({}, {}), now: NOW + 400 * DAY, present: w.present, dryRun: false, freeOf: () => ({ freeBytes: 90, totalBytes: 100 }) })
   check('RETENTION LEAVES A FILE WHOSE REWRITE IS IN FLIGHT ALONE, however old', existsSync(s.path) && w.index.thinRow(s.path) !== null && !del.deleted.some((d) => d.path === s.path) && del.skipped.some((x) => x.path === s.path && /rewrite/.test(x.why)), JSON.stringify(del.skipped))
-  // a dry run touches nothing, leftovers included, and says so
-  const dry = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present })
-  check('a dry run leaves it too, and says it waits for the switch', existsSync(`${s.path}.thin-new`) && w.index.thinInflight().length === 1 && dry.warnings.some((x) => /half done|left in flight|put right/.test(x)), JSON.stringify(dry.warnings))
   const next = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT })
   check('THE NEXT RUN PUTS IT RIGHT FIRST (the leftover rewrite swept, the row checked), then converts it', next.recovered?.sweptUp === 1 && next.thinned.length === 1 && w.index.thinInflight().length === 0 && w.index.thinRow(s.path).thinned === THIN.timelapse && readdirSync(dirname(s.path)).sort().join() === 'seg.h264,seg.h264.idx', JSON.stringify({ recovered: next.recovered, warnings: next.warnings }))
+  w.index.close()
+}
+{
+  // The same, and then the switch set to Dry run. Only a run with it On used to put leftovers right, so with Dry
+  // run (or Off) the file stayed out of every deletion, with its leftover beside it, for as long as that lasted
+  // (review of p3-thin, 2026-09-29). Putting right only finishes or undoes what a run with the switch On began:
+  // the original is put back, or a rewrite that was never swapped in (or the original of one that was committed)
+  // is swept up; it never begins a rewrite. So a dry run does it too, and converts nothing.
+  const w = world()
+  const s = w.add('n1', 0, 60)
+  const orig = readFileSync(s.path)
+  await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT, share: (loc, op, a, o) => (op === 'thinSwap' ? Promise.reject(Object.assign(new Error('share not answering'), { code: 'ESHARESTUCK' })) : shareCalls.shareCall(loc, op, a, o)) })
+  const stuck = existsSync(`${s.path}.thin-new`) && w.index.thinInflight().length === 1
+  const dry = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present })
+  check('A DRY RUN PUTS A REWRITE LEFT HALF DONE RIGHT (the rewrite never swapped in swept, the original as it was, its row full video), converts nothing, and says so', stuck && dry.dryRun && dry.recovered?.sweptUp === 1 && !existsSync(`${s.path}.thin-new`) && readFileSync(s.path).equals(orig) && w.index.thinInflight().length === 0 && w.index.thinRow(s.path).thinned === null && w.index.thinRow(s.path).bytes === s.bytes && dry.thinned.length === 0 && dry.files === 1 && dry.warnings.some((x) => /put right/.test(x)), JSON.stringify({ stuck, recovered: dry.recovered, warnings: dry.warnings }))
+  const next = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT })
+  check('... and the next run with the switch On converts it', next.thinned.length === 1 && next.recovered.sweptUp === 0 && w.index.thinRow(s.path).thinned === THIN.timelapse && readdirSync(dirname(s.path)).sort().join() === 'seg.h264,seg.h264.idx', JSON.stringify(next.skipped))
   w.index.close()
 }
 {
@@ -562,6 +578,65 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   check('"disk too slow" reported while it converts: it stops taking files (the one in hand is finished)', r.thinned.length === 1 && r.thinned[0].path === one.path && /disk too slow/.test(r.stopped ?? '') && statSync(two.path).size === two.bytes, `${r.stopped}; ${r.thinned.map((t) => t.path)}`)
   w.index.close()
 }
+{
+  // The back-off (thin-pace.mjs; review of p3-thin, 2026-09-29): "disk too slow" during a round halves the pace
+  // of the rounds after it -- the 10 minutes standing back alone came after a recording gap and then went on at
+  // the same pace -- and the page and the log say so
+  const P = await import('../thin-pace.mjs')
+  P._test.reset()
+  _test.forget()
+  const w = world()
+  const a = w.add('n1', 0, 60)
+  w.add('n1', 0, 59)
+  w.add('n1', 1, 58)
+  const t0 = Date.UTC(2026, 9, 3, 1, 0) // 01:00 at the site (UTC here): night
+  let t = t0
+  let report = null
+  const share = async (loc, op, x, o) => {
+    const v = await shareCalls.shareCall(loc, op, x, o)
+    if (op === 'thinCommit') report = { at: t, nvr: 'n1', ch: 5, reason: 'disk too slow: a write has waited 5.3 s' }
+    return v
+  }
+  const siteUtc = { siteMin: (ms) => Math.floor((((ms / 60_000) % 1440) + 1440) % 1440) }
+  const first = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share, slow: () => report, clock: () => t, ...siteUtc })
+  t = t0 + 11 * 60_000 // past the 10 minutes it stands back
+  const second = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share, slow: () => report, clock: () => t, ...siteUtc })
+  check('"DISK TOO SLOW" DURING A ROUND: the rounds after it go at half the pace (20 MB/s), and say so', first.thinned.some((x) => x.path === a.path) && /disk too slow/.test(first.stopped ?? '') && second.pace?.factor === 0.5 && second.pace.effectiveMbps === 20 && second.warnings.some((x) => /halved/.test(x) && /01:00/.test(x)) && second.thinned.length >= 1, JSON.stringify({ stopped: first.stopped, pace: second.pace, warnings: second.warnings }))
+  P._test.reset()
+  _test.forget()
+  w.index.close()
+}
+{
+  // A location stopped while the next file waits on the pace (another file's share hung): that file is not sent
+  // to it (review of p3-thin, 2026-09-29: one more call to a stuck share, which could fork a helper to be killed
+  // again). Two locations, so the run itself goes on with the other.
+  const w = world()
+  const root2 = tmp('thin-loc2-')
+  writeFileSync(join(root2, '.cctv-recordings'), JSON.stringify({ id: 'L2' }))
+  const loc2 = { id: 'L2', path: root2, type: 'usb', role: 'main', limitGB: null }
+  const a = w.add('n1', 0, 60)
+  const b = w.add('n1', 1, 59.99)
+  const c = { path: join(root2, 'n1', '2', 'seg.h264'), startMs: NOW - 59.98 * DAY }
+  w.index.addSegment({ nvr: 'n1', ch: 2, path: c.path, startMs: c.startMs, endMs: c.startMs + 59_000, bytes: b.bytes, keyframes: 60, loc: 'L2' })
+  const sent = []
+  const share = async (loc, op, x) => {
+    if (op === 'thin') {
+      sent.push(x.path)
+      await new Promise((r) => setTimeout(r, 30))
+      if (x.path === a.path) throw Object.assign(new Error('share not answering'), { code: 'ESHARESTUCK' })
+      return { outcome: 'thinned', swapped: false, wasBytes: b.bytes, bytes: 100, keyframes: 6, droppedKeyframes: 54, cursor: 1 }
+    }
+    if (op === 'thinSwap') return { swapped: true }
+    if (op === 'thinCommit') return { committed: true }
+    throw new Error(`unexpected ${op}`)
+  }
+  // the second and third files each wait 150 ms on the pace; the first file's share "hangs" after 30 ms
+  const pace = { mbps: b.bytes / 0.15 / 1e6, atOnce: 3, night: { from: 20 * 60, to: 6 * 60 } }
+  const settings = { ...w.settings(), storage: { locations: [w.loc, loc2], lowFreePct: 15, floorFreePct: 5 } }
+  const r = await runThinning({ index: w.index, settings, now: NOW, present: () => true, protectedRanges: () => [], dryRun: false, share, pace, ...AT_NIGHT })
+  check('A LOCATION STOPPED WHILE A FILE WAITED ON THE PACE: that file is not sent to it; the other location goes on', sent.join() === [a.path, c.path].join() && r.thinned.map((t) => t.path).join() === c.path && r.warnings.some((x) => /not answering/.test(x)) && statSync(b.path).size === b.bytes, `sent ${sent.map((p) => p.split(/[\\/]/).slice(-3).join('/')).join(', ')}; ${JSON.stringify(r.warnings)}`)
+  w.index.close()
+}
 
 // ---- the main thread while it converts: 87 cameras, three files at a time through a helper -----------------
 // A share helper that answers like the real one after a few ms (its work is in its own process): what is
@@ -628,6 +703,92 @@ const convertWorld = (walAutocheckpoint) => {
   // at 3.3 files a second (40 MB/s of 12 MB files) this is what thinning adds to the WAL, and so to how often
   // a checkpoint lands on the main thread: recording writes about 10 pages a second (1.4 files a second, 7 each)
   check('... and it writes at most 4 WAL pages a file (one commit a file for its row, the in-flight notes a few files at a time)', pages / r.thinned.length <= 4, `${pages} pages for ${r.thinned.length} files: ${(pages / r.thinned.length).toFixed(2)} a file`)
+  w.index.close()
+}
+
+// ---- the windows' two lookups (rec-index.mjs THIN_SQL.fullNth, fullOlderThan's window end) ------------------
+{
+  const { THIN_SQL } = await import('../rec-index.mjs')
+  const f = join(tmp('thin-db-'), 'r.db')
+  const ix = openRecIndex(f)
+  const t0 = NOW - 20 * DAY
+  for (let k = 0; k < 10; k++) for (const ch of [0, 1]) ix.addSegment({ nvr: 'n1', ch, path: `/rec/n1/${ch}/${k}.h264`, startMs: t0 + k * 60_000, endMs: t0 + k * 60_000 + 59_000, bytes: 10, keyframes: 1, loc: 'L1' })
+  ix.setThin('/rec/n1/0/3.h264', THIN.timelapse)
+  const raw = new DatabaseSync(f)
+  const plan = raw.prepare(`EXPLAIN QUERY PLAN ${THIN_SQL.fullNth}`).all(0, 0).map((r) => r.detail).join(' | ')
+  raw.close()
+  // (not labelled covering, as `thinned` is not in the index; the rows it steps over are not read, all the same:
+  // 0.27 ms for 5,000 of them on the development PC, 0.054 us each, scratchpad p3fix/nth-bench.mjs)
+  check('fullNth searches the partial index of full-video rows from a start, in its order (no sort)', /^SEARCH segments USING (COVERING )?INDEX segments_full \(start_ms>\?\)$/.test(plan), plan)
+  // 19 full rows (one rewritten): two at each minute, but at minute 3 only camera 1's; the 8th (n 7) is at minute 4
+  const starts = [0, 1, 2, 7, 18, 19].map((n) => ix.fullNth(t0, n))
+  check('fullNth: where the n-th full-video row from a time starts, any camera; a rewritten row not counted; past the last, null', JSON.stringify(starts) === JSON.stringify([t0, t0, t0 + 60_000, t0 + 240_000, t0 + 540_000, null]), JSON.stringify(starts.map((s) => (s === null ? null : (s - t0) / 60_000))))
+  const inWindow = ix.fullOlderThan([{ nvr: 'n1', ch: 1 }], NOW, 100, t0 + 60_000, t0 + 240_000).map((r) => r.path)
+  check('fullOlderThan: only the rows starting in the window [from, until)', inWindow.join() === ['/rec/n1/1/1.h264', '/rec/n1/1/2.h264', '/rec/n1/1/3.h264'].join(), inWindow.join())
+  ix.close()
+}
+
+// ---- cameras not set to time-lapse: their full video is passed a window at a time, never in one statement ----
+// Review of p3-thin (2026-09-29): a camera set to 'delete' (or with more full-video days than the rest) keeps
+// its rows in segments_full past the others' cutoff, and every run -- dry run too -- passed all of them in
+// one synchronous statement to find the time-lapse cameras' first row: with 20 of 87 cameras set to 'delete'
+// on a 31-day index, 251-260 ms at a stretch on the development PC, ~125 ms on the production VM. Here: those
+// 20 cameras' 23 days past the cutoff (662,400 rows) and the other 67 cameras' day waiting (96,480 rows); the
+// time-lapse cameras' own earlier days are left out (rewritten rows are not in segments_full, so not passed).
+{
+  const f = join(tmp('thin-db-'), 'r.db')
+  openRecIndex(f).close()
+  const w = world()
+  w.index.close()
+  const raw = new DatabaseSync(f)
+  raw.exec('PRAGMA synchronous = OFF')
+  const cutoff = NOW - 7 * DAY
+  const DEL = 20
+  const fill = raw.prepare(`WITH RECURSIVE m(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM m WHERE k < ?), c(ch) AS (SELECT ? UNION ALL SELECT ch + 1 FROM c WHERE ch < ?)
+    INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) SELECT ? || '/n1/' || ch || '/' || (? + k * 60000) || '.h265', 'n1', ch, ? + k * 60000, ? + k * 60000 + 59000, 12000000, 30, 'L1' FROM m CROSS JOIN c`)
+  raw.exec('BEGIN')
+  const from = cutoff - 23 * DAY
+  fill.run(23 * 1440 - 1, 0, DEL - 1, w.root, from, from, from)
+  fill.run(1440 - 1, DEL, 86, w.root, cutoff - DAY, cutoff - DAY, cutoff - DAY)
+  raw.exec('COMMIT')
+  raw.close()
+  w.index = openRecIndex(f)
+  const cams = Object.fromEntries(Array.from({ length: DEL }, (_, c) => [`n1/${c}`, { after: 'delete' }]))
+  const settings = { ...w.settings(), recording: { defaults: { ...DEFAULTS, fullDays: 7, retentionDays: 30 }, cameras: cams } }
+  // each index statement the job makes, timed: none may pass the 'delete' cameras' rows all at once
+  let longest = { ms: 0, name: '' }
+  const timed = new Proxy(w.index, {
+    get: (t, k) =>
+      typeof t[k] !== 'function'
+        ? t[k]
+        : (...a) => {
+            const t0 = performance.now()
+            const v = t[k](...a)
+            const ms = performance.now() - t0
+            if (ms > longest.ms) longest = { ms, name: String(k) }
+            return v
+          }
+  })
+  const dry = () => runThinning({ index: timed, settings, now: NOW, present: w.present, protectedRanges: () => [] })
+  await dry() // statements prepared, code compiled
+  longest = { ms: 0, name: '' }
+  const m = await bestOf(3, () => mainThread(dry))
+  const dryLongest = longest
+  check('20 OF 87 CAMERAS SET TO DELETE, 31 DAYS: the dry run finds the other 67 cameras\' day waiting', m.value.files === 67 * 1440 && m.value.backlog.files === 67 * 1440, JSON.stringify({ files: m.value.files }))
+  check('... WITH NO STRETCH OF MAIN THREAD OVER 50 MS: their 662,400 rows are passed a window at a time', m.worstMs < 50 && dryLongest.ms < 50, `longest stretch ${m.worstMs.toFixed(1)} ms, longest statement ${dryLongest.ms.toFixed(1)} ms (${dryLongest.name}), busy ${m.busyMs.toFixed(0)} ms in all, event-loop delay max ${m.delayMaxMs.toFixed(1)} ms (review: 251-260 ms at a stretch)`)
+  const share = async (loc, op) => {
+    if (op === 'thin') {
+      await new Promise((r) => setTimeout(r, 3))
+      return { outcome: 'thinned', swapped: false, wasBytes: 12_000_000, bytes: 1_300_000, keyframes: 6, droppedKeyframes: 24, cursor: 1 }
+    }
+    if (op === 'thinSwap') return { swapped: true }
+    if (op === 'thinCommit') return { committed: true }
+    throw new Error(`unexpected ${op}`)
+  }
+  longest = { ms: 0, name: '' }
+  const pace = { mbps: 1e6, atOnce: 3, night: { from: 20 * 60, to: 6 * 60 } }
+  const on = await mainThread(() => runThinning({ index: timed, settings, now: NOW, present: w.present, protectedRanges: () => [], dryRun: false, share, pace, ...AT_NIGHT, maxSegments: 200 }))
+  check('... and the real run\'s walk too: 200 of the waiting files converted, no stretch over 50 ms', on.value.thinned.length === 200 && on.worstMs < 50 && longest.ms < 50 && on.value.thinned.every((t) => Number(t.path.split(/[\\/]/).at(-2)) >= DEL), `${on.value.thinned.length} converted; longest stretch ${on.worstMs.toFixed(1)} ms, longest statement ${longest.ms.toFixed(1)} ms (${longest.name}), busy ${on.busyMs.toFixed(0)} ms (review: 257 ms at a stretch)`)
   w.index.close()
 }
 

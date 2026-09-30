@@ -52,7 +52,7 @@ import { afterStretch, checkFreeRose, firstUnprotected, freeingStalled, makeDele
 import { shareCall } from './share-calls.mjs'
 import { siteMinutesOfDay } from './site-time.mjs'
 import { markerPresent } from './storage-report.mjs'
-import { RUN_MS, SLOW_HOLD_MS, decideRun, describePace, lastDiskTooSlow, makeBucket, thinPace } from './thin-pace.mjs'
+import { RUN_MS, SLOW_HOLD_MS, achievedMBps, backoffText, decideRun, describePace, effectiveMbps, lastDiskTooSlow, makeBucket, noteRound, paceFactor, settleRound, thinPace } from './thin-pace.mjs'
 import { THIN_SUFFIX as suffix, planThin, thinNames as names } from './thin-file.mjs'
 
 // planThin, buildThinned and the check of a rewrite are in thin-file.mjs since 2026-09-29, so that the
@@ -298,11 +298,28 @@ export function recoverThinning(roots, { dryRun = false } = {}) {
 export const KEYFRAME_SHARE = Object.freeze({ low: 0.43, mid: 0.5, high: 0.56 })
 /** Rows asked of the index at a time by the real run's walk (every camera's, oldest first). */
 const LOOK = 100
+/**
+ * The most full-video rows, of any camera, one statement of the walks and sums below may pass: each looks
+ * at one window of time, which ends where the WINDOW_ROWS-th row from its start begins (rec-index.mjs
+ * THIN_SQL.fullNth), and the event loop goes round between windows. A camera not set to time-lapse, or
+ * with more full-video days than the others, keeps its full video in segments_full past their cutoff,
+ * and a statement asked for their rows passed all of it: 251-260 ms at a stretch on the development PC
+ * for 20 cameras of 87 set to 'delete' on a 31-day index, dry run included (review of p3-thin,
+ * 2026-09-29). By rows, not by time: a window of 5,000 is about an hour of the site's 87 cameras, however
+ * the footage is spread; on the development PC 1-3 ms to pass, 7-15 ms to sum when all of it is the
+ * group's (the production VM passes rows about twice as fast: the review's 0.19 against 0.41 us a row).
+ * Test: thinning.test.mjs, 20 of 87 cameras set to 'delete' on a 31-day index.
+ */
+const WINDOW_ROWS = 5000
 /** Files noted in flight (thin_inflight) with the one about to go: the next ones read, in the same transaction. */
 const NOTE_AHEAD = 5
 /** Footage waiting longer than this past its full-video days is "falling behind": a warning, on the page too. */
 export const BEHIND_MS = DAY
-/** A rewrite the helper answered "skipped" for, that no later run could do otherwise: the row is marked THIN.kept. */
+/**
+ * A rewrite the helper answered "skipped" for, that no later run could do otherwise: the row is marked THIN.kept.
+ * (ENOENT: the helper reads the marker again before it says so, and a share unmounted meanwhile is EMARKER,
+ * which leaves the row as it was: review of p3-thin, 2026-09-29.)
+ */
 const LEFT_AS_IT_IS = /^(already thin|nothing to keep|no index rows|cannot be parsed|larger than)|ENOENT/
 
 const gbs = (b) => `${(b / 1e9).toFixed(1)} GB`
@@ -315,47 +332,80 @@ const hoursText = (ms) => `${(ms / 3_600_000).toFixed(1)} h`
 const lastKept = new Map() // "nvr/ch" -> { endMs, cursor }
 let behindSaidAt = -Infinity
 let paceSaid = ''
+let backoffSaid = ''
+
+/**
+ * Windows of segments_full for the walks and sums (WINDOW_ROWS above): nth(from, n) is where the n-th
+ * full-video row from `from` starts, any camera (an index without it -- a test's -- is one window);
+ * end(from, to) is the end of the window that starts at `from`, a row's start.
+ */
+function windowsOf(index) {
+  const nth = (from, n) => (typeof index.fullNth === 'function' ? index.fullNth(from, n) : n === 0 ? from : null)
+  const end = (from, to) => {
+    const e = nth(from, WINDOW_ROWS)
+    // (more than WINDOW_ROWS rows starting in one millisecond, never written on purpose: that one is passed whole)
+    return e === null || e >= to ? to : e > from ? e : from + 1
+  }
+  return { nth, end }
+}
 
 /**
  * A group's full-video rows past its cutoff (the cameras with one cutoff and interval: usually all of
  * them), oldest first across the cameras, read LOOK at a time from segments_full (rewritten rows are not
- * in it). take() gives the oldest row of a camera not busy, so each camera's files go in their order.
+ * in it), a window at a time (WINDOW_ROWS). take() gives the oldest row of a camera not busy, so each
+ * camera's files go in their order.
  */
 class FullStream {
-  constructor(index, group) {
+  constructor(index, group, tick) {
     this.index = index
     this.g = group
+    this.tick = tick
+    this.win = windowsOf(index)
     this.buf = [] // rows read and not taken yet, oldest first
     this.from = Number.MIN_SAFE_INTEGER // where the next look starts
     this.atFrom = new Set() // rows already read that start exactly there
     this.done = false
   }
-  /** Reads the next LOOK rows; false when there are none. */
-  more() {
-    if (this.done) return false
-    const raw = this.index.fullOlderThan(this.g.cams, this.g.cutoff, LOOK, this.from)
-    const rows = raw.filter((r) => !(r.startMs === this.from && this.atFrom.has(r.path)))
-    // (a full look made only of rows read before at one start -- more than LOOK files starting in the same
-    // millisecond, never written on purpose -- ends the walk: it only ever converts less)
-    if (!rows.length) {
-      this.done = true
-      return false
+  /** Reads the next rows (at most LOOK), a window at a time, the loop let go round between windows; false when there are none. */
+  async more() {
+    while (!this.done) {
+      // over time with no full video at all in one look, then one window from there
+      const first = this.win.nth(this.from, 0)
+      if (first === null || first >= this.g.cutoff) break
+      if (first > this.from) {
+        this.from = first
+        this.atFrom = new Set()
+      }
+      const end = this.win.end(this.from, this.g.cutoff)
+      const raw = this.index.fullOlderThan(this.g.cams, this.g.cutoff, LOOK, this.from, end)
+      const rows = raw.filter((r) => !(r.startMs === this.from && this.atFrom.has(r.path)))
+      if (rows.length) {
+        for (const r of rows) {
+          if (r.startMs !== this.from) this.atFrom = new Set()
+          this.from = r.startMs
+          this.atFrom.add(r.path)
+          this.buf.push(r)
+        }
+        return true
+      }
+      // (a full look made only of rows read before at one start -- more than LOOK files starting in the same
+      // millisecond, never written on purpose -- ends the walk: it only ever converts less)
+      if (raw.length >= LOOK) break
+      // none of these cameras' in this window: the next one
+      this.from = end
+      this.atFrom = new Set()
+      await this.tick()
     }
-    for (const r of rows) {
-      if (r.startMs !== this.from) this.atFrom = new Set()
-      this.from = r.startMs
-      this.atFrom.add(r.path)
-      this.buf.push(r)
-    }
-    return true
+    this.done = true
+    return false
   }
   /** The oldest row read of a camera not in `busy`, reading on while the rows read are all busy ones. */
-  first(busy) {
+  async first(busy) {
     for (;;) {
       const r = this.buf.find((x) => !busy.has(`${x.nvr}/${x.ch}`))
       if (r) return r
       // as many rows read as three looks and every one of a busy camera: wait for one to be free
-      if (this.buf.length >= 3 * LOOK || !this.more()) return null
+      if (this.buf.length >= 3 * LOOK || !(await this.more())) return null
     }
   }
   take(r) {
@@ -381,8 +431,9 @@ class FullStream {
  *
  * Dry run (the default): what it would convert, from the index -- every such file on a mounted
  * location outside bookmarked stretches, not the first 2,000 -- with an estimate of what that frees
- * (KEYFRAME_SHARE). No file is opened and the share helper is not asked anything.
- * On: rewrites left half done by an earlier run are put right first; then, if thin-pace.mjs's rule
+ * (KEYFRAME_SHARE). No file is opened and the share helper is not asked anything, but for one thing:
+ * rewrites a run with the switch On left half done are put right first, in a dry run too.
+ * On: those rewrites put right first; then, if thin-pace.mjs's rule
  * says this round works (nights; by day only to keep up; never within minutes of "disk too slow"),
  * the files go to their location's helper oldest first, `pace.atOnce` at a time (one per camera) at
  * `pace.mbps`, until `deadline` (RUN_MS into the storage round by default), `maxSegments`, the switch
@@ -416,6 +467,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   const locs = new Map((settings.storage?.locations ?? []).map((l) => [l.id, l]))
   const here = mountedSet(locs, present, warn)
   const tick = makePacer() // the event loop goes round every 10 ms of the walks here
+  const win = windowsOf(index) // and no statement of theirs passes more than WINDOW_ROWS rows
   const stopLoc = new Map() // location id -> why nothing more is sent to its helper in this run
   const goneTimes = new Map() // location id -> its helper stopped by itself this many times in this run
   const stopLocation = (loc, why) => {
@@ -424,11 +476,18 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
     warn(`${loc.path}: ${why}: nothing more converted on it this run`)
   }
 
-  // rewrites a run, a helper or the server did not finish: put right before anything else, and only
-  // with the switch On (a dry run touches nothing); housekeeping and retention leave them alone meanwhile
+  // Rewrites a run, a helper or the server did not finish: put right before anything else; housekeeping and
+  // retention leave them alone meanwhile. In a dry run too since the review of p3-thin (2026-09-29): only On
+  // did, so after a switch to Dry run the file stayed out of every deletion, a leftover beside it. Putting
+  // right only finishes or undoes what a run with the switch On began -- the original put back, or a rewrite
+  // never swapped in (or the original of one committed) swept up -- and never begins a rewrite. (With Off no
+  // run happens: storage-jobs.mjs says they wait.)
   const inflight = typeof index.thinInflight === 'function' ? index.thinInflight() : []
-  if (inflight.length && dryRun) warn(`${inflight.length} time-lapse rewrite${inflight.length === 1 ? '' : 's'} may have been left half done (the server stopped, or the share hung): put right at the first run with the switch On; until then nothing deletes ${inflight.length === 1 ? 'that file' : 'those files'}`)
-  if (inflight.length && !dryRun) await putRightLeftovers(inflight)
+  if (inflight.length) {
+    await putRightLeftovers(inflight)
+    const { rolledBack, sweptUp } = out.recovered
+    if (rolledBack + sweptUp) warn(`put right ${rolledBack + sweptUp} time-lapse rewrite${rolledBack + sweptUp === 1 ? '' : 's'} left half done by an earlier run with the switch On (the server stopped, or the share hung): ${rolledBack} original${rolledBack === 1 ? '' : 's'} put back, ${sweptUp} with leftovers swept up`)
+  }
 
   const cams = index.cameras()
   if (!cams.length) return out
@@ -473,13 +532,26 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
       thinBytes: est('mid'),
       low: est('low'),
       high: est('high'),
-      note: `an estimate from the index: keyframes taken as ${KEYFRAME_SHARE.low * 100}-${KEYFRAME_SHARE.high * 100} % of a file's bytes, as in 13 real files measured on 29 Sep 2026`
+      note: `an estimate from the index: keyframes taken as ${Math.round(KEYFRAME_SHARE.low * 100)}-${Math.round(KEYFRAME_SHARE.high * 100)} % of a file's bytes, as in 13 real files measured on 29 Sep 2026`
     }
     out.freedBytes = backlog.bytes - out.estimate.thinBytes
     return out
   }
 
   // ---- on: whether this round works (thin-pace.mjs), then the files, through the helper -------------
+  // the round before this one, looked at now (thin-pace.mjs): a "disk too slow" in it lowers the pace; what it
+  // converted counts towards the day rule's figure (review of p3-thin, 2026-09-29)
+  settleRound({ slow: slow(), night: pace.night, siteMin })
+  out.pace.factor = paceFactor()
+  out.pace.effectiveMbps = effectiveMbps(pace)
+  out.pace.achievedMBps = achievedMBps()
+  const lowered = backoffText(pace, siteMin)
+  if (lowered) {
+    out.pace.text = `${describePace({ ...pace, mbps: out.pace.effectiveMbps })} (lowered from ${pace.mbps} MB/s)`
+    // (in the log when it changes, on the page every run)
+    warn(lowered, { quiet: lowered === backoffSaid })
+  }
+  backoffSaid = lowered
   const defaults = settings.recording?.defaults ?? {}
   if (Number.isFinite(defaults.fullDays)) {
     const ref = now - defaults.fullDays * DAY
@@ -490,15 +562,20 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
     warn(w, { quiet: clock() - behindSaidAt < 3_600_000 })
     if (clock() - behindSaidAt >= 3_600_000) behindSaidAt = clock()
   }
-  out.decision = decideRun({ now: clock(), backlogBytes: backlog.bytes, arrivalBytesPerHour: out.backlog.perHourBytes ?? 0, pace, siteMin, slow: slow() })
+  out.decision = decideRun({ now: clock(), backlogBytes: backlog.bytes, arrivalBytesPerHour: out.backlog.perHourBytes ?? 0, pace, siteMin, slow: slow(), factor: out.pace.factor, achievedMBps: out.pace.achievedMBps })
   out.after = { files: backlog.files, bytes: backlog.bytes }
-  if (!out.decision.work) return out
+  if (!out.decision.work) {
+    // a round held back by "disk too slow" is a round that converted nothing (the day rule's figure)
+    if (out.decision.held) noteRound({ start: clock(), end: clock(), held: true })
+    return out
+  }
 
-  const until = deadline ?? clock() + RUN_MS
-  const bucket = makeBucket(pace.mbps * 1e6)
+  const roundStart = clock()
+  const until = deadline ?? roundStart + RUN_MS
+  const bucket = makeBucket(out.pace.effectiveMbps * 1e6)
   // what the repair above could not put right (its share hung, or a person must look): not taken again
   const held = new Set(index.thinInflight().map((r) => r.path))
-  const streams = groups.map((g) => new FullStream(index, g))
+  const streams = groups.map((g) => new FullStream(index, g, tick))
   const busy = new Set() // "nvr/ch" of the cameras with a file being converted
   const running = new Set()
   // thin_inflight is written a few files ahead and cleared a few at a time (thinBegin, thinEnd): each commit
@@ -522,15 +599,19 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   }
   let taken = 0
   const SWITCHED = 'the switch was set to Off or Dry run during this run'
+  // why the round stopped, in a word: 'time', 'slow' and 'locations' mean it ran out of time, not of files, so
+  // what it converted says what the NAS can do (thin-pace.mjs noteRound)
+  let stopKind = null
   const stopWhy = () => {
     if (out.stopped) return out.stopped
-    if (clock() >= until) return `this round's ${RUN_MS / 60_000} minutes were up (the rest waits for the next round)`
-    if (taken >= maxSegments) return `the most one run takes on (${maxSegments} files)`
-    if (armed && !armed()) return SWITCHED
+    const as = (kind, why) => ((stopKind = kind), why)
+    if (clock() >= until) return as('time', `this round's ${RUN_MS / 60_000} minutes were up (the rest waits for the next round)`)
+    if (taken >= maxSegments) return as('limit', `the most one run takes on (${maxSegments} files)`)
+    if (armed && !armed()) return as('switch', SWITCHED)
     const sl = slow()
     const ago = sl ? clock() - sl.at : NaN
-    if (ago >= 0 && ago < SLOW_HOLD_MS) return `the recorder reported "disk too slow" at ${utc(sl.at)}${sl.nvr !== undefined ? ` (${sl.nvr}/${Number(sl.ch) + 1})` : ''}: no more files this round, so recording keeps the disk`
-    if (here.size && [...here].every((id) => stopLoc.has(id))) return 'every location stopped (see the warnings)'
+    if (ago >= 0 && ago < SLOW_HOLD_MS) return as('slow', `the recorder reported "disk too slow" at ${utc(sl.at)}${sl.nvr !== undefined ? ` (${sl.nvr}/${Number(sl.ch) + 1})` : ''}: no more files this round, so recording keeps the disk`)
+    if (here.size && [...here].every((id) => stopLoc.has(id))) return as('locations', 'every location stopped (see the warnings)')
     return null
   }
   try {
@@ -545,7 +626,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
       await tick()
       let pick = null
       for (const st of streams) {
-        const r = st.first(busy)
+        const r = await st.first(busy)
         if (r && (!pick || st.g.cutoff - r.startMs > pick.st.g.cutoff - pick.s.startMs)) pick = { st, s: r }
       }
       if (!pick) {
@@ -577,6 +658,9 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
         out.stopped = late
         break
       }
+      // its location stopped meanwhile (another file's share hung, or its helper stopped twice): not sent to
+      // it, where it would be one more call to a stuck share (review of p3-thin, 2026-09-29)
+      if (stopLoc.has(loc.id) || held.has(s.path)) continue
       // in flight before the helper may make a file beside it: when it is not noted yet, it and the next few
       // read that could go, in one transaction (so one commit for every few files, not one each)
       try {
@@ -614,20 +698,34 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   out.files = out.thinned.length
   out.bytes = wasBytes
   out.after = { files: Math.max(0, backlog.files - out.files), bytes: Math.max(0, backlog.bytes - wasBytes) }
+  // the next round looks at this one: a "disk too slow" during it, and what it converted (thin-pace.mjs)
+  noteRound({ start: roundStart, end: clock(), bytes: wasBytes, full: ['time', 'slow', 'locations'].includes(stopKind) })
   return out
 
   // ---- the pieces ---------------------------------------------------------------------------------
 
+  /** Where these cameras' next full-video row in [from, to) starts, or null: a window at a time (WINDOW_ROWS). */
+  async function nextFull(cams, from, to) {
+    for (let at = from; at < to; ) {
+      const first = win.nth(at, 0) // over time with no full video at all in one look
+      if (first === null || first >= to) return null
+      const end = win.end(first, to)
+      const s = index.firstFull(cams, first, end)
+      if (s !== null) return s
+      at = end
+      await tick()
+    }
+    return null
+  }
+
   /**
-   * What waits, from segments_full: per group, between bookmarked stretches, a stretch of time at a time
-   * (an hour to start with, halved while a sum takes over 8 ms, doubled while it takes under 2 ms), hours
-   * with nothing skipped with one look. No row objects, no files.
+   * What waits, from segments_full: per group, between bookmarked stretches, a window at a time
+   * (WINDOW_ROWS; windows with none of the group's rows passed with one look each). No row objects, no files.
    */
   async function backlogOf(list) {
     const b = { files: 0, bytes: 0, weighted: 0, oldestMs: null, lagMs: 0 }
     const off = new Map() // why -> files on a location that is not usable now
     const ranges = guard.ranges ?? []
-    let step = 3_600_000
     for (const g of list) {
       let lo = Number.MIN_SAFE_INTEGER
       const spans = []
@@ -639,10 +737,9 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
       spans.push([lo, g.cutoff])
       for (const [from, to] of spans) {
         if (from >= to) continue
-        for (let t = index.firstFull(g.cams, from, to); t !== null && t < to; ) {
+        for (let t = await nextFull(g.cams, from, to); t !== null && t < to; ) {
           await tick()
-          const end = Math.min(to, t + step)
-          const t0 = performance.now()
+          const end = win.end(t, to)
           for (const r of index.fullSummary(g.cams, { fromMs: t, toMs: end, endBefore: to, stepMs: g.timelapseS * 1000 })) {
             const loc = locs.get(r.loc)
             if (!loc || !here.has(loc.id)) {
@@ -656,10 +753,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
             if (b.oldestMs === null || r.firstMs < b.oldestMs) b.oldestMs = r.firstMs
             b.lagMs = Math.max(b.lagMs, g.cutoff - r.firstMs)
           }
-          const took = performance.now() - t0
-          if (took > 8) step = Math.max(5 * 60_000, step / 2)
-          else if (took < 2) step = Math.min(DAY, step * 2)
-          t = end < to ? index.firstFull(g.cams, end, to) : null
+          t = end < to ? await nextFull(g.cams, end, to) : null
         }
       }
     }
@@ -1072,4 +1166,4 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
   return out
 }
 
-export const _test = { names, suffix, forget: () => (lastKept.clear(), (behindSaidAt = -Infinity), (paceSaid = '')) }
+export const _test = { names, suffix, forget: () => (lastKept.clear(), (behindSaidAt = -Infinity), (paceSaid = ''), (backoffSaid = '')) }

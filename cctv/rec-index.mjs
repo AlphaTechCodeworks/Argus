@@ -266,7 +266,16 @@ export const LOCATION_SQL = {
 // (the cameras a walk or a sum is for: a JSON list of "nvr/ch" keys, matched on the index's own columns)
 const IN_CAMS = "(nvr || '/' || ch) IN (SELECT value FROM json_each(?))"
 export const THIN_SQL = {
-  // the job's walk: some cameras' full-video rows (those with one cutoff) that ended before it, oldest first
+  // Where the n-th full-video row from a time on starts, whatever its camera: the end of a window the
+  // statements below may pass (thinning.mjs WINDOW_ROWS). A camera not set to time-lapse (or with more
+  // full-video days than the rest) keeps its rows here until its retention; the others' walks and sums
+  // pass them, at 0.19 us a row on the production VM, and in one statement that was 251-260 ms on the
+  // development PC for 20 such cameras of 87 over 31 days (review of p3-thin, 2026-09-29). Counted on the
+  // index alone, no row read (the plan does not say covering, as `thinned` is not in the index): 5,000
+  // entries in 0.27 ms, 20,000 in 0.63 ms on the development PC (scratchpad p3fix/nth-bench.mjs).
+  fullNth: 'SELECT start_ms AS s FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? ORDER BY start_ms LIMIT 1 OFFSET ?',
+  // the job's walk: some cameras' full-video rows (those with one cutoff) that ended before it, oldest first,
+  // starting in one window
   fullOlderThan: `SELECT ${THIN_COLS} FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ? AND end_ms < ? AND ${IN_CAMS} ORDER BY start_ms LIMIT ?`,
   // where those cameras' next full-video row starts (the sums below skip hours with none)
   firstFull: `SELECT start_ms AS s FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ? AND ${IN_CAMS} ORDER BY start_ms LIMIT 1`,
@@ -333,6 +342,7 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
   }
   const q = {
     add: db.prepare('INSERT OR REPLACE INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc, source, filled_ms, thinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+    fullNth: db.prepare(THIN_SQL.fullNth),
     fullOlderThan: db.prepare(THIN_SQL.fullOlderThan),
     firstFull: db.prepare(THIN_SQL.firstFull),
     fullSummary: db.prepare(THIN_SQL.fullSummary),
@@ -438,8 +448,13 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     },
 
     // ---- time-lapse thinning (THIN above; thinning.mjs)
-    /** Some cameras' ([{ nvr, ch }]) full-video rows (thinned null) that ended before ms, oldest first, from fromMs on. */
-    fullOlderThan: (cams, ms, limit, fromMs = NO_START) => q.fullOlderThan.all(fromMs, ms, ms, camKeys(cams), Number(limit)).map(plain),
+    /** Where the full-video row `n` rows on from fromMs starts (n 0: the first at or after it), any camera; null when there are not that many. */
+    fullNth: (fromMs, n = 0) => q.fullNth.get(fromMs, Math.max(0, Math.floor(Number(n) || 0)))?.s ?? null,
+    /**
+     * Some cameras' ([{ nvr, ch }]) full-video rows (thinned null) that ended before ms, oldest first, starting
+     * in [fromMs, untilMs) (untilMs: a window's end, thinning.mjs; at most ms).
+     */
+    fullOlderThan: (cams, ms, limit, fromMs = NO_START, untilMs = ms) => q.fullOlderThan.all(fromMs, Math.min(ms, untilMs), ms, camKeys(cams), Number(limit)).map(plain),
     /** Where those cameras' next full-video row in [fromMs, toMs) starts, or null. */
     firstFull: (cams, fromMs, toMs) => q.firstFull.get(fromMs, toMs, camKeys(cams))?.s ?? null,
     /**
