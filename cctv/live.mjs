@@ -47,6 +47,14 @@ const BUSY_RETRY_MS = 5000 // retry delay while the NVR has calls stuck in the S
 // a start refused this fast is the NVR saying no (stream limit, no permission, camera offline),
 // not a slow network: lastFailure.fast (the recorder then backs off for minutes)
 const FAST_REFUSAL_MS = 1000
+// ...but not SDK error 9, "not connected": the NVR has not said anything, the SDK is making the
+// link it dropped again (20-60 s; the next stream of that NVR started a median 27.7 s later). Taken
+// as a refusal it cost 5-10 minutes of recording per camera: 42 times in 63.5 h (27-29 Sep 2026),
+// 43 of 44 within 21 s of a link drop, 15,546 camera-seconds not recorded. Not fast: the recorder
+// keeps the camera and the stream's own restart steps try it again (RESTART_BACKOFF_MS: after a
+// stall's restart, 15 s and then 60 s later).
+// (8, "cannot connect", stays a refusal: value4u at its sub-stream limit, sub-cap.mjs.)
+const LINK_DOWN_ERROR = 9
 // a valid handle that sends no video this long after the start: the NVR refused it silently
 // (nvr-2 does this at its stream limit); treated as a fast refusal
 export const FIRST_FRAME_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1' && Number(process.env.CCTV_TEST_FIRST_FRAME_MS)) || 8000
@@ -127,7 +135,7 @@ export class LiveStream {
     this.lastKeyframeAsk = 0
     this.firstFrameTimer = null
     this.gotVideo = false
-    this.lastFailure = null // { at, ms, fast, silent?, reason } of the last failed start (recorder.mjs)
+    this.lastFailure = null // { at, ms, fast, code?, silent?, reason } of the last failed start (recorder.mjs)
     this.onFrame = this.#onFrame.bind(this)
     this.op = this.#start()
   }
@@ -251,10 +259,11 @@ export class LiveStream {
     if (cooling) return this.#scheduleRestart(BUSY_RETRY_MS)
     if (handle <= 0) {
       const ms = callStart ? Date.now() - callStart : 0
-      const fast = Boolean(callStart) && !callError && !notTried && ms < FAST_REFUSAL_MS
       // the SDK's last error, as a hint only (it may be per thread); its code too, for a start that
-      // reached the NVR (8, "cannot connect": value4u at its sub-stream limit, sub-cap.mjs)
+      // reached the NVR (8, "cannot connect": value4u at its sub-stream limit, sub-cap.mjs). Read
+      // before `fast` is decided: a dropped link (LINK_DOWN_ERROR) is not a refusal
       const code = callError || notTried ? null : await lastErrorCode()
+      const fast = Boolean(callStart) && !callError && !notTried && ms < FAST_REFUSAL_MS && code !== LINK_DOWN_ERROR
       const why = callError ? callError.message : errorText(code)
       this.lastFailure = { at: Date.now(), ms, fast, code, reason: `${fast ? `refused in ${ms} ms` : `failed after ${ms} ms`}: ${why}` }
       if (this.stopped) return
