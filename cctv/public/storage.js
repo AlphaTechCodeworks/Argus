@@ -191,10 +191,14 @@ function planText(jobs) {
   return jobs.pace && d.after === 'timelapse' && d.fullDays < d.retentionDays ? `${withCams} Time-lapse is written at ${jobs.pace} first.` : withCams
 }
 
-/** "131-135 GB" (one unit when both have it), else "930 MB-1.1 GB". */
+/**
+ * "131-135 GB" (one unit when both have it), else "930 MB-1.1 GB". Two ends that round alike ("1.3-1.3
+ * TB" for a day of the site's footage: seen in a browser, 2026-09-29) are said in whole GB instead.
+ */
 function range(lo, hi) {
   const a = bytes(lo)
   const b = bytes(hi)
+  if (a === b) return `${Math.round(lo / 1e9).toLocaleString('en-GB')}-${Math.round(hi / 1e9).toLocaleString('en-GB')} GB`
   const unit = (s) => s.split(' ')[1]
   return unit(a) === unit(b) ? `${a.split(' ')[0]}-${b}` : `${a}-${b}`
 }

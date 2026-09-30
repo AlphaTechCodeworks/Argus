@@ -361,6 +361,9 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   // the index; with the switch On, what still waits, why a round did not convert, why it stopped early
   const e1 = view({ thinning: run({ segments: 12_345, bytes: 132.5e9, fullBytes: 148e9, estimate: { thinBytes: 15.5e9, low: 13.3e9, high: 17.4e9 }, backlog: { files: 12_345, bytes: 148e9, lagMs: 5 * 3_600_000 } }) })
   check('dry run from the index: the full video it would convert, and what it frees as an estimate with its range', e1.lines[0].text === `Last run ${hhmm} (dry run): would convert 12,345 files (148 GB of full video), freeing about 133 GB (an estimate from the index: 131-135 GB) · the oldest 5.0 h past its full-video days`, e1.lines[0].text)
+  // a day of the site's footage: the range must not round to "1.3-1.3 TB" (seen in a browser, 2026-09-29)
+  const eTB = view({ thinning: run({ segments: 123_275, bytes: 1.32e12, fullBytes: 1.477e12, estimate: { thinBytes: 0.155e12, low: 0.133e12, high: 0.174e12 }, backlog: { files: 123_275, bytes: 1.477e12, lagMs: 0 } }) })
+  check('... at a day\'s size the range still shows two figures', /freeing about 1\.3 TB \(an estimate from the index: 1,303-1,344 GB\)$/.test(eTB.lines[0].text), eTB.lines[0].text)
   const onRun = (o) => run({ mode: 'on', dryRun: false, pace: '40 MB/s, 3 files at a time; nights 20:00-06:00 site time', ...o })
   const e2 = view({ mode: 'on', thinning: onRun({ segments: 812, bytes: 8.6e9, fullBytes: 9.7e9, after: { files: 11_533, bytes: 138e9 }, backlog: { files: 12_345, bytes: 148e9, lagMs: 3_600_000 }, decision: { work: true, night: true, why: 'night hours' } }) })
   check('on: converted, and what still waits', e2.lines[0].text === `Last run ${hhmm}: converted 812 files, freed 8.6 GB · still waiting: 11,533 files, 138 GB`, e2.lines[0].text)
