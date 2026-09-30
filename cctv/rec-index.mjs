@@ -199,6 +199,49 @@ CREATE TABLE IF NOT EXISTS thin_inflight (
   path TEXT PRIMARY KEY, loc TEXT, was_bytes INTEGER NOT NULL, was_keyframes INTEGER NOT NULL, at_ms INTEGER NOT NULL);
 `
 
+/**
+ * Days kept against the target (retention-target.mjs, 2026-09-30, p4-target): where each location's
+ * time-lapse begins and ends, and a sample of its real time-lapse files to weigh them against full video.
+ * Walking the rows for that reads the whole time-lapse stretch (23 days of 87 cameras at the owner's plan),
+ * and an index of every time-lapse row writes one more index page with every file converted: thinning
+ * commits a file at a time and is held to 4 WAL pages a file (thinning.test.mjs; WAL checkpoints land on the
+ * main thread until perf report Task 12), and every page more brings a checkpoint sooner. So this one holds
+ * only the time-lapse files that start in the first minute of an hour -- about one per camera and hour, as
+ * files roll over each minute -- and converting a file touches it 1 time in 60 (rec-index-scans.test.mjs:
+ * under 0.1 page a file more), at about 1/60 of the size (some 1.5 MB at 23 days of 87 cameras). What it
+ * answers is to the hour: the oldest and newest time-lapse are the files of those minutes, and the sample
+ * is an hour's first file of each camera, which spreads it over the day and night alike. The query must say
+ * TL_ROW word for word, or SQLite will not use the index. Building it on an index that predates it reads
+ * every row once, at the first start with this code (as segments_full did).
+ */
+const TL_ROW = `thinned = ${THIN.timelapse} AND start_ms % 3600000 < 60000`
+const TARGET_SCHEMA = `CREATE INDEX IF NOT EXISTS segments_tl ON segments (loc, start_ms) WHERE ${TL_ROW};`
+/**
+ * retention-target.mjs's lookups, every 5 minutes on the main thread off the hot path (its own timer, one
+ * statement per turn of the event loop). Kept here as text so rec-index-scans.test.mjs can check each
+ * one's query plan.
+ */
+export const TARGET_SQL = {
+  // where the n-th row from a time starts, whatever its camera or location: a window's end, so each dayUse
+  // below reads at most that many rows (counted on segments_start alone, no row read)
+  startNth: 'SELECT start_ms AS s FROM segments INDEXED BY segments_start WHERE start_ms >= ? ORDER BY start_ms LIMIT 1 OFFSET ?',
+  // what every camera recorded on each location in a window: files, bytes, footage time, and the bytes
+  // weighted by the share of keyframes one per interval keeps (thinning's estimate, THIN_SQL.fullSummary)
+  dayUse: `SELECT IFNULL(loc, '') AS loc, nvr, ch, COUNT(*) AS files, SUM(bytes) AS bytes, SUM(MAX(0, end_ms - start_ms)) AS ms,
+    SUM(bytes * MIN(1.0, MAX(1.0, (end_ms - start_ms) * 1.0 / ?) / MAX(keyframes, 1))) AS weighted
+    FROM segments INDEXED BY segments_start WHERE start_ms >= ? AND start_ms < ? GROUP BY IFNULL(loc, ''), nvr, ch`,
+  // a location's oldest and newest time-lapse, to the hour (TL_SCHEMA above)
+  tlOldest: `SELECT start_ms AS s FROM segments INDEXED BY segments_tl WHERE ${TL_ROW} AND loc = ? ORDER BY start_ms LIMIT 1`,
+  tlNewest: `SELECT start_ms AS s FROM segments INDEXED BY segments_tl WHERE ${TL_ROW} AND loc = ? ORDER BY start_ms DESC LIMIT 1`,
+  // an hour's first time-lapse file of each camera in a window, by camera: what the real files weigh
+  tlSample: `SELECT nvr, ch, COUNT(*) AS files, SUM(bytes) AS bytes, SUM(MAX(0, end_ms - start_ms)) AS ms
+    FROM segments INDEXED BY segments_tl WHERE ${TL_ROW} AND loc = ? AND start_ms >= ? AND start_ms < ? GROUP BY nvr, ch`,
+  // the first full-video row on a location from a time, among the next `limit` rows there (a window: the
+  // caller goes on from `last`); where full video begins after the newest time-lapse
+  fullNext: `SELECT MIN(CASE WHEN thinned IS NULL THEN start_ms END) AS s, MAX(start_ms) AS last, COUNT(*) AS n
+    FROM (SELECT start_ms, thinned FROM segments INDEXED BY segments_loc WHERE loc = ? AND start_ms >= ? ORDER BY start_ms LIMIT ?)`
+}
+
 const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, keyframes, loc, source, filled_ms AS filledMs'
 // (thinning's rows only: playback's keep the shape they had)
 const THIN_COLS = `${SEG_COLS}, thinned`
@@ -322,6 +365,7 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     if (!have.has('thinned')) db.exec('ALTER TABLE segments ADD COLUMN thinned INTEGER')
   }
   db.exec(THIN_SCHEMA)
+  db.exec(TARGET_SCHEMA)
   // The totals per location (TOTALS_SCHEMA above). A REPLACE's old row is taken off by loc_totals_replace,
   // so the delete trigger must stay out of it: recursive_triggers off (SQLite's default, set in case).
   db.exec('PRAGMA recursive_triggers = OFF')
@@ -347,6 +391,12 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     firstFull: db.prepare(THIN_SQL.firstFull),
     fullSummary: db.prepare(THIN_SQL.fullSummary),
     startedBetween: db.prepare(THIN_SQL.startedBetween),
+    startNth: db.prepare(TARGET_SQL.startNth),
+    dayUse: db.prepare(TARGET_SQL.dayUse),
+    tlOldest: db.prepare(TARGET_SQL.tlOldest),
+    tlNewest: db.prepare(TARGET_SQL.tlNewest),
+    tlSample: db.prepare(TARGET_SQL.tlSample),
+    fullNext: db.prepare(TARGET_SQL.fullNext),
     setThin: db.prepare('UPDATE segments SET thinned = ?, bytes = IFNULL(?, bytes), keyframes = IFNULL(?, keyframes) WHERE path = ?'),
     thinBegin: db.prepare('INSERT OR REPLACE INTO thin_inflight (path, loc, was_bytes, was_keyframes, at_ms) VALUES (?, ?, ?, ?, ?)'),
     thinEnd: db.prepare('DELETE FROM thin_inflight WHERE path = ?'),
@@ -492,6 +542,28 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     thinInflight: () => q.thinAll.all().map(plain),
     /** A file's row with its `thinned` mark (byPath's fields and that), or null. */
     thinRow: (path) => one(q.thinRow.get(String(path))),
+
+    // ---- days kept against the target (TARGET_SQL above; retention-target.mjs)
+    /** Where the row `n` rows on from fromMs starts (n 0: the first at or after it), any camera or location; null when there are not that many. */
+    startNth: (fromMs, n = 0) => q.startNth.get(fromMs, Math.max(0, Math.floor(Number(n) || 0)))?.s ?? null,
+    /**
+     * What every camera recorded on each location, of the rows starting in [fromMs, toMs): [{ loc ('' for none), nvr, ch,
+     * files, bytes, ms (footage time), weighted (bytes by the share of keyframes one per stepMs keeps) }].
+     */
+    dayUse: (fromMs, toMs, stepMs) =>
+      q.dayUse.all(Math.max(1, Number(stepMs)), fromMs, toMs).map((r) => ({ loc: r.loc, nvr: r.nvr, ch: Number(r.ch), files: Number(r.files), bytes: Number(r.bytes), ms: Number(r.ms), weighted: Number(r.weighted) })),
+    /** A location's oldest and newest time-lapse file, to the hour (TL_ROW), or null when it has none. */
+    timelapseEdges(loc) {
+      const o = q.tlOldest.get(String(loc))?.s ?? null
+      return o === null ? null : { oldestMs: o, newestMs: q.tlNewest.get(String(loc))?.s ?? o }
+    },
+    /** An hour's first time-lapse file of each camera on a location, starting in [fromMs, toMs), by camera: [{ nvr, ch, files, bytes, ms }]. */
+    timelapseSample: (loc, fromMs, toMs) => q.tlSample.all(String(loc), fromMs, toMs).map((r) => ({ nvr: r.nvr, ch: Number(r.ch), files: Number(r.files), bytes: Number(r.bytes), ms: Number(r.ms) })),
+    /** Among a location's next `limit` rows from fromMs: where the first full-video one starts (s, or null), the last start looked at and how many were. */
+    fullNext(loc, fromMs, limit) {
+      const r = q.fullNext.get(String(loc), fromMs, Math.max(1, Math.floor(Number(limit) || 1)))
+      return { s: r?.s ?? null, last: r?.last ?? null, n: Number(r?.n ?? 0) }
+    },
 
     // ---- the backfill ledger (phase 2b; see backfill.mjs)
     /** Records a hole worth filling, or returns the row already there (state and attempts kept). */

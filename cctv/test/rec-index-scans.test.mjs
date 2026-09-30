@@ -438,6 +438,87 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   const thin = frames(true)
   check('deleting the oldest full-video files writes about as many WAL pages as deleting rewritten ones (time-first key)', full <= thin * 1.1 + 10, `${full} vs ${thin} pages for 261 files in 3 transactions`)
 }
+// ---- days kept against the target (retention-target.mjs, 2026-09-30, p4-target) ------------------------
+// What every camera recorded on each location in a window (the daily volume), a row window's end on
+// segments_start, the time-lapse rows' edges and a sample of them through a partial index that holds one
+// time-lapse file per camera and hour (so converting a file writes an index page 1 time in 60, not every
+// time: thinning's WAL budget), and the first full-video row after a time on one location.
+{
+  const { THIN, TARGET_SQL } = await import('../rec-index.mjs')
+  const f = join(ROOT, 'target.db')
+  const ix = openRecIndex(f)
+  const raw = new DatabaseSync(f)
+  const add = (ch, i, extra = {}) => ix.addSegment({ nvr: 'd1', ch, path: `/rec/d1/${ch}/${i}.h265`, startMs: T0 + i * MIN, endMs: T0 + i * MIN + 59_000, bytes: 12_000_000, keyframes: 30, loc: 'L1', ...extra })
+  // three hours of two cameras on L1, the second camera's first hour on L2; a third camera with no location
+  for (let i = 0; i < 180; i++) add(0, i)
+  for (let i = 0; i < 180; i++) add(1, i, { loc: i < 60 ? 'L2' : 'L1' })
+  for (let i = 0; i < 10; i++) add(2, i, { loc: null, bytes: 1000 })
+  const use = ix.dayUse(T0, T0 + 3 * 60 * MIN, 10_000)
+  const by = Object.fromEntries(use.map((r) => [`${r.loc}|${r.ch}`, r]))
+  check('dayUse: files, bytes and footage time per location and camera; a row with no location counts under \'\'', J(Object.keys(by).sort()) === J(['L1|0', 'L1|1', 'L2|1', '|2']) && by['L1|0'].files === 180 && by['L1|0'].bytes === 180 * 12_000_000 && by['L1|0'].ms === 180 * 59_000 && by['L2|1'].files === 60 && by['|2'].bytes === 10_000, J(use.map((r) => [r.loc, r.ch, r.files])))
+  check('... and the bytes weighted by the share of keyframes one per interval keeps (as thinning\'s fullSummary)', Math.abs(by['L1|0'].weighted - 180 * 12_000_000 * (5.9 / 30)) < 1, String(by['L1|0'].weighted))
+  check('... only the rows that start in the window', ix.dayUse(T0 + 60 * MIN, T0 + 61 * MIN, 10_000).reduce((a, r) => a + r.files, 0) === 2)
+  check('startNth: where the n-th row from a time starts (any camera, any location); past the last, null', ix.startNth(T0, 0) === T0 && ix.startNth(T0, 3) === T0 + MIN && ix.startNth(T0 + 179 * MIN, 1) === T0 + 179 * MIN && ix.startNth(T0 + 179 * MIN, 2) === null, J([ix.startNth(T0, 3), ix.startNth(T0 + 179 * MIN, 2)]))
+
+  // time-lapse: camera 0's first two hours rewritten; the edges and the sample see the file of each hour's first minute
+  check('no time-lapse yet: no edges, an empty sample', ix.timelapseEdges('L1') === null && ix.timelapseSample('L1', T0, T0 + 3 * 60 * MIN).length === 0)
+  for (let i = 0; i < 120; i++) ix.thinSwapped(`/rec/d1/0/${i}.h265`, { bytes: 1_000_000, keyframes: 6 })
+  const edges = ix.timelapseEdges('L1')
+  check('timelapseEdges: the oldest and newest time-lapse file of the hours\' first minutes (to the hour)', J(edges) === J({ oldestMs: T0, newestMs: T0 + 60 * MIN }) && ix.timelapseEdges('L2') === null, J(edges))
+  const sample = ix.timelapseSample('L1', T0, T0 + 3 * 60 * MIN)
+  check('timelapseSample: one file an hour per camera, with its bytes and footage time', J(sample) === J([{ nvr: 'd1', ch: 0, files: 2, bytes: 2_000_000, ms: 2 * 59_000 }]), J(sample))
+  ix.setThin('/rec/d1/0/0.h265', THIN.kept)
+  check('... a file left as it was (THIN.kept) is not time-lapse', J(ix.timelapseEdges('L1')) === J({ oldestMs: T0 + 60 * MIN, newestMs: T0 + 60 * MIN }))
+  const next = ix.fullNext('L1', T0 + 60 * MIN, 1000)
+  check('fullNext: the first full-video row after a time on one location, within a window of rows', next.s === T0 + 60 * MIN && next.n > 0, J(next))
+  const past = ix.fullNext('L1', T0 + 30 * MIN, 20)
+  check('... none in the window: null, with the last start looked at, for the next window', past.s === null && past.n === 20 && past.last === T0 + 49 * MIN, J(past))
+  const done = ix.fullNext('L2', T0 + 60 * MIN, 1000)
+  check('... past the location\'s last row: fewer rows than asked', done.s === null && done.n === 0, J(done))
+
+  const planOf = (sql, ...p) => raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...p).map((r) => r.detail).join(' | ')
+  const d = planOf(TARGET_SQL.dayUse, 10_000, T0, T0 + MIN)
+  check('dayUse searches segments_start, bounded on both sides', /^SEARCH segments USING INDEX segments_start \(start_ms>\? AND start_ms<\?\)/.test(d) && !/SCAN segments/.test(d), d)
+  const n = planOf(TARGET_SQL.startNth, T0, 5000)
+  check('startNth counts on segments_start alone (no row read)', /^SEARCH segments USING COVERING INDEX segments_start \(start_ms>\?\)$/.test(n), n)
+  const eo = planOf(TARGET_SQL.tlOldest, 'L1')
+  const en = planOf(TARGET_SQL.tlNewest, 'L1')
+  check('the time-lapse edges: one entry of the sampled partial index each (no row read)', /^SEARCH segments USING COVERING INDEX segments_tl \(loc=\?\)$/.test(eo) && /^SEARCH segments USING COVERING INDEX segments_tl \(loc=\?\)$/.test(en), `${eo} ;; ${en}`)
+  const sp = planOf(TARGET_SQL.tlSample, 'L1', T0, T0 + MIN)
+  check('the sample searches it, bounded by start_ms', /^SEARCH segments USING INDEX segments_tl \(loc=\? AND start_ms>\? AND start_ms<\?\)/.test(sp) && !/SCAN segments/.test(sp), sp)
+  const fn = planOf(TARGET_SQL.fullNext, 'L1', T0, 1000)
+  check('fullNext walks segments_loc from the time, a window of rows at most', /SEARCH segments USING INDEX segments_loc \(loc=\? AND start_ms>\?\)/.test(fn) && !/SCAN segments /.test(fn), fn)
+  const tlIdx = raw.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'segments_tl'").get()?.sql ?? ''
+  check('segments_tl holds time-lapse rows of the first minute of each hour only', /WHERE thinned = 1 AND start_ms % 3600000 < 60000/.test(tlIdx), tlIdx)
+  raw.close()
+  ix.close()
+}
+// converting a file writes an index page for segments_tl only when the file starts in its hour's first minute:
+// the same swaps (one commit a file, as thinning makes them) on an index with and without it differ by under
+// 0.1 WAL page a file (thinning.test.mjs holds the job to 4 pages a file)
+{
+  const pages = (withTl) => {
+    const f = join(ROOT, `tl-wal-${withTl}.db`)
+    // (SQLite's own checkpoints off: each would empty the log in the middle of the count)
+    const ix = openRecIndex(f, { walAutocheckpoint: 0 })
+    const raw = new DatabaseSync(f)
+    if (!withTl) raw.exec('DROP INDEX segments_tl')
+    raw.exec('BEGIN')
+    const ins = raw.prepare('INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc) VALUES (?, ?, ?, ?, ?, 12000000, 30, ?)')
+    for (let k = 0; k < 120; k++) for (let c = 0; c < 87; c++) ins.run(`/rec/nvr-${c % 4}/${c}/${k}.h265`, `nvr-${c % 4}`, c, T0 + k * MIN, T0 + k * MIN + 59_000, 'L1')
+    raw.exec('COMMIT')
+    raw.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()
+    let n = 0
+    for (let k = 0; k < 120; k++) for (let c = 0; c < 87; c += 3) (ix.thinSwapped(`/rec/nvr-${c % 4}/${c}/${k}.h265`, { bytes: 1_300_000, keyframes: 6 }), n++)
+    const log = raw.prepare('PRAGMA wal_checkpoint(PASSIVE)').get().log
+    raw.close()
+    ix.close()
+    return { log, n }
+  }
+  const a = pages(false)
+  const b = pages(true)
+  check('segments_tl costs thinning under 0.1 WAL page a converted file (one index page 1 file in 60)', (b.log - a.log) / b.n < 0.1, `${a.log} pages without it, ${b.log} with it, for ${b.n} files swapped one commit each: ${((b.log - a.log) / b.n).toFixed(3)} a file more`)
+}
 // an index written before `thinned` gains the column, its partial index and the in-flight table at open
 {
   const f = join(ROOT, 'before-thin.db')
