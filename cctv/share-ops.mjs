@@ -380,6 +380,12 @@ export function makeShareOps({ id, root: rootIn }) {
         buf = await readWhole(n.seg, tick)
         rows = parseIdx(await readWhole(n.idx, tick))
       } catch (e) {
+        // A share unmounted since the marker was read leaves an empty folder, where the file is "not
+        // there": the server would take that for a file gone for good and never look at it again (review
+        // of p3-thin, 2026-09-29), so the marker is read once more first, as unlink does.
+        const m = await markerIdNow()
+        tick()
+        if (m !== id) throw refuse('EMARKER', `${root} lost its marker while ${basename(r)} was read (unmounted?): nothing touched`)
         return { outcome: 'skipped', why: `cannot read it (${e.code || e.message})` }
       }
       if (!rows.length) return { outcome: 'skipped', why: 'no index rows' }

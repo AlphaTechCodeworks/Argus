@@ -312,6 +312,30 @@ check('the answer time is still 10 s', SHARE_ANSWER_MS === 10_000)
   const noMarker = await settle(shareCall(loc, 'thin', { path: b, timelapseS: 10, cursor: null, maxBytes: 1e9 }))
   check('thin with the marker gone: refused, untouched', noMarker.e?.code === 'EMARKER' && readFileSync(b).equals(bBefore))
 }
+{
+  // The share unmounted between the marker read and the file's: its mount point is an empty folder, where
+  // the file is "not there". That is EMARKER (the server stops the location and leaves the row as it was),
+  // not "cannot read it (ENOENT)", which the server takes for a file really gone and marks for good, so
+  // the file would stay full video for ever (review of p3-thin, 2026-09-29). The helper's own ops, in this
+  // process: tick() after the marker read is the moment the share goes.
+  const { makeShareOps } = await import('../share-ops.mjs')
+  const loc = location('thin-unmounted', 'LU')
+  const p = join(loc.path, 'n1', '0', '2026-09-22', '06', '00.h264')
+  makeSegment(p, T0)
+  const ops = makeShareOps({ id: loc.id, root: loc.path })
+  const aside = join(base, 'thin-unmounted-away')
+  let ticks = 0
+  const unmount = () => {
+    if (ticks++ === 0) renameSync(loc.path, aside) // the share's files go with it; an empty folder is left
+    if (ticks === 1) mkdirSync(loc.path)
+  }
+  const gone = await settle(ops.thin({ path: p, timelapseS: 10, cursor: null, maxBytes: 1e9, swap: false }, unmount))
+  check('THE SHARE UNMOUNTED AFTER THE MARKER READ: the file "not there" is EMARKER, not a file gone for good', gone.e?.code === 'EMARKER', JSON.stringify(gone.v ?? gone.e?.message))
+  rmSync(loc.path, { recursive: true, force: true })
+  renameSync(aside, loc.path)
+  const still = await settle(ops.thin({ path: join(dirname(p), '59.h264'), timelapseS: 10, cursor: null, maxBytes: 1e9, swap: false }, () => {}))
+  check('... while with the marker there a file not there is still "cannot read it (ENOENT)"', still.v?.outcome === 'skipped' && /cannot read it \(ENOENT\)/.test(still.v.why), JSON.stringify(still.v ?? still.e?.message))
+}
 
 // ---- a swap that did not finish is never committed, and its original never swept up ----------------
 // Review of p1-helper (2026-09-29): thinCommit trusted that the swap had finished. After one that
