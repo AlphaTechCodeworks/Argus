@@ -217,7 +217,9 @@ check('cycling unknown (no footage indexed there) still alerts only on a confide
   check('...the days the jobs work from', body.jobs.defaults.fullDays === 30 && body.jobs.defaults.retentionDays === 180 && body.jobs.defaults.timelapseS === 10 && body.jobs.defaults.after === 'timelapse', JSON.stringify(body.jobs.defaults))
   check('...how many cameras have days of their own', body.jobs.camerasOwnDays === 1, body.jobs.camerasOwnDays)
   check('...and no last run before there has been one', body.jobs.thinning === null && body.jobs.retention === null)
-  check('...and how fast and when time-lapse is written (thin-pace.mjs)', body.jobs.pace === '40 MB/s, 3 files at a time; nights 20:00-06:00 site time', body.jobs.pace)
+  // the pace as it is now, its ceiling included (a fresh start: half the most, a step up after each clean night;
+  // review of p3-thin, round 2), so an admin reads it before switching On
+  check('...and how fast and when time-lapse is written, as it is now (thin-pace.mjs)', body.jobs.pace === '20 MB/s (up to 40 MB/s: it rises by 5 MB/s after each night of rounds with no "disk too slow"), 3 files at a time; nights 20:00-06:00 site time', body.jobs.pace)
   await runStorageJobs({
     mode: 'dry-run',
     index: {},

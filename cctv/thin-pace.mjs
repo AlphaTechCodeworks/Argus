@@ -5,8 +5,12 @@
 //   decideRun({ now, ... })   whether this 5-minute round converts, and why (in words for the page)
 //   makeBucket(bytesPerSec)   spaces the files so the reads stay at the pace
 //   noteRecorderGap(m)        the recorder's gap reports (nvrs.mjs): "disk too slow" makes it stand back
-//   noteRound / settleRound   each round with the switch On, looked at once the next begins: the pace
-//                             backs off after a "disk too slow" in it, and what it converted is counted
+//   noteRecorderQueues(n, r)  the recorders' write queues (their stats, nvrs.mjs): writes waiting, the
+//                             warning before a gap, make it stand back too
+//   noteRound / settleRound   each round with the switch On, looked at again as the next ones begin: the
+//                             pace's ceiling moves with the reports whose gaps began in it, and what it
+//                             converted is counted
+//   usePaceFile(file)         where the ceiling is kept (DATA_DIR/thin-pace.json)
 //
 // The pace. Footage passes its full-video days at the rate it is recorded: 17.1 MB/s on average, 19.1
 // MB/s on the 1.65 TB days (verify-1), so the job must convert faster than that while it works, or it
@@ -25,8 +29,9 @@
 // the default, 40 MB/s, is the round figure that meets the 16 hours on that model with room (14.3 h for
 // the biggest day, 12.8 h for an average one: test/thin-pace.test.mjs), not a measured capacity; at 40
 // MB/s of reads plus ~4.4 MB/s of time-lapse written, the NAS link (1 Gbit/s, ~117 MB/s) would carry about
-// 60-65 MB/s with the recording. What keeps recording safe if the NAS cannot take it is the back-off
-// below; CCTV_THIN_MBPS in /etc/cctv/cctv.env lowers the pace by hand.
+// 60-65 MB/s with the recording. What keeps recording safe if the NAS cannot take it is the ceiling
+// below, which starts at half this pace and rises only after whole nights without a recording gap;
+// CCTV_THIN_MBPS in /etc/cctv/cctv.env lowers the pace, and so the most the ceiling rises to, by hand.
 //
 // When. Nights first (CCTV_THIN_NIGHT, site time, 20:00-06:00 by default: fewer people watching, so
 // fewer playback reads on the NAS and on the server): at night every round converts. By day a round
@@ -38,12 +43,12 @@
 // that gives the job only 16 MB/s).
 //
 // Standing back. A round never starts, and a round under way stops taking new files, within
-// SLOW_HOLD_MS of the recorder reporting "disk too slow": recording always has the disk first. And it
-// backs off (review of p3-thin, 2026-09-29: standing back 10 minutes came only after a recording gap,
-// then went on at the same pace, so a pace too fast for the NAS would cost recording night after night):
-// a report during a round, or within AFTER_ROUND_MS of its end, halves the pace, down to BACKOFF_MIN of it,
-// for the rest of that night (an hour by day); from then on each hour of rounds with no such report
-// doubles it back, to the whole pace at most. Kept in memory: a restart starts again at the whole pace.
+// SLOW_HOLD_MS of the recorder reporting "disk too slow", or STRAIN_HOLD_MS of a recorder's writes seen
+// waiting half as long as a gap takes (the warning before one): recording always has the disk first. And
+// the pace has a ceiling learned from the rounds and kept in DATA_DIR (the section below says how: review
+// of p3-thin, 2026-09-29 and round 2, 2026-09-30): a fresh start at half the pace; half what a round ran at
+// after a gap that began in it; a step up only after a whole night of rounds with none.
+import { readFile, rename, writeFile } from 'node:fs/promises'
 import { siteMinutesOfDay } from './site-time.mjs'
 
 /**
@@ -154,27 +159,39 @@ export function hoursToNightEnd(now, night, siteMin = siteMinutesOfDay) {
 /**
  * Whether this round converts. backlogBytes: full video past its full-video days, waiting (the index's
  * figure); arrivalBytesPerHour: the rate footage passes the cutoff (what the cameras recorded in the
- * hours just before it). slow: lastDiskTooSlow(). factor: the back-off (paceFactor()); achievedMBps: what
- * recent rounds converted (achievedMBps(), null while unknown): the coming night is judged at the lower of
- * the pace so lowered and that.
- * @returns {{ work: boolean, night: boolean, why: string }}
+ * hours just before it). slow: lastDiskTooSlow(); strain: lastStrain(). factor: the ceiling (paceFactor());
+ * achievedMBps: what recent rounds converted (achievedMBps(), null while unknown): the coming night is judged
+ * at the lower of the pace so lowered and that.
+ * A round held back by the recorders (held) says whether it would otherwise have worked (wouldWork): by day,
+ * waiting for the night, it would not have, and runThinning does not count it as a round that converted
+ * nothing (review of p3-thin, round 2: on a shared NAS, "disk too slow" reports its other users caused made
+ * the day rule work by day, adding load just when the NAS was under stress).
+ * @returns {{ work: boolean, night: boolean, why: string, held?: true, wouldWork?: boolean }}
  */
-export function decideRun({ now, backlogBytes, arrivalBytesPerHour = 0, pace, siteMin = siteMinutesOfDay, slow = lastDiskTooSlow(), factor = paceFactor(), achievedMBps: achieved = achievedMBps() }) {
+export function decideRun({ now, backlogBytes, arrivalBytesPerHour = 0, pace, siteMin = siteMinutesOfDay, slow = lastDiskTooSlow(), strain = lastStrain(), factor = paceFactor(pace), achievedMBps: achieved = achievedMBps() }) {
   const night = inNight(now, pace.night, siteMin)
   if (!(backlogBytes > 0)) return { work: false, night, why: 'nothing waiting' }
+  const base = night ? { work: true, night, why: 'night hours' } : dayRule()
+  const cam = (x) => (x.nvr !== undefined && x.nvr !== null && x.ch !== undefined && x.ch !== null ? ` (${x.nvr}/${Number(x.ch) + 1})` : '')
   if (slow && now - slow.at >= 0 && now - slow.at < SLOW_HOLD_MS) {
-    const cam = slow.nvr !== undefined && slow.ch !== undefined ? ` (${slow.nvr}/${Number(slow.ch) + 1})` : ''
-    return { work: false, night, held: true, why: `the recorder reported "disk too slow" at ${hhmm(siteMin(slow.at))}${cam}: time-lapse waits ${SLOW_HOLD_MS / 60_000} minutes after that, so recording keeps the disk` }
+    return { work: false, night, held: true, wouldWork: base.work, why: `the recorder reported "disk too slow" at ${hhmm(siteMin(slow.at))}${cam(slow)}: time-lapse waits ${SLOW_HOLD_MS / 60_000} minutes after that, so recording keeps the disk` }
   }
-  if (night) return { work: true, night, why: 'night hours' }
-  const nightHours = ((pace.night.to - pace.night.from + 1440) % 1440) / 60
-  const byPace = pace.mbps * factor
-  const rate = Number.isFinite(achieved) && achieved >= 0 ? Math.min(byPace, achieved) : byPace
-  const how = rate >= pace.mbps ? '' : rate < byPace ? ` at the ${mbText(rate)} recent rounds converted` : ` at the pace lowered to ${mbText(rate)}`
-  const capNight = rate * 1e6 * 3600 * nightHours * DUTY
-  const due = backlogBytes + Math.max(0, arrivalBytesPerHour) * hoursToNightEnd(now, pace.night, siteMin)
-  if (due > capNight) return { work: true, night, why: `by day: about ${gb(due)} would be waiting by the end of the coming night, more than it can convert (${gb(capNight)}${how}), so it converts now rather than fall behind` }
-  return { work: false, night, why: `waiting for the night (${hhmm(pace.night.from)}-${hhmm(pace.night.to)} site time): it can convert the ${gb(backlogBytes)} waiting and what is recorded until then${how}` }
+  if (strain && now - strain.at >= 0 && now - strain.at < STRAIN_HOLD_MS) {
+    const how = Number.isFinite(strain.ageMs) ? ` ${(strain.ageMs / 1000).toFixed(1)} s` : ''
+    return { work: false, night, held: true, wouldWork: base.work, why: `the recorders' writes waited${how} to be written at ${hhmm(siteMin(strain.at))}${cam(strain)}: time-lapse waits ${STRAIN_HOLD_MS / 60_000} minutes after that, so recording keeps the disk` }
+  }
+  return base
+
+  function dayRule() {
+    const nightHours = ((pace.night.to - pace.night.from + 1440) % 1440) / 60
+    const byPace = pace.mbps * factor
+    const rate = Number.isFinite(achieved) && achieved >= 0 ? Math.min(byPace, achieved) : byPace
+    const how = rate >= pace.mbps ? '' : rate < byPace ? ` at the ${mbText(rate)} recent rounds converted` : ` at the pace lowered to ${mbText(rate)}`
+    const capNight = rate * 1e6 * 3600 * nightHours * DUTY
+    const due = backlogBytes + Math.max(0, arrivalBytesPerHour) * hoursToNightEnd(now, pace.night, siteMin)
+    if (due > capNight) return { work: true, night, why: `by day: about ${gb(due)} would be waiting by the end of the coming night, more than it can convert (${gb(capNight)}${how}), so it converts now rather than fall behind` }
+    return { work: false, night, why: `waiting for the night (${hhmm(pace.night.from)}-${hhmm(pace.night.to)} site time): it can convert the ${gb(backlogBytes)} waiting and what is recorded until then${how}` }
+  }
 }
 
 /**
@@ -195,100 +212,336 @@ export function makeBucket(bytesPerSec, { now = () => performance.now(), sleep =
   }
 }
 
-// ---- "disk too slow" ---------------------------------------------------------------------------------
-let slowLast = null
+// ---- what the recorders report: "disk too slow", and their writes waiting ------------------------------
+/** Reports are kept this long after they arrive, for the rounds they fall in (settleRound). */
+const REPORTS_KEPT_MS = 30 * 60_000
+const REPORTS_MAX = 2000
+/**
+ * The warning before a gap (review of p3-thin, round 2, 2026-09-30): each recorder's write queue, in its
+ * worker's stats every 5 s (Recorder.status().queue). segment-writer.mjs drops frames -- a "disk too slow"
+ * gap -- once a write has waited 10 s or 8 MB wait to be written; half of either is the NAS falling behind
+ * with nothing lost yet. Not calibrated on the site (nobody has recorded the queues' normal ages there): a
+ * write waiting 5 s beside ~0.2 MB/s per camera is far outside what a healthy share does.
+ */
+export const STRAIN_AGE_MS = 5000
+export const STRAIN_BYTES = 4 * 1024 * 1024
+/** How long after writes were seen waiting thinning stands back (a round; a gap's is SLOW_HOLD_MS). */
+export const STRAIN_HOLD_MS = 5 * 60_000
+/** One NVR's waiting writes are one report this often at most (its stats come every 5 s). */
+const STRAIN_EVERY_MS = 30_000
 
-/** A recorder's gap report ({t:'recgap', nvr, ch, reason}; nvrs.mjs): a "disk too slow" one is remembered. */
-export function noteRecorderGap(m, now = Date.now()) {
-  if (/disk too slow/i.test(String(m?.reason ?? ''))) slowLast = { at: now, nvr: m.nvr, ch: m.ch, reason: String(m.reason) }
+let reports = [] // { kind: 'gap' | 'strain', at, fromMs, nvr, ch, reason }, in the order they came
+let slowLast = null
+let strainLast = null
+
+function keep(r) {
+  reports.push(r)
+  const old = r.at - REPORTS_KEPT_MS
+  while (reports.length && (reports[0].at < old || reports.length > REPORTS_MAX)) reports.shift()
 }
 
-/** { at, nvr, ch, reason } of the last "disk too slow" report since the server started, or null. */
-export const lastDiskTooSlow = () => (slowLast ? { ...slowLast } : null)
+/**
+ * A recorder's gap report ({t:'recgap', nvr, ch, fromMs, toMs, reason}; nvrs.mjs): a "disk too slow" one is
+ * kept, with when it came (`at`: the stand-back runs from it) and when its gap began (`fromMs`: the round it
+ * falls in). A recorder reports a gap when it records again, so after a long stall that is minutes later, and
+ * every camera of a stall reports it on its own (review of p3-thin, round 2: only the last was kept, by when
+ * it came).
+ */
+export function noteRecorderGap(m, now = Date.now()) {
+  if (!/disk too slow/i.test(String(m?.reason ?? ''))) return
+  const fromMs = Number.isFinite(m.fromMs) && m.fromMs <= now ? m.fromMs : now
+  slowLast = { kind: 'gap', at: now, fromMs, nvr: m.nvr, ch: m.ch, reason: String(m.reason) }
+  keep({ ...slowLast })
+}
 
-// ---- the rounds: the back-off after "disk too slow", and what they converted -------------------------------
+/**
+ * One worker's recorder status (nvr-worker.mjs STATS, every 5 s; nvrs.mjs): a camera whose oldest write has
+ * waited STRAIN_AGE_MS, or with STRAIN_BYTES waiting, is kept as a report of kind 'strain', its gap-to-be
+ * begun when that write was queued.
+ */
+export function noteRecorderQueues(nvr, rec, now = Date.now()) {
+  if (!rec || typeof rec !== 'object') return
+  let worst = null
+  for (const [ch, c] of Object.entries(rec)) {
+    const q = c?.queue
+    if (!q) continue
+    const ageMs = Math.max(0, Number(q.ageMs) || 0)
+    const bytes = Math.max(0, Number(q.bytes) || 0)
+    if ((ageMs >= STRAIN_AGE_MS || bytes >= STRAIN_BYTES) && (!worst || ageMs > worst.ageMs || (ageMs === worst.ageMs && bytes > worst.bytes))) worst = { ch: Number(ch), ageMs, bytes }
+  }
+  if (!worst) return
+  if (strainLast && strainLast.nvr === nvr && now - strainLast.at >= 0 && now - strainLast.at < STRAIN_EVERY_MS) return
+  const reason = `writes waiting to be written: ${(worst.bytes / 1048576).toFixed(1)} MB, the oldest for ${(worst.ageMs / 1000).toFixed(1)} s`
+  strainLast = { kind: 'strain', at: now, fromMs: now - worst.ageMs, nvr, ch: worst.ch, ageMs: worst.ageMs, bytes: worst.bytes, reason }
+  keep({ ...strainLast })
+}
+
+/** { at, fromMs, nvr, ch, reason } of the last "disk too slow" report since the server started, or null. */
+export const lastDiskTooSlow = () => (slowLast ? { ...slowLast } : null)
+/** The last time a recorder's writes were seen waiting (noteRecorderQueues), or null. */
+export const lastStrain = () => (strainLast ? { ...strainLast } : null)
+/** Every report kept (the last half hour), oldest first. */
+export const recorderReports = () => reports.map((r) => ({ ...r }))
+
+// ---- the ceiling: learned from the rounds, kept in DATA_DIR ------------------------------------------------
+// Review of p3-thin, round 2 (2026-09-30): the back-off before this halved the pace for the rest of a night,
+// then doubled it back after each clean hour of rounds (by day after an hour), in memory. A NAS that takes
+// 22-30 MB/s beside the recording then cost 8-9 recording gaps a day, every day, and a restart went back to
+// 40. Now the pace has a ceiling, moved only by what the rounds show:
+//  - a fresh start is at half the pace (START_SHARE: 20 of 40 MB/s): nothing has measured the NAS beside the
+//    recording (the header), and verify-1 said to start low and watch;
+//  - a "disk too slow", or writes waiting (STRAIN_*), whose gap began during a round or AFTER_ROUND_MS after
+//    its end caps it at half what that round ran at (down to BACKOFF_MIN of the pace), once per round however
+//    many cameras report the one stall; and that pace is remembered as one the NAS could not take (badMbps);
+//  - each whole night of rounds (NIGHT_EVIDENCE_MS of work or more) with none raises it one step (STEP_SHARE:
+//    5 MB/s of 40), never by day, never twice a night; up to the pace, or, below a pace that cost a gap, up to
+//    one step under it; that one is tried again only after PROBE_FIRST whole nights there with none, then 4,
+//    8, 16 after each try that costs a gap again (a clean night at it forgets it);
+//  - it is kept in DATA_DIR/thin-pace.json (usePaceFile), so a restart goes on from it.
+// So a round too fast for the NAS costs at most one gap between two whole nights without one, and once the
+// ceiling has found what the NAS takes, fewer and fewer (the test runs NASes taking 12-36 MB/s for three weeks:
+// never more than one gap a day). Halving and then stepping up alone (the review's first form) averaged about
+// three quarters of what the NAS takes, so at 30 MB/s it fell a day behind 1.5 TB days; held one step under
+// the pace that cost a gap, it keeps up.
 /** A "disk too slow" this long after a round's end still counts as during it: recording's writes reach the NAS up to ~30 s late (the kernel's dirty-page expiry). */
 export const AFTER_ROUND_MS = 60_000
-/** Each such report halves the pace, down to this share of it (5 MB/s of 40). */
+/** A report may come this long after the round it is about ended (it comes when recording resumes). */
+export const REPORT_LATE_MS = 10 * 60_000
+/** The ceiling never goes below this share of the pace (5 MB/s of 40). */
 export const BACKOFF_MIN = 1 / 8
-/** Once the night of the last report is over, each hour of rounds (12 rounds' working time) with none doubles the pace back. */
-export const BACKOFF_STEP_MS = 12 * RUN_MS
-/** By day (a round only when it must catch up), a lowered pace holds this long before it may come back. */
-const DAY_HOLD_MS = 60 * 60_000
+/** A fresh start: this share of the pace. */
+export const START_SHARE = 1 / 2
+/** Each whole night of rounds with no report raises the ceiling by this share of the pace. */
+export const STEP_SHARE = 1 / 8
+/** A night whose rounds worked less than this in all shows too little: no step. */
+export const NIGHT_EVIDENCE_MS = 60 * 60_000
+/** Whole nights one step under a pace that cost a gap before that pace is tried again; doubled after each try that costs one, to PROBE_MOST. */
+export const PROBE_FIRST = 2
+export const PROBE_MOST = 16
 /** What the rounds converted is counted over the last this many (an hour of rounds), once there are 3. */
 const ROUNDS_KEPT = 12
 
-const freshRounds = () => ({ last: null, factor: 1, holdUntil: -Infinity, cleanMs: 0, slow: null, samples: [] })
-let rounds = freshRounds()
+const freshState = () => ({ capMbps: null, badMbps: null, topNights: 0, probeEvery: PROBE_FIRST, lowered: null, raised: null, night: null })
+let state = freshState() // saved in DATA_DIR
+let recent = [] // the rounds not looked at for good yet: { start, end, bytes, full, held, mbps, sampled, flagged, counted }
+let samples = []
 
-/**
- * A round with the switch On is over (thinning.mjs runThinning): when it worked and what it converted.
- * full: it ended for want of time -- its minutes up, "disk too slow", every location stopped -- so what it
- * converted says what the NAS and the helper can do; a round that ran out of files, or was stopped by the
- * switch or the per-run limit, says nothing about that. held: it did not work at all because the recorder
- * had just said "disk too slow" (counted as a round that converted nothing).
- */
-export function noteRound({ start, end, bytes = 0, full = false, held = false }) {
-  rounds.last = { start, end, bytes: Math.max(0, Number(bytes) || 0), full: Boolean(full), held: Boolean(held), settled: false }
+const stepOf = (pace) => pace.mbps * STEP_SHARE
+const floorOf = (pace) => pace.mbps * BACKOFF_MIN
+/** The ceiling now, in MB/s of footage read: never above the pace. */
+const capOf = (pace) => Math.min(pace.mbps, Number.isFinite(state.capMbps) ? Math.max(floorOf(pace), state.capMbps) : pace.mbps * START_SHARE)
+/** How high clean nights take the ceiling: the pace, or one step under a pace that cost a gap. */
+const topOf = (pace) => (Number.isFinite(state.badMbps) ? Math.max(floorOf(pace), Math.min(pace.mbps, state.badMbps - stepOf(pace))) : pace.mbps)
+/** Where the night that `t` is in ends (a minute's start), or null by day. */
+function nightEndOf(t, night, siteMin) {
+  if (!inNight(t, night, siteMin)) return null
+  const m = siteMin(t)
+  return Math.floor(t / 60_000) * 60_000 + ((night.to - m + 1440) % 1440) * 60_000
 }
 
 /**
- * The last round, looked at once, when the next begins (runThinning, with the switch On): a minute or so
- * after it ended, as it works at most 4 minutes of each 5, so a "disk too slow" up to AFTER_ROUND_MS after it
- * has been reported by then. Such a report halves the pace for the rest of that night; a round with none
- * counts towards doubling it back once that night is over; what a full round converted is kept. (Not held
- * back until the minute is up: a round that overran its 4 minutes by a few seconds would then be replaced
- * by the next one unlooked at.)
+ * A round with the switch On is over (thinning.mjs runThinning): when it worked, what it converted, and at
+ * what pace (mbps: the ceiling it ran at). full: it ended for want of time -- its minutes up, the disk too
+ * slow, every location stopped -- so what it converted says what the NAS and the helper can do; a round that
+ * ran out of files, or was stopped by the switch or the per-run limit, says nothing about that. held: it did
+ * not work because the recorder had just said the disk was too slow, when it otherwise would have (counted as
+ * a round that converted nothing).
  */
-export function settleRound({ slow = lastDiskTooSlow(), night, siteMin = siteMinutesOfDay }) {
-  const r = rounds.last
-  if (!r || r.settled) return
-  r.settled = true
-  const during = !r.held && slow && slow.at >= r.start && slow.at <= r.end + AFTER_ROUND_MS && slow.at !== rounds.slow?.at
-  if (during) {
-    rounds.factor = Math.max(BACKOFF_MIN, rounds.factor / 2)
-    rounds.holdUntil = inNight(slow.at, night, siteMin) ? slow.at + hoursToNightEnd(slow.at, night, siteMin) * 3_600_000 : slow.at + DAY_HOLD_MS
-    rounds.cleanMs = 0
-    rounds.slow = { ...slow }
-  } else if (!r.held && rounds.factor < 1 && r.start >= rounds.holdUntil) {
-    rounds.cleanMs += Math.max(0, r.end - r.start)
-    while (rounds.cleanMs >= BACKOFF_STEP_MS && rounds.factor < 1) {
-      rounds.factor = Math.min(1, rounds.factor * 2)
-      rounds.cleanMs -= BACKOFF_STEP_MS
+export function noteRound({ start, end, bytes = 0, full = false, held = false, mbps = null }) {
+  recent.push({ start, end: Math.max(start, end), bytes: Math.max(0, Number(bytes) || 0), full: Boolean(full), held: Boolean(held), mbps: Number.isFinite(mbps) && mbps > 0 ? mbps : null, sampled: false, flagged: false, counted: false })
+  if (recent.length > 64) recent.shift()
+}
+
+/**
+ * The rounds, looked at again at the start of each (runThinning, switch On; `now`): each report is set against
+ * the rounds its gap began in (settle once per round), what full rounds converted is counted, and a night over
+ * with all its rounds looked at is judged. reports: recorderReports() by default (a test's own too).
+ */
+export function settleRound({ now = Date.now(), reports: list = reports, night, siteMin = siteMinutesOfDay, pace = thinPace() }) {
+  let changed = false
+  const gapStart = (x) => (Number.isFinite(x?.fromMs) ? x.fromMs : x?.at)
+  for (const r of recent) {
+    // what it converted, once, when the next round begins (a round's share of the time is its slot, RUN_MS,
+    // however soon the disk stopped it)
+    if (!r.sampled) {
+      r.sampled = true
+      if (r.full || r.held) {
+        samples.push({ bytes: r.held ? 0 : r.bytes, ms: RUN_MS })
+        if (samples.length > ROUNDS_KEPT) samples.shift()
+      }
     }
-    if (rounds.factor >= 1) rounds.cleanMs = 0
+    if (!r.held && !r.flagged) {
+      const hit = list.find((x) => x && gapStart(x) >= r.start && gapStart(x) <= r.end + AFTER_ROUND_MS)
+      if (hit) {
+        r.flagged = true
+        const was = capOf(pace)
+        const ran = r.mbps ?? was
+        // a try of the pace that cost a gap before (the ceiling was there): the next try waits twice as long
+        if (Number.isFinite(state.badMbps) && was >= state.badMbps) state.probeEvery = Math.min(PROBE_MOST, (state.probeEvery || PROBE_FIRST) * 2)
+        state.badMbps = Number.isFinite(state.badMbps) ? Math.min(state.badMbps, ran) : ran
+        state.topNights = 0
+        const to = Math.max(floorOf(pace), Math.min(was, ran / 2))
+        if (to < was) state.capMbps = to
+        state.lowered = { at: hit.at, fromMs: gapStart(hit), kind: hit.kind === 'strain' ? 'strain' : 'gap', nvr: hit.nvr ?? null, ch: hit.ch ?? null, ageMs: Number.isFinite(hit.ageMs) ? hit.ageMs : null, ranMbps: ran, toMbps: Math.min(was, to) }
+        changed = true
+      }
+    }
+    // counted towards its night once no report about it can still come
+    if (!r.counted && now - r.end >= REPORT_LATE_MS) {
+      r.counted = true
+      const ends = r.held ? null : nightEndOf(r.start, night, siteMin)
+      if (ends !== null) {
+        if (state.night && state.night.endsAt !== ends) changed = judgeNight(pace) || changed
+        if (!state.night) state.night = { endsAt: ends, workMs: 0, gap: false }
+        state.night.workMs += r.end - r.start
+        if (r.flagged) state.night.gap = true
+        changed = true
+      }
+    }
   }
-  // a round's share of the time is its slot (RUN_MS), however soon a "disk too slow" stopped it
-  if (r.full || r.held) {
-    rounds.samples.push({ bytes: r.held ? 0 : r.bytes, ms: RUN_MS })
-    if (rounds.samples.length > ROUNDS_KEPT) rounds.samples.shift()
-  }
+  recent = recent.filter((r) => !r.counted || !r.sampled)
+  // a night over, and every round of it looked at for good: one step up if none of them had a report
+  if (state.night && now >= state.night.endsAt && !recent.some((r) => !r.counted && !r.held && nightEndOf(r.start, night, siteMin) === state.night.endsAt)) changed = judgeNight(pace) || changed
+  if (changed) save()
 }
 
-/** The share of the pace the back-off leaves: 1, 1/2, 1/4 or 1/8. */
-export const paceFactor = () => rounds.factor
-/** MB/s of footage read now: the pace, backed off. */
-export const effectiveMbps = (pace) => pace.mbps * rounds.factor
+/** A night over: a whole night of rounds with no report moves the ceiling up one step (the header says how far). */
+function judgeNight(pace) {
+  const n = state.night
+  state.night = null
+  if (!n || n.gap || n.workMs < NIGHT_EVIDENCE_MS) return true
+  const was = capOf(pace)
+  let to = was
+  if (Number.isFinite(state.badMbps) && was >= state.badMbps) {
+    // a whole night at the pace that once cost a gap, with none: it no longer does
+    state.badMbps = null
+    state.probeEvery = PROBE_FIRST
+    state.topNights = 0
+    to = was + stepOf(pace)
+  } else if (was < topOf(pace)) to = Math.min(topOf(pace), was + stepOf(pace))
+  else if (Number.isFinite(state.badMbps)) {
+    // one step under it: tried again after so many whole nights here with none
+    state.topNights = (state.topNights || 0) + 1
+    if (state.topNights >= (state.probeEvery || PROBE_FIRST)) {
+      state.topNights = 0
+      to = state.badMbps
+    }
+  }
+  to = Math.min(pace.mbps, to)
+  if (to > was) {
+    state.capMbps = to
+    state.raised = { at: n.endsAt, fromMbps: was, toMbps: to }
+  }
+  return true
+}
+
+/** The share of the pace the ceiling leaves now (1 at the whole pace). */
+export const paceFactor = (pace = thinPace()) => capOf(pace) / pace.mbps
+/** MB/s of footage read now: the pace under its ceiling. */
+export const effectiveMbps = (pace = thinPace()) => capOf(pace)
 /** MB/s the last rounds that could work their whole time converted (a round held back counts as none), or null before 3 of them. */
 export function achievedMBps() {
-  if (rounds.samples.length < 3) return null
-  const bytes = rounds.samples.reduce((a, s) => a + s.bytes, 0)
-  const ms = rounds.samples.reduce((a, s) => a + s.ms, 0)
+  if (samples.length < 3) return null
+  const bytes = samples.reduce((a, s) => a + s.bytes, 0)
+  const ms = samples.reduce((a, s) => a + s.ms, 0)
   return bytes / 1e6 / (ms / 1000)
 }
-/** The back-off in words, for the page and the log; '' at the whole pace. */
-export function backoffText(pace, siteMin = siteMinutesOfDay) {
-  if (rounds.factor >= 1) return ''
-  const halvings = Math.round(Math.log2(1 / rounds.factor))
-  const s = rounds.slow
-  const cam = s?.nvr !== undefined && s?.ch !== undefined ? ` (${s.nvr}/${Number(s.ch) + 1})` : ''
-  const when = s ? ` after the recorder reported "disk too slow" at ${hhmm(siteMin(s.at))} site time${cam} while it converted` : ''
-  return `the pace is ${halvings === 1 ? 'halved' : `halved ${halvings} times`}, to ${mbText(effectiveMbps(pace))} of ${mbText(pace.mbps)},${when}; it doubles back after each hour of rounds with no such report, once that night is over`
+/** The ceiling as it stands, for the page: { mbps, maxMbps, badMbps, lowered, raised }. */
+export const paceState = (pace = thinPace()) => ({ mbps: capOf(pace), maxMbps: pace.mbps, badMbps: Number.isFinite(state.badMbps) ? state.badMbps : null, lowered: state.lowered ? { ...state.lowered } : null, raised: state.raised ? { ...state.raised } : null })
+
+/**
+ * The pace as it is now, for the page: "20 MB/s (up to 40 MB/s: it rises by 5 MB/s after each night of rounds
+ * with no "disk too slow"), 3 files at a time; nights 20:00-06:00 site time"; or, held one step under a pace that
+ * cost a gap, "35 MB/s (up to 40 MB/s: 40 MB/s cost a recording gap; tried again after 2 more nights with none), ...".
+ */
+export function describePaceNow(pace = thinPace()) {
+  const cap = capOf(pace)
+  if (cap >= pace.mbps) return describePace(pace)
+  const bad = state.badMbps
+  const nights = Math.max(1, (state.probeEvery || PROBE_FIRST) - (state.topNights || 0))
+  const how =
+    Number.isFinite(bad) && cap >= topOf(pace)
+      ? `${mbText(bad)} cost a recording gap; tried again after ${nights} more night${nights === 1 ? '' : 's'} of rounds with none`
+      : `it rises by ${mbText(stepOf(pace))} after each night of rounds with no "disk too slow"${Number.isFinite(bad) ? `, to ${mbText(topOf(pace))}` : ''}`
+  return `${mbText(cap)} (up to ${mbText(pace.mbps)}: ${how}), ${describePace(pace).replace(/^[^,]*, /, '')}`
 }
+
+/**
+ * A lowered ceiling in words, for the page and the log (a warning), until it is back one step under the pace
+ * that cost the gap; '' otherwise -- a fresh start stepping up, and the ceiling held under that pace, are said
+ * in describePaceNow. "at 01:00 site time" gains the day when it was not today.
+ */
+export function backoffText(pace = thinPace(), siteMin = siteMinutesOfDay, now = Date.now()) {
+  const cap = capOf(pace)
+  const lo = state.lowered
+  if (cap >= pace.mbps || !lo || cap >= Math.min(lo.ranMbps, topOf(pace))) return ''
+  const t = lo.fromMs ?? lo.at
+  const cam = lo.nvr !== null && lo.nvr !== undefined && lo.ch !== null && lo.ch !== undefined ? ` (${lo.nvr}/${Number(lo.ch) + 1})` : ''
+  const day = now - t > 20 * 3_600_000 ? ` on ${siteDayText(t, siteMin)}` : ''
+  const what = lo.kind === 'strain' ? `the recorders' writes waited${Number.isFinite(lo.ageMs) ? ` ${(lo.ageMs / 1000).toFixed(1)} s` : ''} to be written` : 'the recorder reported "disk too slow"'
+  return `the pace is lowered to ${mbText(cap)} of ${mbText(pace.mbps)}: ${what} at ${hhmm(siteMin(t))} site time${day}${cam} while it converted at ${mbText(lo.ranMbps)}; it rises by ${mbText(stepOf(pace))} after each night of rounds with no such report, to ${mbText(topOf(pace))}`
+}
+/** "3 Oct": the site's date at `t`, its offset taken from siteMin (a test's site clock too). */
+function siteDayText(t, siteMin) {
+  const utcMin = Math.floor((((t / 60_000) % 1440) + 1440) % 1440)
+  const off = ((siteMin(t) - utcMin + 720 + 1440) % 1440) - 720
+  const d = new Date(t + off * 60_000)
+  return `${d.getUTCDate()} ${d.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' })}`
+}
+
+// ---- kept in DATA_DIR ------------------------------------------------------------------------------------
+let store = { file: null, saving: Promise.resolve() }
+
+/**
+ * Where the ceiling is kept (server.mjs: DATA_DIR/thin-pace.json, on the server's own disk). Read once, when
+ * first given; a file that cannot be read leaves the start, and says so. Asynchronous, as is every save.
+ */
+export async function usePaceFile(file) {
+  if (!file || store.file === file) return
+  store.file = file
+  let j
+  try {
+    j = JSON.parse(await readFile(file, 'utf8'))
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn(`[thinning] ${file} could not be read (${e.message}): the time-lapse pace starts again at ${START_SHARE * 100} % of its most`)
+    return
+  }
+  const num = (x) => (Number.isFinite(x) ? x : null)
+  const obj = (x) => (x && typeof x === 'object' && Number.isFinite(x.at) ? { ...x } : null)
+  state = {
+    capMbps: num(j?.capMbps) !== null && j.capMbps > 0 ? j.capMbps : null,
+    badMbps: num(j?.badMbps) !== null && j.badMbps > 0 ? j.badMbps : null,
+    topNights: num(j?.topNights) !== null && j.topNights >= 0 ? Math.floor(j.topNights) : 0,
+    probeEvery: num(j?.probeEvery) !== null && j.probeEvery >= PROBE_FIRST ? Math.min(PROBE_MOST, Math.floor(j.probeEvery)) : PROBE_FIRST,
+    lowered: obj(j?.lowered),
+    raised: obj(j?.raised),
+    night: j?.night && Number.isFinite(j.night.endsAt) && Number.isFinite(j.night.workMs) ? { endsAt: j.night.endsAt, workMs: Math.max(0, j.night.workMs), gap: Boolean(j.night.gap) } : null
+  }
+}
+
+function save() {
+  const file = store.file
+  if (!file) return
+  const body = `${JSON.stringify({ v: 1, savedAt: Date.now(), ...state })}\n`
+  store.saving = store.saving
+    .then(async () => {
+      await writeFile(`${file}.tmp`, body)
+      await rename(`${file}.tmp`, file)
+    })
+    .catch((e) => console.warn(`[thinning] ${file} not written (${e.message}): the time-lapse pace is kept in memory until the next save`))
+}
+
+/** Waits for the saves under way (tests; the server does not wait). */
+export const flushPace = () => store.saving
 
 export const _test = {
   reset() {
+    reports = []
     slowLast = null
-    rounds = freshRounds()
+    strainLast = null
+    state = freshState()
+    recent = []
+    samples = []
+    store = { file: null, saving: Promise.resolve() }
   }
 }

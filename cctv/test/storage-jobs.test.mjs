@@ -374,13 +374,18 @@ for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
     /import \{[^}]*\bprotectedRanges\b[^}]*\} from '\.\/bookmarks\.mjs'/.test(server) && /import \{[^}]*\bmarkerMatches\b[^}]*\} from '\.\/storage\.mjs'/.test(server) && /import \{[^}]*\brunRetention, runThinning\b[^}]*\} from '\.\/thinning\.mjs'/.test(server))
   // thinning converts for at most RUN_MS of each 5-minute round, counted from the round's start (before
   // housekeeping), so a long housekeeping shortens it and the next round is never pushed back (Task 4)
-  check('...thinning\'s deadline: the round\'s start plus thin-pace.mjs RUN_MS', /\bdeadline: roundStart \+ THIN_RUN_MS\b/.test(args) && /function thinAndRetain\(roundStart = Date\.now\(\)\)/.test(body) && /import \{ RUN_MS as THIN_RUN_MS \} from '\.\/thin-pace\.mjs'/.test(server), args)
+  check('...thinning\'s deadline: the round\'s start plus thin-pace.mjs RUN_MS', /\bdeadline: roundStart \+ THIN_RUN_MS\b/.test(args) && /function thinAndRetain\(roundStart = Date\.now\(\)\)/.test(body) && /import \{ RUN_MS as THIN_RUN_MS\b[^}]*\} from '\.\/thin-pace\.mjs'/.test(server), args)
   const tick = server.match(/setInterval\(\(\) => \{\n\s+if \(busy\) return[\s\S]*?\}, 5 \* 60_000\)/)?.[0] ?? ''
   check('...the round\'s start taken before housekeeping, handed to thinAndRetain', /const roundStart = Date\.now\(\)\n\s+runHousekeeping\(/.test(tick) && /thinAndRetain\(roundStart\)/.test(tick), tick.slice(0, 300))
   // "disk too slow" from the recorders reaches thin-pace.mjs (nvrs.mjs loads the SDK: its source is read here)
   const nvrs = readFileSync(new URL('../nvrs.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const onRec = nvrs.match(/const onRecording = \(m\) => \{\n[\s\S]*?\n\}\n/)?.[0] ?? ''
-  check('nvrs.mjs hands every recorder gap to thin-pace.mjs noteRecorderGap (thinning stands back on "disk too slow")', /if \(m\.t === 'recgap'\) \{[\s\S]*?noteRecorderGap\(m\)/.test(onRec) && /import \{ noteRecorderGap \} from '\.\/thin-pace\.mjs'/.test(nvrs), onRec.slice(0, 400))
+  check('nvrs.mjs hands every recorder gap to thin-pace.mjs noteRecorderGap (thinning stands back on "disk too slow")', /if \(m\.t === 'recgap'\) \{[\s\S]*?noteRecorderGap\(m\)/.test(onRec) && /import \{[^}]*\bnoteRecorderGap\b[^}]*\} from '\.\/thin-pace\.mjs'/.test(nvrs), onRec.slice(0, 400))
+  // the recorders' write queues, in each worker's stats every 5 s: the warning before a gap (review of p3-thin, round 2)
+  const onStats = nvrs.match(/onStats: \(s\) => \{[^}]*\}/)?.[0] ?? ''
+  check("...and every worker's stats to noteRecorderQueues (its recorders' writes waiting: thinning stands back before a gap)", /nvr\.workerStats\(s\)/.test(onStats) && /noteRecorderQueues\(nvr\.id, s\?\.rec\)/.test(onStats) && /import \{[^}]*\bnoteRecorderQueues\b[^}]*\} from '\.\/thin-pace\.mjs'/.test(nvrs), onStats)
+  // the pace's ceiling kept in DATA_DIR (in memory, a restart went back to the whole pace: review of p3-thin, round 2)
+  check("...thinning's pace ceiling kept in DATA_DIR/thin-pace.json, and read at start (the page says it before the first round)", /\bpaceFile: join\(auth\.DATA_DIR, 'thin-pace\.json'\)/.test(args) && /if \(LIVE_WORKER\) \{\n[^\n]*\n\s+usePaceFile\(join\(auth\.DATA_DIR, 'thin-pace\.json'\)\)/.test(server) && /import \{[^}]*\busePaceFile\b[^}]*\} from '\.\/thin-pace\.mjs'/.test(server), args)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

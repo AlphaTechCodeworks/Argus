@@ -52,7 +52,7 @@ import { afterStretch, checkFreeRose, firstUnprotected, freeingStalled, makeDele
 import { shareCall } from './share-calls.mjs'
 import { siteMinutesOfDay } from './site-time.mjs'
 import { markerPresent } from './storage-report.mjs'
-import { RUN_MS, SLOW_HOLD_MS, achievedMBps, backoffText, decideRun, describePace, effectiveMbps, lastDiskTooSlow, makeBucket, noteRound, paceFactor, settleRound, thinPace } from './thin-pace.mjs'
+import { RUN_MS, SLOW_HOLD_MS, STRAIN_HOLD_MS, achievedMBps, backoffText, decideRun, describePaceNow, effectiveMbps, lastDiskTooSlow, lastStrain, makeBucket, noteRound, paceFactor, recorderReports, settleRound, thinPace, usePaceFile } from './thin-pace.mjs'
 import { THIN_SUFFIX as suffix, planThin, thinNames as names } from './thin-file.mjs'
 
 // planThin, buildThinned and the check of a rewrite are in thin-file.mjs since 2026-09-29, so that the
@@ -309,6 +309,13 @@ const LOOK = 100
  * the footage is spread; on the development PC 1-3 ms to pass, 7-15 ms to sum when all of it is the
  * group's (the production VM passes rows about twice as fast: the review's 0.19 against 0.41 us a row).
  * Test: thinning.test.mjs, 20 of 87 cameras set to 'delete' on a 31-day index.
+ * What a whole dry run (or an On round's backlog) costs is every waiting row summed: about 1.8 us of main
+ * thread a row on the development PC, so 230 ms for one day of the 87 cameras (125,280 rows) and 3.3 s at 14
+ * days, in stretches of 19-28 ms (a window summed plus the pacer's 10 ms); about half that on the VM, some
+ * 120 ms a day waiting (review of p3-thin, round 2, 2026-09-30, and scratchpad p3fix2/dry-cost.mjs: p3-thin's
+ * "40 ms a day, in <= 10 ms slices" was wrong). Nothing waits at today's settings; with fullDays under the
+ * ~8 days the space limit keeps, one or two days. Weeks of it only with far more space and Dry run kept on
+ * for weeks: then a cache of each day's sums (kept right through every writer of the index) is the fix.
  */
 const WINDOW_ROWS = 5000
 /** Files noted in flight (thin_inflight) with the one about to go: the next ones read, in the same transaction. */
@@ -442,13 +449,16 @@ class FullStream {
  * @param {{ index: object, settings?: object, now?: number, dryRun?: boolean,
  *           present?: (loc)=>boolean, protectedRanges?: function|null, maxSegments?: number,
  *           share?: Function, armed?: () => boolean, deadline?: number, pace?: object,
- *           siteMin?: (ms) => number, slow?: () => object|null, clock?: () => number }} o
- *   now: the cutoffs are counted from it; clock: the time of day, the deadline and "disk too slow"
+ *           siteMin?: (ms) => number, slow?: () => object|null, strain?: () => object|null,
+ *           reports?: () => object[], paceFile?: string|null, clock?: () => number }} o
+ *   now: the cutoffs are counted from it; clock: the time of day, the deadline and "disk too slow";
+ *   slow / strain: the recorders' last "disk too slow" and writes seen waiting (thin-pace.mjs), reports: all
+ *   of them kept; paceFile: where the pace's ceiling is kept (server.mjs: DATA_DIR/thin-pace.json)
  * @returns {Promise<{ dryRun, files, bytes, freedBytes, estimate, backlog, after, decision, stopped, pace,
  *                     recovered, left, thinned: {path, wasBytes, nowBytes, keptKeyframes, droppedKeyframes}[],
  *                     skipped: {path, why, files?}[], warnings: string[], protection: 'ranges'|'none'|'unread' }>}
  */
-export async function runThinning({ index, settings = null, now = Date.now(), dryRun = true, present = markerPresent, protectedRanges, maxSegments = MAX_SEGMENTS_PER_RUN, share = shareCall, armed = null, deadline = null, pace = null, siteMin = siteMinutesOfDay, slow = lastDiskTooSlow, clock = Date.now } = {}) {
+export async function runThinning({ index, settings = null, now = Date.now(), dryRun = true, present = markerPresent, protectedRanges, maxSegments = MAX_SEGMENTS_PER_RUN, share = shareCall, armed = null, deadline = null, pace = null, siteMin = siteMinutesOfDay, slow = lastDiskTooSlow, strain = lastStrain, reports = recorderReports, paceFile = null, clock = Date.now } = {}) {
   settings ??= await currentSettings()
   const out = { dryRun, files: 0, bytes: 0, freedBytes: 0, estimate: null, backlog: null, after: null, decision: null, stopped: null, pace: null, recovered: { rolledBack: 0, sweptUp: 0 }, left: [], thinned: [], skipped: [], warnings: [], protection: 'none' }
   if (!index) return out
@@ -457,7 +467,10 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
     if (!quiet) console.warn(`[thinning] ${w}`)
   }
   pace ??= thinPace()
-  out.pace = { mbps: pace.mbps, atOnce: pace.atOnce, night: pace.night, text: describePace(pace) }
+  // the pace's ceiling, learned from the rounds and kept in DATA_DIR (thin-pace.mjs; review of p3-thin, round 2):
+  // read once, and said on the page in a dry run too, so an admin knows the pace before switching On
+  if (paceFile) await usePaceFile(paceFile)
+  out.pace = { mbps: pace.mbps, atOnce: pace.atOnce, night: pace.night, text: describePaceNow(pace), factor: paceFactor(pace), effectiveMbps: effectiveMbps(pace) }
   if (pace.warnings?.length) {
     // (said in the log once, on the page every run)
     const said = pace.warnings.join('; ')
@@ -469,6 +482,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   const tick = makePacer() // the event loop goes round every 10 ms of the walks here
   const win = windowsOf(index) // and no statement of theirs passes more than WINDOW_ROWS rows
   const stopLoc = new Map() // location id -> why nothing more is sent to its helper in this run
+  const unsettled = new Set() // rewrites putRight could not settle (not known to be gone): they stay in flight
   const goneTimes = new Map() // location id -> its helper stopped by itself this many times in this run
   const stopLocation = (loc, why) => {
     if (stopLoc.has(loc.id)) return
@@ -541,16 +555,17 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   // ---- on: whether this round works (thin-pace.mjs), then the files, through the helper -------------
   // the round before this one, looked at now (thin-pace.mjs): a "disk too slow" in it lowers the pace; what it
   // converted counts towards the day rule's figure (review of p3-thin, 2026-09-29)
-  settleRound({ slow: slow(), night: pace.night, siteMin })
-  out.pace.factor = paceFactor()
+  // every report kept, and the last of each kind as this run was handed them (a test's own)
+  const heard = reports()
+  for (const x of [slow(), strain()]) if (x && !heard.some((y) => y.at === x.at && y.nvr === x.nvr && y.ch === x.ch)) heard.push(x)
+  settleRound({ now: clock(), reports: heard, night: pace.night, siteMin, pace })
+  out.pace.factor = paceFactor(pace)
   out.pace.effectiveMbps = effectiveMbps(pace)
   out.pace.achievedMBps = achievedMBps()
-  const lowered = backoffText(pace, siteMin)
-  if (lowered) {
-    out.pace.text = `${describePace({ ...pace, mbps: out.pace.effectiveMbps })} (lowered from ${pace.mbps} MB/s)`
-    // (in the log when it changes, on the page every run)
-    warn(lowered, { quiet: lowered === backoffSaid })
-  }
+  out.pace.text = describePaceNow(pace)
+  const lowered = backoffText(pace, siteMin, clock())
+  // (in the log when it changes, on the page every run)
+  if (lowered) warn(lowered, { quiet: lowered === backoffSaid })
   backoffSaid = lowered
   const defaults = settings.recording?.defaults ?? {}
   if (Number.isFinite(defaults.fullDays)) {
@@ -562,11 +577,13 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
     warn(w, { quiet: clock() - behindSaidAt < 3_600_000 })
     if (clock() - behindSaidAt >= 3_600_000) behindSaidAt = clock()
   }
-  out.decision = decideRun({ now: clock(), backlogBytes: backlog.bytes, arrivalBytesPerHour: out.backlog.perHourBytes ?? 0, pace, siteMin, slow: slow(), factor: out.pace.factor, achievedMBps: out.pace.achievedMBps })
+  out.decision = decideRun({ now: clock(), backlogBytes: backlog.bytes, arrivalBytesPerHour: out.backlog.perHourBytes ?? 0, pace, siteMin, slow: slow(), strain: strain(), factor: out.pace.factor, achievedMBps: out.pace.achievedMBps })
   out.after = { files: backlog.files, bytes: backlog.bytes }
   if (!out.decision.work) {
-    // a round held back by "disk too slow" is a round that converted nothing (the day rule's figure)
-    if (out.decision.held) noteRound({ start: clock(), end: clock(), held: true })
+    // a round held back by the recorders is a round that converted nothing (the day rule's figure) -- only when
+    // it would otherwise have worked: by day, waiting for the night anyway, reports the NAS's other users caused
+    // made the rule work by day, just when the NAS was under stress (review of p3-thin, round 2)
+    if (out.decision.held && out.decision.wouldWork) noteRound({ start: clock(), end: clock(), held: true, mbps: out.pace.effectiveMbps })
     return out
   }
 
@@ -599,8 +616,8 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   }
   let taken = 0
   const SWITCHED = 'the switch was set to Off or Dry run during this run'
-  // why the round stopped, in a word: 'time', 'slow' and 'locations' mean it ran out of time, not of files, so
-  // what it converted says what the NAS can do (thin-pace.mjs noteRound)
+  // why the round stopped, in a word: 'time', 'slow', 'strain' and 'locations' mean it ran out of time, not of
+  // files, so what it converted says what the NAS can do (thin-pace.mjs noteRound)
   let stopKind = null
   const stopWhy = () => {
     if (out.stopped) return out.stopped
@@ -611,6 +628,10 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
     const sl = slow()
     const ago = sl ? clock() - sl.at : NaN
     if (ago >= 0 && ago < SLOW_HOLD_MS) return as('slow', `the recorder reported "disk too slow" at ${utc(sl.at)}${sl.nvr !== undefined ? ` (${sl.nvr}/${Number(sl.ch) + 1})` : ''}: no more files this round, so recording keeps the disk`)
+    // the warning before a gap: a recorder's writes waiting half as long as makes one (thin-pace.mjs STRAIN_*)
+    const st = strain()
+    const since = st ? clock() - st.at : NaN
+    if (since >= 0 && since < STRAIN_HOLD_MS) return as('strain', `the recorders' writes waited${Number.isFinite(st.ageMs) ? ` ${(st.ageMs / 1000).toFixed(1)} s` : ''} to be written at ${utc(st.at)}${st.nvr !== undefined ? ` (${st.nvr}/${Number(st.ch) + 1})` : ''}: no more files this round, so recording keeps the disk`)
     if (here.size && [...here].every((id) => stopLoc.has(id))) return as('locations', 'every location stopped (see the warnings)')
     return null
   }
@@ -699,7 +720,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   out.bytes = wasBytes
   out.after = { files: Math.max(0, backlog.files - out.files), bytes: Math.max(0, backlog.bytes - wasBytes) }
   // the next round looks at this one: a "disk too slow" during it, and what it converted (thin-pace.mjs)
-  noteRound({ start: roundStart, end: clock(), bytes: wasBytes, full: ['time', 'slow', 'locations'].includes(stopKind) })
+  noteRound({ start: roundStart, end: clock(), bytes: wasBytes, full: ['time', 'slow', 'strain', 'locations'].includes(stopKind), mbps: out.pace.effectiveMbps })
   return out
 
   // ---- the pieces ---------------------------------------------------------------------------------
@@ -863,7 +884,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
       if (n >= 2) stopLocation(loc, 'its share helper stopped twice in this run')
     }
     const ok = await putRight(loc, [{ path: s.path, loc: loc.id, wasBytes: s.bytes, wasKeyframes: s.keyframes }])
-    if (!ok || out.left.includes(s.path)) keepInFlight.add(s.path)
+    if (!ok || out.left.includes(s.path) || unsettled.has(s.path)) keepInFlight.add(s.path)
   }
 
   /** The leftovers from before this run, location by location. */
@@ -890,8 +911,9 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
    * The helper's thinRecover for these rewrites in flight ({ path, wasBytes, wasKeyframes }), then each row
    * made to match its file: rolled back -> the original's size and keyframes, full video; no journal ->
    * the pair on disk is whole, and is the one whose size it has: the original's, or the row's own when the
-   * row already says time-lapse (its swap reached the index). false when the helper could not be asked
-   * (all kept in flight).
+   * row already says time-lapse (its swap reached the index); gone (the helper found nothing of it with the
+   * marker there) -> no longer in flight, its row as it was. A path none of these, whose stat then fails, is
+   * kept in flight (unsettled). false when the helper could not be asked (all kept in flight).
    */
   async function putRight(loc, rows) {
     const paths = rows.map((r) => r.path)
@@ -899,7 +921,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
     const stats = new Map()
     try {
       res = await share(loc, 'thinRecover', { paths })
-      const need = paths.filter((p) => !res.rolledBack.includes(p) && !res.left.includes(p) && !res.refused.includes(p))
+      const need = paths.filter((p) => !res.rolledBack.includes(p) && !res.left.includes(p) && !res.refused.includes(p) && !res.gone?.includes(p))
       if (need.length) for (const x of await share(loc, 'stat', { paths: need })) stats.set(x.path, x)
     } catch (e) {
       warn(`${loc.path}: ${rows.length} rewrite${rows.length === 1 ? '' : 's'} could not be put right now (${e.message}): kept in flight for the next run; nothing deletes ${rows.length === 1 ? 'it' : 'them'} until then`)
@@ -907,6 +929,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
       return false
     }
     const ended = []
+    const gone = new Set(Array.isArray(res.gone) ? res.gone : [])
     for (const r of rows) {
       const p = r.path
       const cur = index.thinRow(p)
@@ -916,26 +939,43 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
         warn(`LEFT HALF DONE, NEEDS A PERSON: ${p}: the file or its .idx is missing and there was nothing to put back; the files beside it are kept as they are, and nothing deletes it`)
         continue
       }
-      ended.push(p)
       if (res.refused.includes(p)) {
+        ended.push(p)
         warn(`${p}: outside ${loc.path}: not touched`)
         continue
       }
       if (res.rolledBack.includes(p)) {
+        ended.push(p)
         out.recovered.rolledBack++
         if (cur) index.setThin(p, null, { bytes: r.wasBytes, keyframes: r.wasKeyframes })
         continue
       }
+      if (gone.has(p)) {
+        // the helper found nothing of it, nor anything beside it, with the location's marker there: deleted
+        ended.push(p)
+        warn(`${p}: not there once put right (deleted meanwhile): its row is left as it is`)
+        continue
+      }
       if (res.sweptUp.includes(p)) out.recovered.sweptUp++
       const st = stats.get(p)
-      if (cur && st && !st.error) {
+      if (!st || st.error) {
+        // Not there, or not answered, and the helper did not say it is gone: the share may have been unmounted
+        // since the helper looked (an empty mount point says ENOENT for everything), with the journal and the
+        // original still beside it on the share. Kept in flight: nothing deletes it, and the next run looks
+        // again (review of p3-thin, round 2, 2026-09-30: it was dropped as "deleted meanwhile").
+        unsettled.add(p)
+        warn(`${p}: ${st?.error === 'ENOENT' ? 'not there' : st?.error ?? 'no answer'} once put right, and not known to be gone (the share unmounted?): kept in flight for the next run; nothing deletes it until then`)
+        continue
+      }
+      ended.push(p)
+      if (cur) {
         if (st.size === cur.bytes) continue // the row says what is on disk (the original, or the committed rewrite)
         if (st.size === r.wasBytes) index.setThin(p, null, { bytes: r.wasBytes, keyframes: r.wasKeyframes })
         else {
           warn(`${p}: once put right its size (${st.size}) is neither the original's (${r.wasBytes}) nor its row's (${cur.bytes}): its row takes that size, as full video, and the next run looks at it again`)
           index.setThin(p, null, { bytes: st.size })
         }
-      } else if (st?.error) warn(`${p}: ${st.error === 'ENOENT' ? 'not there' : st.error} once put right (deleted meanwhile?): its row is left as it is`)
+      }
     }
     index.thinEnd(ended)
     return true

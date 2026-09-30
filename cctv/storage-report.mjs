@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { isAdmin } from './auth.mjs'
 import { freeMarks, spaceLimit } from './location-health.mjs'
 import { lastRuns } from './storage-jobs.mjs'
-import { describePace, thinPace } from './thin-pace.mjs'
+import { describePaceNow, thinPace } from './thin-pace.mjs'
 
 // The caller may hand us a plain user name or the { user, admin } the newer routes pass around.
 // Taking only one of the two is how a route ends up refusing everybody: isAdmin() given an object
@@ -360,8 +360,9 @@ export function jobsReport(settings) {
   const runs = lastRuns()
   return {
     mode: settings?.storage?.thinning ?? 'dry-run',
-    // how fast and when time-lapse is written (thin-pace.mjs; CCTV_THIN_MBPS, CCTV_THIN_NIGHT), 2026-09-29
-    pace: describePace(thinPace()),
+    // how fast and when time-lapse is written (thin-pace.mjs; CCTV_THIN_MBPS, CCTV_THIN_NIGHT), 2026-09-29; as it is
+    // now, under the ceiling the rounds have set (a fresh start at half: review of p3-thin, round 2)
+    pace: describePaceNow(thinPace()),
     defaults: { after: d.after ?? null, fullDays: d.fullDays ?? null, timelapseS: d.timelapseS ?? null, retentionDays: d.retentionDays ?? null },
     camerasOwnDays: Object.values(settings?.recording?.cameras ?? {}).filter((o) => DAY_FIELDS.some((k) => o && k in o)).length,
     thinning: runs.thinning,

@@ -29,7 +29,7 @@ import { cameraRecording, getSettings, onSettingsChange } from './settings.mjs'
 import { spareWhile } from './watchdog.mjs'
 import { checkHealth, listLocations, onChange as onStorageChange, startHealthChecks } from './storage.mjs'
 import { SPOOL_ID, drainSpool, spoolLocation, trimSpool } from './ram-spool.mjs'
-import { noteRecorderGap } from './thin-pace.mjs'
+import { noteRecorderGap, noteRecorderQueues } from './thin-pace.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
 
@@ -962,7 +962,8 @@ function startRecording() {
 const makeNvr = (cfg) => {
   const nvr = new Nvr(cfg)
   if (LIVE_WORKER) {
-    nvr.worker = startWorker(nvr.id, { onStats: (s) => nvr.workerStats(s), onRecording, onReady: ({ spawnedAt }) => recoverFor(nvr.id, spawnedAt) })
+    // (each worker's recorders' write queues, every 5 s: writes waiting make time-lapse stand back before a gap, thin-pace.mjs)
+    nvr.worker = startWorker(nvr.id, { onStats: (s) => { nvr.workerStats(s); noteRecorderQueues(nvr.id, s?.rec) }, onRecording, onReady: ({ spawnedAt }) => recoverFor(nvr.id, spawnedAt) })
     try {
       nvr.worker.setRecording(recordingMsg())
     } catch (e) {

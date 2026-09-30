@@ -134,7 +134,7 @@ import { handleLineAlert } from './line-actions.mjs'
 import { handleOsd } from './osd.mjs'
 import { MAX_SEGMENTS_PER_RUN, runRetention, runThinning } from './thinning.mjs'
 import { runStorageJobs } from './storage-jobs.mjs'
-import { RUN_MS as THIN_RUN_MS } from './thin-pace.mjs'
+import { RUN_MS as THIN_RUN_MS, usePaceFile } from './thin-pace.mjs'
 import { detectEncoder } from './transcode.mjs'
 import { httpsOptions } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
@@ -194,7 +194,8 @@ function thinAndRetain(roundStart = Date.now()) {
     // deadline: thinning converts for at most RUN_MS (4 minutes) from the start of this 5-minute round,
     // housekeeping's time included, so the round (and the next housekeeping) is never pushed back
     // (thin-pace.mjs; perf report Task 4)
-    args: () => ({ index, settings: getSettings(), protectedRanges, present: markerMatches, deadline: roundStart + THIN_RUN_MS }),
+    // paceFile: the pace's ceiling, learned from the rounds, kept across restarts (thin-pace.mjs; review of p3-thin, round 2)
+    args: () => ({ index, settings: getSettings(), protectedRanges, present: markerMatches, deadline: roundStart + THIN_RUN_MS, paceFile: join(auth.DATA_DIR, 'thin-pace.json') }),
     limit: MAX_SEGMENTS_PER_RUN
   })
 }
@@ -203,6 +204,8 @@ function thinAndRetain(roundStart = Date.now()) {
 // deletion every 5 minutes. Its file calls go to each location's helper (housekeeping.mjs); it keeps
 // bookmarked and exported stretches and checks each location's marker, as the switch's jobs do.
 if (LIVE_WORKER) {
+  // the time-lapse pace's ceiling read at start, so Settings > Storage says it before the first round (5 minutes)
+  usePaceFile(join(auth.DATA_DIR, 'thin-pace.json')).catch(() => {})
   let busy = false
   setInterval(() => {
     if (busy) return
