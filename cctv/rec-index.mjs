@@ -380,6 +380,11 @@ export const THIN_SQL = {
   // at most all of them). No file is read for them (verify-1: the dry run read ~24 GB a run).
   fullSummary: `SELECT nvr, ch, loc, COUNT(*) AS files, SUM(bytes) AS bytes, SUM(bytes * MIN(1.0, MAX(1.0, (end_ms - start_ms) * 1.0 / ?) / MAX(keyframes, 1))) AS weighted, MIN(start_ms) AS firstMs
     FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ? AND end_ms < ? AND ${IN_CAMS} GROUP BY nvr, ch, loc`,
+  // the same sums for ONE camera, from its own rows (camera first): a camera with bookmarks of its own is
+  // summed between its own stretches (thinning.mjs backlogOf, since 2026-09-30), and through segments_full
+  // each of its windows would pass every other camera's rows again
+  fullSummaryOf: `SELECT loc, COUNT(*) AS files, SUM(bytes) AS bytes, SUM(bytes * MIN(1.0, MAX(1.0, (end_ms - start_ms) * 1.0 / ?) / MAX(keyframes, 1))) AS weighted, MIN(start_ms) AS firstMs
+    FROM segments INDEXED BY segments_cam WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms < ? AND end_ms < ? AND thinned IS NULL GROUP BY loc`,
   // what every camera recorded in a window (the rate footage passes the cutoff at: thinning's pace)
   startedBetween: 'SELECT COUNT(*) AS files, IFNULL(SUM(bytes), 0) AS bytes FROM segments WHERE start_ms >= ? AND start_ms < ?'
 }
@@ -444,6 +449,7 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     fullOlderThan: db.prepare(THIN_SQL.fullOlderThan),
     firstFull: db.prepare(THIN_SQL.firstFull),
     fullSummary: db.prepare(THIN_SQL.fullSummary),
+    fullSummaryOf: db.prepare(THIN_SQL.fullSummaryOf),
     startedBetween: db.prepare(THIN_SQL.startedBetween),
     startNth: db.prepare(TARGET_SQL.startNth),
     dayUse: db.prepare(TARGET_SQL.dayUse),
@@ -594,6 +600,9 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
      */
     fullSummary: (cams, { fromMs = NO_START, toMs, endBefore, stepMs }) =>
       q.fullSummary.all(Math.max(1, Number(stepMs)), fromMs, toMs, endBefore, camKeys(cams)).map((r) => ({ nvr: r.nvr, ch: Number(r.ch), loc: r.loc, files: Number(r.files), bytes: Number(r.bytes), weighted: Number(r.weighted), firstMs: Number(r.firstMs) })),
+    /** fullSummary for one camera ({ nvr, ch }), read from its own rows only (THIN_SQL.fullSummaryOf). */
+    fullSummaryOf: (cam, { fromMs = NO_START, toMs, endBefore, stepMs }) =>
+      q.fullSummaryOf.all(Math.max(1, Number(stepMs)), String(cam.nvr), Number(cam.ch), fromMs, toMs, endBefore).map((r) => ({ nvr: String(cam.nvr), ch: Number(cam.ch), loc: r.loc, files: Number(r.files), bytes: Number(r.bytes), weighted: Number(r.weighted), firstMs: Number(r.firstMs) })),
     /** { files, bytes } of every camera's rows that started in [fromMs, toMs). */
     startedBetween: (fromMs, toMs) => {
       const r = q.startedBetween.get(fromMs, toMs)
