@@ -13,11 +13,17 @@
 //   GET /api/playback/now                      -> { now, tzOffsetMs, skewMs } (skewMs: NVR clock - server clock)
 //   GET /api/playback/dates                    -> ["2026-09-06", ...]
 //   GET /api/playback/recordings?ch=N&date=D   -> { ranges: [[start, end]], events: [[start, end, type]] }
-//   WS  /playback?ch=N&stream=S&start=T         -> same binary frames as /live, plus JSON text messages
+//   WS  /playback?ch=N&start=T                  -> same binary frames as /live, plus JSON text messages
+//        Which stream is decided by the caller (rec-playback.mjs connectPlayback, rec-fallback.mjs):
+//        connect(ws, url, { main, allowMain, onMain }); the URL's stream parameter is not read here.
 //        Frames are passed through as the camera encoded them; nothing is transcoded here.
 //        client -> server: {"speed": 1|2|4|8} {"pause": true|false}
 //        server -> client: {"type":"started"} {"type":"end"} {"type":"error","message":...}
 //                          {"type":"stream","stream":0} (switched to HD: this camera records no SD)
+//        A camera found to record no SD goes over to main only for a viewer who may see main
+//        (allowMain, asked then); anyone else gets {"type":"error"} and a 1008 "hd not allowed"
+//        close once no SD frame has come in 6 s of playing, on a camera marked HD only; on any other
+//        camera no frame is no footage there: {"type":"end"} after 8 s (hd-only.mjs noSdAction).
 // While the NVR is busy (recovering, or its calls are stuck or just came back late, or the SDK is
 // stuck on any NVR's call) the three GET routes answer 503 { error, retryAfterS } at once and new
 // playbacks fail with the same message, instead of queuing more SDK work for it. Playbacks already
@@ -44,6 +50,8 @@ import { DATA_DIR } from './auth.mjs'
 import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, Transcoder, clientCanDecodeH265, lightPool, pool as transcodePool } from './transcode.mjs'
 import { bind, codecOf, coolingLeftMs, encodeFrame, errorText, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
 import { lastHang } from './watchdog.mjs'
+import { SdWait, hdOnlyStore, noSdAction } from './hd-only.mjs'
+import { HD_ASK_MESSAGE, HD_NOT_ALLOWED, HD_ONLY_MESSAGE } from './stream-param.mjs'
 
 // FindNext* result codes continue the SDK error enum: NET_SDK_FILE_SUCCESS is 85 (one more item).
 // A file walk is complete only when it ends with 86 NET_SDK_FILE_NOFIND or 87 NET_SDK_NOMOREFILE;
@@ -64,7 +72,6 @@ const SESSION_HOURS = 6 // each request asks the NVR for up to this much footage
 const PAUSE_ABOVE = 8 * 1024 * 1024 // bytes queued to a slow client before playback is paused
 const RESUME_BELOW = 1024 * 1024
 const IDLE_END_MS = 8000 // no frames for this long while playing = end of recording
-const SD_FALLBACK_MS = 4000 // some cameras record HD only: no SD frames by then -> switch to HD
 // Server-side pacing. The SDK paces only one playback at a time; others arrive as fast
 // as the NVR can send. Frames are therefore buffered and released at their capture
 // timing (x speed), and the NVR is paused while the buffer holds more than BUFFER_HIGH_MS.
@@ -416,38 +423,28 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
   // ---- playback sessions --------------------------------------------------
 
   const sessions = new Set()
-  // channels found to record no SD stream: skip the SD attempt next time (kept across restarts)
-  const HD_ONLY_FILE = join(DATA_DIR, 'hd-only.json')
-  const readHdOnly = () => {
+  // channels found to record no SD stream: asked for main at once next time (hd-only.mjs: marked only
+  // once main frames came after a switch, cleared by an SD frame, trusted for a week; kept across restarts)
+  const hdOnly = hdOnlyStore({ file: join(DATA_DIR, 'hd-only.json'), nvrId: nvr.id })
+  // a viewer's "may see main" hook, asked now (rec-playback.mjs hands in one that reads the session as
+  // it is then); one that throws is a no
+  const askMain = (allowMain) => {
     try {
-      const all = JSON.parse(readFileSync(HD_ONLY_FILE, 'utf8'))
-      return Array.isArray(all?.[nvr.id]) ? all[nvr.id].filter(Number.isInteger) : []
+      return allowMain() === true
     } catch {
-      return []
+      return false
     }
-  }
-  const hdOnly = new Set(readHdOnly())
-  const saveHdOnly = () => {
-    try {
-      let all = {}
-      try {
-        all = JSON.parse(readFileSync(HD_ONLY_FILE, 'utf8')) ?? {}
-      } catch {}
-      all[nvr.id] = [...hdOnly].sort((a, b) => a - b)
-      writeFileSync(HD_ONLY_FILE, `${JSON.stringify(all)}\n`, { mode: 0o600 })
-    } catch (e) {
-      console.warn(`[${nvr.id}] could not save the HD-only list: ${e.message}`)
-    }
-  }
-  const markHdOnly = (ch) => {
-    if (hdOnly.has(ch)) return
-    hdOnly.add(ch)
-    saveHdOnly()
   }
 
   class PlaybackSession {
-    constructor(ws, ch, mainStream, start, clientH265 = true) {
+    /**
+     * @param {{ allowMain?: () => boolean, onMain?: () => void }} [rights] allowMain: may this viewer
+     *   see main pictures (asked when no SD comes); onMain: told when the session goes over to main
+     */
+    constructor(ws, ch, mainStream, start, clientH265 = true, { allowMain = () => false, onMain = () => {} } = {}) {
       this.ws = ws
+      this.allowMain = allowMain
+      this.onMain = onMain
       // A browser that cannot decode H.265 (no HEVC extension on Windows) gets the NVR's H.265
       // converted to H.264 here, as rec-playback.mjs does for the server's own recordings; with the
       // NAS down, the NVR is where all playback comes from.
@@ -463,6 +460,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       this.throttled = false // by us, because the viewer's connection is backed up
       this.buffered = false // by us, because the pacing buffer is full
       this.nvrRunning = true
+      this.resuming = 0 // RESUMEs asked for that the NVR has not taken yet (#updateNvr)
       this.queue = [] // { ts, msg } waiting for their release time
       this.anchor = null // { wall, media }: media time `media` is released at wall time `wall`
       this.speed = 1
@@ -470,6 +468,8 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       this.lastFrameAt = Date.now()
       this.gotFrames = false
       this.openedAt = 0
+      this.sdWait = new SdWait() // no SD frame in 4 s of the NVR really playing: HD only (hd-only.mjs)
+      this.markOnFrames = false // switched to main: marked HD-only when its first frame comes
       this.onFrame = this.#onFrame.bind(this)
       sessions.add(this)
       ws.on('message', (data, isBinary) => {
@@ -580,6 +580,15 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       }
       if (info.frameType !== 1 || info.length === 0) return
       this.lastFrameAt = Date.now()
+      if (!this.gotFrames) {
+        // the first frame: an SD one proves the camera is not HD only (a mark from a slow NVR heals);
+        // the first main one after a switch is the proof that it is, and only now is it marked
+        if (!this.mainStream) hdOnly.unmark(this.ch)
+        else if (this.markOnFrames) {
+          this.markOnFrames = false
+          hdOnly.mark(this.ch)
+        }
+      }
       this.gotFrames = true
       if (info.keyFrame) {
         // trust the bitstream over the NVR's format notes, which can be empty or late in playback
@@ -666,8 +675,19 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       const run = !this.paused && !this.throttled && !this.buffered
       if (run === this.nvrRunning) return
       this.nvrRunning = run
-      if (run) this.lastFrameAt = Date.now()
-      await this.#control(run ? PLAYCTRL.RESUME : PLAYCTRL.PAUSE)
+      if (!run) return this.#control(PLAYCTRL.PAUSE)
+      // the NVR plays again once it has taken the RESUME, which can wait its turn in the NVR's lane (the
+      // camera wall resumes every tile at once): until then #watch counts nothing as playing
+      this.resuming++
+      try {
+        await this.#control(PLAYCTRL.RESUME)
+      } finally {
+        this.resuming--
+      }
+      this.lastFrameAt = Date.now()
+      // playing again before any frame came (opened paused, then played): the 4 s for an SD
+      // picture start again, rather than having run out while nothing could come
+      if (!this.gotFrames) this.sdWait.restart()
     }
 
     async #control(code, value = 0) {
@@ -702,8 +722,16 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
 
     async #watch() {
       if (this.closed || this.handle <= 0) return
-      if (!this.gotFrames && !this.mainStream && !this.paused && Date.now() - this.openedAt > SD_FALLBACK_MS) {
-        return this.#switchToMain()
+      // no SD frame yet, counted only while the NVR really plays this session (hd-only.mjs SdWait: not
+      // before it has started, not while it is paused or a RESUME waits in the lane): after
+      // SD_FALLBACK_MS over to main for a viewer who may see main, asked now; anyone else is refused
+      // after SD_REFUSE_MS on a camera marked HD only, and elsewhere gets "end" below, as for any
+      // stretch without footage (noSdAction)
+      const running = this.openedAt > 0 && this.nvrRunning && !this.resuming && !this.paused
+      if (!this.gotFrames && !this.mainStream && this.sdWait.tick(Date.now(), running)) {
+        const act = noSdAction({ waitedMs: this.sdWait.ms, mayMain: askMain(this.allowMain), marked: hdOnly.has(this.ch) })
+        if (act === 'switch') return this.#switchToMain()
+        if (act === 'refuse') return this.#refuseHd()
       }
       // flow control: pause the NVR while the viewer's connection is backed up
       const queued = this.ws.bufferedAmount
@@ -714,10 +742,23 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
         this.throttled = false
         await this.#updateNvr()
       }
-      if (this.nvrRunning && this.queue.length === 0 && Date.now() - this.lastFrameAt > IDLE_END_MS) {
+      // judged only while the NVR really plays: not before the session (or its main stream, after a
+      // switch) has started, which can take longer than 8 s on a busy NVR, nor while a RESUME waits
+      if (this.openedAt > 0 && this.nvrRunning && !this.resuming && this.queue.length === 0 && Date.now() - this.lastFrameAt > IDLE_END_MS) {
         this.send({ type: 'end' })
         this.lastFrameAt = Date.now()
       }
+    }
+
+    /**
+     * No SD frame came, and this viewer may not see main: said, and the session ends. `message`: the words
+     * (by default that no SD recording came: noSdAction's refusal, on a camera marked HD only).
+     */
+    #refuseHd(message = HD_ONLY_MESSAGE) {
+      console.log(`[${nvr.id}] playback ch${this.ch + 1}: no SD recording came, and main is not allowed for this viewer`)
+      this.send({ type: 'error', message })
+      this.close()
+      this.ws.close(1008, HD_NOT_ALLOWED)
     }
 
     /** Restarts this playback on the main (HD) stream from the same point. */
@@ -725,6 +766,10 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       const old = this.handle
       this.handle = 0
       this.mainStream = true
+      // marked HD-only once main frames have come (#onFrame): a switch alone proves nothing
+      this.markOnFrames = true
+      this.openedAt = 0 // not started again until the main stream is open (#watch judges nothing before)
+      this.sdWait.restart()
       playFrames.release(old)
       await op(() => call(StopPlayBack, old), PRIORITY.HIGH).catch(() => {})
       this.queue = []
@@ -733,8 +778,21 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       this.nvrRunning = true
       this.xcode?.reset()
       if (this.closed) return this.#unregister()
+      // asked again now: the right may have gone while the NVR stopped the SD playback, and the sweep
+      // then still saw this socket on the sub-stream (which needs Playback SD alone). Said as what it is,
+      // HD needing the right: the camera need not be marked HD only, where no frame is no footage (and
+      // on the camera wall the words stay on the tile)
+      if (!askMain(this.allowMain)) {
+        this.#refuseHd(HD_ASK_MESSAGE)
+        return this.#unregister() // (the SD playback is stopped already: only its login is left)
+      }
       console.log(`[${nvr.id}] playback ch${this.ch + 1}: no SD recording, switching to HD`)
-      markHdOnly(this.ch)
+      // watched for the main-stream rights from now on, and audited (rec-playback.mjs, server.mjs)
+      try {
+        this.onMain()
+      } catch (e) {
+        console.warn(`[${nvr.id}] playback ch${this.ch + 1}: ${e.message}`)
+      }
       this.send({ type: 'stream', stream: 0 })
       await this.#open()
     }
@@ -779,18 +837,30 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
     }
   }
 
-  /** Handles a /playback WebSocket. */
-  const connect = (ws, url) => {
+  /**
+   * Handles a /playback WebSocket for the NVR's recordings. Which stream was decided by the caller
+   * (rec-playback.mjs connectPlayback for a viewer, rec-fallback.mjs for legs and backfill): main
+   * asks the NVR for its main stream; allowMain() says whether this viewer may see main pictures,
+   * asked for a camera known to record in HD only and again whenever no SD comes (a right taken away
+   * meanwhile counts); onMain() is told when the session goes over to main. The URL's own stream
+   * parameter is not read: one decision, made once, by the side that knows the rights.
+   * @returns {{ main: boolean } | null} what it plays; null when refused (bad parameters: the socket
+   *   is closing)
+   */
+  const connect = (ws, url, { main, allowMain = () => false, onMain = () => {} } = {}) => {
     const ch = Number(url.searchParams.get('ch'))
-    const stream = Number(url.searchParams.get('stream') ?? 1)
     const start = Number(url.searchParams.get('start'))
-    if (!Number.isInteger(ch) || ch < 0 || ![0, 1].includes(stream) || !Number.isFinite(start)) {
+    if (!Number.isInteger(ch) || ch < 0 || typeof main !== 'boolean' || !Number.isFinite(start)) {
       ws.close(1008, 'bad parameters')
-      return
+      return null
     }
-    const main = hdOnly.has(ch) || stream === 0
-    if (main && stream !== 0) ws.send(JSON.stringify({ type: 'stream', stream: 0 }))
-    new PlaybackSession(ws, ch, main, start, clientCanDecodeH265(url.searchParams))
+    // A camera known to record in HD only goes to main at once for a viewer who may see main. Anyone
+    // else is tried on SD all the same: a mark can be wrong (a slow NVR), an SD frame clears it
+    // (#onFrame), and with none after SD_REFUSE_MS of playing the session is refused (#watch)
+    const asMain = main || (hdOnly.has(ch) && askMain(allowMain))
+    if (asMain && !main) ws.send(JSON.stringify({ type: 'stream', stream: 0 }))
+    new PlaybackSession(ws, ch, asMain, start, clientCanDecodeH265(url.searchParams), { allowMain, onMain })
+    return { main: asMain }
   }
 
   /** The NVR is reconnecting or was removed: end every playback and tell its viewer. */
@@ -811,7 +881,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
     connect,
     stopAll,
     isHdOnly: (ch) => hdOnly.has(ch),
-    markHdOnly
+    markHdOnly: (ch) => hdOnly.mark(ch)
   }
 }
 

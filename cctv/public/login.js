@@ -1,6 +1,13 @@
 const form = document.getElementById('login')
 const error = document.getElementById('error')
 
+// Whoever signs in next starts with nothing the last user of this browser left behind: the live grid's
+// last pictures (stills.js, cache "argus-stills") are kept per camera, not per user, and would show a
+// camera this person may not open until its live picture replaced it
+try {
+  globalThis.caches?.delete('argus-stills').catch(() => {})
+} catch {}
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault()
   error.hidden = true

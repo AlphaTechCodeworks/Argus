@@ -1,6 +1,6 @@
 // Tests for the remote viewers' frame-rate levels (adaptive-live.mjs), with fake streams: no ffmpeg.
 //   node cctv/test/adaptive-live.test.mjs
-import { AdaptiveLive, CLIMB_AFTER_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, SWITCH_WAIT_MS, TICK_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
+import { AdaptiveLive, CLIMB_AFTER_MS, FULL_MAX, FULL_STOP_MS, LEVELS, REMOTE_CONVERSION, SETTLE_MS, SWITCH_WAIT_MS, TICK_MS, isRemoteAddress, nextLevel } from '../adaptive-live.mjs'
 import { encodeFrame, parseFrame } from '../phone-live.mjs'
 import { HubStream } from '../stream-hub.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
@@ -363,10 +363,10 @@ const isRaw = (e) => e.stream === e.source && !e.switch
 // It was any queue over 256 KB at one look, and on 29 Sep all 12 steps down said "video backing up": a
 // page opening or a level change queues more than that by itself, and it was still going out at the
 // next look, so the next step followed (full to 4 fps in 10 s, three times).
-/** A page's /live-mux socket as its channels show it: the whole queue, its drain rate, what it has written. */
+/** A page's /live-mux socket as its channels show it: the whole queue, its drain rate, what it has written, which socket. */
 function fakePage() {
   const page = { queued: 0, drainBps: null, written: 0 }
-  page.channel = () => ({ ...fakeWs(), overSince: null, get sharedBufferedAmount() { return page.queued }, get drainBps() { return page.drainBps }, get writtenBytes() { return page.written } })
+  page.channel = () => ({ ...fakeWs(), overSince: null, get sharedBufferedAmount() { return page.queued }, get drainBps() { return page.drainBps }, get writtenBytes() { return page.written }, page })
   return page
 }
 /** A viewer on a fake page of n tiles, looked at twice: past its opening (nothing queued then) and settled. */
@@ -535,6 +535,170 @@ function onPage(key, n = 2) {
   check('... two: down', v.level === 1, logs.at(-1))
 }
 
+// ---- a browser's page socket gone dead, and its new one (the final review of live-smooth) ----
+// A PC or phone through the tunnel that changes network drops its page socket (public/live-mux.js:
+// 'network changed', 'nothing received') and opens a new one, while the server's socket to cloudflared
+// stays open: its queue is never written, and it drains at 0, which reads as over at every look. The
+// new page is the same browser (viewerOf), so its tiles join the same viewer, and were stepped full ->
+// 15 -> 8 -> 4 and held there until the dead socket went: 60 s and more (keep-alive cuts it once it has
+// written nothing for 30 s, t9), then 60 s of climbs back.
+{
+  const clock = { now: T }
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => clock.now })
+  const a = fakePage()
+  const aSocks = Array.from({ length: 4 }, (_, i) => {
+    const ws = a.channel()
+    live.attach('moved', { ws, nvrId: 'n1', ch: i, type: 1, source: fakeSource(`cam${i}`) })
+    return ws
+  })
+  clearInterval(live.timer)
+  const v = live.viewers.get('moved')
+  const look = () => {
+    clock.now += TICK_MS
+    live.tick()
+  }
+  a.drainBps = 625_000
+  for (let i = 0; i < 3; i++) {
+    a.written += 1_000_000
+    look()
+  }
+  // its browser is gone: nothing more written, the cameras' frames pile up behind, every tile held
+  // over its cap once the socket's soft mark is passed
+  a.drainBps = 0
+  const b = fakePage()
+  b.drainBps = 1_000_000
+  const levels = []
+  for (let i = 0; i < 20; i++) {
+    a.queued += 700_000
+    if (i === 1) {
+      // 3 s after: the new page opens, its tiles' replays queued as they open (1.4 MB, 1.4 s)
+      b.queued = 1_400_000
+      for (let ch = 0; ch < 4; ch++) live.attach('moved', { ws: b.channel(), nvrId: 'n1', ch, type: 1, source: fakeSource(`cam${ch}`) })
+    }
+    if (i >= 2) {
+      b.written += 1_400_000
+      b.queued = 200_000
+    }
+    if (i >= 3) for (const ws of aSocks) ws.overSince ??= clock.now - 500
+    look()
+    levels.push(v.level)
+  }
+  check('a dead page socket (written nothing, draining at 0, its tiles held over their cap) beside the same browser\'s new one that writes: the viewer stays at full for 40 s', levels.every((l) => l === 0), `${levels.join()} | ${logs.filter((l) => l.includes('->')).join(' | ')}`)
+  check('  the level line leaves the dead one\'s queue out, and says so once', logs.filter((l) => l.includes('has written nothing for')).length === 1, logs.join(' | '))
+  // ...its close then gets through: the viewer is its new page alone
+  for (const ws of aSocks) ws.handlers.close()
+  b.queued = 1_500_000
+  b.drainBps = 625_000
+  look()
+  look()
+  check('  the new page\'s own queue is read as ever: over a second at two looks, down', v.level === 1, logs.at(-1))
+}
+{
+  // Both pages of the browser stopped writing: nothing tells a dead one from a link that stopped, and
+  // both are read as before
+  const clock = { now: T }
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9, now: () => clock.now })
+  const a = fakePage()
+  const b = fakePage()
+  live.attach('stalled', { ws: a.channel(), nvrId: 'n1', ch: 0, type: 1, source: fakeSource('cam0') })
+  live.attach('stalled', { ws: b.channel(), nvrId: 'n1', ch: 1, type: 1, source: fakeSource('cam1') })
+  clearInterval(live.timer)
+  const v = live.viewers.get('stalled')
+  for (let i = 0; i < 2; i++) {
+    clock.now += TICK_MS
+    a.written += 100_000
+    b.written += 100_000
+    live.tick()
+  }
+  const levels = []
+  for (let i = 0; i < 3; i++) {
+    a.queued = b.queued = 1_000_000
+    a.drainBps = b.drainBps = 0
+    clock.now += TICK_MS
+    live.tick()
+    levels.push(v.level)
+  }
+  check('two page sockets of one browser, neither writing: read as a link that stopped (down at the second look, as one page is)', levels.join() === '0,1,1', levels.join())
+}
+{
+  // A page socket with nothing queued is idle, not dead: a tab whose cameras froze (nvr-2 freezes all its
+  // cameras for 11-32 s) writes nothing for as long as they send nothing, while another tab of the same
+  // browser writes. It was counted dead, and said so once a freeze ("its 0.00 MB queued left out"; the
+  // review of d5390d6). Dead only while it has something queued, and has written none of it since a look.
+  const clock = { now: T }
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => clock.now })
+  const a = fakePage()
+  const b = fakePage()
+  a.drainBps = b.drainBps = 625_000
+  live.attach('two-tabs', { ws: a.channel(), nvrId: 'n1', ch: 0, type: 1, source: fakeSource('cam0') })
+  live.attach('two-tabs', { ws: b.channel(), nvrId: 'n1', ch: 1, type: 1, source: fakeSource('cam1') })
+  clearInterval(live.timer)
+  const v = live.viewers.get('two-tabs')
+  const look = (aWrote, bWrote) => {
+    a.written += aWrote
+    b.written += bWrote
+    clock.now += TICK_MS
+    live.tick()
+  }
+  look(100_000, 100_000)
+  look(100_000, 100_000)
+  const said = () => logs.filter((l) => l.includes('has written nothing for'))
+  // a's cameras freeze: nothing to send, nothing queued, nothing written; b writes on
+  for (let i = 0; i < 4; i++) look(0, 100_000)
+  check('a page socket whose cameras froze (nothing queued, nothing written) beside another of the browser\'s that writes: not dead, nothing said', said().length === 0, said().join(' | '))
+  // b's own link backs up: its level line leaves nothing of a out
+  b.queued = 1_500_000
+  look(0, 100_000)
+  look(0, 100_000)
+  const step = logs.find((l) => l.includes('full -> 15'))
+  check('  ... the other\'s link backing up: down, and its level line leaves no dead page\'s queue out', v.level === 1 && step && !step.includes('dead page'), step)
+  b.queued = 0
+  // a's cameras come back: their first frame queued just as a look comes, written by the next
+  a.queued = 40_000
+  look(0, 100_000)
+  a.queued = 0
+  look(40_000, 100_000)
+  check('  ... its cameras back, a frame queued just as the look came (idle before it): not dead either', said().length === 0, said().join(' | '))
+  // a's page goes: what it has queued is never written
+  a.queued = 300_000
+  look(20_000, 100_000)
+  a.queued = 600_000
+  look(0, 100_000)
+  a.queued = 900_000
+  look(0, 100_000)
+  check('  ... a page that goes with 0.6 MB queued, nothing of it written since the look before: dead at once, said once', said().length === 1 && said()[0].includes('has written nothing for 2 s while another of its sockets writes: its 0.60 MB queued left out'), said().join(' | '))
+}
+{
+  // A new page socket of a browser that has one already (a second tab; a reload or a network change
+  // with the old socket still open) opens as a new viewer's page does: its tiles' replays go out
+  // before its queue is read. A tile opening later on a page it had already has none (above).
+  const { page, look, v, live, logs, clock } = onPage('second', 2)
+  page.drainBps = 625_000
+  page.written = 500_000
+  look()
+  const b = fakePage()
+  b.drainBps = 300_000 // 2.4 Mbit/s
+  for (let ch = 5; ch < 8; ch++) {
+    b.queued += 500_000 // its replays: 1.5 MB, 5 s
+    live.attach('second', { ws: b.channel(), nvrId: 'n1', ch, type: 1, source: fakeSource(`cam${ch}`) })
+    clock.now += 15
+  }
+  const both = (written, queued) => {
+    page.written += 100_000
+    b.written = written
+    b.queued = queued
+    look()
+  }
+  both(600_000, 1_000_000)
+  both(1_200_000, 500_000)
+  check('a second page socket of one browser opening with 1.5 MB of its own replays (5 s): not read at two looks while they go out', v.level === 0, logs.at(-1))
+  both(1_800_000, 400_000)
+  both(2_400_000, 400_000)
+  check('... once gone, read: two looks over a second, down', v.level === 1, logs.at(-1))
+}
+
 // ---- replays of a page over a link of a set rate (remote-page.mjs: the real mux, fan-out and stand-ins) ----
 {
   // The 03:55 page open on 29 Sep (stutter report Task 4): 16 nvr-2 sub tiles on one socket over a
@@ -602,6 +766,18 @@ function onPage(key, n = 2) {
   const r = openPage({ tiles, linkMbps: 2, durMs: 12_000 })
   const first = Number.parseFloat(r.downs[0] ?? 'NaN')
   check('a real overload, 16 x 0.5 Mbit/s into 2 Mbit/s: the first step down within 6 s', first <= 6, r.lines.join(' | '))
+}
+{
+  // A PC through the tunnel changes network at 20 s (the final review's probe): 16 subs of 350 kbit/s
+  // over 8 Mbit/s, the old page socket left open on the server, its path taking 0, 2 or 6 MB more, and
+  // the browser's new page open at 23 s. It went full -> 15 -> 8 -> 4 between 24 and 46 s and back at
+  // full only at 104-118 s. The new page stays at full, and gets its video.
+  const tiles = Array.from({ length: 16 }, (_, i) => ({ ch: i, cam: camera({ fps: 30, kbps: 350, from: -3000 - i * 100 }) }))
+  const runs = [0, 2e6, 6e6].map((pipeBytes) => openPage({ tiles, linkMbps: 8, durMs: 70_000, reload: { deadAt: 20_000, openAt: 23_000, pipeBytes } }))
+  check('a browser\'s new page socket beside its old one that went dead (the path took 0, 2 or 6 MB more): no step down in 70 s', runs.every((r) => r.downs.length === 0), runs.map((r) => r.downs.join(' | ')).join(' || '))
+  check('  its new page writes all of the tiles\' video (over 32 MB in 47 s: 16 x 350 kbit/s is 33 MB, and their replays)', runs.every((r) => r.written[1] > 32e6), runs.map((r) => (r.written[1] / 1e6).toFixed(1)).join(', '))
+  const alone = openPage({ tiles, linkMbps: 8, durMs: 40_000, reload: { deadAt: 20_000, openAt: 1e9, pipeBytes: 0 } })
+  check('  (the old page socket alone, no new one: read as a link that stopped, as ever)', alone.downs.length > 0, alone.lines.join(' | '))
 }
 
 // ---- conversions for a PC through the tunnel (stutter report 2.7) ----
@@ -748,6 +924,283 @@ const send = (src, n, { fps = 30, codec = 1, from = 0 } = {}) => {
   for (const i of [0, 1]) for (const v of [...src.viewers]) v.send(encodeFrame(Buffer.from([0, 0, 1, 1]), true, 1, i * 1250))
   check('REMOTE_CONVERSION: a source under 10 fps is converted picture by picture', REMOTE_CONVERSION.slowFps === 10 && made.length === 1 && made[0].o.lowDelay === true, JSON.stringify(REMOTE_CONVERSION))
   clearInterval(live.timer)
+}
+{
+  // A page back at level 8 opens a tile on a cold 30 fps nvr-2 sub, and the NVR freezes 15 s just after
+  // the sub's keyframe and 2 frames (it freezes all its cameras 11-32 s when streams are opened, stutter
+  // report 2.3). The level's stream read 0.2 fps off that hole, sent the sub as it was, 93 frames in 3 s
+  // where level 8 sends about 25, and the controller remembered 0.2 fps for that camera stream, for
+  // #passes and #handOver to reuse (the final review of live-smooth).
+  let now = T
+  const { make } = converters()
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(16), makeTranscoder: make, log: (l) => logs.push(l), budgetBps: 1e9, now: () => now })
+  const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
+  const sub = new HubStream(hub, 4, 1)
+  live.gone.set('back', { level: 3, at: now - 5000 })
+  const ws = fakeWs()
+  live.attach('back', { ws, nvrId: 'nvr-2', ch: 4, type: 1, source: sub })
+  let ts = 0
+  let n = 0
+  const frame = () => {
+    const key = n % 60 === 0
+    sub.onFrame(encodeFrame(Buffer.from([0, 0, 1, 1]), key, 0, ts), key)
+    n++
+    ts += 1000 / 30
+    now += 33
+  }
+  for (let i = 0; i < 3; i++) frame()
+  ts += 15_000
+  now += 15_000
+  for (let i = 0; i < 90; i++) frame()
+  const v = live.viewers.get('back')
+  check('a cold 30 fps sub at level 8 whose NVR froze 15 s after its first 3 frames: converted, about 8 a second (was sent as it is: 93 frames in 3 s)', LEVELS[v.level].id === '8' && ws.got.length <= 3 + 25 && !logs.some((l) => l.includes('sent as it is')), `${ws.got.length} sent | ${logs.join(' | ')}`)
+  check('  the controller remembers it at 30 fps, not 0.2', Math.abs((live.rates.get('nvr-2/4/1') ?? 0) - 30) < 0.5, String(live.rates.get('nvr-2/4/1')))
+  clearInterval(live.timer)
+}
+{
+  // A cold 30 fps sub with a 1.2 s hole after its keyframe and one frame: read as 1.6 fps and sent as it
+  // is, then read again at its 12th frame as 30. At level 8 it is converted from the camera's next
+  // keyframe (a slot taken for it); at level 15 it stays as it is: converted there, a sub comes out
+  // bigger than it went in (nvr-2/6 0.37 -> 0.47 Mbit/s; the stutter report's "do not convert grid
+  // sub-streams at level 15").
+  const at = (level) => {
+    const { made, make } = converters()
+    const logs = []
+    const pool = new TranscodePool(16)
+    const live = new AdaptiveLive({ pool, makeTranscoder: make, log: (l) => logs.push(l), budgetBps: 1e9 })
+    const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
+    const sub = new HubStream(hub, 4, 1)
+    live.gone.set('holed', { level: level + 1, at: Date.now() - 5000 })
+    const ws = fakeWs()
+    live.attach('holed', { ws, nvrId: 'nvr-2', ch: 4, type: 1, source: sub })
+    let ts = 0
+    for (let i = 0; i < 90; i++) {
+      const key = i % 60 === 0
+      sub.onFrame(encodeFrame(Buffer.from([0, 0, 1, 1]), key, 0, ts), key)
+      ts += i === 1 ? 1200 : 1000 / 30
+    }
+    clearInterval(live.timer)
+    return { made, logs, pool, level: LEVELS[live.viewers.get('holed').level].id }
+  }
+  const eight = at(2)
+  check('a 30 fps sub read as 1.6 fps off a hole, read again as 30: at level 8 converted from the next keyframe, 1 in 4, a slot taken', eight.level === '8' && eight.made.length === 1 && eight.made[0].o.keepEvery === 4 && eight.pool.active === 1 && eight.logs.at(-1) === '[phone-live] nvr-2/5: converting a sub stream at 30.0 fps to about 8: keeping 1 in 4', eight.logs.join(' | '))
+  const fifteen = at(1)
+  check('  at level 15: still sent as it is (never converted there), no slot taken', fifteen.level === '15' && fifteen.made.length === 0 && fifteen.pool.active === 0 && fifteen.logs.at(-1) === '[phone-live] nvr-2/5: a sub stream at 30.0 fps: still sent as it is', fifteen.logs.join(' | '))
+}
+{
+  // ...and a camera stream's own GOP with such a hole in it: its rate, as #passes and #handOver read it,
+  // leaves the hole out (it read 0.2 fps off a keyframe, 3 frames and one 15 s later)
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(16), makeTranscoder: converters().make, log: (l) => logs.push(l), budgetBps: 1e9 })
+  const src = fakeSource('holed sub')
+  src.gop = [0, 33.3, 66.7, 100, 15_100, 15_133.3].map((t, i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i === 0, 0, t))
+  live.gone.set('back2', { level: 3, at: Date.now() - 5000 })
+  const ws = fakeWs()
+  live.attach('back2', { ws, nvrId: 'nvr-2', ch: 5, type: 1, source: src })
+  check('a sub whose GOP holds a 15 s hole, at level 8: read as 30 fps, so converted (1 in 4), not passed through at 0.2', Math.abs((live.rates.get('nvr-2/5/1') ?? 0) - 30) < 0.5 && !src.viewers.has(ws), `${live.rates.get('nvr-2/5/1')} | ${[...live.streams.keys()]}`)
+  const two = fakeSource('two frames')
+  two.gop = [0, 1250].map((t, i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i === 0, 0, t))
+  live.attach('back2', { ws: fakeWs(), nvrId: 'nvr-2', ch: 6, type: 1, source: two })
+  check('  a GOP of 2 frames 1.25 s apart: too few to read a rate off (a trickle, or a hole): not remembered', !live.rates.has('nvr-2/6/1'), String(live.rates.get('nvr-2/6/1')))
+  clearInterval(live.timer)
+}
+
+// ---- what level full's conversions cost (the final review of live-smooth) ----
+// A level-full conversion is playback's: 1920 wide, every frame, two decoder threads, 1.38-1.50 cores
+// for a 4K H.265 camera at 1x (f24fe50), where level 15's was 0.85 (1280 wide, 1 in 2; ev-remote A9).
+// Playback holds its own to 2 (CCTV_TRANSCODE_MAX); these drew on the 16 of the live pool alone.
+/**
+ * `n` H.265 mains at 20 fps (a keyframe every 2 s) on the real fan-out, and the stop timers on the
+ * test's clock: play(ms) moves it 50 ms at a time, the cameras sending, the controller looking every
+ * TICK_MS; peak: the most level-full conversions running at once. pool: the live pool's cap; out: each
+ * converter hands every frame back at once (as H.264), so a socket has a picture (lastTs).
+ */
+function fullRig(n, { pool = 16, out = false } = {}) {
+  const real = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout }
+  const timers = new Map()
+  let seq = 0
+  const r = { now: T, xs: [], logs: [], peak: 0 }
+  globalThis.setTimeout = (fn, ms = 0) => {
+    const h = { n: ++seq, unref() { return this } }
+    timers.set(h, { at: r.now + ms, fn })
+    return h
+  }
+  globalThis.clearTimeout = (h) => timers.delete(h)
+  r.restore = () => Object.assign(globalThis, real)
+  r.live = new AdaptiveLive({ pool: new TranscodePool(pool), makeTranscoder: (o) => { const x = { o, closed: false, push(ts, k) { if (out && !this.closed) o.onFrame(ts, k, Buffer.from([7])) }, endPicture() {}, close() { this.closed = true } }; r.xs.push(x); return x }, log: (l) => r.logs.push(l), budgetBps: 1e9, now: () => r.now })
+  const hub = { send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }
+  r.mains = Array.from({ length: n }, (_, ch) => ({ s: new HubStream(hub, ch, 0), n: 0, ts: 0 }))
+  r.full = () => [...r.live.streams].filter(([k, s]) => k.endsWith('@full') && !s.closed).length
+  r.sock = () => {
+    const w = { ...fakeWs(), overSince: null, closers: [], on(e, f) { if (e === 'close') w.closers.push(f) } }
+    w.close = () => { w.readyState = 3; for (const f of w.closers) f() }
+    return w
+  }
+  r.play = (ms) => {
+    for (const end = r.now + ms; r.now < end;) {
+      r.now += 50
+      for (const [h, x] of [...timers]) if (x.at <= r.now) { timers.delete(h); x.fn() }
+      for (const m of r.mains) {
+        const key = m.n % 40 === 0
+        m.s.onFrame(encodeFrame(Buffer.alloc(key ? 40 : 8), key, 1, m.ts), key)
+        m.n++
+        m.ts += 50
+      }
+      if ((r.now - T) % TICK_MS === 0) r.live.tick()
+      r.peak = Math.max(r.peak, r.full())
+    }
+  }
+  return r
+}
+{
+  // A remote PC steps its full-size view with ‹ › through 8 H.265 mains, one every 2 s (viewer.js
+  // openSingle: the main tile closes, the next camera's opens). Each conversion it left went on
+  // converting every frame for its 10 s stop delay: 5-6 running at once, about 7-8 cores for one
+  // viewer watching one camera (final-res/step.mjs), against about 4.5 before the branch.
+  const r = fullRig(8)
+  try {
+    r.live.attach('stepper', { ws: r.sock(), nvrId: 'n', ch: 99, type: 1, source: new HubStream({ send() {}, streams: new Map(), stopDelayMs: { 0: 10_000, 1: 180_000 } }, 99, 1) }) // its grid, behind
+    clearInterval(r.live.timer)
+    r.play(3000)
+    let cur = null
+    const onFull = []
+    for (let i = 0; i < 8; i++) {
+      cur?.close()
+      cur = r.sock()
+      r.live.attach('stepper', { ws: cur, nvrId: 'n', ch: i, type: 0, source: r.mains[i].s, codec: 'h265' })
+      r.play(2000)
+      onFull.push(r.live.streams.get(`n/${i}/0@full`)?.clients.has(cur) === true)
+    }
+    check('a remote PC stepping its full-size view through 8 H.265 mains every 2 s: never more than 2 level-full conversions running (it was 5-6)', r.peak <= 2, `peak ${r.peak}`)
+    check('  every camera it steps to is converted at full', onFull.every(Boolean), onFull.join())
+    cur.close()
+    r.play(FULL_STOP_MS + 100)
+    check(`  the last one left: its conversion closes within ${FULL_STOP_MS / 1000} s (it was 10 s)`, r.full() === 0 && r.xs.every((x) => x.closed), `${r.full()} running`)
+  } finally {
+    r.restore()
+  }
+}
+{
+  // Three remote PCs, each in a full-size view of a different 4K H.265 camera: 4.3 cores beside the 2
+  // playback conversions' 2.9, against the 5.8 or so free (before the branch 2.55). At most FULL_MAX at
+  // full; the next is given level 15's stream (1280 wide), and full once one is free again.
+  const r = fullRig(3)
+  try {
+    const socks = [0, 1, 2].map((ch) => {
+      const ws = r.sock()
+      r.live.attach(`pc${ch}`, { ws, nvrId: 'n', ch, type: 0, source: r.mains[ch].s, codec: 'h265' })
+      clearInterval(r.live.timer)
+      return ws
+    })
+    r.play(1000)
+    const third = r.live.streams.get('n/2/0@15')
+    check(`three PCs at full on three H.265 mains: ${FULL_MAX} level-full conversions, the third on level 15's (1280 wide)`, FULL_MAX === 2 && r.full() === 2 && third?.clients.has(socks[2]) && third.maxWidth === 1280, `${[...r.live.streams.keys()]}`)
+    check('  said once', r.logs.filter((l) => l.includes('full-size conversions run already')).length === 1, r.logs.join(' | '))
+    socks[0].close()
+    r.play(2 * TICK_MS + 2000)
+    check('  one PC gone: the third goes over to full at the camera\'s next keyframe, and never more than 2 at once', r.live.streams.get('n/2/0@full')?.clients.has(socks[2]) && r.peak <= 2, `${[...r.live.streams].map(([k, s]) => `${k}:${s.clients.size}${s.closed ? ' closed' : ''}`)} peak ${r.peak}`)
+  } finally {
+    r.restore()
+  }
+}
+{
+  // Past FULL_MAX a level-full conversion nobody is on any more (its FULL_STOP_MS running) is closed to
+  // make room, the one left longest first: the one left last is the one a PC stepping back with ‹ finds
+  // running. They were closed in the order they were made, which the comment did not say (the review of
+  // d5390d6).
+  const r = fullRig(3)
+  try {
+    const socks = [0, 1].map((ch) => {
+      const ws = r.sock()
+      r.live.attach(`pc${ch}`, { ws, nvrId: 'n', ch, type: 0, source: r.mains[ch].s, codec: 'h265' })
+      clearInterval(r.live.timer)
+      return ws
+    })
+    r.play(1000)
+    const [a, b] = ['n/0/0@full', 'n/1/0@full'].map((k) => r.live.streams.get(k))
+    socks[1].close() // camera 1's viewer goes first...
+    r.play(500)
+    socks[0].close() // ...then camera 0's
+    r.play(500)
+    const ws = r.sock()
+    r.live.attach('pc2', { ws, nvrId: 'n', ch: 2, type: 0, source: r.mains[2].s, codec: 'h265' })
+    clearInterval(r.live.timer)
+    check('FULL_MAX reached by two conversions nobody is on: the one left longest is closed for a third camera, the one left last runs on for its stop delay', b?.closed && a && !a.closed && r.live.streams.get('n/2/0@full')?.clients.has(ws), `camera 0's ${a?.closed ? 'closed' : 'runs'}, camera 1's ${b?.closed ? 'closed' : 'runs'}`)
+  } finally {
+    r.restore()
+  }
+}
+/** Where a socket's frames come from in a fullRig: a level stream's key, or 'raw' (the camera's own stream). */
+const onStream = (r, ws, ch) => {
+  for (const [k, s] of r.live.streams) if (!s.closed && s.clients.has(ws)) return k
+  return r.mains[ch].s.clients.has(ws) ? 'raw' : '?'
+}
+/** How many of the camera's own H.265 frames a socket was sent (a converted one is H.264). */
+const h265Sent = (ws) => ws.got.filter((b) => b[1] === 1).length
+{
+  // FULL_MAX reached (PCs X and Y at full on cameras 0 and 1), and PCs Z and W both in a full-size view
+  // of camera 2, sharing level 15's stream; the live pool at its cap (3). X steps down to 15: its full
+  // place frees, and its own level-15 stream takes its slot. At the next look Z and W found room at full
+  // and no slot, and went from their working conversion onto the camera's own H.265 stream: 1.5 s, 40
+  // H.265 frames, and a PC without HEVC falls back to the sub-stream for 2 minutes (NO_MAIN_MS; the review
+  // of d5390d6, fullmax-pool2.mjs). No slot is no room: they stay on level 15's stream until one is free.
+  const r = fullRig(3, { pool: 3, out: true })
+  try {
+    const [X, Y, Z, W] = [0, 1, 2, 2].map((ch, i) => {
+      const ws = r.sock()
+      r.live.attach(`pc-${'XYZW'[i]}`, { ws, nvrId: 'n', ch, type: 0, source: r.mains[ch].s, codec: 'h265' })
+      clearInterval(r.live.timer)
+      return ws
+    })
+    r.play(5000)
+    check('FULL_MAX reached, the pool at its cap: two PCs at full, two on camera 2\'s level-15 stream', onStream(r, X, 0) === 'n/0/0@full' && onStream(r, Y, 1) === 'n/1/0@full' && onStream(r, Z, 2) === 'n/2/0@15' && onStream(r, W, 2) === 'n/2/0@15' && r.live.pool.active === 3, `${onStream(r, Z, 2)} ${onStream(r, W, 2)} pool ${r.live.pool.active}`)
+    const vx = r.live.viewers.get('pc-X')
+    let held = true
+    Object.defineProperty(X, 'overSince', { get: () => (held ? r.now - 3000 : null), set() {}, configurable: true })
+    for (let i = 0; i < 200 && vx.level === 0; i++) r.play(50)
+    held = false
+    const where = []
+    for (let i = 0; i < 16; i++) {
+      r.play(500)
+      where.push(`${onStream(r, Z, 2)}/${onStream(r, W, 2)}`)
+    }
+    check('  X steps down to 15 (its full place frees, its level-15 stream takes the slot): Z and W stay on level 15\'s stream, never on the camera\'s own H.265 one', vx.level === 1 && where.every((w) => w === 'n/2/0@15/n/2/0@15') && h265Sent(Z) === 0 && h265Sent(W) === 0, `${where.join(' ')} | H.265 frames sent to Z ${h265Sent(Z)}, W ${h265Sent(W)}`)
+    Y.close()
+    r.play(FULL_STOP_MS + 2 * TICK_MS + 2000)
+    check('  ... and once Y has gone and its slot is free, both to full at the camera\'s next keyframe, still no H.265 frame', onStream(r, Z, 2) === 'n/2/0@full' && onStream(r, W, 2) === 'n/2/0@full' && h265Sent(Z) === 0 && h265Sent(W) === 0, `${onStream(r, Z, 2)} ${onStream(r, W, 2)} | ${h265Sent(Z)} ${h265Sent(W)}`)
+  } finally {
+    r.restore()
+  }
+}
+{
+  // The same below full: P and Q in a full-size view of one H.265 camera share its level-full conversion,
+  // the only slot. P steps down to 15: no slot for level 15's stream, and the conversion it is on is not
+  // its alone to hand over. It went onto the camera's own H.265 stream; it stays on the conversion it has,
+  // and once Q has gone (that conversion now its own) the next look hands its slot over to level 15's
+  // stream at the camera's next keyframe.
+  const r = fullRig(1, { pool: 1, out: true })
+  try {
+    const [P, Q] = ['P', 'Q'].map((k) => {
+      const ws = r.sock()
+      r.live.attach(`pc-${k}`, { ws, nvrId: 'n', ch: 0, type: 0, source: r.mains[0].s, codec: 'h265' })
+      clearInterval(r.live.timer)
+      return ws
+    })
+    r.play(5000)
+    const vp = r.live.viewers.get('pc-P')
+    let held = true
+    Object.defineProperty(P, 'overSince', { get: () => (held ? r.now - 3000 : null), set() {}, configurable: true })
+    for (let i = 0; i < 200 && vp.level === 0; i++) r.play(50)
+    held = false
+    r.play(6000)
+    check('below full: a PC stepping down with no slot free, on a level-full conversion another PC shares, keeps that conversion (never the camera\'s own H.265 stream)', vp.level === 1 && onStream(r, P, 0) === 'n/0/0@full' && h265Sent(P) === 0, `level ${vp.level}, on ${onStream(r, P, 0)}, ${h265Sent(P)} H.265 frames`)
+    Q.close()
+    r.play(2 * TICK_MS + 2000)
+    check('  ... Q gone: at a later look it hands that slot over to level 15\'s stream at the camera\'s next keyframe, still no H.265 frame', onStream(r, P, 0) === 'n/0/0@15' && h265Sent(P) === 0 && r.live.pool.active === 1, `on ${onStream(r, P, 0)}, ${h265Sent(P)} H.265 frames, pool ${r.live.pool.active}`)
+  } finally {
+    r.restore()
+  }
 }
 
 // ---- level changes without a freeze or a jump back (stutter report 2.5, verify-5) ----
@@ -1167,6 +1620,277 @@ const brief = (got, from, to) => got.filter((f) => f.at >= from && f.at <= to).m
     check(`  a ${t.fps} fps ${t.type === 0 ? 'main' : 'sub'}: never a frame older than one it had; played, the picture never steps back, the longest still ${p.maxStillMs} ms`,
       got.back === 0 && p.backwards === 0 && p.maxBackMs === 0 && p.maxStillMs <= 267 + 17, `${JSON.stringify(got)} ${JSON.stringify({ back: p.maxBackMs, still: p.maxStillMs, resyncs: p.resyncs })}`)
   }
+}
+
+// ---- a main moved only while its viewer may still see main (stream rights: Live HD) ----
+// A full-size view's main stream is main-stream pictures on the viewer's socket from whatever stream it
+// is put on. live-attach.mjs lets it in with Live HD; the level changes above put it on other streams:
+// another viewer's conversion of that main, level full's, the camera's own. Each such move asks again
+// first (attach's mayMain: the session and the rights now). No longer allowed (Live HD taken away, the
+// access watch's sweep not come yet): not moved, nothing more sent, closed 1008 'hd not allowed'.
+/**
+ * Another remote viewer's full-size view of the rig's camera `t` (its main): mayMain asks `may()`,
+ * counted. `sync`: its close runs its handlers at once (a mux channel runs them a tick later, a ws
+ * socket once the close handshake is done: `sync` false leaves them to the test).
+ */
+function viewerOn(r, key, t, may, { sync = true } = {}) {
+  const ws = r.socket()
+  let asked = 0
+  ws.close = (code, reason) => {
+    if (ws.closedWith) return
+    ws.closedWith = { code, reason }
+    ws.gotAtClose = ws.got.length
+    if (sync) ws.handlers.close?.()
+  }
+  r.live.attach(key, { ws, nvrId: 'n1', ch: t.ch, type: t.type ?? 1, source: t.stream, mayMain: () => { asked++; return may() } })
+  const v = r.live.viewers.get(key)
+  return { ws, v, asked: () => asked, entry: () => [...v.sockets].find((e) => e.ws === ws) }
+}
+const refused = (ws) => ws.closedWith?.code === 1008 && ws.closedWith.reason === 'hd not allowed'
+{
+  // Viewer A (the rig's) steps its main down to 15: its conversion of the main runs. B and C, two more
+  // PCs on the camera's own main at full, step down to 15 too, where A's conversion runs: B's Live HD
+  // was taken away meanwhile, C's was not.
+  const r = rig({ cams: [{ fps: 25, type: 0 }], pool: 4 })
+  const [t] = r.tiles
+  r.down(5000)
+  r.to(7000)
+  const a15 = r.entry(t).stream
+  let bMay = true
+  const b = viewerOn(r, 'b', t, () => bMay, { sync: false })
+  const c = viewerOn(r, 'c', t, () => true)
+  r.to(10_000)
+  check('Live HD: a PC on the camera\'s own main at full, another viewer\'s conversion of it at 15', a15?.fps === 15 && !a15.closed && b.entry().stream === t.stream && c.entry().stream === t.stream && b.ws.got.length > 0, `${a15?.fps}`)
+  bMay = false // taken away; the access watch has not swept yet
+  r.down(11_000, [b.ws, c.ws])
+  check('  its level change onto the other viewer\'s conversion asks first: no Live HD, closed 1008 "hd not allowed", not put on it', LEVELS[b.v.level].id === '15' && refused(b.ws) && !a15.clients.has(b.ws) && b.asked() >= 1, JSON.stringify(b.ws.closedWith))
+  check('  said once', r.logs.filter((l) => l.includes('a main stream not moved')).length === 1 && r.logs.some((l) => l.endsWith('n1/1: a main stream not moved to another stream: its viewer may no longer see it; closed 1008 "hd not allowed"')), r.logs.filter((l) => l.includes('not moved')).join(' | '))
+  check('  the one still allowed goes over as before (asked, and on that conversion)', c.entry().stream === a15 && a15.clients.has(c.ws) && !c.ws.closedWith && c.asked() >= 1)
+  r.to(15_000)
+  check('  its socket still closing (its close not done yet): sent nothing more, moved nowhere, however many looks', b.ws.got.length === b.ws.gotAtClose && b.entry().stream === t.stream && !a15.clients.has(b.ws) && r.live.streams.size === 1, `${b.ws.got.length - b.ws.gotAtClose} more`)
+  b.ws.handlers.close()
+  check('  and once closed, off the camera\'s stream', !t.stream.clients.has(b.ws) && !r.live.viewers.has('b'))
+}
+{
+  // Decided while allowed, taken away before it goes over: A's conversion of the main at 15, B's own at
+  // 8. B climbs back to 15 at 29 s: from its conversion onto A's, at that one's next keyframe (#swap).
+  const r = rig({ cams: [{ fps: 25, gopS: 3, type: 0 }], pool: 4 })
+  const [t] = r.tiles
+  let bMay = true
+  const b = viewerOn(r, 'b', t, () => bMay)
+  r.down(5000, [t.ws, b.ws])
+  r.down(9000, [b.ws])
+  for (let ms = 10_000; ms <= 28_000; ms += 1000) { r.to(ms); r.v.cleanSince = T + ms } // A stays at 15
+  const a15 = r.entry(t).stream
+  const b8 = b.entry().stream
+  r.to(29_000)
+  check('Live HD: a climb onto another viewer\'s conversion of the main, decided while allowed', LEVELS[b.v.level].id === '15' && b.entry().switch?.to === a15 && b8.fps === 8 && a15.fps === 15, `${LEVELS[b.v.level].id} ${b.entry().switch?.to === a15}`)
+  bMay = false
+  r.to(33_000)
+  check('  taken away before that conversion\'s keyframe: asked again there, closed "hd not allowed", never put on it', refused(b.ws) && !a15.clients.has(b.ws) && b.ws.got.length === b.ws.gotAtClose, JSON.stringify(b.ws.closedWith))
+  check('  its own conversion closed, its slot back; the other viewer\'s runs on', b8.closed && !a15.closed && r.live.pool.active === 1 && a15.clients.has(t.ws), `${r.live.pool.active} slots`)
+}
+{
+  // Onto the camera's own main: a PC at 15 on a conversion made for it climbs back to full at 25 s,
+  // decided while allowed, going over at the camera's keyframe at 26 s (#swap); taken away in between
+  const r = rig({ cams: [{ fps: 25, type: 0 }], pool: 4 })
+  const [t] = r.tiles
+  let bMay = true
+  const b = viewerOn(r, 'b', t, () => bMay)
+  r.down(5000, [b.ws])
+  r.to(25_000)
+  const b15 = b.entry().stream
+  check('Live HD: a climb back onto the camera\'s own main, waiting for its keyframe', b.v.level === 0 && b.entry().switch?.to === t.stream && b15.fps === 15, `${b.v.level}`)
+  bMay = false
+  r.to(27_000)
+  check('  taken away meanwhile: asked again at the keyframe, closed "hd not allowed", never on the camera\'s stream again', refused(b.ws) && !t.stream.clients.has(b.ws) && b.ws.got.length === b.ws.gotAtClose, JSON.stringify(b.ws.closedWith))
+  check('  nobody left on the conversion made for it (it closes after its stop delay, as at any leave at full)', b15.clients.size === 0, `${b15.clients.size}`)
+}
+{
+  // No slot free (pool 1): a step down 15 -> 8 hands its own conversion's slot over at the camera's next
+  // keyframe (#handOver); taken away before it
+  const r = rig({ cams: [{ fps: 25, type: 0 }], pool: 1 })
+  const [t] = r.tiles
+  let bMay = true
+  const b = viewerOn(r, 'b', t, () => bMay)
+  r.down(5000, [b.ws])
+  const b15 = b.entry().switch?.to
+  r.down(9000, [b.ws])
+  check('Live HD: a step down with no slot free, its conversion kept for the hand-over', LEVELS[b.v.level].id === '8' && b.entry().stream === b15 && b.entry().switch?.to === null && r.live.pool.active === 1)
+  bMay = 'not allowed' // Live itself taken away: the refusal the access watch would give
+  r.to(11_000)
+  check('  Live taken away before the keyframe: no hand-over, closed 1008 "not allowed" (the watch\'s words), no conversion of 8 made, the slot back', b.ws.closedWith?.code === 1008 && b.ws.closedWith.reason === 'not allowed' && b15.closed && !r.live.streams.has('n1/0/0@8') && r.live.pool.active === 0 && b.ws.got.length === b.ws.gotAtClose, `${[...r.live.streams.keys()]} ${r.live.pool.active}`)
+}
+{
+  // A switch that goes over when its new stream starts, or when its wait runs out (#cutOver): a step down
+  // on a camera whose next keyframe is 3 s off; taken away while it waits (a check that throws: a no)
+  const r = rig({ cams: [{ fps: 25, gopS: 4, type: 0 }], pool: 4 })
+  const [t] = r.tiles
+  let broken = false
+  const b = viewerOn(r, 'b', t, () => { if (broken) throw new Error('rights unreadable'); return true })
+  r.down(7000, [b.ws]) // keyframes at 6, 10 s
+  const made = b.entry().switch?.to
+  broken = true
+  r.to(10_500)
+  check('Live HD: a step down waiting to go over, the check throwing meanwhile: a no, closed 1008 "not allowed", the stream made for it closed', made?.fps === 15 && b.ws.closedWith?.code === 1008 && b.ws.closedWith.reason === 'not allowed' && made.closed && r.live.streams.size === 0 && r.live.pool.active === 0 && b.ws.got.length === b.ws.gotAtClose, `${[...r.live.streams.keys()]}`)
+}
+{
+  // Level full's conversions of mains past FULL_MAX: a third PC waits on level 15's, and goes to full once
+  // one is free. Its Live HD taken away meanwhile: no conversion of full made for it, closed
+  const r = fullRig(3)
+  try {
+    let may2 = true
+    let asked2 = 0
+    const socks = [0, 1, 2].map((ch) => {
+      const ws = r.sock()
+      const close = ws.close
+      ws.close = (code, reason) => { ws.closedWith ??= { code, reason }; ws.gotAtClose ??= ws.got.length; close() }
+      r.live.attach(`pc${ch}`, { ws, nvrId: 'n', ch, type: 0, source: r.mains[ch].s, codec: 'h265', mayMain: ch === 2 ? () => { asked2++; return may2 } : () => true })
+      clearInterval(r.live.timer)
+      return ws
+    })
+    r.play(1000)
+    check('Live HD: the third PC past FULL_MAX on level 15\'s conversion; waiting for full asks nothing', r.live.streams.get('n/2/0@15')?.clients.has(socks[2]) && asked2 === 0, `${asked2}`)
+    may2 = false
+    socks[0].close()
+    r.play(2 * TICK_MS + 2000)
+    check('  one PC gone, its Live HD taken away meanwhile: not moved to full, closed "hd not allowed", no conversion of full left for it', refused(socks[2]) && asked2 === 1 && !r.live.streams.has('n/2/0@full') && r.full() === 1 && r.peak <= 2 && socks[2].got.length === socks[2].gotAtClose, `${[...r.live.streams].map(([k, s]) => `${k}:${s.clients.size}${s.closed ? ' closed' : ''}`)} asked ${asked2}`)
+  } finally {
+    r.restore()
+  }
+}
+{
+  // A main with no picture yet (an H.265 camera for a browser without it, its conversion's first picture
+  // not out) is taken off its stream at a level change before it is put on the new one (#move). Refused
+  // there it is on no stream at all, and its close must still let it go (a ws socket's 'close' comes
+  // later, and a handler that throws there would take the process down)
+  const r = fullRig(1)
+  try {
+    const ws = r.sock()
+    const close = ws.close
+    ws.close = (code, reason) => { ws.closedWith ??= { code, reason }; close() }
+    r.live.attach('pc', { ws, nvrId: 'n', ch: 0, type: 0, source: r.mains[0].s, codec: 'h265', mayMain: () => false })
+    clearInterval(r.live.timer)
+    r.play(SETTLE_MS + 1000)
+    const full = r.live.streams.get('n/0/0@full')
+    ws.overSince = r.now - 3000
+    r.live.tick()
+    check('Live HD: a main with no picture yet, taken off its stream at a level change and refused there: closed "hd not allowed", and let go', full && refused(ws) && !r.live.viewers.has('pc') && ![...r.live.streams.values()].some((s) => s.clients.has(ws)) && r.live.pool.active === 0, `${[...r.live.streams.keys()]} ${r.live.viewers.size} ${r.live.pool.active}`)
+  } finally {
+    r.restore()
+  }
+}
+// Kept on the conversion it has for want of a slot (#retarget: slotless, live-smooth's review of
+// d5390d6): its move is only put off, and the tick tries it again at every look. A main so kept is asked
+// at every look as at any move, so one whose Live HD went is closed at the next look, not kept on that
+// conversion -- another viewer's, maybe -- until the access watch's sweep.
+/** A fullRig socket that keeps what it was closed with, and how much it had been sent by then. */
+const keepsClose = (ws) => {
+  const close = ws.close
+  ws.close = (code, reason) => { ws.closedWith ??= { code, reason }; ws.gotAtClose ??= ws.got.length; close() }
+  return ws
+}
+/** Holds a fullRig viewer's socket over its cap until the viewer has stepped down from full. */
+const stepDown = (r, ws, key) => {
+  const v = r.live.viewers.get(key)
+  let held = true
+  Object.defineProperty(ws, 'overSince', { get: () => (held ? r.now - 3000 : null), set() {}, configurable: true })
+  for (let i = 0; i < 200 && v.level === 0; i++) r.play(50)
+  held = false
+  return v
+}
+{
+  // FULL_MAX reached (X and Y at full on cameras 0 and 1), Z and W in a full-size view of camera 2 on its
+  // level-15 stream, the pool at its cap (3). X steps down to 15: room at full, no slot, and Z and W wait
+  // on level 15's stream (the slotless test above). Z's Live HD is taken away meanwhile.
+  const r = fullRig(3, { pool: 3, out: true })
+  try {
+    let zMay = true
+    let zAsked = 0
+    const [X, Y, Z, W] = [0, 1, 2, 2].map((ch, i) => {
+      const ws = keepsClose(r.sock())
+      r.live.attach(`pc-${'XYZW'[i]}`, { ws, nvrId: 'n', ch, type: 0, source: r.mains[ch].s, codec: 'h265', mayMain: i === 2 ? () => { zAsked++; return zMay } : () => true })
+      clearInterval(r.live.timer)
+      return ws
+    })
+    r.play(5000)
+    const vx = stepDown(r, X, 'pc-X')
+    r.play(2 * TICK_MS)
+    const z = [...r.live.viewers.get('pc-Z').sockets][0]
+    const asked = zAsked
+    r.play(2 * TICK_MS)
+    check('Live HD: a main kept on level 15\'s stream for want of a slot at full (slotless): asked at every look while its move waits', vx.level === 1 && z.slotless && onStream(r, Z, 2) === 'n/2/0@15' && onStream(r, W, 2) === 'n/2/0@15' && zAsked === asked + 2 && !Z.closedWith, `level ${vx.level}, slotless ${z.slotless}, ${onStream(r, Z, 2)} ${onStream(r, W, 2)}, asked ${zAsked - asked} in 2 looks`)
+    zMay = false // taken away; the access watch has not swept yet
+    r.play(TICK_MS)
+    check('  its Live HD taken away: closed 1008 "hd not allowed" at the next look, off level 15\'s stream, sent nothing after, never an H.265 frame', refused(Z) && ![...r.live.streams.values()].some((s) => s.clients.has(Z)) && Z.got.length === Z.gotAtClose && h265Sent(Z) === 0 && !r.live.viewers.has('pc-Z'), `${JSON.stringify(Z.closedWith)} on ${onStream(r, Z, 2)}`)
+    check('  said once', r.logs.filter((l) => l.includes('a main stream not moved')).length === 1 && r.logs.some((l) => l.endsWith('n/3: a main stream not moved to another stream: its viewer may no longer see it; closed 1008 "hd not allowed"')), r.logs.filter((l) => l.includes('not moved')).join(' | '))
+    check('  W, still allowed, waits on level 15\'s stream as before', onStream(r, W, 2) === 'n/2/0@15' && !W.closedWith)
+    Y.close()
+    r.play(FULL_STOP_MS + 2 * TICK_MS + 2000)
+    check('  ... and goes to full once a slot is free; nothing more to Z', onStream(r, W, 2) === 'n/2/0@full' && h265Sent(W) === 0 && Z.got.length === Z.gotAtClose, `${onStream(r, W, 2)} ${h265Sent(W)}`)
+  } finally {
+    r.restore()
+  }
+}
+/**
+ * Below full: P and Q in a full-size view of one H.265 camera share its level-full conversion, the only
+ * slot (pool 1); P steps down to 15 and keeps that conversion for want of a slot (slotless). P's mayMain
+ * asks `may()`.
+ */
+function slotlessBelowFull(may) {
+  const r = fullRig(1, { pool: 1, out: true })
+  let asked = 0
+  const [P, Q] = ['P', 'Q'].map((k) => {
+    const ws = keepsClose(r.sock())
+    r.live.attach(`pc-${k}`, { ws, nvrId: 'n', ch: 0, type: 0, source: r.mains[0].s, codec: 'h265', mayMain: k === 'P' ? () => { asked++; return may() } : () => true })
+    clearInterval(r.live.timer)
+    return ws
+  })
+  r.play(5000)
+  const vp = stepDown(r, P, 'pc-P')
+  r.play(2 * TICK_MS)
+  return { r, P, Q, vp, p: [...vp.sockets][0], asked: () => asked }
+}
+{
+  let pMay = true
+  const { r, P, Q, vp, p, asked } = slotlessBelowFull(() => pMay)
+  try {
+    const was = asked()
+    r.play(2 * TICK_MS)
+    check('Live HD: below full, a main kept on the level-full conversion another PC shares for want of a slot (slotless): asked at every look', vp.level === 1 && p.slotless && onStream(r, P, 0) === 'n/0/0@full' && asked() === was + 2 && !P.closedWith, `level ${vp.level}, slotless ${p.slotless}, on ${onStream(r, P, 0)}, asked ${asked() - was} in 2 looks`)
+    pMay = false
+    r.play(TICK_MS)
+    check('  its Live HD taken away: closed 1008 "hd not allowed" at the next look, off that conversion, sent nothing after, never an H.265 frame', refused(P) && onStream(r, P, 0) === '?' && P.got.length === P.gotAtClose && h265Sent(P) === 0 && !r.live.viewers.has('pc-P'), `${JSON.stringify(P.closedWith)} on ${onStream(r, P, 0)}`)
+    check('  Q keeps that conversion and its slot', onStream(r, Q, 0) === 'n/0/0@full' && !Q.closedWith && r.live.pool.active === 1)
+  } finally {
+    r.restore()
+  }
+}
+{
+  // Kept so while it waited to switch to the camera's own stream (decided before the camera was known to
+  // be H.265, as #retarget decides it for an H.264 one): a move due all the same, and asked there too, at
+  // that very look
+  let pMay = true
+  const { r, P, p } = slotlessBelowFull(() => pMay)
+  try {
+    const source = r.mains[0].s
+    p.switch = { to: source, at: r.now, waitMs: 60_000, level: 1, fps: 0, tap: null, on: null }
+    pMay = false
+    r.play(TICK_MS)
+    check('Live HD: slotless while a switch to the camera\'s own stream waited: asked at the next look, closed 1008 "hd not allowed", never on the camera\'s stream', refused(P) && !source.clients.has(P) && onStream(r, P, 0) === '?' && h265Sent(P) === 0 && P.got.length === P.gotAtClose, `${JSON.stringify(P.closedWith)} on ${onStream(r, P, 0)}`)
+  } finally {
+    r.restore()
+  }
+}
+{
+  // A sub-stream's moves never ask (its streams never carry the main stream): full -> 15 -> 8 and back
+  const r = rig({ cams: [{ fps: 30 }] })
+  const [t] = r.tiles
+  const b = viewerOn(r, 'b', t, () => false)
+  r.down(5000, [b.ws])
+  r.down(9000, [b.ws])
+  r.to(51_000)
+  check('Live HD: a sub-stream\'s level changes ask nothing, and it moves as before', b.asked() === 0 && !b.ws.closedWith && b.v.level === 0 && b.entry().stream === t.stream && b.ws.got.length > 0, `${b.asked()} ${b.v.level}`)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

@@ -6,6 +6,7 @@
 //   node cctv/test/pb-sources.test.mjs
 import { readFileSync } from 'node:fs'
 import {
+  ALL_RIGHTS,
   CONVERTED_SCRUB_TIMEOUT_MS,
   LIVE_MARGIN_MS,
   NVR_REFUSAL_MAX_MS,
@@ -23,7 +24,9 @@ import {
   liveEdge,
   mergeSources,
   nextStretch,
+  nvrQualityOptions,
   nvrRetryDelay,
+  pbRights,
   pickMode,
   prerollUntil,
   qualityForCam,
@@ -36,6 +39,8 @@ import {
   shift,
   speedFor,
   stretchAt,
+  wallQualities,
+  wallTileMode,
   watchesStart
 } from '../public/pb-sources.js'
 
@@ -368,6 +373,113 @@ check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any
   const loadNvrSide = fn('loadNvrSide')
   check('page: loadNvrSide asks nvrRetryDelay for its retry, not a flat 30 s', /nvrRetryDelay\(e, nvrRefusalMs\)/.test(loadNvrSide))
   check('  the backoff resets on a new camera/day (the token) and once the search succeeds', /nvrRefusalMs = null/.test(loadNvrSide) && (loadNvrSide.match(/nvrRefusalMs = null/g) ?? []).length === 2)
+}
+
+// ---- what this viewer may play of a camera (stream rights) ----------------------------------------------
+{
+  const J = JSON.stringify
+  const all = pbRights(undefined)
+  check('pbRights: a camera without flags (an older server) is everything, as before', all.sd && all.hd && all.nvrHd && all.legs)
+  const sdOnly = pbRights({ sd: true, hd: false, nvrHd: false, legs: false })
+  check('pbRights: the flags as sent', sdOnly.sd === true && sdOnly.hd === false && sdOnly.nvrHd === false && sdOnly.legs === false)
+  check('pbRights: NVR HD and legs never without SD, whatever is sent', pbRights({ sd: false, hd: true, nvrHd: true, legs: true }).nvrHd === false && pbRights({ sd: false, hd: true, nvrHd: true, legs: true }).legs === false)
+  check('nvrQualityOptions: HD only for someone who may see the NVR\'s main stream', J(nvrQualityOptions({ nvrHd: true })) === J([[1, 'SD (light)'], [0, 'HD']]) && J(nvrQualityOptions({ nvrHd: false })) === J([[1, 'SD (light)']]))
+  check('serverQualityOptions: no "SD (NVR)" without Playback SD', J(serverQualityOptions({ remote: false, sd: false })) === J([['server', 'HD (server)']]) && J(serverQualityOptions({ remote: true, sd: false }).map(([v]) => v)) === J(['server', 'original']))
+  const tl = { available: true, ranges: [[0, 10]], codec: 'h264' }
+  const HD_ONLY = { sd: false, hd: true, nvrHd: false, legs: false }
+  check('pickMode, Playback HD only: server playback as usual', pickMode({ timeline: tl, h265: true, quality: 'server', rights: HD_ONLY }).mode === 'server')
+  check('... "SD (NVR)" left over from another camera is ignored (the NVR\'s copy is not theirs)', pickMode({ timeline: tl, h265: true, quality: 'sd-nvr', rights: HD_ONLY }).mode === 'server')
+  const none = pickMode({ timeline: { available: true, ranges: [] }, h265: true, quality: 'server', rights: HD_ONLY })
+  check('... a day with no server footage: "none", saying why (never NVR mode)', none.mode === 'none' && /no recordings of this camera on this day/i.test(none.why), J(none))
+  check('... no server recordings at all: "none"', pickMode({ timeline: { available: false }, h265: true, quality: 'server', rights: HD_ONLY }).mode === 'none')
+  check('pickMode with Playback SD, or with no rights given: as before', pickMode({ timeline: { available: false }, h265: true, quality: 'server' }).mode === 'nvr' && pickMode({ timeline: tl, h265: true, quality: 'sd-nvr', rights: ALL_RIGHTS }).mode === 'nvr')
+  check('refusedMessage: "hd not allowed" says HD is needed here and who can give it (words for both refusals: main asked without the right, and no SD recording)', /HD stream/.test(refusedMessage(1008, 'hd not allowed') ?? '') && /Playback HD or Live HD/.test(refusedMessage(1008, 'hd not allowed') ?? ''))
+  // the page (no DOM-free half to run here): where these are used
+  const page = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const fn = (name) => page.slice(page.indexOf(`function ${name}(`), page.indexOf('\n}\n', page.indexOf(`function ${name}(`)))
+  check('page: its cameras from /api/cameras?for=playback, at load and every 30 s', /api\('\/api\/cameras\?for=playback'\)/.test(page) && /fetch\('\/api\/cameras\?for=playback'\)/.test(page))
+  check('  the day\'s mode is picked with this camera\'s rights (loadDay, start), and "none" is handled', (page.match(/rights: rightsNow\(\)/g) ?? []).length === 2 && /pick\.mode === 'none'/.test(fn('loadDay')))
+  check('  the menus come from the rights', /nvrQualityOptions\(\{ nvrHd: r\.nvrHd \}\)/.test(fn('updateModeUi')) && /serverQualityOptions\(\{ remote: state\.remote, sd: r\.sd \}\)/.test(fn('updateModeUi')))
+  check('  the NVR socket asks for main only with nvrHd', /stream=\$\{rightsNow\(\)\.nvrHd \? state\.stream : 1\}/.test(fn('open')))
+  check('  {type:"stream"} says what plays and leaves the viewer\'s own choice alone', /state\.nvrMain = msg\.stream === 0/.test(fn('onStatus')) && !/state\.stream = msg\.stream/.test(fn('onStatus')))
+  check('  without Playback SD: no NVR side, no going over to the NVR', /if \(!rightsNow\(\)\.sd\) return/.test(fn('loadNvrSide')) && /if \(!rightsNow\(\)\.sd \|\| !nvrFallback\.take\(sock\.cam\)\) return false/.test(fn('fallBackToNvr')))
+}
+
+// ---- the Quality menu after an HD-only camera (its {type:'stream'} switch), on the next NVR socket ---------
+// The page's own open() and onStatus(), run against stand-ins for the page (no DOM here): the select must
+// say what the next socket asks for, not the "HD" an HD-only camera's switch put there (the next camera
+// then played SD under "HD", and choosing "HD" fired no change)
+{
+  const page = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const fn = (name) => {
+    const at = page.indexOf(`function ${name}(`)
+    return page.slice(at, page.indexOf('\n}\n', at) + 2)
+  }
+  const pageRig = ({ kind, nvrHd, stream }) => {
+    const values = kind === 'nvr' ? nvrQualityOptions({ nvrHd }).map(([v]) => String(v)) : ['server', 'sd-nvr']
+    const sel = { dataset: { kind }, value: kind === 'nvr' ? String(nvrHd ? stream : 1) : 'sd-nvr', options: values.map((v) => ({ value: v, textContent: v === 'sd-nvr' ? 'SD (NVR)' : v, disabled: false })) }
+    const r = { sel, state: { stream, nvrMain: false, ch: 2, speed: 1, h265: true, ranges: [], position: 0, nvrNow: 0 }, urls: [], relabels: 0 }
+    const deps = {
+      state: r.state,
+      qualitySel: sel,
+      ws: null,
+      rightsNow: () => ({ sd: true, hd: true, nvrHd, legs: true }),
+      // the page's updateModeUi, as far as the NVR option's label goes (it relabels from state.nvrMain)
+      updateModeUi: () => {
+        r.relabels++
+        const o = sel.options.find((x) => x.value === 'sd-nvr')
+        if (o) o.textContent = r.state.nvrMain ? 'HD (NVR)' : 'SD (NVR)'
+      },
+      WebSocket: class { constructor(u) { r.urls.push(u) } close() {} send() {} },
+      location: { protocol: 'http:', host: 'argus' },
+      nvrQ: () => 'nvr=n1',
+      pushFrame: () => {},
+      refusedMessage: () => null,
+      showMessage: () => {},
+      seek: () => {}
+    }
+    Object.assign(r, new Function(...Object.keys(deps), `${fn('open')}\n${fn('onStatus')}\nreturn { open, onStatus }`)(...Object.values(deps)))
+    return r
+  }
+  const a = pageRig({ kind: 'nvr', nvrHd: true, stream: 1 })
+  a.open(1000)
+  a.onStatus({ type: 'stream', stream: 0 })
+  check('page: an HD-only camera switched to main: the select says "HD", the viewer\'s own choice (SD) stays', a.sel.value === '0' && a.state.stream === 1 && a.state.nvrMain === true, a.sel.value)
+  a.open(2000)
+  check('  the next NVR socket (another camera or moment): the select back on the SD it asks for, so "HD" is a change again', a.sel.value === '1' && /[?&]stream=1&/.test(a.urls.at(-1)) && a.state.nvrMain === false, `${a.sel.value} ${a.urls.at(-1)}`)
+  const b = pageRig({ kind: 'nvr', nvrHd: true, stream: 0 })
+  b.open(1000)
+  check('  a viewer who chose HD: "HD", and the socket asks for it', b.sel.value === '0' && /[?&]stream=0&/.test(b.urls.at(-1)))
+  const c = pageRig({ kind: 'nvr', nvrHd: false, stream: 0 })
+  c.open(1000)
+  check('  without NVR HD on this camera: "SD", whatever was chosen before, and the socket asks for SD', c.sel.value === '1' && /[?&]stream=1&/.test(c.urls.at(-1)))
+  const d = pageRig({ kind: 'server', nvrHd: true, stream: 1 })
+  d.open(1000)
+  d.onStatus({ type: 'stream', stream: 0 })
+  check('  "SD (NVR)" chosen with server recordings: relabelled "HD (NVR)" while the HD-only camera plays', d.sel.options.find((o) => o.value === 'sd-nvr').textContent === 'HD (NVR)')
+  d.open(2000)
+  check('  ... and "SD (NVR)" again on the next NVR socket', d.sel.options.find((o) => o.value === 'sd-nvr').textContent === 'SD (NVR)' && d.sel.value === 'sd-nvr')
+}
+
+// ---- the camera wall (stream rights) -----------------------------------------------------------------------
+{
+  const J = JSON.stringify
+  const SD = { sd: true, hd: false }
+  const HD = { sd: false, hd: true }
+  const BOTH = { sd: true, hd: true }
+  check('wallQualities: nothing chosen yet: both choices, as before', J(wallQualities([], 'sd').options.map(([v]) => v)) === J(['sd', 'hd']))
+  check('... only HD-only cameras chosen: HD alone, and chosen', J(wallQualities([HD, HD], 'sd')) === J({ options: [['hd', 'HD (server recordings)']], value: 'hd' }))
+  check('... only SD-only cameras: SD alone', J(wallQualities([SD], 'hd')) === J({ options: [['sd', 'SD (NVR sub-streams)']], value: 'sd' }))
+  check('... a mix: both, the choice kept', J(wallQualities([SD, HD], 'hd').options.map(([v]) => v)) === J(['sd', 'hd']) && wallQualities([SD, BOTH], 'hd').value === 'hd')
+  const tile = (o) => wallTileMode({ quality: 'sd', available: true, codec: 'h264', h265: true, ...o })
+  check('wallTileMode: Playback HD only: the server\'s recordings whatever the Quality', tile({ rights: HD }) === 'server' && tile({ rights: HD, available: false }) === 'server')
+  check('... Playback SD only: the NVR\'s sub-stream whatever the Quality', tile({ rights: SD, quality: 'hd' }) === 'nvr')
+  check('... both: the Quality decides; the server only with its recordings in a codec this browser plays (as before)', tile({ rights: BOTH, quality: 'hd' }) === 'server' && tile({ rights: BOTH }) === 'nvr' && tile({ rights: BOTH, quality: 'hd', codec: 'h265', h265: false }) === 'nvr' && tile({ rights: BOTH, quality: 'hd', available: false }) === 'nvr')
+  const wall = readFileSync(new URL('../public/wall.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  check('wall: its cameras from /api/cameras?for=playback', /api\('\/api\/cameras\?for=playback'\)/.test(wall))
+  check('wall: each tile knows its camera\'s rights and plays from what they allow', /rights: pbRights\(cam\)/.test(wall) && /return wallTileMode\(\{ rights: this\.rights, /.test(wall))
+  check('wall: a 1008 refusal is said on the tile, and final', /if \(e\.code === 1008\) \{\n\s*this\.error = refusedMessage\(e\.code, e\.reason\)/.test(wall))
+  check('wall: the Quality menu follows the chosen cameras\' rights', /wallQualities\(rights, state\.quality\)/.test(wall) && /function showPage\(\) \{\n\s*updateQualityChoices\(\)/.test(wall))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

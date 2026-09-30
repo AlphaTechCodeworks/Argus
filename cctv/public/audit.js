@@ -12,7 +12,7 @@
 // tick means lives in access-model.js, tested without a browser; this file only paints its view
 // and posts its row. The server decides again on save (rights.mjs), so nothing here is trusted.
 
-import { COLUMNS, COLUMN_LABELS, FORMATS, FORMAT_LABELS, buildTree, click, copyFrom, copySources, dropKept, fromRow, sameRow, setAdmin, setAll, setFormat, toRow, view } from './access-model.js'
+import { COLUMNS, COLUMN_LABELS, COLUMN_TITLES, FORMATS, FORMAT_LABELS, HEAD_ROWS, buildTree, click, copyFrom, copySources, dropKept, fromRow, sameRow, setAdmin, setAll, setFormat, toRow, view } from './access-model.js'
 
 const PAD = (n) => String(n).padStart(2, '0')
 
@@ -104,7 +104,10 @@ export const grantText = (list) => (Array.isArray(list) && list.length ? list.ma
  * @param {{users?:object[], actions?:string[], formats?:string[]}} d the body of GET /api/admin/rights
  */
 export function renderRights(d) {
-  const actions = (Array.isArray(d?.actions) ? d.actions : []).filter((a) => a !== 'admin')
+  const sent = (Array.isArray(d?.actions) ? d.actions : []).filter((a) => a !== 'admin')
+  // the editor's order and names (access-model.js); an action this page does not know (a newer
+  // server) goes last, under its own key
+  const actions = [...COLUMNS.filter((a) => sent.includes(a)), ...sent.filter((a) => !COLUMNS.includes(a))]
   const formats = Array.isArray(d?.formats) ? d.formats : []
   const users = (Array.isArray(d?.users) ? d.users : []).map((u) => ({
     user: u.user,
@@ -119,6 +122,7 @@ export function renderRights(d) {
   const admins = users.filter((u) => u.admin).map((u) => u.user)
   return {
     actions,
+    labels: actions.map((a) => COLUMN_LABELS[a] ?? a),
     formats,
     users,
     admins,
@@ -196,15 +200,21 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
   const paintRights = (d) => {
     const r = renderRights(d)
     id('rightsNote').textContent = r.note
+    const heads = ['User', 'Admin', ...r.labels, 'Export formats']
     const head = el('tr')
-    for (const h of ['User', 'Admin', ...r.actions, 'Export formats']) head.append(el('th', { textContent: h }))
+    for (const h of heads) head.append(el('th', { textContent: h }))
     id('rightsHead').replaceChildren(head)
+    // each cell carries its column's name: on a phone the table is one card per user (style.css)
+    const td = (text, i, className = '') => {
+      const c = el('td', { textContent: text, className })
+      c.dataset.label = heads[i]
+      return c
+    }
     id('rightsRows').replaceChildren(...r.users.map((u) => {
       const tr = el('tr')
-      tr.append(el('td', { textContent: u.user }))
-      tr.append(el('td', { textContent: u.admin ? 'yes' : 'no', className: u.admin ? 'warn' : '' }))
-      for (const c of u.cells) tr.append(el('td', { textContent: c.text }))
-      tr.append(el('td', { textContent: u.formatText }))
+      tr.append(td(u.user, 0), td(u.admin ? 'yes' : 'no', 1, u.admin ? 'warn' : ''))
+      u.cells.forEach((c, i) => tr.append(td(c.text, i + 2)))
+      tr.append(td(u.formatText, heads.length - 1))
       return tr
     }))
   }
@@ -290,13 +300,16 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     id('ac-body').hidden = v.admin
     // parent: the site's cell, whose note a camera does not repeat (every camera of a site stored
     // as NVR playback only would otherwise say so twenty times over)
+    const rowNotes = new Map() // target -> ['Live HD: no effect without Live', …] (the row header, on phones)
     const set = (col, target, cell, parent = null) => {
       const box = ac.boxes.get(`${col} ${target}`)
       if (!box) return
       box.cb.checked = cell.state === 'on'
       box.cb.indeterminate = cell.state === 'some'
-      box.note.textContent = parent && parent.note === cell.note ? '' : cell.note
-      box.cb.title = cell.note
+      const note = parent && parent.note === cell.note ? '' : cell.note
+      box.note.textContent = note
+      box.cb.title = cell.note ? `${COLUMN_TITLES[col]}. ${cell.note}` : COLUMN_TITLES[col]
+      if (note) rowNotes.set(target, [...(rowNotes.get(target) ?? []), `${COLUMN_LABELS[col]}: ${note}`])
     }
     for (const col of COLUMNS) {
       set(col, '*', v.all[col])
@@ -305,6 +318,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
         for (const c of s.cameras) set(col, c.key, c.cells[col], s.cells[col])
       }
     }
+    for (const [target, small] of ac.rowNotes) small.textContent = (rowNotes.get(target) ?? []).join(' · ')
     for (const f of v.formats) ac.formatBoxes.get(f.id).checked = f.on
     id('ac-kept').hidden = v.kept.length === 0
     id('ac-keptList').replaceChildren(...v.kept.map((k) => {
@@ -327,8 +341,25 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
   const drawTree = () => {
     const v = view(ac.state, ac.tree)
     ac.boxes = new Map()
+    ac.rowNotes = new Map() // target -> its row header's line of notes (shown on phones instead of per box)
+    // the two header rows from the model, so the columns and their names cannot disagree
+    id('ac-head').replaceChildren(...HEAD_ROWS.map((row) => {
+      const tr = el('tr')
+      for (const h of row) {
+        const th = el('th', { textContent: h.text, className: h.column ? 'ac-col' : h.rowhead ? 'ac-rowhead' : 'ac-group' })
+        th.scope = h.colspan ? 'colgroup' : 'col'
+        if (h.rowspan) th.rowSpan = h.rowspan
+        if (h.colspan) th.colSpan = h.colspan
+        if (h.column) {
+          th.title = COLUMN_TITLES[h.column]
+          th.setAttribute('aria-label', COLUMN_LABELS[h.column])
+        }
+        tr.append(th)
+      }
+      return tr
+    }))
     const cellTd = (col, target, what) => {
-      const cb = el('input', { type: 'checkbox' })
+      const cb = el('input', { type: 'checkbox', title: COLUMN_TITLES[col] })
       cb.setAttribute('aria-label', `${COLUMN_LABELS[col]}: ${what}`)
       cb.addEventListener('change', () => { ac.state = click(ac.state, ac.tree, col, target); paintAccess() })
       const note = el('span', { className: 'ac-note' })
@@ -337,20 +368,22 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       ac.boxes.set(`${col} ${target}`, { cb, note })
       return td
     }
-    const rowHead = (text, sub) => {
+    const rowHead = (text, sub, target) => {
       const head = el('div', { className: 'ac-head' })
-      head.append(el('span', { className: 'ac-name', textContent: text }), el('small', { textContent: sub }))
+      const notes = el('small', { className: 'ac-row-notes' })
+      ac.rowNotes.set(target, notes)
+      head.append(el('span', { className: 'ac-name', textContent: text }), el('small', { textContent: sub }), notes)
       const th = el('th', { scope: 'row' })
       th.append(head)
       return th
     }
     const all = el('tr', { className: 'ac-all' })
-    all.append(rowHead('All sites', 'everything, sites added later included'), ...COLUMNS.map((c) => cellTd(c, '*', 'all sites')))
+    all.append(rowHead('All sites', 'everything, sites added later included', '*'), ...COLUMNS.map((c) => cellTd(c, '*', 'all sites')))
     const rows = [all]
     for (const s of v.sites) {
       const tr = el('tr', { className: 'ac-site' })
       const count = s.cameras.length ? `${s.cameras.length} camera${s.cameras.length === 1 ? '' : 's'}` : 'no cameras listed yet'
-      const th = rowHead(s.site, `${s.name !== s.site ? `${s.name} · ` : ''}${count}`)
+      const th = rowHead(s.site, `${s.name !== s.site ? `${s.name} · ` : ''}${count}`, s.nvr)
       const fold = el('button', { type: 'button', className: 'ac-fold', textContent: '▸' })
       fold.setAttribute('aria-label', `Cameras of ${s.site}`)
       fold.disabled = s.cameras.length === 0
@@ -359,7 +392,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       rows.push(tr)
       const camRows = s.cameras.map((c) => {
         const cr = el('tr', { className: 'ac-cam' })
-        cr.append(rowHead(c.name, `camera ${c.ch + 1}`), ...COLUMNS.map((col) => cellTd(col, c.key, `${c.name}, ${s.site}`)))
+        cr.append(rowHead(c.name, `camera ${c.ch + 1}`, c.key), ...COLUMNS.map((col) => cellTd(col, c.key, `${c.name}, ${s.site}`)))
         return cr
       })
       // A site opens by itself when some of its cameras are ticked and some not: that is the

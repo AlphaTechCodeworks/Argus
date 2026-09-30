@@ -111,7 +111,7 @@ import { playbackApi } from './playback.mjs'
 import { timelineApi } from './rec-api.mjs'
 import { downloadExport, handleExports } from './export-api.mjs'
 import { listExports } from './export-job.mjs'
-import { connectPlayback } from './rec-playback.mjs'
+import { NVR_MAIN_ACTIONS, connectPlayback } from './rec-playback.mjs'
 import { accessWatch } from './access-watch.mjs'
 import { vpnView } from './vpn.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
@@ -122,7 +122,8 @@ import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
 import { retentionCandidates, startRetentionWatch } from './retention-target.mjs'
-import { can, canPlayAnyOn, handleRights, onRightsSaved, sitesFor } from './rights.mjs'
+import { can, canPlayAnyOn, handleRights, liveCameras, mayHd, onRightsSaved, playbackCameras, sitesFor } from './rights.mjs'
+import { streamParam } from './stream-param.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
@@ -905,8 +906,10 @@ const handleRequest = async (req, res) => {
   // an admin sees every NVR in full; anyone else only the sites they hold a grant on, by site, name
   // and status (rights.mjs sitesFor): never an NVR's address, P2P serial, model or serial number
   if (pathname === '/api/sites') return sendJson(res, 200, sitesFor(who, [...nvrs.values()].map((n) => n.info())))
-  // only the cameras this user may watch live (rights.mjs; an admin sees all)
-  if (pathname === '/api/cameras') return sendJson(res, 200, who.admin ? allCameras({ live: true }) : allCameras({ live: true }).filter((c) => can(who, 'live', { nvr: c.nvr, ch: c.ch })))
+  // the cameras this user may watch live, each with what it allows (rights.mjs liveCameras: hd, playback);
+  // ?for=playback: the ones they may play back instead (playbackCameras: sd, hd, nvrHd, legs). An admin
+  // gets every camera with everything allowed.
+  if (pathname === '/api/cameras') return sendJson(res, 200, url.searchParams.get('for') === 'playback' ? playbackCameras(who, allCameras({ live: true })) : liveCameras(who, allCameras({ live: true })))
   // a map shows where cameras are and what they cover: only the sites and cameras this user may see
   // (maps.mjs mapsFor; a site is visible when one of its NVRs' cameras is)
   const siteVisible = (site) => [...nvrs.values()].some((n) => n.site === site && n.channels.some((c) => canSee(n.id, c.ch)))
@@ -1024,16 +1027,29 @@ const onConnection = (ws, req) => {
   if (url.pathname === '/playback') {
     // server recordings (src=auto) or the NVR as before; the "NVR offline" refusal is for NVR
     // sessions only (server playback runs without the NVR), see rec-playback.mjs. Either playback
-    // right opens the socket; connectPlayback asks the right of the source it serves.
+    // right opens the socket; connectPlayback asks the right of the source and quality it serves.
     if (!can(who, 'playback-server', target) && !can(who, 'playback-nvr', target)) return ws.close(1008, 'not allowed')
+    // May this viewer see main pictures of the camera (rights.mjs mayHd)? Asked at the open, and again
+    // whenever the NVR session wants main by itself, which can be minutes later (a wall tile opened
+    // paused): from the session as it is then, never the `who` above, which still says admin for
+    // someone demoted since
+    const allowedMain = (_who, nvrId, ch) => {
+      const u = currentUser(req)
+      return Boolean(u) && mayHd({ user: u, admin: AUTH_OFF || auth.isAdmin(u) }, nvrId, ch)
+    }
+    // an NVR session that goes over to the main stream by itself (a camera recorded in HD only) is
+    // watched for the main-stream rights from then on (access-watch.mjs replaces its entry), and asked
+    // at once rather than at the next sweep, up to SWEEP_MS later
+    const onMain = () => {
+      watch.track(ws, req, { actions: NVR_MAIN_ACTIONS, nvr: nvr.id, ch: target.ch })
+      watch.sweepSoon()
+    }
     // remote by live view's rule (live-attach.mjs): the socket's own address, where the Cloudflare
     // tunnel arrives from 127.0.0.1. Its server playback is converted to fit the tunnel.
-    const session = connectPlayback({ nvr, ws, url, who, index: recIndex(), remote: isRemoteAddress(req.socket.remoteAddress) })
-    // ...and for as long as it is open, the rights of what it plays (access-watch.mjs): the NVR's
-    // recordings, or the server's and, when its gaps are filled from the NVR, the NVR's as well. A
-    // socket connectPlayback refused is closing already and is not tracked.
-    const auto = url.searchParams.get('src') === 'auto'
-    watch.track(ws, req, { actions: !auto ? ['playback-nvr'] : session?.legs ? ['playback-server', 'playback-nvr'] : ['playback-server'], nvr: nvr.id, ch: target.ch })
+    const session = connectPlayback({ nvr, ws, url, who, index: recIndex(), remote: isRemoteAddress(req.socket.remoteAddress), allowedMain, onMain })
+    // ...and for as long as it is open, the rights of what connectPlayback decided it plays (never a
+    // second reading of the URL). A refused socket is closing already and is not watched.
+    if (session) watch.track(ws, req, { actions: session.actions, nvr: nvr.id, ch: target.ch })
     return
   }
   if (url.pathname === '/motion') {
@@ -1046,12 +1062,13 @@ const onConnection = (ws, req) => {
     motionScan(nvr, ws, url)
     return
   }
-  // /live (a missing ch reads as 0, a missing stream as 1, as always)
+  // /live (a missing ch reads as 0, a missing stream as 1, as always; stream-param.mjs: anything but
+  // exactly 0 or 1 is no stream, which attachLive refuses -- '', '0.0' and the like were main)
   attachLive(ws, req, {
     nvr,
     who,
     ch: target.ch,
-    streamType: Number(url.searchParams.get('stream') ?? 1),
+    streamType: streamParam(url.searchParams.get('stream')),
     clientH265: url.searchParams.get('h265') === '1',
     phone15: url.searchParams.get('fps') === '15'
   })
@@ -1074,8 +1091,9 @@ startWarmStreams({
   }
 })
 const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on conversions for phones and remote viewers together
-// one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs)
-const attachLive = liveAttacher({ can, currentUser, adaptiveLive, phoneLive, track: watch.track })
+// one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs); isAdmin: a
+// remote main moved between streams asks Live HD again, with the account's role as it is then
+const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, track: watch.track })
 
 // This listener is synchronous and nothing above it catches: anything that throws here takes the
 // whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27

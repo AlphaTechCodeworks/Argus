@@ -1,6 +1,6 @@
 // Tests live video thinned for phones (phone-live.mjs), with a fake converter: no ffmpeg needed.
 //   node cctv/test/phone-live.test.mjs
-import { PhoneLive, PhoneStream, encodeFrame, frameRate, gopFor, isPhoneRequest, keepEveryFor, parseFrame } from '../phone-live.mjs'
+import { CATCH_UP_MS, LAG_HOLD_MS, PhoneLive, PhoneStream, encodeFrame, frameRate, gopFor, isPhoneRequest, keepEveryFor, parseFrame, steadyRate } from '../phone-live.mjs'
 import { HubStream } from '../stream-hub.mjs'
 import { TranscodePool, ffmpegArgs } from '../transcode.mjs'
 
@@ -118,7 +118,7 @@ const makeTranscoder = (o) => {
 
 // ---- what a remote viewer's level asks of its stream (adaptive-live.mjs) ----
 // (REMOTE_CONVERSION there: how every level's conversion runs, and how soon it starts)
-const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true }
+const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true, rejudge: true, maxLagS: 2 }
 {
   /** One PhoneStream fed `n` frames at `fps` (a keyframe every 12), with a fake converter. */
   const run = (opts, { type = 0, codec = 1, fps = 30, n = 24 } = {}) => {
@@ -431,6 +431,239 @@ const REMOTE = { bufSeconds: 1, lowDelay: false, keySeconds: 2, learnMs: 1000, s
   check('a 20 fps H.265 main at full: two decoder threads and nothing ended, as before (their speed is what 20 fps needs)', fast.o.lowDelay === false && fast.args.includes('-threads 2') && !fast.calls.includes('end') && fast.calls.length > 0, `${fast.args} | ${fast.calls.slice(0, 4)}`)
   const phone = slow({}, { n: 14 })
   check('a phone on the local network: its conversion as before (the converter\'s own low_delay, nothing ended)', phone.o.lowDelay === undefined && !phone.calls.includes('end') && phone.calls.length > 0, phone.calls.slice(0, 4).join(', '))
+}
+
+// ---- a hole in a new stream's first second (the final review of live-smooth) ----
+// A remote viewer's stream decided its rate after 12 frames or 1 s of capture time, on the mean over
+// the span, and never judged again: one hole of 1 s or more in that first second read a normal camera as
+// a trickle, for the stream's whole life. nvr-2 freezes all its cameras for 11-32 s just when streams
+// are opened (stutter report 2.3), and JPB DOOR has 28 holes over 1 s in 10 minutes. Now a hole is left
+// out of the reading (steadyRate), and a rate read on fewer than FIRM_INTERVALS intervals is read again
+// at the 12th frame; more than 2x off, the stream's settings follow from the camera's next keyframe.
+check('steadyRate: an even stream as frameRate reads it (20 fps; a "19 fps" camera, 1 step in 7 of 67 ms)',
+  steadyRate([0, 50, 100, 150, 200, 250]) === 20 && Math.abs(steadyRate([0, 50, 100, 150, 200, 250, 300, 367, 417, 467, 517, 567]) - frameRate([0, 50, 100, 150, 200, 250, 300, 367, 417, 467, 517, 567])) < 1e-9)
+check('  a 30 fps sub on the 60 Hz grid (33 and 50 ms steps, 25.4 fps): the mean, as frameRate (the median would read 30)',
+  Math.abs(steadyRate([0, 33, 67, 117, 150, 183, 233, 267, 300, 350, 383, 417]) - frameRate([0, 33, 67, 117, 150, 183, 233, 267, 300, 350, 383, 417])) < 1e-9)
+check('  a hole of 1.2 s among 50 ms steps left out: 20 fps (frameRate: 6.5)', steadyRate([0, 50, 1250, 1300, 1350, 1400, 1450, 1500, 1550, 1600, 1650, 1700]) === 20, String(steadyRate([0, 50, 1250, 1300, 1350, 1400, 1450, 1500, 1550, 1600, 1650, 1700])))
+check('  a 15 s freeze after 3 steps of 33 ms left out: 30 fps', Math.abs(steadyRate([0, 33.3, 66.7, 100, 15100]) - 30) < 0.01, String(steadyRate([0, 33.3, 66.7, 100, 15100])))
+check('  a trickle at 0.8 fps is one (1250 ms steps); two steps, one a hole: the slower reading (the 12th frame reads it again)', steadyRate([0, 1250, 2500]) === 0.8 && steadyRate([0, 50, 1250]) === 1.6 && steadyRate([5]) === 0 && steadyRate([]) === 0)
+{
+  /**
+   * One PhoneStream on a camera of `fps` (a keyframe every `keyEvery` frames), fed `n` frames with a
+   * hole of `hole` ms after frame `holeAfter`; `slots` conversion slots in all, one of them its own.
+   */
+  const holed = (opts, { type = 0, codec = 1, fps = 20, keyEvery = 40, hole = 1200, holeAfter = 1, n = 120, slots = 1 } = {}) => {
+    const src = fakeSource()
+    const xs = []
+    const logs = []
+    const rates = []
+    const out = []
+    let free = slots - 1
+    const slot = () => ({ gone: false, release() { if (!this.gone) { this.gone = true; free++ } } })
+    const s = new PhoneStream({
+      source: src, type, slot: slot(), camera: 'n1/1', log: (l) => logs.push(l), onRate: (r) => rates.push(r), acquire: () => (free > 0 ? (free--, slot()) : null), ...opts,
+      makeTranscoder: (o) => {
+        const x = { o, pushed: [], closed: false, push(ts, k) { if (this.pushed.push(ts) % o.keepEvery === 1 || o.keepEvery === 1) o.onFrame(ts, k, Buffer.from([1])) }, endPicture() {}, close() { this.closed = true } }
+        xs.push(x)
+        return x
+      }
+    })
+    const ws = fakeWs()
+    ws.send = (b) => { const g = parseFrame(b); out.push({ ts: g.ts, key: g.isKey, converted: g.payload.length === 1 }) }
+    s.add(ws)
+    let ts = 0
+    const keys = []
+    for (let i = 0; i < n; i++) {
+      if (i % keyEvery === 0) keys.push(ts)
+      src.emit(encodeFrame(Buffer.from([0, 0, 1, 1]), i % keyEvery === 0, codec, ts))
+      ts += i === holeAfter ? hole : 1000 / fps
+    }
+    return { s, xs, logs, rates, out, keys, free: () => free }
+  }
+  const show = (r) => JSON.stringify({ xs: r.xs.map((x) => ({ k: x.o.keepEvery, g: x.o.gop, low: x.o.lowDelay, first: x.pushed[0], closed: x.closed })), logs: r.logs, rates: r.rates })
+
+  // a 4K H.265 main at full, 20 fps: a 1.2 s hole read it as 1.6 fps, -g 3 and one decoder thread for good
+  const full = holed({ fps: 0, crf: 25, mainKbps: 2500, maxWidth: 1920, h264Only: true, ...REMOTE })
+  const last = full.xs.at(-1)
+  const args = last ? ffmpegArgs(last.o).join(' ') : ''
+  check('a 20 fps H.265 main at level full, a 1.2 s hole after its first keyframe: converted from its next keyframe as 20 fps, a keyframe every 2 s (-g 40), two decoder threads',
+    full.xs.length === 2 && full.xs[0].closed && last.o.keepEvery === 1 && last.o.gop === 40 && last.o.lowDelay === false && args.includes('-threads 2') && / -g 40 /.test(args) && last.pushed[0] === full.keys[1], show(full))
+  check('  meanwhile converted as the 1 s rule read it (1.6 fps: picture by picture), never handed on as its rate; 20 fps is', full.xs[0].o.lowDelay === true && full.rates.join() === '20', show(full))
+  check('  the log says it read the rate again, and how it converts now', full.logs.some((l) => l === '[phone-live] n1/1: its rate read again on its first 12 frames: 20.0 fps, not 1.6 (a hole as it started); from the camera\'s next keyframe:') && full.logs.at(-1) === '[phone-live] n1/1: converting a main stream at 20.0 fps to H.264, every frame kept', show(full))
+  const ts = full.out.map((o) => o.ts)
+  check('  what goes out never steps back', ts.length > 0 && ts.every((t, i) => i === 0 || t >= ts[i - 1]), ts.slice(0, 20).join())
+
+  // a 30 fps sub at level 8: read as a trickle and sent as it is, 30 fps where level 8 sends 8
+  const sub = holed({ fps: 8, crf: 27, subKbps: 450, ...REMOTE }, { type: 1, codec: 0, fps: 30, keyEvery: 60 })
+  check('a 30 fps sub at level 8, a 1.2 s hole after its first keyframe: not left sent as it is: converted from its next keyframe, 1 in 4, a keyframe every 15 pictures (2 s), two decoder threads',
+    !sub.s.passthrough && sub.xs.length === 1 && sub.xs[0].o.keepEvery === 4 && sub.xs[0].o.gop === 15 && sub.xs[0].o.lowDelay === false && Math.abs(sub.xs[0].pushed[0] - sub.keys[1]) < 0.01 && sub.free() === 0, show(sub))
+  const after = sub.out.filter((o) => o.ts >= sub.keys[1])
+  check('  its own frames up to that keyframe, then only converted ones, about 8 a second', sub.out.filter((o) => o.ts < sub.keys[1]).every((o) => !o.converted) && after.length > 0 && after.every((o) => o.converted) && after.length <= Math.ceil((sub.keys.length ? (sub.out.at(-1).ts - sub.keys[1]) / 1000 : 0) * 7.5) + 1, `${after.length} converted | ${show(sub)}`)
+  const none = holed({ fps: 8, crf: 27, subKbps: 450, ...REMOTE, acquire: () => null }, { type: 1, codec: 0, fps: 30, keyEvery: 60 })
+  check('  no conversion slot free then: still sent as it is, and said', none.s.passthrough && none.xs.length === 0 && none.logs.at(-1) === '[phone-live] n1/1: a sub stream at 30.0 fps: still sent as it is, no conversion slot free', show(none))
+
+  // an H.264 main at 15 whose NVR froze 15 s after its keyframe and 3 frames: read on 4 steps, the hole
+  // left out, at once (it read 0.3 fps: -g 1, every picture a keyframe, 1 in 1 kept: 30 fps, not 15)
+  const froze = holed({ fps: 15, ...REMOTE }, { type: 0, codec: 0, fps: 30, keyEvery: 60, hole: 15_000, holeAfter: 3 })
+  check('an H.264 main at 15, a 15 s NVR freeze after its keyframe and 3 frames: 30 fps at once (the freeze left out), 1 in 2, -g 30, nothing read again', froze.xs.length === 1 && froze.xs[0].o.keepEvery === 2 && froze.xs[0].o.gop === 30 && froze.rates.length === 1 && Math.abs(froze.rates[0] - 30) < 0.01 && !froze.logs.some((l) => l.includes('read again')), show(froze))
+
+  // a camera that really trickles: read again at its 12th frame (15 s), the same, nothing changed
+  const trickle = holed({ fps: 15, ...REMOTE }, { type: 1, codec: 0, fps: 0.8, keyEvery: 1, hole: 1250, n: 14 })
+  check('a sub trickling at 0.8 fps: sent as it is from its 2nd frame, read again at its 12th, the same: nothing restarted, its rate handed on then', trickle.s.passthrough && trickle.xs.length === 0 && trickle.rates.join() === '0.8' && trickle.logs.length === 1, show(trickle))
+  // a phone on the local network: its 12 frames and the mean, as before (the local-network rule)
+  const phone = holed({}, { type: 1, codec: 0, fps: 30, keyEvery: 60 })
+  check('a phone on the local network: 12 frames, read as before (the hole in the mean), nothing read again', phone.logs.length === 1 && phone.logs[0].startsWith('[phone-live] n1/1: a sub stream at 7.2 fps') && phone.rates.length === 1, show(phone))
+}
+
+// ---- a conversion that falls behind the camera (the final review of live-smooth) ----
+// ffmpeg runs niced, so recording wins; under a load that takes a conversion below real time, push went
+// on writing to its stdin, the frames in it grew (transcode.mjs pending), the remote picture fell
+// further behind and the server's memory grew for as long as the load lasted. A remote viewer's
+// conversion (maxLagS) with more than that many seconds of the camera in it for LAG_HOLD_MS is reset,
+// and starts again at the camera's next keyframe, said once. The GOP a new one starts from is let
+// through first, and so are frames handed in faster than they come.
+{
+  /**
+   * A 4K-like H.265 main at `fps` (a keyframe every `keyEvery`) through a converter that hands back
+   * `speed` x real time; `replay` frames of its GOP replayed as the stream joins (all at that moment);
+   * burst: every frame handed in at once, the clock standing still (transcode-ffmpeg.test's feed).
+   */
+  const lagging = (opts, { speed, fps = 20, keyEvery = 40, replay = 0, n = 200, burst = false }) => {
+    const clock = { wall: 0 }
+    const frame = (i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i % keyEvery === 0, 1, (i * 1000) / fps)
+    const gop = Array.from({ length: replay }, (_, i) => frame(i))
+    const src = fakeSource()
+    src.add = function (ws) { this.viewers.add(ws); for (const m of gop) ws.send(m) }
+    clock.wall = replay ? ((replay - 1) * 1000) / fps : 0
+    const xs = []
+    const logs = []
+    const s = new PhoneStream({
+      source: src, type: 0, slot: { release() {} }, camera: 'n1/1', log: (l) => logs.push(l), now: () => clock.wall, ...opts,
+      makeTranscoder: (o) => {
+        // pending: pushed in, not handed back; it hands back what `speed` x the time since it started allows
+        const x = {
+          o, from: null, pushed: 0, out: 0, resets: 0,
+          get pending() { return this.pushed - this.out },
+          push(ts, k) {
+            if (this.from === null) {
+              if (!k) return // (after a reset, nothing until a keyframe, as Transcoder.push)
+              this.from = clock.wall
+            }
+            this.pushed++
+            const can = Math.floor(((clock.wall - this.from) / 1000) * fps * speed) + 1
+            while (this.out < Math.min(this.pushed, can)) { this.out++; o.onFrame(ts, false, Buffer.from([1])) }
+          },
+          reset() { this.resets++; this.from = null; this.pushed = 0; this.out = 0 },
+          endPicture() {},
+          close() {}
+        }
+        xs.push(x)
+        return x
+      }
+    })
+    s.add(fakeWs())
+    let most = 0
+    for (let i = replay; i < replay + n; i++) {
+      if (!burst) clock.wall = (i * 1000) / fps
+      src.emit(frame(i))
+      most = Math.max(most, xs[0]?.pending ?? 0)
+    }
+    return { xs, logs, most }
+  }
+  const FULL = { fps: 0, maxWidth: 1920, h264Only: true, ...REMOTE }
+  const slow = lagging(FULL, { speed: 0.5 })
+  check(`a remote PC's level-full conversion at half real time: reset once 2 s of the camera (40 pictures at 20 fps) has been in it for ${LAG_HOLD_MS / 1000} s`, slow.xs[0]?.resets >= 1 && slow.most > 40 && slow.most <= 51, `resets ${slow.xs[0]?.resets}, at most ${slow.most} in it`)
+  check('  said once', slow.logs.filter((l) => l.includes('fell behind the camera')).length === 1 && slow.logs.some((l) => /^\[phone-live\] n1\/1: the conversion fell behind the camera: 5\d pictures in it, more than 2 s of them for 1 s; started again at the camera's next keyframe \(said once\)$/.test(l)), slow.logs.join(' | '))
+  const fine = lagging(FULL, { speed: 1.2 })
+  check('  at 1.2x real time: never reset (the 13 frames it learnt from, in it at its start, then 1 or 2)', fine.xs[0]?.resets === 0 && fine.most <= 13, `resets ${fine.xs[0]?.resets}, at most ${fine.most}`)
+  const burst = lagging(FULL, { speed: 0.5, burst: true })
+  check('  200 frames handed in at once, the clock standing still: not reset (a burst is not a converter behind)', burst.xs[0]?.resets === 0 && burst.most > 40, `resets ${burst.xs[0]?.resets}, at most ${burst.most}`)
+  const joined = lagging(FULL, { speed: 2.5, fps: 30, keyEvery: 100, replay: 90 })
+  check('  a new one converting from a 3 s GOP replayed at once (90 pictures in it), at 2.5x: not reset, it catches up', joined.xs[0]?.resets === 0 && joined.most > 60, `resets ${joined.xs[0]?.resets}, at most ${joined.most}`)
+  const stuck = lagging(FULL, { speed: 0.8, fps: 30, keyEvery: 100, replay: 90, n: 300 })
+  check('  ... at 0.8x it never catches up: reset 5 s after its first live frame, and a second over, at the latest', stuck.xs[0]?.resets >= 1, `resets ${stuck.xs[0]?.resets}, at most ${stuck.most}`)
+  const phone = lagging({}, { speed: 0.5 })
+  check('  a phone on the local network: as before, nothing reset', phone.xs[0]?.resets === 0 && !phone.logs.some((l) => l.includes('fell behind')), `resets ${phone.xs[0]?.resets}`)
+
+  /**
+   * A fresh level-full conversion of a 20 fps main whose GOP replayed as it joins is R frames (its
+   * keyframe first), through a converter that hands back nothing until t0 s after its first frame (its
+   * process, the probe, a 4K keyframe: 0.24-0.41 s on the server, transcode-ffmpeg.test's INFO) and then
+   * runs at `speed` x real time; never: it hands back nothing at all. Live frames then come in real time.
+   * resetAt: its first reset, in ms from the first live frame.
+   */
+  const starting = ({ R, speed, t0, fps = 20, keyEvery = 40, n = 120, never = false }) => {
+    const clock = { wall: 0 }
+    const frame = (i) => encodeFrame(Buffer.from([0, 0, 1, 1]), i % keyEvery === 0, 1, (i * 1000) / fps)
+    const gop = Array.from({ length: R }, (_, i) => frame(i))
+    const src = fakeSource()
+    src.add = function (ws) { this.viewers.add(ws); for (const m of gop) ws.send(m) }
+    const xs = []
+    const logs = []
+    const s = new PhoneStream({
+      source: src, type: 0, slot: { release() {} }, camera: 'n1/1', log: (l) => logs.push(l), now: () => clock.wall, ...FULL,
+      makeTranscoder: (o) => {
+        const x = {
+          o, from: null, ts: [], out: 0, resets: 0, resetAt: null,
+          get pending() { return this.ts.length - this.out },
+          tick() {
+            if (this.from === null || never) return
+            const can = Math.floor(((clock.wall - this.from) / 1000 - t0) * fps * speed)
+            while (this.out < Math.min(this.ts.length, can)) o.onFrame(this.ts[this.out++], false, Buffer.from([1]))
+          },
+          push(ts, k) {
+            if (this.from === null) {
+              if (!k) return
+              this.from = clock.wall
+            }
+            this.ts.push(ts)
+            this.tick()
+          },
+          reset() { this.resets++; this.resetAt ??= clock.wall; this.from = null; this.ts = []; this.out = 0 },
+          endPicture() {},
+          close() {}
+        }
+        xs.push(x)
+        return x
+      }
+    })
+    s.add(fakeWs())
+    // (the replay at 0, the first live frame 1/fps later, as lag-start.mjs has them)
+    for (let i = R; i < R + n; i++) {
+      clock.wall = ((i - R + 1) * 1000) / fps
+      xs[0]?.tick()
+      src.emit(frame(i))
+    }
+    const at = xs[0]?.resetAt
+    return { resets: xs[0]?.resets ?? 0, resetAt: at == null ? null : at - 1000 / fps, logs }
+  }
+  // Armed before its first picture, a GOP replayed just under the line (40 pictures at 20 fps) went over
+  // it while ffmpeg started, and a converter well above real time was reset at its open: ~1.5 s with
+  // nothing on screen and a "fell behind" line (the review of d5390d6, lag-start.mjs: at 1.3x with its
+  // first picture at 0.5 s, GOPs of 35-39 frames). Armed once a picture is back, and under the line.
+  for (const speed of [1.68, 1.5, 1.3]) {
+    for (const t0 of [0.3, 0.5]) {
+      const hit = []
+      for (let R = 1; R <= 40; R++) {
+        const r = starting({ R, speed, t0 })
+        if (r.resets > 0 || r.logs.some((l) => l.includes('fell behind'))) hit.push(R)
+      }
+      check(`a fresh level-full conversion at ${speed}x real time, its first picture ${t0} s after its first frame: not reset at its start, whatever its GOP replay (1-40 frames)`, hit.length === 0, hit.length ? `reset for GOP replays of ${hit.join(',')} frames` : 'none reset')
+    }
+  }
+  // CATCH_UP_MS counts from the first live frame: from the replayed keyframe, a 3 s GOP (60 frames) left
+  // it 2 s, and a 1.3x converter still 3 s of the camera behind was reset then.
+  const long = starting({ R: 60, speed: 1.3, t0: 0.5, keyEvery: 80, n: 200 })
+  check('  a 3 s GOP replayed (60 frames), first picture at 0.5 s, 1.3x: not reset (CATCH_UP_MS from the first live frame, not the replayed keyframe)', long.resets === 0, long.resets ? `reset at ${long.resetAt} ms` : 'not reset')
+  // a converter that is really too slow is still reset, whatever its start
+  const slowStart = starting({ R: 39, speed: 0.5, t0: 0.5, n: 200 })
+  check('  one at 0.5x, its first picture at 0.5 s and a GOP of 39: still reset, said once', slowStart.resets >= 1 && slowStart.logs.filter((l) => l.includes('fell behind the camera')).length === 1, `resets ${slowStart.resets} at ${slowStart.resetAt} ms`)
+  const slowOne = starting({ R: 1, speed: 0.8, t0: 0.3, n: 300 })
+  check('  one at 0.8x from a lone keyframe: still reset', slowOne.resets >= 1, `resets ${slowOne.resets}`)
+  // ...and one that hands back nothing at all (an ffmpeg that hangs): CATCH_UP_MS after the first live
+  // frame, whatever has come back, and LAG_HOLD_MS over
+  const hung = starting({ R: 20, speed: 1, t0: 0, never: true, n: 200 })
+  check(`  one that hands back nothing: reset ${CATCH_UP_MS / 1000} s after the first live frame and ${LAG_HOLD_MS / 1000} s over, not before`, hung.resets >= 1 && hung.resetAt >= CATCH_UP_MS + LAG_HOLD_MS && hung.resetAt <= CATCH_UP_MS + LAG_HOLD_MS + 100, `resets ${hung.resets} at ${hung.resetAt} ms`)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

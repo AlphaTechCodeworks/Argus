@@ -1,14 +1,18 @@
 // Playback from the server's own recordings over the /playback WebSocket (phase 3).
 //
-// connectPlayback() decides per socket where playback comes from:
-//  - without src=auto: today's NVR playback, unchanged (playback.mjs PlaybackSession, NVR clock),
-//    for a viewer who may play the NVR's recordings back (rights.mjs playback-nvr; anyone else is
-//    closed 1008 "not allowed": playback-server alone never reaches the NVR);
+// connectPlayback() decides per socket where playback comes from, and at which quality:
+//  - without src=auto: the NVR's own recordings (playback.mjs PlaybackSession, NVR clock), for a viewer
+//    who may play them back (rights.mjs playback-nvr; anyone else is closed 1008 "not allowed":
+//    playback-server alone never reaches the NVR). Its main stream (stream=0, or a camera the NVR
+//    keeps only in HD) is full quality: it also needs Live HD or Playback HD on the camera (mayHd),
+//    else {type:'error'} and 1008 "hd not allowed". The stream is read once here (stream-param.mjs)
+//    and handed to playback.mjs, which no longer reads it from the URL.
 //  - with src=auto: the server's recordings (a ServerPlayback), when CCTV_LIVE_WORKER=on (an index),
-//    the viewer may (rights.mjs playback-server) and the camera has recordings. Otherwise the socket
-//    gets {type:'error'} and is closed (1011): never a silent NVR session in another time base (R15).
-//    Server playback does not need the NVR: it runs while the NVR is offline (R14). Its gaps are
-//    filled from the NVR (legs, below) only for a viewer who may also play the NVR back.
+//    the viewer may (rights.mjs playback-server; else {type:'error'} and 1008 "not allowed") and the
+//    camera has recordings (else {type:'error'} and 1011): never a silent NVR session in another time
+//    base (R15). Server playback does not need the NVR: it runs while the NVR is offline (R14). Its
+//    gaps are filled from the NVR (legs, below) only for a viewer who may also play the NVR back.
+//  What it decided comes back with the rights to watch while it plays (server.mjs, access-watch.mjs).
 //
 // ServerPlayback reads the segment files directly (rec-reader.mjs; read-only, one read in flight,
 // at most 4 MB per read call) and sends the frames exactly as stored, in the /live wire format
@@ -96,7 +100,8 @@
 //  - Parsed files are kept per session (an LRU of 64 open readers, closed after 60 s unused), so
 //    scrubbing and seeking back and forth do not read an .idx twice.
 import * as fsp from 'node:fs/promises'
-import { canPlayNvr, canPlayServer } from './rights.mjs'
+import { canPlayNvr, canPlayServer, mayHd } from './rights.mjs'
+import { HD_ASK_MESSAGE, HD_NOT_ALLOWED, MAIN, streamParam } from './stream-param.mjs'
 import { audit } from './audit.mjs'
 import { DATA_DIR } from './auth.mjs'
 import { nvrLegs } from './rec-fallback.mjs'
@@ -182,9 +187,9 @@ const sendJson = (ws, obj) => {
 
 /**
  * One audit row per playback session opened: who looked at recorded footage, which camera, from
- * when, and whether it came off the server or the NVR. Kept tiny and wrapped in its own try even
- * though audit() already swallows everything — nothing about recording an event may ever be the
- * reason somebody cannot watch a camera.
+ * when, and whether it came off the server or the NVR, and from the NVR at which quality. Kept tiny
+ * and wrapped in its own try even though audit() already swallows everything — nothing about
+ * recording an event may ever be the reason somebody cannot watch a camera.
  */
 const note = (who, nvr, ch, source, start) => {
   try {
@@ -198,60 +203,101 @@ const note = (who, nvr, ch, source, start) => {
   } catch {}
 }
 
+/** What an NVR session on the main stream needs while it is open (access-watch.mjs): the NVR's
+ * recordings, and a right to see main -- Live HD or Playback HD, either will do. */
+export const NVR_MAIN_ACTIONS = Object.freeze(['playback-nvr', Object.freeze(['live-hd', 'playback-server'])])
+const NVR_SUB_ACTIONS = Object.freeze(['playback-nvr'])
+const SERVER_REFUSAL = 'You may not play back this camera from the server\'s recordings.'
+
 /**
  * Handles a /playback WebSocket: server recordings (src=auto) or the NVR, see the top.
  * @param {{ nvr: object, ws: object, url: URL, who: {user?: string, admin?: boolean}|null,
- *           index: object|null, allowed?: Function, allowedNvr?: Function, legs?: object|null, remote?: boolean, opts?: object }} args
- *   index: rec-index.mjs (null: CCTV_LIVE_WORKER off); allowed: the access hook for the server's
- *   recordings, allowedNvr for the NVR's (rights.mjs);
- *   remote: the viewer is remote (adaptive-live.mjs isRemoteAddress of the socket; see the top);
- *   opts: ServerPlayback options (tests)
- * @returns {ServerPlayback|null}
+ *           index: object|null, allowed?: Function, allowedNvr?: Function, allowedMain?: Function,
+ *           legs?: object|null, remote?: boolean, onMain?: () => void, opts?: object }} args
+ *   index: rec-index.mjs (null: CCTV_LIVE_WORKER off); allowed, allowedNvr, allowedMain: the access
+ *   hooks for the server's recordings, the NVR's and a main-stream picture (rights.mjs canPlayServer,
+ *   canPlayNvr, mayHd); remote: the viewer is remote (adaptive-live.mjs isRemoteAddress of the socket;
+ *   see the top); onMain: an NVR session went over to the main stream by itself (server.mjs watches
+ *   it for the main-stream rights from then on); opts: ServerPlayback options (tests)
+ * @returns {ServerPlayback|{ source: 'nvr', main: boolean, actions: Array }|null} what it plays, each
+ *   with `actions`, the rights it needs while open; null: refused (the socket is closing)
  */
-export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlayServer, allowedNvr = canPlayNvr, legs = defaultLegs, remote = false, opts = {} }) {
+export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlayServer, allowedNvr = canPlayNvr, allowedMain = mayHd, legs = defaultLegs, remote = false, onMain = () => {}, opts = {} }) {
   const p = url.searchParams
+  // a check that throws is a no
+  const ask = (check, c) => {
+    try {
+      return Boolean(check(who, nvr.id, c))
+    } catch {
+      return false
+    }
+  }
   // The NVR's own recordings are playback-nvr's. server.mjs lets either playback right open the
   // socket, which can serve either source, so each source asks for its own right here: playback-server
   // alone never reaches the NVR, which may still hold days the server has already let go.
-  const nvrAllowed = (c) => {
-    try {
-      return Boolean(allowedNvr(who, nvr.id, c))
-    } catch {
-      return false // a check that throws is a no
-    }
-  }
+  const nvrAllowed = (c) => ask(allowedNvr, c)
+  // One reading of `stream` for every decision below (stream-param.mjs): '', '0.0', '-0' and the like
+  // were main to Number() while a check on the text would have called them SD.
+  const stream = streamParam(p.get('stream'))
   if (p.get('src') !== 'auto') {
     const rawCh = p.get('ch') ?? ''
-    if (!/^\d{1,3}$/.test(rawCh)) {
+    if (!/^\d{1,3}$/.test(rawCh) || Number.isNaN(stream)) {
       ws.close(1008, 'bad parameters')
       return null
     }
-    if (!nvrAllowed(Number(rawCh))) {
+    const ch = Number(rawCh)
+    if (!nvrAllowed(ch)) {
       ws.close(1008, 'not allowed')
       return null
     }
-    // today's NVR playback, exactly as before
-    if (!nvr.online) ws.close(1013, 'NVR offline')
-    else {
-      // Recorded before the socket is handed over: who looked at recorded footage, and when, is
-      // the row an investigation asks for. audit() never throws, so it cannot break playback.
-      note(who, nvr, p.get('ch') ?? '?', 'nvr', p.get('start') ?? '')
-      nvr.playback.connect(ws, url)
+    // The NVR's main stream is full quality: Playback SD and a right to see main (rights.mjs mayHd).
+    // Asked again (allowMain) when the session wants to go over to main by itself (playback.mjs: a
+    // camera the NVR records in HD only), so a right taken away meanwhile counts.
+    const mayMain = () => ask(allowedMain, ch)
+    const main = stream === MAIN
+    if (main && !mayMain()) {
+      sendJson(ws, { type: 'error', message: HD_ASK_MESSAGE })
+      ws.close(1008, HD_NOT_ALLOWED)
+      return null
     }
-    return null
+    if (!nvr.online) {
+      ws.close(1013, 'NVR offline')
+      return null
+    }
+    const start = p.get('start') ?? ''
+    const opened = nvr.playback.connect(ws, url, {
+      main,
+      allowMain: mayMain,
+      onMain: () => {
+        note(who, nvr, ch, 'nvr main (switched: no SD recording)', start)
+        onMain()
+      }
+    })
+    // refused there (bad parameters): the socket is closing, nothing to watch
+    if (!opened) return null
+    // who looked at recorded footage, when, and at which quality: the row an investigation asks for.
+    // audit() never throws, so it cannot break playback.
+    note(who, nvr, ch, opened.main ? 'nvr main' : 'nvr sub', start)
+    return { source: 'nvr', main: opened.main, actions: opened.main ? NVR_MAIN_ACTIONS : NVR_SUB_ACTIONS }
   }
   const rawCh = p.get('ch') ?? ''
   const rawStart = p.get('start') ?? ''
   const ch = Number(rawCh)
-  const stream = Number(p.get('stream') ?? 1)
   const start = Number(rawStart)
-  if (!/^\d{1,3}$/.test(rawCh) || ![0, 1].includes(stream) || rawStart === '' || !Number.isFinite(start)) {
+  if (!/^\d{1,3}$/.test(rawCh) || Number.isNaN(stream) || rawStart === '' || !Number.isFinite(start)) {
     ws.close(1008, 'bad parameters')
+    return null
+  }
+  // a viewer without the right is told so, and closed 1008 like every other refusal of a right (the
+  // pages then stop and say why), not 1011 "not available here", which reads as a fault to retry
+  if (!ask(allowed, ch)) {
+    sendJson(ws, { type: 'error', message: SERVER_REFUSAL })
+    ws.close(1008, 'not allowed')
     return null
   }
   let eligible = false
   try {
-    eligible = Boolean(index) && Boolean(allowed(who, nvr.id, ch)) && index.first(nvr.id, ch) !== null
+    eligible = Boolean(index) && index.first(nvr.id, ch) !== null
   } catch (e) {
     console.warn(`[${nvr.id}] server playback ch${ch + 1}: ${e.message}`)
   }
@@ -388,6 +434,12 @@ export class ServerPlayback {
     if (remote && original) this.#send({ type: 'fit', on: false, original: true })
     this.pacer = setInterval(() => this.#pace(), tickMs)
     this.#fill()
+  }
+
+  /** The rights this session needs while it is open (access-watch.mjs): the server's recordings, and
+   * the NVR's as well when its gaps are filled from there. */
+  get actions() {
+    return this.legs ? ['playback-server', 'playback-nvr'] : ['playback-server']
   }
 
   #send(obj) {
@@ -727,8 +779,7 @@ export class ServerPlayback {
         this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: H.265 conversion refused, ${this.pool.active} already running`)
         this.#send({
           type: 'error',
-          message:
-            'This recording is H.265 and this browser cannot play it. The server can convert it, but it is already converting as many streams as it can. Try again in a few minutes, or choose "SD (NVR)".'
+          message: `This recording is H.265 and this browser cannot play it. The server can convert it, but it is already converting as many streams as it can. Try again in a few minutes${this.legs ? ', or choose "SD (NVR)"' : ''}.`
         })
         // Not 1013: the page turns that into "the NVR is busy", which would replace the message
         // above with one about the wrong machine entirely.

@@ -16,6 +16,16 @@ import { drawOsd, osdIsOff, osdLayout } from './osd-overlay.js'
 const HEADER_SIZE = 16
 export const SUB_STREAM = 1
 export const MAIN_STREAM = 0
+// The server's reason for refusing the main stream (stream-param.mjs): no Live HD on the camera. The
+// tile goes over to the sub-stream rather than asking again (the server would refuse it every time).
+export const HD_REFUSED = 'hd not allowed'
+
+/** What a tile says while the server tells it its sub-stream has no picture yet (live-wait.mjs). */
+export function waitText(why) {
+  if (why === 'held') return 'Waiting for room at the NVR (SD streams)'
+  if (why === 'unavailable') return 'SD stream not available from the NVR'
+  return 'Starting…'
+}
 // stall watchdog: an open socket that delivers no frames this long shows 'no video' (about 2-3
 // GOPs), and this long is closed and opened again (the server may have dropped a frozen stream)
 export const NO_VIDEO_MS = 5000
@@ -103,6 +113,8 @@ export class LiveTile {
    *   recording: tells the dot whether the server is also recording this camera (red rather than
    *   green); leave it out where that is not known. onUnsupported: replaces the built-in handling (main -> sub fallback, message) when the
    *   browser can't play the stream
+   *   onHdRefused: the main stream was refused for want of Live HD; return true when handled
+   *   (viewer.js drops a layer not shown yet), else the tile goes over to the sub-stream itself
    */
   constructor(tile, cam, streamType, startDelayMs = 0, opts = {}) {
     this.tile = tile
@@ -116,6 +128,7 @@ export class LiveTile {
     this.osdEl = tile.querySelector('canvas.osd') // absent in older markup: no overlay is drawn
     this.osdSig = '' // what is on the overlay canvas now, so it is only repainted when it changes
     this.closed = false
+    this.waiting = false // the server said its sub-stream has no picture yet (a wait note, live-wait.mjs)
     this.suspended = false // connected, but frames are dropped (not decoded): see suspend()
     this.attempts = 0 // reconnects since video last arrived
     this.now = opts.now ?? (() => Date.now()) // (tests)
@@ -144,7 +157,10 @@ export class LiveTile {
         if (typeof document !== 'undefined') maybeKeepStill(this.player.canvas, this.nvr, this.ch)
         // a picture on screen is live, whatever the badge said a moment ago ("connecting…" stayed
         // up until a whole second of frames had been counted, over a picture already moving)
-        if (/connecting|no video/.test(this.status.textContent)) this.setStatus('LIVE', true)
+        if (this.waiting || /connecting|no video/.test(this.status.textContent)) {
+          this.waiting = false
+          this.setStatus('LIVE', true)
+        }
         if (shown) return
         shown = true
         opts.onFirstFrame?.()
@@ -321,24 +337,56 @@ export class LiveTile {
       activeTrace()?.event(this, 'open')
     }
     this.ws.onmessage = (e) => {
-      this.attempts = 0
       this.lastDataAt = this.now()
+      // a text is a note from the server, never a frame (live-wait.mjs: the sub-stream has no picture
+      // yet); it is activity all the same, so the stall watchdog leaves the tile alone
+      if (typeof e.data === 'string') return this.#note(e.data)
+      this.attempts = 0
       const buf = new Uint8Array(e.data)
       activeTrace()?.frame(this, buf)
       this.onMessage(buf)
     }
-    this.ws.onclose = () => {
+    this.ws.onclose = (e) => {
       activeTrace()?.event(this, 'close')
       this.player.reset()
-      if (!this.closed) {
-        this.opts.onDisconnect?.()
-        this.setStatus('reconnecting…')
-        // back off (1, 2, 4, 8 s: reconnectDelay) with jitter, so many tiles don't reconnect in lockstep
-        const delay = reconnectDelay(this.attempts) * (0.7 + Math.random() * 0.6)
-        this.attempts++
-        this.retry = setTimeout(() => this.connect(), delay)
-      }
+      if (this.closed) return
+      // the main stream refused for want of Live HD (at once, or taken away while it played): not
+      // asked for again from here, the sub-stream instead
+      if (e?.code === 1008 && e.reason === HD_REFUSED && this.streamType === MAIN_STREAM) return this.#hdRefused()
+      this.opts.onDisconnect?.()
+      this.setStatus('reconnecting…')
+      // back off (1, 2, 4, 8 s: reconnectDelay) with jitter, so many tiles don't reconnect in lockstep
+      const delay = reconnectDelay(this.attempts) * (0.7 + Math.random() * 0.6)
+      this.attempts++
+      this.retry = setTimeout(() => this.connect(), delay)
     }
+  }
+
+  /** A note from the server: {"op":"wait","why":…} while the sub-stream has no picture yet. */
+  #note(text) {
+    let m
+    try {
+      m = JSON.parse(text)
+    } catch {
+      return
+    }
+    if (m?.op !== 'wait') return
+    this.waiting = true
+    this.setStatus(waitText(m.why))
+  }
+
+  /**
+   * The main stream refused for want of Live HD: the caller may handle it (viewer.js: a layer not
+   * shown yet simply goes, the sub-stream under it stays); otherwise this tile goes over to the
+   * sub-stream at once, for good, and says so.
+   */
+  #hdRefused() {
+    if (this.opts.onHdRefused?.() === true) return
+    this.streamType = SUB_STREAM
+    // append, don't rewrite: the name element also holds the Recordings link in full screen
+    this.tile.querySelector('.name')?.append(' (SD: full quality needs Live HD)')
+    this.attempts = 0
+    this.connect()
   }
 
   onMessage(buf) {

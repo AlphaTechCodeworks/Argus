@@ -3,7 +3,7 @@
 // back into a row for POST /api/admin/rights. Pure and DOM-free, so every rule is tested with plain
 // node (test/access-model.test.mjs); audit.js does the drawing.
 //
-// The row is rights.mjs's own: { admin, grants: { live, 'playback-server', 'playback-nvr', export },
+// The row is rights.mjs's own: { admin, grants: { live, 'live-hd', 'playback-server', 'playback-nvr', export },
 // formats }, each grant a list of '*' (everything), '<nvr>' (that NVR, cameras added later
 // included) or '<nvr>/<ch>' (one camera, channel from 0). The editor never invents another shape,
 // and the test proves every row it can produce is one rights.mjs cleanRights stores unchanged.
@@ -15,8 +15,10 @@
 //     because that would grant tomorrow's cameras to someone the admin never ticked a site for.
 //   - Unticking one camera of a ticked site (or of All sites) keeps the rest: the NVR target, or
 //     '*', becomes the cameras and sites that are left.
-//   - Playback is two rights (the server's recordings and the NVR's own). A tick sets or clears
-//     both; a cell nobody touched keeps whatever split it was stored with.
+//   - Live HD counts only with Live on the same camera (rights.mjs can): ticking it ticks Live there
+//     too, unticking Live unticks it, and unticking Live HD leaves Live. Every other column is one
+//     stored right: Playback SD the NVR's recordings (playback-nvr), Playback HD this server's
+//     (playback-server).
 //   - A grant the tree cannot show (an NVR removed from the server, a camera its NVR no longer lists)
 //     is kept and listed, never dropped just because the page could not draw it.
 //
@@ -25,15 +27,35 @@
 // all is '*'; nvrs and cams are targets on the tree; kept is every other target, as stored.
 
 /** The per-camera rights rights.mjs knows ('admin' is the account's role, not a grant). */
-export const GRANTABLE = Object.freeze(['live', 'playback-server', 'playback-nvr', 'export'])
+export const GRANTABLE = Object.freeze(['live', 'live-hd', 'playback-server', 'playback-nvr', 'export'])
 /** Export formats, in rights.mjs's order (it saves them in this order whatever order they are ticked). */
 export const FORMATS = Object.freeze(['pack', 'mp4', 'stills'])
 export const FORMAT_LABELS = Object.freeze({ pack: 'Evidence pack', mp4: 'MP4', stills: 'Stills' })
 
-/** The editor's three tick columns, and the stored rights each one sets. */
-export const COLUMNS = Object.freeze(['live', 'playback', 'export'])
-export const COLUMN_LABELS = Object.freeze({ live: 'Live', playback: 'Playback', export: 'Export' })
-const COLUMN_ACTIONS = Object.freeze({ live: ['live'], playback: ['playback-server', 'playback-nvr'], export: ['export'] })
+/** The editor's tick columns, in the owner's order: one stored right each. */
+export const COLUMNS = Object.freeze(['live', 'live-hd', 'playback-nvr', 'playback-server', 'export'])
+/** Each column's full name: a box's aria-label, the Rights table's header, "Kept from before". */
+export const COLUMN_LABELS = Object.freeze({ live: 'Live', 'live-hd': 'Live HD', 'playback-nvr': 'Playback SD', 'playback-server': 'Playback HD', export: 'Export' })
+/** What each column means, in a box's title and its header's. */
+export const COLUMN_TITLES = Object.freeze({
+  live: 'Live: the grid, on the camera\'s sub-stream as the NVR is set',
+  'live-hd': 'Live HD: full screen at full quality (the camera\'s main stream); needs Live',
+  'playback-nvr': 'Playback SD: the NVR\'s own recordings',
+  'playback-server': 'Playback HD: this server\'s own recordings, at full quality',
+  export: 'Export: clips of this server\'s recordings, always at full quality'
+})
+/**
+ * The tree's two header rows (audit.js draws them): the columns grouped, then each column's short name.
+ * A cell with `column` heads that column; `rowhead` is the column of row names.
+ */
+export const HEAD_ROWS = Object.freeze([
+  Object.freeze([{ text: 'Site / camera', rowspan: 2, rowhead: true }, { text: 'Live', colspan: 2 }, { text: 'Playback', colspan: 2 }, { text: 'Export', rowspan: 2, column: 'export' }]),
+  Object.freeze([{ text: 'Grid', column: 'live' }, { text: 'HD', column: 'live-hd' }, { text: 'SD', column: 'playback-nvr' }, { text: 'HD', column: 'playback-server' }])
+])
+// Live HD counts only with Live on the same camera: ticking it ticks Live there too, unticking Live
+// unticks it (unticking Live HD leaves Live alone)
+const ALSO_ON = Object.freeze({ 'live-hd': ['live'] })
+const ALSO_OFF = Object.freeze({ live: ['live-hd'] })
 
 /** Said of a kept grant whose NVR or camera the server no longer has. */
 export const GONE = 'not on this server any more'
@@ -43,6 +65,7 @@ const ONE_BY_ONE_SITES = 'every site, one by one: a site added later is not incl
 // part-ticked by nothing but kept grants: without this the box looks wrong, nothing under it being ticked
 const KEPT_ONLY = 'only cameras not listed now (see Kept from before)'
 const KEPT_ONLY_ALL = 'only sites or cameras not listed now (see Kept from before)'
+const NO_LIVE = 'no effect without Live'
 
 const isString = (v) => typeof v === 'string'
 const arr = (v) => (Array.isArray(v) ? v : [])
@@ -204,18 +227,18 @@ function apply(cov, target, on, idx) {
 }
 
 /**
- * One box ticked (on true) or unticked. column: 'live', 'playback' (both playback rights) or
- * 'export'. target: '*' for All sites, an NVR id for a site row, 'nvr/ch' for a camera row. A column
- * or target the tree does not have changes nothing.
+ * One box ticked (on true) or unticked. column: one of COLUMNS (Live HD also ticks Live, and Live also
+ * unticks Live HD, on the same target). target: '*' for All sites, an NVR id for a site row, 'nvr/ch'
+ * for a camera row. A column or target the tree does not have changes nothing.
  */
 export function toggle(state, tree, column, target, on) {
-  const actions = Object.hasOwn(COLUMN_ACTIONS, column) ? COLUMN_ACTIONS[column] : null
   const t = cleanTarget(target)
   const idx = indexOf(tree)
-  if (!actions || !t) return state
+  if (!COLUMNS.includes(column) || !t) return state
   if (t !== '*' && !(t.includes('/') ? idx.nvrs.get(nvrOf(t))?.keys.includes(t) : idx.nvrs.has(t))) return state
   const next = copyState(state)
-  for (const a of actions) next.grants[a] = apply(next.grants[a], t, on === true, idx)
+  const also = (on === true ? ALSO_ON : ALSO_OFF)[column] ?? []
+  for (const a of [column, ...also]) next.grants[a] = apply(next.grants[a], t, on === true, idx)
   return next
 }
 
@@ -278,25 +301,15 @@ function allCell(c, idx) {
   return { state: 'some', note: every ? ONE_BY_ONE_SITES : '' }
 }
 
-const RANK = { off: 0, some: 1, on: 2 }
-const WORD = { on: 'all', some: 'some', off: 'none' }
-
-/**
- * The Playback box from its two rights. Ticked when either covers it, because unticking it takes
- * both away; a cell where the two differ says so, since "ticked" alone would hide that one of them
- * is missing.
- */
-function playbackCell(server, nvr) {
-  const state = RANK[server.state] >= RANK[nvr.state] ? server.state : nvr.state
-  if (server.state === nvr.state) return { state, note: server.note === nvr.note ? server.note : '' }
-  if (nvr.state === 'off') return { state, note: 'server recordings only' }
-  if (server.state === 'off') return { state, note: 'NVR recordings only' }
-  return { state, note: `server recordings: ${WORD[server.state]}; NVR recordings: ${WORD[nvr.state]}` }
+/** Every column's cell; a Live HD box on where Live is off (only stored data can do that) says so. */
+function cellsOf(one) {
+  const cells = Object.fromEntries(COLUMNS.map((c) => [c, one(c)]))
+  if (cells['live-hd'].state !== 'off' && cells.live.state === 'off') cells['live-hd'] = { ...cells['live-hd'], note: NO_LIVE }
+  return cells
 }
 
-const cellsOf = (one) => ({ live: one('live'), playback: playbackCell(one('playback-server'), one('playback-nvr')), export: one('export') })
-
-const KEPT_LABELS = { live: 'Live', 'playback-server': 'Playback (server)', 'playback-nvr': 'Playback (NVR)', export: 'Export' }
+/** Whether one stored right covers one camera of the tree: '*', its site, itself, or a kept target of them. */
+const coversKey = (c, nvr, key) => c.all || c.nvrs.includes(nvr) || c.cams.includes(key) || c.kept.includes(nvr) || c.kept.includes(key)
 
 /** The old grants the tree cannot show, one entry per target, with the rights it carries. */
 function keptList(state, idx) {
@@ -307,9 +320,7 @@ function keptList(state, idx) {
     const site = idx.nvrs.get(nvrOf(t))
     const ch = t.includes('/') ? Number(t.slice(t.indexOf('/') + 1)) : null
     const text = ch === null ? `all of ${t}` : `${site ? site.node.site : nvrOf(t)} camera ${ch + 1}`
-    const both = actions.includes('playback-server') && actions.includes('playback-nvr')
-    const columns = actions.filter((a) => !(both && a === 'playback-nvr')).map((a) => (both && a === 'playback-server' ? 'Playback' : KEPT_LABELS[a]))
-    return { target: t, text, reason: site && site.keys.length === 0 ? UNLISTED : GONE, columns }
+    return { target: t, text, reason: site && site.keys.length === 0 ? UNLISTED : GONE, columns: COLUMNS.filter((c) => actions.includes(c)).map((c) => COLUMN_LABELS[c]) }
   })
 }
 
@@ -340,9 +351,12 @@ export function view(state, tree) {
   if (!state.admin && exportsSomething && state.formats.length === 0) {
     warnings.push('Export is ticked, but no format is: they cannot export anything until a format is ticked.')
   }
+  // Live HD where Live is not (kept from before, or hand-edited): it grants nothing there
+  const hdAlone = [...idx.nvrs.values()].some(({ node, keys }) => keys.some((key) => coversKey(g['live-hd'], node.nvr, key) && !coversKey(g.live, node.nvr, key)))
+  if (!state.admin && hdAlone) warnings.push('Live HD is ticked where Live is not (kept from before): it has no effect there. Tick Live there, or untick Live HD.')
   return {
     admin: state.admin,
-    adminNote: 'An admin may watch, play back and export everything, on every site and camera, in any format, and can change all of this. Switch Admin off to choose what they may see.',
+    adminNote: 'An admin may watch (at full quality), play back and export everything, on every site and camera, in any format, and can change all of this. Switch Admin off to choose what they may see.',
     nothing: !state.admin && !GRANTABLE.some((a) => hasAny(g[a])),
     all: cellsOf((a) => allCell(g[a], idx)),
     sites,
@@ -364,10 +378,7 @@ export function cellAt(v, column, target) {
   return null
 }
 
-/**
- * A click on a box: a ticked box is unticked, a part-ticked or empty one ticked, like any checkbox.
- * So a Playback box ticked for one of its two rights takes both away, and a second click grants both.
- */
+/** A click on a box: a ticked box is unticked, a part-ticked or empty one ticked, like any checkbox. */
 export function click(state, tree, column, target) {
   const cell = cellAt(view(state, tree), column, target)
   return cell ? toggle(state, tree, column, target, cell.state !== 'on') : state

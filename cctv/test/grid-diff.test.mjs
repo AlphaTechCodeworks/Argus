@@ -87,5 +87,19 @@ const edit = (list, i, fields) => list.map((c, j) => (j === i ? { ...c, ...field
   check('render uses the same visible set as the diff', /visibleCameras\(cameras, gridView\(perPage\)\)/.test(src))
 }
 
+// ---- Live HD per camera (stream rights) -----------------------------------------------------------------
+{
+  const d = diffCameras(base(), edit(base(), 1, { hd: true }), view())
+  check('hd flipping is a change of that tile, not a rebuild', d.full === false && d.changed.length === 1 && d.changed[0].hd === true && d.changed[0].index === 1)
+  check('hd the same: no change', diffCameras(edit(base(), 1, { hd: true }), edit(base(), 1, { hd: true }), view()).changed.length === 0)
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  check('viewer.js: full screen goes to main only with Live HD (and not remote, and not a browser that failed main)', /if \(cam\.hd !== false && !noMain\.has\(single\) && !cam\.remote\) upgradeToMain\(overlay, cam, sub, opts\)/.test(src))
+  check('viewer.js: without it, the SD badge', /else if \(cam\.hd === false\) overlay\.querySelector\('\.name'\)\.after\(sdBadge\(\)\)/.test(src))
+  check('viewer.js: the full-size view is rebuilt when Live HD flips', /if \(keep && Boolean\(singleCam\?\.hd\) === Boolean\(cam\.hd\)\)/.test(src))
+  check('viewer.js: "Recordings" only with a playback right', /if \(cam\.playback !== false\) \{/.test(src))
+  check('viewer.js: a main layer refused before it showed goes, the sub-stream stays', /onHdRefused: \(\) => \{\n\s*if \(!layer\.classList\.contains\('pending'\)\) return false/.test(src))
+}
+
 console.log(failures ?`\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

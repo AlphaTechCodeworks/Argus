@@ -7,7 +7,7 @@
 //                    (its row looked up by path once closed), unreadable files, flow control, close
 // Temp dirs, a temp index, fake NVR objects and a fake WebSocket only: nothing reaches an NVR.
 // Run:  node cctv/test/rec-playback.test.mjs
-import { mkdtempSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import * as fsp from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,12 +15,14 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'rec-pb-'))
 // real rights for the source checks (rights.mjs reads DATA_DIR when first imported): srv may play
-// n1/0 back from the server only, nv from the NVR only, both from either
-writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ srv: { hash: 'x', role: 'viewer' }, nv: { hash: 'x', role: 'viewer' }, both: { hash: 'x', role: 'viewer' } }))
+// n1/0 back from the server only, nv from the NVR only, both from either; nvhd from the NVR, and may
+// watch it live (the version 1 file is upgraded: Live HD wherever Live is, so the NVR's main stream too)
+writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ srv: { hash: 'x', role: 'viewer' }, nv: { hash: 'x', role: 'viewer' }, both: { hash: 'x', role: 'viewer' }, nvhd: { hash: 'x', role: 'viewer' } }))
 writeFileSync(join(process.env.DATA_DIR, 'rights.json'), JSON.stringify({ version: 1, users: {
   srv: { grants: { 'playback-server': ['n1/0'] } },
   nv: { grants: { 'playback-nvr': ['n1/0'] } },
-  both: { grants: { 'playback-server': ['n1/0'], 'playback-nvr': ['n1/0'] } }
+  both: { grants: { 'playback-server': ['n1/0'], 'playback-nvr': ['n1/0'] } },
+  nvhd: { grants: { 'playback-nvr': ['n1/0'], live: ['n1/0'] } }
 } }))
 
 let failures = 0
@@ -199,7 +201,10 @@ function fakeWs() {
 function fakeNvr(id = NVR_ID) {
   const nvr = { id, name: `NVR ${id}`, online: true, degraded: false, connects: [], calls: 0 }
   nvr.playback = {
-    connect: (ws, url) => nvr.connects.push({ ws, url }),
+    connect: (ws, url, o) => {
+      nvr.connects.push({ ws, url, o })
+      return { main: o?.main === true }
+    },
     lastClock: () => ({ tzOffsetMs: 0, skewMs: 0, at: Date.now() }),
     clock: async () => {
       nvr.calls++
@@ -313,9 +318,9 @@ check('footage: cameras 1, 3 and 4 have 3 files each', cam1.segs.length === 3 &&
   ]
   for (const [label, index, who] of cases) {
     const nvr = fakeNvr()
-    const { ws, url } = open(0, T0 + 1000, { nvr, index, who, src: null })
+    const { ws, url } = open(0, T0 + 1000, { nvr, index, who, src: null, stream: 1 })
     await sleep(30)
-    check(`no src=auto (${label}): the NVR session gets the same ws and url; nothing else is sent`, nvr.connects.length === 1 && nvr.connects[0].ws === ws && nvr.connects[0].url === url && ws.texts.length === 0 && ws.bins.length === 0 && ws.closedWith === 0)
+    check(`no src=auto (${label}): the NVR session gets the same ws and url; nothing else is sent`, nvr.connects.length === 1 && nvr.connects[0].ws === ws && nvr.connects[0].url === url && nvr.connects[0].o.main === false && ws.texts.length === 0 && ws.bins.length === 0 && ws.closedWith === 0)
   }
   // the NVR's own recordings are playback-nvr: server playback alone, or nothing, never reaches the NVR
   const refusedNvr = [
@@ -361,14 +366,78 @@ check('footage: cameras 1, 3 and 4 have 3 files each', cam1.segs.length === 3 &&
   check('no src=auto, NVR offline: closed 1013 "NVR offline" as server.mjs did; no NVR session', ws.closedWith === 1013 && ws.closeReason === 'NVR offline' && off.connects.length === 0, `${ws.closedWith} ${ws.closeReason}`)
 }
 
+// ---- the NVR's main stream: Playback SD and Live HD or Playback HD (stream rights) ------------------
+{
+  const NV = { user: 'nv', admin: false }
+  const NVHD = { user: 'nvhd', admin: false }
+  const BOTH = { user: 'both', admin: false }
+  const nvrUrl = (q) => new URL(`ws://x/playback?nvr=n1&ch=0&start=${T0 + 1000}${q}`)
+  const connect = (who, q, more = {}) => {
+    const nvr = fakeNvr()
+    const ws = fakeWs()
+    const s = rp.connectPlayback({ nvr, ws, url: nvrUrl(q), who, index: IDX, legs: null, ...more })
+    return { nvr, ws, s }
+  }
+  {
+    const { nvr, ws, s } = connect(NV, '&stream=0')
+    check('NVR main with Playback SD only: {type:"error"} then 1008 "hd not allowed", no NVR session', s === null && ws.texts.length === 1 && ws.texts[0].type === 'error' && /Playback HD or Live HD/.test(ws.texts[0].message) && ws.closedWith === 1008 && ws.closeReason === 'hd not allowed' && nvr.connects.length === 0, `${J(ws.texts)} ${ws.closedWith} ${ws.closeReason}`)
+  }
+  const loose = ['', '%20', '0.0', '0x0', '0b0', '0o0', '0e5', '-0', '%2B0', '%0A0', '%200', '2'].filter((raw) => {
+    const { nvr, ws, s } = connect(NV, `&stream=${raw}`)
+    return !(s === null && ws.closedWith === 1008 && ws.closeReason === 'bad parameters' && nvr.connects.length === 0)
+  })
+  check('NVR playback: every stream value Number() read as 0 (and any other) is "bad parameters", never a session', loose.length === 0, loose.join(' '))
+  {
+    const { nvr, ws, s } = connect(NV, '&stream=1')
+    const o = nvr.connects[0]?.o
+    check('NVR sub with Playback SD only: the session is asked for the sub-stream, and may not go over to main', o?.main === false && o.allowMain() === false && typeof o.onMain === 'function' && ws.closedWith === 0 && s?.source === 'nvr' && s.main === false && J(s.actions) === J(['playback-nvr']), J(s))
+    const bare = connect(NV, '')
+    check('... no stream parameter at all is the sub-stream', bare.nvr.connects[0]?.o.main === false)
+    const dup = connect(NV, '&stream=1&stream=0')
+    check('... of two stream parameters the first counts', dup.nvr.connects[0]?.o.main === false)
+  }
+  {
+    const { nvr, ws, s } = connect(NVHD, '&stream=0')
+    check('NVR main with Playback SD and Live HD: the main stream, watched for the main-stream rights', nvr.connects[0]?.o.main === true && nvr.connects[0].o.allowMain() === true && s?.main === true && J(s.actions) === J(['playback-nvr', ['live-hd', 'playback-server']]) && ws.closedWith === 0, J(s))
+    check('... with Playback SD and Playback HD too', connect(BOTH, '&stream=0').s?.main === true)
+    check('... a main-stream check that throws is a no', connect(NVHD, '&stream=0', { allowedMain: () => { throw new Error('x') } }).s === null)
+    let ok = true
+    const flip = connect(NVHD, '&stream=1', { allowedMain: () => ok }).nvr.connects[0].o
+    const first = flip.allowMain()
+    ok = false
+    check('... allowMain asks the hook every time, never an answer kept from the open (server.mjs\'s reads the session then)', first === true && flip.allowMain() === false)
+    check('NVR_MAIN_ACTIONS is that list', J(rp.NVR_MAIN_ACTIONS) === J(['playback-nvr', ['live-hd', 'playback-server']]))
+  }
+  {
+    // the session going over to main by itself (a camera the NVR keeps only in HD): the server's
+    // re-track hook runs and the switch is audited
+    let told = 0
+    const { nvr } = connect(NVHD, '&stream=1', { onMain: () => told++ })
+    nvr.connects[0].o.onMain()
+    const rows = readFileSync(join(process.env.DATA_DIR, 'audit.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.action === 'playback-view' && r.user === 'nvhd')
+    check('onMain: the server\'s hook runs, and the switch is audited', told === 1 && /^nvr main \(switched: no SD recording\) playback from /.test(rows.at(-1)?.detail ?? ''), rows.at(-1)?.detail)
+    check('... and the opening said sub', rows.some((r) => /^nvr sub playback from /.test(r.detail)))
+  }
+  {
+    // playback.mjs refusing (bad parameters)
+    const nvr = fakeNvr()
+    nvr.playback.connect = () => null
+    const s = rp.connectPlayback({ nvr, ws: fakeWs(), url: nvrUrl('&stream=1'), who: NV, index: IDX, legs: null })
+    check('the NVR side refusing: nothing to track (null)', s === null)
+  }
+  const asSrv = open(0, T0 + 1000, { who: { user: 'srv', admin: false } })
+  const asBoth = open(0, T0 + 1000, { who: BOTH, legs: { coverage: () => ({ ranges: [] }), start() { throw new Error('not in this test') } } })
+  check('server playback: watched for Playback HD; with NVR legs, Playback SD too', J(asSrv.session.actions) === J(['playback-server']) && J(asBoth.session.actions) === J(['playback-server', 'playback-nvr']))
+  asSrv.ws.close(1000)
+  asBoth.ws.close(1000)
+}
+
 // ---- src=auto but not eligible (R15): an error and 1011, never a silent NVR session ------------------------
 {
   const MSG = 'Server recordings are not available here; reload the page.'
   const cases = [
     ['no index (flag off)', { index: null }],
-    ['a non-admin', { who: { user: 'v', admin: false } }],
-    ['a camera without recordings', { ch: 9 }],
-    ['refused by the access hook', { allowed: () => false }]
+    ['a camera without recordings', { ch: 9 }]
   ]
   for (const [label, o] of cases) {
     const nvr = fakeNvr()
@@ -376,6 +445,23 @@ check('footage: cameras 1, 3 and 4 have 3 files each', cam1.segs.length === 3 &&
     await sleep(30)
     check(`src=auto, ${label}: error + close 1011, no NVR session`, ws.texts.length === 1 && ws.texts[0].type === 'error' && ws.texts[0].message === MSG && ws.closedWith === 1011 && nvr.connects.length === 0 && ws.bins.length === 0, J(ws.texts) + ` ${ws.closedWith}`)
   }
+  // a rights refusal is 1008 "not allowed" like every other, with its own words (it was 1011 "not available")
+  const refused = [
+    ['a non-admin', { who: { user: 'v', admin: false } }],
+    ['a viewer allowed NVR playback only', { who: { user: 'nv', admin: false } }],
+    ['refused by the access hook', { allowed: () => false }]
+  ]
+  for (const [label, o] of refused) {
+    const nvr = fakeNvr()
+    const { ws } = open(0, T0 + 1000, { nvr, ...o })
+    await sleep(30)
+    check(`src=auto, ${label}: {type:"error"} then 1008 "not allowed", no NVR session`, ws.texts.length === 1 && ws.texts[0].type === 'error' && /may not play back this camera/.test(ws.texts[0].message) && ws.closedWith === 1008 && ws.closeReason === 'not allowed' && nvr.connects.length === 0 && ws.bins.length === 0, J(ws.texts) + ` ${ws.closedWith} ${ws.closeReason}`)
+  }
+  const looseStream = open(0, T0 + 1000, { extra: '&stream=0.0' })
+  check('src=auto with a second, loose stream parameter: the first counts (0), the session runs', looseStream.session !== null)
+  looseStream.ws.close(1000)
+  const badStream = rp.connectPlayback({ nvr: fakeNvr(), ws: fakeWs(), url: new URL(`ws://x/playback?nvr=n1&ch=0&stream=0.0&start=${T0}&src=auto`), who: ADMIN, index: IDX, legs: null })
+  check('src=auto, stream=0.0: bad parameters (stream-param.mjs)', badStream === null)
   const bad = open(0, T0, { chParam: 'x' })
   check('src=auto, bad parameters: closed 1008', bad.ws.closedWith === 1008, `${bad.ws.closedWith}`)
   // R14: server playback works while the NVR is offline

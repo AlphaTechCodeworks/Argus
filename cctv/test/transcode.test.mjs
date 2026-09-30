@@ -253,6 +253,18 @@ function harness(opts = {}) {
   fireIdle()
   check('  the last picture follows once ffmpeg has gone quiet (a scrub shows its still)', frames.length === 3 && frames[2].ts === 2080)
 
+  // pending: the pictures pushed in and not handed back yet, those ffmpeg keeps (a live conversion's
+  // backlog: phone-live.mjs resets one that falls too far behind the camera)
+  const hp = harness({ keepEvery: 2 })
+  const was = hp.t.pending
+  hp.t.push(3000, true, IDR)
+  for (const ts of [3040, 3080, 3120, 3160]) hp.t.push(ts, false, P)
+  const kept = hp.t.pending
+  hp.procs[0].stdout.emit('data', Buffer.concat([SPS, PPS, IDR, P]))
+  const afterOne = hp.t.pending
+  hp.t.reset()
+  check('  pending: the pictures kept (1 in 2) pushed in and not handed back; none after a reset', was === 0 && kept === 3 && afterOne === 2 && hp.t.pending === 0, J([was, kept, afterOne, hp.t.pending]))
+
   // frames handed back in presentation order get the presentation times, not a shuffled set
   const h2 = harness()
   h2.t.push(5000, true, IDR)

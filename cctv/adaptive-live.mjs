@@ -15,21 +15,34 @@
 // cannot keep up, and it goes down a level: what its page has queued takes more than QUEUE_S to go at
 // the rate the socket drains, on two looks in a row, or a tile has been held back over its cap for
 // more than HELD_MS. What a page opening or a level change queues by itself (every tile's replay, the
-// first keyframes) is let go out first (GRACE_MS). Twenty seconds with nothing piling up and it goes
-// back up one, longer after a climb that failed (CLIMB_FAILED_MS); a page whose sockets all closed and
-// came back within REMEMBER_MS comes back one level above where it left. On top of that, when all
-// remote viewers together send more than the uplink budget (CCTV_WAN_BUDGET_MBPS, 20 by default), the
-// viewer taking the most is stepped down first: one person on a good link must not starve everyone else.
+// first keyframes) is let go out first (GRACE_MS). A page socket that writes nothing while another of
+// the same browser writes is a page gone, its socket not closed yet, and is not read (#dead). Twenty
+// seconds with nothing piling up and it goes back up one, longer after a climb that failed
+// (CLIMB_FAILED_MS); a page whose sockets all closed and came back within REMEMBER_MS comes back one
+// level above where it left. On top of that, when all remote viewers together send more than the
+// uplink budget (CCTV_WAN_BUDGET_MBPS, 20 by default), the viewer taking the most is stepped down
+// first: one person on a good link must not starve everyone else.
 //
 // Viewers on the same level share one conversion per camera, so the cost follows the number of
 // cameras being watched remotely, not the number of people watching. Conversions have their own cap
-// (phone-live.mjs maxPhoneStreams); a viewer who cannot get a slot gets the camera's own stream.
+// (phone-live.mjs maxPhoneStreams); a viewer who cannot get a slot gets the camera's own stream. Level
+// full's of main streams, playback's size and cost, one of their own (FULL_MAX): past it, level 15's.
 //
 // A level change moves a tile without a freeze or a jump back (#retarget): it keeps its picture until
 // the new stream has one, and goes over at the camera's next keyframe, where the new level's stream
 // starts; it is never sent a frame older than one it has had. A sub-stream a level would only pass
 // through stays on the camera's own stream (#passes).
-import { PhoneStream, RATE_SAMPLES, keepEveryFor, maxPhoneStreams } from './phone-live.mjs'
+//
+// A main stream (the full-size view) is main-stream pictures on the viewer's socket from whatever
+// stream it is put on: the camera's own, level full's conversion, or a level's conversion another
+// viewer started. live-attach.mjs let it in with Live HD (rights.mjs); every move here puts it on
+// another stream, each with its own replay or keyframe, and asks again first, from the session as it
+// is then (attach's mayMain). No longer allowed: it is not moved, it is sent nothing more, and it is
+// closed 1008 as the access watch would close it at its next sweep ('hd not allowed' when only Live HD
+// went, #mayMove). A sub-stream's streams never carry the main stream (their keys hold the stream
+// type): not asked.
+import { FIRM_INTERVALS, PhoneStream, RATE_SAMPLES, keepEveryFor, maxPhoneStreams, steadyRate } from './phone-live.mjs'
+import { HD_NOT_ALLOWED } from './stream-param.mjs'
 import { CODEC_H265, PLAYBACK_LIMITS, TranscodePool } from './transcode.mjs'
 
 export const LEVELS = Object.freeze([
@@ -60,10 +73,34 @@ export const LEVELS = Object.freeze([
  * A source under 10 fps is then converted picture by picture (slowFps): the two decoder threads and
  * ffmpeg's parser held two pictures back, 2.7 s each at 0.8 fps, where one thread has time to spare.
  * It learns from the camera's GOP replayed whole (wholeReplay): cut to its keyframe, as a big main's is
- * for a viewer, it read 0.5 fps off two keyframes 2 s apart.
+ * for a viewer, it read 0.5 fps off two keyframes 2 s apart. And a hole in what it learns from is left
+ * out, a rate read on too few frames read again at the 12th (rejudge): nvr-2's freezes as streams open
+ * read a 20 fps main as 1.6 fps, for the conversion's whole life (the final review of live-smooth).
+ * One that falls more than 2 s of the camera behind (a load that takes its niced ffmpeg below real
+ * time) starts again at the camera's next keyframe (maxLagS): it fell further behind for as long as the
+ * load lasted, and its backlog grew in the server's memory.
  */
-export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true })
+export const REMOTE_CONVERSION = Object.freeze({ bufSeconds: PLAYBACK_LIMITS.bufSeconds, lowDelay: false, keySeconds: 2, learnMs: 1000, slowFps: 10, wholeReplay: true, rejudge: true, maxLagS: 2 })
+/**
+ * Level full's conversions of main streams running at once, at most (the final review of live-smooth).
+ * Each is playback's (1920 wide, every frame, two decoder threads): 1.38-1.50 cores for a 4K H.265
+ * camera at 1x (f24fe50), where level 15's was 0.85 (1280 wide, 1 in 2; ev-remote A9). Playback holds
+ * its own to 2 (transcode.mjs CCTV_TRANSCODE_MAX); these drew on the live pool's 16 alone, and three PCs
+ * each in a full-size view of a 4K H.265 camera wanted 4.3 cores beside playback's 2.9, against about
+ * 5.8 free (before the branch 2.55). Past the cap a main is given level 15's stream, and full once one
+ * is free again; one that nobody is on any more (its stop delay running) gives its place up at once.
+ */
+export const FULL_MAX = 2
+/**
+ * How long a level-full conversion nobody is on runs on (phone-live.mjs PhoneStream stopDelayMs; 10 s
+ * for the other levels). A PC stepping its full-size view with ‹ › every 2 s left each one converting
+ * every frame for 10 s: 5-6 at once, about 7-8 cores for one viewer watching one camera. A step back
+ * within it finds its conversion running; later, a new one starts from the camera's replay.
+ */
+export const FULL_STOP_MS = 2000
 export const TICK_MS = 2000
+/** A viewer's look that throws is said at most once in this long a viewer, with how many were not (tick). */
+export const LOOK_FAILED_SAY_MS = 60_000
 /**
  * A link that is not keeping up: what its page has queued takes longer than QUEUE_S to go at the rate
  * the page's socket drains (live-mux.mjs drainBps), on PRESSURE_LOOKS looks in a row. It was any queue
@@ -211,11 +248,18 @@ class Viewer {
     // its own start-up going out (GRACE_MS): marks, per socket, the bytes its link will have written
     // once what was queued then has gone; opening: taken as its tiles open, for OPENING_MS
     this.grace = { from: now, marks: new Map(), opening: true }
+    // its /live-mux page sockets (live-mux.mjs MuxChannel.page): what each had written at the last look,
+    // for how many looks in a row that has not grown, whether it ever has, whether it had something to
+    // write at the last look (written since the one before, or something queued), for how many looks in
+    // a row it has written nothing though it had, and whether its being left out has been said (#dead)
+    this.pages = new Map() // page -> { written, still, wrote, busy, stuck, said }
     this.left = new Set() // level streams its closed sockets left with nobody on them (for their 10 s)
     this.sockets = new Set() // { ws, nvrId, ch, type, source, stream, sent, lastTs, switch, ... } (attach)
     this.sentAt = 0
     this.sentBytes = 0
     this.bps = 0
+    this.lookFailedAt = null // when a look of it that threw was last said (tick, LOOK_FAILED_SAY_MS)
+    this.lookFails = 0 // looks that threw since then, not said
   }
 }
 
@@ -271,9 +315,12 @@ export class AdaptiveLive {
   }
 
   /**
-   * A camera stream's frame rate: from the GOP it holds, once that is 12 frames or 1 s of them (as a
-   * level's stream learns it, phone-live.mjs); else the one read or learnt last (a look just after a
-   * keyframe has one frame to go on); 0 when not known yet.
+   * A camera stream's frame rate: from the GOP it holds, once that is 12 frames, or 1 s of them on
+   * FIRM_INTERVALS steps or more, a hole among them left out (as a level's stream reads it,
+   * phone-live.mjs steadyRate); else the one read or learnt last (a look just after a keyframe has one
+   * frame to go on); 0 when not known yet. It read the mean over the GOP, and off nvr-2's 15 s freeze
+   * after a keyframe and 3 frames, 0.3 fps: a 30 fps sub passed through at level 8 (the final review of
+   * live-smooth). Two frames 1.25 s apart are a trickle or a hole: not a rate to go on.
    */
   #rateOf(entry) {
     const key = `${entry.nvrId}/${entry.ch}/${entry.type}`
@@ -281,7 +328,10 @@ export class AdaptiveLive {
     const first = header(gop[0])
     const last = header(gop.at(-1))
     const span = first && last ? last.ts - first.ts : 0
-    if (span > 0 && (gop.length >= RATE_SAMPLES || span >= REMOTE_CONVERSION.learnMs)) this.rates.set(key, ((gop.length - 1) * 1000) / span)
+    if (span > 0 && (gop.length >= RATE_SAMPLES || (span >= REMOTE_CONVERSION.learnMs && gop.length > FIRM_INTERVALS))) {
+      const fps = steadyRate(gop.map((b) => header(b)?.ts ?? NaN).filter(Number.isFinite))
+      if (fps > 0) this.rates.set(key, fps)
+    }
     return this.rates.get(key) ?? 0
   }
 
@@ -303,19 +353,50 @@ export class AdaptiveLive {
     const key = this.#keyFor(entry, level)
     let s = this.streams.get(key)
     if (!s || s.closed) {
+      // a main's level-full conversion past FULL_MAX: level 15's stream, until one is free (the tick's
+      // #retarget at full asks again)
+      if (level === 0 && entry.type === 0 && !this.#roomAtFull()) {
+        if (!entry.fullWait) this.log(`[adaptive] ${entry.nvrId}/${entry.ch + 1}: its main on level 15's stream, not full: ${FULL_MAX} full-size conversions run already`)
+        entry.fullWait = true
+        return this.#streamFor(entry, 1, { fps })
+      }
       const slot = this.pool.acquire()
       if (!slot) return entry.source // no room for another conversion: the camera's own stream
       // level full is only ever for browsers that cannot play H.265 (#converts), so an H.265 stream
       // there is converted even with nothing to thin (h264Only); the other levels are shared with
       // browsers that can. Made for a socket with a picture, it starts at the camera's next keyframe,
       // where that socket switches to it (fromNextKey, #switchTo); the rate it learns is remembered
-      // for this camera stream (#passes).
+      // for this camera stream (#passes). At 8 and 4, one sent as it is that its rate read again says
+      // to convert takes a slot then (rejudge); at 15 it stays as it is: converted there, a sub came out
+      // bigger than it went in (nvr-2/6 0.37 -> 0.47 Mbit/s; the stutter report: do not convert grid
+      // sub-streams at level 15), and at full nothing is thinned.
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), onRate, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, now: this.now, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
       this.#made = s
     }
+    if (level === 0) entry.fullWait = false
     return s
+  }
+
+  /**
+   * Whether a main's level-full conversion may start (FULL_MAX): one that nobody is on or waits for
+   * (its FULL_STOP_MS running) is closed to make room, the one left longest first (PhoneStream emptyAt):
+   * the one left last is the one a PC stepping back with ‹ finds running. They went in the order they
+   * were made (the review of d5390d6).
+   */
+  #roomAtFull() {
+    const idle = []
+    let busy = 0
+    for (const [key, s] of this.streams) {
+      if (!key.endsWith('/0@full') || s.closed) continue
+      if (s.clients.size === 0 && !this.#awaited(s)) idle.push(s)
+      else busy++
+    }
+    const left = (s) => s.emptyAt ?? -Infinity // (never had anyone on it: first)
+    idle.sort((a, b) => (left(a) < left(b) ? -1 : left(a) > left(b) ? 1 : 0))
+    while (busy + idle.length >= FULL_MAX && idle.length) idle.shift().close()
+    return busy + idle.length < FULL_MAX
   }
 
   /**
@@ -343,15 +424,28 @@ export class AdaptiveLive {
    *    went over at once, and a climb onto another viewer's stream held up to that stream's keyframe
    *    interval (1.07 s in the review of ef43e60);
    *  - onto one from the camera's own frames (its stream, or one passing them on): at once, and nothing
-   *    until that stream's next keyframe at or past what it had (#guard).
+   *    until that stream's next keyframe at or past what it had (#guard);
+   *  - no slot free, the conversion it is on not its own to hand over, and a camera stream its browser
+   *    cannot play (H.265): it stays on that conversion (entry.slotless), as a main past FULL_MAX stays
+   *    on level 15's, and every look tries again.
    * @param {{ down?: boolean }} [o] down: to send less (a step down; a tile that finds a slot at last)
    */
   #retarget(e, level, { down = false } = {}) {
+    if (e.refused) return
     let want = this.#streamFor(e, level)
     let made = this.#made
+    // a main about to be put on another stream (or made one, for a switch): only while its viewer may
+    // still see main (#mayMove); a stream made for it that nobody is on closes again
+    const due = want !== e.stream && e.switch?.to !== want
+    if (due && !this.#mayMove(e)) {
+      if (made && made.clients.size === 0 && !this.#awaited(made)) made.close()
+      return
+    }
     // no slot for its level's stream while its own conversion holds one: that one hands its slot over
     // (not one another socket is on or waits for: closing it would free nothing, and cost its picture)
-    const own = e.stream && e.stream !== e.source && !e.stream.passthrough && e.stream.clients.size === 1 && !this.#awaited(e.stream)
+    const converted = e.stream && e.stream !== e.source && !e.stream.passthrough && !e.stream.closed
+    const own = converted && e.stream.clients.size === 1 && !this.#awaited(e.stream)
+    e.slotless = false
     if (want === e.source && own && this.#converts(e, level)) {
       // with a picture: at the camera's next keyframe, the rate it has now handed to the new stream
       if (e.lastTs !== null) {
@@ -364,6 +458,21 @@ export class AdaptiveLive {
       this.#leaveStream(e)
       want = this.#streamFor(e, level)
       made = this.#made
+    }
+    // No slot, and a conversion it cannot hand over (another socket's too): an H.265 camera stream for a
+    // browser that cannot play it stays on the conversion it has. It went onto the camera's own stream:
+    // with FULL_MAX reached and the pool at its cap, two PCs sharing level 15's stream of a camera found
+    // room at full as another PC stepped down, and no slot, and were sent 1.5 s of H.265 (40 frames) -- a
+    // PC without HEVC shows black, and its full-size view falls back to the sub-stream for 2 minutes
+    // (viewer.js NO_MAIN_MS; the review of d5390d6). No slot is no room: the tick asks again at every look.
+    // A main so kept has a move due that is only put off: it is asked at every look as at any move
+    // (#mayMove, above), so one whose Live HD went is closed at the next look, not kept on a conversion --
+    // another viewer's, maybe -- until the access watch's sweep; here too when it waited to switch to the
+    // camera's own stream (decided before the camera was known to be H.265) and was not asked above.
+    if (want === e.source && converted && this.#converts(e, level) && this.#h265(e) && !e.clientH265) {
+      if (!due && !this.#mayMove(e)) return
+      e.slotless = true
+      return this.#cancelSwitch(e)
     }
     if (want === e.stream) return this.#cancelSwitch(e)
     if (e.switch?.to === want) return
@@ -440,6 +549,7 @@ export class AdaptiveLive {
    * would tell the NVR worker it is background (at a sub-stream limit, one a viewer's may displace).
    */
   #swap(e) {
+    if (!this.#mayMove(e)) return
     const sw = e.switch
     const from = e.stream
     e.switch = null
@@ -463,6 +573,7 @@ export class AdaptiveLive {
    * camera's own stream, from this keyframe.
    */
   #handOver(e, { atKey }) {
+    if (!this.#mayMove(e)) return
     const sw = e.switch
     e.switch = null
     this.#leaveStream(e)
@@ -478,6 +589,7 @@ export class AdaptiveLive {
 
   /** A switch done at the new stream's start (#pass), or given up waiting for it: onto the new stream now. */
   #cutOver(e) {
+    if (!this.#mayMove(e)) return
     const sw = e.switch
     if (sw.to === null) return this.#handOver(e, { atKey: false })
     e.switch = null
@@ -485,6 +597,38 @@ export class AdaptiveLive {
     this.#leaveStream(e)
     // (a stream made for it and closed meanwhile: whatever the level has now)
     this.#join(e, sw.to.closed ? this.#streamFor(e, sw.level) : sw.to)
+  }
+
+  /**
+   * Whether a socket may be put on another stream now (#retarget, and where a switch it waits for goes
+   * over: #swap, #handOver, #cutOver, up to SWITCH_MAX_MS after it was decided; at every look while
+   * #retarget keeps it on its conversion for want of a slot, slotless). A main's viewer is asked
+   * again (mayMain, live-attach.mjs: Live and Live HD, from the session and the rights as they are now),
+   * which answers true or the access watch's refusal: 'hd not allowed' (only Live HD went), 'not
+   * allowed', 'signed out'; anything else, a check that throws included, is a no ('hd not allowed', or
+   * 'not allowed' for a throw). No: the socket stays where it is, its switch dropped, nothing more is
+   * sent to it (attach's send), and it is closed 1008 with that reason -- on 'hd not allowed' the page
+   * drops to the sub-stream (live-tile.js) -- as when the access watch closes it, which may be up to its
+   * SWEEP_MS later.
+   */
+  #mayMove(e) {
+    if (e.refused) return false
+    if (e.type !== 0 || typeof e.mayMain !== 'function') return true
+    let answer
+    try {
+      answer = e.mayMain()
+    } catch {
+      answer = 'not allowed' // default deny
+    }
+    if (answer === true) return true
+    const reason = typeof answer === 'string' && answer ? answer : HD_NOT_ALLOWED
+    e.refused = true
+    this.#cancelSwitch(e)
+    this.log(`[adaptive] ${e.nvrId}/${e.ch + 1}: a main stream not moved to another stream: its viewer may no longer see it; closed 1008 "${reason}"`)
+    try {
+      e.ws.close(1008, reason)
+    } catch {}
+    return false
   }
 
   /** Onto a stream now, with its replay; nothing older than what it had goes out (#guard). */
@@ -560,24 +704,27 @@ export class AdaptiveLive {
   /**
    * Takes a remote viewer's /live socket.
    * @param {string} viewerKey one per browser (the session), so all its tiles move together
-   * @param {{ codec?: 'h264'|'h265' }} o codec: what the NVR saw this camera stream send (nvrs.mjs
-   *   codecSeen), for as long as the stream itself has no keyframe to say (#h265)
+   * @param {{ codec?: 'h264'|'h265', mayMain?: () => boolean }} o codec: what the NVR saw this camera
+   *   stream send (nvrs.mjs codecSeen), for as long as the stream itself has no keyframe to say (#h265);
+   *   mayMain: whether a main's viewer may still see it (true, or why not), asked before each move (#mayMove)
    */
-  attach(viewerKey, { ws, nvrId, ch, type, source, clientH265 = false, codec }) {
+  attach(viewerKey, { ws, nvrId, ch, type, source, clientH265 = false, codec, mayMain = null }) {
     const now = this.now()
     let v = this.viewers.get(viewerKey)
     if (!v) this.viewers.set(viewerKey, (v = this.#arrive(viewerKey, now)))
     // lastTs: capture time of the last frame it was sent that its browser can show (#retarget); after /
     // afterAt: nothing older than this goes to it, since then (#guard); switch: a move waiting for the
-    // new stream's first picture (#switchTo); passAt: whether its level sends it as it is (#passes)
-    const entry = { ws, nvrId, ch, type, source, clientH265, codec, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null }
+    // new stream's first picture (#switchTo); passAt: whether its level sends it as it is (#passes);
+    // refused: a main whose viewer may no longer see it, found at a move (#mayMove), sent nothing more;
+    // slotless: kept on the conversion it had, for want of a slot for its level's (#retarget)
+    const entry = { ws, nvrId, ch, type, source, clientH265, codec, mayMain, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null, refused: false, slotless: false }
     // Every frame to this socket, the replay as it joins too: a move waiting to switch goes over at the
     // new stream's start, and nothing older than it had goes after one (#pass). Then the bytes, for the
     // uplink budget and the Health page, and for what a plain /live socket has written (#written).
     const send = ws.send.bind(ws)
     ws.send = (data, ...rest) => {
       const f = header(data)
-      if (f && !this.#pass(entry, f)) return
+      if (f && (entry.refused || !this.#pass(entry, f))) return
       const n = data?.length ?? data?.byteLength ?? 0
       v.sentBytes += n
       entry.sent += n
@@ -586,17 +733,23 @@ export class AdaptiveLive {
     }
     entry.stream = this.#streamFor(entry, v.level)
     entry.stream.add(ws)
+    // A page opening: what its tiles queue as they open (their replays, and a stand-in's before them:
+    // live-attach.mjs) is its own start-up. So is a page socket of a browser that has one already: a
+    // second tab, or a page that changed network. public/live-mux.js drops a socket it has heard nothing
+    // on and opens another, while the server's end of the old one can stay open for a minute; the new
+    // page's tiles came here with no opening of their own (the final review of live-smooth).
+    const page = ws.page ?? null
+    if (page && !(v.grace?.opening && now - v.grace.from < OPENING_MS) && ![...v.sockets].some((e) => e.ws.page === page)) v.grace = { from: now, marks: new Map(), opening: true }
     v.sockets.add(entry)
-    // a page opening: what its tiles queue as they open (their replays, and a stand-in's before them:
-    // live-attach.mjs) is its own start-up
     if (v.grace?.opening && now - v.grace.from < OPENING_MS) v.grace.marks = this.#marks(v)
     ws.on?.('close', () => {
       this.#cancelSwitch(entry)
+      // (none: a main refused at a level change that had been taken off its stream first, #move)
       const s = entry.stream
-      s.remove(ws)
+      s?.remove(ws)
       v.sockets.delete(entry)
       for (const x of v.left) if (x.closed) v.left.delete(x)
-      if (s !== source && s.clients.size === 0) v.left.add(s)
+      if (s && s !== source && s.clients.size === 0) v.left.add(s)
       if (v.sockets.size === 0) this.#leave(v)
     })
     this.#start()
@@ -618,7 +771,8 @@ export class AdaptiveLive {
     this.gone.set(v.key, { level: v.level, at: this.now() })
     // It comes back one level above, if at all: the streams its sockets left at this level would keep
     // their conversion slots for their 10 s (phone-live.mjs STOP_DELAY_MS), and the level it comes back
-    // to needs them. (At full they are its H.265 conversions, the same when it comes back: they stay.)
+    // to needs them. (At full they are its H.265 conversions, the same when it comes back: they stay
+    // their FULL_STOP_MS.)
     // Not one another viewer's tile waits to switch to: made for that one, it would go from under it.
     if (v.level > 0) for (const s of v.left) if (s.clients.size === 0 && !this.#awaited(s)) s.close()
     v.left.clear()
@@ -641,12 +795,14 @@ export class AdaptiveLive {
     // one keyframe interval: so the tiles that need a slot of their own go onto the new level first, and
     // those still on a conversion after them -- one that finds none free hands its own over to the new
     // one at the camera's next keyframe (#retarget, #handOver). A switch the last move left waiting is
-    // dropped first.
+    // dropped first. On no stream at all: a main refused at a move after it was taken off its stream here
+    // (#retarget), its socket not closed yet -- a ws socket says 'close' once the peer answers, up to its
+    // 30 s close timeout behind a backed-up link (the bypass hunt on the merge with live-smooth).
     const left = new Set(v.left)
     v.left.clear()
     for (const e of v.sockets) {
       this.#cancelSwitch(e)
-      if (e.stream === e.source || e.stream === this.streams.get(this.#keyFor(e, level)) || e.lastTs !== null) continue
+      if (!e.stream || e.stream === e.source || e.stream === this.streams.get(this.#keyFor(e, level)) || e.lastTs !== null) continue
       e.stream.remove(e.ws)
       left.add(e.stream)
       e.stream = null
@@ -682,8 +838,13 @@ export class AdaptiveLive {
     let top = null
     let queued = -1
     let over = 0
+    const dead = new Map() // a dead page's queue, left out (#dead)
     for (const e of v.sockets) {
       const q = e.ws.sharedBufferedAmount ?? e.ws.bufferedAmount ?? 0
+      if (this.#dead(v, e)) {
+        dead.set(e.ws.page, q)
+        continue
+      }
       if (q > queued) [top, queued] = [e, q]
       if (e.ws.overSince != null) over++
     }
@@ -693,6 +854,7 @@ export class AdaptiveLive {
     if (bps === null) text += queued > 0 ? ', draining: not measured yet' : ', draining: idle'
     else if (typeof bps === 'number') text += `, draining at ${((bps * 8) / 1e6).toFixed(1)} Mbit/s${bps > 0 ? ` (${(queued / bps).toFixed(1)} s)` : ''}`
     if (over) text += `, ${over} held over ${over === 1 ? 'its' : 'their'} cap`
+    if (dead.size) text += `; a dead page's ${([...dead.values()].reduce((a, q) => a + q, 0) / 1e6).toFixed(2)} MB left out`
     return text
   }
 
@@ -728,23 +890,81 @@ export class AdaptiveLive {
    * Whether a viewer's own start-up is still going out (GRACE_MS): what its sockets had queued when its
    * page opened or its level last changed, not all written yet. Counted in bytes written, not read off
    * the queue: behind a burst the queue holds what the cameras sent meanwhile, and on a link near its
-   * rate that takes many seconds more to come down than the burst itself does to go.
+   * rate that takes many seconds more to come down than the burst itself does to go. A dead page's
+   * never will (#dead).
    */
   #inGrace(v, now) {
     const g = v.grace
     if (!g) return false
     if (g.opening && now - g.from < OPENING_MS) return true
     g.opening = false
-    if (now - g.from < GRACE_MS) for (const [e, mark] of g.marks) if (v.sockets.has(e) && this.#written(e) < mark) return true
+    if (now - g.from < GRACE_MS) for (const [e, mark] of g.marks) if (v.sockets.has(e) && !this.#dead(v, e) && this.#written(e) < mark) return true
     v.grace = null
+    return false
+  }
+
+  /**
+   * Once a look, what each of a viewer's page sockets has written (#dead), and the one it finds dead
+   * said once: which page's queue the level no longer reads.
+   */
+  #lookAtPages(v) {
+    const seen = new Map()
+    for (const e of v.sockets) if (e.ws.page && !seen.has(e.ws.page)) seen.set(e.ws.page, e)
+    for (const [page, e] of seen) {
+      const written = this.#written(e)
+      const queued = this.#queued(e)
+      const was = v.pages.get(page)
+      if (!was) {
+        v.pages.set(page, { written, still: 0, wrote: written > 0, busy: written > 0 || queued > 0, stuck: 0, said: false })
+        continue
+      }
+      // (stuck: nothing written since a look at which it had something to write)
+      const wrote = written !== was.written
+      if (wrote) Object.assign(was, { written, still: 0, wrote: true, said: false })
+      else was.still++
+      was.stuck = !wrote && was.busy ? was.stuck + 1 : 0
+      was.busy = wrote || queued > 0
+    }
+    for (const page of v.pages.keys()) if (!seen.has(page)) v.pages.delete(page)
+    for (const [page, e] of seen) {
+      const p = v.pages.get(page)
+      if (p.said || !this.#dead(v, e)) continue
+      p.said = true
+      this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket of this browser has written nothing for ${(p.stuck * TICK_MS) / 1000} s while another of its sockets writes: its ${(this.#queued(e) / 1e6).toFixed(2)} MB queued left out (a page gone, its socket not closed yet, or a tab that stopped reading)`)
+    }
+  }
+
+  /**
+   * Whether a socket's page has gone dead: its page socket has written nothing since the look before,
+   * while another page socket of the same browser has. A PC or a phone through the tunnel that changes
+   * network drops its page socket and opens a new one (public/live-mux.js), and the server's socket to
+   * cloudflared stays open: its queue is never written, drains at 0, and was read as the link, every look
+   * over and its tiles held over their caps. The new page, the same browser, was stepped full -> 15 -> 8
+   * -> 4 and held there until the dead one went, 60 s and more (keep-alive waits for 30 s with nothing
+   * written, backpressure.mjs), then 60 s of climbs back (the final review of live-smooth). One look, not
+   * two: the path to the browser takes a few MB more after it has gone, and the queue reads over from the
+   * look its writes stop at, so at two the step down came first (a 6 MB path: full -> 15 at 32 s). Two
+   * sockets of one browser share its link, and one that writes nothing while the other writes is not
+   * being read. Both stopped: nothing tells a dead page from a link that stopped, and both count.
+   * Only while it has something queued, and has written none of what it had to write at the look
+   * before: one with nothing to send is idle (a tab whose cameras froze), and was counted dead and said
+   * so once a freeze ("its 0.00 MB queued left out"; the review of d5390d6); one idle until a frame came
+   * just as a look did is not stuck yet either.
+   */
+  #dead(v, e) {
+    const page = e.ws.page
+    const p = page && v.pages.get(page)
+    if (!p || p.stuck < 1 || this.#queued(e) <= 0) return false
+    for (const [other, q] of v.pages) if (other !== page && q.wrote && q.still === 0) return true
     return false
   }
 
   /** This look's pressure on a viewer's link: why, or null (QUEUE_S, PRESSURE_LOOKS, HELD_MS, GRACE_MS). */
   #pressure(v, now) {
+    this.#lookAtPages(v)
     let held = 0
-    for (const e of v.sockets) if (e.ws.overSince != null && now - e.ws.overSince > HELD_MS) held++
-    const over = !this.#inGrace(v, now) && [...v.sockets].some((e) => this.#over(e))
+    for (const e of v.sockets) if (e.ws.overSince != null && now - e.ws.overSince > HELD_MS && !this.#dead(v, e)) held++
+    const over = !this.#inGrace(v, now) && [...v.sockets].some((e) => !this.#dead(v, e) && this.#over(e))
     v.overLooks = over ? v.overLooks + 1 : 0
     if (v.overLooks >= PRESSURE_LOOKS) return 'video backing up on its link'
     if (held) return `${held === 1 ? 'a tile' : `${held} tiles`} held over ${held === 1 ? 'its' : 'their'} cap for more than ${HELD_MS / 1000} s`
@@ -765,43 +985,68 @@ export class AdaptiveLive {
     }
     // over the budget: the one taking most goes down first
     const heaviest = total > this.budgetBps ? [...this.viewers.values()].sort((a, b) => b.bps - a.bps)[0] : null
+    // Each viewer's look on its own: one that throws (a bug) must not stall every viewer after it in the
+    // Map -- no steps down or climbs, no switch cut over past its time -- at every look for as long as it
+    // throws. A main refused at a move while on no stream did that until its socket closed, up to ws's
+    // 30 s close timeout (#move; the bypass hunt on the merge with live-smooth).
     for (const v of this.viewers.values()) {
-      // a switch still waiting past its time (its stream sent nothing to go over on: held over its cap,
-      // or the camera stalled): over now (#switchTo)
-      for (const e of v.sockets) if (e.switch && now - e.switch.at > e.switch.waitMs) this.#cutOver(e)
-      // overSince: backpressure.mjs gateSend sets it while the socket is over its cap (and clears it
-      // once it drains). waitForKey is not used: a move sets it on purpose. A /live-mux channel's own
-      // bufferedAmount is only its part of the page's socket: the whole socket's queue
-      // (sharedBufferedAmount) is what every tile of the page waits behind.
-      const pressure = this.#pressure(v, now)
-      // more than half its tiles already on the camera's own stream for want of a slot: a level lower
-      // would find no more slots than this one and thin none of them (verify-1)
-      const n = nextLevel(v, { pressure, now, overBudget: v === heaviest, starved: this.#raw(v) * 2 > v.sockets.size })
-      if (n.level !== v.level) this.#move(v, n.level, n.why)
-      else {
-        // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
-        // without the HEVC codec (#streamFor converts it). A camera found to be H.265 only after its
-        // socket was attached (no keyframe then, and no codec the NVR had seen) moves to its conversion
-        // here -- that socket alone -- and one whose keyframe shows H.264 after all moves back to its
-        // own stream. This used to move the whole viewer to 15 fps: every tile of the browser went through
-        // a conversion because one full-screen main stream was H.265 (slow starts, 15 fps, the
-        // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
-        // Below full, a tile left on the camera's own stream for want of a slot tries again: one may
-        // have come free since. It stayed raw for as long as the page stayed on that level (verify-1).
-        // (Going there is sending less, as a step down: SWITCH_WAIT_MS.)
-        for (const e of v.sockets) if (v.level === 0 || e.stream === e.source) this.#retarget(e, v.level, { down: v.level > 0 })
-        if (n.stays && v.stayedAt !== v.level) {
-          v.stayedAt = v.level
-          this.log(`[adaptive] ${v.key.slice(0, 8)}: stays at ${LEVELS[v.level].id}, a level lower would find no conversion slot either (${n.stays}; ${this.#state(v, this.#link(v))})`)
-        }
+      try {
+        this.#look(v, now, heaviest)
+      } catch (err) {
+        this.#lookFailed(v, now, err)
       }
-      v.changedAt = n.changedAt
-      v.cleanSince = n.cleanSince
-      v.climbAfterMs = n.climbAfterMs
-      v.climbedAt = n.climbedAt
-      v.pressedAt = n.pressedAt
     }
     this.lastTotalBps = total
+  }
+
+  /** One viewer's look (tick): a switch past its time, then its level. */
+  #look(v, now, heaviest) {
+    // a switch still waiting past its time (its stream sent nothing to go over on: held over its cap,
+    // or the camera stalled): over now (#switchTo)
+    for (const e of v.sockets) if (e.switch && now - e.switch.at > e.switch.waitMs) this.#cutOver(e)
+    // overSince: backpressure.mjs gateSend sets it while the socket is over its cap (and clears it
+    // once it drains). waitForKey is not used: a move sets it on purpose. A /live-mux channel's own
+    // bufferedAmount is only its part of the page's socket: the whole socket's queue
+    // (sharedBufferedAmount) is what every tile of the page waits behind.
+    const pressure = this.#pressure(v, now)
+    // more than half its tiles already on the camera's own stream for want of a slot: a level lower
+    // would find no more slots than this one and thin none of them (verify-1)
+    const n = nextLevel(v, { pressure, now, overBudget: v === heaviest, starved: this.#raw(v) * 2 > v.sockets.size })
+    if (n.level !== v.level) this.#move(v, n.level, n.why)
+    else {
+      // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
+      // without the HEVC codec (#streamFor converts it). A camera found to be H.265 only after its
+      // socket was attached (no keyframe then, and no codec the NVR had seen) moves to its conversion
+      // here -- that socket alone -- and one whose keyframe shows H.264 after all moves back to its
+      // own stream. This used to move the whole viewer to 15 fps: every tile of the browser went through
+      // a conversion because one full-screen main stream was H.265 (slow starts, 15 fps, the
+      // converters swamped: 'full -> 15 (undefined; 66 cameras)' in the log, 2026-09-26).
+      // Below full, a tile left on the camera's own stream for want of a slot tries again: one may
+      // have come free since. It stayed raw for as long as the page stayed on that level (verify-1).
+      // So does one kept on the conversion it had for want of one (#retarget: slotless).
+      // (Going there is sending less, as a step down: SWITCH_WAIT_MS.)
+      for (const e of v.sockets) if (v.level === 0 || e.stream === e.source || e.slotless) this.#retarget(e, v.level, { down: v.level > 0 })
+      if (n.stays && v.stayedAt !== v.level) {
+        v.stayedAt = v.level
+        this.log(`[adaptive] ${v.key.slice(0, 8)}: stays at ${LEVELS[v.level].id}, a level lower would find no conversion slot either (${n.stays}; ${this.#state(v, this.#link(v))})`)
+      }
+    }
+    v.changedAt = n.changedAt
+    v.cleanSince = n.cleanSince
+    v.climbAfterMs = n.climbAfterMs
+    v.climbedAt = n.climbedAt
+    v.pressedAt = n.pressedAt
+  }
+
+  /** A viewer's look that threw (tick): said once in LOOK_FAILED_SAY_MS a viewer, with how many were not. */
+  #lookFailed(v, now, err) {
+    v.lookFails++
+    if (v.lookFailedAt !== null && now - v.lookFailedAt < LOOK_FAILED_SAY_MS) return
+    const more = v.lookFails - 1
+    v.lookFailedAt = now
+    v.lookFails = 0
+    const at = String(err?.stack ?? '').split('\n').find((l) => l.trim().startsWith('at '))?.trim()
+    this.log(`[adaptive] ${v.key.slice(0, 8)}: its look failed, the other viewers looked at as usual: ${err?.message ?? err}${at ? ` (${at})` : ''}${more > 0 ? ` (${more} more since it was last said)` : ''}`)
   }
 
   #start() {

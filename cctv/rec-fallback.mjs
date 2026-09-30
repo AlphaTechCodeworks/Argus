@@ -249,7 +249,9 @@ export function startLeg({ nvr, ch, fromMs, toMs, stream = 0, speed = 1, paused 
   // Only an explicit false converts, so backfill (which stores the NVR's own bytes) never gets H.264.
   const url = new URL(`ws://x/playback?nvr=${encodeURIComponent(nvr.id)}&ch=${Number(ch)}&stream=${Number(stream)}&start=${Math.round(fromMs + skew)}&h265=${h265 === false ? 0 : 1}`)
   try {
-    nvr.playback.connect(proxy, url)
+    // A leg is part of a server playback, whose viewer holds Playback HD (and Playback SD, or there
+    // would be no legs): main pictures are theirs to see. Backfill is this server's own copy.
+    nvr.playback.connect(proxy, url, { main: Number(stream) === 0, allowMain: () => true })
   } catch (e) {
     finish({ reason: 'error', message: e?.message ?? String(e) })
   }

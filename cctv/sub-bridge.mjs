@@ -67,7 +67,7 @@ export const CODEC_H265 = 1 // sdk.mjs frame header byte 1 (transcode.mjs CODEC_
 export const ROOM_S = 0.6 * QUEUE_S
 
 // Why a stand-in ended, as its log line says it
-const ENDED = { sub: 'the sub-stream came', closed: 'the tile closed', h265: 'the main stream is H.265, which this browser cannot play' }
+const ENDED = { sub: 'the sub-stream came', closed: 'the tile closed', h265: 'the main stream is H.265, which this browser cannot play', rights: 'Live HD was taken away' }
 
 /**
  * Sends `main` to `ws` until the first frame of the viewer's own stream is sent to it.
@@ -84,8 +84,9 @@ const ENDED = { sub: 'the sub-stream came', closed: 'the tile closed', h265: 'th
  *   remote: the viewer is through the tunnel (live-attach.mjs): the main stream's keyframes only, each
  *   only if its page has room for it (see above); log: live-attach.mjs puts the camera and the viewer
  *   (remote or local) in front of each line; an end line has why it ended as well ('sub', 'closed',
- *   'h265'), which it uses to say the H.265 one less often
- * @returns {{ end: () => void, active: () => boolean } | null} null when there is nothing to bridge
+ *   'h265', 'rights'), which it uses to say the H.265 one less often
+ * @returns {{ end: (why: string) => void, active: () => boolean } | null} null when there is nothing to
+ *   bridge; end('rights'): Live HD taken away (live-attach.mjs, access-watch.mjs)
  */
 export function bridgeSub(ws, { sub, main, clientH265, remote = false, cap = CAP_BYTES[0], log = () => {}, now = Date.now }) {
   // the sub-stream is running: its own picture goes at once

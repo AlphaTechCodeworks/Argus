@@ -7,26 +7,28 @@
 // Temp data folder only; no NVR, no SDK, no ffmpeg.
 //   node cctv/test/event-snapshot.test.mjs
 import { EventEmitter } from 'node:events'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-snap-test-'))
 // (every rights row below has an account: a row without one grants nothing, rights.mjs rightsOf)
-writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ alice: { hash: 'x', role: 'admin' }, bob: { hash: 'x', role: 'viewer' }, carol: { hash: 'x', role: 'viewer' }, dave: { hash: 'x', role: 'viewer' } }))
-// bob may watch live only; carol may play nvr1/3 back from the server; dave may play all of nvr1 back from the NVR
+writeFileSync(join(process.env.DATA_DIR, 'users.json'), JSON.stringify({ alice: { hash: 'x', role: 'admin' }, bob: { hash: 'x', role: 'viewer' }, carol: { hash: 'x', role: 'viewer' }, dave: { hash: 'x', role: 'viewer' }, erin: { hash: 'x', role: 'viewer' } }))
+// bob may watch live only; carol may play nvr1/3 back from the server; dave may play all of nvr1 back
+// from the NVR; erin may too, and watch nvr1 live (the version 1 file is upgraded: Live HD = Live)
 writeFileSync(join(process.env.DATA_DIR, 'rights.json'), JSON.stringify({
   version: 1,
   users: {
     bob: { grants: { live: ['*'] } },
     carol: { grants: { 'playback-server': ['nvr1/3'] } },
-    dave: { grants: { 'playback-nvr': ['nvr1'] } }
+    dave: { grants: { 'playback-nvr': ['nvr1'] } },
+    erin: { grants: { 'playback-nvr': ['nvr1'], live: ['nvr1'] } }
   }
 }))
 
 const {
-  SNAP_AFTER_MS, SNAP_DIR, SNAP_LATE_MS, SNAP_POLL_MS, SNAP_WAIT_MS,
-  forgetSnapshots, handleSnapshot, snapArgs, snapPath, sweepSnapshots, takeSnapshot
+  SD_RETRY_MS, SD_WIDTH, SNAP_AFTER_MS, SNAP_DIR, SNAP_LATE_MS, SNAP_POLL_MS, SNAP_WAIT_MS,
+  forgetSnapshots, handleSnapshot, sdArgs, sdPath, sdSnapshot, snapArgs, snapPath, sweepSnapshots, takeSnapshot
 } = await import('../event-snapshot.mjs')
 const { addEvent, closeEvents } = await import('../events-db.mjs')
 const { CODEC } = await import('../rec-reader.mjs')
@@ -337,25 +339,29 @@ const fakeRes = () => ({
   writeHead(s, h) { this.status = s; this.headers = h; return this },
   end(b) { this.body = b }
 })
-const call = async (id, who, method = 'GET') => {
+const call = async (id, who, method = 'GET', deps = { spawn: spawnAs('ok'), platform: 'linux' }) => {
   const res = fakeRes()
-  await handleSnapshot({ method }, res, id, who)
+  await handleSnapshot({ method }, res, id, who, deps)
   return res
 }
+const erin = { user: 'erin', admin: false }
 const alice = { user: 'alice', admin: true }
 const bob = { user: 'bob', admin: false }
 const carol = { user: 'carol', admin: false }
 const dave = { user: 'dave', admin: false }
-const { event: shown } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0, source: 'test' })
-const { event: other } = addEvent({ nvr: 'nvr2', ch: 0, type: 'motion', startMs: T0, source: 'test' })
-const { event: bare } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 60_000, source: 'test' })
+// the rows are older than their pictures, as takeSnapshot's always are (it waits for the recording);
+// a picture older than its row is an earlier event's (handleSnapshot answers 404)
+const SEEN = Date.now() - 60_000
+const { event: shown } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0, source: 'test' }, SEEN)
+const { event: other } = addEvent({ nvr: 'nvr2', ch: 0, type: 'motion', startMs: T0, source: 'test' }, SEEN)
+const { event: bare } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 60_000, source: 'test' }, SEEN)
 mkdirSync(SNAP_DIR, { recursive: true })
 writeFileSync(snapPath(shown.id), JPEG)
 writeFileSync(snapPath(other.id), JPEG)
 {
   const a = await call(shown.id, alice)
   check('an admin gets the JPEG', a.status === 200 && a.headers['content-type'] === 'image/jpeg' && Buffer.from(a.body).equals(JPEG) && a.headers['content-length'] === String(JPEG.length))
-  check('  with the security headers, cached privately', a.headers['x-content-type-options'] === 'nosniff' && /^private/.test(a.headers['cache-control']))
+  check('  with the security headers, never cached (the next user of the browser may be allowed less)', a.headers['x-content-type-options'] === 'nosniff' && a.headers['cache-control'] === 'private, no-store')
   check('server playback of that camera is enough', (await call(shown.id, carol)).status === 200)
   check('  but not for another camera', (await call(other.id, carol)).status === 404)
   check('NVR playback of the whole NVR is enough too', (await call(String(shown.id), dave)).status === 200)
@@ -366,6 +372,180 @@ writeFileSync(snapPath(other.id), JPEG)
   check('an event whose picture is not there (yet): 404, never cached', n.status === 404 && n.headers['cache-control'] === 'no-store')
   const p = await call(shown.id, alice, 'POST')
   check('anything but GET: 405', p.status === 405 && p.headers.allow === 'GET')
+}
+
+// ---- the full picture or the SD copy, by right (stream rights) --------------------------------------------
+{
+  const { event: pic } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 120_000, source: 'test' }, SEEN)
+  const FULL = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(200, 9), Buffer.from([0xff, 0xd9])])
+  writeFileSync(snapPath(pic.id), FULL)
+  const before = procs.length
+  const c = await call(pic.id, carol)
+  check('Playback HD: the full picture, no ffmpeg', c.status === 200 && Buffer.from(c.body).equals(FULL) && procs.length === before)
+  const e = await call(pic.id, erin)
+  check('Playback SD with Live HD (every viewer after the upgrade): the full picture', e.status === 200 && Buffer.from(e.body).equals(FULL) && procs.length === before)
+  const d = await call(pic.id, dave)
+  const p = procs.at(-1)
+  check('Playback SD only: the SD copy, made from the stored picture', d.status === 200 && procs.length === before + 1 && p.input.equals(FULL) && Buffer.from(d.body).equals(JPEG), `${d.status} ${procs.length - before}`)
+  check('... at most 704 wide, a JPEG from a JPEG (quoted for the filter parser; no shell)', SD_WIDTH === 704 && p.args.includes("scale='min(704,iw)':-2") && p.args.join(' ').includes('-f image2pipe -c:v mjpeg -i pipe:0') && sdArgs().includes("scale='min(704,iw)':-2"), p.args.join(' '))
+  check('... kept beside it as <id>-sd.jpg', existsSync(sdPath(pic.id)) && sdPath(pic.id) === join(SNAP_DIR, `${pic.id}-sd.jpg`))
+  check('... never cached by the browser', d.headers['cache-control'] === 'private, no-store')
+  await call(pic.id, dave)
+  check('asked again: the kept copy, no second ffmpeg', procs.length === before + 1)
+  const later = new Date(Date.now() + 60_000)
+  utimesSync(snapPath(pic.id), later, later) // the full picture taken again (an event id used again)
+  await call(pic.id, dave)
+  check('the full picture newer than the copy: the copy is made again', procs.length === before + 2)
+  const { event: failPic } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 180_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(failPic.id), FULL)
+  const f = await call(failPic.id, dave, 'GET', { spawn: spawnAs('fail'), platform: 'linux' })
+  check('the copy cannot be made: 404, never the full picture', f.status === 404 && !existsSync(sdPath(failPic.id)), String(f.status))
+  const f2 = await call(failPic.id, dave)
+  check('... asked again at once: 404 without trying again (for SD_RETRY_MS, 5 minutes)', f2.status === 404 && procs.length === before + 3 && SD_RETRY_MS === 300_000)
+  check('live only: still 404, and no ffmpeg for it', (await call(pic.id, bob)).status === 404 && procs.length === before + 3)
+  // a picture older than its event's row belonged to an earlier event with the same id (SQLite can
+  // hand out a deleted newest row's id again), maybe of another camera
+  const { event: reused } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 240_000, source: 'test' })
+  writeFileSync(snapPath(reused.id), FULL)
+  const old = new Date(Date.now() - 600_000)
+  utimesSync(snapPath(reused.id), old, old)
+  check('a picture older than its event (an id used again): 404 whole and as the SD copy, and no copy made of it', (await call(reused.id, carol)).status === 404 && (await call(reused.id, dave)).status === 404 && procs.length === before + 3 && !existsSync(sdPath(reused.id)))
+  const src = readFileSync(new URL('../event-snapshot.mjs', import.meta.url), 'utf8')
+  check('the SD copies take turns on a queue of their own, never ahead of or behind a new event\'s picture', /sdOneAtATime\(\(\) => toJpeg\(input, sdArgs\(\)/.test(src) && /= await oneAtATime\(\(\) => toJpeg\(found\.key\.buf, snapArgs\(found\.key\.codec\), o\)\)/.test(src))
+  check('sdPath refuses what is not an event id', (() => { try { sdPath('../x'); return false } catch { return true } })())
+}
+
+// ---- the SD copy and the picture it was made from (an event id used again while a copy is made, D4) -------
+{
+  // an ffmpeg that answers only when told (a copy can wait its turn on the queue); its "copy" names its input
+  const held = []
+  const spawnHeld = () => {
+    const p = new EventEmitter()
+    p.stdout = new EventEmitter()
+    p.stderr = new EventEmitter()
+    p.stdin = Object.assign(new EventEmitter(), { end: (buf) => { p.input = Buffer.from(buf); held.push(p) } })
+    p.kill = () => p.emit('close', null)
+    return p
+  }
+  const copyOf = (b) => Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from('sd-copy-of:'), b]) // (a JPEG's first and last bytes)
+  const answer = (p) => { p.stdout.emit('data', copyOf(p.input)); p.emit('close', 0) }
+  const until = async (pred) => { for (let i = 0; i < 300 && !pred(); i++) await new Promise((r) => setTimeout(r, 10)); return pred() }
+  const deps = { spawn: spawnHeld, platform: 'linux', timeoutMs: 10_000 }
+  const OLD = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(100, 1), Buffer.from([0xff, 0xd9])])
+  const NEW = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(100, 2), Buffer.from([0xff, 0xd9])])
+  const { event: first } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 300_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(first.id), OLD)
+  const m1 = new Date(SEEN + 10_000)
+  utimesSync(snapPath(first.id), m1, m1)
+  const job1 = sdSnapshot(first, deps)
+  await until(() => held.length === 1)
+  // meanwhile the newest row is deleted and its id handed out again: a new event, seen later, and its picture
+  // taken over the old one
+  const second = { ...first, seenMs: m1.getTime() + 10_000 }
+  writeFileSync(snapPath(first.id), NEW)
+  const m2 = new Date(m1.getTime() + 20_000)
+  utimesSync(snapPath(first.id), m2, m2)
+  const job2 = sdSnapshot(second, deps)
+  answer(held[0])
+  const got1 = await job1
+  check('a copy whose picture was taken again while it was made (an id used again): the request it was made for gets it (that picture was its event\'s when asked)', got1.equals(copyOf(OLD)))
+  check('... but it is not kept as <id>-sd.jpg (newer than the new picture, it would be served for the new event)', !existsSync(sdPath(first.id)))
+  await until(() => held.length === 2)
+  check('the new event\'s request does not join the copy of the old picture: a copy of its own, of the new picture', held.length === 2 && held[1].input.equals(NEW), `${held.length} ffmpeg(s)`)
+  if (held[1]) answer(held[1])
+  const got2 = await job2
+  check('... which it gets, and which is kept', got2.equals(copyOf(NEW)) && existsSync(sdPath(first.id)) && readFileSync(sdPath(first.id)).equals(copyOf(NEW)), got2.subarray(2, 14).toString())
+  check('... asked again: that kept copy, no ffmpeg', (await sdSnapshot(second, deps)).equals(copyOf(NEW)) && held.length === 2)
+  // the picture removed with its event while its copy was made: no copy left behind for the id
+  const { event: gone } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 360_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(gone.id), OLD)
+  const job3 = sdSnapshot(gone, deps)
+  await until(() => held.length === 3)
+  forgetSnapshots([gone.id])
+  if (held[2]) answer(held[2])
+  await job3.catch(() => null)
+  check('a picture removed while its copy was made: the copy is not kept', held.length === 3 && !existsSync(sdPath(gone.id)))
+
+  // a kept copy bears the time of the picture it was made from, and is served only while that picture is
+  // there: one renamed in just after the picture was taken again (between the last look and the rename) is
+  // newer than the new picture by the clock, but bears the old one's time
+  let answered = held.length
+  /** Asks for the copy, answers every ffmpeg it starts; how many ran, the last one's input, what came. */
+  const ask = async (e) => {
+    const n = held.length
+    const job = sdSnapshot(e, deps)
+    await Promise.race([job.catch(() => null), until(() => held.length > n)]) // (served from a kept copy: no ffmpeg to wait for)
+    while (answered < held.length) answer(held[answered++])
+    const got = await job.catch(() => null)
+    return { made: held.length - n, input: held.at(-1)?.input, got }
+  }
+  const { event: stamped } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 420_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(stamped.id), OLD)
+  const mOld = new Date(SEEN + 1000)
+  utimesSync(snapPath(stamped.id), mOld, mOld)
+  await ask(stamped)
+  const sdTime = statSync(sdPath(stamped.id), { throwIfNoEntry: false })?.mtimeMs
+  check('a kept copy bears its picture\'s time (not the time it was written)', sdTime !== undefined && Math.abs(sdTime - mOld.getTime()) < 1, `${sdTime} vs ${mOld.getTime()}`)
+  // the picture taken again (an id used again), dated after the old one, before the copy was written
+  writeFileSync(snapPath(stamped.id), NEW)
+  const mNew = new Date(SEEN + 30_000)
+  utimesSync(snapPath(stamped.id), mNew, mNew)
+  const second5 = { ...stamped, seenMs: SEEN + 20_000 }
+  const a = await ask(second5)
+  check('... the picture taken again: the copy of the old one is not served for it; a copy of the new picture is made', a.made === 1 && a.input?.equals(NEW) && a.got?.equals(copyOf(NEW)), `${a.made} ffmpeg(s)`)
+  // a copy of the old picture renamed in after that (the stat-to-rename window): it bears the old picture's time
+  writeFileSync(sdPath(stamped.id), copyOf(OLD))
+  utimesSync(sdPath(stamped.id), mOld, mOld)
+  const b = await ask(second5)
+  check('... a copy of the old picture in its place again (renamed in late): not served, made again from the new picture', b.made === 1 && b.input?.equals(NEW) && b.got?.equals(copyOf(NEW)), `${b.made} ffmpeg(s)`)
+  // a copy with no stamp (an older release's: the time it was written, after the picture)
+  writeFileSync(sdPath(stamped.id), copyOf(OLD))
+  const c = await ask(second5)
+  check('... nor one merely newer than the picture (no stamp): made again', c.made === 1 && c.got?.equals(copyOf(NEW)), `${c.made} ffmpeg(s)`)
+  const d = await ask(second5)
+  check('... its own copy, stamped, is served again with no ffmpeg', d.made === 0 && d.got?.equals(copyOf(NEW)), `${d.made} ffmpeg(s)`)
+}
+
+// ---- the picture read is the one looked at: taken again in between, it is not read in its place ----------
+{
+  // fs/promises' open and readFile, as event-snapshot.mjs sees them: the picture is taken again (a new file,
+  // a later time: an event id used again) just before its bytes are read, after the look that judged it
+  const fsp = (await import('node:fs/promises')).default
+  const { syncBuiltinESMExports } = await import('node:module')
+  const OLD = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(80, 3), Buffer.from([0xff, 0xd9])])
+  const NEW = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(80, 4), Buffer.from([0xff, 0xd9])])
+  const swapBeforeRead = async (file, fn) => {
+    const real = { open: fsp.open, readFile: fsp.readFile }
+    let swapped = false
+    const swap = (p) => {
+      if (swapped || String(p) !== file) return
+      swapped = true
+      writeFileSync(`${file}.swap`, NEW)
+      const t = new Date(Date.now() + 5000)
+      utimesSync(`${file}.swap`, t, t)
+      renameSync(`${file}.swap`, file)
+    }
+    fsp.open = async (p, ...a) => (swap(p), real.open(p, ...a))
+    fsp.readFile = async (p, ...a) => (swap(p), real.readFile(p, ...a))
+    syncBuiltinESMExports()
+    try {
+      return await fn()
+    } finally {
+      Object.assign(fsp, real)
+      syncBuiltinESMExports()
+    }
+  }
+  const { event: full } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 480_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(full.id), OLD)
+  const r = await swapBeforeRead(snapPath(full.id), () => call(full.id, carol))
+  check('the full picture taken again between the look and the read: 404, never the new picture for the old event', r.status === 404 && !(r.body && Buffer.from(r.body).equals(NEW)), `${r.status}`)
+  const { event: sdEv } = addEvent({ nvr: 'nvr1', ch: 3, type: 'motion', startMs: T0 + 540_000, source: 'test' }, SEEN)
+  writeFileSync(snapPath(sdEv.id), OLD)
+  const before = procs.length
+  const s = await swapBeforeRead(snapPath(sdEv.id), () => call(sdEv.id, dave))
+  check('... and for the SD copy: 404, no copy made of the new picture under the old one\'s look, none kept', s.status === 404 && procs.length === before && !existsSync(sdPath(sdEv.id)), `${s.status}, ${procs.length - before} ffmpeg(s)`)
+  const again = await call(sdEv.id, dave)
+  check('... asked again (the new picture now looked at): its copy', again.status === 200 && procs.at(-1)?.input.equals(NEW), `${again.status}`)
 }
 
 // ---- pictures go with their events ---------------------------------------------------------------------
@@ -383,12 +563,17 @@ writeFileSync(snapPath(other.id), JPEG)
   const old = new Date(Date.now() - 2 * 3_600_000)
   utimesSync(stale, old, old)
   writeFileSync(join(SNAP_DIR, 'readme.txt'), 'not a picture')
+  writeFileSync(sdPath(424243), JPEG) // an SD copy whose event is gone (its full picture already went)
+  writeFileSync(sdPath(other.id), JPEG)
   const { removed } = await sweepSnapshots()
   check('sweepSnapshots: a picture whose event is gone is removed, one whose event is there stays',
     !existsSync(snapPath(424242)) && existsSync(snapPath(other.id)) && removed >= 1, `removed ${removed}`)
   check('  an old temp file is removed, a fresh one (a write in progress) stays, other files stay', !existsSync(stale) && existsSync(fresh) && existsSync(join(SNAP_DIR, 'readme.txt')))
   const kept = await sweepSnapshots({ exists: () => { throw new Error('database locked') } })
   check('  events that cannot be read: nothing removed, nothing thrown', kept.removed === 0 && existsSync(snapPath(other.id)))
+  check('sweepSnapshots: an SD copy goes with its event, and stays while the event is there', !existsSync(sdPath(424243)) && existsSync(sdPath(other.id)))
+  forgetSnapshots([other.id])
+  check('forgetSnapshots removes the SD copy with the picture', !existsSync(sdPath(other.id)) && !existsSync(snapPath(other.id)))
 }
 
 closeEvents()

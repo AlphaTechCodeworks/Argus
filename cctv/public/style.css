@@ -760,6 +760,9 @@ body.phone-full .single-overlay > .zoom-badge { top: calc(8px + env(safe-area-in
 .tile .label .links .pb-link { margin-left: 4px; }
 .tile button.pb-link { background: none; border: 0; padding: 6px 8px; font: inherit; color: var(--accent); cursor: pointer; }
 .tile a.pb-link { padding: 6px 8px; }
+/* the full-size view without Live HD stays on the sub-stream, and says so (viewer.js sdBadge); it takes
+   the pointer (the label does not) so its title shows, as the dot's does */
+.tile .label .sd-badge { flex: none; margin-left: 6px; padding: 1px 6px; border-radius: 4px; background: rgba(255, 255, 255, .18); color: #fff; font-size: 11px; font-weight: 600; letter-spacing: .04em; pointer-events: auto; }
 .img-panel {
   position: absolute;
   top: calc(var(--gap) + 8px);
@@ -1834,9 +1837,14 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .ac-tree-wrap { max-height: min(52vh, 520px); overflow: auto; border: 1px solid var(--border); border-radius: var(--r-md); }
 .ac-tree { width: 100%; border-collapse: collapse; font-size: var(--fs-dense); }
 .ac-tree thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); color: var(--text-muted); font-weight: 500; padding: 6px 8px; text-align: center; white-space: nowrap; }
-.ac-tree thead th:first-child { text-align: left; }
+.ac-tree thead th.ac-rowhead { text-align: left; }
 /* the tick columns keep room for a note such as "NVR recordings only" on one line */
-.ac-tree thead th:not(:first-child) { width: 116px; }
+.ac-tree thead th.ac-col { width: 116px; }
+/* two header rows (audit.js, from access-model.js HEAD_ROWS): the second sticks under the first */
+.ac-tree thead tr:nth-child(2) th { top: var(--ac-head-row, 29px); font-size: var(--fs-meta); }
+.ac-tree thead th.ac-group { border-bottom: 1px solid var(--border); }
+/* .ac-tree: `.ac-tree small { display: block }` below would show them on wide screens too */
+.ac-tree .ac-row-notes { display: none; color: var(--warn); font-size: 11px; line-height: 1.25; }
 .ac-tree tbody th, .ac-tree td { padding: 6px 8px; border-top: 1px solid var(--border); vertical-align: middle; }
 .ac-tree tbody th { text-align: left; font-weight: 400; }
 .ac-tree td { text-align: center; }
@@ -1866,9 +1874,20 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .ac-dirty { margin-right: auto; align-self: center; }
 .ac-user-actions { white-space: nowrap; text-align: right; }
 @media (max-width: 560px) {
-  .ac-dialog { padding: 14px; }
-  .ac-tree thead th:not(:first-child) { width: 76px; }
-  .ac-tree td { padding: 6px 4px; }
-  .ac-cam th { padding-left: 20px; }
+  /* max-width too: the browser caps a modal dialog at 100% - 2em - 6px */
+  .ac-dialog { width: calc(100vw - 16px); max-width: calc(100vw - 16px); padding: 10px; }
+  .ac-tree thead th.ac-col { width: 44px; }
+  .ac-tree td { padding: 6px 2px; }
+  .ac-tree input[type="checkbox"] { width: 22px; height: 22px; }
+  .ac-cam th { padding-left: 12px; }
   .ac-dialog .ac-copy { margin-left: 0; }
+  /* five boxes of 44 px leave no room for a note under each: they are said in the row's header */
+  .ac-tree td .ac-note { display: none; }
+  .ac-row-notes:not(:empty) { display: block; }
+  /* the Rights table: one card per user */
+  .rights-table, .rights-table tbody, .rights-table tr, .rights-table td { display: block; }
+  .rights-table thead { display: none; }
+  .rights-table tr { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 8px; }
+  .rights-table td { display: grid; grid-template-columns: 8.5em 1fr; gap: 8px; padding: 4px 10px; white-space: normal; border-bottom: 0; }
+  .rights-table td::before { content: attr(data-label); color: var(--text-muted); }
 }

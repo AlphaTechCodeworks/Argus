@@ -704,5 +704,43 @@ const cam = (ch, more = {}) => ({ nvr: 'n1', ch, stream: 1, fps: null, h265: nul
   advance(0)
 }
 
+// ---- "wait" from the server (stream rights): handed to that channel's tile as the text it is ----------
+{
+  reset()
+  useMux(true)
+  const a = liveSocket(cam(0))
+  const b = liveSocket(cam(1))
+  const la = track(a)
+  const lb = track(b)
+  const s = sockets[0]
+  s.accept()
+  advance(40) // (a sub settles 40 ms before it goes: then both channels are open)
+  s.text({ op: 'wait', id: a.id, why: 'held' })
+  check('"wait": to that channel only, as the text it is', la.msgs.length === 1 && typeof la.msgs[0] === 'string' && JSON.parse(la.msgs[0]).why === 'held' && lb.msgs.length === 0, JSON.stringify(la.msgs))
+  check('... the channel stays open', a.readyState === 1 && la.closes.length === 0)
+  s.text({ op: 'wait', id: 424242, why: 'held' })
+  s.text({ op: 'wait', why: 'held' })
+  check('... one for an unknown id, or with no id, is dropped', la.msgs.length === 1 && lb.msgs.length === 0)
+  // a Live tile on a channel: the notes are activity (no stall reconnect), and it says why it waits
+  reset()
+  useMux(true)
+  const el = () => ({ textContent: '', classList: { set: new Set(), toggle(c, on) { on ? this.set.add(c) : this.set.delete(c) }, contains(c) { return this.set.has(c) } }, append() {} })
+  const parts = { '.status': el(), '.stats': el(), '.name': el(), '.dot': { className: '', title: '' }, canvas: { width: 0, height: 0, getContext: () => ({}) } }
+  const t = new LiveTile({ querySelector: (q) => parts[q], append() {} }, { nvr: 'n1', ch: 3 }, SUB_STREAM, 0, { now: () => now })
+  clearTimeout(t.retry)
+  t.player.push = () => {}
+  t.connect()
+  sockets[0].accept()
+  advance(40)
+  for (let i = 0; i < 4; i++) {
+    advance(4000)
+    sockets[0].text({ op: 'wait', id: t.ws.id, why: 'held' })
+    t.updateStatus()
+  }
+  check('a Live tile on a channel: 16 s of wait notes, no stall reconnect, and it says why', t.ws.readyState === 1 && t.attempts === 0 && parts['.status'].textContent === 'Waiting for room at the NVR (SD streams)', parts['.status'].textContent)
+  t.close()
+  advance(0)
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
