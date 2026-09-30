@@ -11,6 +11,14 @@ import { dirname, join } from 'node:path'
 
 const dataDir = mkdtempSync(join(tmpdir(), 'cctv-thin-data-'))
 process.env.DATA_DIR = dataDir
+// Every folder this test makes, removed at its end: they were left in the temp folder, 1,862 thin-loc-*
+// and 1,909 thin-db-* (about 316 MB) on the development PC by 2026-09-29, and p3-thin's cases add more.
+const made = []
+const tmp = (prefix) => {
+  const d = mkdtempSync(join(tmpdir(), prefix))
+  made.push(d)
+  return d
+}
 
 const { runThinning, runRetention, recoverThinning, planThin, mayTouch, loadProtectedRanges, _test } = await import('../thinning.mjs')
 const { openRecIndex, THIN } = await import('../rec-index.mjs')
@@ -66,7 +74,7 @@ function makeSegment(path, startMs, { gops = 60, pFrames = 4, keyStepMs = 1000 }
 
 // Sanity: the synthetic stream really does split into the units we think it does.
 {
-  const p = join(mkdtempSync(join(tmpdir(), 'thin-sanity-')), 'x.h264')
+  const p = join(tmp('thin-sanity-'), 'x.h264')
   const m = makeSegment(p, NOW, { gops: 3, pFrames: 2 })
   const rows = parseIdx(readFileSync(`${p}.idx`))
   const { units } = splitUnits(readFileSync(p), CODEC.h264, { final: true, keyOffsets: new Set(rows.map((r) => r.offset)) })
@@ -75,10 +83,10 @@ function makeSegment(path, startMs, { gops = 60, pFrames = 4, keyStepMs = 1000 }
 
 // ---- a world: one location, one index ----------------------------------------------------------
 function world(prefix = 'thin-loc-') {
-  const root = mkdtempSync(join(tmpdir(), prefix))
+  const root = tmp(prefix)
   writeFileSync(join(root, '.cctv-recordings'), JSON.stringify({ id: 'L1' }))
   const loc = { id: 'L1', path: root, type: 'usb', role: 'main', limitGB: null }
-  const index = openRecIndex(join(mkdtempSync(join(tmpdir(), 'thin-db-')), 'r.db'))
+  const index = openRecIndex(join(tmp('thin-db-'), 'r.db'))
   const add = (nvr, ch, ageDays, opts = {}) => {
     const startMs = NOW - ageDays * DAY
     const path = join(root, String(nvr), String(ch), `d${ageDays}`, 'seg.h264')
@@ -92,7 +100,7 @@ function world(prefix = 'thin-loc-') {
 
 // ---- planThin ------------------------------------------------------------------------------------
 {
-  const p = join(mkdtempSync(join(tmpdir(), 'thin-plan-')), 'x.h264')
+  const p = join(tmp('thin-plan-'), 'x.h264')
   makeSegment(p, NOW, { gops: 60, pFrames: 4, keyStepMs: 1000 })
   const rows = parseIdx(readFileSync(`${p}.idx`))
   const plan = planThin(readFileSync(p), rows, { codec: CODEC.h264, timelapseS: 10 })
@@ -566,7 +574,7 @@ const { DatabaseSync } = await import('node:sqlite')
 const convertWorld = (walAutocheckpoint) => {
   const w = world()
   w.index.close()
-  const f = join(mkdtempSync(join(tmpdir(), 'thin-db-')), 'r.db')
+  const f = join(tmp('thin-db-'), 'r.db')
   w.index = walAutocheckpoint === null ? openRecIndex(f) : openRecIndex(f, { walAutocheckpoint })
   w.file = f
   for (let c = 0; c < 87; c++) {
@@ -852,8 +860,10 @@ const helperOps = (loc, log) => {
 // the helper processes the cases above started (runRetention's default share)
 ;(await import('../share-calls.mjs')).stopShareHelpers()
 // (Windows keeps the sqlite file the bookmarks module opened locked until the process ends)
-try {
-  rmSync(dataDir, { recursive: true, force: true, maxRetries: 5 })
-} catch {}
+for (const d of [dataDir, ...made]) {
+  try {
+    rmSync(d, { recursive: true, force: true, maxRetries: 5 })
+  } catch {}
+}
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
