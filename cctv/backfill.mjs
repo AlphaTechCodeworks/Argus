@@ -66,6 +66,35 @@ export const JOIN_MS = 2000
 export const TAIL_MS = 6 * 3_600_000
 /** How far back a scan looks. Beyond the NVRs' own retention there is nothing to find. */
 export const SCAN_MARGIN_MS = 2 * DAY
+/**
+ * The scan reads a camera's history a slice at a time, at most this much of it per read (about 360
+ * one-minute files), and does slices for at most SCAN_TURN_MS before it lets the rest of the server run
+ * (perf report R5 and verify-5, 2026-09-30: the whole window in one go held the main thread 3.3-4.5 s a
+ * tick on production at 4 days of index).
+ */
+export const SCAN_SLICE_MS = 6 * 3_600_000
+const SCAN_TURN_MS = 8
+/** The pick reads the ledger's pending rows this many at a time, oldest hole first, up to PICK_ROWS of them. */
+export const PICK_PAGE = 500
+const PICK_ROWS = 10_000
+/** Holes the NVR has rolled past are made permanent this many at a time. */
+const AGE_OUT_BATCH = 500
+const turn = () => new Promise((r) => setImmediate(r))
+
+/**
+ * Where a camera's next scan starts, after one that read the files `spans` ({ startMs, endMs }) up to h:
+ * the latest point at or before h inside footage. A hole that has not ended by h starts there (at the
+ * end of the footage before it), and the next scan finds it whole, as a scan of the whole window would.
+ * With no footage by h (none yet in the window), h itself: a hole needs footage before it.
+ */
+function markAfter(spans, h) {
+  let mark = null
+  for (const [s, e] of mergeRanges(spans.map((x) => [Number(x.startMs), Number(x.endMs)]))) {
+    if (s > h) break
+    mark = Math.min(e, h)
+  }
+  return mark ?? h
+}
 
 // A refusal is the NVR telling us it has no capacity. Backing off by minutes would simply ask
 // again while it is still full, so the first wait is already long and each further refusal doubles
@@ -316,12 +345,13 @@ export function nvrReady(n, now = Date.now()) {
  *
  * @param {object[]} rows ledger rows: { id, nvr, ch, fromMs, toMs, state, attempts, lastTryMs, nextTryMs? }
  * @param {{ now?:number, nvrs: Map<string, object>|object, retentionMsOf: (nvrId:string) => number,
- *   busyNvrs?: Set<string> }} opts busyNvrs: NVRs already pulling (one camera at a time per NVR)
+ *   busyNvrs?: Set<string>, skipped?: Map<string, number> }} opts busyNvrs: NVRs already pulling (one
+ *   camera at a time per NVR); skipped: the rows passed over and why, counted into (the job's pick, a
+ *   page of rows at a time: the reason for no pick is the commonest over every page)
  * @returns {{ row: object|null, why: string|null }}
  */
-export function chooseGap(rows, { now = Date.now(), nvrs, retentionMsOf, busyNvrs = new Set() } = {}) {
+export function chooseGap(rows, { now = Date.now(), nvrs, retentionMsOf, busyNvrs = new Set(), skipped = new Map() } = {}) {
   const get = (id) => (nvrs instanceof Map ? nvrs.get(id) : nvrs?.[id])
-  const skipped = new Map()
   const note = (why) => skipped.set(why, (skipped.get(why) ?? 0) + 1)
   const candidates = []
   for (const r of rows) {
@@ -504,51 +534,163 @@ export class BackfillJob {
 
   // ---- the ledger
 
-  /** One camera's holes right now, straight from the index. */
+  /** The shortest hole worth a pull, in ms (minGapSeconds, at least a second). */
+  minGapMs() {
+    const s = Number(this.cfg().minGapSeconds ?? 10)
+    return Number.isFinite(s) ? Math.max(1000, s * 1000) : 10_000
+  }
+
+  /**
+   * One camera's holes right now, straight from the index. (Its gap rows by gapsNear: gaps() walked every
+   * gap row the camera has, kept 183 days, twice a pull; the same rows, 2026-09-30.)
+   */
   holesOf(nvr, ch, fromMs, toMs, { minGapMs } = {}) {
-    const cfg = this.cfg()
-    const min = minGapMs ?? Math.max(1000, Number(cfg.minGapSeconds ?? 10) * 1000)
     return findGaps({
       nvr,
       ch,
       now: this.now(),
       fromMs,
       toMs,
-      minGapMs: min,
+      minGapMs: minGapMs ?? this.minGapMs(),
       segments: this.index.segments(nvr, ch, fromMs, toMs),
-      gapRows: this.index.gaps(nvr, ch, fromMs, toMs)
+      gapRows: this.index.gapsNear(nvr, ch, fromMs, toMs)
     })
   }
 
   /**
-   * Looks over every camera's recent history and writes what it finds into the ledger. Holes
-   * already past the NVRs' retention are marked permanent here, so they are never picked up again.
-   * @returns {{ found: number, added: number, permanent: number }}
+   * Looks through every camera's history for holes, from where its last scan stopped, and writes what
+   * it finds into the ledger; then makes permanent the pending holes the NVRs have since rolled past.
+   *
+   * Every tick of the night window it read all 32 days of every camera on the main thread: 3.3-4.5 s a
+   * tick at 4 days of index on production, about 65-70 s at 32 days, 24-121 ticks a night (verify-5,
+   * 2026-09-29). It found the same holes every time but the newest (a hole is eligible only once out of
+   * the 6-hour tail). So each camera keeps a mark in the index (backfill_scan): the latest point inside
+   * footage its scan reached, where a hole not yet ended starts (markAfter). The next scan reads from
+   * there, a slice at a time (SCAN_SLICE_MS, a file's start and end only), SCAN_TURN_MS of slices a turn
+   * of the event loop: a tick is one short slice per camera, the first scan (after the deploy, or a mark
+   * lost) the whole window in slices. It notes exactly the holes, reasons and kinds the full scan noted
+   * at the same times (backfill-scan.test.mjs: 32 days x 87 cameras, and ticks after), but for two
+   * things, both on purpose:
+   *  - nothing behind a mark is looked at again. A hole a deletion opens there (stepping round a
+   *    bookmarked stretch) is older than the NVR keeps by then, as the oldest footage is what goes; one a
+   *    pull splits (backfill's own files) is still its row's, and fill() works out what is left of the row
+   *    from the index every time. The full scan noted each leftover again, as a second row of the same
+   *    footage.
+   *  - a file over MAX_SEGMENT_MS long that began more than an hour before the window's start is seen
+   *    (segments() left it out of the full scan, which then found no hole after it): older than the NVR
+   *    keeps, so it goes to permanent at once.
+   * A camera's whole window is looked through again when the shortest hole changes (minGapSeconds) or
+   * the window reaches further back (nvrRetentionDays).
+   * @param {{ stop?: () => boolean }} [o] stop: asked between slices (the job was stopped); the marks so far are kept
+   * @returns {Promise<{ found: number, added: number, permanent: number, cameras: number, slices: number, rows: number, stopped: boolean }>}
    */
-  scan() {
+  async scan({ stop = () => false } = {}) {
+    const index = this.index
     const now = this.now()
     const retention = this.retentionMs()
     const from = now - retention - SCAN_MARGIN_MS
-    const out = { found: 0, added: 0, permanent: 0 }
-    for (const { nvr, ch } of this.index.cameras()) {
-      for (const g of this.holesOf(nvr, ch, from, now)) {
-        out.found++
-        const known = this.index.backfillFind(nvr, ch, g.fromMs, g.toMs)
-        this.index.backfillNote({ nvr, ch, fromMs: g.fromMs, toMs: g.toMs, reason: g.reason, kind: g.kind }, now)
-        if (!known) out.added++
+    const edge = now - TAIL_MS // findGaps's tail: no hole ends after it
+    const minGapMs = this.minGapMs()
+    const out = { found: 0, added: 0, permanent: 0, cameras: 0, slices: 0, rows: 0, stopped: false }
+    const marks = new Map(index.backfillMarks().map((m) => [`${m.nvr}/${m.ch}`, m]))
+    const moved = new Map() // camera -> its new mark, kept at the end of each turn
+    const keep = () => {
+      if (moved.size) index.backfillMarkSet([...moved.values()])
+      moved.clear()
+    }
+    let turnAt = performance.now()
+    for (const { nvr, ch } of index.cameras()) {
+      if (out.stopped || (out.stopped = stop())) break
+      out.cameras++
+      const key = `${nvr}/${ch}`
+      const m = marks.get(key)
+      const whole = !m || m.minGapMs !== minGapMs || from < m.fromMs
+      const origin = whole ? from : m.fromMs
+      let at = whole ? from : Math.max(m.markMs, from)
+      let to = at
+      while (to < edge) {
+        if ((out.stopped = stop())) break
+        // a slice on; after a stretch with no files (an outage, a camera that stopped), a slice past the next one
+        let end = edge
+        if (edge - to > SCAN_SLICE_MS) {
+          const next = index.scanSpanAfter(nvr, ch, to, edge)
+          if (next) end = Math.min(Math.max(to, next.startMs) + SCAN_SLICE_MS, edge)
+        }
+        to = end
+        const spans = index.scanSpans(nvr, ch, at, to)
+        const last = to >= edge
+        if (last) {
+          // whether footage goes on past the tail's edge decides where a hole across it is cut (findGaps's hi, as in the full scan)
+          const after = index.scanSpanAfter(nvr, ch, to, now)
+          if (after) spans.push(after)
+        }
+        out.slices++
+        out.rows += spans.length
+        const look = { nvr, ch, now, fromMs: at, toMs: last ? now : to, minGapMs, segments: spans }
+        let holes = findGaps(look)
+        if (holes.length) {
+          // the reasons: the gap rows over these holes only (the same rows, in the same order, as over the whole window)
+          holes = findGaps({ ...look, gapRows: index.gapsNear(nvr, ch, holes[0].fromMs, holes.at(-1).toMs) })
+          out.found += holes.length
+          out.added += index.backfillNoteMany(holes, now)
+        }
+        at = markAfter(spans, Math.min(to, edge))
+        moved.set(key, { nvr, ch, markMs: at, fromMs: origin, minGapMs })
+        if (performance.now() - turnAt >= SCAN_TURN_MS) {
+          keep()
+          await turn()
+          turnAt = performance.now()
+        }
       }
     }
-    // A separate pass over the whole ledger, because a hole falls off the end of the NVR's own
-    // retention while it is sitting in the ledger waiting its turn, not while it is being found.
-    // This is where the deadline actually bites, and where roadmap point 5's list comes from. Oldest
-    // first, as the pick: those are the rows that age out, and a newest-first list cuts them off.
-    for (const row of this.index.backfillPending({ limit: 10_000 })) {
-      if (now - row.toMs > retention) {
-        this.index.backfillSet(row.id, { state: 'permanent', note: PERMANENT.aged })
-        out.permanent++
-      }
+    keep()
+    // A separate pass over the ledger, because a hole falls off the end of the NVR's own retention while
+    // it is sitting in the ledger waiting its turn, not while it is being found. This is where the
+    // deadline actually bites, and where roadmap point 5's list comes from. Every pending row that has
+    // aged out, oldest first, a batch a turn (it was the oldest 10,000 pending rows read as objects, 39 ms
+    // on production: verify-5).
+    for (;;) {
+      const n = index.backfillAgeOut(now - retention, PERMANENT.aged, AGE_OUT_BATCH)
+      out.permanent += n
+      if (n < AGE_OUT_BATCH) break
+      await turn()
     }
     return out
+  }
+
+  /**
+   * The next ledger row to pull, or null and why not: chooseGap over the oldest PICK_ROWS pending rows,
+   * read a page at a time (PICK_PAGE) with the rest of the server let run between pages. The tick read
+   * all 10,000 at once, twice (39 + 42 ms on production at 7,500 rows: verify-5). Every NVR is given the
+   * same retention here, so the row picked is the oldest hole that can be pulled (the shortest of those
+   * that start together): one on a page beats every row on the pages after it, and reading stops there.
+   * @returns {Promise<{ row: object|null, why: string|null }>}
+   */
+  async pick(now = this.now()) {
+    const nvrs = this.nvrView()
+    const retention = this.retentionMs()
+    const skipped = new Map()
+    let best = null
+    let why = 'nothing to fill'
+    let after = null
+    for (let seen = 0; seen < PICK_ROWS; ) {
+      const limit = Math.min(PICK_PAGE, PICK_ROWS - seen)
+      const page = this.index.backfillPendingPage({ after, limit })
+      if (!page.length) break
+      seen += page.length
+      const got = chooseGap(
+        page.map((r) => ({ ...r, nextTryMs: this.nextTry.get(r.id) ?? 0 })),
+        { now, nvrs, retentionMsOf: () => retention, busyNvrs: this.busyNvrs, skipped }
+      )
+      why = got.why
+      const r = got.row
+      if (r && (!best || r.fromMs < best.fromMs || (r.fromMs === best.fromMs && r.toMs - r.fromMs < best.toMs - best.fromMs))) best = r
+      const lastRow = page.at(-1)
+      if ((best && best.fromMs < lastRow.fromMs) || page.length < limit) break
+      after = { fromMs: lastRow.fromMs, id: lastRow.id }
+      await turn()
+    }
+    return best ? { row: best, why: null } : { row: null, why }
   }
 
   // ---- running
@@ -616,11 +758,11 @@ export class BackfillJob {
         if (this.running) this.#arm(Math.min(this.tickMs * 10, Math.max(this.tickMs, msUntilWindow(now, cfg.windowStart, cfg.windowEnd))))
         return
       }
-      this.scan()
+      await this.scan({ stop: () => !this.running })
+      if (!this.running) return // stopped while it scanned: stop() has cleared the timer, and nothing is pulled
       // Pending rows only, oldest hole first: the newest 5,000 rows of every state left the oldest
       // pending rows (785 of 5,785 on the server), the ones nearest their deadline, out of the pick.
-      const rows = this.index.backfillPending({ limit: 10_000 }).map((r) => ({ ...r, nextTryMs: this.nextTry.get(r.id) ?? 0 }))
-      const pick = chooseGap(rows, { now, nvrs: this.nvrView(), retentionMsOf: () => this.retentionMs(), busyNvrs: this.busyNvrs })
+      const pick = await this.pick(now)
       if (!pick.row) {
         this.last.what = pick.why
         this.#arm(this.tickMs)
