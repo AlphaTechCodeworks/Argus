@@ -13,7 +13,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { CAMERA_SQL, LOCATION_SQL, MAX_SEGMENT_MS, openRecIndex } from '../rec-index.mjs'
+import * as recIndex from '../rec-index.mjs'
+
+const { CAMERA_SQL, LOCATION_SQL, MAX_SEGMENT_MS, openRecIndex } = recIndex
+// (the gap and scan statements of 2026-09-30: empty here before they exist, so the checks fail rather than the load)
+const { GAP_SQL = {}, SCAN_SQL = {}, LONG_GAP_MS = 3_600_000 } = recIndex
 
 let failures = 0
 const J = (v) => JSON.stringify(v)
@@ -537,6 +541,104 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   ix.close()
 }
 
+// ---- the gap rows and the footage the backfill scan and the recovery read (2026-09-30) ----------------
+// gaps() and lastEnds()'s gap end walk every gap row the camera has whose from_ms is before the bound
+// (gaps_cam is on from_ms, and a row's end says nothing about its start), and gap rows are kept 183 days:
+// nvr-2/0 alone writes about 5,000 a day. The backfill scan asked for them every tick and the recovery
+// asks for 26 cameras' after every worker restart (perf report R5, R8; R11: 808 ms for lastEnds on 87
+// cameras at 31 days). gapsNear() and the new lastEnds() walk only the rows that started within
+// LONG_GAP_MS before the window, and the few longer rows through gaps_long. scanSpans() is every file
+// overlapping a window, long files included (segments() leaves out a file over MAX_SEGMENT_MS that
+// started before the window: harmless for playback, a false hole for the scan). All must give exactly
+// what reading every row gives.
+{
+  const G = LONG_GAP_MS
+  const gcams = []
+  let gn = 0
+  const gapRow = (nvr, ch, fromMs, toMs) => {
+    index.addGap({ nvr, ch, fromMs, toMs, reason: `r${++gn % 5}` })
+    return { fromMs, toMs }
+  }
+  // mostly short rows, some long (hours to days), some exactly LONG_GAP_MS and one ms over, some that end
+  // before they start, some of no length, some starting at the same time
+  for (let c = 0; c < 6; c++) {
+    const nvr = c % 2 ? 'g-b' : 'g-a'
+    const ch = c
+    gcams.push([nvr, ch])
+    for (let i = 0; i < 500; i++) {
+      const s = T0 + between(0, 4 * 24 * 60) * MIN + between(0, 59_999)
+      const r = rand()
+      const len = r < 0.8 ? between(1000, 50 * MIN) : r < 0.86 ? between(2 * 60, 3 * 24 * 60) * MIN : r < 0.89 ? G : r < 0.92 ? G + 1 : r < 0.95 ? -between(1, 3 * 60) * MIN : r < 0.97 ? 0 : G - 1
+      gapRow(nvr, ch, s, s + len)
+      if (rand() < 0.03) gapRow(nvr, ch, s, s + between(1000, 5 * MIN))
+    }
+  }
+  // the newest row ends before it starts, and an older short one ends last: the case the bound cannot answer
+  gcams.push(['g-c', 0])
+  gapRow('g-c', 0, T0, T0 + 50 * MIN)
+  gapRow('g-c', 0, T0 + 30 * MIN, T0 + 30 * MIN - 2 * 60 * MIN)
+  // footage with long files for scanSpans: files of 1-3 h among minute files, one of 2 days
+  gcams.push(['g-d', 0])
+  minutes('g-d', 0, T0, 3 * 24 * 60)
+  for (let i = 0; i < 40; i++) {
+    const s = T0 + between(0, 3 * 24 * 60) * MIN
+    seg('g-d', 0, s, s + between(M + 1, 3 * M))
+  }
+  seg('g-d', 0, T0 + 10 * MIN, T0 + 2 * 24 * 60 * MIN)
+  const oldGaps = old.prepare('SELECT nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason FROM gaps WHERE nvr = ? AND ch = ? AND to_ms >= ? AND from_ms <= ? ORDER BY from_ms, id')
+  const oldGapEnd = old.prepare('SELECT MAX(to_ms) AS e FROM gaps WHERE nvr = ? AND ch = ? AND from_ms < ?')
+  const allSpans = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments NOT INDEXED WHERE nvr = ? AND ch = ? AND end_ms >= ? AND start_ms <= ? ORDER BY start_ms, end_ms')
+  const firstAfter = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments NOT INDEXED WHERE nvr = ? AND ch = ? AND start_ms > ? AND start_ms <= ? ORDER BY start_ms LIMIT 1')
+  const strip = (r) => J({ nvr: r.nvr, ch: r.ch, fromMs: r.fromMs, toMs: r.toMs, reason: r.reason })
+  const bad = []
+  let asked = 0
+  for (const [nvr, ch] of [...gcams, ...cams]) {
+    const windows = [[T0 - 10 * 24 * 60 * MIN, T0 + 10 * 24 * 60 * MIN]]
+    for (let i = 0; i < 40; i++) {
+      const a = T0 + between(-60, 4 * 24 * 60) * MIN + between(0, 59_999)
+      windows.push([a, a + [0, 1, MIN, 6 * 60 * MIN, G, G + 1][i % 6] + between(0, 5000)])
+    }
+    for (const [a, b] of windows) {
+      asked++
+      const want = oldGaps.all(nvr, ch, a, b).map(strip).join()
+      const got = typeof index.gapsNear === 'function' ? index.gapsNear(nvr, ch, a, b).map(strip).join() : null
+      if (got !== want) bad.push(`gapsNear ${nvr}/${ch} [${a}, ${b}]`)
+      const ws = allSpans.all(nvr, ch, a, b).map((r) => `${r.s}-${r.e}`).sort().join()
+      const gs = typeof index.scanSpans === 'function' ? index.scanSpans(nvr, ch, a, b).map((r) => `${r.startMs}-${r.endMs}`).sort().join() : null
+      if (gs !== ws) bad.push(`scanSpans ${nvr}/${ch} [${a}, ${b}]`)
+      const wa = firstAfter.get(nvr, ch, b, b + 3 * 24 * 60 * MIN)
+      const ga = typeof index.scanSpanAfter === 'function' ? index.scanSpanAfter(nvr, ch, b, b + 3 * 24 * 60 * MIN) : undefined
+      if (J(ga ? [ga.startMs, ga.endMs] : ga) !== J(wa ? [wa.s, wa.e] : null)) bad.push(`scanSpanAfter ${nvr}/${ch} ${b}`)
+      for (const bound of [a, b]) {
+        asked++
+        const w = oldGapEnd.get(nvr, ch, bound).e ?? null
+        const g = index.lastEnds(nvr, ch, bound).gapEnd
+        if (g !== w) bad.push(`lastEnds gapEnd ${nvr}/${ch} before ${bound}: ${g} vs ${w}`)
+      }
+    }
+  }
+  check('gapsNear, scanSpans and lastEnds\'s gap end give what reading every row gives (long rows, rows that end before they start, the same start twice)', bad.length === 0, bad.length ? `${bad.length} of ${asked} differ: ${bad.slice(0, 4).join('; ')}` : `${asked} lookups on ${gcams.length + cams.length} cameras`)
+  check('... a newest gap row that ends before it starts still gives the real end', index.lastEnds('g-c', 0, T0 + 60 * MIN).gapEnd === T0 + 50 * MIN, String(index.lastEnds('g-c', 0, T0 + 60 * MIN).gapEnd))
+  check('... scanSpans has the long file the window does not reach the start of', (index.scanSpans?.('g-d', 0, T0 + 30 * 60 * MIN, T0 + 30 * 60 * MIN + MIN) ?? []).some((r) => r.startMs === T0 + 10 * MIN))
+
+  const planOf = (sql, ...p) => {
+    try {
+      return old.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...p).map((r) => r.detail).join(' | ')
+    } catch (e) {
+      return `(no plan: ${e.message})`
+    }
+  }
+  const near = planOf(GAP_SQL.near, 'g-a', 0, T0, T0, T0, 'g-a', 0, T0, T0)
+  check('gapsNear: a search of gaps_cam bounded on from_ms, and one of gaps_long (no scan of every row)', /SEARCH gaps USING INDEX gaps_cam \(nvr=\? AND ch=\? AND from_ms>\? AND from_ms<\?\)/.test(near) && /SEARCH gaps USING INDEX gaps_long \(nvr=\? AND ch=\? AND to_ms>\?\)/.test(near) && !/SCAN gaps/.test(near), near)
+  const since = planOf(GAP_SQL.endSince, 'g-a', 0, T0, T0)
+  const fromBefore = planOf(GAP_SQL.fromBefore, 'g-a', 0, T0)
+  const longEnd = planOf(GAP_SQL.longEnd, 'g-a', 0, T0)
+  check('lastEnds\'s gap end: gaps_cam bounded on both sides, and gaps_long', /gaps_cam \(nvr=\? AND ch=\? AND from_ms>\? AND from_ms<\?\)/.test(since) && /gaps_cam \(nvr=\? AND ch=\? AND from_ms<\?\)/.test(fromBefore) && /INDEX gaps_long \(nvr=\? AND ch=\?\)/.test(longEnd), `${since} ;; ${fromBefore} ;; ${longEnd}`)
+  const spans = planOf(SCAN_SQL.spans, 'g-d', 0, T0, T0, T0, 'g-d', 0, T0, T0)
+  const after = planOf(SCAN_SQL.after, 'g-d', 0, T0, T0)
+  check('scanSpans: segments_cam bounded on start_ms, and segments_long; the file after: one search', /segments_cam \(nvr=\? AND ch=\? AND start_ms>\? AND start_ms<\?\)/.test(spans) && /INDEX segments_long \(nvr=\? AND ch=\? AND end_ms>\?\)/.test(spans) && !/SCAN segments/.test(spans) && /segments_cam \(nvr=\? AND ch=\? AND start_ms>\? AND start_ms<\?\)/.test(after), `${spans} ;; ${after}`)
+}
+
 // ---- every rewritten statement searches an index, bounded where a bound is the point ---------------
 // (The old statements were searches too -- "segments_cam (nvr=? AND ch=?)" -- which is exactly how
 // they came to read every row of a camera: the plan must show the bound on start_ms, and the
@@ -618,6 +720,22 @@ index.close()
   raw.prepare('UPDATE segments SET thinned = NULL WHERE nvr = ? AND ch = ?').run('big', 0)
   const a1 = time(() => ix.fullOlderThan([{ nvr: 'big', ch: 1 }], cut, 5))
   check('... and past a camera never rewritten (99,990 of its rows first): under 1 us a row passed', a1 < 99_990 / 1000 && ix.fullOlderThan([{ nvr: 'big', ch: 1 }], cut, 5)[0]?.startMs === T0 + 99_990 * MIN, `${a1.toFixed(1)} ms, ${((a1 / 99_990) * 1000).toFixed(2)} us a row`)
+  // nvr-2/0's gap rows at 40 days (about 5,000 a day, kept 183 days), and one long row among them: the
+  // gap rows of an hour, and the camera's last gap end, do not read the camera's history
+  const insGap = raw.prepare('INSERT INTO gaps (nvr, ch, from_ms, to_ms, reason) VALUES (?, ?, ?, ?, ?)')
+  raw.exec('BEGIN')
+  for (let i = 0; i < 200_000; i++) insGap.run('big', 0, T0 + i * 17_280, T0 + i * 17_280 + 5000, 'no video from the NVR')
+  insGap.run('big', 0, T0 + 5 * MIN, T0 + 2 * 24 * 60 * MIN, 'camera offline')
+  raw.exec('COMMIT')
+  const gapsOld = raw.prepare('SELECT nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason FROM gaps WHERE nvr = ? AND ch = ? AND to_ms >= ? AND from_ms <= ? ORDER BY from_ms')
+  const gapEndOld = raw.prepare('SELECT MAX(to_ms) AS e FROM gaps WHERE nvr = ? AND ch = ? AND from_ms < ?')
+  const at = T0 + 38 * 24 * 60 * MIN
+  const g0 = time(() => gapsOld.all('big', 0, at, at + 60 * MIN))
+  const g1 = time(() => ix.gapsNear?.('big', 0, at, at + 60 * MIN))
+  check('gapsNear for an hour, among 200,000 gap rows (40 days of nvr-2/0\'s): at least 10x quicker than the old walk', g1 * 10 < g0 && J(ix.gapsNear?.('big', 0, at, at + 60 * MIN).map((r) => r.fromMs)) === J(gapsOld.all('big', 0, at, at + 60 * MIN).map((r) => r.fromMs)), `${g1.toFixed(3)} ms vs ${g0.toFixed(3)} ms`)
+  const e0 = time(() => gapEndOld.get('big', 0, at))
+  const e1 = time(() => ix.lastEnds('big', 0, at))
+  check('lastEnds among them (the downtime rows after a worker restart): at least 10x quicker, the same end', e1 * 10 < e0 && ix.lastEnds('big', 0, at).gapEnd === gapEndOld.get('big', 0, at).e, `${e1.toFixed(3)} ms vs ${e0.toFixed(3)} ms`)
   raw.close()
   ix.close()
 }

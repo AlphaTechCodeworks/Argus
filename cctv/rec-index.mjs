@@ -242,6 +242,59 @@ export const TARGET_SQL = {
     FROM (SELECT start_ms, thinned FROM segments INDEXED BY segments_loc WHERE loc = ? AND start_ms >= ? ORDER BY start_ms LIMIT ?)`
 }
 
+/**
+ * The backfill scan and the recovery after a worker restart (2026-09-30, perf report R5 and R8, and R11's
+ * first item for these two). Both run on the main thread, and both read a camera's whole history:
+ *  - A gap row is found by gaps_cam (nvr, ch, from_ms), and the rows of a window are those that end after
+ *    its start, which from_ms cannot bound: gaps() and lastEnds()'s MAX(to_ms) walked every gap row the
+ *    camera has, and they are kept 183 days (nvr-2/0 writes about 5,000 a day; lastEnds for 87 cameras
+ *    took 808 ms at 31 days, storage.md). A row that ends after a time and is no longer than LONG_GAP_MS
+ *    started at most that long before it: those are a bounded walk of gaps_cam. The longer ones (an
+ *    outage of hours or days: a few per camera) are in gaps_long, which holds only them. The query must
+ *    say LONG_GAP word for word, or SQLite will not use the index. Building it on an index that predates
+ *    it reads every gap row once, at the first start with this code.
+ *  - backfill_scan: how far each camera's history has been looked through for holes (backfill.mjs scan()),
+ *    so that a scan goes on from there instead of reading 32 days of 87 cameras every tick (3.3-4.5 s of
+ *    main thread on production at 4 days of index, about 65-70 s at 32: verify-5). mark_ms: where the
+ *    next scan starts (a point inside footage, or where there was none yet); from_ms and min_gap_ms: the
+ *    window's start and the shortest hole when the camera's scan began: when either changes, the window
+ *    is looked through again.
+ */
+export const LONG_GAP_MS = 60 * 60_000
+const LONG_GAP = `to_ms - from_ms > ${LONG_GAP_MS}`
+const SCAN_SCHEMA = `
+CREATE INDEX IF NOT EXISTS gaps_long ON gaps (nvr, ch, to_ms) WHERE ${LONG_GAP};
+CREATE TABLE IF NOT EXISTS backfill_scan (
+  nvr TEXT NOT NULL, ch INTEGER NOT NULL, mark_ms INTEGER NOT NULL, from_ms INTEGER NOT NULL, min_gap_ms INTEGER NOT NULL,
+  PRIMARY KEY (nvr, ch));
+`
+/** Gap rows near a window, and a camera's last gap end (above). Kept here as text so rec-index-scans.test.mjs can check each one's query plan. */
+export const GAP_SQL = {
+  // every gap row overlapping a window (to_ms >= its start, from_ms <= its end), in from_ms order as gaps()
+  // gives them: those that started within LONG_GAP_MS before the window, then the longer ones before that
+  near: `SELECT id, nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason FROM gaps WHERE nvr = ? AND ch = ? AND from_ms >= ? AND from_ms <= ? AND to_ms >= ?
+    UNION ALL SELECT id, nvr, ch, from_ms, to_ms, reason FROM gaps INDEXED BY gaps_long WHERE nvr = ? AND ch = ? AND to_ms >= ? AND from_ms < ? AND ${LONG_GAP}
+    ORDER BY fromMs, id`,
+  // lastEnds(): the newest start before a time, the latest end among the rows that started within
+  // LONG_GAP_MS of it, and the latest end of the longer ones (lastSegmentEnd()'s way, with gaps_long)
+  fromBefore: 'SELECT MAX(from_ms) AS f FROM gaps WHERE nvr = ? AND ch = ? AND from_ms < ?',
+  endSince: 'SELECT MAX(to_ms) AS e FROM gaps WHERE nvr = ? AND ch = ? AND from_ms >= ? AND from_ms < ?',
+  longEnd: `SELECT MAX(to_ms) AS e FROM gaps INDEXED BY gaps_long WHERE nvr = ? AND ch = ? AND from_ms < ? AND ${LONG_GAP}`
+}
+/**
+ * The backfill scan's reads of one camera (backfill.mjs scan()): a file's start and end, all it needs (the
+ * other columns, made into objects, were 72% of the old scan's time: verify-5). Kept here as text so
+ * rec-index-scans.test.mjs can check each one's query plan.
+ */
+export const SCAN_SQL = {
+  // every file overlapping a window: those that started within MAX_SEGMENT_MS before it, then the longer
+  // ones before that (segments() leaves those out: a false hole at the window's start for the scan)
+  spans: `SELECT start_ms AS startMs, end_ms AS endMs FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? AND end_ms >= ?
+    UNION ALL SELECT start_ms, end_ms FROM segments INDEXED BY segments_long WHERE nvr = ? AND ch = ? AND end_ms >= ? AND start_ms < ? AND ${LONG_ROW}`,
+  // the first file starting after a time and not after a bound
+  after: 'SELECT start_ms AS startMs, end_ms AS endMs FROM segments WHERE nvr = ? AND ch = ? AND start_ms > ? AND start_ms <= ? ORDER BY start_ms LIMIT 1'
+}
+
 const SEG_COLS = 'nvr, ch, path, start_ms AS startMs, end_ms AS endMs, bytes, keyframes, loc, source, filled_ms AS filledMs'
 // (thinning's rows only: playback's keep the shape they had)
 const THIN_COLS = `${SEG_COLS}, thinned`
@@ -366,6 +419,7 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
   }
   db.exec(THIN_SCHEMA)
   db.exec(TARGET_SCHEMA)
+  db.exec(SCAN_SCHEMA)
   // The totals per location (TOTALS_SCHEMA above). A REPLACE's old row is taken off by loc_totals_replace,
   // so the delete trigger must stay out of it: recursive_triggers off (SQLite's default, set in case).
   db.exec('PRAGMA recursive_triggers = OFF')
@@ -412,6 +466,18 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     bfPending: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps WHERE state = 'pending' ORDER BY from_ms LIMIT ?`),
     bfForget: db.prepare('DELETE FROM backfill_gaps WHERE to_ms < ?'),
     bfDrop: db.prepare('DELETE FROM backfill_gaps WHERE id = ?'),
+    // the pick a page at a time: pending rows after (from_ms, id), in that order (backfill_state (state, from_ms), the id its rowid)
+    bfPage: db.prepare(`SELECT ${BF_COLS} FROM backfill_gaps WHERE state = 'pending' AND (from_ms, id) > (?, ?) ORDER BY from_ms, id LIMIT ?`),
+    // holes the NVR has rolled past: the oldest pending ones that ended before a time, a batch at a time
+    bfAgeOut: db.prepare("UPDATE backfill_gaps SET state = 'permanent', note = ? WHERE id IN (SELECT id FROM backfill_gaps WHERE state = 'pending' AND from_ms < ? AND to_ms < ? ORDER BY from_ms LIMIT ?)"),
+    bfMarks: db.prepare('SELECT nvr, ch, mark_ms AS markMs, from_ms AS fromMs, min_gap_ms AS minGapMs FROM backfill_scan'),
+    bfMark: db.prepare('INSERT OR REPLACE INTO backfill_scan (nvr, ch, mark_ms, from_ms, min_gap_ms) VALUES (?, ?, ?, ?, ?)'),
+    gapsNear: db.prepare(GAP_SQL.near),
+    gapFromBefore: db.prepare(GAP_SQL.fromBefore),
+    gapEndSince: db.prepare(GAP_SQL.endSince),
+    gapLongEnd: db.prepare(GAP_SQL.longEnd),
+    spans: db.prepare(SCAN_SQL.spans),
+    spanAfter: db.prepare(SCAN_SQL.after),
     gap: db.prepare('INSERT INTO gaps (nvr, ch, from_ms, to_ms, reason) VALUES (?, ?, ?, ?, ?)'),
     // (start_ms bounded below as in at(): the rows just before the range, never the camera's whole history)
     segs: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? AND end_ms >= ? ORDER BY start_ms`),
@@ -469,6 +535,21 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     if (inWindow < s) return q.lastEndBefore.get(nvr, ch, before).e
     const long = q.longEnd.get(nvr, ch, before).e
     return long !== null && long > inWindow ? long : inWindow
+  }
+  /**
+   * The latest to_ms of one camera's gap rows that started before `before`, the same way (GAP_SQL): F = the
+   * newest start; a row no longer than LONG_GAP_MS that started before F - LONG_GAP_MS ended before F, and
+   * the rows from there on end at F or later (the newest one does, if it ends after it starts), so the
+   * answer is theirs or a longer row's (gaps_long). When the rows from F - LONG_GAP_MS on all end before F
+   * (the newest row ends before it starts), that fails, and every row of the camera is read as before.
+   */
+  const lastGapEnd = (nvr, ch, before) => {
+    const f = q.gapFromBefore.get(nvr, ch, before).f
+    if (f === null) return null
+    const near = q.gapEndSince.get(nvr, ch, f - LONG_GAP_MS, before).e
+    if (near < f) return q.lastGapEndBefore.get(nvr, ch, before).e
+    const long = q.gapLongEnd.get(nvr, ch, before).e
+    return long !== null && long > near ? long : near
   }
   /** [{ nvr, ch }] -> the JSON list THIN_SQL matches cameras against ("nvr/ch", as the index's columns make it). */
   const camKeys = (cams) => JSON.stringify(cams.map((c) => camKey(c.nvr, c.ch)))
@@ -603,14 +684,56 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     backfillForgetBefore(ms) {
       q.bfForget.run(Math.round(ms))
     },
+    /**
+     * Notes many holes in one transaction (backfill.mjs scan(); backfillNote's INSERT OR IGNORE, without
+     * reading each row back): returns how many were new.
+     */
+    backfillNoteMany(gs, nowMs = Date.now()) {
+      let added = 0
+      inOne(gs, (g) => {
+        added += Number(q.bfAdd.run(String(g.nvr), Number(g.ch), Math.round(g.fromMs), Math.round(g.toMs), g.reason ?? null, g.kind ?? null, Math.round(nowMs)).changes)
+      })
+      return added
+    },
+    /** Pending rows after `after` ({ fromMs, id }; null: from the oldest), oldest hole first, `limit` of them (backfill.mjs's pick, a page at a time). */
+    backfillPendingPage: ({ after = null, limit = 500 } = {}) => q.bfPage.all(after ? Math.round(after.fromMs) : NO_START, after ? Number(after.id) : NO_START, Number(limit)).map(plain),
+    /** Marks the oldest `limit` pending rows that ended before toMs permanent, with `note`: how many were. */
+    backfillAgeOut: (toMs, note, limit) => Number(q.bfAgeOut.run(note ?? null, Math.round(toMs), Math.round(toMs), Number(limit)).changes),
+    /** How far each camera has been scanned for holes: [{ nvr, ch, markMs, fromMs, minGapMs }] (backfill_scan above). */
+    backfillMarks: () => q.bfMarks.all().map(plain),
+    /** Keeps these cameras' scan marks, in one transaction. */
+    backfillMarkSet(marks) {
+      inOne(Array.isArray(marks) ? marks : [marks], (m) => q.bfMark.run(String(m.nvr), Number(m.ch), Math.round(m.markMs), Math.round(m.fromMs), Math.round(m.minGapMs)))
+    },
     addGap(g) {
       q.gap.run(String(g.nvr), Number(g.ch), Math.round(g.fromMs), Math.round(g.toMs), g.reason ?? null)
     },
     /** Segments of one camera overlapping [fromMs, toMs], oldest first. */
     segments: (nvr, ch, fromMs, toMs) => q.segs.all(String(nvr), Number(ch), fromMs - MAX_SEGMENT_MS, toMs, fromMs).map(plain),
+    /**
+     * Every file of one camera overlapping [fromMs, toMs], files longer than MAX_SEGMENT_MS that began
+     * before it included, as { startMs, endMs } in no set order (SCAN_SQL; backfill.mjs scan()).
+     */
+    scanSpans: (nvr, ch, fromMs, toMs) => {
+      const n = String(nvr)
+      const c = Number(ch)
+      return q.spans.all(n, c, fromMs - MAX_SEGMENT_MS, toMs, fromMs, n, c, fromMs, Math.min(fromMs - MAX_SEGMENT_MS, toMs + 1))
+    },
+    /** One camera's first file starting in (afterMs, boundMs], as { startMs, endMs }, or null. */
+    scanSpanAfter: (nvr, ch, afterMs, boundMs) => q.spanAfter.get(String(nvr), Number(ch), afterMs, boundMs) ?? null,
     /** The segment row of a file (its primary key), or null (not indexed: still open, or removed). */
     byPath: (path) => one(q.byPath.get(String(path))),
     gaps: (nvr, ch, fromMs, toMs) => q.gaps.all(String(nvr), Number(ch), fromMs, toMs).map(plain),
+    /**
+     * gaps()'s rows, in its order, without reading the camera's history (GAP_SQL.near: rows that started
+     * within LONG_GAP_MS before the window, and the longer ones), each with its id. For the backfill scan
+     * and its fill every tick (backfill.mjs).
+     */
+    gapsNear: (nvr, ch, fromMs, toMs) => {
+      const n = String(nvr)
+      const c = Number(ch)
+      return q.gapsNear.all(n, c, fromMs - LONG_GAP_MS, toMs, fromMs, n, c, fromMs, Math.min(fromMs - LONG_GAP_MS, toMs + 1))
+    },
     /** A segment now lives elsewhere (same footage, new file). */
     moveSegment(oldPath, newPath, loc) {
       q.moveSeg.run(String(newPath), loc, String(oldPath))
@@ -666,9 +789,10 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     lastSegmentEnd: (nvr, ch, beforeMs = null) => lastSegmentEnd(String(nvr), Number(ch), Number.isFinite(beforeMs) ? beforeMs : NO_BOUND),
     /**
      * The end of one camera's newest recording and of its newest gap row: { segEnd, gapEnd } (null
-     * when none). beforeMs: only rows that started before it count. For the downtime rows at a start
-     * (rec-recover.mjs); what only needs segEnd asks lastSegmentEnd(), because MAX(to_ms) reads every
-     * gap row of the camera (23 ms for 87 cameras on a 3-day index, and gap rows are kept as long as footage).
+     * when none). beforeMs: only rows that started before it count. For the downtime rows after a start
+     * or a worker restart (rec-recover.mjs, 26 cameras at a time). MAX(to_ms) read every gap row of the
+     * camera, kept 183 days (23 ms for 87 cameras on a 3-day index, 808 ms at 31 days): lastGapEnd() above
+     * since 2026-09-30. Without a bound (tests), still every row.
      */
     lastEnds: (nvr, ch, beforeMs = null) => {
       const n = String(nvr)
@@ -676,9 +800,11 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
       const bounded = Number.isFinite(beforeMs)
       return {
         segEnd: lastSegmentEnd(n, c, bounded ? beforeMs : NO_BOUND),
-        gapEnd: (bounded ? q.lastGapEndBefore.get(n, c, beforeMs) : q.lastGapEnd.get(n, c))?.e ?? null
+        gapEnd: bounded ? lastGapEnd(n, c, beforeMs) : (q.lastGapEnd.get(n, c)?.e ?? null)
       }
     },
+    /** The start of one camera's newest file that started before beforeMs, or null (rec-recover.mjs: where a crash's leftovers can start). */
+    newestStart: (nvr, ch, beforeMs) => q.newestStart.get(String(nvr), Number(ch), beforeMs).s ?? null,
     forgetGapsBefore(ms) {
       q.oldGaps.run(ms)
     },
@@ -759,6 +885,8 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     noteClosed(path) {
       for (const [k, o] of opens) if (o.path === String(path)) opens.delete(k)
     },
+    /** The files an NVR's worker has announced open: [{ nvr, ch, path, startMs, loc }] (a worker that died: what it left without a row). */
+    opensOf: (nvr) => [...opens.values()].filter((o) => o.nvr === String(nvr)).map((o) => ({ ...o })),
     /** An NVR's worker (re)started: nothing it had open is being written any more. */
     dropOpen(nvr) {
       for (const [k, o] of opens) if (o.nvr === String(nvr)) opens.delete(k)
