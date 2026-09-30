@@ -292,8 +292,10 @@ export function recoverThinning(roots, { dryRun = false } = {}) {
  * is), so it comes from the audit's real files (29 Sep 2026, production VM): 13 files read from the NAS,
  * the time-lapse copy 8.7 % (R1, 5 files) and 11.1 % (verify-1, 8 files) of the originals with about 6
  * of each file's 30 keyframes kept, so keyframes are 43-56 % of a file's bytes (2.8-16 % per file kept:
- * one file alone can be far off, a day of them is not). An estimate, and the page and the log say so;
- * the real runs report what they really freed.
+ * one file alone can be far off, a day of them is not). Measured directly on 21 more (review of p3-thin
+ * round 2, 30 Sep 2026: files of 26 Sep read into /tmp on the VM, every keyframe's bytes counted): 50.0 %
+ * of their bytes (H.265 51.9 %, H.264 45.6 %; 11-100 % per file), the time-lapse 10.4 %: the middle figure
+ * holds. An estimate, and the page and the log say so; the real runs report what they really freed.
  */
 export const KEYFRAME_SHARE = Object.freeze({ low: 0.43, mid: 0.5, high: 0.56 })
 /** Rows asked of the index at a time by the real run's walk (every camera's, oldest first). */
@@ -546,7 +548,7 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
       thinBytes: est('mid'),
       low: est('low'),
       high: est('high'),
-      note: `an estimate from the index: keyframes taken as ${Math.round(KEYFRAME_SHARE.low * 100)}-${Math.round(KEYFRAME_SHARE.high * 100)} % of a file's bytes, as in 13 real files measured on 29 Sep 2026`
+      note: `an estimate from the index: keyframes taken as ${Math.round(KEYFRAME_SHARE.low * 100)}-${Math.round(KEYFRAME_SHARE.high * 100)} % of a file's bytes, as in 34 real files measured on 29 and 30 Sep 2026`
     }
     out.freedBytes = backlog.bytes - out.estimate.thinBytes
     return out

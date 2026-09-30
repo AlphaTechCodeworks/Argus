@@ -17,21 +17,23 @@
 // never catches up; and the task asks for a day's footage converted within about 16 hours of rounds,
 // which on the biggest day seen (1.65 TB, rounds working 4 minutes in 5) takes at least 36 MB/s. The
 // audit's "20 MB/s or less" left 5-17 % of headroom; verify-1 showed one file at a time is 19-23 MB/s
-// at most anyway. What was MEASURED (below; the audit's, on the production VM, 29 Sep): reading one
-// segment from the NAS, one at a time, 0.30 s for 12 MB; an fsync 66-99 ms; a metadata call 0.9-2.4 ms.
-// What is MODELLED from those, not measured: a whole rewrite end to end (fileMs: the reads, the helper's
-// ~50 file calls, 3 fsyncs, the time-lapse written and read back) 0.55-0.75 s for 12 MB; and that three
-// files in flight each take what one takes alone -- that the NAS serves 40 MB/s of cold reads and ~10
-// fsyncs a second beside 87 recording streams. Neither has been measured: reading real footage from the
-// NAS into /tmp on the server, to time 1, 2 and 3 reads at once and to run the rewrite on copies of real
-// H.264 and H.265, was refused by this project's permission checks twice (p3-thin 2026-09-29, its fix
-// round 2026-09-30; scratchpad p3fix/fetch.mjs and thin-real.mjs are ready for when it is allowed). So
-// the default, 40 MB/s, is the round figure that meets the 16 hours on that model with room (14.3 h for
-// the biggest day, 12.8 h for an average one: test/thin-pace.test.mjs), not a measured capacity; at 40
-// MB/s of reads plus ~4.4 MB/s of time-lapse written, the NAS link (1 Gbit/s, ~117 MB/s) would carry about
-// 60-65 MB/s with the recording. What keeps recording safe if the NAS cannot take it is the ceiling
-// below, which starts at half this pace and rises only after whole nights without a recording gap;
-// CCTV_THIN_MBPS in /etc/cctv/cctv.env lowers the pace, and so the most the ceiling rises to, by hand.
+// at most anyway. What was MEASURED (below), on the production VM beside the recording: reading one segment
+// from the NAS, one at a time, 0.30 s for 12 MB, an fsync 66-99 ms, a metadata call 0.9-2.4 ms (the audit, 29
+// Sep); and reading real segments cold from the NAS one, two and three at a time, 54.0, 55.4 and 70.5 MB/s
+// together (review of p3-thin round 2, 30 Sep: 21 files of 26 Sep, 279 MB, 16 cameras, H.264 and H.265, read
+// into /tmp; the helper's rewrite then run on those copies: all 21 decode with no ffmpeg error, one I frame
+// per keyframe kept, the time-lapse 10.4 % of the bytes, 50-53 file calls, 1-10 ms of CPU a file). What is
+// MODELLED from those: a whole rewrite end to end (fileMs: the reads, the helper's ~50 file calls, 3 fsyncs,
+// the time-lapse written and read back), 0.55-0.75 s for 12 MB alone and 0.77-0.93 s with three in flight,
+// each reading at a third of what three reads get together. What is ASSUMED, as nothing may be written to
+// the shared NAS to measure it: the writes and fsyncs of three in flight each as quick as one alone. So three
+// in flight convert 38.6-46.6 MB/s of footage, and the default, 40 MB/s, is the round figure in that range
+// that meets the 16 hours with room (14.8 h for the biggest day, 13.2 h for an average one:
+// test/thin-pace.test.mjs); the reads alone had 70 MB/s. At 40 MB/s of reads plus ~4.4 MB/s of time-lapse written, the NAS link (1 Gbit/s, ~117
+// MB/s) carries about 60-65 MB/s with the recording. What keeps recording safe if the NAS cannot take it
+// beside the recording at night is the ceiling below, which starts at half this pace and rises only after
+// whole nights without a recording gap; CCTV_THIN_MBPS in /etc/cctv/cctv.env lowers the pace, and so the most
+// the ceiling rises to, by hand.
 //
 // When. Nights first (CCTV_THIN_NIGHT, site time, 20:00-06:00 by default: fewer people watching, so
 // fewer playback reads on the NAS and on the server): at night every round converts. By day a round
@@ -52,16 +54,20 @@ import { readFile, rename, writeFile } from 'node:fs/promises'
 import { siteMinutesOfDay } from './site-time.mjs'
 
 /**
- * The audit's measurements this pace rests on (perf report R1 and verify-1, 29 Sep 2026, production VM), each
- * of one file or one call at a time: reading a segment, its .idx and a stat from the NAS took 177 ms + 10.1
- * ms per MB (8 files, 3-39 MB; R1's 5 files agreed); an fsync on the share 66-99 ms; one metadata call (stat,
- * rename, unlink) 0.9-2.4 ms at the median; parsing and building the rewrite 5-24 ms, about 10; the time-lapse
- * copy 8.7-11.1 % of the original over the 13 files (2.8-16 % per file); the mean segment 11.98 MB;
- * 1.474-1.65 TB recorded a day.
+ * The measurements this pace rests on, on the production VM beside the recording. The audit's (perf report R1
+ * and verify-1, 29 Sep 2026), each of one file or one call at a time: reading a segment, its .idx and a stat
+ * from the NAS took 177 ms + 10.1 ms per MB (8 files, 3-39 MB; R1's 5 files agreed); an fsync on the share
+ * 66-99 ms; one metadata call (stat, rename, unlink) 0.9-2.4 ms at the median; parsing and building the
+ * rewrite 5-24 ms, about 10; the time-lapse copy 8.7-11.1 % of the original over the 13 files (2.8-16 % per
+ * file); the mean segment 11.98 MB; 1.474-1.65 TB recorded a day. Review of p3-thin round 2 (30 Sep 2026, 21
+ * files of 26 Sep, 3.5 days old, 7 each): read one, two and three at a time, 54.0, 55.4 and 70.5 MB/s together
+ * (one at a time 111 ms + 9.4 ms per MB: the audit's figure, a little quicker); the time-lapse 10.4 % of their
+ * bytes (3.6-23 % per file), their keyframes 50.0 % (thinning.mjs KEYFRAME_SHARE).
  */
 export const MEASURED = Object.freeze({
   readBaseMs: 177,
   readMsPerMB: 10.1,
+  readAtOnceMBps: [54.0, 55.4, 70.5],
   fsyncMs: [66, 99],
   callMs: [0.9, 2.4],
   cpuMs: 10,
@@ -71,10 +77,11 @@ export const MEASURED = Object.freeze({
   recordMBps: [17.1, 19.1]
 })
 /**
- * What the model of a whole rewrite (fileMs) takes for granted, never measured (header): the time-lapse
- * written to the NAS at 100 MB/s, and files in flight together each as quick as one alone.
+ * What the model of a whole rewrite (fileMs) takes for granted, never measured (header; nothing may be written
+ * to the shared NAS to measure it): the time-lapse written to the NAS at 100 MB/s, and the writes, fsyncs and
+ * metadata calls of files in flight together each as quick as one alone (the reads in flight are measured).
  */
-export const ASSUMED = Object.freeze({ writeMBps: 100, inFlightScales: true })
+export const ASSUMED = Object.freeze({ writeMBps: 100, writesInFlightScale: true })
 
 export const DEFAULT_MBPS = 40
 export const AT_ONCE = 3
@@ -122,21 +129,24 @@ export const describePace = (p) => `${p.mbps} MB/s, ${p.atOnce} files at a time;
  * The time one rewrite of an `mb` MB file takes end to end (read, rewrite, fsyncs, swap, commit): a model
  * built from MEASURED and ASSUMED, not a measurement. `calls` is how many file calls the helper makes for
  * it (test/thin-pace.test.mjs counts them from share-ops.mjs), of which the measured read covers the stat
- * and the two reads, and three are fsyncs.
+ * and the two reads, and three are fsyncs. atOnce: files in flight together, each reading at its share of
+ * what that many reads got together (MEASURED.readAtOnceMBps), never quicker than one alone.
  */
-export function fileMs(mb, { calls, worst = true }) {
+export function fileMs(mb, { calls, worst = true, atOnce = 1 }) {
   const m = MEASURED
   const pick = ([a, b]) => (worst ? b : a)
   const readCalls = 1 + 4 + Math.ceil((mb * 1e6) / (8 * 1024 * 1024)) + 4 // stat; segment open/stat/reads/close; .idx
   const thinMB = mb * pick(m.thinShare)
   const others = Math.max(0, calls - readCalls - 3)
-  return m.readBaseMs + m.readMsPerMB * mb + others * pick(m.callMs) + 3 * pick(m.fsyncMs) + (thinMB / ASSUMED.writeMBps) * 1000 + thinMB * m.readMsPerMB + m.cpuMs
+  const together = m.readAtOnceMBps[Math.min(m.readAtOnceMBps.length, Math.max(1, atOnce)) - 1]
+  const readMs = Math.max(m.readBaseMs + m.readMsPerMB * mb, atOnce > 1 ? ((atOnce * mb) / together) * 1000 : 0)
+  return readMs + others * pick(m.callMs) + 3 * pick(m.fsyncMs) + (thinMB / ASSUMED.writeMBps) * 1000 + thinMB * m.readMsPerMB + m.cpuMs
 }
 
-/** MB/s converted while working, on the model: the pace, or what `atOnce` files in flight can do if that is less (ASSUMED.inFlightScales). */
+/** MB/s converted while working, on the model: the pace, or what `atOnce` files in flight can do if that is less. */
 export function throughputMBps(pace, model) {
   const mb = MEASURED.meanSegmentMB
-  return Math.min(pace.mbps, (pace.atOnce * mb) / (fileMs(mb, model) / 1000))
+  return Math.min(pace.mbps, (pace.atOnce * mb) / (fileMs(mb, { ...model, atOnce: pace.atOnce }) / 1000))
 }
 
 /** Hours of 5-minute rounds (RUN_MS of work each) to convert `tb` TB. */

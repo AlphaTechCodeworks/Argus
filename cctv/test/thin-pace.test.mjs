@@ -1,12 +1,12 @@
 // Tests for thin-pace.mjs: how fast time-lapse thinning goes, when, and when it stands back.
 //   node cctv/test/thin-pace.test.mjs
-// Any PC, no SDK. The capacity figures come from a model (thin-pace.mjs fileMs) built on the audit's
-// measurements of real footage read from the NAS on the production VM, one file at a time (perf report R1
-// and its check verify-1, 29 Sep 2026), and on what that model assumes (ASSUMED: nobody has measured
-// several reads at once beside the recording, nor a rewrite written to the NAS); the number of file calls
-// a rewrite makes is counted here from the share helper's own ops, so the proof follows the code if it
-// changes. The back-off and the day rule's figure (review of p3-thin) are what keep recording safe if the
-// model is wrong.
+// Any PC, no SDK. The capacity figures come from a model (thin-pace.mjs fileMs) built on measurements of
+// real footage read from the NAS on the production VM beside the recording: one file at a time (perf report
+// R1 and its check verify-1, 29 Sep 2026) and one, two and three at a time (review of p3-thin round 2, 30 Sep
+// 2026); and on what that model assumes (ASSUMED: nothing may be written to the NAS to measure it, so the
+// rewrite's writes and fsyncs are the audit's one-at-a-time figures); the number of file calls a rewrite makes
+// is counted here from the share helper's own ops, so the proof follows the code if it changes. The pace's
+// ceiling and the day rule's figure (review of p3-thin) are what keep recording safe if the model is wrong.
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -82,8 +82,11 @@ let calls = null
   check('one 12 MB file end to end, on the model built from the audit\'s measurements: 0.5-0.8 s (verify-1: 0.53-0.63 s without the extra checks)', best > 450 && worst < 850 && best < worst, `${best.toFixed(0)}-${worst.toFixed(0)} ms, ${calls} file calls`)
   const one = P.throughputMBps({ mbps: 1000, atOnce: 1 }, { calls, worst: true })
   check('one file at a time cannot keep up with the recording on its worst figures (verify-1: 19-23 MB/s at most)', one < m.recordMBps[1], `${one.toFixed(1)} MB/s against ${m.recordMBps[1]} MB/s recorded`)
-  const t = P.throughputMBps(pace, { calls, worst: true })
-  check('three at a time reach the default pace on the worst figures, if three in flight each go as fast as one alone (ASSUMED, not measured)', t >= pace.mbps, `${t.toFixed(1)} MB/s`)
+  // three reads at once from the NAS, beside the recording: 70.5 MB/s together (30 Sep 2026, 7 files of 26 Sep);
+  // three rewrites in flight each read at a third of that, their writes and fsyncs as one alone (ASSUMED)
+  const t = P.throughputMBps({ ...pace, mbps: 1000 }, { calls, worst: true })
+  const tBest = P.throughputMBps({ ...pace, mbps: 1000 }, { calls, worst: false })
+  check('THE DEFAULT PACE FROM THE MEASUREMENT: three in flight convert 36-50 MB/s on the reads measured three at once, and the default (40) is within it', t > 36 && tBest < 50 && t <= pace.mbps + 2 && tBest >= pace.mbps, `${t.toFixed(1)}-${tBest.toFixed(1)} MB/s (reads three at once: ${P.MEASURED.readAtOnceMBps[2]} MB/s together)`)
   const h = P.hoursForDay(m.dayTB[1], pace, { calls, worst: true })
   const h0 = P.hoursForDay(m.dayTB[0], pace, { calls, worst: true })
   check('THE BIGGEST DAY SEEN (1.65 TB) IS CONVERTED WITHIN 16 HOURS AT THE DEFAULTS, runs every 5 minutes included (on the model)', h <= 16, `${h.toFixed(1)} h (1.474 TB: ${h0.toFixed(1)} h)`)
