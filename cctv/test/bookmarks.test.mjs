@@ -386,6 +386,43 @@ const SEE = seeOnly(['nvr1/0', 'nvr2/1']) // every camera the bookmarks above ar
   check('  nothing named, nothing done', removeBookmarks([]) === 0)
 }
 
+// ---- one maker's bookmarks that ended before a time, a page at a time (auto-bookmarks.mjs forgetAutoBookmarks) ----
+// Data-safety review of 19321dd (2026-09-30): the forget step read every bookmark that started before the shortest
+// days kept, row by row in JavaScript, every 5 minutes. Now the maker and the end are asked of SQLite, in the end
+// index's order, and a page stops where it was told to; the next page goes on from the last one returned.
+{
+  const { AUTO_USER } = await import('../public/bookmarks-view.js')
+  const { listEndedBefore } = await import('../bookmarks.mjs')
+  const P = Date.parse('2026-08-01T00:00:00Z')
+  const mk = (endMs, user = 'pager', cam = 'nvr7/1') => createBookmark({ cameras: [cam], startMs: endMs - 1000, endMs, title: `Line crossing — ${endMs - P}` }, user, { now: NOW }).bookmark
+  // three share one end, to try the tie-break
+  const made = [mk(P + 5000), mk(P + 1000), mk(P + 3000), mk(P + 3000), mk(P + 3000), mk(P + 9000), mk(P + 2000, 'someone-else')]
+  const ids = (list) => list.map((b) => `${b.endMs - P}#${b.id}`).join(' ')
+  const want = [made[1], made[2], made[3], made[4], made[0]]
+  const got = listEndedBefore('pager', P + 9000, { limit: 100 })
+  check('listEndedBefore: that maker\'s only, ended strictly before the time, oldest end first and the same end by id', ids(got) === ids(want), ids(got))
+  check('  whole bookmarks, as the rest of the app sees them', got[0].cameras.join() === 'nvr7/1' && got[0].user === 'pager' && typeof got[0].title === 'string')
+  const pages = []
+  let after = null
+  for (let i = 0; i < 10; i++) {
+    const page = listEndedBefore('pager', P + 9000, { after, limit: 2 })
+    pages.push(ids(page))
+    if (!page.length) break
+    after = { endMs: page.at(-1).endMs, id: page.at(-1).id }
+  }
+  check('  page by page from the last one returned: each once, none skipped, even where a page splits one end', pages.join(' | ') === `${ids(want.slice(0, 2))} | ${ids(want.slice(2, 4))} | ${ids(want.slice(4))} | `, pages.join(' | '))
+  check('  no maker, or no time: nothing', listEndedBefore('', P + 9000).length === 0 && listEndedBefore('pager', NaN).length === 0 && listEndedBefore('pager', null).length === 0)
+  check('  a cursor that is not one starts from the oldest', ids(listEndedBefore('pager', P + 9000, { after: { endMs: 'x' }, limit: 1 })) === ids(want.slice(0, 1)))
+  // the plan: the end index (its order is the page's order, so SQLite stops at the page's end), never the maker
+  // index plus a sort of every one of that maker's rows
+  const src = readFileSync(new URL('../bookmarks.mjs', import.meta.url), 'utf8')
+  const sql = /endedBy: db\.prepare\(`([^`]+)`\)/.exec(src)?.[1]?.replace('${COLS}', 'id')
+  const raw = new DatabaseSync(BOOKMARKS_DB)
+  const plan = sql ? raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(AUTO_USER, P, P, 0, 2000).map((r) => r.detail).join(' | ') : ''
+  raw.close()
+  check('  SQLite walks the end index, from the cursor, with no sort', /USING INDEX bookmarks_end/.test(plan) && !/TEMP B-TREE/.test(plan), plan || 'statement not found')
+}
+
 closeBookmarks()
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

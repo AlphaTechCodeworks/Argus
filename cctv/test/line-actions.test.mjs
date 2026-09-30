@@ -13,7 +13,7 @@ const DATA = process.env.DATA_DIR
 writeFileSync(join(DATA, 'users.json'), JSON.stringify({ alice: { hash: 'x', role: 'admin' }, bob: { hash: 'x', role: 'viewer' } }))
 
 const {
-  AUTO_USER, BOOKMARK_POST_S, BOOKMARK_PRE_S, LINE_RULE_NAME, LINE_TYPE, RULE_MIN_GAP_S, RULE_PRIORITY,
+  AUTO_DESCRIPTION, AUTO_USER, BOOKMARK_POST_S, BOOKMARK_PRE_S, LINE_RULE_NAME, LINE_TYPE, RULE_MIN_GAP_S, RULE_PRIORITY,
   autoBookmark, ensureNtfyTopic, eventLink, handleLineAlert, lineRuleCameras, newTopic, onLineCrossing, onServerClock, setLineAlert
 } = await import('../line-actions.mjs')
 const { addEvent, closeEvents, createRule, deleteRule, listRules, updateRule } = await import('../events-db.mjs')
@@ -21,6 +21,7 @@ const { applyRules } = await import('../event-rules.mjs')
 const { SETTINGS_FILE, getSettings, saveSettings } = await import('../settings.mjs')
 const { CLIP_POST_S, CLIP_PRE_S, makeAlarmNotifier } = await import('../alarms.mjs')
 const bookmarks = await import('../bookmarks.mjs')
+const { isAutoBookmark } = await import('../auto-bookmarks.mjs')
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -247,11 +248,22 @@ const filesWith = (text) => readdirSync(DATA)
   check('a person’s bookmark on that camera is not stretched', nearHers.merged === false && nearHers.bookmark.id !== hers.bookmark.id && bookmarks.getBookmark(hers.bookmark.id).endMs === T + MIN)
 
   // a stretch past the 24 hours a bookmark may cover starts a new one instead
-  const long = bookmarks.createBookmark({ cameras: ['nvr-2/11'], startMs: T - 24 * 3600 * S + 45 * S, endMs: T + 30 * S, title: 'Line crossing — nvr-2/11' }, AUTO_USER, { now })
+  const long = bookmarks.createBookmark({ cameras: ['nvr-2/11'], startMs: T - 24 * 3600 * S + 45 * S, endMs: T + 30 * S, title: 'Line crossing — nvr-2/11', description: AUTO_DESCRIPTION }, AUTO_USER, { now })
   check('(a nearly 24-hour automatic bookmark to stretch)', long.ok, long.error)
   const past = await autoBookmark(crossing('nvr-2', 11, T), opts)
   check('stretching past 24 hours starts a new bookmark', past.ok && past.merged === false && past.bookmark.id !== long.bookmark.id && past.bookmark.startMs === T - 30 * S)
   check('  and leaves the long one as it was', bookmarks.getBookmark(long.bookmark.id).endMs === T + 30 * S)
+
+  // made on the deployed master (its text) and not touched since: still automatic, still stretched
+  const MASTER_TEXT = 'Kept automatically around line crossings on this camera; later crossings stretch it.'
+  const older = bookmarks.createBookmark({ cameras: ['nvr-2/12'], startMs: T - 30 * S, endMs: T + 60 * S, title: 'Line crossing — nvr-2/12', description: MASTER_TEXT }, AUTO_USER, { now })
+  const onOlder = await autoBookmark(crossing('nvr-2', 12, T + 40 * S), opts)
+  check('an automatic bookmark made on the master (its text) is stretched like a new one', onOlder.merged === true && onOlder.bookmark.id === older.bookmark.id && onOlder.bookmark.endMs === T + 100 * S, JSON.stringify(onOlder))
+  // made on the master and annotated there by an admin: the master's updateBookmark left it "system"
+  const noted = bookmarks.createBookmark({ cameras: ['nvr-2/13'], startMs: T - 30 * S, endMs: T + 60 * S, title: 'Line crossing — nvr-2/13', description: 'White van took the pallet' }, AUTO_USER, { now })
+  const nearNoted = await autoBookmark(crossing('nvr-2', 13, T + 40 * S), opts)
+  check('A "SYSTEM" BOOKMARK AN ADMIN ANNOTATED ON THE MASTER IS NOT STRETCHED: it is a person’s', nearNoted.merged === false && nearNoted.bookmark.id !== noted.bookmark.id && bookmarks.getBookmark(noted.bookmark.id).endMs === T + 60 * S)
+  check('a new automatic bookmark is one by the rule the forget step uses (auto-bookmarks.mjs)', isAutoBookmark(first.bookmark, 'nvr-2/2') && first.bookmark.description === AUTO_DESCRIPTION && isAutoBookmark(nearNoted.bookmark, 'nvr-2/13'))
 
   const noStart = await autoBookmark({ nvr: 'nvr-2', ch: 2, type: LINE_TYPE }, opts)
   check('an event with no start time is not bookmarked', noStart.ok === false)
@@ -371,17 +383,20 @@ const filesWith = (text) => readdirSync(DATA)
 // forgotten once it ended more than its camera's retentionDays ago, and its footage goes with the rest; one a
 // person has changed is theirs (bookmarks.mjs) and stays, as does anybody's own.
 {
-  const { forgetLineBookmarks } = await import('../line-actions.mjs')
+  const { forgetLineBookmarks, FORGET_BATCH } = await import('../line-actions.mjs')
+  const ab = await import('../auto-bookmarks.mjs')
+  check('line-actions.mjs hands on auto-bookmarks.mjs’s texts and batch', AUTO_DESCRIPTION === ab.AUTO_DESCRIPTION && FORGET_BATCH === ab.FORGET_BATCH && LINE_RULE_NAME === ab.AUTO_TITLE_PREFIX)
   const DAY = 86_400_000
   const now = T + 40 * DAY
   const settings = { recording: { defaults: { retentionDays: 30 }, cameras: { 'nvr-3/5': { retentionDays: 60 } } } }
-  const mk = (cam, startMs, user = AUTO_USER, title = `${LINE_RULE_NAME} — ${cam}`) => bookmarks.createBookmark({ cameras: [cam], startMs, endMs: startMs + 90 * S, title }, user, { now: startMs + MIN }).bookmark
+  const mk = (cam, startMs, user = AUTO_USER, title = `${LINE_RULE_NAME} — ${cam}`, description = AUTO_DESCRIPTION) => bookmarks.createBookmark({ cameras: [cam], startMs, endMs: startMs + 90 * S, title, description }, user, { now: startMs + MIN }).bookmark
   const old = mk('nvr-3/1', now - 45 * DAY)
   const edge = mk('nvr-3/1', now - 30 * DAY + 60 * S) // ends 30 s inside the 30 days
   const young = mk('nvr-3/1', now - 10 * DAY)
   const longer = mk('nvr-3/5', now - 45 * DAY) // its camera keeps 60 days
   const hers = mk('nvr-3/1', now - 45 * DAY, 'alice', 'Van at the gate')
   const taken = mk('nvr-3/1', now - 44 * DAY)
+  const annotated = mk('nvr-3/1', now - 44 * DAY + 10 * MIN, AUTO_USER, `${LINE_RULE_NAME} — nvr-3/1`, 'White van took the pallet') // annotated on the master: still "system"
   bookmarks.updateBookmark(taken.id, { title: `${LINE_RULE_NAME} — pallet taken` }, { user: 'alice' })
   const lines = []
   const r = await forgetLineBookmarks({ store: bookmarks, settings, now, log: (l) => lines.push(l) })
@@ -391,6 +406,7 @@ const filesWith = (text) => readdirSync(DATA)
   check('  a camera\'s own days count (60 here)', has(longer))
   check('  a person\'s own bookmark is never forgotten, however old', has(hers))
   check('  NOR ONE A PERSON CHANGED (it is theirs now)', has(taken) && bookmarks.getBookmark(taken.id).user === 'alice')
+  check('  NOR A "SYSTEM" ONE WHOSE DESCRIPTION A PERSON CHANGED ON THE MASTER (it is theirs too)', has(annotated))
   check('  one line in the log, saying how many and why', lines.length === 1 && /forgot \d+ automatic line-crossing bookmark/.test(lines[0]) && /days kept/.test(lines[0]), JSON.stringify(lines))
   const again = await forgetLineBookmarks({ store: bookmarks, settings, now, log: (l) => lines.push(l) })
   check('  run again: nothing more, and nothing said', again.forgotten === 0 && lines.length === 1, JSON.stringify(again))

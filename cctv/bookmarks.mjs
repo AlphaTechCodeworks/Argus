@@ -58,6 +58,10 @@ function open() {
     // overlapping, not contained: a search for an hour must still find the bookmark that straddles it
     inWindow: db.prepare(`SELECT ${COLS} FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC`),
     protect: db.prepare('SELECT start_ms AS startMs, end_ms AS endMs, cameras FROM bookmarks WHERE end_ms >= ? AND start_ms <= ? ORDER BY start_ms'),
+    // one maker's that ended before a time, a page on from the last one returned (listEndedBefore). "+user" keeps
+    // SQLite off the user index: that one would have it read and sort every row of the maker's each page, where
+    // the end index is already in the page's order, so the walk stops at the page's end.
+    endedBy: db.prepare(`SELECT ${COLS} FROM bookmarks WHERE +user = ? AND end_ms < ? AND (end_ms, id) > (?, ?) ORDER BY end_ms, id LIMIT ?`),
     update: db.prepare('UPDATE bookmarks SET cameras = ?, start_ms = ?, end_ms = ?, title = ?, description = ?, user = ? WHERE id = ?'),
     remove: db.prepare('DELETE FROM bookmarks WHERE id = ?')
   }
@@ -185,9 +189,11 @@ export function listBookmarks({ text = '', fromMs = null, toMs = null, camera = 
  *
  * A bookmark no person made (filed under AUTO_USER: a line crossing's, line-actions.mjs) that a person
  * changes becomes theirs: the signed-in name goes on it. Since 2026-09-30 an automatic bookmark is
- * forgotten after its camera's days kept (line-actions.mjs forgetLineBookmarks), and a person who took
+ * forgotten after its camera's days kept (auto-bookmarks.mjs forgetAutoBookmarks), and a person who took
  * the trouble to change one -- a note of what happened, a longer stretch -- has kept it. Later crossings
  * no longer stretch it either: what a person wrote about an incident is not grown by the system.
+ * (Edits made before this rule, on the master deployed until then, left "system" on the bookmark; the
+ * forget step tells those by their description instead: auto-bookmarks.mjs isAutoBookmark.)
  * @returns {{ ok: true, bookmark: object } | { ok: false, status: number, error: string }}
  */
 export function updateBookmark(id, patch, who, { now = Date.now() } = {}) {
@@ -221,7 +227,7 @@ export function deleteBookmark(id, who) {
 
 /**
  * Deletes these bookmarks in one transaction, with no rights check: for the server's own jobs, which
- * decide which (line-actions.mjs forgetLineBookmarks: automatic ones past their camera's days kept).
+ * decide which (auto-bookmarks.mjs forgetAutoBookmarks: automatic ones past their camera's days kept).
  * One commit for the lot, not one each: each is WAL pages, and a checkpoint lands on the main thread.
  * @param {number[]} ids
  * @returns {number} how many there were
@@ -240,6 +246,28 @@ export function removeBookmarks(ids) {
     throw e
   }
   return gone
+}
+
+/**
+ * One maker's bookmarks that ended before `beforeMs`, oldest end first (the same end by id), at most `limit`, from
+ * after `after` on: the { endMs, id } of the last one a previous page returned (null: from the oldest). For the
+ * server's own jobs, which page through them a bounded number a round (auto-bookmarks.mjs forgetAutoBookmarks):
+ * no rights check, and no cap but the one asked for, so a short page means the end was reached.
+ *
+ * Why (data-safety review of 19321dd, 2026-09-30): the forget step used listBookmarks, which reads every row in
+ * its window in JavaScript and filters there; with 20,000 automatic bookmarks it read them all each 5 minutes
+ * (157-199 ms on the main thread). Here the maker and the end are SQLite's, in the end index's order.
+ * @param {string} user
+ * @param {number} beforeMs
+ * @param {{ after?: { endMs: number, id: number } | null, limit?: number }} [o]
+ * @returns {object[]}
+ */
+export function listEndedBefore(user, beforeMs, { after = null, limit = 1000 } = {}) {
+  const before = beforeMs === null || beforeMs === undefined ? NaN : Number(beforeMs)
+  if (!user || !Number.isFinite(before)) return []
+  const n = Math.max(1, Math.floor(Number(limit)) || 1000)
+  const from = after && Number.isFinite(after.endMs) && Number.isSafeInteger(after.id) ? after : { endMs: -8.64e15, id: 0 }
+  return open().endedBy.all(String(user), Math.round(before), Math.round(from.endMs), from.id, n).map(toBookmark)
 }
 
 /**
