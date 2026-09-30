@@ -10,7 +10,9 @@
 // again before each job, so a switch to Off or Dry run during a long thinning run holds for the
 // retention run straight after it:
 //   'off'      neither job runs;
-//   'dry-run'  both run and work out exactly what they would do, and touch nothing (the default);
+//   'dry-run'  both run and work out exactly what they would do, and touch nothing (the default) -- but
+//              for time-lapse rewrites a run with the switch On left half done, which thinning puts
+//              right in a dry run too (the original back, or the leftovers swept: thinning.mjs);
 //   'on'       they convert and delete as the recording settings say.
 // Anything that is not exactly 'on' is a dry run: a typo must never be the thing that arms them.
 //
@@ -91,10 +93,29 @@ function record(job, mode, result, { at, tookMs = null, limit = null, error = nu
   }
 }
 
+/**
+ * A job not run because the switch is Off. Time-lapse rewrites a run with the switch On left half done (the
+ * server stopped, or the share hung) are put right by the next run on Dry run or On (thinning.mjs); with Off
+ * there is none, and they wait, kept from every deletion (thin_inflight). Nothing said so (review of p3-thin,
+ * 2026-09-29): now the time-lapse line and the log do. One small read of the index, on the main thread.
+ */
+function offRecord(job, index, at) {
+  const r = record(job, 'off', null, { at })
+  let n = 0
+  try {
+    if (job === 'thinning' && typeof index?.thinInflight === 'function') n = index.thinInflight().length
+  } catch {}
+  if (n) {
+    r.warnings = [`${plural(n, 'time-lapse rewrite was', 'time-lapse rewrites were')} left half done (the server stopped, or the share hung): ${n === 1 ? 'it is' : 'they are'} put right by the first run with the switch on Dry run or On; until then nothing deletes ${n === 1 ? 'that file' : 'those files'}`]
+    r.warningCount = 1
+  }
+  return r
+}
+
 /** The log line for one run: "[thinning] dry run, nothing touched: would convert 1,240 files, ..." */
 export function summaryLine(r) {
   const tag = `[${r.job}]`
-  if (r.mode === 'off') return `${tag} switched off (Settings > Storage): not run`
+  if (r.mode === 'off') return `${tag} switched off (Settings > Storage): not run${r.warnings?.length ? `; ${r.warnings[0]}` : ''}`
   const how = r.dryRun ? 'dry run, nothing touched' : 'on'
   if (r.error) return `${tag} ${how}: did not run: ${r.error}`
   const extra = [r.skipped ? `${n(r.skipped)} skipped` : '', r.warningCount ? `${plural(r.warningCount, 'warning', 'warnings')} (above)` : '', r.unprotected ? 'BOOKMARKS NOT CHECKED' : '']
@@ -125,14 +146,15 @@ export function summaryLine(r) {
 function keep(r, { log, warn }) {
   runs[r.job] = r
   const last = logged[r.job]
-  const key = `${r.mode}|${r.error ?? ''}`
+  // (with Off, the rewrites left half done count too: said at once when they appear or go)
+  const key = `${r.mode}|${r.error ?? ''}${r.mode === 'off' ? `|${r.warnings.join()}` : ''}`
   const changedFootage = r.mode === 'on' && r.segments > 0
   // A clock put back (a server that started a day ahead, then NTP) makes `since` negative: that is
   // due now, or there would be no line until the clock passed the old time again (review 2026-09-29).
   const since = r.at - last.at
   if (!changedFootage && key === last.key && since >= 0 && since < SUMMARY_EVERY_MS) return
   logged[r.job] = { key, at: r.at }
-  ;(r.error || r.unprotected ? warn : log)(summaryLine(r))
+  ;(r.error || r.unprotected || (r.mode === 'off' && r.warningCount) ? warn : log)(summaryLine(r))
 }
 
 /** The switch as it is right now: 'on' | 'off' | 'dry-run'. One that cannot be read is a dry run. */
@@ -169,7 +191,7 @@ export async function runStorageJobs({ mode, index, jobs, args, limit = null, cl
   const out = { log, warn }
   const m = switchNow(mode)
   if (m === 'off') {
-    for (const job of JOBS) keep(record(job, 'off', null, { at: clock() }), out)
+    for (const job of JOBS) keep(offRecord(job, index, clock()), out)
     return
   }
   if (!index) {
@@ -191,7 +213,7 @@ export async function runStorageJobs({ mode, index, jobs, args, limit = null, cl
       sw = switchNow(mode)
     }
     if (sw === 'off') {
-      keep(record(job, 'off', null, { at: clock() }), out)
+      keep(offRecord(job, index, clock()), out)
       continue
     }
     const dryRun = sw !== 'on'

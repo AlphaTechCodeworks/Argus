@@ -83,6 +83,19 @@ for (const odd of [undefined, null, '', 'yes', 'ON', true]) {
   check('off: said in the log, once for each job', r.logs.length === 2 && r.logs.every((l) => /off/.test(l)) && /^\[thinning\]/.test(r.logs[0]) && /^\[retention\]/.test(r.logs[1]), JSON.stringify(r.logs))
 }
 {
+  // Rewrites left half done by a run with the switch On (the server stopped, or the share hung) are put right
+  // by the next run in Dry run or On; with Off none runs, and they wait, kept from every deletion. That is
+  // said, on the page and in the log (review of p3-thin, 2026-09-29: with Off nothing warned).
+  _test.reset()
+  const index = { thinInflight: () => [{ path: '/rec/a', loc: 'L1' }, { path: '/rec/b', loc: 'L1' }] }
+  const r = await run('off', { index })
+  const t = r.runs.thinning
+  check('off with 2 rewrites left half done: nothing runs, and the time-lapse line says they wait for Dry run or On', r.thinning.calls.length === 0 && t.mode === 'off' && t.warnings.some((w) => /2 time-lapse rewrites/.test(w) && /half done/.test(w) && /Dry run or On/.test(w)), JSON.stringify(t))
+  check('... said in the log at once, as a warning', r.warns.some((l) => /^\[thinning\] switched off/.test(l) && /half done/.test(l)), JSON.stringify([r.logs, r.warns]))
+  const again = await run('off', { index: { thinInflight: () => [] } })
+  check('... and not once they are gone', again.runs.thinning.warnings.length === 0, JSON.stringify(again.runs.thinning.warnings))
+}
+{
   _test.reset()
   const r = await run('on', { index: null })
   check('no recordings index: neither job is called', r.thinning.calls.length === 0 && r.retention.calls.length === 0)

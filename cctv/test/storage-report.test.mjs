@@ -348,6 +348,10 @@ check('render: a camera whose days we cannot say gets no colour', renderStorage(
   check('a failed run is red and says why', v6.lines[0].state === 'bad' && /failed: database is locked/.test(v6.lines[0].text), v6.lines[0].text)
   const v7 = view({ mode: 'off', thinning: run({ mode: 'off', segments: null, bytes: null, skipped: null }) })
   check('switched off: says it is not running', /switched off/i.test(v7.lines[0].text) && !/would/.test(v7.lines[0].text), v7.lines[0].text)
+  // rewrites left half done wait for Dry run or On to be put right: said with Off too (review of p3-thin)
+  const halfDone = '2 time-lapse rewrites were left half done (the server stopped, or the share hung): they are put right by the first run with the switch on Dry run or On; until then nothing deletes those files'
+  const v7b = view({ mode: 'off', thinning: run({ mode: 'off', segments: null, bytes: null, skipped: null, warnings: [halfDone], warningCount: 1 }) })
+  check('switched off with rewrites left half done: the warning is shown, in amber', v7b.lines[0].warnings.join() === halfDone && v7b.lines[0].state === 'warn' && /switched off/i.test(v7b.lines[0].text), JSON.stringify(v7b.lines[0]))
   const v8 = view({ thinning: run({ warnings: ['w1', 'w2'], warningCount: 4 }) })
   check('warnings listed, with how many more there were', v8.lines[0].warnings.join('|') === 'w1|w2|and 2 more (the server log has them all)' && v8.lines[0].state === 'warn', JSON.stringify(v8.lines[0]))
   const v9 = view({ thinning: run({ protection: 'none', segments: 3, bytes: 1e9, unprotected: true }) })

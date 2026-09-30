@@ -215,7 +215,8 @@ function when(ms, now) {
 function runLine(job, r, now) {
   const label = job === 'thinning' ? 'Time-lapse' : 'Retention'
   if (!r) return { job, label, text: 'not run yet since the server started (it runs every 5 minutes while the server records)', state: '', warnings: [] }
-  if (r.mode === 'off') return { job, label, text: `Switched off: not run (checked ${when(r.at, now)})`, state: '', warnings: [] }
+  // (with Off: rewrites left half done wait for Dry run or On to be put right, storage-jobs.mjs offRecord)
+  if (r.mode === 'off') return { job, label, text: `Switched off: not run (checked ${when(r.at, now)})`, state: r.warnings?.length ? 'warn' : '', warnings: [...(r.warnings ?? [])] }
   const head = `Last run ${when(r.at, now)}${r.dryRun ? ' (dry run)' : ''}`
   // the job's own warnings go with it: for unreadable bookmarks they hold the reason
   if (r.error) return { job, label, text: `${head} failed: ${r.error}`, state: 'bad', warnings: [...(r.warnings ?? [])] }
