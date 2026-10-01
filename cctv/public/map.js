@@ -1,5 +1,8 @@
-// Camera map: where each camera is and what it covers, per site, on an uploaded site
-// plan or a street/satellite map. Click a camera for live video; admins place and aim them.
+// Camera map: every camera of every site on one street/satellite map, where it is and what it
+// covers, with a row of site buttons to move between the sites on it. Zoomed out a site is one
+// badge; zoomed in, its cameras. A site that has a plan image (a floor plan, a yard layout) opens
+// it as its close-up. Click a camera for live video; admins place the sites and aim the cameras.
+// What the page works out before it draws is in map-model.js and map-cameras.js.
 //
 // Map engine: world coordinates are image pixels for a plan, or Web Mercator units
 // (the whole world is 256 wide, like one zoom-0 tile) for street/satellite maps.
@@ -26,6 +29,22 @@ import {
   xToLng,
   yToLat
 } from './map-cameras.js'
+import {
+  PLACE_ZOOM,
+  allView,
+  badgeLabel,
+  badgeTitle,
+  collapsedSites,
+  mergeGeo,
+  parseLatLng,
+  ringPlacements,
+  saveBody,
+  siteBadges,
+  siteList,
+  sitePosition,
+  siteView,
+  visibleMarkers
+} from './map-model.js'
 
 const $ = (id) => document.getElementById(id)
 const LAYERS = {
@@ -446,7 +465,8 @@ class MapView {
 // ---- page -------------------------------------------------------------------
 
 const view = new MapView($('map'))
-const siteSelect = $('site')
+const sitesRow = $('sites')
+const satBox = $('sat')
 const namesBox = $('names')
 const editBtn = $('edit')
 const linksBtn = $('links')
@@ -462,12 +482,18 @@ let cameras = [] // /api/cameras: { nvr, site, nvrName, ch, name, online, config
 // until then rather than assumed to be well.
 let states = {}
 let maps = { sites: {} } // /api/maps
-let site = ''
+let siteNames = [] // every site in the roster, in name order
+let site = '' // the site chosen in the row along the top; '' is "All sites"
+let planSite = null // the site whose plan is open as its close-up; null while the one map is showing
+let layer = 'street' // the one map's background, a choice kept in this browser
+let geoBefore = null // where the one map was when a plan was opened, to come back to
 let editing = false
-let draft = null // the site's map being edited
-let dirty = false
+let drafts = null // every site's map while editing; a save sends only the ones changed
+const dirtySites = new Set()
 let selected = null // camera key
 let placing = null // camera key waiting for a click on the map
+let placingSite = false // the chosen site is waiting for a click on the map to say where it is
+let merged = null // the one map built from every site's placements (oneMap), until something changes
 let popup = null // { key, tile }
 // Which camera adjoins which (camera-links.mjs). Drawn on the map rather than edited in a list of
 // dropdowns because the spatial relationship is the whole idea: you can see that the yard camera
@@ -479,13 +505,42 @@ let newOneWay = false // a one-way door or a stairwell: the link leads only one 
 
 const camKey = (c) => `${c.nvr}/${c.ch}`
 const enc = encodeURIComponent
-const siteCams = () => cameras.filter((c) => c.site === site).sort((a, b) => a.nvrName.localeCompare(b.nvrName) || a.ch - b.ch)
+/** The site the camera list is about: the plan that is open, else the one chosen in the row. */
+const listSite = () => planSite ?? site
+const siteCams = (name = listSite()) => cameras.filter((c) => c.site === name && c.configured !== false).sort((a, b) => a.nvrName.localeCompare(b.nvrName) || a.ch - b.ch)
 const camByKey = (key) => cameras.find((c) => camKey(c) === key)
 const camLabel = (cam, key) => (cam ? `${cam.ch + 1} · ${cam.name}` : `Unknown camera (${key})`)
-/** The map shown: the draft while editing. */
-const current = () => (editing ? draft : maps.sites[site]) ?? null
+/** Every site's map as it stands: the drafts while editing. */
+const source = () => (editing ? drafts : maps.sites)
+/**
+ * The one map: every site's street-map placements as a single map, with the sites and their
+ * badges. Worked out once and kept until something it is made from changes (changed(), a save, the
+ * 30-second poll), because the draw path asks for it on every frame of a pan or a flight.
+ */
+function oneMap() {
+  if (!merged) {
+    const all = { sites: source() }
+    const sites = siteList({ cameras, maps: all })
+    merged = { ...mergeGeo(all.sites, siteNames), sites, badges: siteBadges({ sites, maps: all, states }) }
+  }
+  return merged
+}
+const stale = () => {
+  merged = null
+}
+/** A site's plan as a map of its own, sharing the stored placements. Null when it has no plan. */
+const planOf = (name) => {
+  const s = source()[name]
+  return s?.plan?.file ? { mode: 'plan', plan: s.plan } : null
+}
+/** The map shown: the open plan, else the one map. */
+const current = () => (planSite ? planOf(planSite) : oneMap().map)
 /** Camera placements of a map in its current mode. */
 const placed = (m = current()) => (m?.[m.mode]?.cams ?? {})
+/** The site a camera's placement belongs to. */
+const siteOfKey = (key) => planSite ?? oneMap().siteOf[key] ?? camByKey(key)?.site ?? null
+const siteInfo = (name) => oneMap().sites.find((s) => s.name === name) ?? null
+const badgeOf = (name) => oneMap().badges.find((b) => b.name === name) ?? null
 
 function el(tag, props = {}, ...children) {
   const node = document.createElement(tag)
@@ -639,11 +694,64 @@ function clusterNode(cluster) {
   return g
 }
 
+/**
+ * A whole site as one badge: its name and camera count, a dot in its worst camera's colour, and
+ * the offline count in the alert colour. SVG has no box that grows with its text, so the pill's
+ * width is reckoned from the length of the words; a few pixels out either way does not show.
+ */
+function badgeNode(b) {
+  const text = badgeLabel(b)
+  const off = b.offline ? ` · ${b.offline} offline` : ''
+  const w = Math.round((text.length + off.length) * 6.6) + 34
+  const g = svgEl('g', { class: `site-badge st-${b.state}`, 'data-site': b.name, transform: `translate(${b.sx.toFixed(1)} ${b.sy.toFixed(1)})` })
+  const title = svgEl('title')
+  title.textContent = badgeTitle(b)
+  const label = svgEl('text', { x: -w / 2 + 24, class: 'site-badge-text' })
+  label.textContent = text
+  if (off) {
+    const span = svgEl('tspan', { class: 'site-badge-off' })
+    span.textContent = off
+    label.append(span)
+  }
+  g.append(title, svgEl('rect', { x: -w / 2, y: -13, width: w, height: 26, rx: 13, class: 'site-badge-pill' }), svgEl('circle', { cx: -w / 2 + 13, cy: 0, r: 5, class: 'site-badge-dot' }), label)
+  return g
+}
+
+/** While placing sites: a pin where each one is, so its position can be seen and corrected. */
+function sitePinNode(name, pos) {
+  const [x, y] = view.toScreen(lngToX(pos.lng), latToY(clamp(pos.lat, -MAX_LAT, MAX_LAT)))
+  const g = svgEl('g', { class: `site-pin${name === site ? ' sel' : ''}`, transform: `translate(${x.toFixed(1)} ${y.toFixed(1)})` })
+  const label = svgEl('text', { y: -16, class: 'site-pin-name' })
+  label.textContent = name
+  g.append(svgEl('path', { d: 'M 0 -9 L 9 0 L 0 9 L -9 0 Z', class: 'site-pin-mark' }), label)
+  return g
+}
+
+/**
+ * The one map's markers at this zoom: the cameras of the sites that are open, and a badge for
+ * each site that is not. A plan shows every camera on it, as it always has.
+ */
+function scene() {
+  const all = currentMarkers()
+  if (planSite || !view.mode) return { markers: all, badges: [] }
+  const { siteOf, badges } = oneMap()
+  // the site of the camera being watched or worked on stays open under the person's hands
+  const open = [selected, popup?.key].filter(Boolean).map((k) => siteOf[k])
+  const shut = collapsedSites(badges, view.zoom, { open, editing: editing || linkMode })
+  return {
+    markers: visibleMarkers(all, siteOf, shut),
+    badges: badges.filter((b) => shut.has(b.name)).map((b) => {
+      const [sx, sy] = view.toScreen(b.x, b.y)
+      return { ...b, sx, sy }
+    })
+  }
+}
+
 view.onDraw = () => {
   const m = current()
   const cones = svgEl('g')
   const marks = svgEl('g')
-  const markers = currentMarkers()
+  const { markers, badges } = scene()
   if (m && view.mode) {
     const showNames = namesBox.checked
     // While editing, every camera stays its own marker: an admin is moving and aiming individual
@@ -669,6 +777,10 @@ view.onDraw = () => {
       }
     }
     for (const cluster of clusters) if (cluster.count > 1) marks.append(clusterNode(cluster))
+    for (const b of badges) marks.append(badgeNode(b))
+    if (editing && !planSite) {
+      for (const s of oneMap().sites) if (s.placed) marks.append(sitePinNode(s.name, s.position))
+    }
   }
   // links above the cones (they say where a person goes, not what a camera sees) but below the marks
   view.svg.replaceChildren(cones, linkLayer(current()), marks)
@@ -677,9 +789,9 @@ view.onDraw = () => {
 // ---- interaction ----
 
 view.hitTest = (e, start) => {
-  if (!editing || placing) return null
+  if (!editing || placing || placingSite) return null
   const handle = e.target.closest?.('[data-handle]')
-  if (handle && selected && placed(draft)[selected]) return dragHandle(handle.dataset.handle)
+  if (handle && selected && placed()[selected]) return dragHandle(handle.dataset.handle)
   const mark = e.target.closest?.('.cam')
   if (mark?.dataset.key) {
     select(mark.dataset.key)
@@ -689,8 +801,19 @@ view.hitTest = (e, start) => {
 }
 
 view.onClick = (p, target) => {
+  if (placingSite) {
+    const [wx, wy] = view.toWorld(p.x, p.y)
+    setSitePosition(site, clamp(yToLat(clamp(wy, 0, TILE)), -MAX_LAT, MAX_LAT), clamp(xToLng(wx), -180, 180))
+    return
+  }
   if (placing) {
     placeAt(placing, p)
+    return
+  }
+  const badge = target?.closest?.('.site-badge')
+  if (badge) {
+    // a badge is its site seen from far away: clicking it goes there, as its button in the row does
+    goSite(badge.dataset.site)
     return
   }
   const pile = target?.closest?.('.cluster')
@@ -720,7 +843,7 @@ function clickedInLinkMode(key) {
 }
 
 function dragCamera(key, start) {
-  const m = draft
+  const m = current()
   const c = placed(m)[key]
   const w = camWorld(m, c)
   const s = view.toScreen(w.x, w.y)
@@ -729,7 +852,7 @@ function dragCamera(key, start) {
     move: (q) => {
       const [wx, wy] = view.toWorld(q.x + offset.x, q.y + offset.y)
       setCamPos(m, c, wx, wy)
-      changed()
+      changed(siteOfKey(key))
       view.requestRender()
     },
     end: () => renderSide()
@@ -737,7 +860,7 @@ function dragCamera(key, start) {
 }
 
 function dragHandle(kind) {
-  const m = draft
+  const m = current()
   const c = placed(m)[selected]
   return {
     move: (q) => {
@@ -757,7 +880,7 @@ function dragHandle(kind) {
         const off = Math.abs(((angle - c.dir + 540) % 360) - 180)
         c.fov = clamp(Math.round(off * 2), 5, 360)
       }
-      changed()
+      changed(siteOfKey(selected))
       syncInputs()
       view.requestRender()
     },
@@ -768,17 +891,71 @@ function dragHandle(kind) {
 function placeAt(key, p) {
   placing = null
   view.el.classList.remove('placing')
-  const m = draft
-  if (!m || !m[m.mode]) return
+  const m = current()
+  if (!editing || !m) return
   const [wx, wy] = view.toWorld(p.x, p.y)
   const c = { dir: 0, fov: 90, range: m.mode === 'geo' ? 25 : Math.round(Math.min(m.plan.w, m.plan.h) * 0.12) }
   setCamPos(m, c, wx, wy)
-  m[m.mode].cams ??= {}
-  m[m.mode].cams[key] = c
+  const name = planSite ?? camByKey(key)?.site
+  if (!name) return
+  if (planSite) {
+    m.plan.cams ??= {}
+    m.plan.cams[key] = c
+  } else {
+    // a camera dropped on the map before its site was placed puts the site there too
+    const g = geoDraft(name, c.lat, c.lng)
+    g.cams[key] = c
+  }
   selected = key
-  changed()
+  changed(name)
+  renderSites()
   renderSide()
   view.requestRender()
+}
+
+/** A site's geo block in the drafts, made at the given position if the site had none. */
+function geoDraft(name, lat, lng) {
+  const d = (drafts[name] ??= {})
+  if (!sitePosition(d)) d.geo = { ...d.geo, lat, lng, zoom: PLACE_ZOOM, layer }
+  d.geo.cams ??= {}
+  return d.geo
+}
+
+/** A site's cameras that are not on the one map yet. */
+const unplacedKeys = (name) => {
+  const on = source()[name]?.geo?.cams ?? {}
+  return siteCams(name).map(camKey).filter((k) => !on[k])
+}
+
+/** Drops a site's unplaced cameras in a ring around its position, to be dragged to their spots. */
+function dropRing(name) {
+  const pos = sitePosition(drafts[name])
+  const keys = unplacedKeys(name)
+  if (!pos || !keys.length) return 0
+  Object.assign(geoDraft(name, pos.lat, pos.lng).cams, ringPlacements(pos, keys))
+  changed(name)
+  return keys.length
+}
+
+/**
+ * Says where a site is. The first time, its cameras come with it, in a ring around the spot, so
+ * placing a site is one click and then dragging; after that, moving the site's position leaves
+ * its cameras where they were put.
+ */
+function setSitePosition(name, lat, lng) {
+  placingSite = false
+  view.el.classList.remove('placing')
+  if (!editing || !name) return
+  const first = !sitePosition(drafts[name])
+  const g = geoDraft(name, lat, lng)
+  g.lat = lat
+  g.lng = lng
+  changed(name)
+  const dropped = first ? dropRing(name) : 0
+  renderSites()
+  renderSide()
+  setStatus(dropped ? `${name} placed, with ${dropped} camera${dropped === 1 ? '' : 's'} in a ring around it. Drag each to where it is, then Save.` : `${name} ${first ? 'placed' : 'moved'}. Unsaved changes`)
+  flyToSite(name)
 }
 
 function select(key) {
@@ -788,8 +965,10 @@ function select(key) {
   view.requestRender()
 }
 
-function changed() {
-  dirty = true
+/** Something in a site's map was edited: that site is saved, and the one map is worked out again. */
+function changed(name) {
+  if (name) dirtySites.add(name)
+  stale()
   setStatus('Unsaved changes')
 }
 
@@ -859,42 +1038,158 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) hiddenTimer = setTimeout(closeLive, 3000)
 })
 
-// ---- showing a site ----
+// ---- the one map, the sites on it, and a site's plan ----
 
 function showEmpty(...content) {
   emptyEl.replaceChildren(...content)
   emptyEl.hidden = false
 }
 
-/** Sets up the background for the current map. keepView: don't move the view (same background). */
+/**
+ * Sets up the background: the open plan, else the street/satellite map every site shares.
+ * keepView: don't move the view (same background).
+ */
 function applyView(keepView = false) {
-  const m = current()
   emptyEl.hidden = true
-  if (!m || (m.mode === 'plan' && !m.plan?.file)) {
-    view.clear()
-    if (editing) {
-      showEmpty(
-        el('p', { textContent: 'Upload a site plan (a floor plan, yard layout or aerial photo), or choose Street map or Satellite in the panel.' }),
-        uploadButton()
-      )
-    } else {
-      const create = isAdmin ? el('button', { type: 'button', className: 'st-primary', textContent: 'Create a map', onclick: startEdit }) : null
-      showEmpty(el('p', { textContent: site ? `No map for ${site} yet.` : 'No cameras yet.' }), create)
-    }
+  const plan = planSite && planOf(planSite)
+  if (plan) {
+    view.setPlan(`/api/maps/plan/${plan.plan.file}`, plan.plan.w, plan.plan.h, keepView)
+    view.requestRender()
     return
   }
-  if (m.mode === 'plan') view.setPlan(`/api/maps/plan/${m.plan.file}`, m.plan.w, m.plan.h, keepView)
-  else view.setGeo(m.geo ?? DEFAULT_GEO, keepView)
+  planSite = null
+  view.setGeo({ ...DEFAULT_GEO, layer }, keepView)
+  if (!editing && !oneMap().badges.length) {
+    showEmpty(
+      el('p', { textContent: siteNames.length ? 'No site is on the map yet.' : 'No cameras yet.' }),
+      isAdmin && siteNames.length ? el('p', { textContent: 'Choose a site in the row above and press “Place this site”.' }) : null
+    )
+  }
   view.requestRender()
 }
 
-/** Zooms to every placed camera (street/satellite), or the whole plan. */
+const here = () => ({ cx: view.cx, cy: view.cy, zoom: view.zoom })
+
+/** Where the one map should be to show a site, or every site for ''. Null when nothing is placed. */
+function siteTarget(name) {
+  const all = { sites: source() }
+  return name ? siteView(badgeOf(name), all.sites[name], view.size()) : allView(oneMap().badges, all, view.size())
+}
+
+/**
+ * Travels to a site (or to everything) rather than jumping there: flyTo pulls back far enough to
+ * show where the new place is on the way, and lands at once for a person who has asked for no
+ * animation. False when the site has no place to go to.
+ */
+function flyToSite(name, ms) {
+  const to = siteTarget(name)
+  if (to) view.flyTo(to, ms)
+  return Boolean(to)
+}
+
+/** Back from a site's plan to the one map, where it was left. */
+function leavePlan() {
+  if (!planSite) return
+  planSite = null
+  applyView(false)
+  if (geoBefore) Object.assign(view, geoBefore)
+  geoBefore = null
+}
+
+/** A site button, a badge, or "All sites" (''): choose it and fly there on the one map. */
+function goSite(name) {
+  site = siteNames.includes(name) ? name : ''
+  try { localStorage.setItem('cctv.mapSite', site) } catch {}
+  selected = null
+  placing = null
+  placingSite = false
+  view.el.classList.remove('placing')
+  closeLive()
+  leavePlan()
+  renderSites()
+  renderSide()
+  flyToSite(site)
+  view.requestRender()
+}
+
+/** A site's plan as its close-up. The one map is left where it was, to come back to. */
+function openPlan(name) {
+  if (!planOf(name)) return
+  view.cancelFly()
+  if (!planSite) geoBefore = here()
+  site = name
+  planSite = name
+  selected = null
+  placing = null
+  placingSite = false
+  view.el.classList.remove('placing')
+  closeLive()
+  applyView(false)
+  renderSites()
+  renderSide()
+}
+
+/** "Place this site": into Edit mode with that site chosen, waiting for a click on the map. */
+function startPlaceSite(name) {
+  if (!isAdmin) return
+  if (!editing) startEdit()
+  goSite(name)
+  placingSite = true
+  view.el.classList.add('placing')
+  renderSide()
+  setStatus(`Click the map where ${name} is, or type its coordinates.`)
+}
+
+/**
+ * The row of site buttons along the top: "All sites", then one per site with its camera count
+ * and, in the alert colour, how many are offline. A site with a plan has a Plan button beside it;
+ * one that is not on the map yet says so and, for an admin, offers to place it. Real buttons, so
+ * the row is reachable and usable from the keyboard; it is redrawn whole when anything in it
+ * changes, and the focus is put back on the button it was on.
+ */
+function renderSites() {
+  const focused = sitesRow.contains(document.activeElement) ? document.activeElement.dataset.fid : null
+  const btn = (fid, props, ...children) => el('button', { type: 'button', 'data-fid': fid, ...props }, ...children)
+  const parts = []
+  if (planSite) {
+    const back = btn('back', { className: 'map-site-back', textContent: '← Map', title: 'Back to the map of every site' })
+    back.addEventListener('click', () => goSite(site))
+    parts.push(back)
+  }
+  const all = btn('all', { className: 'map-site-go', textContent: 'All sites', 'aria-pressed': String(!planSite && !site) })
+  all.addEventListener('click', () => goSite(''))
+  parts.push(el('span', { className: `map-site${!planSite && !site ? ' sel' : ''}` }, all))
+  for (const s of oneMap().sites) {
+    const offline = s.keys.filter((k) => stateFor(k) === 'offline').length
+    // said in full for a screen reader: read as written, "37" and "4 offline" run together as 374
+    const spoken = `${s.name}, ${s.count} camera${s.count === 1 ? '' : 's'}${offline ? `, ${offline} offline` : ''}${s.placed ? '' : ', not placed on the map'}`
+    const go = btn(`go:${s.name}`, { className: 'map-site-go', 'aria-label': spoken, 'aria-pressed': String(!planSite && site === s.name) },
+      `${s.name} · ${s.count}`,
+      offline ? el('span', { className: 'map-site-off', textContent: `${offline} offline` }) : null,
+      s.placed ? null : el('span', { className: 'map-site-hint', textContent: 'not placed' }))
+    go.addEventListener('click', () => goSite(s.name))
+    const group = el('span', { className: `map-site${site === s.name ? ' sel' : ''}`, role: 'group', 'aria-label': s.name }, go)
+    if (s.hasPlan) {
+      const plan = btn(`plan:${s.name}`, { className: 'map-site-plan', textContent: 'Plan', title: `The plan of ${s.name}`, 'aria-pressed': String(planSite === s.name) })
+      plan.addEventListener('click', () => (planSite === s.name ? goSite(s.name) : openPlan(s.name)))
+      group.append(plan)
+    }
+    if (!s.placed && isAdmin) {
+      const place = btn(`place:${s.name}`, { className: 'map-site-place', textContent: 'Place this site' })
+      place.addEventListener('click', () => startPlaceSite(s.name))
+      group.append(place)
+    }
+    parts.push(group)
+  }
+  sitesRow.replaceChildren(...parts)
+  if (focused) [...sitesRow.querySelectorAll('button')].find((b) => b.dataset.fid === focused)?.focus()
+}
+
+/** Zooms to the chosen site's cameras, or every site's; in a plan, to the whole plan. */
 function fitAll() {
-  const m = current()
-  if (!m || !view.mode) return
-  if (m.mode === 'plan') return view.fit()
-  const box = boundsOf(m)
-  if (box) view.fit(box)
+  if (!view.mode) return
+  if (planSite) return view.fit()
+  if (!flyToSite(site, 600)) flyToSite('', 600)
 }
 
 /**
@@ -921,6 +1216,19 @@ function centreOnCamera(key) {
   view.centreOn(w.x, w.y)
 }
 
+/**
+ * Brings a camera from the list into view. On the one map that may be a long way off and far
+ * closer in than the map is now, so it is flown to; on a plan it is only ever a short slide.
+ */
+function showCamera(key) {
+  const m = current()
+  const c = placed(m)[key]
+  if (!c) return
+  if (planSite) return centreOnCamera(key)
+  const w = camWorld(m, c)
+  view.flyTo({ cx: w.x, cy: w.y, zoom: Math.max(view.zoom, PLACE_ZOOM) }, 700)
+}
+
 // ---- side panel ----
 
 function renderSide() {
@@ -938,45 +1246,63 @@ function camRow(cam, key, extra, opts = {}) {
 }
 
 function viewPanel() {
-  const m = current()
-  const where = placed(m)
+  const name = listSite()
+  const info = name ? siteInfo(name) : null
+  const where = placed()
   const list = el('ul', { className: 'map-cams' })
-  for (const cam of siteCams()) {
-    const key = camKey(cam)
-    if (where[key]) {
-      const btn = el('button', { type: 'button', className: 'st-link', textContent: 'Show' })
-      const li = camRow(cam, key, btn, { placed: true })
-      const show = () => {
-        centreOnCamera(key)
-        openLive(key)
-        renderSide()
+  const names = name ? [name] : siteNames
+  let on = 0
+  let total = 0
+  for (const n of names) {
+    // every site at once: each under its own name, so the list reads the way the map does
+    if (names.length > 1) list.append(el('li', { className: 'map-cams-site', textContent: n }))
+    for (const cam of siteCams(n)) {
+      const key = camKey(cam)
+      total++
+      if (where[key]) {
+        on++
+        const btn = el('button', { type: 'button', className: 'st-link', textContent: 'Show' })
+        const li = camRow(cam, key, btn, { placed: true })
+        const show = () => {
+          showCamera(key)
+          openLive(key)
+          renderSide()
+        }
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation()
+          show()
+        })
+        li.addEventListener('click', show)
+        list.append(li)
+      } else {
+        list.append(camRow(cam, key, el('span', { className: 'map-note', textContent: planSite ? 'not on plan' : 'not on map' })))
       }
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation()
-        show()
-      })
-      li.addEventListener('click', show)
-      list.append(li)
-    } else {
-      list.append(camRow(cam, key, el('span', { className: 'map-note', textContent: 'not on map' })))
     }
   }
-  const count = Object.keys(where).filter((k) => camByKey(k)?.site === site).length
-  return [
-    el('h2', { textContent: 'Cameras' }),
-    el('p', { className: 'map-help', textContent: m ? `${count} of ${siteCams().length} on the map. Click a camera for live video.` : 'This site has no map yet.' }),
-    legend(),
-    list
-  ]
+  const parts = [el('h2', { textContent: planSite ? `${planSite}: plan` : name || 'All sites' })]
+  if (info && !info.placed && !planSite) {
+    // a site nobody has put on the map: say so, and say what can be done about it
+    parts.push(el('p', { className: 'map-help', textContent: `${name} is not placed on the map yet.${info.hasPlan ? ' Its plan is still here: press Plan.' : ''}` }))
+    const acts = el('div', { className: 'map-actions' })
+    if (info.hasPlan) acts.append(el('button', { type: 'button', textContent: 'Plan', onclick: () => openPlan(name) }))
+    if (isAdmin) acts.append(el('button', { type: 'button', className: 'st-primary', textContent: 'Place this site', onclick: () => startPlaceSite(name) }))
+    if (acts.childElementCount) parts.push(acts)
+  } else {
+    parts.push(el('p', { className: 'map-help', textContent: `${on} of ${total} on the ${planSite ? 'plan' : 'map'}. Click a camera for live video.` }))
+  }
+  parts.push(legend(), list)
+  return parts
 }
 
 /**
- * What the colours mean, with the number of this site's markers in each. A colour nobody can read
- * is worse than no colour, and the count is the quickest answer to "is anything wrong here".
- * States with nothing in them are left out, so the usual case is two short lines, not five.
+ * What the colours mean, with the number of markers in each: the chosen site's, or every site's.
+ * A colour nobody can read is worse than no colour, and the count is the quickest answer to "is
+ * anything wrong here". States with nothing in them are left out, so the usual case is two short
+ * lines, not five.
  */
 function legend() {
-  const counts = stateCounts(currentMarkers())
+  const mine = planSite || !site ? currentMarkers() : currentMarkers().filter((m) => oneMap().siteOf[m.key] === site)
+  const counts = stateCounts(mine)
   const ul = el('ul', { className: 'map-legend' })
   for (const [state, meta] of Object.entries(STATES)) {
     if (!counts[state]) continue
@@ -989,104 +1315,141 @@ function legend() {
 function uploadButton() {
   const input = el('input', { type: 'file', accept: 'image/*', hidden: true })
   input.addEventListener('change', () => input.files[0] && uploadPlan(input.files[0]))
-  const btn = el('button', { type: 'button', textContent: draft?.plan?.file ? 'Replace plan image…' : 'Upload plan image…' })
+  const btn = el('button', { type: 'button', textContent: drafts?.[listSite()]?.plan?.file ? 'Replace plan image…' : 'Upload plan image…' })
   btn.addEventListener('click', () => input.click())
   return el('span', {}, btn, input)
 }
 
+/** Where the chosen site is on the one map: set by a click on the map or by typing coordinates. */
+function sitePanel(name) {
+  const pos = sitePosition(drafts[name])
+  const find = el('input', { type: 'text', placeholder: '42.7070, -71.1631 or a Google Maps link', value: pos ? `${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}` : '', 'aria-label': 'Latitude, longitude' })
+  const set = el('button', { type: 'button', textContent: 'Set' })
+  const setTyped = () => {
+    const at = parseLatLng(find.value)
+    if (!at) {
+      find.setCustomValidity('Enter latitude, longitude')
+      find.reportValidity()
+      return
+    }
+    find.setCustomValidity('')
+    setSitePosition(name, at.lat, at.lng)
+  }
+  set.addEventListener('click', setTyped)
+  find.addEventListener('keydown', (e) => e.key === 'Enter' && setTyped())
+  const pick = el('button', { type: 'button', textContent: placingSite ? 'Click the map… (Esc to stop)' : pos ? 'Move it: click the map' : 'Place it: click the map' })
+  pick.addEventListener('click', () => {
+    placingSite = !placingSite
+    placing = null
+    view.el.classList.toggle('placing', placingSite)
+    renderSide()
+  })
+  const section = el('section', {},
+    el('h2', { textContent: name }),
+    el('p', { className: 'map-help', textContent: pos
+      ? 'Where this site is on the map. Moving it leaves its cameras where they are.'
+      : `${name} is not on the map yet. Say where it is and its cameras are dropped in a ring around it, ready to be dragged to their spots.` }),
+    el('label', {}, 'Latitude, longitude', el('span', { className: 'map-find' }, find, set)),
+    pick)
+  const waiting = unplacedKeys(name).length
+  if (pos && waiting) {
+    const ring = el('button', { type: 'button', textContent: `Drop the ${waiting} unplaced camera${waiting === 1 ? '' : 's'} around it` })
+    ring.addEventListener('click', () => {
+      dropRing(name)
+      renderSide()
+      flyToSite(name, 600)
+    })
+    section.append(ring)
+  }
+  // the plan is the site's close-up: uploaded here, opened from its Plan button in the row
+  section.append(uploadButton())
+  if (drafts[name]?.plan?.file) section.append(el('button', { type: 'button', textContent: 'Open its plan', onclick: () => openPlan(name) }))
+  return section
+}
+
 function editPanel() {
-  const m = draft
-  const bg = el('select', {},
-    el('option', { value: 'plan', textContent: 'Site plan image' }),
-    el('option', { value: 'street', textContent: 'Street map' }),
-    el('option', { value: 'satellite', textContent: 'Satellite' }))
-  bg.value = m.mode === 'geo' ? m.geo?.layer ?? 'street' : 'plan'
-  bg.addEventListener('change', () => setBackground(bg.value))
-
-  const bgSection = el('section', {}, el('h2', { textContent: 'Background' }), el('label', {}, 'Show cameras on', bg))
-  if (m.mode === 'plan') {
-    bgSection.append(uploadButton(), el('p', { className: 'map-help', textContent: 'A floor plan, yard layout or aerial photo (JPEG, PNG or WebP). Large images are scaled down to 4096 px.' }))
+  const name = listSite()
+  const parts = []
+  if (planSite) {
+    parts.push(el('section', {},
+      el('h2', { textContent: `${planSite}: plan` }),
+      uploadButton(),
+      el('p', { className: 'map-help', textContent: 'A floor plan, yard layout or aerial photo (JPEG, PNG or WebP). Large images are scaled down to 4096 px.' })))
+  } else if (name) {
+    parts.push(sitePanel(name))
   } else {
-    const find = el('input', { type: 'text', placeholder: '42.7070, -71.1631 or a Google Maps link' })
-    const go = el('button', { type: 'button', textContent: 'Go' })
-    const goTo = () => {
-      const t = find.value
-      // "lat, lng", or a Google Maps link with @lat,lng
-      const at = /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/.exec(t) ?? /(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/.exec(t)
-      const lat = at && Number(at[1])
-      const lng = at && Number(at[2])
-      if (!at || Math.abs(lat) > MAX_LAT || Math.abs(lng) > 180) {
-        find.setCustomValidity('Enter latitude, longitude')
-        find.reportValidity()
-        return
+    parts.push(el('section', {},
+      el('h2', { textContent: 'Place the sites' }),
+      el('p', { className: 'map-help', textContent: 'Choose a site in the row above to say where it is and to place its cameras. Cameras already on the map can be dragged and aimed from here.' })))
+  }
+
+  const where = placed()
+  if (name) {
+    // cameras: this site's, plus placements whose camera no longer exists
+    const mine = planSite ? where : drafts[name]?.geo?.cams ?? {}
+    const list = el('ul', { className: 'map-cams' })
+    const keys = new Set(siteCams(name).map(camKey))
+    for (const k of Object.keys(mine)) if (!keys.has(k) && !camByKey(k)) keys.add(k)
+    for (const key of keys) {
+      const cam = camByKey(key)
+      if (mine[key]) {
+        const remove = el('button', { type: 'button', className: 'st-link st-danger', textContent: 'Remove' })
+        remove.addEventListener('click', (e) => {
+          e.stopPropagation()
+          removePlacement(key)
+        })
+        const li = camRow(cam, key, remove, { placed: true })
+        li.addEventListener('click', () => {
+          select(key)
+          centreOnCamera(key)
+        })
+        list.append(li)
+      } else if (cam) {
+        const place = el('button', { type: 'button', className: 'st-link', textContent: placing === key ? 'Click the map…' : 'Place' })
+        place.addEventListener('click', () => {
+          placing = placing === key ? null : key
+          placingSite = false
+          view.el.classList.toggle('placing', Boolean(placing))
+          renderSide()
+        })
+        const li = camRow(cam, key, place)
+        li.draggable = true
+        li.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('text/x-cctv-cam', key)
+          e.dataTransfer.effectAllowed = 'copy'
+        })
+        list.append(li)
       }
-      find.setCustomValidity('')
-      view.setGeo({ layer: m.geo.layer, lat, lng, zoom: 18 })
-      changed()
     }
-    go.addEventListener('click', goTo)
-    find.addEventListener('keydown', (e) => e.key === 'Enter' && goTo())
-    bgSection.append(
-      el('label', {}, 'Find the site', el('span', { className: 'map-find' }, find, go)),
-      el('p', { className: 'map-help', textContent: 'Or pan and zoom to it. The view you leave is saved with the map.' })
-    )
+    parts.push(el('section', {},
+      el('h2', { textContent: 'Cameras' }),
+      el('p', { className: 'map-help', textContent: 'Drag a camera onto the map, or click Place and then click the map.' }),
+      list))
   }
 
-  // cameras: this site's, plus placements whose camera no longer exists
-  const where = placed(m)
-  const list = el('ul', { className: 'map-cams' })
-  const keys = new Set(siteCams().map(camKey))
-  for (const k of Object.keys(where)) if (!keys.has(k) && !camByKey(k)) keys.add(k)
-  for (const key of keys) {
-    const cam = camByKey(key)
-    if (where[key]) {
-      const remove = el('button', { type: 'button', className: 'st-link st-danger', textContent: 'Remove' })
-      remove.addEventListener('click', (e) => {
-        e.stopPropagation()
-        delete where[key]
-        if (selected === key) selected = null
-        changed()
-        renderSide()
-        view.requestRender()
-      })
-      const li = camRow(cam, key, remove, { placed: true })
-      li.addEventListener('click', () => {
-        select(key)
-        centreOnCamera(key)
-      })
-      list.append(li)
-    } else if (cam) {
-      const place = el('button', { type: 'button', className: 'st-link', textContent: placing === key ? 'Click the map…' : 'Place' })
-      place.addEventListener('click', () => {
-        placing = placing === key ? null : key
-        view.el.classList.toggle('placing', Boolean(placing))
-        renderSide()
-      })
-      const li = camRow(cam, key, place)
-      li.draggable = true
-      li.addEventListener('dragstart', (e) => {
-        e.dataTransfer.setData('text/x-cctv-cam', key)
-        e.dataTransfer.effectAllowed = 'copy'
-      })
-      list.append(li)
-    }
-  }
-  const camSection = el('section', {},
-    el('h2', { textContent: 'Cameras' }),
-    el('p', { className: 'map-help', textContent: 'Drag a camera onto the map, or click Place and then click the map.' }),
-    list)
-
-  const parts = [bgSection, camSection]
   const c = selected && where[selected]
-  if (c) parts.push(selectedPanel(m, c))
+  if (c) parts.push(selectedPanel(current(), c))
 
-  statusEl = el('p', { className: 'map-help', role: 'status', textContent: dirty ? 'Unsaved changes' : '' })
+  statusEl = el('p', { className: 'map-help', role: 'status', textContent: dirtySites.size ? 'Unsaved changes' : '' })
   const save = el('button', { type: 'button', className: 'st-primary', textContent: 'Save' })
   save.addEventListener('click', saveMap)
   const cancel = el('button', { type: 'button', textContent: 'Cancel' })
   cancel.addEventListener('click', () => stopEdit())
   parts.push(el('div', { className: 'map-actions' }, save, cancel), statusEl)
   return parts
+}
+
+/** Takes a camera off the map being edited (the open plan, or its site's place on the one map). */
+function removePlacement(key) {
+  const name = siteOfKey(key)
+  const cams = planSite ? placed() : drafts[name]?.geo?.cams
+  if (!cams?.[key]) return
+  delete cams[key]
+  if (selected === key) selected = null
+  changed(name)
+  renderSites()
+  renderSide()
+  view.requestRender()
 }
 
 function selectedPanel(m, c) {
@@ -1097,7 +1460,7 @@ function selectedPanel(m, c) {
     input.addEventListener('input', () => {
       c[key] = Number(input.value)
       out.textContent = `${input.value}${unit}`
-      changed()
+      changed(siteOfKey(selected))
       view.requestRender()
     })
     return el('label', {}, el('span', { className: 'map-field' }, label, out), input)
@@ -1107,7 +1470,7 @@ function selectedPanel(m, c) {
     const v = Number(range.value)
     if (v >= 1 && v <= MAX_RANGE[m.mode]) {
       c.range = v
-      changed()
+      changed(siteOfKey(selected))
       view.requestRender()
     }
   })
@@ -1121,7 +1484,7 @@ function selectedPanel(m, c) {
 
 /** Keeps the selected camera's inputs in step while its handles are dragged. */
 function syncInputs() {
-  const c = selected && placed(draft)[selected]
+  const c = selected && placed()[selected]
   if (!c) return
   for (const input of side.querySelectorAll('[data-field]')) input.value = String(Math.round(c[input.dataset.field]))
   for (const out of side.querySelectorAll('[data-out]')) out.textContent = `${Math.round(c[out.dataset.out])}°`
@@ -1260,7 +1623,6 @@ async function startLinks() {
   selected = null
   editBtn.hidden = true
   linksBtn.hidden = true
-  siteSelect.disabled = true
   view.el.classList.add('linking')
   renderSide()
   await loadLinks()
@@ -1272,63 +1634,52 @@ function stopLinks() {
   linkMode = false
   selected = null
   view.el.classList.remove('linking')
-  editBtn.hidden = !isAdmin || !site
-  linksBtn.hidden = !isAdmin || !site
-  siteSelect.disabled = false
+  editBtn.hidden = linksBtn.hidden = !isAdmin
   renderSide()
   view.requestRender()
 }
 
 // ---- editing ----
 
+/**
+ * Edit mode works on a copy of every site's map at once: on the one map an admin moves between
+ * sites while placing them, and each site that was touched is saved through its own route.
+ */
 function startEdit() {
   closeLive()
-  draft = structuredClone(maps.sites[site] ?? { mode: 'plan' })
+  drafts = structuredClone(maps.sites)
   editing = true
-  dirty = false
+  dirtySites.clear()
   selected = null
   placing = null
+  placingSite = false
+  stale()
   editBtn.hidden = true
   linksBtn.hidden = true
-  siteSelect.disabled = true
   applyView(true)
+  renderSites()
   renderSide()
 }
 
 function stopEdit(force = false) {
-  if (!force && dirty && !confirm('Discard the changes to this map?')) return
+  if (!force && dirtySites.size && !confirm('Discard the changes to the map?')) return
   editing = false
-  draft = null
-  dirty = false
+  drafts = null
+  dirtySites.clear()
   selected = null
   placing = null
+  placingSite = false
   view.el.classList.remove('placing')
-  editBtn.hidden = !isAdmin
-  linksBtn.hidden = !isAdmin || !site
-  siteSelect.disabled = false
+  stale()
+  editBtn.hidden = linksBtn.hidden = !isAdmin
   applyView(true)
-  renderSide()
-}
-
-function setBackground(value) {
-  const m = draft
-  selected = null
-  placing = null
-  if (value === 'plan') {
-    m.mode = 'plan'
-  } else {
-    const wasGeo = m.mode === 'geo'
-    m.mode = 'geo'
-    m.geo ??= { ...DEFAULT_GEO, cams: {} }
-    if (wasGeo) Object.assign(m.geo, view.geoView()) // switching street <-> satellite: stay where we are
-    m.geo.layer = value
-  }
-  changed()
-  applyView(false)
+  renderSites()
   renderSide()
 }
 
 async function uploadPlan(file) {
+  const name = listSite()
+  if (!editing || !name) return
   try {
     setStatus('Preparing the image…')
     const bitmap = await createImageBitmap(file)
@@ -1344,50 +1695,65 @@ async function uploadPlan(file) {
     let data = canvas.toDataURL('image/jpeg', 0.85)
     if (data.length > 16_000_000) data = canvas.toDataURL('image/jpeg', 0.6)
     setStatus('Uploading…')
-    const saved = await api('POST', `/api/admin/maps/${enc(site)}/plan`, { data, w, h })
+    const saved = await api('POST', `/api/admin/maps/${enc(name)}/plan`, { data, w, h })
     // the server kept its saved cameras in place on the new image; do the same for unsaved ones
-    const old = draft.plan
+    const d = (drafts[name] ??= {})
+    const old = d.plan
     const cams = {}
     if (old?.cams && old.w && old.h) {
       const sx = w / old.w
       const sy = h / old.h
       for (const [key, c] of Object.entries(old.cams)) cams[key] = { ...c, x: Math.round(c.x * sx), y: Math.round(c.y * sy), range: Math.round(c.range * Math.sqrt(sx * sy)) }
     }
-    maps.sites[site] = saved
-    draft.plan = { ...saved.plan, cams }
-    draft.mode = 'plan'
-    applyView(false)
-    renderSide()
-    changed()
+    maps.sites[name] = saved
+    d.plan = { ...saved.plan, cams }
+    stale()
+    // the new plan is opened, so the cameras can be put on it straight away
+    if (planSite === name) {
+      applyView(false)
+      renderSites()
+      renderSide()
+    } else {
+      openPlan(name)
+    }
+    changed(name)
     setStatus('Plan uploaded. Place the cameras, then Save.')
   } catch (e) {
     setStatus(`Upload failed: ${e.message}`)
   }
 }
 
+/**
+ * Saves each site that was changed, through the same admin route as ever, one site at a time. A
+ * site that fails stops the save and is named; the ones before it are already stored and are not
+ * sent again.
+ */
 async function saveMap() {
-  const m = draft
-  if (m.mode === 'plan' && !m.plan?.file) return setStatus('Upload a site plan first, or choose Street map or Satellite.')
-  if (m.mode === 'geo') Object.assign(m.geo, view.geoView())
-  try {
-    setStatus('Saving…')
-    const body = { mode: m.mode, plan: m.plan ? { cams: m.plan.cams ?? {} } : undefined, geo: m.geo }
-    maps.sites[site] = await api('PUT', `/api/admin/maps/${enc(site)}`, body)
-    stopEdit(true)
-  } catch (e) {
-    setStatus(`Could not save: ${e.message}`)
+  setStatus('Saving…')
+  for (const name of [...dirtySites]) {
+    const body = saveBody(drafts[name], layer)
+    if (body) {
+      try {
+        maps.sites[name] = await api('PUT', `/api/admin/maps/${enc(name)}`, body)
+      } catch (e) {
+        return setStatus(`Could not save ${name}: ${e.message}`)
+      }
+    }
+    dirtySites.delete(name)
   }
+  stopEdit(true)
 }
 
 addEventListener('beforeunload', (e) => {
-  if (editing && dirty) e.preventDefault()
+  if (editing && dirtySites.size) e.preventDefault()
 })
 
 document.addEventListener('keydown', (e) => {
   if (e.target.closest?.('input, select, textarea')) return
   if (e.key === 'Escape') {
-    if (placing) {
+    if (placing || placingSite) {
       placing = null
+      placingSite = false
       view.el.classList.remove('placing')
       renderSide()
     } else if (popup) {
@@ -1398,13 +1764,7 @@ document.addEventListener('keydown', (e) => {
       select(null)
     }
   }
-  if ((e.key === 'Delete' || e.key === 'Backspace') && editing && selected && placed(draft)[selected]) {
-    delete placed(draft)[selected]
-    selected = null
-    changed()
-    renderSide()
-    view.requestRender()
-  }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && editing && selected && placed()[selected]) removePlacement(selected)
   if (e.key === '+' || e.key === '=') view.zoomBy(0.5)
   if (e.key === '-') view.zoomBy(-0.5)
 })
@@ -1423,31 +1783,11 @@ namesBox.addEventListener('change', () => {
   view.requestRender()
 })
 
-siteSelect.addEventListener('change', () => {
-  // Where we are now, so we can travel from it rather than blink to the new site. Only worth it
-  // between two street/satellite maps: flying from a floor plan to a map of the world is
-  // meaningless, because they are not the same space.
-  const from = view.mode === 'geo' ? { cx: view.cx, cy: view.cy, zoom: view.zoom } : null
-
-  site = siteSelect.value
-  selected = null
-  try { localStorage.setItem('cctv.mapSite', site) } catch {}
-  closeLive()
-  applyView(false)
-  renderSide()
-  fitAll()
-
-  // fitAll has put us at the destination; if we can travel there instead, go back and fly
-  if (from && view.mode === 'geo') {
-    const to = { cx: view.cx, cy: view.cy, zoom: view.zoom }
-    const moved = Math.hypot(to.cx - from.cx, to.cy - from.cy) > 1e-9 || Math.abs(to.zoom - from.zoom) > 0.01
-    if (moved) {
-      view.cx = from.cx
-      view.cy = from.cy
-      view.zoom = from.zoom
-      view.flyTo(to)
-    }
-  }
+// street map or satellite pictures: one choice for the whole map, remembered in this browser
+satBox.addEventListener('change', () => {
+  layer = satBox.checked ? 'satellite' : 'street'
+  try { localStorage.setItem('cctv.mapLayer', layer) } catch {}
+  if (!planSite && view.mode === 'geo') view.setGeo({ layer, ...view.geoView() }, true)
 })
 
 $('logout').addEventListener('click', async () => {
@@ -1476,26 +1816,55 @@ async function loadStates() {
   }
 }
 
-;[cameras, maps] = await Promise.all([api('GET', '/api/cameras'), api('GET', '/api/maps'), loadStates()])
-const siteNames = [...new Set(cameras.map((c) => c.site))].sort()
-siteSelect.replaceChildren(...siteNames.map((n) => new Option(n, n)))
-{
-  let saved = ''
-  try { saved = localStorage.getItem('cctv.mapSite') || localStorage.getItem('cctv.site') || '' } catch {}
-  site = siteNames.includes(saved) ? saved : siteNames[0] ?? ''
-  siteSelect.value = site
+/** The roster, and from it the sites in the row: every site that has a real camera. */
+function setCameras(list) {
+  cameras = list
+  siteNames = [...new Set(cameras.filter((c) => c.configured !== false).map((c) => c.site))].sort((a, b) => String(a).localeCompare(String(b)))
+  stale()
 }
-editBtn.hidden = linksBtn.hidden = !isAdmin || !site
+
+{
+  const [roster, stored] = await Promise.all([api('GET', '/api/cameras'), api('GET', '/api/maps'), loadStates()])
+  maps = stored
+  setCameras(roster)
+}
+{
+  let savedSite = ''
+  let savedLayer = ''
+  try {
+    savedSite = localStorage.getItem('cctv.mapSite') ?? ''
+    savedLayer = localStorage.getItem('cctv.mapLayer') ?? ''
+  } catch {}
+  site = siteNames.includes(savedSite) ? savedSite : '' // every site, unless one was chosen last time
+  // the layer chosen in this browser, else the one the first placed site was saved with
+  const first = siteNames.map((n) => maps.sites[n]).find((m) => sitePosition(m))
+  layer = LAYERS[savedLayer] ? savedLayer : first?.geo?.layer === 'satellite' ? 'satellite' : 'street'
+  satBox.checked = layer === 'satellite'
+}
+editBtn.hidden = linksBtn.hidden = !isAdmin
 applyView(false)
+renderSites()
 renderSide()
-requestAnimationFrame(fitAll)
+{
+  // arrive already looking at the chosen site (or every site): no flight on opening the page
+  const land = () => {
+    const { w, h } = view.size()
+    if (!w || !h) return requestAnimationFrame(land)
+    const to = siteTarget(site) ?? siteTarget('')
+    if (to) Object.assign(view, to)
+    view.requestRender()
+  }
+  land()
+}
 
 // camera colours every 30 s: the roster for names and new cameras, the health poll for the states
 setInterval(async () => {
   try {
-    cameras = await api('GET', '/api/cameras')
+    setCameras(await api('GET', '/api/cameras'))
   } catch {}
   await loadStates()
+  stale() // the badges carry the states
   view.requestRender()
+  renderSites()
   if (!editing) renderSide()
 }, 30_000)

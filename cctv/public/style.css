@@ -588,6 +588,23 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 }
 .map-overlay .handle { fill: #fff; stroke: var(--accent); stroke-width: 2; cursor: grab; }
 .map-overlay .handle.edge { fill: var(--accent); stroke: #fff; }
+/* A whole site seen from too far away to tell its cameras apart: one pill with its name and camera
+   count. The dot is the worst state among its cameras, in the markers' own colours, and the
+   offline count is in the alert colour so a site with a camera down is seen from any distance. */
+.map-overlay .site-badge { pointer-events: auto; cursor: pointer; }
+.map-overlay .site-badge-pill { fill: #14181d; fill-opacity: 0.94; stroke: #fff; stroke-width: 1.5; }
+.map-overlay .site-badge:hover .site-badge-pill { stroke: var(--accent); stroke-width: 2.5; }
+.map-overlay .site-badge-text { font: 600 12px system-ui, sans-serif; }
+.map-overlay .site-badge-off { fill: var(--rec-alert); }
+.map-overlay .site-badge-dot { fill: var(--rec-unknown); }
+.map-overlay .site-badge.st-recording .site-badge-dot { fill: var(--rec-ok); }
+.map-overlay .site-badge.st-idle .site-badge-dot { fill: var(--rec-idle); }
+.map-overlay .site-badge.st-alert .site-badge-dot, .map-overlay .site-badge.st-offline .site-badge-dot { fill: var(--rec-alert); }
+.map-overlay .site-badge.st-offline .site-badge-pill { stroke: var(--rec-alert); }
+/* Edit mode: where each site has been placed. Not a handle: a site is moved from the panel. */
+.map-overlay .site-pin-mark { fill: none; stroke: #fff; stroke-width: 2; stroke-dasharray: 4 3; }
+.map-overlay .site-pin.sel .site-pin-mark { stroke: #ffcf87; }
+.map-overlay .site-pin-name { font: 600 11px system-ui, sans-serif; text-anchor: middle; paint-order: stroke; stroke: rgba(0, 0, 0, 0.75); stroke-width: 3px; }
 .map-zoom { position: absolute; top: 8px; right: 8px; display: flex; flex-direction: column; gap: 4px; z-index: 3; }
 .map-zoom button { width: 34px; height: 34px; padding: 0; font-size: 17px; line-height: 1; }
 .map-credit {
@@ -694,6 +711,36 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-selected { padding-top: 10px; border-top: 1px solid var(--border); }
 .map-actions { display: flex; gap: 8px; }
 .map-actions button { flex: 1; padding: 6px 10px; }
+/* The row of sites above the map. One line that scrolls sideways when the sites do not fit, which
+   on a phone is always: wrapping would push the map itself down the page. */
+.map-sites {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: var(--gap) var(--gap) 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+.map-sites:empty { display: none; }
+.map-site { flex: none; display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.map-site.sel { border-color: var(--accent); }
+.map-sites button { flex: none; height: 32px; padding: 0 12px; font-size: 13px; white-space: nowrap; }
+.map-site button { border: 0; border-radius: 0; background: none; }
+.map-site button + button { border-left: 1px solid var(--border); }
+.map-site button:hover { background: var(--surface-2); }
+.map-site button[aria-pressed="true"] { background: var(--accent); color: #fff; font-weight: 600; }
+.map-sites button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.map-site button[aria-pressed="true"]:focus-visible { outline-color: #fff; }
+.map-site-go { display: inline-flex; align-items: center; gap: 8px; }
+.map-site-off { color: var(--rec-alert); font-weight: 600; }
+.map-site button[aria-pressed="true"] .map-site-off { color: #fff; text-decoration: underline; }
+.map-site-hint { color: var(--muted); font-size: 12px; font-style: italic; }
+.map-site button[aria-pressed="true"] .map-site-hint { color: #fff; }
+.map-site-place { color: var(--accent); }
+.map-cams li.map-cams-site { padding: 10px 6px 2px; font-size: 12px; font-weight: 600; color: var(--muted); }
 @media (max-width: 800px) {
   .map-main { flex-direction: column; }
   .map-view { min-height: 55vh; }

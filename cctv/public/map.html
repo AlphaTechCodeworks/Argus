@@ -26,7 +26,7 @@
       <h1>CCTV</h1>
     </div>
     <div class="controls">
-      <label>Site <select id="site"></select></label>
+      <label title="Satellite pictures instead of the street map"><input id="sat" type="checkbox" /> Satellite</label>
       <label title="Show camera names on the map"><input id="names" type="checkbox" checked /> Names</label>
       <button id="edit" type="button" hidden>Edit map</button>
       <button id="links" type="button" hidden title="Say which camera leads to which, so a follow can step from one to the next">Edit links</button>
@@ -38,8 +38,11 @@
     </div>
   </header>
 
+  <!-- every site on the one map: a button each, filled in by map.js; scrolls sideways on a phone -->
+  <nav id="sites" class="map-sites" aria-label="Sites on the map"></nav>
+
   <main class="map-main">
-    <div id="map" class="map-view" tabindex="0" aria-label="Camera map. The camera list beside it has the same cameras.">
+    <div id="map" class="map-view" tabindex="0" aria-label="Map of every site's cameras. The site buttons above and the camera list beside it reach the same sites and cameras.">
       <div class="map-tiles"></div>
       <img class="map-plan" alt="" hidden />
       <svg class="map-overlay" aria-hidden="true"></svg>
