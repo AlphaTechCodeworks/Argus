@@ -620,22 +620,37 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 }
 .map-credit a { color: inherit; }
 .map-credit[hidden] { display: none; }
+/* A notice over the map (nothing placed yet). Only the card is solid and takes the pointer: the
+   map underneath is a live map and must still drag, and the zoom buttons must still press. */
 .map-empty {
   position: absolute;
   inset: 0;
   z-index: 3;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
   padding: 24px;
-  text-align: center;
-  color: var(--muted);
-  cursor: default;
+  pointer-events: none;
 }
 .map-empty[hidden] { display: none; }
-.map-empty p { margin: 0; max-width: 420px; }
+.map-empty-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 360px;
+  padding: 16px 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  text-align: center;
+  cursor: default;
+  pointer-events: auto;
+}
+.map-empty p { margin: 0; }
+.map-empty p + p { color: var(--muted); font-size: 13px; }
 .map-live {
   position: absolute;
   right: 12px;
@@ -685,7 +700,8 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-side input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .map-field { display: flex; justify-content: space-between; }
 .map-field output { color: var(--text); font-variant-numeric: tabular-nums; }
-.map-find { display: flex; gap: 6px; }
+.map-find { display: flex; align-items: flex-end; gap: 6px; }
+.map-find label { flex: 1; min-width: 0; }
 .map-help { margin: 0; color: var(--muted); font-size: 12px; }
 .map-note { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .map-cams { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -742,6 +758,7 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-site-place { color: var(--accent); }
 .map-cams li.map-cams-site { padding: 10px 6px 2px; font-size: 12px; font-weight: 600; color: var(--muted); }
 @media (max-width: 800px) {
+  .map-sites button { height: 44px; } /* a finger, not a mouse pointer */
   .map-main { flex-direction: column; }
   .map-view { min-height: 55vh; }
   .map-side { width: auto; max-height: 45vh; }

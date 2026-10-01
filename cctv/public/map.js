@@ -39,6 +39,7 @@ import {
   parseLatLng,
   ringPlacements,
   saveBody,
+  saveSummary,
   siteBadges,
   siteList,
   sitePosition,
@@ -493,6 +494,7 @@ const dirtySites = new Set()
 let selected = null // camera key
 let placing = null // camera key waiting for a click on the map
 let placingSite = false // the chosen site is waiting for a click on the map to say where it is
+let saving = false // a save is on its way: Save and Cancel wait for it
 let merged = null // the one map built from every site's placements (oneMap), until something changes
 let popup = null // { key, tile }
 // Which camera adjoins which (camera-links.mjs). Drawn on the map rather than edited in a list of
@@ -545,7 +547,8 @@ const badgeOf = (name) => oneMap().badges.find((b) => b.name === name) ?? null
 function el(tag, props = {}, ...children) {
   const node = document.createElement(tag)
   for (const [k, v] of Object.entries(props)) {
-    if (k.startsWith('aria-') || k.startsWith('data-')) node.setAttribute(k, v)
+    // role is not a property every browser reflects: set as an attribute it always reaches a screen reader
+    if (k === 'role' || k.startsWith('aria-') || k.startsWith('data-')) node.setAttribute(k, v)
     else node[k] = v
   }
   node.append(...children.filter((c) => c !== null && c !== undefined && c !== false))
@@ -1059,13 +1062,32 @@ function applyView(keepView = false) {
   }
   planSite = null
   view.setGeo({ ...DEFAULT_GEO, layer }, keepView)
-  if (!editing && !oneMap().badges.length) {
-    showEmpty(
-      el('p', { textContent: siteNames.length ? 'No site is on the map yet.' : 'No cameras yet.' }),
-      isAdmin && siteNames.length ? el('p', { textContent: 'Choose a site in the row above and press “Place this site”.' }) : null
-    )
-  }
+  if (!editing && !oneMap().badges.length) showEmpty(firstRunCard())
   view.requestRender()
+}
+
+/**
+ * What the map says before any site has been placed on it, which is how every installation
+ * starts. A small solid card, not a sheet over the map: the map behind it still drags and zooms.
+ * An admin is taken straight to placing a site; anyone else is told where the plans are.
+ */
+function firstRunCard() {
+  const card = el('div', { className: 'map-empty-card' })
+  if (!siteNames.length) {
+    card.append(el('p', { textContent: 'No cameras yet.' }))
+    return card
+  }
+  card.append(el('p', { textContent: 'No site is on the map yet.' }))
+  const sites = oneMap().sites
+  if (isAdmin) {
+    const name = sites.some((s) => s.name === site) ? site : sites[0].name
+    card.append(
+      el('p', { textContent: 'Say where a site is and its cameras are dropped around it, ready to be dragged to their spots.' }),
+      el('button', { type: 'button', className: 'st-primary', textContent: `Place ${name}`, onclick: () => startPlaceSite(name) }))
+  } else if (sites.some((s) => s.hasPlan)) {
+    card.append(el('p', { textContent: 'A site with a plan still opens it: press Plan beside its name in the row above.' }))
+  }
+  return card
 }
 
 const here = () => ({ cx: view.cx, cy: view.cy, zoom: view.zoom })
@@ -1132,7 +1154,8 @@ function openPlan(name) {
 /** "Place this site": into Edit mode with that site chosen, waiting for a click on the map. */
 function startPlaceSite(name) {
   if (!isAdmin) return
-  if (!editing) startEdit()
+  if (linkMode) stopLinks() // one kind of editing at a time
+  startEdit() // does nothing when an edit is already under way, so nothing unsaved is dropped
   goSite(name)
   placingSite = true
   view.el.classList.add('placing')
@@ -1147,7 +1170,7 @@ function startPlaceSite(name) {
  * the row is reachable and usable from the keyboard; it is redrawn whole when anything in it
  * changes, and the focus is put back on the button it was on.
  */
-function renderSites() {
+function renderSites({ reveal = true } = {}) {
   const focused = sitesRow.contains(document.activeElement) ? document.activeElement.dataset.fid : null
   const btn = (fid, props, ...children) => el('button', { type: 'button', 'data-fid': fid, ...props }, ...children)
   const parts = []
@@ -1182,7 +1205,15 @@ function renderSites() {
     parts.push(group)
   }
   sitesRow.replaceChildren(...parts)
-  if (focused) [...sitesRow.querySelectorAll('button')].find((b) => b.dataset.fid === focused)?.focus()
+  if (focused) {
+    // back on the button it was on; if that button has gone (a site just placed has no "Place
+    // this site" any more), on the site's own button rather than nowhere
+    const at = (fid) => [...sitesRow.querySelectorAll('button')].find((b) => b.dataset.fid === fid)
+    const own = focused.includes(':') ? `go:${focused.slice(focused.indexOf(':') + 1)}` : site ? `go:${site}` : 'all'
+    ;(at(focused) ?? at(own) ?? at('all'))?.focus()
+  }
+  // the chosen site may be off the end of the row, on a phone usually is: bring it into view
+  if (reveal) sitesRow.querySelector('.map-site.sel')?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
 }
 
 /** Zooms to the chosen site's cameras, or every site's; in a plan, to the whole plan. */
@@ -1323,12 +1354,12 @@ function uploadButton() {
 /** Where the chosen site is on the one map: set by a click on the map or by typing coordinates. */
 function sitePanel(name) {
   const pos = sitePosition(drafts[name])
-  const find = el('input', { type: 'text', placeholder: '42.7070, -71.1631 or a Google Maps link', value: pos ? `${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}` : '', 'aria-label': 'Latitude, longitude' })
+  const find = el('input', { type: 'text', placeholder: '42.7070, -71.1631 or a Google Maps link', value: pos ? `${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}` : '' })
   const set = el('button', { type: 'button', textContent: 'Set' })
   const setTyped = () => {
     const at = parseLatLng(find.value)
     if (!at) {
-      find.setCustomValidity('Enter latitude, longitude')
+      find.setCustomValidity('Type the latitude and longitude on their own, like 42.7070, -71.1631, or paste a Google Maps link.')
       find.reportValidity()
       return
     }
@@ -1349,7 +1380,8 @@ function sitePanel(name) {
     el('p', { className: 'map-help', textContent: pos
       ? 'Where this site is on the map. Moving it leaves its cameras where they are.'
       : `${name} is not on the map yet. Say where it is and its cameras are dropped in a ring around it, ready to be dragged to their spots.` }),
-    el('label', {}, 'Latitude, longitude', el('span', { className: 'map-find' }, find, set)),
+    // the label names the box alone; Set sits beside it, not inside it
+    el('div', { className: 'map-find' }, el('label', {}, 'Latitude, longitude', find), set),
     pick)
   const waiting = unplacedKeys(name).length
   if (pos && waiting) {
@@ -1385,20 +1417,22 @@ function editPanel() {
 
   const where = placed()
   if (name) {
-    // cameras: this site's, plus placements whose camera no longer exists
+    // cameras: this site's, plus whatever else is stored under it -- a placement whose camera no
+    // longer exists, or now belongs to another site -- so that it can be seen and removed
     const mine = planSite ? where : drafts[name]?.geo?.cams ?? {}
     const list = el('ul', { className: 'map-cams' })
     const keys = new Set(siteCams(name).map(camKey))
-    for (const k of Object.keys(mine)) if (!keys.has(k) && !camByKey(k)) keys.add(k)
+    for (const k of Object.keys(mine)) keys.add(k)
     for (const key of keys) {
       const cam = camByKey(key)
       if (mine[key]) {
         const remove = el('button', { type: 'button', className: 'st-link st-danger', textContent: 'Remove' })
         remove.addEventListener('click', (e) => {
           e.stopPropagation()
-          removePlacement(key)
+          removePlacement(key, name)
         })
         const li = camRow(cam, key, remove, { placed: true })
+        if (cam && cam.site !== name) li.append(el('span', { className: 'map-note', textContent: `now at ${cam.site}` }))
         li.addEventListener('click', () => {
           select(key)
           centreOnCamera(key)
@@ -1431,17 +1465,16 @@ function editPanel() {
   if (c) parts.push(selectedPanel(current(), c))
 
   statusEl = el('p', { className: 'map-help', role: 'status', textContent: dirtySites.size ? 'Unsaved changes' : '' })
-  const save = el('button', { type: 'button', className: 'st-primary', textContent: 'Save' })
+  const save = el('button', { type: 'button', className: 'st-primary', textContent: 'Save', disabled: saving })
   save.addEventListener('click', saveMap)
-  const cancel = el('button', { type: 'button', textContent: 'Cancel' })
+  const cancel = el('button', { type: 'button', textContent: 'Cancel', disabled: saving })
   cancel.addEventListener('click', () => stopEdit())
   parts.push(el('div', { className: 'map-actions' }, save, cancel), statusEl)
   return parts
 }
 
 /** Takes a camera off the map being edited (the open plan, or its site's place on the one map). */
-function removePlacement(key) {
-  const name = siteOfKey(key)
+function removePlacement(key, name = siteOfKey(key)) {
   const cams = planSite ? placed() : drafts[name]?.geo?.cams
   if (!cams?.[key]) return
   delete cams[key]
@@ -1646,6 +1679,7 @@ function stopLinks() {
  * sites while placing them, and each site that was touched is saved through its own route.
  */
 function startEdit() {
+  if (editing) return // already editing: starting again would throw the unsaved work away
   closeLive()
   drafts = structuredClone(maps.sites)
   editing = true
@@ -1724,24 +1758,35 @@ async function uploadPlan(file) {
 }
 
 /**
- * Saves each site that was changed, through the same admin route as ever, one site at a time. A
- * site that fails stops the save and is named; the ones before it are already stored and are not
- * sent again.
+ * Saves each site that was changed, through the same admin route as ever, one site at a time.
+ * One site failing does not stop the others being stored: every failure is named with its reason,
+ * the stored ones are named too, and what failed stays in the edit to be put right and saved
+ * again. Save and Cancel wait while it runs, so nothing is sent twice or dropped halfway.
  */
 async function saveMap() {
+  if (saving) return
+  saving = true
+  for (const b of side.querySelectorAll('.map-actions button')) b.disabled = true
   setStatus('Saving…')
+  const stored = []
+  const failed = []
   for (const name of [...dirtySites]) {
     const body = saveBody(drafts[name], layer)
     if (body) {
       try {
         maps.sites[name] = await api('PUT', `/api/admin/maps/${enc(name)}`, body)
+        stored.push(name)
       } catch (e) {
-        return setStatus(`Could not save ${name}: ${e.message}`)
+        failed.push({ name, error: e.message })
+        continue
       }
     }
     dirtySites.delete(name)
   }
-  stopEdit(true)
+  saving = false
+  if (!failed.length) return stopEdit(true)
+  renderSide()
+  setStatus(saveSummary(stored, failed))
 }
 
 addEventListener('beforeunload', (e) => {
@@ -1865,6 +1910,6 @@ setInterval(async () => {
   await loadStates()
   stale() // the badges carry the states
   view.requestRender()
-  renderSites()
+  renderSites({ reveal: false }) // a refresh must not pull the row back from where it was scrolled to
   if (!editing) renderSide()
 }, 30_000)
