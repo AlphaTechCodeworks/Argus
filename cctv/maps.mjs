@@ -13,6 +13,12 @@
 //            geo:  { lat, lng, zoom, layer: 'street' | 'satellite',
 //                    cams: { "nvr/ch": { lat, lng, dir, fov, range } } } }                  (range in metres)
 // dir: degrees clockwise from up/north; fov: degrees.
+//
+// The map page shows every site on one street/satellite map (public/map.js, public/map-model.js):
+// geo.lat/lng is where the site is on it and geo.cams its cameras there, whatever `mode` says. A
+// site with no geo block is simply not placed on that map yet; its plan, if it has one, opens as
+// the site's close-up. `mode` is still stored, and camera-links.mjs reads it to choose which
+// placements to guess neighbours from.
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'

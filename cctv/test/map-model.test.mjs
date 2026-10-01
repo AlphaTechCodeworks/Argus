@@ -1,8 +1,10 @@
 // Tests for the one map's pure side (public/map-model.js): which sites exist and whether each is
 // placed, every site's cameras merged onto one street map, the badge a site collapses into when
 // zoomed out, where to fly for a site or for everything, the ring unplaced cameras are dropped in,
-// and what a save sends. No DOM, no server, nothing is sent anywhere.
+// and what a save sends -- which is then given to maps.mjs itself, on a temp data folder, to prove
+// the server stores it and old data needs no migration. No DOM, no NVR, nothing is sent anywhere.
 //   node cctv/test/map-model.test.mjs
+import { readFileSync } from 'node:fs'
 import { boundsOf, latToY, lngToX, metresPerUnit } from '../public/map-cameras.js'
 import {
   BADGE_SPAN,
@@ -230,6 +232,55 @@ const SIZE = { w: 1000, h: 600 }
   const geoWithPlan = { ...emptyPlan, mode: 'geo', plan: { ...emptyPlan.plan, cams: { 'yard/0': { x: 1, y: 1, dir: 0, fov: 90, range: 5 } } } }
   check('a site already saved as a street-map site stays one', saveBody(geoWithPlan, 'street').mode === 'geo')
   check('a site with neither a plan nor a position has nothing to save', saveBody({}, 'street') === null && saveBody(undefined, 'street') === null)
+}
+
+// ---- the server stores what the page sends, with no change to old data ---------------------------------
+{
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const DATA = mkdtempSync(join(tmpdir(), 'cctv-map-model-'))
+  process.env.DATA_DIR = DATA // maps.mjs reads it when first imported
+  writeFileSync(join(DATA, 'maps.json'), JSON.stringify({ sites: { 'IT Office': MAPS.sites['IT Office'] } }))
+  const { handleMapsAdmin, mapsFor, readMaps } = await import('../maps.mjs')
+  const put = (name, body) => handleMapsAdmin('PUT', `/api/admin/maps/${encodeURIComponent(name)}`, async () => body)
+
+  // an old plan-only site is placed on the one map: position, then its unplaced cameras in a ring
+  const draft = structuredClone(readMaps().sites['IT Office'])
+  draft.geo = { lat: 42.7, lng: -71.16, cams: ringPlacements({ lat: 42.7, lng: -71.16 }, ['office/0', 'office/1']) }
+  const [status, saved] = await put('IT Office', saveBody(draft, 'street'))
+  check('the admin route takes a plan site with its new place on the map', status === 200, J(saved))
+  check('  its plan and plan cameras are untouched', saved.plan?.file === 'aaaaaaaaaaaaaaaa.jpg' && J(saved.plan.cams) === J(MAPS.sites['IT Office'].plan.cams), J(saved.plan))
+  check('  and the ring is stored as it was sent', Object.keys(saved.geo?.cams ?? {}).join(',') === 'office/0,office/1' && sitePosition(saved)?.lat === 42.7, J(saved.geo))
+
+  const [s2, fresh] = await put('Rigging lot', saveBody({ geo: { lat: 10, lng: 20, cams: ringPlacements({ lat: 10, lng: 20 }, ['yard/0']) } }, 'satellite'))
+  check('a site with no map at all is stored once placed', s2 === 200 && fresh.mode === 'geo' && fresh.geo.layer === 'satellite', J(fresh))
+
+  // the rights filter is the server's and is not loosened: one camera of the office, nothing of the yard
+  const view = { canSee: (nvr, ch) => nvr === 'office' && ch === 1, siteVisible: (name) => name === 'IT Office' }
+  const mine = mapsFor(readMaps(), view)
+  const { map } = mergeGeo(mine.sites, ['IT Office', 'Rigging lot'])
+  check('a limited viewer\'s one map holds only the cameras they may see', Object.keys(map.geo.cams).join(',') === 'office/1', Object.keys(map.geo.cams).join(','))
+  check('  and no site they may not', !mine.sites['Rigging lot'])
+}
+
+// ---- the page is wired to it -------------------------------------------------------------------------
+{
+  const js = readFileSync(new URL('../public/map.js', import.meta.url), 'utf8')
+  const html = readFileSync(new URL('../public/map.html', import.meta.url), 'utf8')
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8')
+  check('the page has a row for the site buttons, and no site list to pick one map from', /<nav id="sites"/.test(html) && !/id="site"/.test(html))
+  check('the row has "All sites" and real buttons', /textContent: 'All sites'/.test(js) && /el\('button', \{ type: 'button', 'data-fid': fid/.test(js))
+  check('  which say which is chosen', /'aria-pressed'/.test(js))
+  check('  and scrolls sideways rather than wrapping', /\.map-sites \{[^}]*overflow-x: auto/.test(css))
+  check('a site is flown to, with the flight that honours reduced motion', /function flyToSite[\s\S]{0,200}view\.flyTo\(/.test(js) && /prefers-reduced-motion/.test(js))
+  check('an unplaced site says so, and an admin can place it', /'not placed'/.test(js) && /textContent: 'Place this site'/.test(js) && /!s\.placed && isAdmin/.test(js))
+  check('a site with a plan has a Plan button, and the plan has a way back', /if \(s\.hasPlan\)/.test(js) && /Back to the map of every site/.test(js))
+  check('the draw path asks the model which sites are badges', /collapsedSites\(badges, view\.zoom/.test(js) && /visibleMarkers\(/.test(js))
+  check('clicking a badge goes to its site', /closest\?\.\('\.site-badge'\)/.test(js))
+  check('the offline count on a badge is in the alert colour', /\.site-badge-off \{ fill: var\(--rec-alert\)/.test(css))
+  check('each changed site is saved through its own admin route', /api\('PUT', `\/api\/admin\/maps\/\$\{enc\(name\)\}`, body\)/.test(js) && /saveBody\(drafts\[name\], layer\)/.test(js))
+  check('the page reads only what /api/maps gave this user', (js.match(/api\('GET', '\/api\/maps'\)/g) ?? []).length === 1)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nAll passed')
