@@ -50,7 +50,8 @@ const TRACE_FORMAT = 'argus-frame-trace' // public/frame-trace.js
  * as such a page plays it; a local page's is the default (nothing).
  */
 export const REMOTE_LIVE = Object.freeze({ clock: REMOTE_CLOCK, playerOptions: Object.freeze({ maxQueuedFrames: REMOTE_QUEUED_FRAMES, noRewindMs: REMOTE_NO_REWIND_MS }) })
-const TS0 = 1_700_000_000_000 // capture times handed to the player are epoch ms, as the camera's are
+/** What a capture time of 0 in the arrivals is to the player (patch: player.skipUntil(TS0 + ms)). */
+export const TS0 = 1_700_000_000_000 // capture times handed to the player are epoch ms, as the camera's are
 const REFRESH_MS = 1000 / 60
 const STEP_MS = 0.5
 

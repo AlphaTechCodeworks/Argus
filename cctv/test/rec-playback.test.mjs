@@ -4,7 +4,9 @@
 //                    8 per second), reverse, long GOPs and keyframes-only footage paced at their media
 //                    time (only holes are jumped: between files, and inside a file where the NVR stalled),
 //                    pause, seek and scrub with gen numbers, segment crossing, gaps, the open (growing) file
-//                    (its row looked up by path once closed), unreadable files, flow control, close
+//                    (its row looked up by path once closed), unreadable files, flow control, close,
+//                    the conversion (who gets it, the cap, a remote viewer), and a converter's start:
+//                    the pacer waits for it and never runs ahead of it
 // Temp dirs, a temp index, fake NVR objects and a fake WebSocket only: nothing reaches an NVR.
 // Run:  node cctv/test/rec-playback.test.mjs
 import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -1611,6 +1613,298 @@ for (const speed of [2, 4]) {
     check('remote, H.264 then H.265: every frame of both files converted, by one converter', xs.length === 1 && ws.bins.every(converted) && ws.bins.some((b) => b.tsMs < bStart) && ws.bins.filter((b) => b.tsMs >= bStart && !b.key).length >= 5, `${xs.length} conversions, ${ws.bins.length} frames`)
     check('  told H.264 for the first file and H.265 from the second file\'s first frame, restarted once there', firstB > 0 && x.codecs.slice(0, firstB).every((c) => c === 0) && x.codecs.slice(firstB).every((c) => c === 1) && x.resets === 1, `switch at push ${firstB}, ${x?.resets} resets`)
     check('  time never goes back', ws.bins.every((f, i) => i === 0 || f.tsMs > ws.bins[i - 1].tsMs))
+    session.close()
+  }
+
+  // ---- a converter that takes its time: the server never runs ahead of it (playback hunt, 1 Oct 2026, F3) ----
+  // ffmpeg's first picture comes 0.5-1.4 s after its first frame went in (the journal: "first frame
+  // 524-1410 ms" over 14 sessions) and it then converts at 1.2-2.3x real time. The pacer went on at 1x
+  // from the start point meanwhile, so what it handed in during that wait came out in a rush: the first
+  // seconds reached the page faster than they play (traced: 14, 30, 31, 20 frames a second), up to 0.9 s
+  // ahead of the clock its player had set on the first frame, and the player skipped, or dropped
+  // everything to the next keyframe: a skip and a freeze 3-4 s after the first picture, at every start
+  // and every jump of a converted playback. Now the pacer stops where a converter starts, until that
+  // converter has given back all it can, and its clock goes on from there. The stand-in above hands
+  // each frame back inside push, which no ffmpeg does; this one keeps ffmpeg's time.
+  /**
+   * A Transcoder stand-in with ffmpeg's timing: its first picture comes firstMs after its first frame
+   * went in, and every later one perMs after the one before it (26.7 ms: 1.5x real time on this 25 fps
+   * footage), never before it went in itself. holds: a picture comes out only once that many more have
+   * gone in (ffmpeg keeps one in its parser and one in its second decoder thread). A reset is a fresh
+   * ffmpeg: what was inside is lost and the next first picture takes firstMs again. Pictures are marked
+   * as fakeXcode marks them.
+   */
+  const slowXcode = (rec, { firstMs = 800, perMs = 40 / 1.5, holds = 0 } = {}) => (o) => {
+    const x = { opts: o, inCodec: o.inCodec, pushed: [], ends: 0, resets: 0, closes: 0, closed: false, q: [], next: 0, freeAt: 0, timer: null }
+    const pump = () => {
+      x.timer = null
+      while (!x.closed && x.next + holds < x.q.length) {
+        const f = x.q[x.next]
+        const ready = x.q[x.next + holds].at // when the frame that lets it out went in
+        const due = x.next === 0 ? Math.max(x.q[0].at + firstMs, ready) : Math.max(x.freeAt, ready) + perMs
+        const wait = due - performance.now()
+        if (wait > 0) {
+          x.timer = setTimeout(pump, wait)
+          return
+        }
+        x.freeAt = due
+        x.next++
+        o.onFrame(f.ts, f.isKey, Buffer.concat([Buffer.from([0xaa]), f.buf.subarray(0, 4)]))
+      }
+    }
+    const forget = () => {
+      clearTimeout(x.timer)
+      x.timer = null
+      x.q = []
+      x.next = 0
+    }
+    x.push = (ts, isKey, buf) => {
+      const at = performance.now()
+      x.pushed.push({ ts, at, run: x.resets })
+      x.q.push({ ts, isKey, buf, at })
+      if (!x.timer) pump()
+    }
+    x.endPicture = () => x.ends++
+    x.reset = () => {
+      x.resets++
+      forget()
+    }
+    x.close = () => {
+      x.closes++
+      x.closed = true
+      forget()
+    }
+    rec.push(x)
+    return x
+  }
+  /** How far ahead of its media time a frame after `first` was sent at most, with `first` as the clock (ms). */
+  const maxLead = (bins, first) => Math.max(0, ...bins.filter((b) => b.at > first.at).map((b) => b.tsMs - first.tsMs - (b.at - first.at)))
+  /** The frames handed to the converter within 100 ms of `from` (a burst). */
+  const burstOf = (x, from) => x.pushed.filter((p) => p.at >= from.at && p.at - from.at < 100)
+  const slowOpts = (xs, more = {}, timing = {}) => ({ fitAboveKbps: 0, pool: new TranscodePool(2), makeTranscoder: slowXcode(xs, timing), ...more })
+  {
+    // a start in the middle of a GOP (the frames from the keyframe before T are the preroll: decoded by
+    // the browser, not shown), then a seek on the same socket
+    const xs = []
+    const { ws, session } = open(0, T, { remote: true, opts: slowOpts(xs) })
+    await until(() => ws.bins.some((b) => b.tsMs >= T), 5000)
+    await sleep(2500)
+    const bins = ws.bins.slice()
+    const x = xs[0]
+    const pre = exp0.filter((f) => f.ts >= kT.ts && f.ts <= T).length
+    const first = bins.find((b) => b.tsMs >= T)
+    const lead = first ? maxLead(bins, first) : Infinity
+    check('a converter whose first picture takes 800 ms and which then runs at 1.5x, a start mid-GOP: from the first converted frame at the start point on, no frame is sent more than 150 ms ahead of its media time', lead <= 150, `${Math.round(lead)} ms ahead at most, ${bins.length} frames`)
+    const burst = x ? burstOf(x, x.pushed[0]) : []
+    const gateOut = bins[pre - 1]?.at // the converted frame at the start point comes out
+    const nextIn = x?.pushed[burst.length]?.at
+    check(`  the converter is handed the ${pre} frames up to the start point at once, and 3 more (what ffmpeg keeps inside before it gives a picture back)`, burst.length === pre + 3, `${burst.length} at once`)
+    check('  and nothing more until the converted frame at the start point has come out: the clock starts there', nextIn >= gateOut - 1 && nextIn - gateOut < 120, `the next one ${Math.round(nextIn - gateOut)} ms after it`)
+    const i0 = by0.get(bins[0]?.us)
+    check('  every frame from the keyframe before T comes out converted, in order, each with its recorded time', bins.length > pre + 30 && i0 === by0.get(kT.us) && bins.every((b, j) => converted(b) && b.us === exp0[i0 + j].us), `${bins.length} frames`)
+    const firstMs = first ? first.at - ws.t0 : Infinity
+    check('  the first frame the browser shows comes when the converter gets to it (800 ms and the preroll at 1.5x), not after a wait', firstMs < 800 + (pre * 40) / 1.5 + 400, `${Math.round(firstMs)} ms after the start, a preroll of ${pre}`)
+    const w1 = first ? first.at + 300 : 0
+    const adv = tsAt(bins, w1 + 1000) - tsAt(bins, w1)
+    check('  from there it plays at 1x: 1.0 s of wall time sends 1.0 s +- 15% of footage', Math.abs(adv - 1000) <= 150, `${adv.toFixed(0)} ms`)
+    check('  the page is told as before: started (gen 0) at T, from the keyframe, before any frame', J(started(ws, 0)) === J({ type: 'started', gen: 0, at: T, from: kT.ts, src: 'server' }) && ws.log.findIndex((e) => e.text?.type === 'started') < ws.log.findIndex((e) => e.bin), J(started(ws, 0)))
+
+    const T2 = T0 + 150_000 + 1300
+    const k2 = keyBefore(exp0, T2)
+    const pre2 = exp0.filter((f) => f.ts >= k2.ts && f.ts <= T2).length
+    ws.command({ seek: T2, gen: 1 })
+    await until(() => binsAfterStart(ws, 1).some((b) => b.tsMs >= T2), 5000)
+    await sleep(2000)
+    const after = binsAfterStart(ws, 1)
+    const first2 = after.find((b) => b.tsMs >= T2)
+    const lead2 = first2 ? maxLead(after, first2) : Infinity
+    const run2 = x.pushed.filter((p) => p.run === 1)
+    check('a seek on the open socket restarts the converter (800 ms again) and takes the same path: no frame more than 150 ms ahead', xs.length === 1 && x.resets === 1 && lead2 <= 150, `${Math.round(lead2)} ms ahead at most, ${x.resets} resets`)
+    check(`  its ${pre2} frames up to the seek time and 3 more at once, then the clock from the converted frame at the seek time`, run2.length > pre2 + 3 && burstOf(x, run2[0]).length === pre2 + 3 && run2[pre2 + 3].at >= after[pre2 - 1]?.at - 1, `${run2.length ? burstOf(x, run2[0]).length : 0} at once`)
+    check('  every frame from the keyframe before it, converted, in order', after.length > pre2 + 20 && after[0].us === k2.us && after.every((b, j) => converted(b) && b.us === exp0[by0.get(k2.us) + j].us), `${after.length} frames`)
+    session.close()
+    check('  close: the converter is closed', x.closes === 1)
+  }
+  {
+    // a start exactly on a keyframe (a jump to a file's first frame; back to 1x after 2x): no preroll,
+    // and the converter cannot give its first picture until three more frames are in
+    const xs = []
+    const { ws, session } = open(0, kT.ts, { remote: true, opts: slowOpts(xs) })
+    await until(() => ws.bins.length > 0, 5000)
+    await sleep(2500)
+    const bins = ws.bins.slice()
+    const lead = bins.length ? maxLead(bins, bins[0]) : Infinity
+    check('the same converter, a start on a keyframe: after the first converted frame no frame is sent more than 150 ms ahead of its media time', bins.length > 40 && bins[0].us === kT.us && lead <= 150, `${Math.round(lead)} ms ahead at most, ${bins.length} frames`)
+    check('  the keyframe and 3 more go in at once; the first picture is out as soon as the converter has it (800 ms)', burstOf(xs[0], xs[0].pushed[0]).length === 4 && bins[0].at - ws.t0 < 1100, `${burstOf(xs[0], xs[0].pushed[0]).length} at once, first picture after ${Math.round(bins[0]?.at - ws.t0)} ms`)
+    check('  every frame in order', bins.every((b, j) => converted(b) && b.us === exp0[by0.get(kT.us) + j].us))
+    session.close()
+  }
+  {
+    // ffmpeg as it is: a picture comes out only when two more have gone in. Handed only the frames up to
+    // the start point, it would never give back the one the pacer waits for (and the wait would run out
+    // its 3 s at every start): the three frames past the start point are what lets it out.
+    const xs = []
+    const a = open(0, kT.ts, { remote: true, opts: slowOpts(xs, {}, { holds: 2 }) })
+    const b = open(0, T, { remote: true, opts: slowOpts(xs, {}, { holds: 2 }) })
+    await until(() => a.ws.bins.length > 0 && b.ws.bins.some((f) => f.tsMs >= T), 5000)
+    await sleep(2000)
+    const firstB = b.ws.bins.find((f) => f.tsMs >= T)
+    const leads = [maxLead(a.ws.bins, a.ws.bins[0] ?? { at: Infinity }), firstB ? maxLead(b.ws.bins, firstB) : Infinity]
+    const pre = exp0.filter((f) => f.ts >= kT.ts && f.ts <= T).length
+    check('a converter that keeps two pictures inside until more go in (ffmpeg\'s parser and second thread): the first picture still comes at once, on a keyframe and mid-GOP', a.ws.bins.length > 30 && a.ws.bins[0].at - a.ws.t0 < 1100 && firstB && firstB.at - b.ws.t0 < 800 + (pre * 40) / 1.5 + 400, `${Math.round(a.ws.bins[0]?.at - a.ws.t0)} ms and ${Math.round(firstB?.at - b.ws.t0)} ms`)
+    check('  and no frame is sent more than 150 ms ahead of its media time', leads.every((l) => l <= 150), leads.map((l) => `${Math.round(l)} ms`).join(', '))
+    const adv = firstB ? tsAt(b.ws.bins, firstB.at + 1300) - tsAt(b.ws.bins, firstB.at + 300) : 0
+    check('  then 1x', Math.abs(adv - 1000) <= 150, `${adv.toFixed(0)} ms in 1 s`)
+    a.session.close()
+    b.session.close()
+  }
+  {
+    // the codec changes between two files (camera 11: H.264, then H.265): ffmpeg is told what it reads
+    // when it starts, so a fresh one starts on the new file's first frame, and takes its 800 ms again
+    const xs = []
+    const { ws, session } = open(11, T11 + 100, { remote: true, extra: '&h265=1', opts: slowOpts(xs) })
+    const bStart = exp11b[0].ts
+    await until(() => ws.bins.some((b) => b.tsMs >= bStart + 2500), 12_000)
+    const b = ws.bins.filter((f) => f.tsMs >= bStart)
+    const lead = b.length ? maxLead(b, b[0]) : Infinity
+    const x = xs[0]
+    const runB = x.pushed.filter((p) => p.run === 1)
+    check('a codec change between two files restarts the converter and takes the same path: after its first converted frame, none more than 150 ms ahead', xs.length === 1 && x.resets === 1 && b.length > 40 && lead <= 150, `${Math.round(lead)} ms ahead at most, ${b.length} frames, ${x.resets} resets`)
+    check('  the new file\'s first frame and 3 more at once, then nothing until its first picture is out', runB.length > 4 && burstOf(x, runB[0]).length === 4 && runB[4].at >= b[0]?.at - 1, `${runB.length ? burstOf(x, runB[0]).length : 0} at once`)
+    check('  every frame of the new file from its first, in order', b.length > 0 && b.every((f, j) => converted(f) && Math.abs(f.tsMs - exp11b[j].ts) < 0.001))
+    session.close()
+  }
+  {
+    // 2x while converting is keyframes only (one picture at a time, each ended at once); back at 1x the
+    // converter starts afresh on the next keyframe with every frame behind it
+    const xs = []
+    const { ws, session } = open(10, T10 + 100, { extra: '&h265=0', opts: slowOpts(xs, { pool: freePool() }) })
+    ws.command({ speed: 2 })
+    await until(() => ws.bins.length >= 2, 6000)
+    const x = xs[0]
+    const keyIn = x.pushed.slice(0, 3)
+    check('keyframes only (2x while converting) is unchanged: each keyframe goes in at its media time and is ended, none ahead, no wait', keyIn.length >= 2 && keyIn[1].at - keyIn[0].at > 350 && x.ends >= 2 && ws.bins.every((b) => b.key), `${keyIn.slice(1).map((p, i) => Math.round(p.at - keyIn[i].at)).join(', ')} ms apart, ${x.ends} ended`)
+    const n = ws.bins.length
+    const r = x.resets
+    ws.command({ speed: 1 })
+    await until(() => ws.bins.length > n, 5000)
+    await sleep(2000)
+    const all = ws.bins.slice(n).filter((b) => b.tsMs > ws.bins[n - 1].tsMs)
+    const lead = all.length ? maxLead(all, all[0]) : Infinity
+    const run = x.pushed.filter((p) => p.run === x.resets)
+    check('back at 1x the converter starts afresh, and takes the same path: after its first converted frame, none more than 150 ms ahead', x.resets === r + 1 && all.length > 20 && all[0].key && all.some((b) => !b.key) && lead <= 150, `${Math.round(lead)} ms ahead at most, ${all.length} frames`)
+    check('  its keyframe and 3 more at once, then nothing until its first picture is out', run.length > 4 && burstOf(x, run[0]).length === 4 && run[4].at >= all[0]?.at - 1, `${run.length ? burstOf(x, run[0]).length : 0} at once`)
+    const endsAt1x = x.ends
+    session.close()
+    check('  (playing every frame, no picture is ended by hand)', endsAt1x >= 2 && x.ends === endsAt1x)
+  }
+  {
+    // a scrub's one keyframe, as before: pushed and ended at once, whatever the converter is doing
+    const xs = []
+    const { ws, session } = open(0, T, { remote: true, opts: slowOpts(xs) })
+    await until(() => xs.length > 0 && xs[0].pushed.length > 0, 3000)
+    await sleep(100) // (the converter has given nothing yet: the pacer is waiting for it)
+    const x = xs[0]
+    ws.command({ scrub: T0 + 30_000, gen: 1 })
+    await until(() => ws.bins.length > 0, 3000)
+    await sleep(300)
+    const run = x.pushed.filter((p) => p.run === 1)
+    check('a scrub during the wait: the converter is reset, its one keyframe pushed and ended, and that one picture sent', x.resets === 1 && run.length === 1 && x.ends === 1 && ws.bins.length === 1 && ws.bins[0].key && converted(ws.bins[0]) && Math.abs(ws.bins[0].tsMs - keyBefore(exp0, T0 + 30_000).ts) < 0.001 && Math.abs(run[0].ts - ws.bins[0].tsMs) < 0.001, `${run.length} pushed, ${x.ends} ended, ${ws.bins.length} sent`)
+    session.close()
+  }
+  {
+    // the converter gives nothing back (ffmpeg starved of processor, or dead without a word): the wait
+    // ends after convertWaitMs (3 s in service) and the pacer carries on at 1x, as it always did
+    const xs = []
+    const lines = []
+    const { ws, session } = open(0, kT.ts, { remote: true, opts: slowOpts(xs, { convertWaitMs: 500, log: (l) => lines.push(l) }, { firstMs: 1e9 }) })
+    await until(() => xs.length > 0 && xs[0].pushed.length >= 4, 3000)
+    const x = xs[0]
+    const t0 = x.pushed[0].at
+    await sleep(350)
+    const during = x.pushed.length
+    await sleep(1200) // to about 1.55 s: the wait ended at 0.5 s, then a second of footage
+    const late = x.pushed.filter((p) => p.at - t0 >= 400)
+    check('a converter that gives no picture: 4 frames in, then the pacer waits', during === 4, `${during} in after 350 ms`)
+    check('  after the wait (500 ms here) it carries on at 1x from where it stopped, with no rush', late.length >= 20 && late.length <= 32 && late[0].at - t0 >= 480 && late[0].at - t0 < 700 && late[0].ts === exp0[by0.get(kT.us) + 4].ts, `${late.length} more in the next second, the first ${Math.round(late[0]?.at - t0)} ms after the start`)
+    check('  and the log says so, once', lines.filter((l) => /the conversion gave no picture in 500 ms \(4 frames in, 0 out\)/.test(l)).length === 1, lines.join(' | '))
+    check('  no frame was sent (none came out), and the session is open', ws.bins.length === 0 && ws.readyState === 1 && !ws.texts.some((t) => t.type === 'error'))
+    session.close()
+    const dflt = open(0, kT.ts, { remote: true, opts: slowOpts(xs) })
+    check('  the wait is 3 s unless a test says otherwise', dflt.session.convertWaitMs === 3000, String(dflt.session.convertWaitMs))
+    dflt.session.close()
+    // The wait is on the converter's silence, not on the whole start: a long preroll (a 4 s GOP is 80
+    // frames at 20 fps) takes ffmpeg longer than 3 s to work through on a busy server, and its pictures
+    // keep coming all the while. Here: the same 500 ms, a converter at 1x whose preroll takes over 1.1 s.
+    const ys = []
+    const quiet = []
+    const slow = open(0, T, { remote: true, opts: slowOpts(ys, { convertWaitMs: 500, log: (l) => quiet.push(l) }, { firstMs: 300, perMs: 40 }) })
+    await until(() => slow.ws.bins.some((b) => b.tsMs >= T), 5000)
+    await sleep(300)
+    const pre = exp0.filter((f) => f.ts >= kT.ts && f.ts <= T).length
+    const y = ys[0]
+    const gate = slow.ws.bins[pre - 1]
+    check('a preroll that takes longer to convert than the wait, its pictures coming all the while: the pacer waits it out', pre >= 15 && gate && gate.at - slow.ws.t0 > 800 && burstOf(y, y.pushed[0]).length === pre + 3 && y.pushed[pre + 3]?.at >= gate.at - 1 && !quiet.some((l) => /gave no picture/.test(l)), `the frame at the start point out after ${Math.round(gate?.at - slow.ws.t0)} ms, the next frame in ${Math.round(y.pushed[pre + 3]?.at - gate?.at)} ms after it; ${quiet.join(' | ')}`)
+    slow.session.close()
+  }
+  {
+    // paused while the converter starts: nothing more goes in, the pictures it has come out, and play
+    // goes on from the next frame at 1x
+    const xs = []
+    const { ws, session } = open(0, kT.ts, { remote: true, opts: slowOpts(xs) })
+    await until(() => xs.length > 0 && xs[0].pushed.length >= 4, 3000)
+    const x = xs[0]
+    await sleep(100)
+    ws.command({ pause: true })
+    await sleep(1400)
+    check('paused while the converter starts: the 4 frames it has are converted and sent, nothing more goes in', x.pushed.length === 4 && ws.bins.length === 4, `${x.pushed.length} in, ${ws.bins.length} out`)
+    ws.command({ pause: false })
+    const n = ws.bins.length
+    await sleep(1500)
+    const after = ws.bins.slice(n)
+    const lead = after.length ? maxLead(after, after[0]) : Infinity
+    check('  play: on from the next frame, at 1x, none more than 150 ms ahead', after.length >= 25 && after.length <= 45 && after[0].us === exp0[by0.get(kT.us) + 4].us && lead <= 150 && ws.bins.every((b, j) => b.us === exp0[by0.get(kT.us) + j].us), `${after.length} frames in 1.5 s, ${Math.round(lead)} ms ahead at most`)
+    session.close()
+  }
+  {
+    // An NVR leg that begins in the very pass that started the converter (camera 8: one file with a
+    // 30 s hole inside; a start in that hole, the NVR having it): the frames before the hole went into
+    // the converter, and the leg plays. The wait for the converter ends there: while the leg plays,
+    // nothing from after the hole may be handed in (it would come out converted in the middle of the
+    // NVR's frames).
+    const T8 = Date.UTC(2026, 8, 24, 17, 0, 0)
+    const xs = []
+    const legs = { starts: [], coverage: (nvr, ch, fromMs, toMs) => ({ ranges: [[fromMs, toMs]], skewMs: 0 }) }
+    legs.start = (o) => {
+      let finish
+      const h = { done: new Promise((r) => (finish = r)), command() {}, close() {}, announced: true, frames: 0, lastTs: null }
+      legs.starts.push({ o, finish })
+      return h
+    }
+    const { ws, session } = open(8, T8 + 20_000, { remote: true, legs, opts: slowOpts(xs, { noticeGapMs: 10_000 }) })
+    await until(() => legs.starts.length > 0, 3000)
+    await sleep(1500)
+    const x = xs[0]
+    const before = x?.pushed.length
+    check('an NVR leg beginning as the converter starts (a start in a hole inside a file): the 50 frames before the hole went in, the leg plays the hole from the start point', legs.starts.length === 1 && before === 50 && x.pushed.every((p) => p.ts < T8 + 10_000) && legs.starts[0].o.fromMs === T8 + 20_000 && legs.starts[0].o.toMs === T8 + 40_000, `${legs.starts.length} legs, ${before} frames in, the leg ${legs.starts[0]?.o.fromMs - T8}-${legs.starts[0]?.o.toMs - T8} ms`)
+    check('  while it plays, nothing from after the hole is handed to the converter, and the pacer is not waiting for it', x.pushed.length === 50 && session.hold === null && ws.bins.every((b) => b.tsMs < T8 + 10_000), `${x.pushed.length} in, ${ws.bins.filter((b) => b.tsMs >= T8 + 40_000).length} from after the hole sent`)
+    const t1 = performance.now()
+    legs.starts[0].finish({ reason: 'end', frames: 10, lastTs: T8 + 39_960, announced: true })
+    await sleep(1200)
+    const later = x.pushed.slice(50)
+    check('  the leg over: on from the first frame after the hole, at 1x', later.length >= 20 && later.length <= 36 && later[0].ts === T8 + 40_000 && later[0].at - t1 < 150 && ws.texts.some((m) => m.type === 'source' && m.src === 'server'), `${later.length} frames in 1.2 s, the first ${Math.round(later[0]?.at - t1)} ms after the leg`)
+    session.close()
+  }
+  {
+    // what is not converted is not touched: the local network's start goes out as it always did (the
+    // preroll at once, then 1x from T), with a slow converter at hand and never asked
+    const xs = []
+    const { ws, session } = open(0, T, { opts: slowOpts(xs) })
+    await until(() => ws.bins.some((b) => b.tsMs >= T), 2000)
+    await sleep(700)
+    const pre = ws.bins.filter((b) => b.tsMs < T)
+    const first = ws.bins.find((b) => b.tsMs >= T)
+    check('the local network, a recording the browser decodes: the preroll at once and T on at its time, no wait, no converter', xs.length === 0 && pre.length > 0 && pre.at(-1).at - pre[0].at < 50 && first && first.at - pre.at(-1).at < 60 && !ws.bins.some(converted) && ws.bins.length > pre.length + 10, `${pre.length} preroll frames in ${Math.round(pre.at(-1)?.at - pre[0]?.at)} ms, the next ${Math.round(first?.at - pre.at(-1)?.at)} ms later`)
     session.close()
   }
 }
