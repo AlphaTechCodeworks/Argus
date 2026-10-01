@@ -227,8 +227,8 @@ function fakeNvr({ cover = [], mode = 'ok', clockKnown = true, stepMs = 200, eve
       const dayEnd = dayStart + 86_400_000 - 1000
       return { ranges: nvrCover.map(([s, e]) => [Math.max(s, dayStart), Math.min(e, dayEnd)]).filter(([s, e]) => e > s), events: [] }
     },
-    connect(ws, url) {
-      const c = { ws, url, start: Number(url.searchParams.get('start')), commands: [], sent: [], closed: false, closedAt: 0, paused: false, timer: null, t0: null }
+    connect(ws, url, o) {
+      const c = { ws, url, o, start: Number(url.searchParams.get('start')), commands: [], sent: [], closed: false, closedAt: 0, paused: false, timer: null, t0: null }
       nvr.connects.push(c)
       ws.on('message', (d, isBinary) => {
         if (isBinary) return
@@ -390,10 +390,11 @@ check('exports: nvrCoverage, startLeg, nvrLegs {coverage, start}', typeof fb.nvr
 function scriptedNvr({ throwOnConnect = false } = {}) {
   const s = { id: NVR_ID, name: 'NVR n1', online: true, degraded: false, ws: null, url: null, commands: [], closed: 0 }
   s.playback = {
-    connect(ws, url) {
+    connect(ws, url, o) {
       if (throwOnConnect) throw new Error('connect exploded')
       s.ws = ws
       s.url = url
+      s.o = o
       ws.on('message', (d, isBinary) => {
         if (!isBinary) s.commands.push(JSON.parse(String(d)))
       })
@@ -836,6 +837,77 @@ const firstB2 = exp2.find((f) => f.seg === cam2.segs[1].path)
   check('a seek while an NVR coverage wait hangs: the newer seek to server footage plays within 150 ms', first && took >= 0 && took < 150 && ws.texts.find((m) => m.type === 'started' && m.gen === 2)?.src === 'server', `${took.toFixed(0)} ms, ${J(ws.texts.map((m) => m.type + (m.gen ?? '')))}`)
   check('... and gen 1 never started', !ws.texts.some((m) => m.type === 'started' && m.gen === 1))
   ws.close(1000)
+}
+
+// ---- a remote viewer: the leg is fitted as its server playback is (playback.mjs #fitDecide; finding F6) ------------
+{
+  // startLeg: `fit` goes to the NVR session as given; nothing on the local network
+  const lent = { release() {} }
+  const a = scriptedNvr()
+  const realA = fakeWs()
+  const legA = fb.startLeg({ nvr: a, ch: 0, fromMs: F, toMs: F + 60_000, skewMs: SKEW, real: realA, gen: null, fit: { slot: lent } })
+  check('startLeg fit: handed to the NVR session as given (the lent slot); still main, still allowed', a.o?.fit?.slot === lent && a.o.main === true && a.o.allowMain() === true, J(Object.keys(a.o ?? {})))
+  a.ws.send(J({ type: 'started' }))
+  a.ws.send(J({ type: 'fit', on: false, busy: true }))
+  check('proxy: a session\'s {type:"fit"} reaches the browser as it is', J(realA.texts.at(-1)) === J({ type: 'fit', on: false, busy: true }), J(realA.texts))
+  legA.close()
+  const b = scriptedNvr()
+  const legB = fb.startLeg({ nvr: b, ch: 0, fromMs: F, toMs: F + 60_000, skewMs: SKEW, real: fakeWs(), gen: null })
+  check('startLeg without fit (the local network, backfill): none handed on', (b.o?.fit ?? null) === null && b.o?.main === true)
+  legB.close()
+}
+{
+  const { TranscodePool } = await import('../transcode.mjs')
+  const xcode = (o) => ({ inCodec: o.inCodec, push: (ts, isKey, buf) => o.onFrame(ts, isKey, buf), endPicture() {}, reset() {}, close() {} })
+  const lastA = exp2.filter((f) => f.seg === cam2.segs[0].path).at(-1)
+  const endA = cam2.segs[0].endMs
+  const cover = [[S2 - 3_600_000, S2 + 3_600_000]]
+  const openR = (start, { remote = true, pool = new TranscodePool(2), fitAboveKbps = 0 } = {}) => {
+    const nvr = fakeNvr({ cover })
+    const ws = fakeWs()
+    const url = new URL(`ws://x/playback?nvr=${NVR_ID}&ch=2&stream=0&start=${start}&src=auto`)
+    const session = rp.connectPlayback({ nvr, ws, url, who: ADMIN, index: IDX, legs: fb.nvrLegs, remote, opts: { log: (l) => logs.push(l), endGraceMs: 300, pool, makeTranscoder: xcode, fitAboveKbps } })
+    return { nvr, ws, session, pool }
+  }
+  {
+    // the run is converted (a slot held): the leg converts in that slot
+    const r = openR(lastA.ts - 400)
+    await until(() => r.nvr.connects.length === 1, 6000)
+    const o = r.nvr.connects[0]?.o
+    check('remote, a converted run reaching a hole: the leg is lent the run\'s slot (fit.slot), one slot in all', r.ws.texts.some((m) => m.type === 'fit' && m.on === true) && o?.fit?.slot === r.session.slot && Boolean(o?.fit?.slot) && r.pool.active === 1, `${J(r.ws.texts.filter((m) => m.type === 'fit'))} fit ${J(Object.keys(o?.fit ?? {}))} active ${r.pool.active}`)
+    r.ws.close(1000)
+    check('... closed: the slot given back', r.pool.active === 0, String(r.pool.active))
+  }
+  {
+    // the local network: the leg is the NVR's stream as it is
+    const r = openR(lastA.ts - 400, { remote: false })
+    await until(() => r.nvr.connects.length === 1, 6000)
+    check('local: the leg is not fitted (no fit handed on), no slot', r.nvr.connects.length === 1 && (r.nvr.connects[0].o?.fit ?? null) === null && r.pool.active === 0 && !r.ws.texts.some((m) => m.type === 'fit'), J(r.nvr.connects[0]?.o?.fit ?? null))
+    r.ws.close(1000)
+  }
+  {
+    // no conversion to spare for the run (said): the leg goes as it is too
+    const pool = new TranscodePool(2)
+    const other = pool.acquire()
+    const r = openR(lastA.ts - 400, { pool })
+    await until(() => r.nvr.connects.length === 1, 6000)
+    check('remote, the run sent as it is for want of a conversion (said): the leg as it is too', r.ws.texts.some((m) => m.type === 'fit' && m.busy === true) && r.nvr.connects.length === 1 && (r.nvr.connects[0].o?.fit ?? null) === null && pool.active === 1, `${J(r.ws.texts.filter((m) => m.type === 'fit'))} ${J(r.nvr.connects[0]?.o?.fit ?? null)}`)
+    r.ws.close(1000)
+    other.release()
+  }
+  {
+    // a start inside the hole: the run has decided already (the file after the hole is opened first)
+    const r = openR(endA + 30_000)
+    await until(() => r.nvr.connects.length === 1, 6000)
+    const o = r.nvr.connects[0]?.o
+    check('remote, a start inside a hole: the run is converted (said) and the leg is lent its slot', r.ws.texts.some((m) => m.type === 'fit' && m.on === true) && o?.fit?.slot === r.session.slot && Boolean(o?.fit?.slot) && r.pool.active === 1, `${J(r.ws.texts.filter((m) => m.type === 'fit'))} ${J(Object.keys(o?.fit ?? {}))}`)
+    r.ws.close(1000)
+    const kbps = (cam2.segs[0].bytes * 8) / (cam2.segs[0].endMs - cam2.segs[0].startMs)
+    const w = openR(endA + 30_000, { fitAboveKbps: Math.ceil(kbps) + 1 })
+    await until(() => w.nvr.connects.length === 1, 6000)
+    check('... a camera recording within the cap: sent as it is (said), and the leg as it is too', w.ws.texts.some((m) => m.type === 'fit' && m.fits === true) && w.nvr.connects.length === 1 && (w.nvr.connects[0].o?.fit ?? null) === null && w.pool.active === 0, `${J(w.ws.texts.filter((m) => m.type === 'fit'))} ${J(w.nvr.connects[0]?.o?.fit ?? null)}`)
+    w.ws.close(1000)
+  }
 }
 
 // ---- the real PlaybackSession (playback.mjs) through the proxy ----------------------------------------------------

@@ -33,6 +33,7 @@ import {
   convertTime,
   describeSkew,
   fitChange,
+  nvrFitChange,
   gapAt,
   liveEdge,
   mergeSources,
@@ -175,6 +176,7 @@ const state = {
   quality: 'server',
   remote: false, // the server converts this viewer's playback to fit a remote link ({type:'fit'} came)
   fit: null, // what the server last said of that: 'on', 'busy', 'fits' or 'original' (pb-sources.js fitChange)
+  nvrFit: null, // the same of the NVR's own HD recording (NVR mode; pb-sources.js nvrFitChange)
   skew: 0, // the NVR's clock - the server's (ms)
   firstMs: null, // the camera's oldest server recording
   gaps: [], // server mode: recorder gaps [[start, end, reason]]
@@ -709,6 +711,13 @@ function closeSocket() {
 
 function onStatus(msg) {
   if (msg.type === 'error') showMessage(msg.message)
+  if (msg.type === 'fit') {
+    // a remote viewer's HD from the NVR (playback.mjs): converted to fit the link, or the NVR's
+    // stream itself for want of a free conversion; said when it changes, not at every seek
+    const change = nvrFitChange(state.nvrFit, msg)
+    state.nvrFit = change.fit
+    if (change.notice) showNotice(change.notice)
+  }
   if (msg.type === 'stream') {
     // this camera records HD only; the server switched over (only for a viewer who may see main). What
     // plays is shown; the viewer's own choice (state.stream) stays, so the next camera is not asked

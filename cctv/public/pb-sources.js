@@ -233,6 +233,22 @@ export function fitChange(prev, msg) {
   return { fit, notice }
 }
 
+/**
+ * fitChange for the NVR's own recordings (NVR playback in HD, playback.mjs #fitDecide): the same
+ * notes, in words for that menu, which has no "Original (server)". Each seek there is a new socket
+ * that says it again, so it is told only when it changes.
+ * @param {'on'|'busy'|'fits'|'original'|null} prev
+ * @param {{ on?: boolean, busy?: boolean, fits?: boolean }} msg
+ * @returns {{ fit: 'on'|'busy'|'fits'|'original', notice: string|null }}
+ */
+export function nvrFitChange(prev, msg) {
+  const { fit } = fitChange(prev, msg)
+  let notice = null
+  if (fit === 'on' && prev !== 'on') notice = 'Playing a lighter copy of the NVR\u2019s HD recording, made to fit a remote connection.'
+  if (fit === 'busy' && prev !== 'busy') notice = 'The server is converting as many playbacks as it can, so this plays the NVR\u2019s HD recording itself, which may stutter on a slow connection.'
+  return { fit, notice }
+}
+
 // ---- the NVR refusing a search: backing off --------------------------------------------------------
 // dc9e296: loadNvrSide's background recordings() throws on a refused FindFile or a broken file walk,
 // and the route answers 502 with no retryAfterS. That is not "busy for a moment" (503, retryAfterS):

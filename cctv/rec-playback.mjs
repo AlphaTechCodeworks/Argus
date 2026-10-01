@@ -111,6 +111,13 @@
 //    &original=1 (the page's "Original (server)"; the camera wall's tiles) is the recording itself:
 //    never converted, unless it is H.265 for a browser that cannot decode it. The local network is
 //    not touched.
+//    The NVR's own main stream is fitted the same way for a remote viewer, by its session
+//    (playback.mjs #fitDecide; the playback hunt of 1 Oct 2026, finding F6: it went through the tunnel
+//    as it was, 6.3 Mbit/s measured, 3-50 frames a second). NVR playback: connectPlayback tells the
+//    session, with the rate the server recorded the camera at when it knows one. An NVR leg (#legFit):
+//    a converted run lends the leg its slot; a run sent as it is (within the cap, or no conversion to
+//    spare, both said already) leaves the leg as it is too; a start inside a hole has decided nothing
+//    yet, and the leg decides for itself and says so.
 //  - Parsed files are kept per session (an LRU of 64 open readers, closed after 60 s unused), so
 //    scrubbing and seeking back and forth do not read an .idx twice.
 import * as fsp from 'node:fs/promises'
@@ -286,9 +293,15 @@ export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlaySer
       return null
     }
     const start = p.get('start') ?? ''
+    // A remote viewer's main stream is fitted to the link by the session (playback.mjs #fitDecide),
+    // unless the camera records within the cap: the rate of the server's own recording of it just
+    // before, when there is one (the server records the main stream). Told for the sub-stream too:
+    // a camera the NVR records in HD only goes over to main by itself. &original=1: the NVR's stream.
+    const fit = remote && p.get('original') !== '1' ? { kbps: kbpsBefore(index, nvr.id, ch, Number(start || NaN)) } : null
     const opened = nvr.playback.connect(ws, url, {
       main,
       allowMain: mayMain,
+      fit,
       onMain: () => {
         note(who, nvr, ch, 'nvr main (switched: no SD recording)', start)
         onMain()
@@ -336,6 +349,17 @@ export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlaySer
   // a remote viewer who chose "Original (server)": the recording itself, not the capped conversion
   const original = p.get('original') === '1'
   return new ServerPlayback({ ws, nvr, ch, start, stream, index, legs: nvrAllowed(ch) ? legs : null, clientH265, remote: Boolean(remote), original, ...opts })
+}
+
+/** A segment's rate in kbit/s (bits per ms) from the index, its bytes over its span; null: not known. */
+const kbpsOf = (s) => (s?.bytes > 0 && s.endMs > s.startMs ? (s.bytes * 8) / (s.endMs - s.startMs) : null)
+/** The rate the server recorded a camera at just before `ms` (the last file starting before it); null: not known. */
+function kbpsBefore(index, nvrId, ch, ms) {
+  try {
+    return Number.isFinite(ms) && index ? kbpsOf(index.prev(nvrId, ch, ms)) : null
+  } catch {
+    return null
+  }
 }
 
 /** HH:MM:SS of a server time, in the NVR's time zone when known (else the server's). */
@@ -550,12 +574,7 @@ export class ServerPlayback {
    * a remote viewer's run is converted).
    */
   #recordedKbps(seg) {
-    const rate = (s) => (s?.bytes > 0 && s.endMs > s.startMs ? (s.bytes * 8) / (s.endMs - s.startMs) : null)
-    try {
-      return rate(seg) ?? rate(this.index.prev(this.nvr.id, this.ch, seg.startMs))
-    } catch {
-      return null
-    }
+    return kbpsOf(seg) ?? kbpsBefore(this.index, this.nvr.id, this.ch, seg.startMs)
   }
 
   /**
@@ -1427,6 +1446,23 @@ export class ServerPlayback {
     return 'skipped'
   }
 
+  /**
+   * What a leg is told of a remote viewer (playback.mjs #fitDecide; null: nothing, the NVR's stream as
+   * it is). A converted run lends its slot: its own converter is idle while the leg plays, and with a
+   * pool of 2 whose last slot is kept for H.265 a browser cannot decode, the leg could never have had
+   * one of its own beside it. A run sent as it is (the recording is within the cap, or there was no
+   * conversion to spare: both said at its first file) leaves the leg as it is. A start or seek into a
+   * hole has opened no file and decided nothing: the leg decides for itself, by the rate of the file
+   * before the hole when that is within the cap, and says what it did (passed on by the proxy).
+   */
+  #legFit(fromMs) {
+    if (!this.fit) return null
+    if (this.fitOn) return { slot: this.slot }
+    if (this.fitAsked) return null
+    const kbps = kbpsBefore(this.index, this.nvr.id, this.ch, fromMs)
+    return { kbps: kbps !== null && kbps <= this.fitAboveKbps ? kbps : null }
+  }
+
   #startLeg({ fromMs, toMs, gen, floorMs, skewMs }) {
     let skew = skewMs
     if (!Number.isFinite(skew)) {
@@ -1439,7 +1475,7 @@ export class ServerPlayback {
     const rec = { handle: null, gen, fromMs, toMs, keyMode: this.#keyMode() }
     try {
       // h265: the NVR's frames go straight to this browser, so they must be converted when ours are
-      rec.handle = this.legs.start({ nvr: this.nvr, ch: this.ch, fromMs, toMs, stream: 0, speed: Math.min(this.speed, LEG_MAX_SPEED), paused: this.paused, skewMs: skew, real: this.ws, gen, at: fromMs, floorMs, h265: this.clientH265 })
+      rec.handle = this.legs.start({ nvr: this.nvr, ch: this.ch, fromMs, toMs, stream: 0, speed: Math.min(this.speed, LEG_MAX_SPEED), paused: this.paused, skewMs: skew, real: this.ws, gen, at: fromMs, floorMs, h265: this.clientH265, fit: this.#legFit(fromMs) })
     } catch (e) {
       rec.handle = failedLeg(e)
     }

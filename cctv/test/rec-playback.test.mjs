@@ -381,6 +381,21 @@ check('footage: cameras 1, 3 and 4 have 3 files each', cam1.segs.length === 3 &&
     return { nvr, ws, s }
   }
   {
+    // a remote viewer's NVR playback is fitted to the link (playback.mjs #fitDecide; finding F6)
+    const rem = connect(ADMIN, '&stream=0', { remote: true })
+    const f = rem.nvr.connects[0]?.o?.fit
+    const seg0 = cam0.segs[0]
+    check('NVR playback, a remote viewer: the session is told (fit), with the rate the server recorded this camera at', Boolean(f) && !f.slot && Math.abs(f.kbps - (seg0.bytes * 8) / (seg0.endMs - seg0.startMs)) < 0.001, J(f ?? null))
+    const sd = connect(ADMIN, '&stream=1', { remote: true })
+    check('... the sub-stream too (it may go over to main by itself: a camera recording HD only)', Boolean(sd.nvr.connects[0]?.o?.fit))
+    const noIdx = connect(ADMIN, '&stream=0', { remote: true, index: null })
+    check('... no index: the rate is not known (null)', noIdx.nvr.connects[0]?.o?.fit?.kbps === null, J(noIdx.nvr.connects[0]?.o?.fit ?? null))
+    const loc = connect(ADMIN, '&stream=0')
+    check('NVR playback on the local network: no fit', loc.nvr.connects.length === 1 && (loc.nvr.connects[0].o?.fit ?? null) === null)
+    const orig = connect(ADMIN, '&stream=0&original=1', { remote: true })
+    check('... and none for a remote viewer who asked for the original (&original=1)', orig.nvr.connects.length === 1 && (orig.nvr.connects[0].o?.fit ?? null) === null)
+  }
+  {
     const { nvr, ws, s } = connect(NV, '&stream=0')
     check('NVR main with Playback SD only: {type:"error"} then 1008 "hd not allowed", no NVR session', s === null && ws.texts.length === 1 && ws.texts[0].type === 'error' && /Playback HD or Live HD/.test(ws.texts[0].message) && ws.closedWith === 1008 && ws.closeReason === 'hd not allowed' && nvr.connects.length === 0, `${J(ws.texts)} ${ws.closedWith} ${ws.closeReason}`)
   }
