@@ -16,9 +16,10 @@
 // the rate the socket drains, on two looks in a row, or a tile has been held back over its cap for
 // more than HELD_MS. What a page opening or a level change queues by itself (every tile's replay, the
 // first keyframes) is let go out first (GRACE_MS). A page socket that has written nothing since the look
-// before, with video queued, is a page that has stopped reading (gone, its socket not closed yet): its
-// queue is not its link's doing and is not read, its tiles are not moved, and after PAUSE_MS its
-// conversions stop until it writes again (#stopped, #lookAtStopped). Twenty
+// before, with video queued, not even part of the frame in hand, is a page that has stopped reading (gone,
+// its socket not closed yet): its queue is not its link's doing and is not read, its tiles are not moved,
+// and after PAUSE_MS, or when its browser's other page changes level, its conversions stop until it
+// writes again (#stopped, #lookAtStopped, #pause). Twenty
 // seconds with nothing piling up and it goes back up one, longer after a climb that failed
 // (CLIMB_FAILED_MS); a page whose sockets all closed and came back within REMEMBER_MS comes back one
 // level above where it left. On top of that, when all remote viewers together send more than the
@@ -265,8 +266,9 @@ class Viewer {
     // for how many looks in a row that has not grown, whether it ever has, whether it had something to
     // write at the last look (written since the one before, or something queued), for how many looks in
     // a row it has written nothing though it had, and whether its being left out has been said (#dead)
-    // paused: its conversions stopped, PAUSE_MS of that (#lookAtStopped)
-    this.pages = new Map() // page -> { written, still, wrote, busy, stuck, said, paused }
+    // paused: its conversions stopped (#pause); pending: what the system had not taken of the frame in
+    // hand at the last look (#pending)
+    this.pages = new Map() // page -> { written, pending, still, wrote, busy, stuck, said, paused }
     this.left = new Set() // level streams its closed sockets left with nobody on them (for their 10 s)
     this.sockets = new Set() // { ws, nvrId, ch, type, source, stream, sent, lastTs, switch, ... } (attach)
     this.sentAt = 0
@@ -286,6 +288,9 @@ export class AdaptiveLive {
     this.gone = new Map() // key -> { level, at }: viewers whose last socket closed, for REMEMBER_MS
     this.streams = new Map() // `${nvr}/${ch}/${type}@${level}` -> PhoneStream
     this.rates = new Map() // `${nvr}/${ch}/${type}` -> the frame rate last read or learnt of that camera stream (#rateOf)
+    // page -> its entry of a viewer's pages, kept while its conversions are paused and no tile of it is
+    // open (its socket still is, or nothing would ask): #lookAtPages, #leave
+    this.pausedPages = new WeakMap()
     this.timer = null
   }
 
@@ -748,10 +753,12 @@ export class AdaptiveLive {
       return send(data, ...rest)
     }
     const page = ws.page ?? null
-    // A tile opened on a page whose conversions are stopped (the tab is alive and asks, its downstream is
-    // not read): the camera's own stream where its browser can play it, and no conversion started for it;
-    // it gets its level's stream with the page's others when the page writes again (#lookAtStopped).
-    if (page && v.pages.get(page)?.paused) {
+    // A tile opened on a page that has stopped reading (the tab is alive and asks, its downstream is not
+    // read): the camera's own stream where its browser can play it, and no conversion started for it; it
+    // gets its level's stream with the page's others when the page writes again (#lookAtStopped). From the
+    // first look that found it stopped, not only once it is paused: a tile opened in the 8 s between
+    // started a conversion. And a paused page whose tiles had all closed (its entry kept: pausedPages).
+    if (page && ((v.pages.get(page) ?? this.pausedPages.get(page))?.paused || this.#stopped(v, entry))) {
       entry.parked = true
       if (!this.#converts(entry, v.level)) entry.stream = source
     } else entry.stream = this.#streamFor(entry, v.level)
@@ -790,6 +797,8 @@ export class AdaptiveLive {
   /** Its last socket has closed: remembered for REMEMBER_MS. */
   #leave(v) {
     if (this.viewers.get(v.key) === v) this.viewers.delete(v.key)
+    // (a paused page's socket may still be open, and a tile opened on it again: #lookAtPages)
+    for (const [page, p] of v.pages) if (p.paused) this.pausedPages.set(page, p)
     this.gone.set(v.key, { level: v.level, at: this.now() })
     // It comes back one level above, if at all: the streams its sockets left at this level would keep
     // their conversion slots for their 10 s (phone-live.mjs STOP_DELAY_MS), and the level it comes back
@@ -820,10 +829,21 @@ export class AdaptiveLive {
     // dropped first. On no stream at all: a main refused at a move after it was taken off its stream here
     // (#retarget), its socket not closed yet -- a ws socket says 'close' once the peer answers, up to its
     // 30 s close timeout behind a backed-up link (the bypass hunt on the merge with live-smooth).
+    // A page of this browser that has stopped reading (parked, #lookAtStopped) comes off its conversions
+    // here, before its PAUSE_MS: left on the old level's streams it kept their slots, and the browser's
+    // live page -- the same cameras, after a network change -- found none for the new level's and went
+    // onto the cameras' raw streams, more to send on a link already backed up ("4 on the raw stream for
+    // want of a conversion slot, 0 of 4 free" with the pool of 4, until the pause up to 8 s later; the
+    // review of fix D, 1 Oct).
+    for (const [page, p] of v.pages) {
+      if (p.paused) continue
+      const socks = [...v.sockets].filter((e) => e.parked && e.ws.page === page)
+      if (socks.length) this.#pause(v, p, socks, `its browser's other page going from ${from} to ${LEVELS[level].id}`)
+    }
     const left = new Set(v.left)
     v.left.clear()
     for (const e of v.sockets) {
-      // (parked: on the stream it has until its page writes again; that stream stays for it)
+      // (parked: on the camera's own stream or on none until its page writes again)
       if (e.parked) continue
       this.#cancelSwitch(e)
       if (!e.stream || e.stream === e.source || e.stream === this.streams.get(this.#keyFor(e, level)) || e.lastTs !== null) continue
@@ -936,26 +956,54 @@ export class AdaptiveLive {
     for (const e of v.sockets) if (e.ws.page && !seen.has(e.ws.page)) seen.set(e.ws.page, e)
     for (const [page, e] of seen) {
       const written = this.#written(e)
+      const pending = this.#pending(e)
       const queued = this.#queued(e)
-      const was = v.pages.get(page)
+      let was = v.pages.get(page)
       if (!was) {
-        v.pages.set(page, { written, still: 0, wrote: written > 0, busy: written > 0 || queued > 0, stuck: 0, said: false, paused: false })
-        continue
+        // (a paused page whose tiles had all closed, one opened on it again: as it was left, still paused)
+        was = this.pausedPages.get(page)
+        this.pausedPages.delete(page)
+        if (was) v.pages.set(page, was)
+        else {
+          v.pages.set(page, { written, pending, still: 0, wrote: written > 0, busy: written > 0 || queued > 0, stuck: 0, said: false, paused: false })
+          continue
+        }
       }
-      // (stuck: nothing written since a look at which it had something to write)
-      const wrote = written !== was.written
-      if (wrote) Object.assign(was, { written, still: 0, wrote: true, said: false })
+      // Written: a frame called back as gone, or the frame in hand further on than at the look before
+      // (#pending). (stuck: nothing written since a look at which it had something to write)
+      const wrote = written !== was.written || pending !== was.pending
+      if (wrote) Object.assign(was, { written, pending, still: 0, wrote: true, said: false })
       else was.still++
       was.stuck = !wrote && was.busy ? was.stuck + 1 : 0
       was.busy = wrote || queued > 0
     }
-    for (const page of v.pages.keys()) if (!seen.has(page)) v.pages.delete(page)
+    for (const [page, p] of v.pages) {
+      if (seen.has(page)) continue
+      // (its tiles all closed. Paused, its socket may still be open: kept for a tile opened on it again,
+      // which started a conversion for a page nobody reads, for the 10 s until it was found stopped again)
+      if (p.paused) this.pausedPages.set(page, p)
+      v.pages.delete(page)
+    }
     for (const [page, e] of seen) {
       const p = v.pages.get(page)
       if (p.said || !this.#dead(v, e)) continue
       p.said = true
       this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket of this browser has written nothing for ${(p.stuck * TICK_MS) / 1000} s while another of its sockets writes: its ${(this.#queued(e) / 1e6).toFixed(2)} MB queued left out (a page gone, its socket not closed yet, or a tab that stopped reading)`)
     }
+  }
+
+  /**
+   * What the system has not yet taken of the frame a page's socket is writing (live-mux.mjs socketPending),
+   * or null where the socket does not say (a plain /live socket, a fake). #written moves a whole frame at
+   * a time, when ws calls back, and a main stream's keyframe of 600 KB takes 4.8 s at 1 Mbit/s and 16 s at
+   * 0.3: at most looks a slow link that worked had "written nothing", was read as a page that has stopped
+   * (#stopped), stepped down at 10-20 s where it had been 4 s, never at 0.15 Mbit/s, and had its
+   * conversions paused and started again (the review of fix D, 1 Oct; measured through the real mux, now
+   * a test). This goes down while the frame goes out, and stands still when nobody reads.
+   */
+  #pending(e) {
+    const n = e.ws.socketPending
+    return typeof n === 'number' ? n : null
   }
 
   /**
@@ -990,43 +1038,43 @@ export class AdaptiveLive {
    * socket that writes). Its queue says nothing about its link, and no level makes it write: it was read
    * as over at every look, its tiles as held over their caps, and the page stepped full -> 15 -> 8 -> 4
    * in 8 s, each step up to 16 conversions started for nobody (PAUSE_MS). A link that is slow but live
-   * writes at every look, whatever its queue, and is read as ever (behind one big frame, at every other:
-   * #pressure). One look, not two, as #dead: the queue reads over from the look its writes stop at.
+   * writes at every look, whatever its queue, and is read as ever: "written" counts the frame in hand
+   * going out, not only frames gone whole (#pending; where the socket does not say that, one behind a big
+   * frame reads as stopped at some looks, and the looks before still count: #pressure). One look, not
+   * two, as #dead: the queue reads over from the look its writes stop at.
    */
   #stopped(v, e) {
     const p = e.ws.page && v.pages.get(e.ws.page)
     return Boolean(p && p.stuck >= 1 && this.#queued(e) > 0)
   }
 
+  /** Whether every socket a viewer has is on a page that has stopped reading (one with none: no). */
+  #allStopped(v) {
+    if (v.sockets.size === 0) return false
+    for (const e of v.sockets) if (!this.#stopped(v, e)) return false
+    return true
+  }
+
   /**
    * Once a look, after #lookAtPages: the tiles of a page that has stopped reading are parked, not moved
    * to another stream by a level change or a slot coming free (the browser's other page may step down:
-   * 4 conversions started for the dead one at each step); a camera's own stream goes on to them, held
-   * back by its gate as ever (backpressure.mjs: over its cap for 30 s, the page's socket is cut). After
-   * PAUSE_MS they come off their conversions, which stop there and then when nobody else is on them
-   * (another browser's tile on the same one keeps it); the gate no longer sees those, and the page's socket
-   * is cut by its keep-alive, 30 s with nothing written and a ping unanswered (server.mjs, live-mux.mjs
-   * quiet). When the page writes again each goes back onto
-   * its level's stream as at any move: nothing older than the last picture it had, from a keyframe
-   * (#retarget, #guard; a conversion made for it starts at the camera's next keyframe).
+   * 4 conversions started for the dead one at each step), and a switch one was waiting for is dropped (it
+   * went over 2.5 s later, onto the conversion made for it; the review of fix D); a camera's own stream
+   * goes on to them, held back by its gate as ever (backpressure.mjs: over its cap for 30 s, the page's
+   * socket is cut). After PAUSE_MS, or when the viewer's level moves (#move), they come off their level's
+   * streams (#pause). When the page writes again each goes back onto its level's stream as at any move:
+   * nothing older than the last picture it had, from a keyframe (#retarget, #guard; a conversion made for
+   * it starts at the camera's next keyframe).
    */
   #lookAtStopped(v) {
     for (const [page, p] of v.pages) {
       const socks = [...v.sockets].filter((e) => e.ws.page === page)
       if (socks.length && this.#stopped(v, socks[0])) {
-        for (const e of socks) e.parked = true
-        if (p.paused || p.stuck * TICK_MS < PAUSE_MS) continue
-        p.paused = true
-        const before = this.#conversions()
         for (const e of socks) {
-          if (!e.stream || e.stream === e.source) continue
-          this.#cancelSwitch(e)
-          this.#leaveStream(e)
-          // (gateSend's, which nothing calls for a socket on no stream: not held over its cap for ever)
-          e.ws.overSince = null
+          if (!e.parked) this.#cancelSwitch(e)
+          e.parked = true
         }
-        const stopped = before - this.#conversions()
-        this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket has stopped, nothing written for ${(p.stuck * TICK_MS) / 1000} s with ${(this.#queued(socks[0]) / 1e6).toFixed(2)} MB queued (a page gone, its socket not closed yet, or a tab that stopped reading): its level stays at ${LEVELS[v.level].id}, its conversions paused until it writes again (${stopped} stopped)`)
+        if (!p.paused && p.stuck * TICK_MS >= PAUSE_MS) this.#pause(v, p, socks, `nothing written for ${(p.stuck * TICK_MS) / 1000} s`)
       } else if (socks.some((e) => e.parked)) {
         if (p.paused) this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket whose conversions were paused writes again: its tiles back on level ${LEVELS[v.level].id}'s streams, from a keyframe`)
         p.paused = false
@@ -1034,6 +1082,28 @@ export class AdaptiveLive {
         for (const e of socks) this.#retarget(e, v.level, { down: v.level > 0 })
       }
     }
+  }
+
+  /**
+   * A stopped page's tiles come off their level's streams: a conversion stops there and then when nobody
+   * else is on it (another browser's tile on the same one keeps it), and so does a level's stream that
+   * passes the camera's frames on, which is sent nothing meanwhile either. A tile on the camera's own
+   * stream stays: its gate holds it back (backpressure.mjs), and the page's socket is cut by its
+   * keep-alive, 30 s with nothing written and a ping unanswered (server.mjs, live-mux.mjs quiet).
+   * Said once a pause, with why now: its PAUSE_MS up, or the viewer's level moving (#move).
+   */
+  #pause(v, p, socks, why) {
+    p.paused = true
+    const before = this.#conversions()
+    for (const e of socks) {
+      this.#cancelSwitch(e)
+      if (!e.stream || e.stream === e.source) continue
+      this.#leaveStream(e)
+      // (gateSend's, which nothing calls for a socket on no stream: not held over its cap for ever)
+      e.ws.overSince = null
+    }
+    const stopped = before - this.#conversions()
+    this.log(`[adaptive] ${v.key.slice(0, 8)}: a page socket has stopped, ${why} with ${(this.#queued(socks[0]) / 1e6).toFixed(2)} MB queued (a page gone, its socket not closed yet, or a tab that stopped reading): its level stays at ${LEVELS[v.level].id}, its conversions paused until it writes again (${stopped} conversion${stopped === 1 ? '' : 's'} stopped)`)
   }
 
   /** The conversions running now. */
@@ -1045,13 +1115,10 @@ export class AdaptiveLive {
 
   /** This look's pressure on a viewer's link: why, or null (QUEUE_S, PRESSURE_LOOKS, HELD_MS, GRACE_MS). */
   #pressure(v, now) {
-    this.#lookAtPages(v)
-    this.#lookAtStopped(v)
     // Nothing of it to read at this look (every socket on a stopped page): the looks before still count.
-    // A slow link with a big frame at the head of its queue (a main's keyframe of 600 KB takes 4.8 s at
-    // 1 Mbit/s, and ws calls back once the whole frame is written) reads as stopped at every other look,
-    // and was over before it and is over after it.
-    if (v.sockets.size && [...v.sockets].every((e) => this.#stopped(v, e))) return null
+    // Where a socket does not say how far the frame in hand has gone (#pending), a slow link behind a big
+    // one reads as stopped at some looks, and was over before them and is over after them.
+    if (this.#allStopped(v)) return null
     let held = 0
     for (const e of v.sockets) if (e.ws.overSince != null && now - e.ws.overSince > HELD_MS && !this.#stopped(v, e)) held++
     const over = !this.#inGrace(v, now) && [...v.sockets].some((e) => !this.#stopped(v, e) && this.#over(e))
@@ -1089,8 +1156,11 @@ export class AdaptiveLive {
     this.lastTotalBps = total
   }
 
-  /** One viewer's look (tick): a switch past its time, then its level. */
+  /** One viewer's look (tick): its pages, a switch past its time, then its level. */
   #look(v, now, heaviest) {
+    // (first: a page found stopped at this look has its switches dropped, not cut over)
+    this.#lookAtPages(v)
+    this.#lookAtStopped(v)
     // a switch still waiting past its time (its stream sent nothing to go over on: held over its cap,
     // or the camera stalled): over now (#switchTo)
     for (const e of v.sockets) if (e.switch && now - e.switch.at > e.switch.waitMs) this.#cutOver(e)
@@ -1102,7 +1172,7 @@ export class AdaptiveLive {
     // Every socket it has on a page that has stopped reading (#stopped): no level fits a link that writes
     // nothing. Neither down (the budget's step too: it is being sent next to nothing) nor up: a climb is
     // a round of new streams and replays, and its 20 s clean start when the page writes again.
-    if ([...v.sockets].every((e) => this.#stopped(v, e))) {
+    if (this.#allStopped(v)) {
       v.cleanSince = now
       return
     }

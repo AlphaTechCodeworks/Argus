@@ -55,7 +55,9 @@ function virtualClock() {
  * The page's socket as ws has it: each message (its fragments, as live-mux sends them) queues until the
  * link has written it, at `bps` bytes a second, and ws then runs its send callback. gone(n): its browser
  * has gone (a network change) and the server's socket was not told: the path takes n bytes more, then
- * nothing is written again.
+ * nothing is written again. The message in hand goes piece by piece, and the socket's handle says how much
+ * of it the system has not taken yet, as a real one does on the server (_socket._handle.writeQueueSize:
+ * live-mux.mjs socketPending, live-mux-socket.test.mjs).
  */
 function linkSocket(bps) {
   const ws = { OPEN: 1, readyState: 1, bufferedAmount: 0, handlers: {}, queue: [], parts: 0, credit: 0, room: Infinity, written: 0 }
@@ -84,6 +86,7 @@ function linkSocket(bps) {
     if (!ws.queue.length) ws.credit = 0 // an idle link saves nothing up
   }
   ws.gone = (n) => (ws.room = n)
+  ws._socket = { _handle: { get writeQueueSize() { return ws.queue.length ? ws.queue[0].bytes - Math.max(0, Math.min(ws.queue[0].bytes, ws.credit, ws.room)) : 0 } } }
   ws.close = () => {}
   ws.terminate = () => {}
   return ws
