@@ -1896,6 +1896,34 @@ for (const speed of [2, 4]) {
     session.close()
   }
   {
+    // Footage with pictures far apart (camera 12: keyframes only, one a second; time-lapse is such
+    // footage), converted. ffmpeg gives a picture back only once two more are in, so paced by the clock
+    // the first picture came two intervals after the start (and each one two intervals late). The three
+    // frames handed in past the start point are three intervals of footage here: the first picture
+    // comes as soon as the converter has it, and the one after it right behind; from there on each
+    // comes at its own distance from the one before.
+    const T12 = Date.UTC(2026, 8, 24, 18, 0, 0)
+    const rnd12 = prng(31)
+    const cam12 = await recordGroups(12, [Array.from({ length: 16 }, (_, i) => ({ buf: h264.key(rnd12, 1200), isKey: true, ts: T12 + i * 1000 }))])
+    const exp12 = await readBack(cam12.segs)
+    check('footage (camera 12): 16 keyframes a second apart, nothing between them', exp12.length === 16 && exp12.every((f, i) => f.isKey && Math.abs(f.ts - (T12 + i * 1000)) < 1), `${exp12.length} frames`)
+    for (const [label, start, firstShown] of [['a start between two pictures', T12 + 3500, 4], ['a start on a picture', T12 + 8000, 8]]) {
+      const xs = []
+      const lines = []
+      const { ws, session } = open(12, start, { remote: true, opts: slowOpts(xs, { log: (l) => lines.push(l) }, { holds: 2 }) })
+      await until(() => ws.bins.filter((b) => b.tsMs >= start).length >= 3, 6000)
+      const shown = ws.bins.filter((b) => b.tsMs >= start)
+      const gaps = shown.slice(1).map((b, j) => Math.round(b.at - shown[j].at))
+      const x = xs[0]
+      check(`pictures a second apart, converted, ${label}: 4 frames go in at once, and the first picture to show is out as soon as the converter has it (800 ms), not two intervals later`, burstOf(x, x.pushed[0]).length === 4 && shown.length >= 3 && Math.abs(shown[0].tsMs - (T12 + firstShown * 1000)) < 1 && shown[0].at - ws.t0 < 1300, `${burstOf(x, x.pushed[0]).length} at once, picture ${Math.round((shown[0]?.tsMs - T12) / 1000)} after ${Math.round(shown[0]?.at - ws.t0)} ms`)
+      // (on a picture: that picture and the next come out together, the converter having both; the clock is on the second)
+      const spaced = firstShown === 4 ? gaps.slice(0, 2) : gaps.slice(1, 2)
+      check('  then each at its own distance from the one before (1 s +- 150 ms), every picture in order', spaced.length > 0 && spaced.every((g) => Math.abs(g - 1000) <= 150) && ws.bins.every((b, j) => converted(b) && Math.abs(b.tsMs - ws.bins[0].tsMs - j * 1000) < 1), `${gaps.join(', ')} ms apart`)
+      check('  no wait run out, nothing logged about it', !lines.some((l) => /gave no picture/.test(l)), lines.join(' | '))
+      session.close()
+    }
+  }
+  {
     // what is not converted is not touched: the local network's start goes out as it always did (the
     // preroll at once, then 1x from T), with a slow converter at hand and never asked
     const xs = []
