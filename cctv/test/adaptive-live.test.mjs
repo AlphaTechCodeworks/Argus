@@ -369,7 +369,12 @@ function fakePage() {
   page.channel = () => ({ ...fakeWs(), overSince: null, get sharedBufferedAmount() { return page.queued }, get drainBps() { return page.drainBps }, get writtenBytes() { return page.written }, page })
   return page
 }
-/** A viewer on a fake page of n tiles, looked at twice: past its opening (nothing queued then) and settled. */
+/**
+ * A viewer on a fake page of n tiles, looked at twice: past its opening (nothing queued then) and settled.
+ * A page given a drain rate writes 100 KB by each look, as a link that drains does: a page socket with
+ * video queued that has written nothing since the look before has stopped reading, and is not read (fix
+ * D, 1 Oct). Its rate 0 or not measured: nothing written, unless the test says so.
+ */
 function onPage(key, n = 2) {
   const clock = { now: T }
   const logs = []
@@ -382,6 +387,7 @@ function onPage(key, n = 2) {
   })
   clearInterval(live.timer)
   const look = () => {
+    if (page.drainBps > 0) page.written += 100_000
     clock.now += TICK_MS
     live.tick()
   }
@@ -414,13 +420,20 @@ function onPage(key, n = 2) {
   check('300 KB queued on a link that writes it in 0.02 s, three looks: not pressure (it was, over 256 KB)', v.level === 0, logs.at(-1))
   page.queued = 1_500_000
   page.drainBps = null // queued too lately to say how fast it goes
+  page.written += 100_000
   look()
+  page.written += 100_000
   look()
   check('... 1.5 MB with no rate measured yet: not read as over', v.level === 0, logs.at(-1))
-  page.drainBps = 0 // busy, and nothing written: a link that stopped
+  page.drainBps = 0 // busy, and nothing written: a page that stopped reading, which no level helps
   look()
   look()
-  check('... busy and nothing written: over, and down at the second look', v.level === 1, logs.at(-1))
+  look()
+  check('... busy and nothing written: a page that has stopped reading, not stepped (it was read as a link that stopped: down at the second look)', v.level === 0, logs.at(-1))
+  page.drainBps = 200_000 // it writes again, 1.6 Mbit/s: 7.5 s to go
+  look()
+  look()
+  check('... writing again, slowly: over, and down at the second look', v.level === 1, logs.at(-1))
 }
 {
   const { socks, look, v, logs, clock } = onPage('held')
@@ -474,27 +487,30 @@ function onPage(key, n = 2) {
   now += TICK_MS
   live.tick()
   check('... once they have gone the queue is read: one look over a second', v.level === 0)
+  page.written += 600_000
   now += TICK_MS
   live.tick()
   check('... two: down', v.level === 1, logs.at(-1))
   clearInterval(live.timer)
 }
 {
-  // ...and for 8 s at most: an opening's replays that do not go out at all are the link's doing
+  // ...and for 8 s at most: an opening's replays that all but do not go out (50 KB every 2 s) are the
+  // link's doing
   let now = T
   const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9, now: () => now })
   const page = fakePage()
-  page.drainBps = 0
+  page.drainBps = 25_000
   page.queued = 2_100_000
   live.attach('stuck', { ws: page.channel(), nvrId: 'n1', ch: 0, type: 1, source: fakeSource('cam') })
   const v = live.viewers.get('stuck')
   const levels = []
   for (let i = 0; i < 5; i++) {
+    page.written += 50_000
     now += TICK_MS
     live.tick()
     levels.push(v.level)
   }
-  check('... nothing of them written: not read before 8 s, then two looks (8 and 10 s): down at 10 s', levels.join() === '0,0,0,0,1', levels.join())
+  check('... next to nothing of them written: not read before 8 s, then two looks (8 and 10 s): down at 10 s', levels.join() === '0,0,0,0,1', levels.join())
   clearInterval(live.timer)
 }
 {
@@ -510,7 +526,7 @@ function onPage(key, n = 2) {
   look()
   look()
   check('... 1.5 MB queued at the move not gone yet: 2.9 s queued at two settled looks, no second step', v.level === 1, logs.at(-1))
-  page.written = 1_500_000 // gone
+  page.written += 1_500_000 // gone
   page.queued = 1_000_000 // 1.6 s of what level 15 sends: still too much
   look()
   check('... once gone: read again, one look', v.level === 1)
@@ -590,13 +606,15 @@ function onPage(key, n = 2) {
   for (const ws of aSocks) ws.handlers.close()
   b.queued = 1_500_000
   b.drainBps = 625_000
+  b.written += 100_000
   look()
+  b.written += 100_000
   look()
   check('  the new page\'s own queue is read as ever: over a second at two looks, down', v.level === 1, logs.at(-1))
 }
 {
-  // Both pages of the browser stopped writing: nothing tells a dead one from a link that stopped, and
-  // both are read as before
+  // Both pages of the browser stopped writing: neither is read. They were read as a link that stopped
+  // (down at the second look, as one page was); no level makes a socket write (fix D, 1 Oct)
   const clock = { now: T }
   const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9, now: () => clock.now })
   const a = fakePage()
@@ -619,7 +637,7 @@ function onPage(key, n = 2) {
     live.tick()
     levels.push(v.level)
   }
-  check('two page sockets of one browser, neither writing: read as a link that stopped (down at the second look, as one page is)', levels.join() === '0,1,1', levels.join())
+  check('two page sockets of one browser, neither writing: not stepped (they were read as a link that stopped: down at the second look)', levels.join() === '0,0,0', levels.join())
 }
 {
   // A page socket with nothing queued is idle, not dead: a tab whose cameras froze (nvr-2 freezes all its
@@ -699,6 +717,220 @@ function onPage(key, n = 2) {
   check('... once gone, read: two looks over a second, down', v.level === 1, logs.at(-1))
 }
 
+// ---- a page that has stopped reading (the playback report, F7 and fix D, 1 Oct) ----
+// A remote Live page left (or its tab frozen) with video queued: its page socket writes nothing more, and
+// through the tunnel the server is not told (a Close frame does not get through Cloudflare while the
+// downstream is blocked; the server's own 30-second rule cuts it, 32-64 s later). The queue of a socket
+// draining at 0 was read as its link at every look: full -> 15 -> 8 -> 4 at 20:19:03.8, :07.8 and :11.8 on
+// 30 Sep, each step 16 conversions started, 48 ffmpeg in 11 s for a page nobody was reading, beside the
+// owner's playback conversion. A level cannot help a socket that writes nothing: it is not stepped (nor
+// climbed), and after PAUSE_MS its conversions stop until it writes again.
+{
+  // the report's test: 6 MB queued, draining at 0
+  const { page, socks, look, v, logs, live, clock } = onPage('gone', 4)
+  page.drainBps = 2_000_000
+  for (let i = 0; i < 2; i++) {
+    page.written += 4_000_000
+    look()
+  }
+  page.queued = 6_000_000
+  page.drainBps = 0
+  const levels = []
+  let most = 0
+  for (let i = 0; i < 15; i++) {
+    if (i >= 1) for (const ws of socks) ws.overSince ??= clock.now - 500 // gateSend: every tile over its cap
+    look()
+    levels.push(v.level)
+    most = Math.max(most, live.pool.active, live.streams.size)
+  }
+  const steps = logs.filter((l) => l.includes('->'))
+  check('a page socket with 6 MB queued draining at 0, its tiles held over their caps, for 30 s: no level change (it went full -> 15 -> 8 -> 4)', levels.every((l) => l === 0) && steps.length === 0, `${levels.join()} | ${steps.join(' | ')}`)
+  check('  and no conversion started for it', most === 0, `${most}`)
+  check('  said once, with what it has queued', logs.filter((l) => l.includes('has stopped, nothing written for')).length === 1 && logs.some((l) => l.includes('nothing written for 8 s with 6.00 MB queued')), logs.join(' | '))
+  // it reads again: the same link as ever
+  page.drainBps = 625_000
+  page.written += 5_000_000
+  page.queued = 1_500_000
+  for (const ws of socks) ws.overSince = null
+  look()
+  check('  it writes again, 2.4 s queued: read as its link again, one look', v.level === 0, logs.at(-1))
+  page.written += 1_000_000
+  look()
+  check('  ... two: down, as a slow link that writes always was', v.level === 1, logs.at(-1))
+}
+{
+  // a slow but live link: it writes at every look, far less than it is handed
+  const { page, socks, look, v, logs, clock } = onPage('trickle', 4)
+  page.drainBps = 25_000 // 0.2 Mbit/s
+  page.queued = 2_000_000
+  page.written += 50_000
+  look()
+  page.queued = 3_000_000
+  page.written += 50_000
+  look()
+  check('a link that still writes (0.2 Mbit/s) with its queue growing: down at the second look, as ever', v.level === 1 && logs.at(-1).includes('full -> 15 (video backing up on its link;'), logs.at(-1))
+  for (let i = 0; i < 2; i++) {
+    page.queued += 1_000_000
+    page.written += 50_000
+    for (const ws of socks) ws.overSince = clock.now + TICK_MS - 3000
+    look()
+  }
+  check('  ... its tiles held over their caps while it writes on: down again', v.level === 2, logs.at(-1))
+}
+{
+  // a slow link with a big frame at the head of its queue: ws calls back once a whole frame is written,
+  // and a main's keyframe of 600 KB takes 4.8 s at 1 Mbit/s, so every other look finds nothing written
+  const { page, look, v, logs } = onPage('big', 1)
+  page.queued = 1_500_000
+  page.drainBps = 125_000 // (onPage's look writes for it)
+  look()
+  page.drainBps = 0
+  look()
+  check('a slow link, over at one look and nothing written by the next (a big frame going out): not stepped there', v.level === 0, logs.at(-1))
+  page.drainBps = 125_000
+  look()
+  check('  ... over again at the next, writing: the look before it still counts, down', v.level === 1, logs.at(-1))
+}
+{
+  // below full: a stopped page is not climbed either (a climb is a round of new streams and replays)
+  const { page, look, v, logs } = onPage('low', 2)
+  page.drainBps = 625_000
+  page.queued = 1_500_000
+  page.written += 100_000
+  look()
+  page.written += 100_000
+  look()
+  check('(a page at 15 after a real step down)', v.level === 1, logs.at(-1))
+  page.drainBps = 0
+  page.queued = 6_000_000
+  const levels = []
+  for (let i = 0; i < 20; i++) {
+    look()
+    levels.push(v.level)
+  }
+  check('a page at 15 that stops reading for 40 s: neither down nor up', levels.every((l) => l === 1), `${levels.join()} | ${logs.filter((l) => l.includes('->')).join(' | ')}`)
+}
+{
+  // Its conversions: an H.265 camera for a PC is converted at every level (2 tiles here, one of them a
+  // camera another browser watches too). They run on for PAUSE_MS, a stall that short being a link's
+  // hiccup, then stop: the one only this page was on gives its slot back, the shared one runs on for the
+  // other browser. Once the page writes again its tiles go back, from a keyframe, nothing older than
+  // the last picture they had.
+  const clock = { now: T }
+  const logs = []
+  // (a converter that hands back every frame it is given)
+  const made = []
+  const make = (o) => {
+    const x = { push(ts, k) { o.onFrame(ts, k, Buffer.from([1])) }, close() { this.closed = true } }
+    made.push(x)
+    return x
+  }
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: make, log: (l) => logs.push(l), budgetBps: 1e9, now: () => clock.now })
+  const srcs = [0, 1].map((i) => {
+    const s = fakeSource(`h265 ${i}`)
+    s.gop = [encodeFrame(Buffer.from([0, 0, 1, 1]), true, 1, 0)]
+    return s
+  })
+  const page = fakePage()
+  const other = fakePage()
+  const socks = srcs.map((source, ch) => {
+    const ws = page.channel()
+    live.attach('pc', { ws, nvrId: 'n1', ch, type: 1, source })
+    return ws
+  })
+  const theirs = other.channel()
+  live.attach('other', { ws: theirs, nvrId: 'n1', ch: 0, type: 1, source: srcs[0] })
+  clearInterval(live.timer)
+  const v = live.viewers.get('pc')
+  let frame = 0
+  const play = (n) => {
+    // 30 fps H.265, a keyframe every 12 frames
+    for (let i = frame; i < frame + n; i++) for (const s of srcs) for (const x of [...s.viewers]) x.send(encodeFrame(Buffer.from([0, 0, 1, 1]), i % 12 === 0, 1, (i * 1000) / 30))
+    frame += n
+  }
+  const look = (wrote) => {
+    page.written += wrote
+    other.written += 100_000
+    play(15)
+    clock.now += TICK_MS
+    live.tick()
+  }
+  page.drainBps = other.drainBps = 2_000_000
+  look(100_000)
+  look(100_000)
+  const before = socks.map((ws) => ws.got.length)
+  check('(two H.265 tiles for a PC at full: a conversion each, the first shared with another browser)', live.pool.active === 2 && before.every((n) => n > 0), `${live.pool.active} ${before}`)
+  page.queued = 6_000_000
+  page.drainBps = 0
+  const active = []
+  for (let i = 0; i < 6; i++) {
+    look(0)
+    active.push(live.pool.active)
+  }
+  check('a page that stops reading: its conversions run on for 8 s, then the one only it was on stops (the shared one runs on)', active.join() === '2,2,2,1,1,1' && live.streams.has('n1/0/1@full') && !live.streams.has('n1/1/1@full') && made.filter((x) => x.closed).length === 1, `${active.join()} ${[...live.streams.keys()]}`)
+  const parked = socks.map((ws) => ws.got.length)
+  const theirsAt = theirs.got.length
+  look(0)
+  check('  its tiles are sent nothing more; the other browser\'s picture goes on', socks.every((ws, i) => ws.got.length === parked[i]) && theirs.got.length > theirsAt, `${socks.map((ws) => ws.got.length)} ${parked} ${theirs.got.length} ${theirsAt}`)
+  check('  no level change, and said once', v.level === 0 && logs.filter((l) => l.includes('->')).length === 0 && logs.filter((l) => l.includes('conversions paused')).length === 1, logs.filter((l) => l.includes('[adaptive]')).join(' | '))
+  const lastTs = socks.map((ws) => parseFrame(ws.got.at(-1)).ts)
+  // it drains
+  page.queued = 200_000
+  page.drainBps = 2_000_000
+  look(5_800_000)
+  check('  it writes again: its conversions are back at the next look', live.pool.active === 2 && live.streams.has('n1/1/1@full'), `${live.pool.active} ${[...live.streams.keys()]}`)
+  play(30)
+  const first = socks.map((ws, i) => (ws.got.length > parked[i] ? parseFrame(ws.got[parked[i]]) : null))
+  check('  ... and each tile starts again at a keyframe, not older than the last picture it had', first.every((f, i) => f && f.isKey && f.ts >= lastTs[i]) && socks.every((ws, i) => ws.got.slice(parked[i]).every((b) => parseFrame(b).ts >= lastTs[i])), `${JSON.stringify(first.map((f) => f && { key: f.isKey, ts: f.ts }))} ${lastTs}`)
+  check('  ... said', logs.some((l) => l.includes('writes again')), logs.filter((l) => l.includes('[adaptive]')).join(' | '))
+  // a tile opened on a paused page (the tab is alive, its downstream is not) starts no conversion
+  page.queued = 6_000_000
+  page.drainBps = 0
+  for (let i = 0; i < 6; i++) look(0)
+  const src2 = fakeSource('h265 2')
+  src2.gop = [encodeFrame(Buffer.from([0, 0, 1, 1]), true, 1, 0)]
+  const late = page.channel()
+  live.attach('pc', { ws: late, nvrId: 'n1', ch: 2, type: 1, source: src2 })
+  check('  a tile opened on a page whose conversions are paused: none started for it', live.pool.active === 1 && !live.streams.has('n1/2/1@full') && late.got.length === 0, `${live.pool.active} ${[...live.streams.keys()]}`)
+  srcs.push(src2)
+  look(1_000_000)
+  check('  ... and it gets its stream with the others when the page writes again', live.pool.active === 3 && live.streams.has('n1/2/1@full'), `${live.pool.active} ${[...live.streams.keys()]}`)
+  late.handlers.close()
+  for (const ws of socks) ws.handlers.close()
+  check('  closing a paused page\'s tiles leaves nothing behind', !live.viewers.has('pc'))
+}
+{
+  // Two page sockets of one browser, the dead one beside the new one (above): while the new one's link
+  // backs up and the viewer steps down, the dead page's tiles are not moved to the new level's streams
+  // (4 conversions for nobody at each step).
+  const clock = { now: T }
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(16), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 1e9, now: () => clock.now })
+  const a = fakePage()
+  const b = fakePage()
+  for (let ch = 0; ch < 4; ch++) live.attach('two', { ws: a.channel(), nvrId: 'n1', ch, type: 1, source: fakeSource(`cam${ch}`) })
+  for (let ch = 4; ch < 6; ch++) live.attach('two', { ws: b.channel(), nvrId: 'n1', ch, type: 1, source: fakeSource(`cam${ch}`) })
+  clearInterval(live.timer)
+  const v = live.viewers.get('two')
+  const look = (aWrote, bWrote) => {
+    a.written += aWrote
+    b.written += bWrote
+    clock.now += TICK_MS
+    live.tick()
+  }
+  a.drainBps = b.drainBps = 625_000
+  look(100_000, 100_000)
+  look(100_000, 100_000)
+  a.queued = 6_000_000
+  a.drainBps = 0
+  look(0, 100_000)
+  look(0, 100_000)
+  b.queued = 1_500_000
+  look(0, 100_000)
+  look(0, 100_000)
+  check('a dead page beside the browser\'s live one whose link backs up: the viewer steps down, and only the live page\'s 2 tiles go onto level 15\'s streams', v.level === 1 && live.streams.size === 2 && [...live.streams.keys()].sort().join() === 'n1/4/1@15,n1/5/1@15', `${v.level} ${[...live.streams.keys()]}`)
+}
+
 // ---- replays of a page over a link of a set rate (remote-page.mjs: the real mux, fan-out and stand-ins) ----
 {
   // The 03:55 page open on 29 Sep (stutter report Task 4): 16 nvr-2 sub tiles on one socket over a
@@ -776,8 +1008,14 @@ function onPage(key, n = 2) {
   const runs = [0, 2e6, 6e6].map((pipeBytes) => openPage({ tiles, linkMbps: 8, durMs: 70_000, reload: { deadAt: 20_000, openAt: 23_000, pipeBytes } }))
   check('a browser\'s new page socket beside its old one that went dead (the path took 0, 2 or 6 MB more): no step down in 70 s', runs.every((r) => r.downs.length === 0), runs.map((r) => r.downs.join(' | ')).join(' || '))
   check('  its new page writes all of the tiles\' video (over 32 MB in 47 s: 16 x 350 kbit/s is 33 MB, and their replays)', runs.every((r) => r.written[1] > 32e6), runs.map((r) => (r.written[1] / 1e6).toFixed(1)).join(', '))
-  const alone = openPage({ tiles, linkMbps: 8, durMs: 40_000, reload: { deadAt: 20_000, openAt: 1e9, pipeBytes: 0 } })
-  check('  (the old page socket alone, no new one: read as a link that stopped, as ever)', alone.downs.length > 0, alone.lines.join(' | '))
+  // The page socket alone, no new one: the owner's Live page left behind on 30 Sep, the report's F7. It
+  // was read as a link that stopped: full -> 15 -> 8 -> 4 from 4 s after its writes stopped, a conversion
+  // started for each tile that its level thins at each step. Through the real mux and its drain meter,
+  // the path taking 0, 2 or 6 MB more, for 60 s after (the keep-alive that cuts it at 30 s is not here).
+  const alone = [0, 2e6, 6e6].map((pipeBytes) => openPage({ tiles, linkMbps: 8, durMs: 80_000, reload: { deadAt: 20_000, openAt: 1e9, pipeBytes } }))
+  check('  the old page socket alone, no new one, 60 s: no level change (it was read as a link that stopped: full -> 15 -> 8 -> 4)', alone.every((r) => !r.lines.some((l) => l.includes(' -> '))), alone.map((r) => r.lines.join(' | ')).join(' || '))
+  check('  ... and no conversion started for it', alone.every((r) => r.conversions === 0), alone.map((r) => r.conversions).join())
+  check('  ... said once each, 8-10 s after its last write', alone.every((r) => r.lines.filter((l) => l.includes('has stopped, nothing written for 8 s')).length === 1), alone.map((r) => r.lines.join(' | ')).join(' || '))
 }
 
 // ---- conversions for a PC through the tunnel (stutter report 2.7) ----

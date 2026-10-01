@@ -128,14 +128,17 @@ const payload = (n) => {
  *   opens another), and the server's socket is not told: it takes pipeBytes more, then writes nothing
  *   and stays open (keep-alive would cut it 30 s later, backpressure.mjs; here it never goes); at
  *   openAt the same browser's new page socket opens, its tiles subscribing 15 ms apart as at first.
- * @returns {{ lines: string[], downs: string[], live: AdaptiveLive, written: number[] }} lines: the
- *   controller's, each with the second it was said at in front; written: bytes each page socket wrote
+ * @returns {{ lines: string[], downs: string[], live: AdaptiveLive, written: number[], conversions: number }} lines:
+ *   the controller's, each with the second it was said at in front; written: bytes each page socket wrote;
+ *   conversions: how many converters were started in all
  */
 export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true, reload = null }) {
   const clock = virtualClock()
   try {
     const lines = []
+    let conversions = 0
     const makeTranscoder = (o) => {
+      conversions++
       let n = 0
       let out = 0
       return {
@@ -218,7 +221,7 @@ export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true, 
       if (at > 0 && at % TICK_MS === 0) live.tick()
     }
     const said = lines.filter((l) => l.includes('[adaptive]'))
-    return { lines: said, downs: said.filter((l) => /: (full|15|8) -> (15|8|4) /.test(l)), live, written: pages.map((p) => p.ws.written) }
+    return { lines: said, downs: said.filter((l) => /: (full|15|8) -> (15|8|4) /.test(l)), live, written: pages.map((p) => p.ws.written), conversions }
   } finally {
     clock.restore()
   }
