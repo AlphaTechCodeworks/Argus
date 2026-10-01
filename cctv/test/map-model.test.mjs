@@ -17,6 +17,7 @@ import {
   parseLatLng,
   ringPlacements,
   saveBody,
+  saveSummary,
   siteBadges,
   siteList,
   sitePosition,
@@ -211,6 +212,46 @@ const SIZE = { w: 1000, h: 600 }
   check('a longitude off the map is refused', parseLatLng('10, 200') === null)
 }
 
+{
+  check('coordinates buried in other words are refused, not guessed at', parseLatLng('Site 5, 42.7, -71.1') === null)
+  check('trailing words are refused too', parseLatLng('42.7, -71.1 by the gate') === null)
+  check('a pasted "lat, lng, 17z" is read', J(parseLatLng(' 42.7, -71.1, 17z ')) === J({ lat: 42.7, lng: -71.1 }))
+  check('a single number is not a position', parseLatLng('42.7') === null)
+}
+
+// ---- only real cameras and real places count --------------------------------------------------------
+{
+  // what the old editor stored when "Street map" was chosen and nothing was ever done with it
+  const untouched = { mode: 'geo', geo: { lat: 30, lng: -40, zoom: 2, layer: 'street', cams: {} } }
+  check('the old editor\'s untouched default view is not a place', sitePosition(untouched) === null)
+  check('  so that site is listed as not placed', siteList({ cameras: CAMERAS, maps: { sites: { 'Rigging lot': untouched } } }).find((s) => s.name === 'Rigging lot').placed === false)
+  check('the same spot with a camera on it is a place', sitePosition({ mode: 'geo', geo: { lat: 30, lng: -40, zoom: 2, cams: { 'yard/0': g(30, -40) } } }) !== null)
+
+  // a site whose only placements are of cameras that have since been removed from the NVR
+  const gone = { sites: { 'Rigging lot': { mode: 'geo', geo: { lat: 10, lng: 20, zoom: 17, layer: 'street', cams: { 'yard/7': g(10.5, 20.5), 'yard/8': g(11, 21) } } } } }
+  const gl = siteList({ cameras: CAMERAS, maps: gone })
+  const gb = siteBadges({ sites: gl, maps: gone, states: {} })
+  check('placements of removed cameras are not counted as on the map', gl.find((s) => s.name === 'Rigging lot').onMap === 0 && gb[0].onMap === 0 && gb[0].box === null, J(gb[0]))
+  check('  the badge sits at the site, not among cameras that are not there', near(gb[0].x, lngToX(20)) && near(gb[0].y, latToY(10)))
+  check('  and stays a badge: opening it would show nothing', collapsedSites(gb, 19).has('Rigging lot'))
+  const gv = siteView(gb[0], gone.sites['Rigging lot'], SIZE)
+  check('  and the site is flown to at its own position', near(gv.cx, lngToX(20)) && near(gv.cy, latToY(10)), J(gv))
+
+  // one real camera among removed ones: only the real one shapes the badge and the flight
+  const mixed = { sites: { 'Rigging lot': { mode: 'geo', geo: { lat: 10, lng: 20, zoom: 17, layer: 'street', cams: { 'yard/0': g(10, 20), 'yard/8': g(11, 21) } } } } }
+  const mb = siteBadges({ sites: siteList({ cameras: CAMERAS, maps: mixed }), maps: mixed, states: {} })
+  check('a removed camera does not stretch the box of the real ones', mb[0].onMap === 1 && mb[0].box.x0 === mb[0].box.x1 && near(mb[0].x, lngToX(20)), J(mb[0]))
+  const mv = siteView(mb[0], mixed.sites['Rigging lot'], SIZE)
+  check('  nor the view the site is flown to', near(mv.cx, lngToX(20), 1e-3) && mv.zoom >= DETAIL_ZOOM, J(mv))
+
+  // a limited viewer: /api/cameras and /api/maps both hold only what they may see
+  const seen = CAMERAS.filter((c) => c.nvr === 'shop' && c.ch === 1)
+  const theirs = { sites: { 'Value 4 U': { ...MAPS.sites['Value 4 U'], geo: { ...MAPS.sites['Value 4 U'].geo, cams: { 'shop/1': MAPS.sites['Value 4 U'].geo.cams['shop/1'] } } } } }
+  const lb = siteBadges({ sites: siteList({ cameras: seen, maps: theirs }), maps: theirs, states: STATES })
+  check('a limited viewer\'s badge counts only their cameras', lb.length === 1 && lb[0].count === 1 && lb[0].onMap === 1 && lb[0].offline === 1, J(lb))
+  check('  and sits on their camera, not in the middle of ones they cannot see', near(lb[0].x, lngToX(-71.163)) && near(lb[0].y, latToY(42.7069)))
+}
+
 // ---- what a save sends -----------------------------------------------------------------------------
 {
   const fresh = saveBody({ geo: { lat: 1, lng: 2, cams: { 'yard/0': g(1, 2) } } }, 'satellite')
@@ -232,6 +273,15 @@ const SIZE = { w: 1000, h: 600 }
   const geoWithPlan = { ...emptyPlan, mode: 'geo', plan: { ...emptyPlan.plan, cams: { 'yard/0': { x: 1, y: 1, dir: 0, fov: 90, range: 5 } } } }
   check('a site already saved as a street-map site stays one', saveBody(geoWithPlan, 'street').mode === 'geo')
   check('a site with neither a plan nor a position has nothing to save', saveBody({}, 'street') === null && saveBody(undefined, 'street') === null)
+}
+
+{
+  check('a save that all went through has nothing to report', saveSummary(['A', 'B'], []) === '')
+  const some = saveSummary(['Main site'], [{ name: 'IT Office', error: 'Bad range' }, { name: 'Yard', error: 'HTTP 500' }])
+  check('a failed save names every site that failed, and why', some.includes('IT Office (Bad range)') && some.includes('Yard (HTTP 500)'), some)
+  check('  and says which sites were stored', some.includes('Stored: Main site'), some)
+  check('  and that the rest is still there to save again', /still unsaved/.test(some), some)
+  check('with nothing stored it does not claim anything was', !saveSummary([], [{ name: 'Yard', error: 'x' }]).includes('Stored'))
 }
 
 // ---- the server stores what the page sends, with no change to old data ---------------------------------
@@ -280,6 +330,13 @@ const SIZE = { w: 1000, h: 600 }
   check('clicking a badge goes to its site', /closest\?\.\('\.site-badge'\)/.test(js))
   check('the offline count on a badge is in the alert colour', /\.site-badge-off \{ fill: var\(--rec-alert\)/.test(css))
   check('each changed site is saved through its own admin route', /api\('PUT', `\/api\/admin\/maps\/\$\{enc\(name\)\}`, body\)/.test(js) && /saveBody\(drafts\[name\], layer\)/.test(js))
+  check('the first-run notice is a card that leaves the map and its buttons live', /\.map-empty \{[^}]*pointer-events: none/.test(css) && /\.map-empty-card \{[^}]*background: var\(--panel\)[^}]*pointer-events: auto/.test(css) && /className: 'map-empty-card'/.test(js))
+  check('  and leads an admin straight to placing a site', /function firstRunCard[\s\S]{0,900}startPlaceSite\(/.test(js))
+  check('placing a site never throws away an edit already under way', /function startEdit\(\) \{\n  if \(editing\) return/.test(js) && /function startPlaceSite[\s\S]{0,120}if \(linkMode\) stopLinks\(\)/.test(js))
+  check('Save cannot be pressed twice, and reports every site', /if \(saving\) return/.test(js) && /saveSummary\(stored, failed\)/.test(js))
+  check('a role is set as an attribute, so it reaches a screen reader', /k === 'role'/.test(js))
+  check('the site buttons are a full touch target on a phone', /@media \(max-width: 800px\) \{[^@]*\.map-sites button \{ height: 44px/.test(css))
+  check('the chosen site is brought into view in the row', /scrollIntoView\(\{ inline: 'nearest', block: 'nearest' \}\)/.test(js))
   check('the page reads only what /api/maps gave this user', (js.match(/api\('GET', '\/api\/maps'\)/g) ?? []).length === 1)
 }
 

@@ -25,22 +25,38 @@ export const PLACE_ZOOM = 18
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v)
 
+/**
+ * The view the old editor gave a site the moment "Street map" was chosen: the middle of the
+ * Atlantic, zoomed right out. Saved with no camera on it, it was never anyone's idea of where the
+ * site is, so it must not put a badge in the ocean.
+ */
+const OLD_DEFAULT = { lat: 30, lng: -40, zoom: 2 }
+
 /** Where a site is on the one map, or null when nobody has placed it. */
 export function sitePosition(siteMap) {
   const g = siteMap?.geo
-  return g && isNum(g.lat) && isNum(g.lng) ? { lat: g.lat, lng: g.lng } : null
+  if (!g || !isNum(g.lat) || !isNum(g.lng)) return null
+  const untouched = g.lat === OLD_DEFAULT.lat && g.lng === OLD_DEFAULT.lng && g.zoom === OLD_DEFAULT.zoom && !Object.keys(g.cams ?? {}).length
+  return untouched ? null : { lat: g.lat, lng: g.lng }
 }
 
-/** A site's street-map placements that really have a position, as [key, placement] pairs. */
-const geoCams = (siteMap) => Object.entries(siteMap?.geo?.cams ?? {}).filter(([, c]) => c && isNum(c.lat) && isNum(c.lng))
+/**
+ * A site's street-map placements that really have a position, as [key, placement] pairs. With
+ * `keys` (the site's cameras in the roster), only those: a placement left behind by a camera that
+ * has been removed, or moved to another site, is not a camera anyone can open.
+ */
+const geoCams = (siteMap, keys) => {
+  const mine = keys && new Set(keys)
+  return Object.entries(siteMap?.geo?.cams ?? {}).filter(([k, c]) => c && isNum(c.lat) && isNum(c.lng) && (!mine || mine.has(k)))
+}
 
 /** The same, as a map boundsOf and buildMarkers can read. */
-const geoOnly = (siteMap) => ({ mode: 'geo', geo: { cams: Object.fromEntries(geoCams(siteMap)) } })
+const geoOnly = (siteMap, keys) => ({ mode: 'geo', geo: { cams: Object.fromEntries(geoCams(siteMap, keys)) } })
 
 /**
  * The sites in the row along the top: one per site in the camera roster, in name order.
  * `count` is the site's real cameras (an empty channel slot is not a camera); `onMap` is how many
- * placements it has on the one map; `placed` is whether the site itself has a position.
+ * of them are on the one map; `placed` is whether the site itself has a position.
  * @param {{ cameras: object[], maps: { sites: object } }} o  /api/cameras and /api/maps
  */
 export function siteList({ cameras = [], maps }) {
@@ -54,14 +70,15 @@ export function siteList({ cameras = [], maps }) {
     const siteMap = maps?.sites?.[name]
     const position = sitePosition(siteMap)
     const cams = by.get(name).sort((a, b) => String(a.nvrName ?? '').localeCompare(String(b.nvrName ?? '')) || a.ch - b.ch)
+    const keys = cams.map((c) => `${c.nvr}/${c.ch}`)
     return {
       name,
-      keys: cams.map((c) => `${c.nvr}/${c.ch}`),
+      keys,
       count: cams.length,
       position,
       placed: Boolean(position),
       hasPlan: Boolean(siteMap?.plan?.file),
-      onMap: geoCams(siteMap).length
+      onMap: geoCams(siteMap, keys).length
     }
   })
 }
@@ -98,7 +115,8 @@ export function siteBadges({ sites = [], maps, states = {} }) {
   const out = []
   for (const s of sites) {
     if (!s.placed) continue
-    const pts = geoCams(maps?.sites?.[s.name]).map(([, c]) => ({ x: lngToX(c.lng), y: latToY(c.lat) }))
+    // only the site's own cameras shape the badge: what it opens into is what the roster holds
+    const pts = geoCams(maps?.sites?.[s.name], s.keys).map(([, c]) => ({ x: lngToX(c.lng), y: latToY(c.lat) }))
     const box = pts.length
       ? { x0: Math.min(...pts.map((p) => p.x)), y0: Math.min(...pts.map((p) => p.y)), x1: Math.max(...pts.map((p) => p.x)), y1: Math.max(...pts.map((p) => p.y)) }
       : null
@@ -111,7 +129,8 @@ export function siteBadges({ sites = [], maps, states = {} }) {
       x: box ? (box.x0 + box.x1) / 2 : lngToX(s.position.lng),
       y: box ? (box.y0 + box.y1) / 2 : latToY(clamp(s.position.lat, -MAX_LAT, MAX_LAT)),
       box,
-      onMap: pts.length
+      onMap: pts.length,
+      keys: s.keys
     })
   }
   return out
@@ -188,7 +207,7 @@ export function siteView(badge, siteMap, size) {
     const z = siteMap?.geo?.zoom
     return { cx: badge.x, cy: badge.y, zoom: clamp(isNum(z) ? z : PLACE_ZOOM, FIT_MIN_ZOOM, FIT_MAX_ZOOM) }
   }
-  const fit = boxView(boundsOf(geoOnly(siteMap)), size)
+  const fit = boxView(boundsOf(geoOnly(siteMap, badge.keys)), size)
   if (!fit) return null
   const span = Math.max(badge.box.x1 - badge.box.x0, badge.box.y1 - badge.box.y0)
   const opens = span > 0 ? Math.min(DETAIL_ZOOM, Math.log2(BADGE_SPAN / span) + 0.01) : DETAIL_ZOOM
@@ -199,7 +218,7 @@ export function siteView(badge, siteMap, size) {
 export function allView(badges, maps, size) {
   if (!badges.length) return null
   if (badges.length === 1) return siteView(badges[0], maps?.sites?.[badges[0].name], size)
-  const boxes = badges.map((b) => (b.onMap ? boundsOf(geoOnly(maps?.sites?.[b.name])) : null) ?? { x0: b.x, y0: b.y, x1: b.x, y1: b.y })
+  const boxes = badges.map((b) => (b.onMap ? boundsOf(geoOnly(maps?.sites?.[b.name], b.keys)) : null) ?? { x0: b.x, y0: b.y, x1: b.x, y1: b.y })
   return boxView({
     x0: Math.min(...boxes.map((b) => b.x0)),
     y0: Math.min(...boxes.map((b) => b.y0)),
@@ -239,15 +258,32 @@ export function ringPlacements(centre, keys, { spacing = 8, minRadius = 12, fov 
   return out
 }
 
-/** "42.7070, -71.1631", or a Google Maps link with @lat,lng in it; null when it is neither. */
+/**
+ * "42.7070, -71.1631" (as pasted from a map, with or without a trailing ", 17z"), or a Google
+ * Maps link with @lat,lng in it; null when it is neither. The plain form must be the whole text:
+ * two numbers picked out of a sentence ("Site 5, 42.7, -71.1") would put a site somewhere nobody
+ * meant, and a wrong place on a map looks exactly as sure of itself as a right one.
+ */
 export function parseLatLng(text) {
   const t = String(text ?? '')
-  const at = /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/.exec(t) ?? /(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/.exec(t)
+  const at = /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/.exec(t) ?? /^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*\d+(?:\.\d+)?z)?\s*$/.exec(t)
   if (!at) return null
   const lat = Number(at[1])
   const lng = Number(at[2])
   if (Math.abs(lat) > MAX_LAT || Math.abs(lng) > 180) return null
   return { lat, lng }
+}
+
+/**
+ * What to tell the admin after a save in which some sites failed: every site that failed and why,
+ * which ones were stored, and that the rest is still there. Empty when nothing failed.
+ * @param {string[]} stored
+ * @param {{name: string, error: string}[]} failed
+ */
+export function saveSummary(stored, failed) {
+  if (!failed.length) return ''
+  const bad = failed.map((f) => `${f.name} (${f.error})`).join('; ')
+  return `Could not save ${bad}.${stored.length ? ` Stored: ${stored.join(', ')}.` : ''} What failed is still unsaved here: put it right and press Save again.`
 }
 
 /**
