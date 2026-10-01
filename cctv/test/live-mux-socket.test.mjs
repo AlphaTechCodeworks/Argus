@@ -62,13 +62,14 @@ if (partial) check('  the system took part of the frame before it stopped (less 
 const seen = [pending]
 for (let i = 0; i < 6 && channel.writtenBytes === 0; i++) {
   client._socket.resume()
-  await sleep(15)
+  await sleep(5)
   client._socket.pause()
   await sleep(60)
-  seen.push(channel.socketPending)
+  // (only while the frame is still going: how much a reader takes in 5 ms is the machine's doing)
+  if (channel.writtenBytes === 0) seen.push(channel.socketPending)
 }
 const moved = seen.filter((p, i) => i > 0 && p < seen[i - 1]).length
-if (partial) check('a reader taking a little at a time: the frame not written yet, and pending goes down at every look', channel.writtenBytes === 0 && moved === seen.length - 1, `${channel.writtenBytes} ${seen.join()}`)
+if (partial) check('a reader taking a little at a time: pending goes down at every look while the frame is not written yet', seen.length >= 3 && moved === seen.length - 1, seen.join())
 else console.log(`PASS  (not Linux: the system took the whole frame at once, ${channel.writtenBytes} bytes written with nobody reading; the checks of a socket backing up are left out)`)
 
 // and all of it
