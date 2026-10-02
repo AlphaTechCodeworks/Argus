@@ -863,6 +863,10 @@ body.phone-full .single-overlay > .zoom-badge { top: calc(8px + env(safe-area-in
 .tile .label .links .pb-link { margin-left: 4px; }
 .tile button.pb-link { background: none; border: 0; padding: 6px 8px; font: inherit; color: var(--accent); cursor: pointer; }
 .tile a.pb-link { padding: 6px 8px; }
+/* Full-size: lift the control strip off the very bottom edge and give its buttons a bigger tap target,
+   so a near-miss has somewhere to land (viewer.js also stops a tap in the strip from closing the view). */
+.single-overlay > .label { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+.single-overlay .label button.pb-link, .single-overlay .label a.pb-link { padding: 9px 12px; }
 /* the full-size view without Live HD stays on the sub-stream, and says so (viewer.js sdBadge); it takes
    the pointer (the label does not) so its title shows, as the dot's does */
 .tile .label .sd-badge { flex: none; margin-left: 6px; padding: 1px 6px; border-radius: 4px; background: rgba(255, 255, 255, .18); color: #fff; font-size: 11px; font-weight: 600; letter-spacing: .04em; pointer-events: auto; }
@@ -1859,7 +1863,7 @@ body.phone-full .single-overlay .status { top: calc(8px + env(safe-area-inset-to
 body.phone-full .single-overlay > .phone-fs-btn { top: calc(12px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right)); }
 body.phone-full .single-overlay .phone-step-prev { left: calc(10px + env(safe-area-inset-left)); }
 body.phone-full .single-overlay .phone-step-next { right: calc(10px + env(safe-area-inset-right)); }
-body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-inset-left)); padding-right: calc(8px + env(safe-area-inset-right)); padding-bottom: calc(4px + env(safe-area-inset-bottom)); }
+body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-inset-left)); padding-right: calc(8px + env(safe-area-inset-right)); padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
 /* a small nudge when the camera opens, so the eye finds them */
 @keyframes phone-step-hint { 0%, 60% { opacity: 1; } 30% { opacity: .5; } 100% { opacity: .75; } }
 .phone-fs-note { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; max-width: 80%;
