@@ -1011,6 +1011,11 @@ body.phone-full .single-overlay > .zoom-badge { top: calc(8px + env(safe-area-in
 .tile.single-overlay canvas.ln-overlay.ln-locked { cursor: default; }
 .tile.single-overlay canvas.ln-loupe { position: absolute; z-index: 5; display: block; transform: none; object-fit: fill; border-radius: 50%; border: 2px solid var(--accent); background: var(--video-bg); pointer-events: none; }
 .tile.single-overlay canvas.ln-overlay[hidden], .tile.single-overlay canvas.ln-loupe[hidden] { display: none; }
+/* the on-picture control bar (OSD, Picture, Lines) sits above the editor's drag layer (z-index 3) so
+   its buttons stay tappable while an OSD or Lines editor is open. The bar itself is click-through
+   (pointer-events: none on .label); only its buttons take a tap, so a drag elsewhere still reaches the
+   drawing canvas. The status badge, step arrows, zoom badge and fullscreen button are already above it. */
+.tile.single-overlay > .label { z-index: 4; }
 /* a phone's full-size camera covers the grid (z-index 91): the panel goes above it */
 body.phone-full #grid > .lines-panel, body.phone-full #grid > .osd-panel { z-index: 92; }
 
