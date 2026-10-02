@@ -238,6 +238,10 @@ class MapView {
     const lowest = Math.max(this.minZoom, Math.min(from.zoom, to.zoom) - out)
     const worthIt = out > 0.15 // a short hop should just glide, not lurch outwards and back
 
+    // warm the pulled-back tiles now, so the way out does not show blank squares before they load
+    // (the cache-warming loads land in the service worker's tile cache too; map.js sw.js)
+    if (worthIt) this.#preloadFly(from, to, lowest)
+
     // a person in the room may prefer no animation at all
     if (matchMedia('(prefers-reduced-motion: reduce)').matches || ms <= 0) {
       this.cx = to.cx; this.cy = to.cy; this.zoom = to.zoom
@@ -274,6 +278,35 @@ class MapView {
   cancelFly() {
     if (this.flyFrame) cancelAnimationFrame(this.flyFrame)
     this.flyFrame = 0
+  }
+
+  /**
+   * Starts loading the tiles the flight is about to pull back to see, before it gets there, so the
+   * way out shows the map rather than blank squares. Only warms the browser/service-worker caches
+   * (new Image().src) -- it does not touch this.tiles or the DOM, so it cannot affect rendering.
+   * Bounded by a budget so a long flight never floods the tile servers.
+   */
+  #preloadFly(from, to, lowest) {
+    const layer = LAYERS[this.layer]
+    const z = clamp(Math.round(lowest), 0, layer.maxZoom)
+    const n = 2 ** z
+    const unit = TILE / n // world units per tile at this zoom
+    const { w, h } = this.size()
+    const mx = w / 2 / 2 ** z + unit // half a viewport (world units), plus a tile of slack
+    const my = h / 2 / 2 ** z + unit
+    const txMin = Math.floor((Math.min(from.cx, to.cx) - mx) / unit)
+    const txMax = Math.floor((Math.max(from.cx, to.cx) + mx) / unit)
+    const tyMin = Math.max(0, Math.floor((Math.min(from.cy, to.cy) - my) / unit))
+    const tyMax = Math.min(n - 1, Math.floor((Math.max(from.cy, to.cy) + my) / unit))
+    let budget = 80 // never hammer the tile servers
+    for (let ty = tyMin; ty <= tyMax && budget > 0; ty++) {
+      for (let tx = txMin; tx <= txMax && budget > 0; tx++, budget--) {
+        if (this.tiles.has(`${this.layer}/${z}/${tx}/${ty}`)) continue
+        const img = new Image()
+        img.referrerPolicy = 'strict-origin-when-cross-origin'
+        img.src = layer.url(z, ((tx % n) + n) % n, ty)
+      }
+    }
   }
 
   zoomAt(z, sx, sy) {
