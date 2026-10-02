@@ -831,10 +831,13 @@ view.onDraw = () => {
       // the status, so recording-ok/degraded/offline is never lost. No group -> today's cone.
       const cs = coneStyle(placed(m)[marker.key], groupsOf(siteOfKey(marker.key)))
       if (cs) {
-        cone.setAttribute('fill', cs.color)
-        cone.setAttribute('stroke', cs.color)
-        cone.setAttribute('fill-opacity', String(cs.opacity))
-        cone.setAttribute('stroke-opacity', '0.9')
+        // inline style, not a fill/stroke attribute: the .cone CSS rules (status colours) are class
+        // selectors and would otherwise win over a presentation attribute, so the group colour never
+        // showed. Inline style beats the class, so the admin's colour is what is drawn.
+        cone.style.fill = cs.color
+        cone.style.stroke = cs.color
+        cone.style.fillOpacity = String(cs.opacity)
+        cone.style.strokeOpacity = '0.9'
       }
       cones.append(cone)
       marks.append(markerNode(marker, sel, showNames))
