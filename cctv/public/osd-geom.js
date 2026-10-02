@@ -1,46 +1,43 @@
 // The maths and rules of placing a camera's burnt-in OSD (osd-panel.js): the camera's own
-// position grid, which fields a Save would change, the words for the confirm dialog, and the
-// name rule checked here as well so a bad name is caught before it reaches the camera. Pure (no
-// DOM), so the node tests (test/osd-geom.test.mjs) run it exactly as the browser does.
+// position grid, which fields a Save would change, the words for the confirm dialog, and the name
+// rule checked here as well so a bad name is caught before it reaches the camera. Pure (no DOM),
+// so the node tests (test/osd-geom.test.mjs) run it exactly as the browser does.
 //
-// Position is the camera's own: whole numbers 0..9999 across the picture's width and down its
-// height, origin top-left, Y down (queryIPChlORChlOSD/editIPChlORChlOSD, osd-doc.mjs, which
-// enforces the same 0..9999 on the server). It is NOT pixels, so the same spot holds when the
-// resolution changes. A camera may not expose a position at all (parseOsd returns x/y null): then
-// there is no free placement and the panel offers preset corners instead.
+// The camera carries TWO independently placed overlays (osd-doc.mjs): the clock (time) and the
+// channel name (chlName), each with its own on/off switch and X/Y position. Position is the
+// camera's own whole numbers 0..10000 across the picture's width and down its height, origin
+// top-left, Y down (the camera reports min/max on every X/Y; osd-doc.mjs enforces the same range
+// on the server). It is NOT pixels, so the same spot holds when the resolution changes.
 //
-// The server writes only the fields that changed and reads them back; this module decides which
-// those are and mirrors osd-doc.mjs checkWanted's name rule, so the panel never sends what the
-// server would refuse.
+// The server writes only the fields that changed, block by block, and reads them back; this module
+// decides which those are and mirrors osd-doc.mjs's name rule, so the panel never sends what the
+// server would refuse. changedFields()'s output is exactly the POST body shape osd.mjs takes.
 
-/** The grid the overlay sits on: 0..OSD_MAX in each axis (osd-doc.mjs: 0 <= v <= 9999). */
-export const OSD_MAX = 9999
-/** The longest a name may be (osd-doc.mjs checkWanted), so it fits the picture. */
+export const OSD_MIN = 0
+export const OSD_MAX = 10000
+/** The longest a name may be (osd-doc.mjs), so it fits the picture. */
 export const NAME_MAX = 32
+/** The two overlays, as the model and the POST body name them. */
+export const OVERLAYS = ['name', 'time']
 
-/** Hold v to lo..hi. */
 export const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 
 /** A fraction of the picture (0..1, a drag past the edge stops at it) as a whole camera unit. */
-export function toUnits(frac) {
+export function toUnits(frac, max = OSD_MAX) {
   const f = Number(frac)
   if (!Number.isFinite(f)) return 0
-  return Math.round(clamp(f, 0, 1) * OSD_MAX)
+  return Math.round(clamp(f, 0, 1) * max)
 }
 
 /** A camera unit as a fraction of the picture (held to 0..1 so a stray value never draws off-picture). */
-export function toFrac(units) {
+export function toFrac(units, max = OSD_MAX) {
   const n = Number(units)
   if (!Number.isFinite(n)) return 0
-  return clamp(n, 0, OSD_MAX) / OSD_MAX
+  return clamp(n, 0, max) / max
 }
 
-/**
- * Whether the camera exposes a free X/Y position to drag (both read as numbers), rather than only
- * letting the name be shown or hidden. A camera that reports no position has x/y null (parseOsd
- * never invents 0,0), and the panel shows preset corners instead.
- */
-export const hasFreePosition = (osd) => Number.isFinite(osd?.x) && Number.isFinite(osd?.y)
+/** Whether an overlay (name or time) has a position to drag: both X and Y read as numbers. */
+export const overlayHasPosition = (block) => Number.isFinite(block?.x) && Number.isFinite(block?.y)
 
 /**
  * The name rule, the same one the server applies (osd-doc.mjs checkWanted), checked here so the
@@ -54,43 +51,56 @@ export function nameError(name) {
   return null
 }
 
+const round = (v) => (Number.isFinite(v) ? Math.round(v) : null)
+
 /** A draft the panel keeps while the admin works (a copy: the camera's reading is untouched). */
 export function draftOf(osd) {
+  const t = osd?.time ?? {}
+  const n = osd?.name ?? {}
   return {
-    name: osd?.name ?? '',
-    showName: osd?.showName === true,
-    showTime: osd?.showTime === true,
-    x: Number.isFinite(osd?.x) ? Math.round(osd.x) : null,
-    y: Number.isFinite(osd?.y) ? Math.round(osd.y) : null
+    name: { show: n.show === true, x: round(n.x), y: round(n.y), text: n.text ?? '' },
+    time: { show: t.show === true, x: round(t.x), y: round(t.y), dateFormat: t.dateFormat ?? null, timeFormat: t.timeFormat ?? null }
   }
 }
 
-/** Whether the overlay was moved (either axis differs by a whole unit from the camera's reading). */
-export function positionMoved(osd, draft) {
-  if (!Number.isFinite(draft?.x) || !Number.isFinite(draft?.y)) return false
-  return Math.round(draft.x) !== (Number.isFinite(osd?.x) ? Math.round(osd.x) : null) ||
-    Math.round(draft.y) !== (Number.isFinite(osd?.y) ? Math.round(osd.y) : null)
+/** Whether an overlay was moved (either axis differs by a whole unit from the camera's reading). */
+export function overlayMoved(block, draftBlock) {
+  if (!Number.isFinite(draftBlock?.x) || !Number.isFinite(draftBlock?.y)) return false
+  return round(draftBlock.x) !== round(block?.x) || round(draftBlock.y) !== round(block?.y)
 }
 
 /**
  * What a Save would send: only the fields that differ from the camera's reading, in the shape the
- * POST route takes ({ name?, showName?, showTime?, x?, y? }). The server writes changed fields
- * only and reads them back; this is the client's matching view. {} when nothing changed. A name
- * that fails nameError is left out (the panel disables Save then), never sent for the server to
- * refuse.
+ * POST route takes ({ name?: { text?, show?, x?, y? }, time?: { show?, x?, y?, dateFormat?,
+ * timeFormat? } }). A block with no change is left out entirely; {} when nothing changed. A name
+ * that fails nameError is left out (the panel disables Save then), never sent to be refused.
  */
 export function changedFields(osd, draft) {
   const out = {}
-  if (String(draft.name) !== String(osd?.name ?? '') && !nameError(draft.name)) out.name = String(draft.name)
-  if (draft.showName === true !== (osd?.showName === true)) out.showName = draft.showName === true
-  if (draft.showTime === true !== (osd?.showTime === true)) out.showTime = draft.showTime === true
-  if (Number.isFinite(draft.x) && Math.round(draft.x) !== (Number.isFinite(osd?.x) ? Math.round(osd.x) : null)) out.x = clamp(Math.round(draft.x), 0, OSD_MAX)
-  if (Number.isFinite(draft.y) && Math.round(draft.y) !== (Number.isFinite(osd?.y) ? Math.round(osd.y) : null)) out.y = clamp(Math.round(draft.y), 0, OSD_MAX)
+  const n = {}
+  const on = osd?.name ?? {}
+  if (String(draft.name.text) !== String(on.text ?? '') && !nameError(draft.name.text)) n.text = String(draft.name.text)
+  if ((draft.name.show === true) !== (on.show === true)) n.show = draft.name.show === true
+  if (Number.isFinite(draft.name.x) && round(draft.name.x) !== round(on.x)) n.x = clamp(round(draft.name.x), OSD_MIN, OSD_MAX)
+  if (Number.isFinite(draft.name.y) && round(draft.name.y) !== round(on.y)) n.y = clamp(round(draft.name.y), OSD_MIN, OSD_MAX)
+  if (Object.keys(n).length) out.name = n
+
+  const tm = {}
+  const ot = osd?.time ?? {}
+  if ((draft.time.show === true) !== (ot.show === true)) tm.show = draft.time.show === true
+  if (Number.isFinite(draft.time.x) && round(draft.time.x) !== round(ot.x)) tm.x = clamp(round(draft.time.x), OSD_MIN, OSD_MAX)
+  if (Number.isFinite(draft.time.y) && round(draft.time.y) !== round(ot.y)) tm.y = clamp(round(draft.time.y), OSD_MIN, OSD_MAX)
+  if (draft.time.dateFormat != null && draft.time.dateFormat !== ot.dateFormat) tm.dateFormat = draft.time.dateFormat
+  if (draft.time.timeFormat != null && draft.time.timeFormat !== ot.timeFormat) tm.timeFormat = draft.time.timeFormat
+  if (Object.keys(tm).length) out.time = tm
   return out
 }
 
-/** How many fields a Save would change. */
-export const changeCount = (osd, draft) => Object.keys(changedFields(osd, draft)).length
+/** How many fields a Save would change, across both overlays. */
+export function changeCount(osd, draft) {
+  const ch = changedFields(osd, draft)
+  return Object.values(ch).reduce((s, b) => s + Object.keys(b).length, 0)
+}
 
 /**
  * What a Save would change, one line each in plain words: the Save button counts them, the
@@ -101,27 +111,30 @@ export function changeSummary(osd, draft) {
   const out = []
   const onOff = (v) => (v ? 'on' : 'off')
   const ch = changedFields(osd, draft)
-  if ('name' in ch) out.push(`Name: ${osd?.name ? `"${osd.name}"` : '(none)'} → "${ch.name}"`)
-  if ('showName' in ch) out.push(`Show name: ${onOff(osd?.showName)} → ${onOff(ch.showName)}`)
-  if ('showTime' in ch) out.push(`Show time: ${onOff(osd?.showTime)} → ${onOff(ch.showTime)}`)
-  if ('x' in ch || 'y' in ch) {
-    const nx = 'x' in ch ? ch.x : osd?.x
-    const ny = 'y' in ch ? ch.y : osd?.y
-    const was = hasFreePosition(osd) ? `${osd.x},${osd.y}` : 'not set'
-    out.push(`Position: ${was} → ${nx},${ny}`)
+  if (ch.name) {
+    const o = osd?.name ?? {}
+    if ('text' in ch.name) out.push(`Name text: ${o.text ? `"${o.text}"` : '(none)'} → "${ch.name.text}"`)
+    if ('show' in ch.name) out.push(`Show name: ${onOff(o.show)} → ${onOff(ch.name.show)}`)
+    if ('x' in ch.name || 'y' in ch.name) out.push(`Name position: ${posText(o)} → ${ch.name.x ?? o.x},${ch.name.y ?? o.y}`)
+  }
+  if (ch.time) {
+    const o = osd?.time ?? {}
+    if ('show' in ch.time) out.push(`Show clock: ${onOff(o.show)} → ${onOff(ch.time.show)}`)
+    if ('x' in ch.time || 'y' in ch.time) out.push(`Clock position: ${posText(o)} → ${ch.time.x ?? o.x},${ch.time.y ?? o.y}`)
+    if ('dateFormat' in ch.time) out.push(`Date format: ${o.dateFormat ?? '(none)'} → ${ch.time.dateFormat}`)
+    if ('timeFormat' in ch.time) out.push(`Clock: ${o.timeFormat ?? '(none)'}-hour → ${ch.time.timeFormat}-hour`)
   }
   return out
 }
 
+const posText = (block) => (overlayHasPosition(block) ? `${block.x},${block.y}` : 'not set')
+
 /** "Save", "Save 1 change", "Save 3 changes". */
 export const saveLabel = (n) => (n ? `Save ${n} change${n === 1 ? '' : 's'}` : 'Save')
 
-/** How far in from each edge a preset corner sits (units), so the text is not clipped at the very edge. */
+/** How far in from each edge a preset corner sits (units), so the text is not clipped at the edge. */
 export const CORNER_INSET = 200
-/**
- * The preset corners, for a camera that does not expose free X/Y (or for quick placement). Y down,
- * so "top" is the small Y. Values are clamped into the grid.
- */
+/** The preset corners, for quick placement. Y down, so "top" is the small Y. */
 export const CORNERS = [
   { id: 'top-left', label: 'Top left', x: CORNER_INSET, y: CORNER_INSET },
   { id: 'top-right', label: 'Top right', x: OSD_MAX - CORNER_INSET, y: CORNER_INSET },
@@ -129,10 +142,7 @@ export const CORNERS = [
   { id: 'bottom-right', label: 'Bottom right', x: OSD_MAX - CORNER_INSET, y: OSD_MAX - CORNER_INSET }
 ]
 
-/**
- * Which preset corner a position sits in, for highlighting the right button: the nearest corner by
- * straight distance, or null when there is no position to compare.
- */
+/** Which preset corner a position sits nearest, for highlighting; null when there is no position. */
 export function nearestCorner(x, y) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null
   let best = null

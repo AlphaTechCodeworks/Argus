@@ -1016,6 +1016,11 @@ body.phone-full #grid > .lines-panel, body.phone-full #grid > .osd-panel { z-ind
 
 /* ---- the camera's burnt-in OSD (admins): osd-panel.js, over the full-size view ---- */
 /* the panel reuses the line-crossing box (.img-panel, Hide/fold, the .ln-overlay drawing canvas) */
+/* each overlay (name, clock) is its own box; the selected one (what a corner button and a tap place) is ringed */
+.osd-ov { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-md); display: flex; flex-direction: column; gap: 8px; }
+.osd-ov.osd-current { border-color: var(--accent); }
+.osd-select { align-self: flex-start; padding: 3px 9px; font-size: 12px; }
+.osd-select[aria-pressed="true"] { border-color: var(--accent); color: var(--text); font-weight: 600; }
 .osd-name-row { flex-direction: column; align-items: stretch; gap: 3px; font-size: 12.5px; }
 .osd-name { background: #0f1216; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 7px; font: inherit; color-scheme: light dark; }
 .osd-name-err:empty { display: none; }

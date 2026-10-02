@@ -1,30 +1,39 @@
-// Tests for osd-geom.js: the maths and rules of placing a camera's burnt-in OSD.
+// Tests for osd-geom.js: the maths and rules of placing a camera's two burnt-in OSD overlays.
 //   node cctv/test/osd-geom.test.mjs
 //
 // Pure, no DOM, so it runs here exactly as it does in the browser. The point worth testing hard:
-// what a Save sends (only the fields that changed) and that a bad name or an off-grid position is
-// caught before it reaches a camera, because the OSD is burnt into every recording for ever.
+// what a Save sends (only the fields that changed, block by block) and that a bad name or an
+// off-grid position is caught before it reaches a camera -- the OSD is burnt into every recording
+// for ever. changedFields()'s output is the exact POST body osd.mjs takes.
 import {
   CORNERS, OSD_MAX, changeCount, changeSummary, changedFields, clamp, draftOf,
-  hasFreePosition, nameError, nearestCorner, positionMoved, saveLabel, toFrac, toUnits
+  nameError, nearestCorner, overlayHasPosition, overlayMoved, saveLabel, toFrac, toUnits
 } from '../public/osd-geom.js'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
 
+// the shape parseOsd produces (osd-doc.mjs), as the panel receives it
+const CAM = {
+  chlId: '{x}', grid: { min: 0, max: 10000 },
+  name: { show: true, x: 75, y: 100, text: 'Gate' },
+  time: { show: true, x: 6600, y: 100, dateFormat: 'day-month-year', timeFormat: '24' },
+  types: { dateFormat: ['year-month-day', 'month-day-year', 'day-month-year'], timeFormat: ['12', '24'] }
+}
+
 // ---- coordinate mapping ------------------------------------------------------------------------
 {
-  check('a fraction maps to a whole unit on the 0..9999 grid', toUnits(0.5) === 5000 && toUnits(1) === OSD_MAX && toUnits(0) === 0, String(toUnits(0.5)))
+  check('a fraction maps to a whole unit on the 0..10000 grid', toUnits(0.5) === 5000 && toUnits(1) === OSD_MAX && toUnits(0) === 0, String(toUnits(0.5)))
   check('a drag past the edge is held to the grid', toUnits(1.4) === OSD_MAX && toUnits(-0.2) === 0)
-  check('a unit maps back to a fraction', Math.abs(toFrac(5000) - 0.5000500) < 1e-6 && toFrac(0) === 0 && toFrac(OSD_MAX) === 1)
+  check('a unit maps back to a fraction', toFrac(5000) === 0.5 && toFrac(0) === 0 && toFrac(OSD_MAX) === 1)
   check('an off-grid or junk unit is held to the picture', toFrac(20000) === 1 && toFrac(-5) === 0 && toFrac('x') === 0)
   check('clamp holds a value to its range', clamp(12, 0, 9) === 9 && clamp(-1, 0, 9) === 0 && clamp(5, 0, 9) === 5)
 }
 
-// ---- free position vs none ---------------------------------------------------------------------
+// ---- which overlay has a position --------------------------------------------------------------
 {
-  check('a camera with X/Y has a free position', hasFreePosition({ x: 100, y: 200 }) === true)
-  check('a camera with no position does not (never treated as 0,0)', hasFreePosition({ x: null, y: null }) === false && hasFreePosition({}) === false)
+  check('an overlay with X/Y has a position', overlayHasPosition({ x: 100, y: 200 }) === true)
+  check('an overlay with no position does not (never treated as 0,0)', overlayHasPosition({ x: null, y: null }) === false && overlayHasPosition({}) === false)
 }
 
 // ---- the name rule (mirrors the server) --------------------------------------------------------
@@ -37,41 +46,47 @@ const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PAS
 
 // ---- the draft ---------------------------------------------------------------------------------
 {
-  const d = draftOf({ name: 'Yard', showName: true, showTime: false, x: 500.4, y: 9200.8 })
-  check('a draft copies the reading and rounds the position', d.name === 'Yard' && d.showName === true && d.showTime === false && d.x === 500 && d.y === 9201, JSON.stringify(d))
-  const n = draftOf({ name: null, showName: null, showTime: null, x: null, y: null })
-  check('nulls become an empty name, off switches and no position', n.name === '' && n.showName === false && n.showTime === false && n.x === null && n.y === null, JSON.stringify(n))
+  const d = draftOf(CAM)
+  check('a draft copies both overlays', d.name.text === 'Gate' && d.name.x === 75 && d.time.show === true && d.time.timeFormat === '24', JSON.stringify(d))
+  const n = draftOf({ name: { text: null, show: null, x: null, y: null }, time: { show: null, x: null, y: null } })
+  check('nulls become an empty name, off switches and no position', n.name.text === '' && n.name.show === false && n.name.x === null && n.time.show === false, JSON.stringify(n))
+  check('a draft rounds a fractional position', draftOf({ name: { x: 75.6, y: 100.2 } }).name.x === 76)
 }
 
-// ---- what a Save sends (only what changed) -----------------------------------------------------
+// ---- what a Save sends (only what changed, per block) ------------------------------------------
 {
-  const osd = { name: 'Gate', showName: true, showTime: true, x: 500, y: 9200 }
-  check('no change sends nothing', JSON.stringify(changedFields(osd, draftOf(osd))) === '{}')
-  check('only the name that changed is sent', JSON.stringify(changedFields(osd, { ...draftOf(osd), name: 'North Gate' })) === '{"name":"North Gate"}')
-  check('a switch flip is sent as a boolean', changedFields(osd, { ...draftOf(osd), showTime: false }).showTime === false)
-  const moved = changedFields(osd, { ...draftOf(osd), x: 1200.6, y: 300 })
-  check('a moved position is sent rounded and clamped', moved.x === 1201 && moved.y === 300 && !('name' in moved), JSON.stringify(moved))
-  check('an off-grid position is clamped into the grid', changedFields(osd, { ...draftOf(osd), x: 999999 }).x === OSD_MAX)
-  // A name that would be refused by the server is never sent; the panel disables Save instead.
-  check('an invalid name is not sent', !('name' in changedFields(osd, { ...draftOf(osd), name: '  ' })))
-  // A position the camera did not have, now set (e.g. from a corner button), counts as a change.
-  const none = { name: 'Gate', showName: true, showTime: true, x: null, y: null }
-  check('setting a position where there was none is a change', changedFields(none, { ...draftOf(none), x: 200, y: 200 }).x === 200)
-  check('changeCount counts the changed fields', changeCount(osd, { ...draftOf(osd), name: 'A', showTime: false }) === 2)
+  check('no change sends nothing', JSON.stringify(changedFields(CAM, draftOf(CAM))) === '{}')
+  const d1 = draftOf(CAM); d1.name.text = 'North Gate'
+  check('only the changed name text is sent, in the name block', JSON.stringify(changedFields(CAM, d1)) === '{"name":{"text":"North Gate"}}')
+  const d2 = draftOf(CAM); d2.time.show = false; d2.time.timeFormat = '12'
+  check('a clock switch and format go in the time block', JSON.stringify(changedFields(CAM, d2)) === '{"time":{"show":false,"timeFormat":"12"}}')
+  const d3 = draftOf(CAM); d3.name.x = 1200.6; d3.time.y = 300
+  const ch3 = changedFields(CAM, d3)
+  check('each overlay moves independently, rounded and clamped', ch3.name.x === 1201 && ch3.time.y === 300 && !('y' in ch3.name) && !('x' in ch3.time), JSON.stringify(ch3))
+  const d4 = draftOf(CAM); d4.name.x = 999999
+  check('an off-grid position is clamped into the grid', changedFields(CAM, d4).name.x === OSD_MAX)
+  const d5 = draftOf(CAM); d5.name.text = '  '
+  check('an invalid name is not sent', !('name' in changedFields(CAM, d5)) || !('text' in (changedFields(CAM, d5).name ?? {})))
+  // a position where there was none (e.g. a corner button) counts as a change
+  const none = { name: { show: true, x: null, y: null, text: 'G' }, time: { show: true, x: null, y: null } }
+  const dn = draftOf(none); dn.time.x = 200; dn.time.y = 200
+  check('setting a position where there was none is a change', changedFields(none, dn).time.x === 200)
+  const d6 = draftOf(CAM); d6.name.text = 'A'; d6.time.show = false
+  check('changeCount counts across both overlays', changeCount(CAM, d6) === 2)
 }
 
 // ---- the words for the dialog ------------------------------------------------------------------
 {
-  const osd = { name: 'Gate', showName: true, showTime: true, x: 500, y: 9200 }
-  const lines = changeSummary(osd, { name: 'North Gate', showName: true, showTime: false, x: 500, y: 9200 })
-  check('the summary names the name change with before and after', lines.some((l) => l.includes('Gate') && l.includes('North Gate')), JSON.stringify(lines))
-  check('the summary names a switch going off', lines.some((l) => /Show time: on → off/.test(l)), JSON.stringify(lines))
-  check('nothing changed is an empty summary', changeSummary(osd, draftOf(osd)).length === 0)
-  const pos = changeSummary(osd, { ...draftOf(osd), x: 1000, y: 1000 })
-  check('a moved position is named', pos.some((l) => /Position:/.test(l)), JSON.stringify(pos))
-  const fromNone = changeSummary({ name: 'G', showName: true, showTime: true, x: null, y: null }, { name: 'G', showName: true, showTime: true, x: 200, y: 200 })
-  check('a position set from none says "not set"', fromNone.some((l) => /not set → 200,200/.test(l)), JSON.stringify(fromNone))
-  check('positionMoved is true only when an axis differs', positionMoved(osd, { ...draftOf(osd), x: 501 }) === true && positionMoved(osd, draftOf(osd)) === false)
+  const d = draftOf(CAM); d.name.text = 'North Gate'; d.time.show = false
+  const lines = changeSummary(CAM, d)
+  check('the summary names the name-text change with before and after', lines.some((l) => l.includes('Gate') && l.includes('North Gate')), JSON.stringify(lines))
+  check('the summary names the clock going off', lines.some((l) => /Show clock: on → off/.test(l)), JSON.stringify(lines))
+  check('nothing changed is an empty summary', changeSummary(CAM, draftOf(CAM)).length === 0)
+  const dm = draftOf(CAM); dm.name.x = 1000; dm.name.y = 1000
+  check('a moved name position is named', changeSummary(CAM, dm).some((l) => /Name position:/.test(l)), JSON.stringify(changeSummary(CAM, dm)))
+  const df = draftOf(CAM); df.time.dateFormat = 'month-day-year'
+  check('a format change is named', changeSummary(CAM, df).some((l) => /Date format:/.test(l)))
+  check('overlayMoved is true only when an axis differs', overlayMoved(CAM.name, { ...draftOf(CAM).name, x: 76 }) === true && overlayMoved(CAM.name, draftOf(CAM).name) === false)
   check('saveLabel counts', saveLabel(0) === 'Save' && saveLabel(1) === 'Save 1 change' && saveLabel(3) === 'Save 3 changes')
 }
 

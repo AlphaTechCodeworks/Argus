@@ -1,25 +1,27 @@
 // The on-screen display for one camera (admins), over the full-size Live view: the name text and
 // the clock the camera BURNS INTO ITS PICTURE -- part of every recording for ever, the timestamp a
-// person reads off evidence. Drag the overlay on the live picture to place it, edit the name, turn
-// the name/time on or off, then Save. Modelled on the line-crossing panel (lines-panel.js) so it
-// matches the app and its safety model.
+// person reads off evidence. The camera carries two independently placed overlays (the name and
+// the clock), each with its own on/off switch and X/Y. Drag either box on the live picture to
+// place it, edit the name, pick the clock's date/time format, turn each overlay on or off, then
+// Save. Modelled on the line-crossing panel (lines-panel.js) so it matches the app and its safety
+// model.
 //
 // Nothing reaches the camera without a click on Save or Undo. Save first lists what it will change
 // and warns it is burnt into recordings; the server (osd.mjs) reads the camera, writes only the
-// changed fields, reads them back and logs before/after; the result is shown here (applied or not,
-// before vs after) and Undo writes the previous values back.
+// changed fields block by block, reads them back and logs before/after; the result is shown here
+// (applied or not, before vs after) and Undo writes the previous values back.
 //
 // This is the camera's REAL overlay, not Argus's own browser overlay (osd-overlay.js): a different
-// thing entirely, left alone.
-//
-// The drawing canvas lies exactly over the picture (colour-check-ui.js's tested maths); the
-// placement maths and rules are osd-geom.js (node-tested). The DOM is only touched in OsdPanel.
+// thing entirely, left alone. The canvas lies exactly over the picture (colour-check-ui.js's tested
+// maths); the placement maths and rules are osd-geom.js (node-tested). The DOM is only touched here.
 import { clientToPicture, objectPosition, overlayBox, pictureRect, pictureToOverlay } from './colour-check-ui.js'
-import { CORNERS, OSD_MAX, changeCount, changeSummary, changedFields, draftOf, hasFreePosition, nameError, nearestCorner, saveLabel, toFrac, toUnits } from './osd-geom.js'
+import { CORNERS, OSD_MAX, changeCount, changeSummary, changedFields, draftOf, nameError, nearestCorner, overlayHasPosition, overlayMoved, saveLabel, toFrac, toUnits } from './osd-geom.js'
 
 const MOVE_PX = 4 // a press that moved less than this is a tap (place the overlay there)
+const REACH_PX = 10 // extra slack around a box when deciding which one a press grabs
+const OV_LABEL = { name: 'name', time: 'clock' }
+const DATEFMT_WORDS = { 'year-month-day': 'Year-Month-Day', 'month-day-year': 'Month-Day-Year', 'day-month-year': 'Day-Month-Year' }
 
-/** A small DOM builder: el('p', { className: 'x' }, 'text', child). */
 function el(tag, props = {}, ...kids) {
   const n = document.createElement(tag)
   for (const [k, v] of Object.entries(props ?? {})) {
@@ -39,24 +41,26 @@ async function api(method, url, body) {
 }
 const errorOf = (r) => new Error(r.data?.error || `HTTP ${r.status}`)
 
-/** A sample clock in the camera's own format, drawn in the time box so its place can be judged. */
-function sampleTime(osd) {
+/** A sample clock in the draft's own format, drawn in the clock box so its place can be judged. */
+function sampleTime(time) {
   const d = new Date()
   const p = (n) => String(n).padStart(2, '0')
-  const date = /year-month-day/i.test(osd?.dateFormat ?? '') ? `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` : `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`
-  const h = /^12/.test(osd?.timeFormat ?? '') ? `${((d.getHours() + 11) % 12) + 1}:${p(d.getMinutes())}:${p(d.getSeconds())} ${d.getHours() < 12 ? 'AM' : 'PM'}` : `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  const date = time?.dateFormat === 'year-month-day' ? `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+    : time?.dateFormat === 'month-day-year' ? `${p(d.getMonth() + 1)}-${p(d.getDate())}-${d.getFullYear()}`
+      : `${p(d.getDate())}-${p(d.getMonth() + 1)}-${d.getFullYear()}`
+  const h = time?.timeFormat === '12' ? `${((d.getHours() + 11) % 12) + 1}:${p(d.getMinutes())}:${p(d.getSeconds())} ${d.getHours() < 12 ? 'AM' : 'PM'}` : `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
   return `${date} ${h}`
 }
 
-/** A translucent box with a dark edge and white text, so it shows on any picture. */
-function box(g, x, y, w, h, text, { current, dashed, dim, k }) {
+/** A translucent box with a dark edge and white text, so it shows on any picture. Returns its rect (CSS px). */
+function drawBox(g, x, y, w, h, text, { current, dashed, dim, k }) {
   g.save()
   g.setLineDash(dashed ? [8 * k, 5 * k] : [])
-  g.fillStyle = dim ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.55)'
+  g.fillStyle = dim ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.55)'
   g.strokeStyle = current ? '#ffd23f' : 'rgba(255,255,255,0.85)'
   g.lineWidth = (current ? 2.5 : 1.5) * k
-  g.beginPath()
   const r = 4 * k
+  g.beginPath()
   g.moveTo(x + r, y)
   g.arcTo(x + w, y, x + w, y + h, r)
   g.arcTo(x + w, y + h, x, y + h, r)
@@ -66,7 +70,7 @@ function box(g, x, y, w, h, text, { current, dashed, dim, k }) {
   g.fill()
   g.stroke()
   g.setLineDash([])
-  g.font = `600 ${Math.round(h * 0.52)}px system-ui, sans-serif`
+  g.font = `600 ${Math.round(h * 0.5)}px system-ui, sans-serif`
   g.textAlign = 'left'
   g.textBaseline = 'middle'
   g.fillStyle = dim ? 'rgba(255,255,255,0.55)' : '#fff'
@@ -88,9 +92,10 @@ export class OsdPanel {
     this.liveEl = liveEl
     this.opener = opener
     this.onClose = onClose
-    this.osd = null // GET .../osd: the camera's reading
+    this.osd = null // GET .../osd: the camera's reading (two-overlay model)
     this.draft = null // draftOf(osd), as the admin changes it
-    this.undo = null // { fields, at, by } the values to put back after a Save
+    this.undo = null // { want, at, by } the values to put back after a Save
+    this.selected = 'name' // the overlay the corner buttons and a tap place
     this.busy = false
     this.sending = 0
     this.session = 0
@@ -98,6 +103,7 @@ export class OsdPanel {
     this.isOpen = false
     this.folded = false
     this.drag = null
+    this.boxes = {} // last-drawn box rects in canvas CSS px, for hit-testing
     this.ov = null
     this.layoutKey = ''
     this.onResize = () => this.layout()
@@ -120,13 +126,20 @@ export class OsdPanel {
     this.el = el('aside', { className: 'img-panel osd-panel', 'aria-label': 'On-screen display' })
     this.el.innerHTML = `
       <div class="ip-head"><h2 tabindex="-1">OSD <span class="ip-cam"></span></h2><span class="ln-head-buttons"><button type="button" class="ln-fold" aria-expanded="true" title="Fold the panel away to see the whole picture">Hide</button><button type="button" class="ip-close" aria-label="Close OSD editor">×</button></span></div>
-      <p class="ln-help">This is what the camera burns into its picture, and into every recording from now on. Drag the overlay on the picture to place it; edit the name and turn the name or clock on or off, then Save.</p>
-      <p class="osd-nopos ln-note" hidden></p>
-      <label class="ip-row osd-name-row">Name <input type="text" class="osd-name" maxlength="32" /></label>
-      <p class="osd-name-err ip-error" role="alert"></p>
-      <label class="ip-switch"><input type="checkbox" class="osd-show-name" /> Show the name</label>
-      <label class="ip-switch"><input type="checkbox" class="osd-show-time" /> Show the clock</label>
-      <div class="osd-corners" hidden><p class="ln-note">Place the overlay:</p><div class="osd-corner-buttons"></div></div>
+      <p class="ln-help">This is what the camera burns into its picture, and into every recording from now on. Drag the name box or the clock box on the picture to place it; a tap places the selected one. Edit the name and the clock below, then Save.</p>
+      <section class="ln-box osd-ov" data-ov="name">
+        <label class="ip-switch"><input type="checkbox" class="osd-show-name" /> Show the name</label>
+        <label class="ip-row osd-name-row">Name <input type="text" class="osd-name" maxlength="32" /></label>
+        <p class="osd-name-err ip-error" role="alert"></p>
+        <button type="button" class="osd-select" data-ov="name">Place the name</button>
+      </section>
+      <section class="ln-box osd-ov" data-ov="time">
+        <label class="ip-switch"><input type="checkbox" class="osd-show-time" /> Show the clock</label>
+        <label class="ln-row">Date format <select class="osd-datefmt"></select></label>
+        <label class="ln-row">Clock <select class="osd-timefmt"></select></label>
+        <button type="button" class="osd-select" data-ov="time">Place the clock</button>
+      </section>
+      <div class="osd-corners"><p class="ln-note">Move the <span class="osd-sel-word">name</span> to a corner:</p><div class="osd-corner-buttons"></div></div>
       <div class="ip-result osd-result" hidden></div>
       <p class="ip-error osd-error" role="alert"></p>
       <p class="ip-status" role="status"></p>
@@ -146,19 +159,23 @@ export class OsdPanel {
     $('.ip-undo').addEventListener('click', () => this.undoLast())
     $('.ip-revert').addEventListener('click', () => this.revert())
     this.nameInput = $('.osd-name')
-    this.nameInput.addEventListener('input', () => this.edit(() => (this.draft.name = this.nameInput.value)))
-    $('.osd-show-name').addEventListener('change', (e) => this.edit(() => (this.draft.showName = e.target.checked)))
-    $('.osd-show-time').addEventListener('change', (e) => this.edit(() => (this.draft.showTime = e.target.checked)))
-    // four corner buttons, for a camera that does not expose a free position
+    this.dateSel = $('.osd-datefmt')
+    this.timeSel = $('.osd-timefmt')
+    this.nameInput.addEventListener('input', () => this.edit(() => (this.draft.name.text = this.nameInput.value)))
+    $('.osd-show-name').addEventListener('change', (e) => this.edit(() => (this.draft.name.show = e.target.checked), 'name'))
+    $('.osd-show-time').addEventListener('change', (e) => this.edit(() => (this.draft.time.show = e.target.checked), 'time'))
+    this.dateSel.addEventListener('change', () => this.edit(() => (this.draft.time.dateFormat = this.dateSel.value), 'time'))
+    this.timeSel.addEventListener('change', () => this.edit(() => (this.draft.time.timeFormat = this.timeSel.value), 'time'))
+    for (const b of this.el.querySelectorAll('.osd-select')) b.addEventListener('click', () => this.select(b.dataset.ov))
     this.cornerButtons = CORNERS.map((c) => {
       const b = el('button', { type: 'button', className: 'osd-corner' }, c.label)
-      b.addEventListener('click', () => this.edit(() => { this.draft.x = c.x; this.draft.y = c.y }))
+      b.addEventListener('click', () => this.edit(() => { this.draft[this.selected].x = c.x; this.draft[this.selected].y = c.y }))
       return { ...c, b }
     })
     $('.osd-corner-buttons').replaceChildren(...this.cornerButtons.map((c) => c.b))
 
     this.shield = el('div', { className: 'ln-shield' })
-    this.canvas = el('canvas', { className: 'ln-overlay', hidden: true, 'aria-label': 'The camera picture: drag the overlay to place it' })
+    this.canvas = el('canvas', { className: 'ln-overlay', hidden: true, 'aria-label': 'The camera picture: drag the name or clock to place it' })
     this.ctx = this.canvas.getContext('2d')
     for (const n of [this.el, this.shield, this.canvas]) {
       n.addEventListener('click', (e) => e.stopPropagation())
@@ -226,6 +243,12 @@ export class OsdPanel {
     this.$('.osd-error').textContent = error ? text : ''
   }
 
+  select(ov) {
+    this.selected = ov
+    this.update()
+    this.draw()
+  }
+
   // ---- reading -----------------------------------------------------------------------------------
 
   async load({ first = false } = {}) {
@@ -256,13 +279,19 @@ export class OsdPanel {
   show(osd) {
     this.osd = osd ?? null
     this.draft = osd ? draftOf(osd) : null
-    const free = hasFreePosition(osd)
-    const nopos = this.$('.osd-nopos')
-    nopos.hidden = free || !osd
-    nopos.textContent = free || !osd ? '' : 'The camera did not report where it places the overlay, so it cannot be dragged. Use a corner below; if the camera does not accept it, the result will say so.'
-    this.$('.osd-corners').hidden = !osd || free
+    // the date/time format choices: the camera's own list, or just the current value when it gave none
+    this.fillFormatOptions()
     this.update()
     this.draw()
+  }
+
+  fillFormatOptions() {
+    const types = this.osd?.types ?? {}
+    const dates = types.dateFormat?.length ? types.dateFormat : [this.osd?.time?.dateFormat].filter(Boolean)
+    const times = types.timeFormat?.length ? types.timeFormat : [this.osd?.time?.timeFormat].filter(Boolean)
+    this.dateSel.replaceChildren(...dates.map((v) => new Option(DATEFMT_WORDS[v] ?? v, v)))
+    this.timeSel.replaceChildren(...times.map((v) => new Option(`${v}-hour`, v)))
+    this.$('[data-ov="time"].osd-ov').querySelectorAll('.ln-row').forEach((r) => { r.hidden = !(dates.length || times.length) })
   }
 
   revert() {
@@ -273,31 +302,42 @@ export class OsdPanel {
     this.draw()
   }
 
-  edit(fn) {
+  /** A change to the draft from a control. ov: select that overlay so the corners/drawing follow it. */
+  edit(fn, ov = null) {
     if (!this.draft || this.busy) return this.update()
     fn()
+    if (ov) this.selected = ov
     this.update()
     this.draw()
   }
 
-  /** Brings the controls in line with the draft, the unsaved changes and whether a request runs. */
   update() {
     const locked = this.busy || !this.osd
-    if (document.activeElement !== this.nameInput) this.nameInput.value = this.draft?.name ?? ''
+    const d = this.draft
+    if (document.activeElement !== this.nameInput) this.nameInput.value = d?.name.text ?? ''
     this.nameInput.disabled = locked
-    const err = this.draft ? nameError(this.draft.name) : null
-    this.$('.osd-name-err').textContent = this.draft && String(this.draft.name) !== String(this.osd?.name ?? '') && err ? err : ''
-    const sn = this.$('.osd-show-name')
-    const st = this.$('.osd-show-time')
-    sn.checked = this.draft?.showName === true
-    st.checked = this.draft?.showTime === true
-    sn.disabled = st.disabled = locked
+    const nameChanged = d && String(d.name.text) !== String(this.osd?.name?.text ?? '')
+    const err = d ? nameError(d.name.text) : null
+    this.$('.osd-name-err').textContent = nameChanged && err ? err : ''
+    this.$('.osd-show-name').checked = d?.name.show === true
+    this.$('.osd-show-time').checked = d?.time.show === true
+    if (d) {
+      if (document.activeElement !== this.dateSel && d.time.dateFormat != null) this.dateSel.value = d.time.dateFormat
+      if (document.activeElement !== this.timeSel && d.time.timeFormat != null) this.timeSel.value = d.time.timeFormat
+    }
+    for (const n of ['.osd-show-name', '.osd-show-time']) this.$(n).disabled = locked
+    this.dateSel.disabled = this.timeSel.disabled = locked
+    // which overlay is selected
+    for (const s of this.el.querySelectorAll('.osd-ov')) s.classList.toggle('osd-current', s.dataset.ov === this.selected)
+    for (const b of this.el.querySelectorAll('.osd-select')) b.setAttribute('aria-pressed', String(b.dataset.ov === this.selected))
+    this.$('.osd-sel-word').textContent = OV_LABEL[this.selected]
+    const selBlock = d?.[this.selected]
     for (const c of this.cornerButtons) {
       c.b.disabled = locked
-      c.b.setAttribute('aria-pressed', String(this.draft && nearestCorner(this.draft.x, this.draft.y) === c.id))
+      c.b.setAttribute('aria-pressed', String(selBlock && nearestCorner(selBlock.x, selBlock.y) === c.id))
     }
     const n = this.dirty
-    const blockedByName = Boolean(this.draft && String(this.draft.name) !== String(this.osd?.name ?? '') && nameError(this.draft.name))
+    const blockedByName = Boolean(nameChanged && err)
     const save = this.$('.osd-save')
     save.textContent = saveLabel(n)
     save.disabled = locked || n === 0 || blockedByName
@@ -321,7 +361,6 @@ export class OsdPanel {
     }
   }
 
-  /** Puts the canvas exactly over the picture (letterboxing and devicePixelRatio accounted for), in whichever tile holds it now. */
   layout() {
     if (!this.isOpen) return
     const video = this.videoEl()
@@ -360,37 +399,37 @@ export class OsdPanel {
       this.canvas.hidden = true
       return
     }
-    const ov = overlayBox(pic, hostBox, dpr)
-    Object.assign(this.canvas.style, { left: `${ov.left}px`, top: `${ov.top}px`, width: `${ov.width}px`, height: `${ov.height}px` })
-    if (this.canvas.width !== ov.backingWidth) this.canvas.width = ov.backingWidth
-    if (this.canvas.height !== ov.backingHeight) this.canvas.height = ov.backingHeight
+    const o = overlayBox(pic, hostBox, dpr)
+    Object.assign(this.canvas.style, { left: `${o.left}px`, top: `${o.top}px`, width: `${o.width}px`, height: `${o.height}px` })
+    if (this.canvas.width !== o.backingWidth) this.canvas.width = o.backingWidth
+    if (this.canvas.height !== o.backingHeight) this.canvas.height = o.backingHeight
     this.canvas.hidden = false
-    this.ov = ov
+    this.ov = o
     this.draw()
   }
 
-  /** The overlay boxes (name, clock) at the draft's position, dashed when moved but not saved. */
+  /** The two overlay boxes at the draft's positions; the selected one on top, dashed when moved. */
   draw() {
     const g = this.ctx
     const ov = this.ov
     if (!g || !ov) return
     g.setTransform(1, 0, 0, 1, 0, 0)
     g.clearRect(0, 0, ov.backingWidth, ov.backingHeight)
-    if (!this.draft || !hasFreePosition(this.draft)) return
+    this.boxes = {}
+    if (!this.draft) return
     const k = ov.backingWidth / Math.max(1, ov.width)
-    const [ax, ay] = pictureToOverlay([toFrac(this.draft.x), toFrac(this.draft.y)], ov)
-    const moved = this.osd && (this.draft.x !== this.osd.x || this.draft.y !== this.osd.y)
     const lineH = Math.max(16 * k, ov.backingHeight * 0.055)
     const chW = lineH * 0.6
-    let y = ay
-    if (this.draft.showName || this.draft.name) {
-      const label = this.draft.name || '(no name)'
-      box(g, ax, y, Math.max(chW * 3, label.length * chW), lineH, label, { current: true, dashed: moved, dim: !this.draft.showName, k })
-      y += lineH + 4 * k
-    }
-    if (this.draft.showTime) {
-      const t = sampleTime(this.osd)
-      box(g, ax, y, t.length * chW, lineH, t, { current: !this.draft.showName && !this.draft.name, dashed: moved, dim: false, k })
+    // draw the unselected overlay first, so the selected one sits on top and wins a press
+    for (const ovName of ['name', 'time'].sort((a) => (a === this.selected ? 1 : -1))) {
+      const block = this.draft[ovName]
+      if (!overlayHasPosition(block)) continue
+      const label = ovName === 'name' ? (block.text || '(no name)') : sampleTime(block)
+      const w = Math.max(chW * 3, label.length * chW)
+      const [ax, ay] = pictureToOverlay([toFrac(block.x), toFrac(block.y)], ov)
+      const moved = overlayMoved(this.osd?.[ovName], block)
+      drawBox(g, ax, ay, w, lineH, label, { current: ovName === this.selected, dashed: moved, dim: !block.show, k })
+      this.boxes[ovName] = { x: ax / k, y: ay / k, w: w / k, h: lineH / k } // CSS px for hit-testing
     }
   }
 
@@ -401,17 +440,38 @@ export class OsdPanel {
     return { x: toUnits(u), y: toUnits(v) }
   }
 
+  /** Which overlay box a press at CSS-px (px,py) lands on (the selected one wins a tie); null if none. */
+  boxAt(px, py) {
+    let hit = null
+    for (const ovName of ['name', 'time']) {
+      const b = this.boxes[ovName]
+      if (!b) continue
+      if (px >= b.x - REACH_PX && px <= b.x + b.w + REACH_PX && py >= b.y - REACH_PX && py <= b.y + b.h + REACH_PX) {
+        if (!hit || ovName === this.selected) hit = ovName
+      }
+    }
+    return hit
+  }
+
   onPointerDown(e) {
-    if (!e.isPrimary || e.button !== 0 || !this.ov || !this.draft || this.busy || !hasFreePosition(this.draft)) return
-    const at = this.unitsAt(e)
+    if (!e.isPrimary || e.button !== 0 || !this.ov || !this.draft || this.busy) return
+    const r = this.canvas.getBoundingClientRect()
+    const at = this.unitsAt(e, r)
     if (!at) return
     e.preventDefault()
     e.stopPropagation()
-    // grab by the offset from the overlay's anchor, so a drag on the box does not make it jump
-    this.drag = { id: e.pointerId, dx: this.draft.x - at.x, dy: this.draft.y - at.y, moved: false, x: e.clientX, y: e.clientY }
+    const hit = this.boxAt(e.clientX - r.left, e.clientY - r.top)
+    const target = hit ?? this.selected
+    if (!overlayHasPosition(this.draft[target])) return
+    this.selected = target
+    const block = this.draft[target]
+    // grab by the offset from the box's anchor (when the press was on it), so it does not jump
+    this.drag = { id: e.pointerId, overlay: target, dx: hit ? block.x - at.x : 0, dy: hit ? block.y - at.y : 0, moved: false, x: e.clientX, y: e.clientY }
     try {
       this.canvas.setPointerCapture(e.pointerId)
     } catch {}
+    this.update()
+    this.draw()
   }
 
   onPointerMove(e) {
@@ -421,9 +481,9 @@ export class OsdPanel {
     d.moved = true
     const at = this.unitsAt(e)
     if (!at) return
-    // a tap (no move yet) placed the anchor under the finger; a drag keeps the grab offset
-    this.draft.x = Math.min(OSD_MAX, Math.max(0, at.x + d.dx))
-    this.draft.y = Math.min(OSD_MAX, Math.max(0, at.y + d.dy))
+    const block = this.draft[d.overlay]
+    block.x = Math.min(OSD_MAX, Math.max(0, at.x + d.dx))
+    block.y = Math.min(OSD_MAX, Math.max(0, at.y + d.dy))
     this.update()
     this.draw()
   }
@@ -433,11 +493,14 @@ export class OsdPanel {
     if (!d || e.pointerId !== d.id) return
     this.drag = null
     if (!d.moved) {
-      // a tap places the overlay there
-      const at = this.unitsAt(e)
-      if (at) {
-        this.draft.x = at.x
-        this.draft.y = at.y
+      // a tap on empty picture places the selected overlay there; a tap on a box just selects it
+      const onBox = this.boxAt(e.clientX - this.canvas.getBoundingClientRect().left, e.clientY - this.canvas.getBoundingClientRect().top)
+      if (!onBox) {
+        const at = this.unitsAt(e)
+        if (at && overlayHasPosition(this.draft[d.overlay])) {
+          this.draft[d.overlay].x = at.x
+          this.draft[d.overlay].y = at.y
+        }
       }
     }
     this.update()
@@ -485,40 +548,52 @@ export class OsdPanel {
 
   async save() {
     if (!this.osd || this.busy) return
-    const fields = changedFields(this.osd, this.draft)
-    if (Object.keys(fields).length === 0) return
-    const summary = changeSummary(this.osd, this.draft)
+    const change = changedFields(this.osd, this.draft)
+    if (Object.keys(change).length === 0) return
     const ok = await this.dialog({
       title: 'Change what this camera burns into its picture?',
       lead: 'This is part of every recording from now on and cannot be edited out of footage later. It changes:',
-      items: summary,
+      items: changeSummary(this.osd, this.draft),
       action: 'Save to camera'
     })
     if (!ok) {
       this.status('Nothing was sent.')
       return
     }
-    // the values to put back, for Undo: the camera's current reading of exactly the fields we change
-    const before = {}
-    for (const f of Object.keys(fields)) if (this.osd[f] !== null && this.osd[f] !== undefined) before[f] = this.osd[f]
-    await this.send({ ...fields, confirm: true }, { verb: 'Saving', undoFields: before })
+    const undoWant = this.undoWantFor(change)
+    await this.send({ ...change, confirm: true }, { verb: 'Saving', undoWant })
+  }
+
+  /** The values to put back (Undo): the camera's current reading of exactly the fields being changed. */
+  undoWantFor(change) {
+    const want = {}
+    for (const [block, fields] of Object.entries(change)) {
+      const have = this.osd?.[block] ?? {}
+      const o = {}
+      for (const k of Object.keys(fields)) if (have[k] !== null && have[k] !== undefined) o[k] = have[k]
+      if (Object.keys(o).length) want[block] = o
+    }
+    return want
   }
 
   async undoLast() {
     if (!this.undo || this.busy) return
     if (!this.confirmDiscard()) return
+    // show it as current -> previous, the same way a save is listed
+    const draft = draftOf(this.osd)
+    for (const [block, fields] of Object.entries(this.undo.want)) for (const [k, v] of Object.entries(fields)) draft[block][k] = v
     const ok = await this.dialog({
       title: 'Put back the previous OSD?',
-      lead: 'This writes the previous name, switches and position back into the camera (and into its recordings from now on). It sets:',
-      items: changeSummary(this.osd, { ...draftOf(this.osd), ...this.undo.fields }),
+      lead: 'This writes the previous settings back into the camera (and into its recordings from now on). It sets:',
+      items: changeSummary(this.osd, draft),
       action: 'Put it back'
     })
     if (!ok) return
-    await this.send({ ...this.undo.fields, confirm: true }, { verb: 'Undoing', undoFields: null })
+    await this.send({ ...this.undo.want, confirm: true }, { verb: 'Undoing', undoWant: null })
   }
 
   /** Sends a Save or an Undo, then shows the camera as read back and what happened to each field. */
-  async send(body, { verb, undoFields }) {
+  async send(body, { verb, undoWant }) {
     const session = this.session
     this.busy = true
     this.update()
@@ -546,12 +621,8 @@ export class OsdPanel {
       return
     }
     const result = r.data ?? {}
-    // keep Undo only when something was actually applied and we have values to put back
-    if (undoFields && Object.keys(undoFields).length && result.applied) {
-      this.undo = { fields: undoFields, at: Date.now(), by: 'you' }
-    } else if (verb === 'Undoing') {
-      this.undo = null
-    }
+    if (undoWant && Object.keys(undoWant).length && result.applied) this.undo = { want: undoWant, at: Date.now(), by: 'you' }
+    else if (verb === 'Undoing') this.undo = null
     if (result.after) this.show(result.after)
     this.showResult(result)
     this.status('')
@@ -560,13 +631,17 @@ export class OsdPanel {
   showResult(result) {
     const sent = result?.sent ?? {}
     const after = result?.after ?? null
-    const label = { name: 'Name', showName: 'Show name', showTime: 'Show time', x: 'Position X', y: 'Position Y' }
-    const valueText = (k, v) => (v === null || v === undefined ? '(none)' : k === 'showName' || k === 'showTime' ? (v ? 'on' : 'off') : String(v))
-    const fields = Object.entries(sent).map(([k, want]) => {
-      const got = after ? after[k] : undefined
-      const ok = after && got === want
-      return { ok, text: ok ? `${label[k] ?? k}: ${valueText(k, want)} (as asked)` : `${label[k] ?? k}: not applied (asked ${valueText(k, want)}, the camera has ${valueText(k, got)})` }
-    })
+    const label = { 'name.text': 'Name text', 'name.show': 'Show name', 'name.x': 'Name X', 'name.y': 'Name Y', 'time.show': 'Show clock', 'time.x': 'Clock X', 'time.y': 'Clock Y', 'time.dateFormat': 'Date format', 'time.timeFormat': 'Clock format' }
+    const valueText = (k, v) => (v === null || v === undefined ? '(none)' : /\.show$/.test(k) ? (v ? 'on' : 'off') : String(v))
+    const fields = []
+    for (const [block, bits] of Object.entries(sent)) {
+      for (const [f, want] of Object.entries(bits)) {
+        const key = `${block}.${f}`
+        const got = after?.[block]?.[f]
+        const ok = after && got === want
+        fields.push({ ok, text: ok ? `${label[key] ?? key}: ${valueText(key, want)} (as asked)` : `${label[key] ?? key}: not applied (asked ${valueText(key, want)}, the camera has ${valueText(key, got)})` })
+      }
+    }
     const good = fields.filter((f) => f.ok).length
     const status = fields.length === 0 ? 'unknown' : result.applied ? 'done' : good > 0 ? 'partial' : 'failed'
     const headline = {
@@ -575,13 +650,13 @@ export class OsdPanel {
       failed: 'Not saved: the camera kept its settings.',
       unknown: 'Sent, but the camera could not be read back afterwards.'
     }[status]
-    const box2 = this.$('.osd-result')
-    box2.className = `ip-result osd-result ip-${status}`
-    box2.replaceChildren(
+    const box = this.$('.osd-result')
+    box.className = `ip-result osd-result ip-${status}`
+    box.replaceChildren(
       el('p', {}, headline),
       result.warning && status !== 'done' ? el('p', { className: 'ln-note' }, result.warning) : '',
       fields.length ? el('ul', {}, fields.map((f) => el('li', { className: f.ok ? 'ln-ok' : 'ln-no' }, f.text))) : ''
     )
-    box2.hidden = false
+    box.hidden = false
   }
 }
