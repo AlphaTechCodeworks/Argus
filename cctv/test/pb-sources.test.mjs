@@ -20,6 +20,7 @@ import {
   convertTime,
   describeSkew,
   fitChange,
+  nvrFitChange,
   gapAt,
   liveEdge,
   mergeSources,
@@ -169,6 +170,13 @@ const text = (list) => list.map((x) => `${x.src} ${x.s}-${x.e}`).join(', ')
   check('  a slot at the next jump: "on" again, said', fitChange('busy', { type: 'fit', on: true }).fit === 'on' && fitChange('busy', { type: 'fit', on: true }).notice !== null)
   const orig = fitChange('on', { type: 'fit', on: false, original: true })
   check('  the original chosen: "original", nothing to say (the viewer chose it)', orig.fit === 'original' && orig.notice === null, JSON.stringify(orig))
+  // the NVR's own recordings (NVR playback): the same notes, its own words (no "Original (server)" there)
+  const non = nvrFitChange(null, { type: 'fit', on: true })
+  check('nvrFitChange: converted to fit ("on"), said once, without pointing at a menu entry NVR playback does not have', non.fit === 'on' && /lighter copy/.test(non.notice ?? '') && !/Original/.test(non.notice), JSON.stringify(non))
+  check('  not said again while it stays so (each seek is a new socket that says it again)', nvrFitChange('on', { type: 'fit', on: true }).notice === null)
+  const nbusy = nvrFitChange('on', { type: 'fit', on: false, busy: true })
+  check('  no conversion free: "busy", said (the NVR\'s recording itself, which may stutter)', nbusy.fit === 'busy' && /as many/.test(nbusy.notice ?? '') && nvrFitChange('busy', { type: 'fit', on: false, busy: true }).notice === null, JSON.stringify(nbusy))
+  check('  within the cap: "fits", nothing to say', nvrFitChange(null, { type: 'fit', on: false, fits: true }).fit === 'fits' && nvrFitChange(null, { type: 'fit', on: false, fits: true }).notice === null)
   const fits = fitChange(null, { type: 'fit', on: false, fits: true })
   check('  a recording within the cap, sent as it is: "fits", nothing to say (nothing was taken away)', fits.fit === 'fits' && fits.notice === null && fitChange('busy', { type: 'fit', on: false, fits: true }).notice === null, JSON.stringify(fits))
   check('scrubTimeoutMs: a remote viewer\'s converted scrubs wait as long as H.265 ones (each is an ffmpeg start and a whole keyframe)', scrubTimeoutMs(true, true) === CONVERTED_SCRUB_TIMEOUT_MS && scrubTimeoutMs(true, false) === SCRUB_TIMEOUT_MS && scrubTimeoutMs(false, false) === CONVERTED_SCRUB_TIMEOUT_MS)

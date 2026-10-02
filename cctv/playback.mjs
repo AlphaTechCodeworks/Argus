@@ -47,7 +47,7 @@ import { PRIORITY } from './lanes.mjs'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
-import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, Transcoder, clientCanDecodeH265, lightPool, pool as transcodePool } from './transcode.mjs'
+import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, PLAYBACK_LIMITS, Transcoder, clientCanDecodeH265, lightPool, pool as transcodePool } from './transcode.mjs'
 import { bind, codecOf, coolingLeftMs, encodeFrame, errorText, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
 import { lastHang } from './watchdog.mjs'
 import { SdWait, hdOnlyStore, noSdAction } from './hd-only.mjs'
@@ -81,6 +81,15 @@ const BUFFER_LOW_MS = 3000 // ... and resumed
 const GAP_MS = 3000 // next frame this far ahead of the play position: a gap in the recording, jump over it
 const LIVE_EDGE_MS = 30_000 // playback ends this long before "now"
 const MAX_QUEUE_FRAMES = 5000 // pacing buffer backstop (~2.5 min at 30 fps) if the NVR ignores pauses
+// A remote viewer's main stream, fitted to the tunnel (the playback hunt of 1 Oct 2026, finding F6).
+// The NVR's main stream went to a remote viewer as it was: 42.76 MB in 54 s (6.3 Mbit/s) through a
+// tunnel connection that carries 3.5-6.5, at 3-50 frames a second with 3 gaps over 1 s and about 1 MB
+// standing in cloudflared. Server playback has fitted its own recordings since the smoothness report
+// (rec-playback.mjs, "A remote viewer"); this is the same for the NVR's: NVR playback in HD, and the
+// NVR legs of a server playback. See PlaybackSession #fitDecide.
+const FIT_KEYS_PER_S = 8 // faster than 1x a fitted session converts keyframes only, at most this many a second (rec-playback.mjs maxKeysPerS)
+const FIT_HOLDS = 3 // frames ffmpeg needs after the first before it gives a picture back (rec-playback.mjs CONVERTER_HOLDS)
+const FIT_WAIT_MS = 3000 // a converter silent this long at its start is not waited for (rec-playback.mjs convertWaitMs)
 
 // continuous/manual recording vs. event recordings (DD_RECORD_TYPE)
 const CONTINUOUS_TYPES = 0x1 | 0x2
@@ -182,9 +191,11 @@ export const PB = { PlayBackByTimeEx, SetPlayDataCallBack, PlayBackControl, Stop
 /**
  * Recording search and playback for one NVR.
  * @param {{ id: string, userId: number, loggedInAt?: number }} nvr
- * @param {{ now?: () => number }} [opts] now: the clock of the recording-days cache (tests)
+ * @param {{ now?: () => number, makeTranscoder?: Function, pool?: object, log?: Function }} [opts]
+ *   now: the clock of the recording-days cache; makeTranscoder, pool: the conversion and its slots for
+ *   a main stream (transcode.mjs Transcoder and pool); log (all for tests)
  */
-export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
+export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder = (o) => new Transcoder(o), pool: mainPool = transcodePool, log = (l) => console.log(l) } = {}) {
   const userId = () => nvr.userId
   // all SDK work for this NVR goes through its lane, with time limits (lanes.mjs, sdk.mjs)
   const op = (task, priority = PRIORITY.NORMAL) => nvr.lane.run(task, { priority })
@@ -438,13 +449,25 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
 
   class PlaybackSession {
     /**
-     * @param {{ allowMain?: () => boolean, onMain?: () => void }} [rights] allowMain: may this viewer
-     *   see main pictures (asked when no SD comes); onMain: told when the session goes over to main
+     * @param {{ allowMain?: () => boolean, onMain?: () => void, fit?: object|null }} [rights] allowMain:
+     *   may this viewer see main pictures (asked when no SD comes); onMain: told when the session goes
+     *   over to main; fit: a remote viewer, whose main stream is fitted to the link (#fitDecide):
+     *   { kbps?: the rate this camera records at when known, slot?: a conversion slot lent by the server
+     *   playback this is a leg of }; null: a viewer on the local network, nothing changes
      */
-    constructor(ws, ch, mainStream, start, clientH265 = true, { allowMain = () => false, onMain = () => {} } = {}) {
+    constructor(ws, ch, mainStream, start, clientH265 = true, { allowMain = () => false, onMain = () => {}, fit = null } = {}) {
       this.ws = ws
       this.allowMain = allowMain
       this.onMain = onMain
+      this.fit = fit // a remote viewer (see FIT_KEYS_PER_S above and #fitDecide)
+      this.fitAsked = false // decided for the frames from here on (asked again after a speed change)
+      this.fitOn = false // the main stream goes through the capped conversion
+      this.fitKey = true // the converter starts at the next keyframe (its first frame, or after a speed change)
+      this.fitKeyAt = 0 // when the last keyframe went in, faster than 1x (FIT_KEYS_PER_S)
+      this.xin = 0 // frames handed to the fitting converter since it started, and pictures it gave back
+      this.xout = 0
+      this.hold = null // the pacer waits for a converter that has just started (#heldPace)
+      this.lastIn = null // the capture time of the last frame handed in
       // A browser that cannot decode H.265 (no HEVC extension on Windows) gets the NVR's H.265
       // converted to H.264 here, as rec-playback.mjs does for the server's own recordings; with the
       // NAS down, the NVR is where all playback comes from.
@@ -621,7 +644,9 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
 
     /** Releases the frames that are due. */
     #pace() {
-      if (this.closed || this.paused || this.queue.length === 0) return
+      if (this.closed || this.paused) return
+      if (this.hold) return this.#heldPace()
+      if (this.queue.length === 0) return
       const now = Date.now()
       const head = this.queue[0].ts
       if (!this.anchor) this.anchor = { wall: now, media: head }
@@ -631,41 +656,177 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
         this.anchor = { wall: now, media: head }
         mediaNow = head
       }
-      while (this.queue.length && this.queue[0].ts <= mediaNow) this.#deliver(this.queue.shift())
+      // (a converter that starts on one of these stops the release there: #heldPace goes on)
+      while (!this.hold && this.queue.length && this.queue[0].ts <= mediaNow) this.#deliver(this.queue.shift())
       if (this.buffered && this.#bufferedMs() < BUFFER_LOW_MS * this.speed) {
         this.buffered = false
         this.#updateNvr()
       }
     }
 
-    #deliver({ msg, codec, ts }) {
+    /**
+     * A fitting converter has just started, playing every frame: ffmpeg's first picture comes 0.5-1.4 s
+     * after its first frame went in, and it then works off what it was handed meanwhile faster than it
+     * plays, so a clock that ran on meanwhile sent the first seconds in a rush (rec-playback.mjs, "A
+     * converter's start", finding F3: a skip and a freeze 3-4 s after the first picture). As there: the
+     * converter is handed FIT_HOLDS frames more, which it needs before it gives a picture back, and the
+     * clock stops until it has given back all but that many (the first frame's picture is out), or has
+     * been silent for FIT_WAIT_MS. The clock then goes on from the last frame handed in.
+     */
+    #heldPace() {
+      const h = this.hold
+      while (this.hold === h && h.extra < FIT_HOLDS && this.queue.length) {
+        h.extra++
+        this.#deliver(this.queue.shift())
+      }
+      if (this.hold !== h) return
+      const now = Date.now()
+      const out = this.xout >= Math.max(1, this.xin - FIT_HOLDS)
+      if (!out && now - h.last < FIT_WAIT_MS) return
+      if (!out) log(`[${nvr.id}] playback ch${this.ch + 1}: the conversion gave no picture in ${FIT_WAIT_MS} ms (${this.xin} frames in, ${this.xout} out): playing on`)
+      this.hold = null
+      this.anchor = this.lastIn === null ? null : { wall: now, media: this.lastIn }
+      if (this.buffered && this.#bufferedMs() < BUFFER_LOW_MS * this.speed) {
+        this.buffered = false
+        this.#updateNvr()
+      }
+    }
+
+    /**
+     * A remote viewer's main stream, decided at a keyframe: the session's first frame, and the next
+     * keyframe after a change of speed while it is sent as it is. As server playback decides a run
+     * (rec-playback.mjs #fitRun):
+     *  - A slot lent by the server playback this session is a leg of (fit.slot): that viewer's run is
+     *    converted and has been told so, and its own converter is idle while the leg plays. Converted,
+     *    nothing said. (The pool is 2 and the last is never taken for this, so a leg could never have
+     *    had one of its own beside the server playback's.)
+     *  - A camera known to record within the cap (fit.kbps, from the server's own recordings of it,
+     *    times the speed) is sent as it is: {type:'fit', on:false, fits:true}. Not known: converted.
+     *  - Otherwise a slot of the playback pool, never the last free one unless this is H.265 the browser
+     *    cannot decode (which needs one anyway): {type:'fit', on:true}. None to spare: said
+     *    ({type:'fit', on:false, busy:true}) and the NVR's stream goes as it is, as before.
+     * Converted, every frame (H.264 too) goes through PLAYBACK_LIMITS (1920 wide, 2.5 Mbit/s) with the
+     * decoder's frame threads (lowDelay false). Faster than 1x only keyframes are converted, at most
+     * FIT_KEYS_PER_S a second and stamped so (one picture at a time, with low_delay): a converter fed
+     * every frame at 2x-8x falls behind (4K: 2.2x real time at best), and its cap would hold per camera
+     * second, not per second of the link. The sub-stream is never fitted, and neither is anything for a
+     * viewer on the local network.
+     */
+    #fitDecide(codec) {
+      this.fitAsked = true
+      if (this.closed) return // (a closed session must never take a slot: close() will not run again)
+      const needed = !this.clientH265 && codec === X_H265
+      if (this.fit.slot) {
+        this.#fitTake({ release() {} }) // lent: the lender gives it back
+        return
+      }
+      const kbps = this.fit.kbps
+      if (!needed && Number.isFinite(kbps) && kbps > 0 && kbps * this.speed <= PLAYBACK_LIMITS.maxKbps) {
+        this.send({ type: 'fit', on: false, fits: true })
+        return
+      }
+      const slot = mainPool.acquire({ keepFree: needed ? 0 : 1 })
+      if (slot) {
+        this.#fitTake(slot)
+        this.send({ type: 'fit', on: true })
+        return
+      }
+      const kept = needed ? '' : '; the last is kept for H.265 a browser cannot decode'
+      log(`[${nvr.id}] playback ch${this.ch + 1}: remote viewer, no conversion to spare (${mainPool.active} of ${mainPool.max} running${kept}): sending the NVR's stream as it is`)
+      this.send({ type: 'fit', on: false, busy: true })
+    }
+
+    /** The session converts from here on, in this slot (a converter of the sub-stream before a switch ends). */
+    #fitTake(slot) {
+      this.xcode?.close()
+      this.xcode = null
+      this.slot?.release()
+      this.slot = slot
+      this.fitOn = true
+      this.fitKey = true
+    }
+
+    /** One frame of a fitted session to its converter (see #fitDecide). */
+    #fitPush({ msg, codec, ts }) {
+      const isKey = (msg[0] & 1) === 1
+      const keysOnly = this.speed > 1
+      if (this.fitKey || (this.xcode && this.xcode.inCodec !== codec)) {
+        // the converter starts here: its first frame, a change of speed (other arguments), or the
+        // camera's codec changed (ffmpeg is told what it reads when it starts). On a keyframe only.
+        if (!isKey) return
+        this.xcode?.reset()
+        if (this.xcode) this.xcode.inCodec = codec
+        this.fitKey = false
+        this.xin = 0
+        this.xout = 0
+        this.hold = null
+      }
+      if (keysOnly) {
+        const now = Date.now()
+        if (!isKey || now - this.fitKeyAt < 1000 / FIT_KEYS_PER_S) return
+        this.fitKeyAt = now
+      }
+      if (!this.xcode) {
+        this.xcode = makeTranscoder({
+          inCodec: codec,
+          ...PLAYBACK_LIMITS,
+          // asked each time an ffmpeg starts (a change of speed starts another)
+          lowDelay: () => this.speed > 1,
+          picturesPerS: () => (this.speed > 1 ? FIT_KEYS_PER_S : 0),
+          onFrame: (t, key, out) => {
+            this.xout++
+            if (this.hold) this.hold.last = Date.now() // (it is working: #heldPace waits on)
+            this.#sendConverted(t, key, out)
+          },
+          onFail: (e) => this.send({ type: 'error', message: `Could not convert this recording (${e.message}).` }),
+          log: (l) => log(`[${nvr.id}] playback ch${this.ch + 1}: ${l}`)
+        })
+        log(`[${nvr.id}] playback ch${this.ch + 1}: converting the NVR's main stream for a remote viewer, at most ${PLAYBACK_LIMITS.maxWidth} wide and ${PLAYBACK_LIMITS.maxKbps} kbit/s`)
+      }
+      // a converter starts on this frame, playing every frame: the pacer waits for it (#heldPace)
+      if (this.xin === 0 && !keysOnly) this.hold = { last: Date.now(), extra: 0 }
+      this.xin++
+      this.lastIn = ts
+      this.xcode.push(ts, isKey, msg.subarray(16))
+      if (keysOnly) this.xcode.endPicture()
+    }
+
+    /** A converted picture, in the wire format and at the capture time of the frame it was made from. */
+    #sendConverted(t, isKey, out) {
+      if (this.closed || this.ws.readyState !== this.ws.OPEN) return
+      const m = Buffer.allocUnsafe(16 + out.length)
+      m.writeUInt8(isKey ? 1 : 0, 0)
+      m.writeUInt8(X_H264, 1)
+      m.writeUInt16LE(0, 2)
+      m.writeUInt16LE(0, 4)
+      m.writeUInt16LE(0, 6)
+      m.writeBigInt64LE(BigInt(Math.round(t * 1000)), 8)
+      out.copy(m, 16)
+      this.ws.send(m)
+    }
+
+    #deliver(item) {
+      const { msg, codec, ts } = item
       if (this.ws.readyState !== this.ws.OPEN) return
+      if (this.fit && this.mainStream) {
+        if (!this.fitAsked && (msg[0] & 1) === 1) this.#fitDecide(codec)
+        if (this.fitOn) return this.#fitPush(item)
+      }
       if (this.clientH265 || codec !== X_H265) return this.ws.send(msg)
       if (!this.xcode) {
-        const pool = this.mainStream ? transcodePool : lightPool // an SD stream is cheap: its own, larger cap
+        const pool = this.mainStream ? mainPool : lightPool // an SD stream is cheap: its own, larger cap
         this.slot = pool.acquire()
         if (!this.slot) {
           this.send({ type: 'error', message: `This recording is H.265 and the server is already converting ${pool.max} for other viewers. Try again in a moment.` })
           return this.close()
         }
-        this.xcode = new Transcoder({
+        this.xcode = makeTranscoder({
           inCodec: X_H265,
-          onFrame: (t, isKey, out) => {
-            if (this.closed || this.ws.readyState !== this.ws.OPEN) return
-            const m = Buffer.allocUnsafe(16 + out.length)
-            m.writeUInt8(isKey ? 1 : 0, 0)
-            m.writeUInt8(X_H264, 1)
-            m.writeUInt16LE(0, 2)
-            m.writeUInt16LE(0, 4)
-            m.writeUInt16LE(0, 6)
-            m.writeBigInt64LE(BigInt(Math.round(t * 1000)), 8)
-            out.copy(m, 16)
-            this.ws.send(m)
-          },
+          onFrame: (t, isKey, out) => this.#sendConverted(t, isKey, out),
           onFail: (e) => this.send({ type: 'error', message: `Could not convert this H.265 recording (${e.message}).` }),
-          log: (l) => console.log(`[${nvr.id}] playback ch${this.ch + 1}: ${l}`)
+          log: (l) => log(`[${nvr.id}] playback ch${this.ch + 1}: ${l}`)
         })
-        console.log(`[${nvr.id}] playback ch${this.ch + 1}: converting the NVR's H.265 to H.264 for this browser`)
+        log(`[${nvr.id}] playback ch${this.ch + 1}: converting the NVR's H.265 to H.264 for this browser`)
       }
       this.xcode.push(ts, (msg[0] & 1) === 1, msg.subarray(16))
     }
@@ -710,12 +871,20 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
           const now = Date.now()
           this.anchor = { wall: now, media: this.anchor.media + (now - this.anchor.wall) * this.speed }
         }
+        if (this.fit && speed !== this.speed) {
+          // fitted: another converter from the next keyframe (every frame at 1x, keyframes only faster;
+          // the frames up to it are not shown). Sent as it is: decided again there, at the new speed.
+          if (this.fitOn) this.fitKey = true
+          else this.fitAsked = false
+          this.hold = null
+        }
         this.speed = speed
         await this.#control(speed === 1 ? PLAYCTRL.NORMAL : PLAYCTRL.FF, SPEED_CODE[speed] ?? 0)
       }
       if ('pause' in cmd) {
         this.paused = Boolean(cmd.pause)
         this.anchor = null // resume from the next buffered frame
+        if (this.hold) this.hold.last = Date.now() // (a converter's start is not timed through a pause)
         await this.#updateNvr()
       }
     }
@@ -777,6 +946,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
       this.buffered = false
       this.nvrRunning = true
       this.xcode?.reset()
+      this.hold = null
       if (this.closed) return this.#unregister()
       // asked again now: the right may have gone while the NVR stopped the SD playback, and the sweep
       // then still saw this socket on the sub-stream (which needs Playback SD alone). Said as what it is,
@@ -842,12 +1012,13 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
    * (rec-playback.mjs connectPlayback for a viewer, rec-fallback.mjs for legs and backfill): main
    * asks the NVR for its main stream; allowMain() says whether this viewer may see main pictures,
    * asked for a camera known to record in HD only and again whenever no SD comes (a right taken away
-   * meanwhile counts); onMain() is told when the session goes over to main. The URL's own stream
-   * parameter is not read: one decision, made once, by the side that knows the rights.
+   * meanwhile counts); onMain() is told when the session goes over to main; fit: the viewer is remote
+   * and a main stream is fitted to the link (PlaybackSession's `fit`; null on the local network). The
+   * URL's own stream parameter is not read: one decision, made once, by the side that knows the rights.
    * @returns {{ main: boolean } | null} what it plays; null when refused (bad parameters: the socket
    *   is closing)
    */
-  const connect = (ws, url, { main, allowMain = () => false, onMain = () => {} } = {}) => {
+  const connect = (ws, url, { main, allowMain = () => false, onMain = () => {}, fit = null } = {}) => {
     const ch = Number(url.searchParams.get('ch'))
     const start = Number(url.searchParams.get('start'))
     if (!Number.isInteger(ch) || ch < 0 || typeof main !== 'boolean' || !Number.isFinite(start)) {
@@ -859,7 +1030,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now } = {}) {
     // (#onFrame), and with none after SD_REFUSE_MS of playing the session is refused (#watch)
     const asMain = main || (hdOnly.has(ch) && askMain(allowMain))
     if (asMain && !main) ws.send(JSON.stringify({ type: 'stream', stream: 0 }))
-    new PlaybackSession(ws, ch, asMain, start, clientCanDecodeH265(url.searchParams), { allowMain, onMain })
+    new PlaybackSession(ws, ch, asMain, start, clientCanDecodeH265(url.searchParams), { allowMain, onMain, fit })
     return { main: asMain }
   }
 

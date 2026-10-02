@@ -120,15 +120,20 @@ function dayRanges(nvr, cache, ch, date, ttl, t) {
  * Starts an NVR playback of [fromMs, toMs] (server time) for the browser socket `real` (see the top).
  * @param {{ nvr: object, ch: number, fromMs: number, toMs: number, stream?: number, speed?: number,
  *   paused?: boolean, skewMs?: number, real: object, gen?: number|null, at?: number,
- *   floorMs?: number|null, startTimeoutMs?: number, h265?: boolean }} opts
+ *   floorMs?: number|null, startTimeoutMs?: number, h265?: boolean, fit?: object|null }} opts
  *   gen: the generation of a start or seek (announced with {type:'started'}); null: a hole between two
  *   server files ({type:'source'}); at: the time the browser shows first (default fromMs);
  *   floorMs: the last frame the browser already has; startTimeoutMs: the session must have started by then;
- *   h265: the browser can decode H.265 (false: the NVR session converts it to H.264, as the server does)
+ *   h265: the browser can decode H.265 (false: the NVR session converts it to H.264, as the server does);
+ *   fit: the viewer is remote and the leg is fitted to the link as the server playback around it is
+ *   (playback.mjs PlaybackSession's `fit`: { slot } the run's conversion slot, lent; or { kbps } for the
+ *   session to decide by itself, which it then says with {type:'fit'}, passed on). null (the local
+ *   network, backfill): the NVR's own bytes, as before (1 Oct 2026, the playback hunt's finding F6:
+ *   a remote viewer's leg went through the tunnel at 6.3 Mbit/s)
  * @returns {{ command: (obj: object) => void, close: () => void, done: Promise<object>,
  *   announced: boolean, frames: number, lastTs: number|null, fromMs: number, toMs: number }}
  */
-export function startLeg({ nvr, ch, fromMs, toMs, stream = 0, speed = 1, paused = false, skewMs = 0, real, gen = null, at = fromMs, floorMs = null, startTimeoutMs = 20_000, h265 = true }) {
+export function startLeg({ nvr, ch, fromMs, toMs, stream = 0, speed = 1, paused = false, skewMs = 0, real, gen = null, at = fromMs, floorMs = null, startTimeoutMs = 20_000, h265 = true, fit = null }) {
   const skew = Number.isFinite(skewMs) ? skewMs : 0
   const skewUs = BigInt(Math.round(skew * 1000))
   const handlers = {}
@@ -180,6 +185,7 @@ export function startLeg({ nvr, ch, fromMs, toMs, stream = 0, speed = 1, paused 
       case 'started':
         return announce()
       case 'stream':
+      case 'fit': // (a remote viewer's leg that decided for itself: converted, as it is, or none to spare)
         return toReal(msg)
       case 'end':
         return finish({ reason: 'end' })
@@ -251,7 +257,7 @@ export function startLeg({ nvr, ch, fromMs, toMs, stream = 0, speed = 1, paused 
   try {
     // A leg is part of a server playback, whose viewer holds Playback HD (and Playback SD, or there
     // would be no legs): main pictures are theirs to see. Backfill is this server's own copy.
-    nvr.playback.connect(proxy, url, { main: Number(stream) === 0, allowMain: () => true })
+    nvr.playback.connect(proxy, url, { main: Number(stream) === 0, allowMain: () => true, fit })
   } catch (e) {
     finish({ reason: 'error', message: e?.message ?? String(e) })
   }

@@ -55,7 +55,9 @@ function virtualClock() {
  * The page's socket as ws has it: each message (its fragments, as live-mux sends them) queues until the
  * link has written it, at `bps` bytes a second, and ws then runs its send callback. gone(n): its browser
  * has gone (a network change) and the server's socket was not told: the path takes n bytes more, then
- * nothing is written again.
+ * nothing is written again. The message in hand goes piece by piece, and the socket's handle says how much
+ * of it the system has not taken yet, as a real one does on the server (_socket._handle.writeQueueSize:
+ * live-mux.mjs socketPending, live-mux-socket.test.mjs).
  */
 function linkSocket(bps) {
   const ws = { OPEN: 1, readyState: 1, bufferedAmount: 0, handlers: {}, queue: [], parts: 0, credit: 0, room: Infinity, written: 0 }
@@ -84,6 +86,7 @@ function linkSocket(bps) {
     if (!ws.queue.length) ws.credit = 0 // an idle link saves nothing up
   }
   ws.gone = (n) => (ws.room = n)
+  ws._socket = { _handle: { get writeQueueSize() { return ws.queue.length ? ws.queue[0].bytes - Math.max(0, Math.min(ws.queue[0].bytes, ws.credit, ws.room)) : 0 } } }
   ws.close = () => {}
   ws.terminate = () => {}
   return ws
@@ -128,14 +131,17 @@ const payload = (n) => {
  *   opens another), and the server's socket is not told: it takes pipeBytes more, then writes nothing
  *   and stays open (keep-alive would cut it 30 s later, backpressure.mjs; here it never goes); at
  *   openAt the same browser's new page socket opens, its tiles subscribing 15 ms apart as at first.
- * @returns {{ lines: string[], downs: string[], live: AdaptiveLive, written: number[] }} lines: the
- *   controller's, each with the second it was said at in front; written: bytes each page socket wrote
+ * @returns {{ lines: string[], downs: string[], live: AdaptiveLive, written: number[], conversions: number }} lines:
+ *   the controller's, each with the second it was said at in front; written: bytes each page socket wrote;
+ *   conversions: how many converters were started in all
  */
 export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true, reload = null }) {
   const clock = virtualClock()
   try {
     const lines = []
+    let conversions = 0
     const makeTranscoder = (o) => {
+      conversions++
       let n = 0
       let out = 0
       return {
@@ -218,7 +224,7 @@ export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true, 
       if (at > 0 && at % TICK_MS === 0) live.tick()
     }
     const said = lines.filter((l) => l.includes('[adaptive]'))
-    return { lines: said, downs: said.filter((l) => /: (full|15|8) -> (15|8|4) /.test(l)), live, written: pages.map((p) => p.ws.written) }
+    return { lines: said, downs: said.filter((l) => /: (full|15|8) -> (15|8|4) /.test(l)), live, written: pages.map((p) => p.ws.written), conversions }
   } finally {
     clock.restore()
   }

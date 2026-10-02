@@ -238,6 +238,21 @@ class MuxChannel {
   }
 
   /**
+   * What the system has not yet taken of the piece the page's socket is writing now, in bytes (0: nothing
+   * in hand; null: this socket does not say). writtenBytes moves once a WHOLE frame has gone (ws's send
+   * callback), and a main stream's keyframe of 600 KB takes 4.8 s at 1 Mbit/s, 16 s at 0.3: between two
+   * looks 2 s apart a slow link that works had "written nothing", as a page that has stopped reading has
+   * (adaptive-live.mjs #stopped; the review of fix D, 1 Oct: stepped down at 10-20 s where it was 4 s,
+   * never at 0.15 Mbit/s, and its conversions paused). This number goes down as the link takes the frame
+   * and stands still when the reader has stopped (test/live-mux-socket.test.mjs, a real socket). Only
+   * whether it changed counts. It is the stream handle's own count (libuv's write queue), which ws and
+   * net do not pass on.
+   */
+  get socketPending() {
+    return this.#mux.pending()
+  }
+
+  /**
    * Which page socket this channel is on: the same object for every channel of one socket, nothing
    * more. adaptive-live tells a browser's page socket gone dead (its network changed, and the server's
    * end still open) from the new one the same browser opened (the final review of 29 Sep).
@@ -380,6 +395,10 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
     progressAt: now(), // when ws last wrote some of them (or the queue last started from empty)
     drain: drainMeter(now), // how fast it writes them (DRAIN_WINDOW_MS)
     page: Object.freeze({}), // this socket, as its channels name it (MuxChannel.page)
+    pending: () => {
+      const n = ws._socket?._handle?.writeQueueSize
+      return typeof n === 'number' ? n : null
+    },
     stalled: () => mux.queued > 0 && now() - mux.progressAt > STUCK_MS,
     sendText: (msg) => {
       if (ws.readyState === OPEN) ws.send(JSON.stringify(msg))

@@ -81,6 +81,20 @@
 //    once; over that the viewer is told plainly and the socket closes, rather than joining a queue.
 //    The ffmpeg is killed on close, on error and on every seek: recording always wins. NVR legs are
 //    told the same (h265), so the NVR's own playback is converted for this browser too.
+//  - A converter's start, playing every frame (the playback hunt of 1 Oct 2026, finding F3): ffmpeg's
+//    first picture comes 0.5-1.4 s after its first frame went in (the journal: first frame 524-1410 ms
+//    over 14 sessions), and it then works off what it was handed meanwhile at 25-45 pictures a second.
+//    The pacer went on at 1x from the start point all the same, so those seconds reached the page
+//    faster than they play (traced: 14, 30, 31, 20 frames a second), up to 0.9 s ahead of the clock
+//    its player had set on the first frame: a skip and a freeze of 0.3-1.6 s some 3-4 s after the first
+//    picture, at every start and every jump. So where a converter starts (a start or seek, back to 1x
+//    from keyframes, a change of codec between two files) the pacer hands it what is due (the frames
+//    up to the start point) and CONVERTER_HOLDS frames more, which ffmpeg needs before it gives a
+//    picture back, and then stops its clock until the converter has given back all but that many:
+//    the converted frame at the start point is out. The clock goes on from the last frame handed in,
+//    and the preroll ends there. The start is no faster for it; it is even. A converter silent for
+//    convertWaitMs (3 s) is not waited for any longer. One picture at a time (a scrub, keyframes
+//    only) never waits, and neither does a frame that is not converted.
 //  - A remote viewer (`remote`: server.mjs asks adaptive-live.mjs isRemoteAddress of the socket, the
 //    rule live view uses; the Cloudflare tunnel arrives from 127.0.0.1): one tunnel connection
 //    carried 3.5-6.5 Mbit/s, and a 4.2 Mbit/s main stream through it froze 22 times a minute
@@ -97,6 +111,13 @@
 //    &original=1 (the page's "Original (server)"; the camera wall's tiles) is the recording itself:
 //    never converted, unless it is H.265 for a browser that cannot decode it. The local network is
 //    not touched.
+//    The NVR's own main stream is fitted the same way for a remote viewer, by its session
+//    (playback.mjs #fitDecide; the playback hunt of 1 Oct 2026, finding F6: it went through the tunnel
+//    as it was, 6.3 Mbit/s measured, 3-50 frames a second). NVR playback: connectPlayback tells the
+//    session, with the rate the server recorded the camera at when it knows one. An NVR leg (#legFit):
+//    a converted run lends the leg its slot; a run sent as it is (within the cap, or no conversion to
+//    spare, both said already) leaves the leg as it is too; a start inside a hole has decided nothing
+//    yet, and the leg decides for itself and says so.
 //  - Parsed files are kept per session (an LRU of 64 open readers, closed after 60 s unused), so
 //    scrubbing and seeking back and forth do not read an .idx twice.
 import * as fsp from 'node:fs/promises'
@@ -106,7 +127,7 @@ import { audit } from './audit.mjs'
 import { DATA_DIR } from './auth.mjs'
 import { nvrLegs } from './rec-fallback.mjs'
 import { SegmentReader, keyAtOrAfter, keyAtOrBefore } from './rec-reader.mjs'
-import { CODEC_H264, PLAYBACK_LIMITS, Transcoder, clientCanDecodeH265, pool as transcodePool, wantsTranscode } from './transcode.mjs'
+import { CODEC_H264, DECODE_THREADS, PLAYBACK_LIMITS, Transcoder, clientCanDecodeH265, pool as transcodePool, wantsTranscode } from './transcode.mjs'
 
 // ---- read-ahead: the next file of a playback, read once in the background ----
 // When playback opens a file, the one after it is read through (1 MB at a time into one reused
@@ -156,6 +177,13 @@ const defaultLegs = nvrLegs
 // NVR coverage shorter than this is clock jitter at the edge of server footage, not a stretch to play
 const COVER_MIN_MS = 2000
 const LEG_MAX_SPEED = 8 // NVR sessions play at most 8x
+/**
+ * The pictures a conversion playing forward keeps inside until more go in: one in ffmpeg's parser (a
+ * picture is whole only when the next begins), one in each decoder thread past the first
+ * (transcode.mjs DECODE_THREADS), and the last one out, which the Transcoder holds until the next
+ * proves it whole. Handed four frames it gives the first back; handed fewer, nothing.
+ */
+const CONVERTER_HOLDS = DECODE_THREADS + 1
 
 /** A leg that could not be started at all. */
 const failedLeg = (e) => ({
@@ -265,9 +293,15 @@ export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlaySer
       return null
     }
     const start = p.get('start') ?? ''
+    // A remote viewer's main stream is fitted to the link by the session (playback.mjs #fitDecide),
+    // unless the camera records within the cap: the rate of the server's own recording of it just
+    // before, when there is one (the server records the main stream). Told for the sub-stream too:
+    // a camera the NVR records in HD only goes over to main by itself. &original=1: the NVR's stream.
+    const fit = remote && p.get('original') !== '1' ? { kbps: kbpsBefore(index, nvr.id, ch, Number(start || NaN)) } : null
     const opened = nvr.playback.connect(ws, url, {
       main,
       allowMain: mayMain,
+      fit,
       onMain: () => {
         note(who, nvr, ch, 'nvr main (switched: no SD recording)', start)
         onMain()
@@ -317,6 +351,17 @@ export function connectPlayback({ nvr, ws, url, who, index, allowed = canPlaySer
   return new ServerPlayback({ ws, nvr, ch, start, stream, index, legs: nvrAllowed(ch) ? legs : null, clientH265, remote: Boolean(remote), original, ...opts })
 }
 
+/** A segment's rate in kbit/s (bits per ms) from the index, its bytes over its span; null: not known. */
+const kbpsOf = (s) => (s?.bytes > 0 && s.endMs > s.startMs ? (s.bytes * 8) / (s.endMs - s.startMs) : null)
+/** The rate the server recorded a camera at just before `ms` (the last file starting before it); null: not known. */
+function kbpsBefore(index, nvrId, ch, ms) {
+  try {
+    return Number.isFinite(ms) && index ? kbpsOf(index.prev(nvrId, ch, ms)) : null
+  } catch {
+    return null
+  }
+}
+
 /** HH:MM:SS of a server time, in the NVR's time zone when known (else the server's). */
 function clockText(ms, tzOffsetMs) {
   const tz = tzOffsetMs ?? -new Date(ms).getTimezoneOffset() * 60_000
@@ -347,6 +392,8 @@ export class ServerPlayback {
    *   remote: a remote viewer, whose frames all go through the capped conversion while a slot is
    *   free; original: that viewer asked for the recording itself instead (see the top);
    *   fitAboveKbps: only a recording over this rate is converted for a remote viewer (the cap);
+   *   convertWaitMs: a converter that has just started is waited for until it has been silent this
+   *   long (see the top);
    *   pool, makeTranscoder: the concurrency cap and the converter, injectable for tests
    */
   constructor({
@@ -377,6 +424,7 @@ export class ServerPlayback {
     remote = false,
     original = false,
     fitAboveKbps = PLAYBACK_LIMITS.maxKbps,
+    convertWaitMs = 3000,
     pool = transcodePool,
     makeTranscoder = (o) => new Transcoder(o),
     log = (line) => console.log(line)
@@ -385,6 +433,10 @@ export class ServerPlayback {
     this.xcode = null // the running conversion (H.265 recordings, a browser that cannot decode them)
     this.slot = null // its place under the concurrency cap
     this.converts = false // this viewer's frames are converted (#noteCodec): 2x and 4x are keyframes only
+    this.convertWaitMs = convertWaitMs
+    this.xin = 0 // frames handed to the converter since it last started, and pictures it has given back
+    this.xout = 0
+    this.hold = null // { last, extra }: the pacer is waiting for a converter that has just started (#heldPace)
     // a remote viewer's frames all go through the conversion, capped for the tunnel (see the top)
     this.fit = Boolean(remote) && !original
     this.fitAboveKbps = fitAboveKbps
@@ -522,12 +574,7 @@ export class ServerPlayback {
    * a remote viewer's run is converted).
    */
   #recordedKbps(seg) {
-    const rate = (s) => (s?.bytes > 0 && s.endMs > s.startMs ? (s.bytes * 8) / (s.endMs - s.startMs) : null)
-    try {
-      return rate(seg) ?? rate(this.index.prev(this.nvr.id, this.ch, seg.startMs))
-    } catch {
-      return null
-    }
+    return kbpsOf(seg) ?? kbpsBefore(this.index, this.nvr.id, this.ch, seg.startMs)
   }
 
   /**
@@ -685,8 +732,10 @@ export class ServerPlayback {
   #pace() {
     if (this.closed) return
     const now = this.now()
+    // (a converter has just started: the clock stands still until it has caught up)
+    if (this.hold) this.#heldPace(now)
     // (idle during an NVR leg: the leg sends its frames itself)
-    if (!this.paused && this.queue.length && !this.leg) {
+    else if (!this.paused && this.queue.length && !this.leg) {
       const dir = Math.sign(this.speed)
       const keyMode = this.#keyMode()
       const spd = Math.max(1, Math.abs(this.speed))
@@ -732,6 +781,13 @@ export class ServerPlayback {
         this.#deliver(item)
         if (this.closed) return
       }
+      // A converter started on a frame of this pass (#transcode), and has now been handed all that
+      // was due: the clock stops here, and starts again where the converter has caught up.
+      if (this.hold) {
+        this.anchor = null
+        this.#heldPace(now)
+        if (this.closed) return
+      }
     }
     this.#edges(now)
     this.#fill()
@@ -741,21 +797,70 @@ export class ServerPlayback {
     }
   }
 
+  /**
+   * A converter has just started (this.hold, set in #transcode) and has been handed what was due.
+   * Until it has caught up the clock stands still (see the top):
+   *  - it is handed CONVERTER_HOLDS frames more, as they are queued, whatever their time (a notice
+   *    among them goes out with them): without them ffmpeg gives no picture back, and the frame at
+   *    the start point would never come out;
+   *  - once it has given back all but CONVERTER_HOLDS of what it was handed, it is as far as it can
+   *    get: the wait ends (#release). Looked at here, on the pacer's tick, not where the picture
+   *    comes out: 15 ms later at most;
+   *  - it ends too at a hole the NVR may play, at a frame that is not converted (H.264 after H.265,
+   *    for a browser without H.265), and when the converter has given nothing for convertWaitMs
+   *    (dead, or starved of processor): then the clock runs as it always did.
+   * While paused nothing more is handed in; the wait still ends as above.
+   */
+  #heldPace(now) {
+    const h = this.hold
+    if (this.xout > 0 && this.xin - this.xout <= CONVERTER_HOLDS) return this.#release(now)
+    while (!this.paused && h.extra < CONVERTER_HOLDS && this.queue.length) {
+      const item = this.queue[0]
+      if (item.legAt || (item.buf && !this.#convertsFrame(item.codec))) return this.#release(now)
+      this.queue.shift()
+      if (item.buf) {
+        this.queueBytes -= item.buf.length
+        h.extra++
+      }
+      this.#deliver(item)
+      // (closed; or a file in another codec among them: the next converter's own wait has begun)
+      if (this.closed || this.hold !== h) return
+    }
+    if (now - h.last >= this.convertWaitMs) {
+      // (said only of a converter that had enough to give a picture: with fewer frames in, the
+      // footage ended there or its pictures are seconds apart, and there was nothing to wait for)
+      if (this.xin > CONVERTER_HOLDS) this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: the conversion gave no picture in ${Math.round(this.convertWaitMs)} ms (${this.xin} frames in, ${this.xout} out): playing on without waiting for it`)
+      this.#release(now)
+    }
+  }
+
+  /**
+   * The wait for a converter is over, and so is the preroll. The clock goes on from the last frame
+   * handed in; from the start point when nothing past it went in (the converter had caught up before
+   * there was more to hand it: footage with pictures seconds apart, a stand-in that takes no time),
+   * so the next frame goes at its own distance from the start point, as it always did.
+   */
+  #release(now) {
+    const media = this.preroll !== null && this.preroll > this.lastTs ? this.preroll : this.lastTs
+    this.hold = null
+    this.preroll = null
+    // (paused meanwhile: from the next queued frame when play resumes, as #setPaused leaves it)
+    this.anchor = this.paused ? null : { wall: now, media }
+  }
+
   #deliver(item) {
     if (item.text) return this.#send(item.text)
     if (this.ws.readyState !== this.ws.OPEN) return
     if (this.#convertsFrame(item.codec)) {
       // The browser cannot decode what was recorded, or a remote viewer's link cannot carry it:
       // ffmpeg turns it into H.264 and the converted frame is sent from the callback below, in this
-      // same wire format and at this same time. The position is moved on here all the same, so
-      // pacing does not wait on the encoder.
-      if (this.#transcode(item)) {
-        if (this.#oneAtATime()) this.xcode.endPicture()
-        this.lastTs = item.ts
-        if (this.preroll !== null && item.ts >= this.preroll) this.preroll = null
-        return
-      }
-      return // the cap is full: #transcode has told the viewer and closed the session
+      // same wire format and at this same time. The position is moved on all the same (#transcode),
+      // so pacing does not wait on the encoder: except where a converter starts (#heldPace), and
+      // there the preroll ends when that wait does, not here.
+      if (!this.#transcode(item)) return // the cap is full: #transcode has told the viewer and closed the session
+      if (this.#oneAtATime()) this.xcode.endPicture()
+      if (!this.hold && this.preroll !== null && item.ts >= this.preroll) this.preroll = null
+      return
     }
     this.ws.send(encodeDiskFrame(item.buf, item.isKey, item.codec, item.ts))
     this.lastTs = item.ts
@@ -819,7 +924,15 @@ export class ServerPlayback {
       // whole) are lost with it.
       this.xcode.reset()
       this.xcode.inCodec = item.codec
+      this.xin = 0
+      this.xout = 0
     }
+    // A converter starts on this frame (the first of a run, or of a file in another codec), playing
+    // every frame: the pacer waits for it once what is due has gone in (#heldPace). One picture at
+    // a time (a scrub, keyframes only) is ended and comes out by itself: no wait.
+    if (this.xin === 0 && !this.#oneAtATime()) this.hold = { last: this.now(), extra: 0 }
+    this.xin++
+    this.lastTs = item.ts // (before the push: a stand-in may hand the picture back inside it)
     this.xcode.push(item.ts, item.isKey, item.buf)
     return true
   }
@@ -828,6 +941,8 @@ export class ServerPlayback {
     if (this.closed || this.ws.readyState !== this.ws.OPEN) return
     this.ws.send(encodeDiskFrame(buf, isKey, CODEC_H264, ts))
     if (this.timing.first === null) this.timing.first = this.now() - this.t0
+    this.xout++
+    if (this.hold) this.hold.last = this.now() // (it is working: #heldPace waits on)
   }
 
   /**
@@ -836,6 +951,10 @@ export class ServerPlayback {
    * recorder, so it is killed rather than allowed to drain.
    */
   #stopTranscode(final) {
+    // (the next frame handed in starts a converter; a wait for this one is over with it)
+    this.xin = 0
+    this.xout = 0
+    this.hold = null
     if (final) {
       this.xcode?.close()
       this.xcode = null
@@ -1327,6 +1446,23 @@ export class ServerPlayback {
     return 'skipped'
   }
 
+  /**
+   * What a leg is told of a remote viewer (playback.mjs #fitDecide; null: nothing, the NVR's stream as
+   * it is). A converted run lends its slot: its own converter is idle while the leg plays, and with a
+   * pool of 2 whose last slot is kept for H.265 a browser cannot decode, the leg could never have had
+   * one of its own beside it. A run sent as it is (the recording is within the cap, or there was no
+   * conversion to spare: both said at its first file) leaves the leg as it is. A start or seek into a
+   * hole has opened no file and decided nothing: the leg decides for itself, by the rate of the file
+   * before the hole when that is within the cap, and says what it did (passed on by the proxy).
+   */
+  #legFit(fromMs) {
+    if (!this.fit) return null
+    if (this.fitOn) return { slot: this.slot }
+    if (this.fitAsked) return null
+    const kbps = kbpsBefore(this.index, this.nvr.id, this.ch, fromMs)
+    return { kbps: kbps !== null && kbps <= this.fitAboveKbps ? kbps : null }
+  }
+
   #startLeg({ fromMs, toMs, gen, floorMs, skewMs }) {
     let skew = skewMs
     if (!Number.isFinite(skew)) {
@@ -1339,11 +1475,12 @@ export class ServerPlayback {
     const rec = { handle: null, gen, fromMs, toMs, keyMode: this.#keyMode() }
     try {
       // h265: the NVR's frames go straight to this browser, so they must be converted when ours are
-      rec.handle = this.legs.start({ nvr: this.nvr, ch: this.ch, fromMs, toMs, stream: 0, speed: Math.min(this.speed, LEG_MAX_SPEED), paused: this.paused, skewMs: skew, real: this.ws, gen, at: fromMs, floorMs, h265: this.clientH265 })
+      rec.handle = this.legs.start({ nvr: this.nvr, ch: this.ch, fromMs, toMs, stream: 0, speed: Math.min(this.speed, LEG_MAX_SPEED), paused: this.paused, skewMs: skew, real: this.ws, gen, at: fromMs, floorMs, h265: this.clientH265, fit: this.#legFit(fromMs) })
     } catch (e) {
       rec.handle = failedLeg(e)
     }
     this.leg = rec
+    this.hold = null // (a converter that started on the frames before the hole is not waited for: the leg plays)
     this.anchor = null
     this.startAt = null
     this.preroll = null
