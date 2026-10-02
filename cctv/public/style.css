@@ -577,6 +577,18 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-overlay .cam.st-unknown .cam-dot { fill: var(--rec-unknown); stroke-dasharray: 3 3; }
 .map-overlay .cam.cluster .cam-dot { stroke-width: 3; }
 .map-overlay .cam.sel .cam-dot { stroke: #ffcf87; stroke-width: 3; }
+/* Live lighting. The status colour stays on the dot; these rings sit behind it and say that
+   something is happening right now. A brief green pulse for motion; a steady red ring for an alarm
+   (or a camera the server cannot reach) that lingers until it clears. */
+.map-overlay .cam-pulse { fill: none; stroke: var(--rec-ok); stroke-width: 2.5; transform-box: fill-box; transform-origin: center; animation: map-motion 1.1s ease-out 1; pointer-events: none; }
+.map-overlay .cam-ring { fill: none; stroke: var(--rec-alert); stroke-width: 3; transform-box: fill-box; transform-origin: center; animation: map-alarm 1.6s ease-in-out infinite; pointer-events: none; }
+@keyframes map-motion { from { transform: scale(1); opacity: 0.85; } to { transform: scale(2.4); opacity: 0; } }
+@keyframes map-alarm { 0%, 100% { transform: scale(1.3); opacity: 0.4; } 50% { transform: scale(1.65); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  /* no movement, but the alarm highlight must still be seen */
+  .map-overlay .cam-pulse { animation: none; opacity: 0; }
+  .map-overlay .cam-ring { animation: none; opacity: 0.9; transform: scale(1.5); }
+}
 .map-overlay text { fill: #fff; pointer-events: none; dominant-baseline: central; }
 .map-overlay .cam-num { font: 600 11px system-ui, sans-serif; text-anchor: middle; }
 .map-overlay .cam-name {
@@ -719,6 +731,33 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 /* A ring rather than a solid dot: unknown should not read as one of the states we did check. */
 .map-dot.st-unknown { background: transparent; box-shadow: inset 0 0 0 2px var(--rec-unknown); }
 .map-legend { list-style: none; margin: 0 0 4px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+/* The cone-colour groups, as a legend for everyone and as a small editor for an admin. */
+.map-cone-legend li { display: flex; align-items: center; gap: 6px; }
+.map-swatch { width: 12px; height: 12px; flex: none; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35); }
+.map-groups { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.map-groups li { display: flex; align-items: center; gap: 8px; }
+.map-groups input[type="color"] { width: 30px; height: 26px; padding: 0; border: 1px solid var(--border); border-radius: 4px; background: none; flex: none; }
+.map-group-name { flex: 1; min-width: 0; }
+.map-cone-colour { display: flex; flex-direction: column; gap: 4px; }
+.map-cone-row { display: flex; align-items: center; gap: 8px; }
+.map-cone-select { flex: 1; min-width: 0; }
+.map-cone-row input[type="color"] { width: 30px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 4px; background: none; flex: none; }
+/* The hover snapshot bubble: a small picture above the marker, no pointer of its own. */
+.map-hover {
+  position: absolute;
+  z-index: 4;
+  width: 180px;
+  transform: translate(-50%, calc(-100% - 10px));
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  pointer-events: none;
+}
+.map-hover[hidden] { display: none; }
+.map-hover-name { font-size: 12px; padding: 4px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.map-hover .tile { aspect-ratio: 16 / 9; border-radius: 0; cursor: default; }
 .map-legend li { display: flex; align-items: center; gap: 6px; }
 .map-live-state { font-size: 12px; color: var(--muted); }
 .map-live-state.st-recording { color: var(--rec-ok); }
