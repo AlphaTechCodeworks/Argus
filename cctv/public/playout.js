@@ -43,7 +43,8 @@ export const PLAYOUT_DEFAULTS = {
   catchUpMs: 2000, // after a slow-down (setRate), frames arriving this long are checked for being too far ahead
   stretchLate: false, // a late frame grows the buffer by its lateness at once (REMOTE_CLOCK)
   stretchMarginMs: 30, // ... and this much more
-  shrinkWindowMs: 0 // > 0: shrink towards the largest lateness of this long, shrinkMs every adapt() (REMOTE_CLOCK)
+  shrinkWindowMs: 0, // > 0: shrink towards the largest lateness of this long, shrinkMs every adapt() (REMOTE_CLOCK)
+  restartPastMax: false // stretchLate: a frame later than the buffer may grow to re-anchors at once (REMOTE_PLAYBACK_CLOCK)
 }
 
 /**
@@ -89,12 +90,38 @@ export const PLAYBACK_CLOCK = { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 
  */
 export const REMOTE_CLOCK = { startDelayMs: 350, minDelayMs: 150, maxDelayMs: 2000, stretchLate: true, shrinkWindowMs: 60_000 }
 
+/**
+ * Recorded footage for a viewer the server calls remote (playback.js, once {type:'fit'} has said so;
+ * VideoPlayer.remotePlayback). Playback through the tunnel had the local buffer: 300 ms, growing
+ * 40 ms a second to 1 s at most, and since PLAYBACK_CLOCK re-anchors at once on a frame far too late,
+ * a link pause longer than the buffer re-anchored on the first frame of the burst behind it and then
+ * jumped ahead over the rest: a link stalling 1.2 s every 8 s showed 85% of its frames with 20
+ * re-syncs a minute, and the buffer never grew (playback hunt F4, 1 Oct 2026). REMOTE_CLOCK's two
+ * rules on playback's own buffer: a late frame grows it by its lateness at once (the picture is
+ * standing still for it anyway), up to 2 s of footage, and it comes down again 10 ms a second once a
+ * minute has needed less. Far too late for a second still re-anchors (lateForMs is live's again, not
+ * 0): at once, the stretch never got its turn. The server's own stall (PLAYBACK_CLOCK's reason for
+ * 0) is one late frame to this clock: the buffer grows by the stall and the picture goes on, one
+ * freeze for it as before.
+ */
+export const REMOTE_PLAYBACK_CLOCK = { ...PLAYBACK_CLOCK, maxDelayMs: 2000, lateForMs: PLAYOUT_DEFAULTS.lateForMs, stretchLate: true, shrinkWindowMs: 60_000, restartPastMax: true }
+
 export class PlayoutClock {
   constructor(options = {}) {
     this.opts = { ...PLAYOUT_DEFAULTS, ...options }
     this.delay = this.opts.startDelayMs
     this.rate = 1 // playback speed: 2 shows two seconds of video per second
     this.reset()
+  }
+
+  /**
+   * Other options from here on (VideoPlayer.remotePlayback: the server has said the viewer is remote).
+   * The buffer and the anchor stay as they are; the new rules read the frames that come next.
+   */
+  setOptions(options = {}) {
+    this.opts = { ...PLAYOUT_DEFAULTS, ...options }
+    // (the number only: the frames buffered stay where they are)
+    this.delay = Math.min(this.delay, this.opts.maxDelayMs)
   }
 
   reset() {
@@ -182,16 +209,7 @@ export class PlayoutClock {
     }
     // stretchLate: the picture is standing still waiting for this frame; the buffer grows by its
     // lateness (and a margin) now, so it and the frames after it keep their cadence (REMOTE_CLOCK)
-    if (o.stretchLate && at + this.growLeft < now && now > this.warmupUntil) {
-      const s = Math.min(Math.ceil(now - at + o.stretchMarginMs), o.maxDelayMs - this.delay)
-      if (s > 0) {
-        this.delay += s
-        this.#shift(s)
-        at += s
-        this.steadySince = now
-        this.stretches++
-      }
-    }
+    if (o.stretchLate && at + this.growLeft < now && now > this.warmupUntil) at = this.#stretch(tsMs, at, now)
     // shrinkWindowMs: the delay that would have had this frame just on time. A stretch or a shrink
     // moves the delay and the anchor together, so it stays what the link did, whatever they were
     if (o.shrinkWindowMs && now > this.warmupUntil) {
@@ -207,6 +225,59 @@ export class PlayoutClock {
     this.lastAt = at
     this.lastAtTs = tsMs
     return at
+  }
+
+  /**
+   * stretchLate: the buffer grows by a late frame's lateness and the margin, as far as maxDelayMs
+   * lets it. Returns the frame's display time after it.
+   *
+   * restartPastMax (REMOTE_PLAYBACK_CLOCK): a frame later than the buffer may grow to starts the clock
+   * again on it, from the starting buffer, at once. Left as it is (live), a buffer at its most keeps
+   * every later frame late for good when the lateness is there to stay: recorded footage after the
+   * server's pacer stood still twice, 1.5 s each. The first grew the buffer to 1.53 s, the second
+   * could add 0.47 s, and from there on every frame was a second late, never far enough past the 2 s
+   * buffer to re-anchor: shown as it landed, with the link's jitter (the replay of 1 Oct, 99.3% shown
+   * on the site PC's decoder; 64.8% on a decoder that hands its frames back in bursts).
+   */
+  #stretch(tsMs, at, now) {
+    const o = this.opts
+    const want = Math.ceil(now - at + o.stretchMarginMs)
+    const room = o.maxDelayMs - this.delay
+    if (o.restartPastMax && want > room) {
+      this.delay = Math.min(this.delay, o.startDelayMs)
+      this.#reanchor(tsMs, now)
+      this.lastTs = tsMs
+      this.lastNow = now
+      this.resyncs++
+      return this.presentAt(tsMs)
+    }
+    const s = Math.min(want, room)
+    if (s <= 0) return at
+    this.delay += s
+    this.#shift(s)
+    this.steadySince = now
+    this.stretches++
+    return at + s
+  }
+
+  /**
+   * A frame out of the decoder (player.js, playback timed on arrival: VideoPlayer.remotePlayback), when
+   * it came in time and the decoder handed it back after its display time. The clock timed it as it
+   * arrived and so never saw that: with the frames timed once decoded (playback on the local network)
+   * a decoder that hands its frames back late, or in bursts, reads as late frames and the buffer
+   * grows to cover it. Here it is told: the buffer grows by the lateness (stretchLate), or the frame
+   * counts as late (adapt() grows the buffer). Never for a frame that waited for one of the decoder's
+   * pictures to come free: that one is out a few frames before its time.
+   */
+  decodedLate(tsMs, now) {
+    if (this.anchor === null || now <= this.warmupUntil) return
+    const at = this.presentAt(tsMs)
+    if (at + this.growLeft >= now) return
+    if (this.opts.stretchLate) this.#stretch(tsMs, at, now)
+    else {
+      this.late++
+      this.lateTotal++
+    }
   }
 
   // drift: the earliest (least network-delayed) arrival per window, against the first window

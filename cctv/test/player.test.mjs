@@ -515,5 +515,26 @@ const B = await import('../public/player.js?range=full')
 }
 check('wantsRangeFix: only limited range with no colour description', A.wantsRangeFix({ fullRange: false, colourDesc: null }) && !A.wantsRangeFix({ fullRange: true, colourDesc: null }) && !A.wantsRangeFix({ fullRange: false, colourDesc: { primaries: 1, transfer: 1, matrix: 1 } }) && !A.wantsRangeFix({ fullRange: null, colourDesc: null }) && !A.wantsRangeFix(null))
 
+// ---- remote playback: timed on arrival, a bigger buffer, the remote clock at 1x (playback hunt F4) ----
+{
+  const { REMOTE_PLAYBACK_CLOCK, PLAYBACK_CLOCK } = await import('../public/playout.js')
+  const p = new A.VideoPlayer(canvas(), { clock: PLAYBACK_CLOCK })
+  check('local playback: not timed on arrival, the 45-frame buffer, no remote profile (unchanged by this)', p.arrivalClock === false && p.maxQueued === 45 && p.remote === null && p.clock.opts.stretchLate === false, `arrival ${p.arrivalClock}, queued ${p.maxQueued}, remote ${p.remote}`)
+  p.remotePlayback({ clock: REMOTE_PLAYBACK_CLOCK })
+  check('remotePlayback: frames timed on arrival, up to REMOTE_QUEUED_FRAMES kept, the remote profile at 1x', p.arrivalClock === true && p.maxQueued >= A.REMOTE_QUEUED_FRAMES && p.remote !== null && p.clock.opts.stretchLate === true && p.clock.opts.restartPastMax === true, `arrival ${p.arrivalClock}, queued ${p.maxQueued} vs ${A.REMOTE_QUEUED_FRAMES}`)
+  p.setRate(2)
+  check('  at a faster speed it falls back to the page clock (the stretch/re-anchor is a 1x rule)', p.clock.opts.stretchLate === false && p.clock.opts.restartPastMax !== true, JSON.stringify(p.clock.opts.stretchLate))
+  p.setRate(1)
+  check('  back at 1x the remote profile again', p.clock.opts.stretchLate === true && p.clock.opts.restartPastMax === true)
+  p.remotePlayback({ clock: REMOTE_PLAYBACK_CLOCK })
+  check('  calling it again is harmless (idempotent)', p.arrivalClock === true && p.remote !== null)
+  p.close()
+
+  const np = new A.VideoPlayer(canvas(), { pacing: false })
+  np.remotePlayback({ clock: REMOTE_PLAYBACK_CLOCK })
+  check('without pacing there is no playout clock to make remote: remotePlayback is a no-op', np.arrivalClock === false && np.remote === null)
+  np.close()
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

@@ -24,10 +24,13 @@
 // Switching between them (quality "SD (NVR)", or a camera or day in the other mode) converts the
 // position by the NVR's clock skew.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
-import { PLAYBACK_CLOCK } from './playout.js'
+import { PLAYBACK_CLOCK, REMOTE_PLAYBACK_CLOCK } from './playout.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
+  MESSAGE_STICKY_MS,
   NvrFallback,
+  PLAYBACK_STALL_MS,
+  RECONNECT_MESSAGE,
   SERVER_START_TIMEOUT_MS,
   ScrubThrottle,
   convertTime,
@@ -44,6 +47,7 @@ import {
   pickMode,
   prerollUntil,
   qualityForCam,
+  reconnectOnClose,
   recordedFrom as stretchFrom,
   refusedMessage,
   scrubTimeoutMs,
@@ -52,6 +56,7 @@ import {
   serverSocketQuery,
   shift,
   speedFor,
+  waitingText,
   watchesStart
 } from './pb-sources.js'
 import { MAX_BOXES, boxSeekMs, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
@@ -95,6 +100,7 @@ const clockInput = $('clockInput')
 const messageEl = $('message')
 const noticeEl = $('pbNotice')
 const badgeEl = $('srcBadge')
+const remoteMarkEl = $('remoteMark') // the server calls this viewer remote ({type:'fit'}): shown then (F1/F6)
 const skewEl = $('skewHint')
 const legendServer = $('legendServer')
 const hintEl = $('pbHint')
@@ -211,6 +217,7 @@ const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
     noteStart()
+    notePlaybackFrame() // a frame arrived: not waiting; re-arm the "nothing is arriving" watch
     hideMessage()
     scheduleDraw()
   },
@@ -239,11 +246,16 @@ function showSpinner() {
   spinnerEl.hidden = false
 }
 
-function showMessage(text) {
+// A message shown mid-play (the server waiting, a reconnect) stays at least MESSAGE_STICKY_MS: without
+// this the next buffered frame's onFrame -> hideMessage wiped it before it could be read (F5).
+let messageStickyUntil = 0
+function showMessage(text, { sticky = false } = {}) {
   messageEl.textContent = text
   messageEl.hidden = false
+  if (sticky) messageStickyUntil = performance.now() + MESSAGE_STICKY_MS
 }
 function hideMessage() {
+  if (performance.now() < messageStickyUntil) return
   if (!messageEl.hidden) messageEl.hidden = true
 }
 
@@ -258,6 +270,35 @@ function showNotice(text) {
     noticeEl.classList.add('fading')
     noticeTimer = setTimeout(() => (noticeEl.hidden = true), 600)
   }, NOTICE_MS)
+}
+
+// ---- "nothing is arriving" (playback hunt F5) ----------------------------
+// The server says {type:'waiting', why} when its pacer has had nothing to send for 2 s while playing,
+// and {type:'playing'} before it goes on. The page also watches for itself (an older server, or the
+// socket stalled): PLAYBACK_STALL_MS with no frame while playing shows the same spinner and message.
+let stallTimer = null
+let waiting = false
+/** A frame (or a {type:'next'}) arrived: clear any waiting state and re-arm the watch for `ms`. */
+function notePlaybackFrame(ms = PLAYBACK_STALL_MS) {
+  clearTimeout(stallTimer)
+  if (waiting) {
+    waiting = false
+    if (!state.paused) hideMessage()
+  }
+  if (!state.paused && !scrub) stallTimer = setTimeout(() => showWaiting(), ms)
+}
+/** Shows the spinner and a message while playback waits (the server's reason, or a plain fallback). */
+function showWaiting(why) {
+  clearTimeout(stallTimer)
+  waiting = true
+  showSpinner()
+  showMessage(waitingText(why), { sticky: true })
+}
+/** Stops the watch (paused, scrubbing, ended, the socket gone). */
+function stopStallWatch() {
+  clearTimeout(stallTimer)
+  stallTimer = null
+  waiting = false
 }
 
 // ---- data ---------------------------------------------------------------
@@ -702,6 +743,7 @@ function pushFrame(data) {
 }
 
 function closeSocket() {
+  stopStallWatch()
   if (!ws) return
   settleStart(ws)
   ws.onclose = null
@@ -716,6 +758,7 @@ function onStatus(msg) {
     // stream itself for want of a free conversion; said when it changes, not at every seek
     const change = nvrFitChange(state.nvrFit, msg)
     state.nvrFit = change.fit
+    if (remoteMarkEl) remoteMarkEl.hidden = false // a remote viewer's NVR HD is fitted too
     if (change.notice) showNotice(change.notice)
   }
   if (msg.type === 'stream') {
@@ -729,6 +772,12 @@ function onStatus(msg) {
       hd.disabled = false
       qualitySel.value = '0'
     }
+  }
+  if (msg.type === 'notice') {
+    // a waiting notice (the NVR not answering, F8) shows a spinner and a message that the next frame
+    // clears; any other notice is a passing toast, as before
+    if (msg.waiting) showWaiting(msg.message)
+    else showNotice(msg.message)
   }
   if (msg.type === 'end') {
     // skip gaps between recordings automatically
@@ -831,7 +880,7 @@ function fallBackToNvr(sock, why) {
   return true
 }
 
-function openServer(start) {
+function openServer(start, { reconnected = false } = {}) {
   closeSocket()
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   // server footage is the main stream (stream=0); all times are the server's clock
@@ -850,6 +899,8 @@ function openServer(start) {
   sock.pending = null
   sock.ackOnFrame = null // a scrub's reply came: its keyframe frees the throttle
   sock.startTimer = null // watchStart: no answer to the start or a seek yet
+  sock.ended = false // the end of the footage was reached (not a drop to reconnect through)
+  sock.reconnected = reconnected // this socket is itself a reconnect: it does not reconnect again (no loop)
   sock.onopen = () => {
     if (state.speed !== 1) sock.send(JSON.stringify({ speed: state.speed }))
     if (sock.pending) sock.send(JSON.stringify(sock.pending))
@@ -869,6 +920,7 @@ function openServer(start) {
   sock.onclose = (e) => {
     if (ws !== sock) return
     settleStart(sock)
+    stopStallWatch()
     ws = null
     // the camera taken away or the session signed out while it played (access-watch.mjs)
     const refused = refusedMessage(e.code, e.reason)
@@ -877,6 +929,12 @@ function openServer(start) {
     // a failed server playback (the share down, say): the NVR's copy, once per camera, with the
     // server's own message ({type:'error'}, just before this) as the notice's reason
     else if (serverFailed(e.code, e.reason)) fallBackToNvr(sock, (sock.error ?? 'Server playback failed').replace(/[.\s]+$/, ''))
+    // a drop the page did not plan for (1006, or a 1000/1001 while it was still playing): the browser
+    // or the tunnel let go. Reconnect once, at the position reached, rather than sit silent or loop (F5).
+    else if (reconnectOnClose(e.code, e.reason, { playing: sock.okGen >= 0 && !sock.ended, reconnected: sock.reconnected })) {
+      showMessage(RECONNECT_MESSAGE, { sticky: true })
+      openServer(state.position ?? start, { reconnected: true })
+    }
   }
   ws = sock
   watchStart(sock, 0, start)
@@ -887,6 +945,7 @@ function onServerStatus(sock, msg) {
     case 'started': {
       if (msg.gen !== sock.gen) return
       sock.okGen = msg.gen
+      sock.ended = false // a fresh start (e.g. a seek past a previous end): a later drop may reconnect
       settleStart(sock)
       // a server start at 1x-4x sends the frames from the keyframe before `at` at once (the
       // preroll): decoded, not shown; its keyframe is the poster. Keyframe starts, reverse and
@@ -920,6 +979,18 @@ function onServerStatus(sock, msg) {
     case 'notice':
       showNotice(msg.message)
       return
+    case 'waiting':
+      // the server's pacer has had nothing to send for 2 s: show the reason, do not keep the stale picture silent
+      showWaiting(msg.why)
+      return
+    case 'playing':
+      // it is sending again: the frame right behind this clears the spinner (notePlaybackFrame)
+      notePlaybackFrame()
+      return
+    case 'next':
+      // a picture is that far off (time-lapse footage): not stalled, just a long gap -- re-arm past it
+      notePlaybackFrame(Number(msg.inMs) + PLAYBACK_STALL_MS)
+      return
     case 'fit': {
       // Only a remote viewer is told this (rec-playback.mjs): converted to fit the link, sent the
       // original for want of a free conversion or because it fits already, or the original as
@@ -927,13 +998,20 @@ function onServerStatus(sock, msg) {
       const change = fitChange(state.fit, msg)
       const learned = !state.remote
       state.remote = true
+      if (remoteMarkEl) remoteMarkEl.hidden = false // the server is treating this viewer as remote
       state.fit = change.fit
+      // the server treats this viewer as remote: time frames on arrival (a burst after a link pause is
+      // not read as a slow decoder) and, at 1x, grow the buffer with the link (playback hunt F4). Local
+      // playback is untouched; this is idempotent, so a fit at every seek is harmless.
+      player.remotePlayback({ clock: REMOTE_PLAYBACK_CLOCK })
       if (change.notice) showNotice(change.notice)
       if (learned) updateModeUi()
       return
     }
     case 'end':
       settleStart(sock) // (nothing to play there is an answer too)
+      sock.ended = true // a clean end: a close after this is not a drop to reconnect through
+      stopStallWatch()
       return onServerEnd(msg)
     case 'error':
       settleStart(sock) // (the close that follows decides)

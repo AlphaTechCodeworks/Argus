@@ -22,6 +22,10 @@ import {
   fitChange,
   nvrFitChange,
   gapAt,
+  MESSAGE_STICKY_MS,
+  PLAYBACK_STALL_MS,
+  RECONNECT_MESSAGE,
+  WAITING_FALLBACK,
   liveEdge,
   mergeSources,
   nextStretch,
@@ -31,6 +35,7 @@ import {
   pickMode,
   prerollUntil,
   qualityForCam,
+  reconnectOnClose,
   recordedFrom,
   refusedMessage,
   scrubTimeoutMs,
@@ -40,6 +45,7 @@ import {
   shift,
   speedFor,
   stretchAt,
+  waitingText,
   wallQualities,
   wallTileMode,
   watchesStart
@@ -488,6 +494,25 @@ check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any
   check('wall: each tile knows its camera\'s rights and plays from what they allow', /rights: pbRights\(cam\)/.test(wall) && /return wallTileMode\(\{ rights: this\.rights, /.test(wall))
   check('wall: a 1008 refusal is said on the tile, and final', /if \(e\.code === 1008\) \{\n\s*this\.error = refusedMessage\(e\.code, e\.reason\)/.test(wall))
   check('wall: the Quality menu follows the chosen cameras\' rights', /wallQualities\(rights, state\.quality\)/.test(wall) && /function showPage\(\) \{\n\s*updateQualityChoices\(\)/.test(wall))
+}
+
+// ---- the server waiting, and a socket dropping mid-play (playback hunt F5) --------------------------
+{
+  check('waitingText: the server\'s reason when it gave one', waitingText('Waiting for the next recording.') === 'Waiting for the next recording.')
+  check('  a plain fallback otherwise', waitingText() === WAITING_FALLBACK && waitingText('') === WAITING_FALLBACK && waitingText('   ') === WAITING_FALLBACK && /waiting/i.test(WAITING_FALLBACK))
+  check('  the watch waits ~2 s, and a message sticks ~3 s so the next frame does not wipe it', PLAYBACK_STALL_MS === 2000 && MESSAGE_STICKY_MS === 3000)
+
+  const playing = { playing: true, reconnected: false }
+  check('reconnectOnClose: a 1006 drop mid-play reconnects', reconnectOnClose(1006, '', playing) === true)
+  check('  a 1000/1001 while still playing reconnects too (the page closes its own socket, so this was not the page)', reconnectOnClose(1000, 'viewer left', playing) === true && reconnectOnClose(1001, '', playing) === true)
+  check('  only once: a socket that is itself a reconnect does not reconnect again (no loop)', reconnectOnClose(1006, '', { playing: true, reconnected: true }) === false)
+  check('  not before anything played (the 8 s start watch covers a slow start)', reconnectOnClose(1006, '', { playing: false, reconnected: false }) === false)
+  check('  not a refusal (1008), the NVR busy (1013) or a failed playback (1011): each has its own answer', reconnectOnClose(1008, 'not allowed', playing) === false && reconnectOnClose(1013, '', playing) === false && reconnectOnClose(1011, 'playback failed', playing) === false)
+  check('  there is a reconnect message to show', typeof RECONNECT_MESSAGE === 'string' && RECONNECT_MESSAGE.length > 0)
+
+  const pb = readFileSync(new URL('../public/playback.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  check('playback.js uses the rules, not its own: showWaiting on {type:\'waiting\'}, reconnectOnClose on a drop', /case 'waiting':/.test(pb) && /showWaiting\(msg\.why\)/.test(pb) && /reconnectOnClose\(e\.code, e\.reason/.test(pb) && /openServer\(state\.position \?\? start, \{ reconnected: true \}\)/.test(pb))
+  check('playback.js arms its own 2 s watch on each frame and shows a sticky message', /notePlaybackFrame\(\)/.test(pb) && /showMessage\(waitingText\(why\), \{ sticky: true \}\)/.test(pb))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

@@ -48,7 +48,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, PLAYBACK_LIMITS, Transcoder, clientCanDecodeH265, lightPool, pool as transcodePool } from './transcode.mjs'
-import { bind, codecOf, coolingLeftMs, encodeFrame, errorText, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
+import { bind, codecOf, coolingLeftMs, encodeFrame, errorText, lateCalls, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
 import { lastHang } from './watchdog.mjs'
 import { SdWait, hdOnlyStore, noSdAction } from './hd-only.mjs'
 import { HD_ASK_MESSAGE, HD_NOT_ALLOWED, HD_ONLY_MESSAGE } from './stream-param.mjs'
@@ -195,7 +195,7 @@ export const PB = { PlayBackByTimeEx, SetPlayDataCallBack, PlayBackControl, Stop
  *   now: the clock of the recording-days cache; makeTranscoder, pool: the conversion and its slots for
  *   a main stream (transcode.mjs Transcoder and pool); log (all for tests)
  */
-export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder = (o) => new Transcoder(o), pool: mainPool = transcodePool, log = (l) => console.log(l) } = {}) {
+export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder = (o) => new Transcoder(o), pool: mainPool = transcodePool, log = (l) => console.log(l), nvrStalled = () => lateCalls(nvr.id) > 0 || sdkStuck() } = {}) {
   const userId = () => nvr.userId
   // all SDK work for this NVR goes through its lane, with time limits (lanes.mjs, sdk.mjs)
   const op = (task, priority = PRIORITY.NORMAL) => nvr.lane.run(task, { priority })
@@ -603,6 +603,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
       }
       if (info.frameType !== 1 || info.length === 0) return
       this.lastFrameAt = Date.now()
+      this.nvrStalledSaid = false // a frame came: a later stall may say "not answering" again
       if (!this.gotFrames) {
         // the first frame: an SD one proves the camera is not HD only (a mark from a slow NVR heals);
         // the first main one after a switch is the proof that it is, and only now is it marked
@@ -914,8 +915,21 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
       // judged only while the NVR really plays: not before the session (or its main stream, after a
       // switch) has started, which can take longer than 8 s on a busy NVR, nor while a RESUME waits
       if (this.openedAt > 0 && this.nvrRunning && !this.resuming && this.queue.length === 0 && Date.now() - this.lastFrameAt > IDLE_END_MS) {
-        this.send({ type: 'end' })
-        this.lastFrameAt = Date.now()
+        // F8: an NVR not answering (an overdue SDK call to it, or the SDK stuck on another) looks the
+        // same here as the end of the footage -- silence. Those NVRs stalled when many streams opened,
+        // and the page took "end" as the end: it seeked away or said "End of recordings". End only at a
+        // real end; while the NVR is stalled, say so once and wait for a frame or a true end.
+        if (nvrStalled()) {
+          if (!this.nvrStalledSaid) {
+            this.nvrStalledSaid = true
+            this.send({ type: 'notice', waiting: true, message: 'The NVR is not answering; still trying to play this recording.' })
+            log(`[${nvr.id}] playback ch${this.ch + 1}: no frames for ${Math.round((Date.now() - this.lastFrameAt) / 1000)} s, but the NVR has an overdue call: not an end, waiting`)
+          }
+          // leave lastFrameAt where it is: keep waiting, do not re-tick the 8 s
+        } else {
+          this.send({ type: 'end' })
+          this.lastFrameAt = Date.now()
+        }
       }
     }
 

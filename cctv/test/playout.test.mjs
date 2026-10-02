@@ -2,7 +2,7 @@
 // real cameras through the real PlayoutClock, with a stand-in for the player's display loop
 // (60 Hz refresh, newest due frame shown, older due frames skipped, at most 45 frames queued).
 //   node cctv/test/playout.test.mjs
-import { PLAYBACK_CLOCK, PLAYOUT_DEFAULTS, PlayoutClock, REMOTE_CLOCK } from '../public/playout.js'
+import { PLAYBACK_CLOCK, PLAYOUT_DEFAULTS, PlayoutClock, REMOTE_CLOCK, REMOTE_PLAYBACK_CLOCK } from '../public/playout.js'
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -720,6 +720,47 @@ const stalled = ({ durMs = 120_000, stalls = [], stallMs = 1200 } = {}) => {
   const tileOptions = viewer.match(/\nconst tileOptions = \(cam\) => \(\{[\s\S]*?\n\}\)\n/)?.[0] ?? ''
   check('... and its tiles keep up to 2 s of decoded frames (player.js REMOTE_QUEUED_FRAMES); a local page\'s the player\'s own', /\n {2}clock: clockOptions\(\),\n/.test(tileOptions) && /\n {2}maxQueuedFrames: REMOTE_PAGE \? REMOTE_QUEUED_FRAMES : undefined,?\n/.test(tileOptions) && /\nconst REMOTE_PAGE = !isLocalHost\(\)\n/.test(viewer))
   check('... what viewer.js uses for it is imported from where it is made', /import \{[^}]*\bisLocalHost\b[^}]*\} from '\.\/device\.js'/.test(viewer) && /import \{[^}]*\bREMOTE_CLOCK\b[^}]*\} from '\.\/playout\.js'/.test(viewer) && /import \{[^}]*\bREMOTE_QUEUED_FRAMES\b[^}]*\} from '\.\/player\.js'/.test(viewer))
+}
+
+// ---- remote playback: the buffer grows with the tunnel, and a frame too late re-anchors (F4) --------
+// (playback hunt F4, 1 Oct 2026.) Playback through the tunnel had the local 300 ms buffer and, since
+// PLAYBACK_CLOCK re-anchors on the first frame far too late, a link pause longer than the buffer
+// re-anchored on the burst behind it and then jumped over the rest. REMOTE_PLAYBACK_CLOCK takes
+// REMOTE_CLOCK's two rules on playback's own buffer (stretch late frames to 2 s, shrink over a
+// minute) and keeps live's re-sync grace (lateForMs), but a frame later than the buffer may grow to
+// re-anchors at once (restartPastMax) rather than running a second late for good.
+{
+  check('REMOTE_PLAYBACK_CLOCK: playback\'s start buffer, up to 2 s, stretchLate, shrinks over a minute, live\'s re-sync grace, re-anchors past its most', REMOTE_PLAYBACK_CLOCK.startDelayMs === PLAYBACK_CLOCK.startDelayMs && REMOTE_PLAYBACK_CLOCK.minDelayMs === PLAYBACK_CLOCK.minDelayMs && REMOTE_PLAYBACK_CLOCK.maxDelayMs === 2000 && REMOTE_PLAYBACK_CLOCK.stretchLate === true && REMOTE_PLAYBACK_CLOCK.shrinkWindowMs === 60_000 && REMOTE_PLAYBACK_CLOCK.lateForMs === PLAYOUT_DEFAULTS.lateForMs && REMOTE_PLAYBACK_CLOCK.restartPastMax === true, JSON.stringify(REMOTE_PLAYBACK_CLOCK))
+  check('  PLAYBACK_CLOCK (local playback) does not stretch, shrink or re-anchor past a max, and keeps its 1 s buffer', PLAYBACK_CLOCK.stretchLate !== true && !PLAYBACK_CLOCK.restartPastMax && !PLAYBACK_CLOCK.shrinkWindowMs && PLAYBACK_CLOCK.maxDelayMs === 1000)
+
+  // a link falling steadily behind, each frame 100 ms later than the one before (the wall gap stays
+  // well under jumpMs: not an outage). The buffer stretches to its most; then, where the live-page
+  // remote clock keeps showing frames a buffer's length late before it gives up, playback's clock
+  // re-anchors at once the moment the buffer cannot stretch for a frame (restartPastMax).
+  const ramp = (opts) => {
+    const c = new PlayoutClock(opts)
+    let k = 0
+    for (; k < 90; k++) c.schedule(k * FRAME_MS, 1000 + k * FRAME_MS) // 3 s steady, past warm-up
+    for (let j = 1; j <= 40; j++, k++) c.schedule(k * FRAME_MS, 1000 + k * FRAME_MS + j * 100)
+    return c
+  }
+  const pb = ramp(REMOTE_PLAYBACK_CLOCK)
+  const page = ramp(REMOTE_CLOCK)
+  check('a link falling behind past the 2 s buffer: remote playback re-anchors, showing far fewer frames late than the live-page clock', pb.resyncs >= 1 && pb.lateTotal < page.lateTotal, `playback resyncs ${pb.resyncs} late ${pb.lateTotal}; page resyncs ${page.resyncs} late ${page.lateTotal}`)
+  check('  both grow the buffer to its 2 s most on the way', pb.delay <= REMOTE_PLAYBACK_CLOCK.maxDelayMs && page.delay === REMOTE_CLOCK.maxDelayMs && pb.stretches > 0, `playback delay ${pb.delay} stretches ${pb.stretches}; page delay ${page.delay}`)
+
+  // a late frame the buffer can still grow for is stretched, not re-anchored (restartPastMax fires only past the max)
+  const within = new PlayoutClock(REMOTE_PLAYBACK_CLOCK)
+  for (let k = 0; k < 90; k++) within.schedule(k * FRAME_MS, 1000 + k * FRAME_MS)
+  const d = within.presentAt(90 * FRAME_MS)
+  within.schedule(90 * FRAME_MS, d + 800)
+  check('  a smaller lateness the buffer can still hold stretches instead, no re-sync', within.stretches === 1 && within.resyncs === 0 && within.delay > PLAYBACK_CLOCK.startDelayMs && within.delay <= REMOTE_PLAYBACK_CLOCK.maxDelayMs, `stretches ${within.stretches}, resyncs ${within.resyncs}, delay ${within.delay}`)
+
+  // 1.2 s stalls every ~20 s at 1x: playback's remote clock grows its buffer and shows every frame,
+  // as REMOTE_CLOCK does for a live page (the stretch rule is shared)
+  const arr = stalled({ stalls: [11_000, 31_000, 52_000, 71_000] })
+  const r = replay(arr, REMOTE_PLAYBACK_CLOCK, REMOTE_QUEUED)
+  check('  1.2 s stalls: the buffer grows and every frame is shown, few re-syncs', r.skipped === 0 && r.clock.delay >= 1200 && r.clock.resyncs <= 1, `skipped ${r.skipped}, delay ${r.clock.delay}, resyncs ${r.clock.resyncs}`)
 }
 
 console.log(failures ?`\n${failures} FAILED` : '\nall passed')

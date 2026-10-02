@@ -164,6 +164,15 @@ const READER_IDLE_MS = 60_000 // a kept file unused this long is closed
 // lie on a line whose step can be a little under the GOP (1999 ms for 2 s), which must not halve
 // the rate. The wall-time limit in the pacer still holds.
 const KEY_SPACING_SLACK = 0.9
+// The pacer has had nothing to send for this long while playing: the page is told {type:'waiting'}
+// and a log line is written (F5). A next picture this far off (time-lapse footage): {type:'next'} so
+// a 2-3 s wait between pictures is not read as a stall (one frame interval is 50 ms, far under this).
+const DRY_MS = 2000
+const NEXT_GAP_MS = 1500
+// No progress (no frame sent) for this long cuts the keep-alive, where one missed pong does not: a
+// playback socket through the tunnel answers its ping late behind its own backlog (as /live-mux's
+// does, backpressure.mjs quiet). Matches STUCK_MS there.
+const QUIET_MS = 30_000
 const SKIP_CODES = new Set(['ENOENT', 'EACCES'])
 // The store itself failing (the NAS share down or unreachable; it is mounted soft, so a stuck read ends
 // in one of these after a few minutes). Not skipped like a missing file: that would not cover a read
@@ -425,19 +434,23 @@ export class ServerPlayback {
     original = false,
     fitAboveKbps = PLAYBACK_LIMITS.maxKbps,
     convertWaitMs = 3000,
+    quietMs = QUIET_MS,
     pool = transcodePool,
     makeTranscoder = (o) => new Transcoder(o),
+    readAhead: readAheadFn = readAhead,
     log = (line) => console.log(line)
   }) {
-    Object.assign(this, { clientH265, pool, makeTranscoder })
+    Object.assign(this, { clientH265, pool, makeTranscoder, readAhead: readAheadFn })
     this.xcode = null // the running conversion (H.265 recordings, a browser that cannot decode them)
     this.slot = null // its place under the concurrency cap
     this.converts = false // this viewer's frames are converted (#noteCodec): 2x and 4x are keyframes only
     this.convertWaitMs = convertWaitMs
+    this.quietMs = quietMs
     this.xin = 0 // frames handed to the converter since it last started, and pictures it has given back
     this.xout = 0
     this.hold = null // { last, extra }: the pacer is waiting for a converter that has just started (#heldPace)
     // a remote viewer's frames all go through the conversion, capped for the tunnel (see the top)
+    this.remote = Boolean(remote) // for the close line (local or remote viewer) and the keep-alive
     this.fit = Boolean(remote) && !original
     this.fitAboveKbps = fitAboveKbps
     this.fitOn = false // they do: a slot was had at a run's first file (kept for the session, as the slot is)
@@ -471,16 +484,35 @@ export class ServerPlayback {
     this.revEnd = false // reverse: at the camera's first recording
     this.endSent = false
     this.readers = new Map() // path -> SegmentReader, least recently used first
+    this.opening = new Map() // path -> Promise<SegmentReader>: an open in flight (dedup: the next file read ahead and then at need share one)
     this.skipLogged = false
     this.lastIdleCheck = 0
     this.t0 = now()
+    // what the session did, for the close line and the keep-alive (F5)
+    this.framesSent = 0
+    this.bytesSent = 0
+    this.maxBuffered = 0
+    this.lastFrameAt = null // wall time of the last frame sent (null: none yet)
+    this.lastProgressAt = this.t0 // ... or of the start (keep-alive: no progress for 30 s cuts, not one missed pong)
+    this.waiting = null // { on, start, announced }: the pacer has had nothing to send for 2 s while playing
+    this.longestWait = 0
+    this.nextAnnouncedTs = null // the ts of the far-off next picture last announced ({type:'next'})
+    this.closeCode = null
+    this.closeReason = null
+    this.convLag = 0 // how far behind its input the conversion is (ms), and its most
+    this.convLagMax = 0
+    this.pushWalls = [] // wall times of frames handed to the converter and not yet out (FIFO; conversion lag)
     this.timing = { index: null, idx: null, first: null }
     // cursor: { phase: 'start'|'resume'|'scrub'|'play'|'scrubbed'|'end', ... }
     this.cur = { phase: 'start', t: start, gen: 0 }
     ws.on('message', (data, isBinary) => {
       if (!isBinary) this.#onCommand(String(data))
     })
-    ws.on('close', () => this.close())
+    ws.on('close', (code, reason) => {
+      if (code !== undefined) this.closeCode = code
+      if (reason !== undefined && reason !== null) this.closeReason = String(reason)
+      this.close()
+    })
     if (stream !== 0) this.#send({ type: 'stream', stream: 0 }) // server footage is the main stream (R17)
     // (the page offers "Original (server)" only to a viewer the server calls remote: this says so)
     if (remote && original) this.#send({ type: 'fit', on: false, original: true })
@@ -732,6 +764,7 @@ export class ServerPlayback {
   #pace() {
     if (this.closed) return
     const now = this.now()
+    this.maxBuffered = Math.max(this.maxBuffered, this.ws.bufferedAmount ?? 0)
     // (a converter has just started: the clock stands still until it has caught up)
     if (this.hold) this.#heldPace(now)
     // (idle during an NVR leg: the leg sends its frames itself)
@@ -790,11 +823,69 @@ export class ServerPlayback {
       }
     }
     this.#edges(now)
+    this.#checkIdle(now)
     this.#fill()
     if (now - this.lastIdleCheck > 1000) {
       this.lastIdleCheck = now
       this.#closeIdleReaders(now)
     }
+  }
+
+  /**
+   * While playing forward, the pacer either has the next picture queued or has nothing to send:
+   *  - a far-off next picture (time-lapse footage, pictures seconds apart): {type:'next', inMs} so the
+   *    page knows it is not stalled, it is just waiting for a picture that far off;
+   *  - nothing queued for DRY_MS: {type:'waiting'} with why (store: a file is slow to open; newest: at
+   *    the end of the footage), or, when the viewer's own socket has backed up, a log line only (a
+   *    message would just queue behind the video already waiting). The next frame clears it (#beforeSend).
+   * Not while paused, during a leg, a converter hold, stills (reverse/scrub), before the first frame,
+   * or outside a play (F5, F9).
+   */
+  #checkIdle(now) {
+    if (this.paused || this.leg || this.hold || this.stills || this.cur.phase !== 'play' || this.lastFrameAt === null) return
+    const head = this.queue.find((q) => q.buf)
+    if (head) {
+      const inMs = this.#dueIn(head.ts, now)
+      if (inMs >= NEXT_GAP_MS && head.ts !== this.nextAnnouncedTs) {
+        this.nextAnnouncedTs = head.ts
+        this.#send({ type: 'next', inMs: Math.round(inMs) })
+      }
+      return
+    }
+    if (this.waiting !== null || now - this.lastFrameAt < DRY_MS) return
+    this.#startWaiting(now)
+  }
+
+  /** When the next buffered frame at ts is due, in wall ms from now (its media distance over the speed). */
+  #dueIn(ts, now) {
+    const spd = Math.abs(this.speed) || 1
+    if (!this.anchor) return Math.abs(ts - this.lastTs) / spd
+    return this.anchor.wall + (ts - this.anchor.media) / this.speed - now
+  }
+
+  /** The pacer has had nothing to send for DRY_MS: say so, or log it when the socket has backed up. */
+  #startWaiting(now) {
+    const buffered = this.ws.bufferedAmount ?? 0
+    const prefix = `[${this.nvr.id}] server playback ch${this.ch + 1}: `
+    const secs = ((now - this.lastFrameAt) / 1000).toFixed(1)
+    if (this.throttled || buffered >= this.pauseAbove) {
+      // the viewer's own socket is backed up, not the server: a {type:'waiting'} would only queue
+      // behind the video already waiting on it. Logged with the queue, said to nobody.
+      this.waiting = { on: 'link', start: this.lastFrameAt, announced: false }
+      this.log(`${prefix}nothing to send for ${secs} s, ${(buffered / 1e6).toFixed(2)} MB queued in node (the viewer's link)`)
+      return
+    }
+    const w = this.#whyWaiting()
+    this.waiting = { on: w.on, start: this.lastFrameAt, announced: true }
+    this.#send({ type: 'waiting', on: w.on, why: w.why })
+    this.log(`${prefix}nothing to send for ${secs} s${w.file ? `, waiting for ${w.file}` : ''} (${w.on === 'newest' ? 'the next recording' : 'recording store'})`)
+  }
+
+  /** Why the pacer has nothing: the end of the footage (newest), or a file slow to open (store). */
+  #whyWaiting() {
+    if (this.atEnd || this.revEnd || (this.cur.reader?.growing && this.cur.needPoll)) return { on: 'newest', why: 'Waiting for the next recording.', file: null }
+    const next = this.index.next(this.nvr.id, this.ch, this.cur.seg?.startMs)
+    return { on: 'store', why: 'Waiting for the server (reading the recording store).', file: next?.path ?? null }
   }
 
   /**
@@ -862,10 +953,40 @@ export class ServerPlayback {
       if (!this.hold && this.preroll !== null && item.ts >= this.preroll) this.preroll = null
       return
     }
-    this.ws.send(encodeDiskFrame(item.buf, item.isKey, item.codec, item.ts))
+    const now = this.now()
+    const msg = encodeDiskFrame(item.buf, item.isKey, item.codec, item.ts)
+    this.#beforeSend(now) // ({type:'playing'} before the first frame after a wait)
+    this.ws.send(msg)
     this.lastTs = item.ts
     if (this.preroll !== null && item.ts >= this.preroll) this.preroll = null
-    if (this.timing.first === null) this.timing.first = this.now() - this.t0
+    if (this.timing.first === null) this.timing.first = now - this.t0
+    this.#progress(msg.length, now)
+  }
+
+  /**
+   * A frame is about to go out: a wait is over. The page was told we were waiting ({type:'waiting'},
+   * on 'store' or 'newest'): tell it we are playing again, with how long it was; a wait the page was
+   * not told of (its own link backed up) is only counted. Sent before the frame so the page sees it
+   * first (F5).
+   */
+  #beforeSend(now) {
+    const w = this.waiting
+    if (w === null) return
+    this.waiting = null
+    this.nextAnnouncedTs = null
+    const waited = now - w.start
+    this.longestWait = Math.max(this.longestWait, waited)
+    if (!w.announced) return
+    this.#send({ type: 'playing', waitedMs: Math.round(waited) })
+    this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: playing again after ${(waited / 1000).toFixed(1)} s`)
+  }
+
+  /** A frame went out: count it, and note progress (the close line and the keep-alive). */
+  #progress(bytes, now = this.now()) {
+    this.framesSent++
+    this.bytesSent += bytes
+    this.lastFrameAt = now
+    this.lastProgressAt = now
   }
 
   // ---- H.265 -> H.264 conversion (transcode.mjs) -----------------------------------------------
@@ -926,6 +1047,7 @@ export class ServerPlayback {
       this.xcode.inCodec = item.codec
       this.xin = 0
       this.xout = 0
+      this.pushWalls = []
     }
     // A converter starts on this frame (the first of a run, or of a file in another codec), playing
     // every frame: the pacer waits for it once what is due has gone in (#heldPace). One picture at
@@ -933,16 +1055,28 @@ export class ServerPlayback {
     if (this.xin === 0 && !this.#oneAtATime()) this.hold = { last: this.now(), extra: 0 }
     this.xin++
     this.lastTs = item.ts // (before the push: a stand-in may hand the picture back inside it)
+    this.pushWalls.push(this.now()) // (the conversion lag: when this frame went in)
     this.xcode.push(item.ts, item.isKey, item.buf)
     return true
   }
 
   #sendConverted(ts, isKey, buf) {
     if (this.closed || this.ws.readyState !== this.ws.OPEN) return
-    this.ws.send(encodeDiskFrame(buf, isKey, CODEC_H264, ts))
-    if (this.timing.first === null) this.timing.first = this.now() - this.t0
+    const now = this.now()
+    const msg = encodeDiskFrame(buf, isKey, CODEC_H264, ts)
+    this.#beforeSend(now)
+    this.ws.send(msg)
+    if (this.timing.first === null) this.timing.first = now - this.t0
     this.xout++
-    if (this.hold) this.hold.last = this.now() // (it is working: #heldPace waits on)
+    // how far behind its input the conversion is: this picture against when its frame went in (FIFO,
+    // no B-frames). Shown in the close line, so a converter that fell behind is on the record (F5).
+    const pw = this.pushWalls.shift()
+    if (pw != null) {
+      this.convLag = now - pw
+      this.convLagMax = Math.max(this.convLagMax, this.convLag)
+    }
+    this.#progress(msg.length, now)
+    if (this.hold) this.hold.last = now // (it is working: #heldPace waits on)
   }
 
   /**
@@ -954,6 +1088,7 @@ export class ServerPlayback {
     // (the next frame handed in starts a converter; a wait for this one is over with it)
     this.xin = 0
     this.xout = 0
+    this.pushWalls = []
     this.hold = null
     if (final) {
       this.xcode?.close()
@@ -1034,7 +1169,13 @@ export class ServerPlayback {
     run.then(
       (progress) => this.#stepDone(stale, Boolean(progress)),
       (e) => {
-        if (stale()) return this.#stepDone(stale, false)
+        if (stale()) {
+          // A read (a file opening, a GOP) that a seek, scrub or close has made stale, and failed:
+          // dropped today without a word, so a read failing on footage nobody waits for any more left
+          // no trace. Logged now (F5); the session is not failed by it (the new position decides).
+          if (e && !this.closed) this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: a read no longer needed was dropped: ${e.message ?? e.code ?? e}`)
+          return this.#stepDone(stale, false)
+        }
         this.busy = false
         this.#fail(e)
       }
@@ -1114,6 +1255,7 @@ export class ServerPlayback {
       this.startAt = at
       this.preroll = at
     }
+    this.#readAheadNext()
     return true
   }
 
@@ -1138,6 +1280,7 @@ export class ServerPlayback {
       k = ka >= 0 ? ka : r.rows.length
     }
     this.cur = { ...base, seg: opened.seg, reader: r, k }
+    this.#readAheadNext()
     return true
   }
 
@@ -1283,6 +1426,7 @@ export class ServerPlayback {
     const first = r.times[0] ?? opened.seg.startMs
     if (before != null) this.#hole(before, first)
     this.cur = { phase: 'play', seg: opened.seg, reader: r, k: 0, i: 0, target: c.target, needPoll: false, waitUntil: 0 }
+    this.#readAheadNext()
     return true
   }
 
@@ -1588,29 +1732,68 @@ export class ServerPlayback {
     this.log(`[${this.nvr.id}] server playback ch${this.ch + 1}: ${seg.path}: ${e.code}, skipped`)
   }
 
-  /** A reader for seg: kept from before (LRU), or opened (its .idx read once). */
+  /**
+   * A reader for seg: kept from before (LRU), opened now, or an open already in flight (the next file
+   * is opened ahead when this one opens, #readAheadNext, and asked for again at need: both share one
+   * SegmentReader and one pair of file opens, which is why the open is deduped here).
+   */
   async #reader(seg) {
-    let r = this.readers.get(seg.path)
-    if (r) {
+    const cached = this.readers.get(seg.path)
+    if (cached) {
       this.readers.delete(seg.path)
-      this.readers.set(seg.path, r)
-      if (r.growing && !seg.open) await r.markClosed(seg.endMs ?? null, this.#nextStartOf(seg))
-      else if (r.growing) await r.refresh() // the open file, kept from a while ago: what has arrived since
-    } else {
-      // the neighbours: the last GOP runs up to the next file's first keyframe (a seamless minute join), and a
-      // catch-up burst at this file's start may take its time back to the previous file's end
-      const after = seg.open ? null : this.index.next(this.nvr.id, this.ch, seg.startMs)
-      const nextStartMs = Number.isFinite(after?.startMs) ? after.startMs : null
-      const prevEndMs = this.index.prev(this.nvr.id, this.ch, seg.startMs)?.endMs ?? null
-      r = new SegmentReader({ path: seg.path, endMs: seg.endMs ?? null, growing: Boolean(seg.open), fs: this.fs, nextStartMs, prevEndMs })
-      await r.open()
-      this.readers.set(seg.path, r) // (closed with the rest if the session closed meanwhile)
-      this.#evict()
-      // the next file, ready before it is needed (not the one still being written)
-      if (after && !after.open) readAhead(after.path)
+      this.readers.set(seg.path, cached)
+      if (cached.growing && !seg.open) await cached.markClosed(seg.endMs ?? null, this.#nextStartOf(seg))
+      else if (cached.growing) await cached.refresh() // the open file, kept from a while ago: what has arrived since
+      cached.lastUsed = this.now()
+      return cached
     }
+    let pending = this.opening.get(seg.path)
+    if (!pending) {
+      pending = this.#openReader(seg)
+      this.opening.set(seg.path, pending)
+      const done = () => this.opening.get(seg.path) === pending && this.opening.delete(seg.path)
+      pending.then(done, done)
+    }
+    const r = await pending
     r.lastUsed = this.now()
     return r
+  }
+
+  /** Opens seg's file and its .idx (a fresh SegmentReader), keeps it (LRU), evicts the oldest. */
+  async #openReader(seg) {
+    // the neighbours: the last GOP runs up to the next file's first keyframe (a seamless minute join), and a
+    // catch-up burst at this file's start may take its time back to the previous file's end
+    const after = seg.open ? null : this.index.next(this.nvr.id, this.ch, seg.startMs)
+    const nextStartMs = Number.isFinite(after?.startMs) ? after.startMs : null
+    const prevEndMs = this.index.prev(this.nvr.id, this.ch, seg.startMs)?.endMs ?? null
+    const r = new SegmentReader({ path: seg.path, endMs: seg.endMs ?? null, growing: Boolean(seg.open), fs: this.fs, nextStartMs, prevEndMs })
+    await r.open()
+    if (this.closed) {
+      // closed while this opened (a read-ahead in flight, or a jump that moved on): do not leak its fds
+      await r.close().catch(() => {})
+      return r
+    }
+    this.readers.set(seg.path, r) // (closed with the rest if the session closed meanwhile)
+    this.#evict()
+    return r
+  }
+
+  /**
+   * The next file, opened ahead: its reader (its .idx) when the current file opens, not 3 s before its
+   * end, so a file slow to open does not stall the picture silently at the join (F9). The whole file is
+   * read into the OS cache (readAhead), one file ahead only -- never two whole files ahead (the task's
+   * bound). Forward 1x-4x only; never the file being written, and not if it is already open or opening.
+   */
+  #readAheadNext() {
+    // 1x forward only: this is the owner's case, where a file slow to open stalled the picture
+    // silently at the join (F9). Faster speeds already read readAheadMs x speed ahead and consume the
+    // next file's start with more lead; reverse and keyframe speeds jump file to file. Keeping it to
+    // 1x also leaves those paths' index lookups exactly as they were.
+    if (this.closed || this.speed !== 1 || !this.cur.reader) return
+    const next = this.index.next(this.nvr.id, this.ch, this.cur.seg?.startMs)
+    if (!next || next.open || this.readers.has(next.path) || this.opening.has(next.path)) return
+    this.readAhead(next.path)
+    this.#reader(next).catch(() => {}) // its .idx; a real failure surfaces at need (#openSeg logs the skip)
   }
 
   /** The start of the file after seg (its first keyframe), or null. */
@@ -1666,8 +1849,27 @@ export class ServerPlayback {
     this.queue = []
     this.queueBytes = 0
     if (!this.busy) this.#closeReaders()
+    if (this.waiting !== null) this.longestWait = Math.max(this.longestWait, this.now() - this.waiting.start)
     const ms = (v) => (v === null ? '-' : String(Math.round(v)))
+    const mb = (b) => (b / 1e6).toFixed(2)
     const from = Number.isFinite(this.start) && Math.abs(this.start) < 8.64e15 ? new Date(this.start).toISOString() : String(this.start)
-    this.log(`[${this.nvr.id}] server playback ch${this.ch + 1} from ${from}: index ${ms(this.timing.index)} ms, idx ${ms(this.timing.idx)} ms, first frame ${ms(this.timing.first)} ms`)
+    const viewer = this.remote ? 'remote' : 'local'
+    const reason = this.closeReason ? ` "${this.closeReason}"` : ''
+    const code = this.closeCode ?? 1000
+    // What the session did, so a stalled or cut one can be read from the journal alone (F5): where it
+    // came from, how much went out, what was still queued in node, the close code, the longest wait
+    // the pacer had, and (converting) how far behind the conversion was.
+    let line = `[${this.nvr.id}] server playback ch${this.ch + 1} from ${from}: index ${ms(this.timing.index)} ms, idx ${ms(this.timing.idx)} ms, first frame ${ms(this.timing.first)} ms; ${viewer} viewer, ${this.framesSent} frames (${mb(this.bytesSent)} MB) sent, ${mb(this.ws.bufferedAmount ?? 0)} MB queued in node at the end (${mb(this.maxBuffered)} at most), closed with code ${code}${reason}, longest wait ${(this.longestWait / 1000).toFixed(1)} s`
+    if (this.converts || this.xcode) line += `, conversion ${Math.round(this.convLag)} ms behind at the end (${Math.round(this.convLagMax)} at most)`
+    this.log(line)
+  }
+
+  /**
+   * The keep-alive's patience for this socket (server.mjs): true when it may be cut -- no frame sent
+   * for QUIET_MS. A socket through the tunnel that answers its ping late behind its own backlog is
+   * still writing (progress), so it is waited for, not cut on one missed pong (F5; as /live-mux).
+   */
+  quiet() {
+    return this.now() - this.lastProgressAt >= this.quietMs
   }
 }
