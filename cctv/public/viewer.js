@@ -773,24 +773,6 @@ function openSingle(cam, { fromTap = false } = {}) {
   else if (cam.hd === false) overlay.querySelector('.name').after(sdBadge())
   syncTiles()
   updatePager()
-  nudgeRepaint(overlay)
-}
-
-/**
- * The first paint of a fresh full-size view can leave the controls behind the picture until any
- * resize clears it (a GPU-compositing quirk: the picture's canvas layer and the controls' blurred
- * layers composite in the wrong order on entry). An imperceptible opacity nudge over the next frames
- * forces the overlay to re-composite, so the controls sit over the picture without needing a resize.
- */
-function nudgeRepaint(el) {
-  let n = 0
-  const tick = () => {
-    if (!el?.isConnected || el !== overlay) return
-    el.style.opacity = n % 2 ? '' : '0.9999'
-    if (++n <= 3) requestAnimationFrame(tick)
-    else el.style.opacity = ''
-  }
-  requestAnimationFrame(tick)
 }
 
 /** Back to the grid: the grid tiles pick up again straight away. */

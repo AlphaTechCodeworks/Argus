@@ -1873,6 +1873,13 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 /* the full-size camera's own controls stay above its picture (the picture was raised a layer over
    the hidden iPhone-player copy, and took the name bar, Recordings and Picture under it) */
 .single-overlay > .label, .single-overlay > .stats, .single-overlay > canvas.osd { z-index: 4; }
+/* The picture's canvas is GPU-composited on its own layer. The control strip has no transform or
+   backdrop-filter, so it is NOT promoted and paints into the tile's base layer -- BELOW the canvas's
+   layer -- so the name, Picture and Lines sat behind the picture (only OSD, over the black bar where
+   the canvas has no pixels, showed through) until any resize re-composited it. Promote the strip to
+   its own layer so z-index 4 wins. The other controls (status, arrows, fullscreen) carry a
+   backdrop-filter and are already layered, so they are left alone (translateZ there can break blur). */
+.single-overlay > .label, .single-overlay > .stats { transform: translateZ(0); }
 .single-overlay > .tile-upgrade { z-index: 2; }
 .single-overlay > .phone-fs-btn, .single-overlay > .phone-step, .single-overlay > .phone-fs-note { z-index: 6; }
 /* phones: the camera list */
