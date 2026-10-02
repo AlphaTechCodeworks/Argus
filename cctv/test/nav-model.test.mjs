@@ -14,7 +14,7 @@ const ids = (groups) => groups.flatMap((g) => g.items.map((i) => i.id))
 check('three groups in order', NAV_GROUPS.map((g) => g.id).join() === 'watch,monitor,admin')
 check('watch holds live, playback, map (the wall is Many cameras in Playback)', ids([NAV_GROUPS[0]]).join() === 'live,playback,map')
 check('monitor holds alarms, health', ids([NAV_GROUPS[1]]).join() === 'alarms,health')
-check('admin holds sites, settings, storage, reports, audit', ids([NAV_GROUPS[2]]).join() === 'sites,settings,storage,reports,audit')
+check('admin leads with Users & access, then sites, settings, storage, reports', ids([NAV_GROUPS[2]]).join() === 'audit,sites,settings,storage,reports')
 check('no item appears twice', new Set(ids(NAV_GROUPS)).size === ids(NAV_GROUPS).length)
 check('only the admin group is admin-only', NAV_GROUPS.filter((g) => g.adminOnly).map((g) => g.id).join() === 'admin')
 

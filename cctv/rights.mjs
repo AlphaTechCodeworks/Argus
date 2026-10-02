@@ -326,7 +326,7 @@ function upgradeToV2(users, text, from, raw = {}, said = from) {
   const summary = (names) => {
     const lines = []
     // first, so the audit row's 500-character cap never cuts it; the names last, for the same reason
-    if (bad !== null) lines.push(`rights.v2.json could not be used (${String(bad).slice(0, 80)}) and a copy of it is kept as rights.v2.json.unreadable, so Live HD was given to nobody; re-grant it in the access editor (Users & audit, Edit access) to whoever should have it: ${withheld.length ? `${withheld.length} account(s) with Live have none now (${names(withheld)})` : 'no account but an admin has Live'}`)
+    if (bad !== null) lines.push(`rights.v2.json could not be used (${String(bad).slice(0, 80)}) and a copy of it is kept as rights.v2.json.unreadable, so Live HD was given to nobody; re-grant it in the access editor (Users & access, Edit access) to whoever should have it: ${withheld.length ? `${withheld.length} account(s) with Live have none now (${names(withheld)})` : 'no account but an admin has Live'}`)
     if (kept.length) lines.push(`Live HD kept as the file had it (cut to Live) for ${kept.length} account(s) (${names(kept)})`)
     if (copied.length) lines.push(`Live HD given wherever Live was granted for ${copied.length} account(s) (${names(copied)})`)
     if (restored.length) lines.push(`Live HD restored from rights.v2.json (written ${new Date(shadow.writtenAt).toISOString()}) for ${restored.length} account(s) (${names(restored)})`)

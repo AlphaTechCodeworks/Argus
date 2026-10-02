@@ -16,11 +16,11 @@ export const NAV_GROUPS = Object.freeze([
     { id: 'health', label: 'Health', href: '/health.html', icon: 'pulse' }
   ] },
   { id: 'admin', label: 'Admin', adminOnly: true, items: [
+    { id: 'audit', label: 'Users & access', href: '/audit.html', icon: 'people' },
     { id: 'sites', label: 'Sites', href: '/sites.html', icon: 'site' },
     { id: 'settings', label: 'Settings', href: '/settings.html', icon: 'cog' },
     { id: 'storage', label: 'Storage', href: '/settings.html#storage', icon: 'disk' },
-    { id: 'reports', label: 'Reports', href: '/reports.html', icon: 'chart' },
-    { id: 'audit', label: 'Users & audit', href: '/audit.html', icon: 'list' }
+    { id: 'reports', label: 'Reports', href: '/reports.html', icon: 'chart' }
   ] }
 ])
 
