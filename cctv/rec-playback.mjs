@@ -485,6 +485,7 @@ export class ServerPlayback {
     this.endSent = false
     this.readers = new Map() // path -> SegmentReader, least recently used first
     this.opening = new Map() // path -> Promise<SegmentReader>: an open in flight (dedup: the next file read ahead and then at need share one)
+    this.aheadRead = null // the next file's index, read ahead (#readAheadNext): drained before the next step so a read never overlaps one (one read in flight)
     this.skipLogged = false
     this.lastIdleCheck = 0
     this.t0 = now()
@@ -1158,6 +1159,22 @@ export class ServerPlayback {
   #fill() {
     if (this.closed || this.busy || !this.#wantRead()) return
     this.busy = true
+    // A file read ahead (#readAheadNext) is a real read: let it drain before this step's read starts, so
+    // a scrub or seek arriving mid-prefetch never has two reads in flight at once (the task's bound).
+    const ahead = this.aheadRead
+    if (ahead) {
+      this.aheadRead = null
+      ahead.then(() => this.#runStep(), () => this.#runStep())
+    } else {
+      this.#runStep()
+    }
+  }
+
+  #runStep() {
+    if (this.closed) {
+      this.busy = false
+      return this.#closeReaders()
+    }
     const epoch = this.epoch
     const stale = () => this.closed || epoch !== this.epoch
     let run
@@ -1789,11 +1806,15 @@ export class ServerPlayback {
     // silently at the join (F9). Faster speeds already read readAheadMs x speed ahead and consume the
     // next file's start with more lead; reverse and keyframe speeds jump file to file. Keeping it to
     // 1x also leaves those paths' index lookups exactly as they were.
-    if (this.closed || this.speed !== 1 || !this.cur.reader) return
+    if (this.closed || this.speed !== 1 || !this.cur.reader || this.aheadRead) return
     const next = this.index.next(this.nvr.id, this.ch, this.cur.seg?.startMs)
     if (!next || next.open || this.readers.has(next.path) || this.opening.has(next.path)) return
-    this.readAhead(next.path)
-    this.#reader(next).catch(() => {}) // its .idx; a real failure surfaces at need (#openSeg logs the skip)
+    this.readAhead(next.path) // the whole file into the OS cache (its own fs, uncounted): warms it, does not read for a frame
+    // its .idx, read ahead: held so #fill drains it before the next step's read -- the index read is a
+    // real read and must not overlap one (one read in flight, the task's bound). A failure surfaces at
+    // need (#openSeg logs the skip).
+    const p = this.#reader(next).catch(() => {}).finally(() => { if (this.aheadRead === p) this.aheadRead = null })
+    this.aheadRead = p
   }
 
   /** The start of the file after seg (its first keyframe), or null. */
