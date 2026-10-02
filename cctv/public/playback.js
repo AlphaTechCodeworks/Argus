@@ -100,6 +100,7 @@ const clockInput = $('clockInput')
 const messageEl = $('message')
 const noticeEl = $('pbNotice')
 const badgeEl = $('srcBadge')
+const remoteMarkEl = $('remoteMark') // the server calls this viewer remote ({type:'fit'}): shown then (F1/F6)
 const skewEl = $('skewHint')
 const legendServer = $('legendServer')
 const hintEl = $('pbHint')
@@ -757,6 +758,7 @@ function onStatus(msg) {
     // stream itself for want of a free conversion; said when it changes, not at every seek
     const change = nvrFitChange(state.nvrFit, msg)
     state.nvrFit = change.fit
+    if (remoteMarkEl) remoteMarkEl.hidden = false // a remote viewer's NVR HD is fitted too
     if (change.notice) showNotice(change.notice)
   }
   if (msg.type === 'stream') {
@@ -990,6 +992,7 @@ function onServerStatus(sock, msg) {
       const change = fitChange(state.fit, msg)
       const learned = !state.remote
       state.remote = true
+      if (remoteMarkEl) remoteMarkEl.hidden = false // the server is treating this viewer as remote
       state.fit = change.fit
       // the server treats this viewer as remote: time frames on arrival (a burst after a link pause is
       // not read as a slow decoder) and, at 1x, grow the buffer with the link (playback hunt F4). Local

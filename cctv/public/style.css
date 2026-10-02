@@ -1113,6 +1113,10 @@ body.phone-full #grid > .lines-panel { z-index: 92; }
 
 /* The running build, top right: the only way to tell from the screen whether a deploy landed. */
 .build { color: var(--muted); font-size: 11px; font-family: ui-monospace, Consolas, monospace; letter-spacing: 0.02em; }
+/* An unobtrusive mark when the server treats this viewer as remote (through the tunnel): the video is
+   converted and the link is slower, so on site the local address is worth using (playback hunt F1/F6). */
+.remote-mark { color: var(--muted); font-size: 11px; letter-spacing: 0.02em; cursor: help; opacity: 0.8; }
+.remote-mark::before { content: "\1F310"; margin-right: 0.35em; } /* a globe */
 
 /* Digital zoom on the playback picture (playback.js): magnifies what is on screen only. */
 .pb-video { overflow: hidden; }

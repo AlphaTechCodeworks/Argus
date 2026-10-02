@@ -44,6 +44,12 @@ const SMOOTH_CLOCK = { startDelayMs: 400, minDelayMs: 300, maxDelayMs: 1200 }
 const REMOTE_PAGE = !isLocalHost()
 const REMOTE_SMOOTH_CLOCK = { ...REMOTE_CLOCK, startDelayMs: SMOOTH_CLOCK.startDelayMs, minDelayMs: SMOOTH_CLOCK.minDelayMs }
 const clockOptions = () => (REMOTE_PAGE ? (smoothBox.checked ? REMOTE_SMOOTH_CLOCK : REMOTE_CLOCK) : smoothBox.checked ? SMOOTH_CLOCK : undefined)
+// an unobtrusive mark when this Live page was loaded through the tunnel, not the local address: the
+// video is heavier on the link, so on site the local address is faster (playback hunt F1)
+if (REMOTE_PAGE) {
+  const mark = document.getElementById('remoteMark')
+  if (mark) mark.hidden = false
+}
 // cameras whose main stream this browser could not play: full screen stays on the sub stream, for a
 // while. Not for the whole session any more: the server now converts H.265 for phones and remote
 // viewers, and a phone that once failed (before it did) was kept on the blurry sub-stream for good.
