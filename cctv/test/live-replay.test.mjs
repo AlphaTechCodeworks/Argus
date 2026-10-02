@@ -201,8 +201,10 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
 // over a minute) and a player that keeps up to 2 s of decoded frames (player.js REMOTE_QUEUED_FRAMES).
 // What it shows on the modelled tunnel traces, on both decoder models (Task 2's proof: frames shown
 // about 100%, freezes of 200 ms or more at most about 0.5 a minute, median delay about 1.2-2 s where
-// the link stalls; the numbers in brackets are the local profile's, above). Local pages are not
-// touched: the baseline above is theirs, unchanged.
+// the link stalls; the numbers in brackets are the local profile's, above). The wall and local
+// playback are not touched: the baseline above is theirs, unchanged. Remote playback is its own
+// case: it opts into a remote-playback clock (playout.js REMOTE_PLAYBACK_CLOCK, playback hunt F4),
+// never the live profile here.
 {
   const remote = async (name, i, decoder = {}) => {
     const tile = fixtureTrace(name).tiles[i]
@@ -214,7 +216,13 @@ const brief = (r) => JSON.stringify({ shown: r.shownPct, freezes: r.freezesPerMi
   const sw = await remote('switch', 0)
   check('remote profile: a level change onto a new conversion whose keyframe is 1.5 s older: never steps back, held 0.75 s instead [back 1.4 s, 6 resyncs]', sw.backwards === 0 && sw.maxBackMs === 0 && sw.resyncs === 0 && sw.maxStillMs === 750, brief(sw))
   const page = (f) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8')
-  check('... playback and the wall keep theirs: no remote clock, no decoded-frame limit of their own', ['playback.js', 'wall.js'].every((f) => !/REMOTE_|maxQueuedFrames|stretchLate|shrinkWindowMs/.test(page(f))))
+  // the wall keeps its own playout entirely: no remote tuning of any kind.
+  check('... the wall keeps its own: no remote clock, no decoded-frame limit', !/REMOTE_|maxQueuedFrames|stretchLate|shrinkWindowMs/.test(page('wall.js')))
+  // playback opts a remote viewer into its OWN remote-playback clock (REMOTE_PLAYBACK_CLOCK, hunt F4),
+  // but must never borrow the live profile (REMOTE_CLOCK/REMOTE_LIVE/REMOTE_QUEUED_FRAMES) or hard-code
+  // live's tuning literals. Strip the one name it is allowed, then nothing else may remain.
+  const pb = page('playback.js').replace(/REMOTE_PLAYBACK_CLOCK/g, '')
+  check('... playback uses only its own remote-playback clock, not the live profile or its literals', !/REMOTE_CLOCK|REMOTE_LIVE|REMOTE_QUEUED_FRAMES|maxQueuedFrames|stretchLate|shrinkWindowMs/.test(pb))
   for (const decoder of [{}, { inFlight: 5 }]) {
     const on = decoder.inFlight ? ', Chrome-like decoder' : ''
     let r = await remote('tunnel-stall', 0, decoder)
