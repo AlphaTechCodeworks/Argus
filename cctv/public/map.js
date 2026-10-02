@@ -8,6 +8,7 @@
 // (the whole world is 256 wide, like one zoom-0 tile) for street/satellite maps.
 // screen = (world - centre) * 2^zoom + half the viewport.
 import { LiveTile, SUB_STREAM, TILE_HTML } from './live-tile.js'
+import { showStill } from './stills.js'
 import {
   MAX_LAT,
   STATES,
@@ -30,11 +31,15 @@ import {
   yToLat
 } from './map-cameras.js'
 import {
+  MAX_GROUPS,
   PLACE_ZOOM,
+  activeMarkers,
   allView,
   badgeLabel,
   badgeTitle,
   collapsedSites,
+  coneStyle,
+  isHexColor,
   mergeGeo,
   parseLatLng,
   ringPlacements,
@@ -504,6 +509,14 @@ let linkMode = false
 let linkData = { links: {}, version: 0, suggestions: {} } // suggestions: guesses from the map, never stored
 let newLabel = '' // the label given to the next link drawn
 let newOneWay = false // a one-way door or a stairwell: the link leads only one way
+// Which markers are lit right now, from the events feed (motion/alarm) and the health poll
+// (offline folded into alarm). Never a guess: empty until a poll answers, and only ever cameras the
+// server already let this user see (GET /api/events is rights-filtered, and we draw only our own).
+let lighting = { motion: new Set(), alarm: new Set() }
+let recentEvents = [] // the last poll's events, kept so decay can be recomputed between polls
+let lightingTimer = 0
+// the next palette colour a new group is given, so two groups are not born the same colour
+const GROUP_SWATCHES = ['#3ba2ff', '#e0a030', '#9b5de5', '#18b27a', '#e5484d', '#38bdf8', '#f472b6', '#a3e635']
 
 const camKey = (c) => `${c.nvr}/${c.ch}`
 const enc = encodeURIComponent
@@ -543,6 +556,8 @@ const placed = (m = current()) => (m?.[m.mode]?.cams ?? {})
 const siteOfKey = (key) => planSite ?? oneMap().siteOf[key] ?? camByKey(key)?.site ?? null
 const siteInfo = (name) => oneMap().sites.find((s) => s.name === name) ?? null
 const badgeOf = (name) => oneMap().badges.find((b) => b.name === name) ?? null
+/** A site's cone-colour groups as stored (or being edited); empty when it has none. */
+const groupsOf = (name) => source()[name]?.geo?.groups ?? []
 
 function el(tag, props = {}, ...children) {
   const node = document.createElement(tag)
@@ -672,12 +687,19 @@ function currentMarkers() {
 
 /** One camera's marker: the dot, its channel number, and its name when names are on. */
 function markerNode(marker, sel, showNames) {
-  const g = svgEl('g', { class: `${markerClass(marker.state)}${sel}`, 'data-key': marker.key, transform: `translate(${marker.x.toFixed(1)} ${marker.y.toFixed(1)})` })
+  const motion = lighting.motion.has(marker.key)
+  const alarm = lighting.alarm.has(marker.key)
+  const lit = `${alarm ? ' alarm' : ''}${motion ? ' motion' : ''}`
+  const g = svgEl('g', { class: `${markerClass(marker.state)}${sel}${lit}`, 'data-key': marker.key, transform: `translate(${marker.x.toFixed(1)} ${marker.y.toFixed(1)})` })
   const title = svgEl('title')
   title.textContent = markerTitle(marker)
   const num = svgEl('text', { class: 'cam-num' })
   num.textContent = marker.cam ? String(marker.cam.ch + 1) : '?'
-  g.append(title, svgEl('circle', { r: 12, class: 'cam-dot' }), num)
+  g.append(title)
+  // the rings sit under the dot, so the status colour on the dot stays readable through a pulse
+  if (alarm) g.append(svgEl('circle', { r: 16, class: 'cam-ring' }))
+  if (motion) g.append(svgEl('circle', { r: 12, class: 'cam-pulse' }))
+  g.append(svgEl('circle', { r: 12, class: 'cam-dot' }), num)
   if (showNames && marker.cam) {
     const name = svgEl('text', { x: 17, class: 'cam-name' })
     name.textContent = marker.cam.name
@@ -688,12 +710,16 @@ function markerNode(marker, sel, showNames) {
 
 /** Several cameras in one place: one dot carrying the count, coloured by its worst member. */
 function clusterNode(cluster) {
-  const g = svgEl('g', { class: `cam cluster st-${cluster.state}`, 'data-cluster': cluster.members.map((m) => m.key).join(' '), transform: `translate(${cluster.x.toFixed(1)} ${cluster.y.toFixed(1)})` })
+  // a fault must never hide inside a pile: if any camera in it is in alarm, the whole cluster rings
+  const alarm = cluster.members.some((m) => lighting.alarm.has(m.key))
+  const g = svgEl('g', { class: `cam cluster st-${cluster.state}${alarm ? ' alarm' : ''}`, 'data-cluster': cluster.members.map((m) => m.key).join(' '), transform: `translate(${cluster.x.toFixed(1)} ${cluster.y.toFixed(1)})` })
   const title = svgEl('title')
   title.textContent = `${cluster.count} cameras here — ${STATES[cluster.state].title}. Zoom in, or click to.`
   const num = svgEl('text', { class: 'cam-num' })
   num.textContent = String(cluster.count)
-  g.append(title, svgEl('circle', { r: 14, class: 'cam-dot' }), num)
+  g.append(title)
+  if (alarm) g.append(svgEl('circle', { r: 18, class: 'cam-ring' }))
+  g.append(svgEl('circle', { r: 14, class: 'cam-dot' }), num)
   return g
 }
 
@@ -767,7 +793,17 @@ view.onDraw = () => {
       // saying nothing, so a clustered camera keeps its position and loses its cone.
       if (!alone.has(marker.key)) continue
       const sel = marker.key === selected || marker.key === popup?.key ? ' sel' : ''
-      cones.append(svgEl('path', { d: conePath([marker.x, marker.y], marker.dir, marker.fov, marker.r), class: `cone st-${marker.state}${sel}` }))
+      const cone = svgEl('path', { d: conePath([marker.x, marker.y], marker.dir, marker.fov, marker.r), class: `cone st-${marker.state}${sel}` })
+      // an admin-chosen group colour overrides the status colour of the cone; the dot still carries
+      // the status, so recording-ok/degraded/offline is never lost. No group -> today's cone.
+      const cs = coneStyle(placed(m)[marker.key], groupsOf(siteOfKey(marker.key)))
+      if (cs) {
+        cone.setAttribute('fill', cs.color)
+        cone.setAttribute('stroke', cs.color)
+        cone.setAttribute('fill-opacity', String(cs.opacity))
+        cone.setAttribute('stroke-opacity', '0.9')
+      }
+      cones.append(cone)
       marks.append(markerNode(marker, sel, showNames))
       if (editing && marker.key === selected) {
         const p = [marker.x, marker.y]
@@ -1031,6 +1067,7 @@ function closeLive() {
   popup = null
   liveEl.hidden = true
   liveEl.replaceChildren()
+  hideHover() // any change of mode or camera also drops the hover bubble
   view.requestRender()
 }
 
@@ -1040,6 +1077,114 @@ document.addEventListener('visibilitychange', () => {
   clearTimeout(hiddenTimer)
   if (document.hidden) hiddenTimer = setTimeout(closeLive, 3000)
 })
+
+// ---- live lighting: motion pulses and alarm rings ----
+
+const EVENTS_POLL_MS = 8000 // modest: a marker reacting within a few seconds is plenty on a map
+const EVENT_LOOKBACK_MS = 90_000 // long enough to still be lighting a lingering alarm
+
+/**
+ * Asks the events feed what has happened lately on the cameras this user may see, and lights the
+ * markers for it. The feed is filtered server-side (rights.mjs), and the page draws only cameras it
+ * was given, so nothing lights or reveals a camera the viewer may not see. A failed poll leaves the
+ * last lighting alone: a dropped request is not evidence that nothing is happening.
+ */
+async function loadEvents() {
+  try {
+    const from = Date.now() - EVENT_LOOKBACK_MS
+    const data = await api('GET', `/api/events?from=${from}&limit=300`)
+    recentEvents = data.events ?? []
+    recomputeLighting()
+  } catch {}
+}
+
+/** Works the active sets out again from the last events and the current time, and folds in offline. */
+function recomputeLighting() {
+  const next = activeMarkers(recentEvents, { now: Date.now() })
+  // a camera the server cannot reach rings too, from the health poll the page already has
+  for (const [key, s] of Object.entries(states)) if (s?.state === 'offline') next.alarm.add(key)
+  lighting = next
+  view.requestRender()
+  clearTimeout(lightingTimer)
+  // while anything is lit, re-reckon soon so a motion pulse or a cleared alarm fades between polls
+  if (lighting.motion.size || lighting.alarm.size) lightingTimer = setTimeout(recomputeLighting, 3000)
+}
+
+// ---- hover snapshot bubble ----
+//
+// Hovering a camera marker shows a small picture of it without opening the full live popup. There
+// is no server route for a live per-camera still (see the report): the bubble shows the last frame
+// this device kept of the camera (stills.js, a per-device cache other pages fill) and, for a camera
+// that is up, a small live sub-stream for a current frame. One at a time, after a short dwell, so
+// sweeping across markers does not hammer the NVR; on touch (no hover) the marker still taps to live.
+
+const canHover = typeof matchMedia === 'function' && matchMedia('(hover: hover)').matches
+let hoverEl = null
+let hoverTile = null
+let hoverKey = null
+let hoverTimer = 0
+
+function showHover(key, markEl) {
+  if (key === hoverKey) return
+  hideHover()
+  const cam = camByKey(key)
+  if (!cam || !markEl.isConnected) return
+  hoverKey = key
+  if (!hoverEl) {
+    hoverEl = el('div', { className: 'map-hover' })
+    view.el.append(hoverEl)
+  }
+  // above the marker and centred on it, kept clear of the map's edges
+  const r = markEl.getBoundingClientRect()
+  const b = view.el.getBoundingClientRect()
+  hoverEl.style.left = `${clamp(r.left + r.width / 2 - b.left, 94, Math.max(94, b.width - 94))}px`
+  hoverEl.style.top = `${clamp(r.top - b.top, 108, b.height - 8)}px`
+  hoverEl.hidden = false
+  const state = stateFor(key)
+  const tile = el('div', { className: 'tile' })
+  tile.innerHTML = TILE_HTML
+  hoverEl.replaceChildren(
+    el('div', { className: 'map-hover-name', textContent: `${cam.ch + 1} · ${cam.name}` }),
+    tile)
+  if (state === 'offline' || !cam.online) {
+    tile.classList.add('offline')
+    tile.querySelector('.status').textContent = 'offline'
+    showStill(tile, cam.nvr, cam.ch) // the last frame this device kept, if it has one
+  } else {
+    // a short-lived sub-stream, exactly as the live popup opens one, torn down the moment we leave
+    hoverTile = new LiveTile(tile, cam, SUB_STREAM, 0, { onDisconnect: () => {} })
+  }
+}
+
+function hideHover() {
+  clearTimeout(hoverTimer)
+  hoverTimer = 0
+  hoverKey = null
+  hoverTile?.close()
+  hoverTile = null
+  if (hoverEl) {
+    hoverEl.hidden = true
+    hoverEl.replaceChildren()
+  }
+}
+
+if (canHover) {
+  view.svg.addEventListener('pointerover', (e) => {
+    if (editing || linkMode || placing || placingSite) return // not while the markers are being worked on
+    const mark = e.target.closest?.('.cam[data-key]')
+    if (!mark || !mark.dataset.key) return
+    const key = mark.dataset.key
+    clearTimeout(hoverTimer)
+    hoverTimer = setTimeout(() => showHover(key, mark), 250) // a dwell, so a sweep across markers is quiet
+  })
+  view.svg.addEventListener('pointerout', (e) => {
+    const mark = e.target.closest?.('.cam[data-key]')
+    if (mark && mark.dataset.key === hoverKey && e.relatedTarget?.closest?.('.cam[data-key]') === mark) return
+    hideHover()
+  })
+  // taking hold of the map (pan, pinch, click-through to live) drops the bubble at once
+  view.el.addEventListener('pointerdown', hideHover)
+}
 
 // ---- the one map, the sites on it, and a site's plan ----
 
@@ -1321,7 +1466,7 @@ function viewPanel() {
   } else {
     parts.push(el('p', { className: 'map-help', textContent: `${on} of ${total} on the ${planSite ? 'plan' : 'map'}. Click a camera for live video.` }))
   }
-  parts.push(legend(), list)
+  parts.push(legend(), coneLegend(), list)
   return parts
 }
 
@@ -1399,6 +1544,132 @@ function sitePanel(name) {
   return section
 }
 
+// ---- cone colour groups (admin) ----
+
+/** A colour normalised to the #rrggbb an <input type="color"> wants; a safe default otherwise. */
+const hex6 = (c) => {
+  if (!isHexColor(c)) return '#3ba2ff'
+  return c.length === 4 ? `#${[...c.slice(1)].map((x) => x + x).join('')}` : c.toLowerCase()
+}
+
+/** The groups being edited for a site, creating the geo block to hold them if need be. */
+function ensureGroups(name) {
+  const d = (drafts[name] ??= {})
+  d.geo ??= {}
+  d.geo.groups ??= []
+  return d.geo.groups
+}
+
+function addGroup(name) {
+  const groups = ensureGroups(name)
+  if (groups.length >= MAX_GROUPS) {
+    setStatus(`At most ${MAX_GROUPS} colour groups per site.`)
+    return
+  }
+  const id = `g${Date.now().toString(36)}${Math.floor(Math.random() * 1000)}`
+  groups.push({ id, name: `Group ${groups.length + 1}`, color: GROUP_SWATCHES[groups.length % GROUP_SWATCHES.length] })
+  changed(name)
+  renderSide()
+  view.requestRender()
+}
+
+/** Removes a group; cameras that were in it fall back to today's cone. */
+function removeGroup(name, id) {
+  const geo = drafts[name]?.geo
+  if (!geo) return
+  geo.groups = (geo.groups ?? []).filter((grp) => grp.id !== id)
+  for (const c of Object.values(geo.cams ?? {})) if (c.group === id) delete c.group
+  changed(name)
+  renderSide()
+  view.requestRender()
+}
+
+/** The panel for managing a site's colour groups: a colour, a name and a Delete for each. */
+function groupsPanel(name) {
+  const groups = drafts[name]?.geo?.groups ?? []
+  const list = el('ul', { className: 'map-groups' })
+  for (const grp of groups) {
+    const color = el('input', { type: 'color', value: hex6(grp.color), title: 'Cone colour' })
+    color.addEventListener('input', () => {
+      grp.color = color.value
+      changed(name)
+      view.requestRender()
+    })
+    const label = el('input', { type: 'text', maxLength: 60, value: grp.name, placeholder: 'name', className: 'map-group-name' })
+    label.addEventListener('input', () => {
+      grp.name = label.value
+      changed(name)
+    })
+    const del = el('button', { type: 'button', className: 'st-link st-danger', textContent: 'Delete' })
+    del.addEventListener('click', () => removeGroup(name, grp.id))
+    list.append(el('li', {}, color, label, del))
+  }
+  const add = el('button', { type: 'button', textContent: 'Add colour group' })
+  add.addEventListener('click', () => addGroup(name))
+  return el('section', { className: 'map-group-edit' },
+    el('h2', { textContent: 'Cone colours' }),
+    el('p', { className: 'map-help', textContent: 'Colour the view cones by group. The dot on each camera still shows what it is recording, so a fault is never hidden by a colour.' }),
+    groups.length ? list : el('p', { className: 'map-help', textContent: 'No groups yet. Add one, then assign cameras to it below.' }),
+    add)
+}
+
+/** The cone-colour control for the selected camera: pick a group, a custom colour, or the default. */
+function coneColorControl(c) {
+  const site = siteOfKey(selected)
+  const groups = drafts[site]?.geo?.groups ?? []
+  const select = el('select', { className: 'map-cone-select' })
+  select.append(el('option', { value: '', textContent: 'Default (by status)' }))
+  for (const grp of groups) select.append(el('option', { value: `g:${grp.id}`, textContent: grp.name || grp.id }))
+  select.append(el('option', { value: 'custom', textContent: 'Custom colour…' }))
+  select.value = isHexColor(c.color) ? 'custom' : c.group ? `g:${c.group}` : ''
+  const custom = el('input', { type: 'color', value: hex6(c.color || '#3ba2ff'), hidden: !isHexColor(c.color), title: 'Custom cone colour' })
+  const apply = () => {
+    changed(siteOfKey(selected))
+    view.requestRender()
+  }
+  select.addEventListener('change', () => {
+    if (select.value === 'custom') {
+      c.color = custom.value
+      delete c.group
+      custom.hidden = false
+    } else if (select.value.startsWith('g:')) {
+      c.group = select.value.slice(2)
+      delete c.color
+      custom.hidden = true
+    } else {
+      delete c.group
+      delete c.color
+      custom.hidden = true
+    }
+    apply()
+  })
+  custom.addEventListener('input', () => {
+    c.color = custom.value
+    delete c.group
+    apply()
+  })
+  return el('label', { className: 'map-cone-colour' }, el('span', { className: 'map-field' }, 'Cone colour'), el('span', { className: 'map-cone-row' }, select, custom))
+}
+
+/** The groups a reader sees as a legend: those in use on the site(s) shown. Hidden when there are none. */
+function coneLegend() {
+  const names = listSite() ? [listSite()] : siteNames
+  const seen = new Map()
+  for (const n of names) {
+    for (const grp of (source()[n]?.geo?.groups ?? [])) {
+      if (isHexColor(grp.color)) seen.set(`${n}\u0000${grp.id}`, grp)
+    }
+  }
+  if (!seen.size) return el('span', { hidden: true })
+  const ul = el('ul', { className: 'map-legend map-cone-legend' })
+  for (const grp of seen.values()) {
+    const sw = el('span', { className: 'map-swatch' })
+    sw.style.background = grp.color
+    ul.append(el('li', {}, sw, el('span', { textContent: grp.name || 'Group' })))
+  }
+  return ul
+}
+
 function editPanel() {
   const name = listSite()
   const parts = []
@@ -1459,6 +1730,7 @@ function editPanel() {
       el('h2', { textContent: 'Cameras' }),
       el('p', { className: 'map-help', textContent: 'Drag a camera onto the map, or click Place and then click the map.' }),
       list))
+    parts.push(groupsPanel(name))
   }
 
   const c = selected && where[selected]
@@ -1512,6 +1784,7 @@ function selectedPanel(m, c) {
     slider('Direction', 'dir', 0, 359, '°'),
     slider('Field of view', 'fov', 5, 360, '°'),
     el('label', {}, m.mode === 'geo' ? 'Range (metres)' : 'Range (plan pixels)', range),
+    coneColorControl(c),
     el('p', { className: 'map-help', textContent: 'On the map: drag the camera to move it, the white handle to aim it and set its range, the small handle to widen or narrow its view.' }))
 }
 
@@ -1909,7 +2182,11 @@ setInterval(async () => {
   } catch {}
   await loadStates()
   stale() // the badges carry the states
-  view.requestRender()
+  recomputeLighting() // the health poll may have changed which cameras are offline
   renderSites({ reveal: false }) // a refresh must not pull the row back from where it was scrolled to
   if (!editing) renderSide()
 }, 30_000)
+
+// what is happening on the cameras, more often than the colours: motion pulses, alarm rings
+loadEvents()
+setInterval(loadEvents, EVENTS_POLL_MS)
