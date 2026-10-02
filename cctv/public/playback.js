@@ -773,6 +773,12 @@ function onStatus(msg) {
       qualitySel.value = '0'
     }
   }
+  if (msg.type === 'notice') {
+    // a waiting notice (the NVR not answering, F8) shows a spinner and a message that the next frame
+    // clears; any other notice is a passing toast, as before
+    if (msg.waiting) showWaiting(msg.message)
+    else showNotice(msg.message)
+  }
   if (msg.type === 'end') {
     // skip gaps between recordings automatically
     const next = state.ranges.find(([s]) => s > (state.position ?? 0) + 1000)
