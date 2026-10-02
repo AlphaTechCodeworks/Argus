@@ -973,11 +973,11 @@ body.phone-full .single-overlay > .zoom-badge { top: calc(8px + env(safe-area-in
 /* ---- line crossing (admins): lines-panel.js, over the full-size view ---- */
 /* the panel is the Picture panel's box (.img-panel); Hide folds it to its title bar so the whole
    picture can be drawn on */
-.lines-panel.ln-folded { bottom: auto; height: auto; }
+.lines-panel.ln-folded, .osd-panel.ln-folded { bottom: auto; height: auto; }
 @media (max-width: 600px) {
-  .lines-panel.ln-folded { top: auto; bottom: calc(var(--gap) + 8px); }
+  .lines-panel.ln-folded, .osd-panel.ln-folded { top: auto; bottom: calc(var(--gap) + 8px); }
 }
-.lines-panel.ln-folded > :not(.ip-head, dialog) { display: none !important; }
+.lines-panel.ln-folded > :not(.ip-head, dialog), .osd-panel.ln-folded > :not(.ip-head, dialog) { display: none !important; }
 .ln-head-buttons { display: flex; align-items: center; gap: 6px; flex: none; }
 .ln-fold { padding: 2px 9px; font-size: 12px; }
 .ln-help, .ln-note { margin: 0; color: var(--muted); font-size: 12px; }
@@ -1012,7 +1012,18 @@ body.phone-full .single-overlay > .zoom-badge { top: calc(8px + env(safe-area-in
 .tile.single-overlay canvas.ln-loupe { position: absolute; z-index: 5; display: block; transform: none; object-fit: fill; border-radius: 50%; border: 2px solid var(--accent); background: var(--video-bg); pointer-events: none; }
 .tile.single-overlay canvas.ln-overlay[hidden], .tile.single-overlay canvas.ln-loupe[hidden] { display: none; }
 /* a phone's full-size camera covers the grid (z-index 91): the panel goes above it */
-body.phone-full #grid > .lines-panel { z-index: 92; }
+body.phone-full #grid > .lines-panel, body.phone-full #grid > .osd-panel { z-index: 92; }
+
+/* ---- the camera's burnt-in OSD (admins): osd-panel.js, over the full-size view ---- */
+/* the panel reuses the line-crossing box (.img-panel, Hide/fold, the .ln-overlay drawing canvas) */
+.osd-name-row { flex-direction: column; align-items: stretch; gap: 3px; font-size: 12.5px; }
+.osd-name { background: #0f1216; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 7px; font: inherit; color-scheme: light dark; }
+.osd-name-err:empty { display: none; }
+.osd-corners { display: flex; flex-direction: column; gap: 6px; }
+.osd-corner-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.osd-corner { padding: 5px 8px; font-size: 12px; }
+.osd-corner[aria-pressed="true"] { border-color: var(--accent); color: var(--text); font-weight: 600; }
+.osd-result ul { list-style: none; padding-left: 0; margin: 4px 0 0; }
 
 /* ---- add NVR: connect by address or by serial number (TVT P2P) ---- */
 .st-dialog [hidden] { display: none !important; }
