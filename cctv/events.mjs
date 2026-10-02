@@ -567,12 +567,15 @@ const num = (v) => {
  * @param {string} method
  * @param {string} pathname   with or without its query string
  * @param {() => Promise<object>} readJson
- * @param {{nvrs: Map, user?: string, admin?: boolean, intake?: object, query?: Function}} deps
+ * @param {{nvrs: Map, user?: string, admin?: boolean, intake?: object, query?: Function, canSee?: Function}} deps
+ *   canSee: which cameras this person may watch or play back (rights.mjs, via server.mjs); left out
+ *   (not passed at all, as opposed to admin, which is its own explicit flag): nothing is seen, never
+ *   everything — a caller that forgot the hook must not hand a viewer every camera's events (FAIL CLOSED)
  * @returns {Promise<[number, object, object?] | null>}
  */
 export async function handleEvents(method, pathname, readJson, deps = {}) {
   const [path, search = ''] = String(pathname ?? '').split('?')
-  const { nvrs, user = null, admin = false, intake = null, query = sdkQuery, canSee = () => true } = deps
+  const { nvrs, user = null, admin = false, intake = null, query = sdkQuery, canSee = () => false } = deps
 
   if (path === '/api/events/sources') {
     if (method !== 'GET') return [405, { error: 'Method not allowed' }]

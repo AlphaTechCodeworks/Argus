@@ -6,7 +6,7 @@
 // one module that would (motion-tune) is driven with a fake query so the write path is exercised
 // without a real box.
 //   node cctv/test/events.test.mjs
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -617,6 +617,41 @@ const S = 1000
     typeof db.intakeCursorMs === 'function' && db.intakeCursorMs('cur1', 3) === midnight - 12 * MIN && db.intakeCursorMs('cur1', 9) === null)
   check('... while lastEventMs still means the camera’s newest row of any source', db.lastEventMs('cur1', 3) === midnight + MIN)
   db.closeEvents()
+}
+
+// --- the events route: only cameras this user may see ----------------------------------------------------------
+//
+// GET /api/events drops every event on a camera the caller's canSee hook (rights.mjs, via server.mjs)
+// refuses. Real store, temp file.
+{
+  const db = await import('../events-db.mjs')
+  const at = T0 + 300 * MIN
+  db.addEvent({ nvr: 'rt1', ch: 0, type: 'motion', startMs: at, source: SOURCE_RECORDINGS }, at)
+  db.addEvent({ nvr: 'rt2', ch: 1, type: 'motion', startMs: at + S, source: SOURCE_RECORDINGS }, at + S)
+  const get = (deps) => events.handleEvents('GET', `/api/events?from=${at - MIN}&to=${at + MIN}`, async () => ({}), { nvrs: new Map(), ...deps })
+  const cams = (r) => (r[1].events ?? []).map((e) => `${e.nvr}/${e.ch}`).sort().join()
+
+  // canSee is explicit here, as server.mjs's real one always is (and, for an admin, always true): the
+  // fail-closed default below must never be what stands in for "an admin sees everything"
+  const all = await get({ user: 'alice', admin: true, canSee: () => true })
+  check('the events route: a hook that lets every camera through lists both', all[0] === 200 && cams(all) === 'rt1/0,rt2/1', cams(all))
+  const viewer = await get({ user: 'bob', admin: false, canSee: (nvr) => nvr === 'rt1' })
+  check('...a viewer’s hook keeps only the cameras it lets through', viewer[0] === 200 && cams(viewer) === 'rt1/0', cams(viewer))
+
+  // FAIL CLOSED: a caller that forgets the canSee hook entirely (left out of deps, not passed as
+  // () => true) must get nothing for a non-admin, never every camera's events.
+  const forgot = await get({ user: 'carol', admin: false }) // no canSee at all
+  check('a forgotten canSee hook: a non-admin sees no events, not all of them', forgot[0] === 200 && forgot[1].events.length === 0, cams(forgot))
+  db.closeEvents()
+}
+
+// source-shape: server.mjs always hands handleEvents a canSee (the same one alarms, bookmarks and maps
+// get), on every call, rather than leaving it out and falling on the fail-closed default
+{
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  const calls = server.match(/handleEvents\(.*$/gm) ?? []
+  const ok = calls.length > 0 && calls.every((c) => /\{ nvrs, user, admin: who\.admin, intake: null, canSee \}\)$/.test(c))
+  check('server.mjs passes handleEvents a canSee hook, on every call', ok, ok ? '' : calls.join(' | ') || 'no call found')
 }
 
 // --- the read-only command probe ------------------------------------------------------------------------
