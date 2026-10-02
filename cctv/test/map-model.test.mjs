@@ -7,12 +7,19 @@
 import { readFileSync } from 'node:fs'
 import { boundsOf, latToY, lngToX, metresPerUnit } from '../public/map-cameras.js'
 import {
+  ALARM_EVENT_TYPES,
   BADGE_SPAN,
+  DEFAULT_CONE_OPACITY,
   DETAIL_ZOOM,
+  MAX_GROUPS,
+  activeMarkers,
   allView,
   badgeLabel,
   boxView,
+  cleanGroups,
   collapsedSites,
+  coneStyle,
+  isHexColor,
   mergeGeo,
   parseLatLng,
   ringPlacements,
@@ -338,6 +345,56 @@ const SIZE = { w: 1000, h: 600 }
   check('the site buttons are a full touch target on a phone', /@media \(max-width: 800px\) \{[^@]*\.map-sites button \{ height: 44px/.test(css))
   check('the chosen site is brought into view in the row', /scrollIntoView\(\{ inline: 'nearest', block: 'nearest' \}\)/.test(js))
   check('the page reads only what /api/maps gave this user', (js.match(/api\('GET', '\/api\/maps'\)/g) ?? []).length === 1)
+}
+
+// ---- cone colours: groups, overrides, validation -------------------------------------------------
+{
+  check('a plain hex colour is valid, in both lengths', isHexColor('#fff') && isHexColor('#3bA2ff'))
+  check('junk and non-hex are not colours', !isHexColor('red') && !isHexColor('#12') && !isHexColor('#gggggg') && !isHexColor(123) && !isHexColor(null))
+
+  const groups = [{ id: 'ent', name: 'Entrances', color: '#3bA2ff' }, { id: 'dark', name: 'Dark', color: '#223344', opacity: 0.4 }]
+  check('a camera with no colour of its own keeps today\'s cone (null)', coneStyle({ dir: 0 }, groups) === null && coneStyle(undefined, groups) === null)
+  check('a camera takes its group\'s colour', J(coneStyle({ group: 'ent' }, groups)) === J({ color: '#3bA2ff', opacity: DEFAULT_CONE_OPACITY }))
+  check('  and its group\'s opacity when the group sets one', coneStyle({ group: 'dark' }, groups).opacity === 0.4)
+  check('a per-camera override beats the group', coneStyle({ group: 'ent', color: '#010203' }, groups).color === '#010203')
+  check('a group id that is not defined falls back to today\'s cone', coneStyle({ group: 'gone' }, groups) === null)
+  check('a non-hex override is ignored, not drawn', coneStyle({ color: 'blue' }, groups) === null)
+
+  check('groups are cleaned: ids unique, colours valid hex, names and opacity carried', J(cleanGroups([
+    { id: 'a', name: 'A', color: '#fff' },
+    { id: 'a', name: 'dup', color: '#000' }, // duplicate id dropped
+    { id: 'b', name: 'B', color: 'notahex' }, // bad colour dropped
+    { id: 'c', name: 'C', color: '#123456', opacity: 0.5 }
+  ])) === J([{ id: 'a', name: 'A', color: '#fff' }, { id: 'c', name: 'C', color: '#123456', opacity: 0.5 }]))
+  check('no groups is an empty list, never an error', cleanGroups(undefined).length === 0 && cleanGroups(null).length === 0 && cleanGroups('x').length === 0)
+  check('strict cleaning throws on a bad colour (the server rejecting junk)', (() => { try { cleanGroups([{ id: 'a', color: 'x' }], { strict: true }); return false } catch { return true } })())
+  check('strict cleaning throws when there are too many groups', (() => { try { cleanGroups(Array.from({ length: MAX_GROUPS + 1 }, (_, i) => ({ id: `g${i}`, color: '#fff' })), { strict: true }); return false } catch { return true } })())
+
+  const withGroups = saveBody({ geo: { lat: 1, lng: 2, cams: { 'yard/0': g(1, 2) }, groups } }, 'street')
+  check('a save carries the site\'s groups', J(withGroups.geo.groups) === J(groups), J(withGroups.geo.groups))
+  check('a save with no groups sends no groups key', saveBody({ geo: { lat: 1, lng: 2, cams: { 'yard/0': g(1, 2) } } }, 'street').geo.groups === undefined)
+}
+
+// ---- live lighting: which markers are active ------------------------------------------------------
+{
+  const now = 1_000_000
+  const ev = (nvr, ch, type, ago) => ({ nvr, ch, type, startMs: now - ago })
+  const events = [
+    ev('shop', 0, 'motion', 2000), // fresh motion
+    ev('shop', 1, 'motion', 20_000), // motion too old to pulse
+    ev('shop', 2, 'line-crossing', 10_000), // alarm, still lingering
+    ev('yard', 0, 'tamper', 120_000), // alarm too old
+    ev('yard', 1, 'motion', -5000) // in the future: ignored
+  ]
+  const { motion, alarm } = activeMarkers(events, { now })
+  check('a fresh motion event pulses its marker', motion.has('shop/0') && !motion.has('shop/1'))
+  check('an alarm-kind event lights its marker and lingers longer', alarm.has('shop/2') && !alarm.has('yard/0'))
+  check('motion is not treated as an alarm, nor the reverse', !alarm.has('shop/0') && !motion.has('shop/2'))
+  check('an event in the future is ignored, not lit forever', !motion.has('yard/1'))
+  check('no events lights nothing', activeMarkers([], { now }).motion.size === 0 && activeMarkers(undefined, { now }).alarm.size === 0)
+  check('camera-offline is an alarm kind', ALARM_EVENT_TYPES.includes('camera-offline') && !ALARM_EVENT_TYPES.includes('motion'))
+  const both = activeMarkers([ev('shop', 0, 'motion', 1000), ev('shop', 0, 'line-crossing', 1000)], { now })
+  check('a camera can be both pulsing and in alarm at once', both.motion.has('shop/0') && both.alarm.has('shop/0'))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nAll passed')

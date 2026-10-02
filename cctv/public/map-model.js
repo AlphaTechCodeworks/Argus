@@ -25,6 +25,127 @@ export const PLACE_ZOOM = 18
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v)
 
+// ---- cone colours (admin-assigned groups) -------------------------------------------------------
+//
+// An admin may colour a camera's VIEW CONE by a named group, or with a per-camera override, while
+// the camera's recording status stays on the small marker dot (so green/amber/red for
+// recording/degraded/offline is never lost). A camera with no colour of its own keeps today's cone
+// (coloured by status), so old stored data needs no migration: no group, no override, no change.
+//
+// Storage: a site's geo block may carry `groups: [{ id, name, color, opacity? }]`, and a placement
+// may carry `group` (a group id) or `color` (a direct hex override). Groups are a street-map
+// feature; a plan camera can still carry a direct `color`.
+
+/** The most groups one site may define: enough to label a real site, small enough to stay bounded. */
+export const MAX_GROUPS = 32
+/** The cone fill opacity used when a group gives no opacity of its own. Matches today's blue cone. */
+export const DEFAULT_CONE_OPACITY = 0.2
+
+/** A CSS hex colour, #rgb or #rrggbb. Nothing else is let near a stored map or an inline style. */
+export const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/
+export const isHexColor = (s) => typeof s === 'string' && HEX_RE.test(s)
+
+/**
+ * The cone colour a placement resolves to: its own `color` override first, then its `group`'s
+ * colour, then null for "no colour of its own" (the caller leaves today's status-coloured cone).
+ * @param {{group?: string, color?: string}|null|undefined} placement
+ * @param {{id: string, name?: string, color: string, opacity?: number}[]} groups the site's groups
+ * @returns {{ color: string, opacity: number }|null}
+ */
+export function coneStyle(placement, groups = []) {
+  if (isHexColor(placement?.color)) return { color: placement.color, opacity: DEFAULT_CONE_OPACITY }
+  const id = placement?.group
+  if (id === undefined || id === null || id === '') return null
+  const g = (groups ?? []).find((x) => x && x.id === id)
+  if (!g || !isHexColor(g.color)) return null
+  const opacity = isNum(g.opacity) && g.opacity > 0 && g.opacity <= 1 ? g.opacity : DEFAULT_CONE_OPACITY
+  return { color: g.color, opacity }
+}
+
+/**
+ * A site's groups, cleaned for storage and for the edit UI: each one a { id, name, color } (and an
+ * optional opacity), ids unique, colours valid hex, capped at MAX_GROUPS. `strict` throws on the
+ * first bad entry (the server, which must reject junk); otherwise bad entries are dropped (the
+ * page, which must still draw). A group whose colour is not hex is never kept: an invalid colour is
+ * not a colour.
+ * @param {unknown} input
+ * @param {{ strict?: boolean, max?: number }} [opts]
+ * @returns {{ id: string, name: string, color: string, opacity?: number }[]}
+ */
+export function cleanGroups(input, { strict = false, max = MAX_GROUPS } = {}) {
+  if (input === undefined || input === null) return []
+  if (!Array.isArray(input)) {
+    if (strict) throw new Error('Groups must be a list')
+    return []
+  }
+  if (input.length > max) {
+    if (strict) throw new Error(`Too many groups (max ${max})`)
+    input = input.slice(0, max)
+  }
+  const out = []
+  const seen = new Set()
+  for (const g of input) {
+    const bad = (msg) => { if (strict) throw new Error(msg) }
+    if (!g || typeof g !== 'object') { bad('Bad group'); continue }
+    const id = String(g.id ?? '').slice(0, 40)
+    if (!id || seen.has(id)) { bad('Bad or duplicate group id'); continue }
+    if (!isHexColor(g.color)) { bad(`Bad colour for group "${id}"`); continue }
+    seen.add(id)
+    const entry = { id, name: String(g.name ?? '').slice(0, 60), color: g.color }
+    if (isNum(g.opacity) && g.opacity > 0 && g.opacity <= 1) entry.opacity = Math.round(g.opacity * 100) / 100
+    out.push(entry)
+  }
+  return out
+}
+
+// ---- live lighting (motion / alarm) -------------------------------------------------------------
+//
+// A marker reacts when something happens on its camera. The page polls GET /api/events (newest
+// first, already filtered to the cameras this user may see) and asks which markers are "active":
+// a brief motion pulse, or a stronger alarm highlight that lingers. Offline is folded in by the
+// caller from the health poll it already has, so a camera the server cannot reach rings too.
+
+/**
+ * The event kinds that light a marker with the stronger, lingering alarm highlight rather than the
+ * brief motion pulse. 'motion' is deliberately not here: motion is the quiet, common thing and gets
+ * its own short pulse. Kinds the app cannot actually produce yet are left out.
+ */
+export const ALARM_EVENT_TYPES = Object.freeze([
+  'line-crossing', 'tamper', 'sensor', 'ai', 'face', 'pos', 'video-loss', 'camera-offline', 'nvr-event'
+])
+
+/**
+ * Which markers are active, from the latest events and a decay window. Pure: the same events and
+ * the same `now` always give the same answer, so it is tested with no clock and no DOM.
+ *
+ * An event in the future (a clock skew) is ignored rather than lit forever. A key is in `motion`
+ * while a motion event on it is younger than `motionMs`, and in `alarm` while an alarm-kind event
+ * on it is younger than `alarmMs`; the same key can be in both.
+ *
+ * @param {{nvr: string, ch: number, type: string, startMs: number}[]} events from GET /api/events
+ * @param {{ now?: number, motionMs?: number, alarmMs?: number, alarmTypes?: readonly string[] }} [opts]
+ * @returns {{ motion: Set<string>, alarm: Set<string> }} keyed "nvr/ch"
+ */
+export function activeMarkers(events, { now = Date.now(), motionMs = 6000, alarmMs = 60_000, alarmTypes = ALARM_EVENT_TYPES } = {}) {
+  const motion = new Set()
+  const alarm = new Set()
+  const alarmSet = alarmTypes instanceof Set ? alarmTypes : new Set(alarmTypes)
+  for (const e of events ?? []) {
+    if (!e || e.nvr === undefined || e.ch === undefined) continue
+    const t = Number(e.startMs)
+    if (!Number.isFinite(t)) continue
+    const age = now - t
+    if (age < 0) continue
+    const key = `${e.nvr}/${e.ch}`
+    if (e.type === 'motion') {
+      if (age <= motionMs) motion.add(key)
+    } else if (alarmSet.has(e.type)) {
+      if (age <= alarmMs) alarm.add(key)
+    }
+  }
+  return { motion, alarm }
+}
+
 /**
  * The view the old editor gave a site the moment "Street map" was chosen: the middle of the
  * Atlantic, zoomed right out. Saved with no camera on it, it was never anyone's idea of where the
@@ -301,8 +422,15 @@ export function saveBody(draft, layer) {
   const position = sitePosition(draft)
   const hasPlan = Boolean(draft?.plan?.file)
   if (!position && !hasPlan) return null
+  const groups = cleanGroups(draft?.geo?.groups)
   const geo = position
-    ? { ...position, zoom: isNum(draft.geo.zoom) ? draft.geo.zoom : PLACE_ZOOM, layer: layer === 'satellite' ? 'satellite' : 'street', cams: draft.geo.cams ?? {} }
+    ? {
+        ...position,
+        zoom: isNum(draft.geo.zoom) ? draft.geo.zoom : PLACE_ZOOM,
+        layer: layer === 'satellite' ? 'satellite' : 'street',
+        cams: draft.geo.cams ?? {},
+        ...(groups.length ? { groups } : {})
+      }
     : undefined
   const plan = hasPlan ? { cams: draft.plan.cams ?? {} } : undefined
   let mode = draft.mode === 'geo' ? 'geo' : 'plan'
