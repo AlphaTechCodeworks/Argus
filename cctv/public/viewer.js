@@ -1289,7 +1289,7 @@ function stepCamera(dir) {
   if (list.length < 2 || single === null) return
   const i = list.findIndex((c) => camKey(c) === single)
   const next = list[(i + dir + list.length) % list.length]
-  if (imagePanel.confirmDiscard() && linesDiscard()) openSingle(next)
+  if (imagePanel.confirmDiscard() && linesDiscard() && osdDiscard()) openSingle(next)
 }
 
 /** The ‹ › on a phone's full-size camera: they say a flick works, and a tap on one works too. */
