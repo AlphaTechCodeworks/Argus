@@ -186,7 +186,9 @@ export class VideoPlayer {
     // movement at 1x, 1x, 2x, several times a second (stutter report 2.8, 29 Sep)
     this.minDrawStepMs = options.maxFps > 0 ? (0.75 * 1000) / options.maxFps - 4 : 0
     this.lastDrawnTs = null // capture time (ms) of the last frame present() drew
+    this.clockOptions = options.clock
     this.clock = new PlayoutClock(options.clock)
+    this.remote = null
     this.maxQueued = options.maxQueuedFrames ?? MAX_QUEUED_FRAMES
     this.arrivalClock = options.arrivalClock === true && this.pacing // (without pacing there is no clock)
     // noRewindMs: capture times (ms) of the newest frame timed as it arrived, and of the newest queued
@@ -417,7 +419,11 @@ export class VideoPlayer {
     }
     // out of the decoder: this frame, and any fed before it that never came back (no B-frames: the
     // decoder hands frames back in the order it took them)
-    while (this.fed.length && this.fed[0].ts <= frame.timestamp) this.fed.shift()
+    let fedAt = null
+    while (this.fed.length && this.fed[0].ts <= frame.timestamp) {
+      const f = this.fed.shift()
+      if (f.ts === frame.timestamp) fedAt = f.at
+    }
     // position in the keyframe interval (the decoder keeps timestamps; there are no B-frames)
     if (this.keyTsSet.has(frame.timestamp)) {
       this.sinceKey = 0
@@ -463,6 +469,11 @@ export class VideoPlayer {
       return
     }
     if (!this.paused && !this.arrivalClock) this.clock.schedule(ts, performance.now()) // (live: timed as it arrived, push)
+    else if (!this.paused && this.remote) {
+      const now = performance.now()
+      if (this.clock.anchor === null) this.clock.schedule(ts, now)
+      else if (fedAt !== null && this.clock.presentAt(ts) >= fedAt) this.clock.decodedLate(ts, now)
+    }
     // The first picture after a (re)start is painted the moment it is decoded rather than after
     // the playout delay (350 ms, more with Smooth): the camera appears at once, and the frames
     // after it still play out through the buffer that evens out the NVRs' bursts. (A camera opened
@@ -503,6 +514,30 @@ export class VideoPlayer {
     this.onFrame?.(ts)
   }
 
+  /**
+   * The server has said this viewer is remote ({type:'fit'}; playback.js passes the remote clock
+   * profile). From here each frame is timed on the playout clock as it arrives (arrivalClock, as live
+   * does), so a burst after a link pause is not read as a slow decoder and dropped to the next
+   * keyframe; the bigger buffer keeps up to REMOTE_QUEUED_FRAMES decoded frames; and at 1x the clock
+   * takes the remote profile (it grows with the link, re-anchoring once past its most), falling back
+   * to the page's own clock at other speeds. The profile is not named here: the player stays free of
+   * any playback clock so a live page cannot pick one up (no live page calls this).
+   * @param {{ clock?: object }} [options] clock: the remote playback clock profile the page made
+   */
+  remotePlayback({ clock = null } = {}) {
+    if (this.remote || !this.pacing) return
+    this.remote = { clock }
+    this.arrivalClock = true
+    this.fed = []
+    if (clock) this.maxQueued = Math.max(this.maxQueued, REMOTE_QUEUED_FRAMES)
+    this.#remoteClock()
+  }
+
+  #remoteClock() {
+    const c = this.remote?.clock
+    if (c) this.clock.setOptions(this.clock.rate === 1 ? c : this.clockOptions)
+  }
+
   /** Freezes on the current picture; buffered frames are kept. */
   pause() {
     this.paused = true
@@ -519,6 +554,7 @@ export class VideoPlayer {
   setRate(rate) {
     const next = this.queue[0]?.ts
     this.clock.setRate(rate, next, performance.now())
+    this.#remoteClock()
   }
 
   #draw(frame, now) {

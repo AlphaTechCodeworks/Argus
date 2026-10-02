@@ -24,7 +24,7 @@
 // Switching between them (quality "SD (NVR)", or a camera or day in the other mode) converts the
 // position by the NVR's clock skew.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
-import { PLAYBACK_CLOCK } from './playout.js'
+import { PLAYBACK_CLOCK, REMOTE_PLAYBACK_CLOCK } from './playout.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
   MESSAGE_STICKY_MS,
@@ -991,6 +991,10 @@ function onServerStatus(sock, msg) {
       const learned = !state.remote
       state.remote = true
       state.fit = change.fit
+      // the server treats this viewer as remote: time frames on arrival (a burst after a link pause is
+      // not read as a slow decoder) and, at 1x, grow the buffer with the link (playback hunt F4). Local
+      // playback is untouched; this is idempotent, so a fit at every seek is harmless.
+      player.remotePlayback({ clock: REMOTE_PLAYBACK_CLOCK })
       if (change.notice) showNotice(change.notice)
       if (learned) updateModeUi()
       return
