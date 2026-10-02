@@ -1111,7 +1111,7 @@ for (const speed of [2, 4]) {
   check('close: the timers are cleared', during > before && timers() === before, `${before} before, ${during} while playing, ${timers()} after`)
   check('close: every file handle is closed', openDuring > 0 && stats.open === 0, `${openDuring} while playing, ${stats.open} after`)
   check('close: nothing is sent afterwards', ws.bins.length === n)
-  check('close: one log line with the start timings', lines.length === 1 && /^\[n1\] server playback ch1 from 2026-09-24T10:01:15\.900Z: index \d+ ms, idx \d+ ms, first frame \d+ ms$/.test(lines[0]), lines.join(' | '))
+  check('close: one log line with the start timings and what the session did', lines.length === 1 && /^\[n1\] server playback ch1 from 2026-09-24T10:01:15\.900Z: index \d+ ms, idx \d+ ms, first frame \d+ ms; local viewer, \d+ frames \(\d+\.\d\d MB\) sent, \d+\.\d\d MB queued in node at the end \(\d+\.\d\d at most\), closed with code 1000, longest wait \d+\.\d s$/.test(lines[0]), lines.join(' | '))
 }
 
 // ---- H.265 -> H.264 for a browser that cannot decode H.265 (transcode.mjs) ----------------------

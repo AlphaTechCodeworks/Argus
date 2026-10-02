@@ -983,7 +983,10 @@ const muxWss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYT
 // when it has also written nothing for 30 s: its ping waits behind the video already queued on it,
 // and through the tunnel that backlog can take longer than 15 s to go (stutter report 2.10)
 const pageSockets = new WeakMap() // /live-mux socket -> its serveMux handle
-keepAlive(wss)
+// a server playback socket, for the keep-alive below: through the tunnel it answers its ping late
+// behind its own backlog, so one missed pong must not cut it (playback hunt F5, as /live-mux)
+const playbackSessions = new WeakMap() // /playback socket -> its ServerPlayback
+keepAlive(wss, { quiet: (ws) => playbackSessions.get(ws)?.quiet() ?? true })
 keepAlive(muxWss, { quiet: (ws) => pageSockets.get(ws)?.quiet() ?? true })
 // Every open video socket and mux channel is asked again while it is open (access-watch.mjs): soon
 // after rights or accounts are saved or a session is signed out, and every SWEEP_MS. A camera taken
@@ -1050,6 +1053,9 @@ const onConnection = (ws, req) => {
     // ...and for as long as it is open, the rights of what connectPlayback decided it plays (never a
     // second reading of the URL). A refused socket is closing already and is not watched.
     if (session) watch.track(ws, req, { actions: session.actions, nvr: nvr.id, ch: target.ch })
+    // server playback (a ServerPlayback: it has quiet()) gets the patient keep-alive; NVR playback keeps
+    // the plain one (its own session has no such backlog measure yet)
+    if (session && typeof session.quiet === 'function') playbackSessions.set(ws, session)
     return
   }
   if (url.pathname === '/motion') {

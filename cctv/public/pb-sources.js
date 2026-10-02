@@ -318,6 +318,45 @@ export function watchesStart(list, t) {
   return stretchAt(list, t)?.src !== 'nvr'
 }
 
+// ---- the server waiting, and the socket dropping mid-play (playback hunt F5) -----------------------
+// The server now says {type:'waiting', why} when its pacer has had nothing to send for 2 s while
+// playing, and {type:'playing'} before it carries on; the page shows a spinner and the reason. The
+// page also watches for itself: 2 s with no frame while playing (an older server, or the socket
+// itself stalled) shows the same spinner. A socket that drops mid-play (1006, or a 1000/1001 the page
+// did not ask for) is the browser or the tunnel letting go: the page reconnects once at the position,
+// rather than sitting silent or looping.
+
+/** The page's own "nothing is arriving" watch: 2 s with no frame while playing shows the spinner. */
+export const PLAYBACK_STALL_MS = 2000
+
+/** A message shown mid-play stays at least this long, so the next buffered frame does not wipe it. */
+export const MESSAGE_STICKY_MS = 3000
+
+/** What to show while the server (or the page's own watch) says playback is waiting. */
+export const WAITING_FALLBACK = 'Waiting for the server…'
+export function waitingText(why) {
+  return typeof why === 'string' && why.trim() ? why : WAITING_FALLBACK
+}
+
+/** Shown when a dropped socket is reconnected (once). */
+export const RECONNECT_MESSAGE = 'The connection dropped. Reconnecting…'
+
+/**
+ * Whether to reconnect a server socket that just closed: only a drop the page did not plan for, and
+ * only once. 1006 is the tunnel or the browser letting go; 1000/1001 arriving while frames were still
+ * playing is the same (the page closes its own socket with ws=null first, so a close that reaches here
+ * mid-play was not the page's). A refusal (1008), the NVR busy (1013) and a failed playback (1011,
+ * which goes to the NVR's copy) each have their own answer and never reconnect.
+ * @param {number} code @param {string} reason
+ * @param {{ playing: boolean, reconnected: boolean }} state playing: a frame has been shown and no end
+ *   reached; reconnected: this socket has already been reconnected once
+ */
+export function reconnectOnClose(code, reason, { playing, reconnected }) {
+  if (!playing || reconnected) return false
+  if (code === 1008 || code === 1013 || serverFailed(code, reason)) return false
+  return code === 1000 || code === 1001 || code === 1006
+}
+
 /**
  * Once per camera: the first failure of a camera's server playback goes over to the NVR, any later one
  * (the viewer chose "HD (server)" again) is shown as it is. So a camera whose NVR copy fails too can
