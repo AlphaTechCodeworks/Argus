@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
+import { cleanGroups, isHexColor } from './public/map-model.js'
 
 const MAPS_FILE = join(DATA_DIR, 'maps.json')
 const PLANS_DIR = join(DATA_DIR, 'maps')
@@ -75,6 +76,16 @@ const cleanCams = (input, mode, plan) => {
       range: mode === 'geo' ? num(c.range, 1, 5000, 'range') : num(c.range, 1, 20_000, 'range')
     }
     if (cone.dir < 0) cone.dir += 360
+    // an admin may colour a camera's cone by a group id or a direct hex override; the recording
+    // status stays on the marker dot. A colour that is not hex is not a colour: reject it.
+    if (c.group !== undefined && c.group !== null && c.group !== '') {
+      if (typeof c.group !== 'string' || c.group.length > 40) throw new HttpError(400, 'Bad camera group')
+      cone.group = c.group
+    }
+    if (c.color !== undefined && c.color !== null && c.color !== '') {
+      if (!isHexColor(c.color)) throw new HttpError(400, 'Bad camera colour')
+      cone.color = c.color
+    }
     out[key] =
       mode === 'geo'
         ? { lat: num(c.lat, -85, 85, 'latitude'), lng: num(c.lng, -180, 180, 'longitude'), ...cone }
@@ -102,6 +113,14 @@ const cleanSite = (input, existing = {}) => {
       layer: g.layer === 'satellite' ? 'satellite' : 'street',
       cams: cleanCams(g.cams, 'geo')
     }
+    // the named cone-colour palette for this site, capped and with every colour checked
+    let groups
+    try {
+      groups = cleanGroups(g.groups, { strict: true })
+    } catch (e) {
+      throw new HttpError(400, e.message)
+    }
+    if (groups.length) out.geo.groups = groups
   }
   if (mode === 'plan' && !out.plan) throw new HttpError(400, 'Upload a site plan first')
   return out
