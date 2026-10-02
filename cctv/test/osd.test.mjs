@@ -1,4 +1,4 @@
-// Tests for osd.mjs: reading what a camera burns into its picture, and changing it safely.
+// Tests for osd-doc.mjs: reading what a camera burns into its picture, and changing it safely.
 //   node cctv/test/osd.test.mjs
 //
 // Why this is worth testing hard: the OSD is part of the recorded image for ever. It cannot be
@@ -6,11 +6,11 @@
 // at evidence. A write that wipes a field it did not mean to touch is not recoverable from the
 // recordings it has already spoiled.
 //
-// The shape below is not confirmed against a real NVR yet -- queryIPChlORChlOSD answers with a
-// proper <response> so the firmware knows the command, but refuses a bodyless read with errorCode
-// 536871059. These fixtures are written in the shape the rest of this dialect uses; the parser is
-// deliberately forgiving and reports null rather than guessing, which is what makes that safe.
-import { buildEdit, checkWanted, osdRequest, parseOsd, probeShapes } from '../osd-doc.mjs'
+// The REAL_OSD fixture below is the real response read (read-only) from nvr-2 ch0 via the working
+// "requireField + condition" query, with the serial and name replaced by placeholders. It pins the
+// real two-overlay shape: a <types> list and a <content><chl> holding a <time> overlay and a
+// <chlName> overlay, each with its own switch and X/Y on a 0..10000 grid.
+import { allApplied, buildEdit, checkWanted, osdRequest, parseOsd, probeShapes } from '../osd-doc.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -19,85 +19,85 @@ const refuses = (fn, pattern) => {
 }
 
 const CHL = '{00000001-0000-0000-0000-000000000000}'
-const OK = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryIPChlORChlOSD"><status>success</status><content><chlId>${CHL}</chlId><name><![CDATA[Main Gate]]></name><nameSwitch>true</nameSwitch><timeSwitch>true</timeSwitch><position><X>500</X><Y>9200</Y></position><dateFormat>day-month-year</dateFormat><timeFormat>24</timeFormat><somethingWeDoNotKnow>keep me</somethingWeDoNotKnow></content></response>`
+// The real shape (placeholders for the serial and the name; a trailing unknown element and a
+// second name line are kept to pin that the builder echoes what it does not touch).
+const REAL_OSD = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryIPChlORChlOSD"><status>success</status><types><dateFormat><enum>year-month-day</enum><enum>month-day-year</enum><enum>day-month-year</enum></dateFormat><timeFormat><enum>12</enum><enum>24</enum></timeFormat></types><content><chl id="${CHL}"><time><switch>true</switch><X min="0" max="10000">6600</X><Y min="0" max="10000">100</Y><dateFormat type="dateFormat">day-month-year</dateFormat><timeFormat type="timeFormat">24</timeFormat></time><chlName><switch>true</switch><X min="0" max="10000">75</X><Y min="0" max="10000">100</Y><name maxLen="63">Example Cam</name><extraLine>keep me</extraLine></chlName></chl></content></response>`
 
 // ---- reading -----------------------------------------------------------------------------------
 {
-  const r = parseOsd(OK)
-  check('the camera name is read', r.ok && r.osd.name === 'Main Gate', JSON.stringify(r.osd?.name))
-  check('the switches are read as booleans, not strings', r.osd.showName === true && r.osd.showTime === true)
-  check('the position is read', r.osd.x === 500 && r.osd.y === 9200, `${r.osd.x},${r.osd.y}`)
-  check('the formats are read', r.osd.dateFormat === 'day-month-year' && r.osd.timeFormat === '24')
+  const r = parseOsd(REAL_OSD)
+  check('the response is read as a success', r.ok && r.osd !== null)
+  check('the clock overlay is read: switch and position', r.osd.time.show === true && r.osd.time.x === 6600 && r.osd.time.y === 100, JSON.stringify(r.osd.time))
+  check('the clock formats are read', r.osd.time.dateFormat === 'day-month-year' && r.osd.time.timeFormat === '24')
+  check('the name overlay is read: switch, position and text', r.osd.name.show === true && r.osd.name.x === 75 && r.osd.name.y === 100 && r.osd.name.text === 'Example Cam', JSON.stringify(r.osd.name))
+  check('the grid bounds are read from the X/Y min/max', r.osd.grid.min === 0 && r.osd.grid.max === 10000, JSON.stringify(r.osd.grid))
+  check('the allowed formats are read from <types>', r.osd.types.dateFormat.includes('day-month-year') && r.osd.types.timeFormat.join() === '12,24', JSON.stringify(r.osd.types))
+  check('the channel id is read', r.osd.chlId === CHL, r.osd.chlId)
 }
 {
-  // A refusal is a refusal. The important part is that it is not mistaken for "this camera shows
-  // nothing", which would invite a write built on an empty picture of the camera.
   const fail = '<?xml version="1.0"?><response cmdUrl="queryIPChlORChlOSD"><status>fail</status><errorCode>536871059</errorCode></response>'
   const r = parseOsd(fail)
   check('a refusal is reported as one, with its code', r.ok === false && r.errorCode === '536871059' && r.osd === null)
 }
 {
-  // Firmware that names things differently, and a position given as flat fields.
-  const other = `<?xml version="1.0"?><response><status>success</status><content><osdName>Yard</osdName><showName>1</showName><showTime>off</showTime><posX>10</posX><posY>20</posY></content></response>`
-  const r = parseOsd(other)
-  check('other field names are still read', r.osd.name === 'Yard' && r.osd.x === 10 && r.osd.y === 20, JSON.stringify(r.osd))
-  check('"1" is on and "off" is off', r.osd.showName === true && r.osd.showTime === false)
-}
-{
-  // The rule this whole file exists for: never invent a reading. A position we could not find is
-  // null, because 0,0 is a real corner of the picture and would be believed.
-  const bare = '<?xml version="1.0"?><response><status>success</status><content><chlId>x</chlId></content></response>'
+  // Never invent a reading: a block or position that is not there is null, because 0,0/false would
+  // be believed.
+  const bare = `<?xml version="1.0"?><response><status>success</status><content><chl id="x"></chl></content></response>`
   const r = parseOsd(bare)
-  check('a position that is not there is null, never 0', r.osd.x === null && r.osd.y === null)
-  check('a name that is not there is null, never empty text', r.osd.name === null)
-  check('a switch that is not there is null, not false', r.osd.showName === null && r.osd.showTime === null)
+  check('a missing position is null, never 0', r.osd.time.x === null && r.osd.name.y === null)
+  check('a missing switch is null, not false', r.osd.time.show === null && r.osd.name.show === null)
+  check('a missing name is null, never empty text', r.osd.name.text === null)
 }
 
 // ---- what a change may be ----------------------------------------------------------------------
 {
-  check('a sensible change is accepted', JSON.stringify(checkWanted({ name: 'Gate', x: 100, y: 9000 })) === '{"name":"Gate","x":100,"y":9000}')
-  check('booleans come through as booleans', checkWanted({ showTime: false }).showTime === false)
-  check('a position is rounded to whole units', checkWanted({ x: 12.6 }).x === 13)
-  check('refuses an empty name', refuses(() => checkWanted({ name: '   ' }), /cannot be empty/))
-  check('refuses a name too long to fit the picture', refuses(() => checkWanted({ name: 'x'.repeat(33) }), /32 characters/))
-  // The name is written into XML and then burnt into the picture; neither is a place for markup.
-  check('refuses markup smuggled into a name', refuses(() => checkWanted({ name: 'Gate <b>' }), /cannot contain/))
-  check('refuses a position off the picture', refuses(() => checkWanted({ x: -1 }), /between 0 and 9999/) && refuses(() => checkWanted({ y: 10000 }), /between 0 and 9999/))
-  check('refuses a position that is not a number', refuses(() => checkWanted({ x: 'left' }), /between 0 and 9999/))
-  check('refuses a change that changes nothing', refuses(() => checkWanted({}), /nothing to change/))
+  const osd = parseOsd(REAL_OSD).osd
+  check('a sensible change to both overlays is accepted',
+    JSON.stringify(checkWanted({ name: { text: 'Gate', x: 100 }, time: { show: false } }, osd)) === '{"name":{"text":"Gate","x":100},"time":{"show":false}}')
+  check('a position is rounded to a whole unit', checkWanted({ name: { x: 12.6 } }, osd).name.x === 13)
+  check('refuses an empty name', refuses(() => checkWanted({ name: { text: '   ' } }, osd), /cannot be empty/))
+  check('refuses a name too long to fit', refuses(() => checkWanted({ name: { text: 'x'.repeat(33) } }, osd), /32 characters/))
+  check('refuses markup smuggled into a name', refuses(() => checkWanted({ name: { text: 'Gate <b>' } }, osd), /cannot contain/))
+  check('refuses a position off the 0..10000 grid', refuses(() => checkWanted({ time: { x: -1 } }, osd), /between 0 and 10000/) && refuses(() => checkWanted({ time: { y: 10001 } }, osd), /between 0 and 10000/))
+  check('refuses a position that is not a number', refuses(() => checkWanted({ name: { x: 'left' } }, osd), /between 0 and 10000/))
+  check('refuses a date format not in the camera\'s list', refuses(() => checkWanted({ time: { dateFormat: 'martian' } }, osd), /must be one of/))
+  check('accepts a date format that is in the list', checkWanted({ time: { dateFormat: 'month-day-year' } }, osd).time.dateFormat === 'month-day-year')
+  check('refuses a change that changes nothing', refuses(() => checkWanted({}, osd), /nothing to change/))
+  check('an empty block is nothing to change', refuses(() => checkWanted({ name: {}, time: {} }, osd), /nothing to change/))
 }
 
 // ---- building the write ------------------------------------------------------------------------
 {
-  const doc = buildEdit(OK, CHL, { name: 'North Gate', x: 200 })
-  check('the new name is in the document', doc.includes('<name><![CDATA[North Gate]]></name>'), doc.slice(0, 200))
-  check('the new position is in the document', doc.includes('<X>200</X>'), doc)
-  // The whole point: these NVRs replace the block rather than merging into it, so anything left
-  // out is wiped. Including the things this module never understood.
-  check('what was not asked for is carried through untouched', doc.includes('<Y>9200</Y>') && doc.includes('<timeSwitch>true</timeSwitch>'), doc)
-  check('a field this module does not understand survives', doc.includes('<somethingWeDoNotKnow>keep me</somethingWeDoNotKnow>'), doc)
-  check('the document opens <request> exactly once', (doc.match(/<request\b/g) ?? []).length === 1 && (doc.match(/<\/request>/g) ?? []).length === 1, doc.slice(0, 120))
-  const tags = doc.match(/<\/?[A-Za-z][A-Za-z0-9]*/g) ?? []
-  check('and is balanced', tags.reduce((d, t) => d + (t.startsWith('</') ? -1 : 1), 0) === 0)
+  const doc = buildEdit(REAL_OSD, checkWanted({ name: { text: 'North Gate', x: 200 } }, parseOsd(REAL_OSD).osd))
+  check('the new name is in the name block', doc.includes('>North Gate</name>'), doc.slice(0, 400))
+  check('the name X is changed, keeping its min/max attributes', /<X min="0" max="10000">200<\/X>/.test(doc), doc)
+  // The whole point: these NVRs replace the block, so anything left out is wiped.
+  check('the clock block is carried through untouched', doc.includes('<X min="0" max="10000">6600</X>') && doc.includes('<dateFormat type="dateFormat">day-month-year</dateFormat>'), doc)
+  check('a second name line and unknown elements survive', doc.includes('<extraLine>keep me</extraLine>'), doc)
+  check('the document opens <request> exactly once', (doc.match(/<request\b/g) ?? []).length === 1 && (doc.match(/<\/request>/g) ?? []).length === 1)
 }
 {
-  const off = buildEdit(OK, CHL, { showTime: false })
-  check('a switch turned off says false, and the name is left alone', off.includes('<timeSwitch>false</timeSwitch>') && off.includes('Main Gate'), off)
-  // An answer we cannot build on must stop the write rather than send a document made up from
-  // nothing, which is how a camera's settings get wiped.
+  // A change to the clock must not touch the name block, and vice versa.
+  const doc = buildEdit(REAL_OSD, checkWanted({ time: { show: false, timeFormat: '12' } }, parseOsd(REAL_OSD).osd))
+  check('only the clock switch and format change', doc.includes('<switch>false</switch>') && doc.includes('<timeFormat type="timeFormat">12</timeFormat>'), doc)
+  check('the name block keeps its switch on and its text', /<chlName>[\s\S]*<switch>true<\/switch>[\s\S]*Example Cam/.test(doc), doc)
   check('an answer with no content refuses rather than inventing one',
-    refuses(() => buildEdit('<?xml version="1.0"?><response><status>fail</status></response>', CHL, { name: 'x' }), /no content to build on/))
+    refuses(() => buildEdit('<?xml version="1.0"?><response><status>fail</status></response>', { name: { text: 'x' } }), /no content to build on/))
+}
+
+// ---- the read-back check -----------------------------------------------------------------------
+{
+  const after = parseOsd(REAL_OSD).osd
+  check('allApplied is true when the camera reports every asked field', allApplied({ name: { text: 'Example Cam' }, time: { show: true } }, after))
+  check('allApplied is false when a field was kept', allApplied({ name: { text: 'Different' } }, after) === false)
+  check('allApplied is false with no after at all', allApplied({ time: { show: true } }, null) === false)
 }
 
 // ---- the probe ---------------------------------------------------------------------------------
 {
   const shapes = probeShapes(CHL)
-  // Round one named the channel six ways and changed nothing, so round two tries naming the
-  // fields instead -- copying queryNodeEncodeInfo, which works on these NVRs every day.
-  check('the field-naming shape is tried first now', shapes[0][1].includes('<requireField>') && !shapes[0][1].includes('<condition>'), shapes[0][1])
-  check('the shape from round one is kept, so the two runs can be compared', shapes.some(([, d]) => d === osdRequest(CHL)))
-  check('every shape names the channel or is deliberately bodyless', shapes.every(([, d]) => d.includes(CHL) || d.includes('</request>')))
-  // A probe that could write would be a probe nobody should run.
+  check('the confirmed working shape is tried first', shapes[0][1] === osdRequest(CHL) && shapes[0][1].includes('<requireField>') && shapes[0][1].includes('<condition>'), shapes[0][1])
+  check('every shape names the channel or is deliberately bodyless', shapes.every(([, d]) => d.includes(CHL) || d.endsWith('</request>')))
   check('nothing in the probe is a write', shapes.every(([, d]) => !/edit|set|add|del/i.test(d)))
   check('each shape is a whole, single request', shapes.every(([, d]) => (d.match(/<request\b/g) ?? []).length === 1 && d.startsWith('<?xml')))
 }
