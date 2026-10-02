@@ -17,16 +17,21 @@
 // These NVRs replace a whole block rather than merging into it, so a partial write silently wipes
 // whatever it does not mention.
 //
-//   GET  /api/admin/nvrs/:id/channels/:ch/osd            what this camera shows now
+// The camera carries TWO independently placed overlays (osd-doc.mjs): the clock (time) and the
+// channel name (chlName), each with its own switch and X/Y on a 0..10000 grid. A change names the
+// block(s) to touch and only the sub-fields within them that should change.
+//
+//   GET  /api/admin/nvrs/:id/channels/:ch/osd            what this camera shows now (the two-overlay model)
 //   GET  /api/admin/nvrs/:id/channels/:ch/osd?probe=1    read-only: which request shape it accepts
-//   POST /api/admin/nvrs/:id/channels/:ch/osd            { name?, showName?, showTime?, x?, y?, confirm: true }
+//   POST /api/admin/nvrs/:id/channels/:ch/osd            { name?: { text?, show?, x?, y? },
+//                                                          time?: { show?, x?, y?, dateFormat?, timeFormat? }, confirm: true }
 
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 import { HttpError, cameraOf, chlIdOf, transparent, withNvrLock } from './nvr-xml.mjs'
 // the documents and the rules about them live apart so they can be tested without the SDK
-import { buildEdit, checkWanted, osdRequest, parseOsd, probeShapes } from './osd-doc.mjs'
+import { allApplied, buildEdit, checkWanted, osdRequest, parseOsd, probeShapes } from './osd-doc.mjs'
 
 const QUERY_URL = 'queryIPChlORChlOSD'
 const EDIT_URL = 'editIPChlORChlOSD'
@@ -69,14 +74,15 @@ export async function probeOsd(nvr, ch, query) {
  * @returns {Promise<{before:object, sent:object, after:object, applied:boolean, warning?:string}>}
  */
 export async function setOsd(nvr, ch, want, user, query = transparent) {
-  const wanted = checkWanted(want)
   const chlId = chlIdOf(ch)
   return withNvrLock(nvr, 'osd', async () => {
     const beforeXml = String((await query(nvr, QUERY_URL, osdRequest(chlId), 'osd before')) ?? '')
     const before = parseOsd(beforeXml)
     if (!before.ok) throw new HttpError(502, `the NVR would not say what this camera shows (${before.errorCode}); nothing was changed`)
+    // validated against the camera's own grid bounds and its <types> list, now that we have them
+    const wanted = checkWanted(want, before.osd)
 
-    const reply = String((await query(nvr, EDIT_URL, buildEdit(beforeXml, chlId, wanted), 'osd write')) ?? '')
+    const reply = String((await query(nvr, EDIT_URL, buildEdit(beforeXml, wanted), 'osd write')) ?? '')
     if (!/<status>\s*success/i.test(reply)) {
       const code = /<errorCode>\s*(\d+)/.exec(reply)?.[1]
       throw new HttpError(502, `the NVR refused the change${code ? ` (code ${code})` : ''}; nothing was changed`)
@@ -85,7 +91,7 @@ export async function setOsd(nvr, ch, want, user, query = transparent) {
     await new Promise((r) => setTimeout(r, READ_BACK_MS))
     const after = parseOsd(String((await query(nvr, QUERY_URL, osdRequest(chlId), 'osd after')) ?? ''))
     // Asked, not assumed: these NVRs will answer "success" and keep what they had.
-    const applied = after.ok && Object.entries(wanted).every(([k, v]) => after.osd[k] === v)
+    const applied = after.ok && allApplied(wanted, after.osd)
 
     try {
       appendFileSync(LOG_FILE, `${JSON.stringify({ at: new Date().toISOString(), nvr: nvr.id, ch, by: user ?? '?', wanted, before: before.osd, after: after.osd ?? null, applied })}\n`, { mode: 0o600 })
