@@ -812,8 +812,13 @@ export class AdaptiveLive {
   #move(v, level, why) {
     const from = LEVELS[v.level].id
     const down = level > v.level
+    const wasEased = v.level > 0
     const link = this.#link(v) // what made it move, before the move changes it
     v.level = level
+    // tell the viewer's tiles when quality starts or stops being eased for bandwidth, so the page can
+    // show why the picture went lighter (live-tile.js ease chip). A page's /live-mux channel carries
+    // the note; a plain /live socket has no notice path and simply does not get it.
+    if ((level > 0) !== wasEased) try { for (const e of v.sockets) e.ws.notice?.({ op: 'ease', on: level > 0, why }) } catch {}
     // Two passes: every socket off its level stream, each stream left with nobody on it closed there
     // and then, and only then every socket onto the new level. In one pass the new level's streams took
     // their slots before the old level's had given theirs back, and a stream left empty kept its slot

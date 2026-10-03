@@ -72,6 +72,25 @@ if (typeof addEventListener === 'function') {
   addEventListener('pageshow', (e) => { if (e.persisted) for (const t of liveTiles) t.reconnectNow() })
 }
 
+// A small page chip shown while the server is easing quality for bandwidth (adaptive-live.mjs #move,
+// {op:'ease'}), so a lighter picture on a busy link reads as deliberate rather than broken. One chip
+// for the page: present while any tile is eased, gone when none are.
+const easedTiles = new Set()
+let easeChip = null
+function updateEaseChip() {
+  if (typeof document === 'undefined') return
+  if (easedTiles.size > 0 && !easeChip) {
+    easeChip = document.createElement('div')
+    easeChip.className = 'ease-chip'
+    easeChip.textContent = 'Easing off · link busy'
+    easeChip.title = 'The picture is lighter on purpose to fit the available bandwidth; it sharpens when the link frees up.'
+    document.body.append(easeChip)
+  } else if (easedTiles.size === 0 && easeChip) {
+    easeChip.remove()
+    easeChip = null
+  }
+}
+
 /** The markup a LiveTile expects inside its tile element. */
 // The .osd canvas sits over the video canvas and is drawn by this app (osd-overlay.js), never by
 // the camera. It is a second canvas rather than drawing onto the player's own, because the player
@@ -362,13 +381,22 @@ export class LiveTile {
     }
   }
 
-  /** A note from the server: {"op":"wait","why":…} while the sub-stream has no picture yet. */
+  /**
+   * A note from the server:
+   *  - {"op":"wait","why":…}  while the sub-stream has no picture yet
+   *  - {"op":"ease","on":bool} quality is (no longer) being eased for bandwidth (adaptive-live.mjs)
+   */
   #note(text) {
     let m
     try {
       m = JSON.parse(text)
     } catch {
       return
+    }
+    if (m?.op === 'ease') {
+      if (m.on) easedTiles.add(this)
+      else easedTiles.delete(this)
+      return updateEaseChip()
     }
     if (m?.op !== 'wait') return
     this.waiting = true
@@ -546,6 +574,7 @@ export class LiveTile {
   close() {
     if (!this.closed) activeTrace()?.event(this, 'end')
     liveTiles.delete(this)
+    if (easedTiles.delete(this)) updateEaseChip()
     this.closed = true
     this.#unborrow()
     this.taps.clear()
