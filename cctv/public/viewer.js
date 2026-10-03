@@ -8,7 +8,7 @@ import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-
 import { ImagePanel } from './image-panel.js'
 import { LinesPanel, linesSupportAsker } from './lines-panel.js'
 import { OsdPanel } from './osd-panel.js'
-import { muxState, useMux } from './live-mux.js'
+import { freshenForPageChange, muxState, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
@@ -1085,8 +1085,11 @@ siteSelect.addEventListener('change', () => {
   try { localStorage.setItem('cctv.site', siteSelect.value) } catch {}
   render({ keepSingle: true })
 })
-prevBtn.addEventListener('click', () => { page--; render() })
-nextBtn.addEventListener('click', () => { page++; render() })
+// drop a big grid's backed-up shared connection before the new page subscribes, so it starts clean
+// (live-mux.js): the old page's video, still draining over a slow link, otherwise held the new page's
+// streams behind it. The tiles are rebuilt by render() regardless.
+prevBtn.addEventListener('click', () => { page--; freshenForPageChange(); render() })
+nextBtn.addEventListener('click', () => { page++; freshenForPageChange(); render() })
 document.addEventListener('keydown', (e) => {
   // Escape closes the Lines or OSD panel first (they lie over the picture), then the full-size view
   if (e.key === 'Escape' && linesPanel) {

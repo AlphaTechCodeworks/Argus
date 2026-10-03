@@ -99,7 +99,7 @@ const mux = await import('../public/live-mux.js')
 const { LiveTile, MAIN_STREAM, STALL_RECONNECT_MS, SUB_STREAM } = await import('../public/live-tile.js')
 const { CODEC_H265 } = await import('../public/player.js')
 const { serveMux } = await import('../live-mux.mjs')
-const { liveSocket, useMux, muxState } = mux
+const { liveSocket, useMux, muxState, freshenForPageChange } = mux
 
 /**
  * What the server (live-mux.mjs, the real one) makes of what one connection sent: each message
@@ -740,6 +740,36 @@ const cam = (ch, more = {}) => ({ nvr: 'n1', ch, stream: 1, fps: null, h265: nul
   check('a Live tile on a channel: 16 s of wait notes, no stall reconnect, and it says why', t.ws.readyState === 1 && t.attempts === 0 && parts['.status'].textContent === 'Waiting for room at the NVR (SD streams)', parts['.status'].textContent)
   t.close()
   advance(0)
+}
+
+// freshenForPageChange: a big grid's backed-up connection is dropped before the new page subscribes,
+// so it starts clean; a small grid is left alone (no backlog to drop).
+{
+  mux._test.reset(clock)
+  useMux(true)
+  const chans = []
+  for (let i = 0; i < 20; i++) chans.push(liveSocket(cam(i)))
+  const s = sockets.at(-1)
+  s.accept()
+  advance(100) // past SETTLE_MS; 20 subs fit the burst of 160, so all subscribe
+  check('big grid: 20 channels on one open connection', muxState().channels === 20 && muxState().socket === 'open', JSON.stringify(muxState()))
+  let closed = 0
+  for (const c of chans) c.onclose = () => closed++
+  freshenForPageChange(17)
+  advance(0) // the channels' onclose is delivered deferred (post)
+  check('freshenForPageChange drops a big grid\'s connection and ends its channels', s.closedWith != null && muxState().socket === 'none' && muxState().channels === 0 && closed === 20, `${s.closedWith} ${muxState().socket} ${muxState().channels} ${closed}`)
+}
+{
+  mux._test.reset(clock)
+  useMux(true)
+  const chans = []
+  for (let i = 0; i < 4; i++) chans.push(liveSocket(cam(i)))
+  const s = sockets.at(-1)
+  s.accept()
+  advance(100)
+  check('small grid: 4 channels on one open connection', muxState().channels === 4 && muxState().socket === 'open')
+  freshenForPageChange(17)
+  check('freshenForPageChange leaves a small grid (below the threshold) alone', s.closedWith == null && muxState().socket === 'open' && muxState().channels === 4, `${s.closedWith} ${muxState().socket} ${muxState().channels}`)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

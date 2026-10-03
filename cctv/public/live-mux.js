@@ -405,6 +405,19 @@ export function muxState() {
   }
 }
 
+/**
+ * On a big grid over a slow link the shared connection carries a backlog of the page being left; the
+ * new page's streams queue behind it (the server logs "a page socket has stopped, N MB queued", and
+ * the last page's tiles stayed 'connecting' for seconds). Dropping the connection before the new page
+ * subscribes lets it start on a clean one -- the tiles that were on it are being replaced anyway, so
+ * each opens a fresh channel on the new connection. Only for grids big enough to back up; a small
+ * grid, where there is no backlog to speak of, is left alone so its page change stays instant.
+ * @param {number} [minChannels] act only when the page being left has at least this many tiles
+ */
+export function freshenForPageChange(minChannels = 17) {
+  if (sock && sockOpen && channels.size + waiting.length >= minChannels) drop(sock, 'the page changed on a big grid', false)
+}
+
 /** (tests) Forgets every channel and the connection, off again; clock: { now, later, cancel }. */
 export const _test = {
   reset(c = realClock) {
