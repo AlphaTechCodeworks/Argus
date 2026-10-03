@@ -123,6 +123,26 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   check('a suspended tile is not reconnected by the watchdog', !w2.closed)
   t2.close()
 }
+// a released tile (the grid freed under a full-size view): its socket is closed so the server stops
+// sending it; the watchdog leaves it alone; resume reconnects it
+{
+  now += 1000
+  const t2b = new LiveTile(tileEl, { nvr: 'n1', ch: 8 }, 1, 0, { now: () => now })
+  clearInterval(t2b.statusTimer)
+  clearTimeout(t2b.retry)
+  t2b.connect()
+  const w2b = sockets.at(-1)
+  w2b.readyState = 1
+  const n2b = sockets.length
+  t2b.release()
+  check('release closes the socket and marks the tile released', w2b.closed && t2b.suspended && t2b.released && t2b.ws === null, `${w2b.closed} ${t2b.suspended} ${t2b.released}`)
+  now += 60_000
+  t2b.updateStatus()
+  check('a released tile is not reconnected by the watchdog', sockets.length === n2b)
+  t2b.resume()
+  check('resume reconnects a released tile (a fresh socket), no longer released', sockets.length === n2b + 1 && !t2b.released && !t2b.suspended)
+  t2b.close()
+}
 // a socket still connecting: given a few seconds, then dropped and tried again (the browser's own
 // timeout never came: a full-size view waited 10+ minutes for its main stream, 2026-09-27)
 {

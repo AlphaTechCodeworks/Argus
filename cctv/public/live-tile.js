@@ -149,6 +149,7 @@ export class LiveTile {
     this.closed = false
     this.waiting = false // the server said its sub-stream has no picture yet (a wait note, live-wait.mjs)
     this.suspended = false // connected, but frames are dropped (not decoded): see suspend()
+    this.released = false // suspended AND disconnected, so the server stops sending it: see release()
     this.attempts = 0 // reconnects since video last arrived
     this.now = opts.now ?? (() => Date.now()) // (tests)
     this.lastDataAt = 0 // the last frame on this socket, or when it opened
@@ -526,6 +527,28 @@ export class LiveTile {
   }
 
   /**
+   * Like suspend, but closes the connection so the server stops sending this stream. suspend alone
+   * keeps the stream flowing (the frames are only dropped at the client), so a grid left under the
+   * full-size view went on using its share of the link -- on a tunnel, 25-64 streams competing with
+   * the one camera being watched. resume() reconnects a released tile; the stall watchdog leaves a
+   * suspended one alone, so nothing reconnects it meanwhile.
+   */
+  release() {
+    if (this.closed) return
+    this.suspended = true
+    this.released = true
+    clearTimeout(this.retry)
+    this.retry = null
+    if (this.ws) {
+      this.ws.onclose = null // resume() does the reconnect, not the socket's own close handler
+      this.ws.onmessage = null
+      this.ws.close()
+      this.ws = null
+    }
+    activeTrace()?.event(this, 'suspend')
+  }
+
+  /**
    * Picks up again at once. Still connected, with the stream kept from its last keyframe: that is
    * decoded now and the frames carry on (no reconnect). Otherwise it reconnects, and the server
    * starts the new connection with the stream's latest keyframe.
@@ -534,9 +557,10 @@ export class LiveTile {
     if (!this.suspended || this.closed) return
     // the frame trace says which way it came back, as its replay must do the same (test/live-replay.mjs
     // segments); said while still hidden, so a trace that first sees the tile here knows it was
-    const kept = this.lendable
+    const kept = this.lendable && !this.released // a released tile has no connection: it must reconnect
     activeTrace()?.event(this, 'resume', kept ? 'kept' : 'reconnect')
     this.suspended = false
+    this.released = false
     if (kept) {
       this.player.reset()
       for (const m of this.gop) this.#decode(m)

@@ -620,7 +620,11 @@ function openSingle(cam, { fromTap = false } = {}) {
   }
   single = camKey(cam)
   singleCam = cam
-  for (const t of gridTiles) t.suspend()
+  // free the grid's streams while watching one camera: suspend alone leaves them flowing (frames only
+  // dropped at the client), so on a tunnel 25-64 grid streams kept competing with the full-size view.
+  // Keep the one it borrows (the lender, lenderFor); release the rest, which reconnect on return.
+  const lender = gridTiles.find((t) => t.nvr === cam.nvr && t.ch === cam.ch && t.streamType === SUB_STREAM && t.lendable)
+  for (const t of gridTiles) { if (t === lender) t.suspend(); else t.release() }
   overlay = makeTile(cam)
   overlay.classList.add('single', 'single-overlay')
   // links sit next to the name (not in it): a long name is cut short, the links never are
