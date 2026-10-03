@@ -187,6 +187,10 @@ let gridSlots = [] // one per grid cell: { cam, el, live: LiveTile | null }
 let gridStale = false // the camera list changed while the tab was hidden
 let singleTiles = [] // LiveTiles of the full-size view (sub, then main)
 let overlay = null // the full-size tile, laid over the (suspended) grid
+let upgradeTimer = null // the pending HD upgrade (debounced; cleared by closeSingle on a step or close)
+// Wait this long on a camera before asking the NVR for its HD (main) stream, so stepping quickly
+// through cameras does not churn main streams the NVR opens and closes (seconds each on a busy NVR).
+const UPGRADE_DELAY_MS = 1000
 
 const syncTiles = () => {
   tiles = [...gridTiles, ...singleTiles]
@@ -769,14 +773,22 @@ function openSingle(cam, { fromTap = false } = {}) {
   // full screen at full quality (the main stream) only with Live HD on the camera (/api/cameras hd;
   // the server refuses it anyway); cameras reached through TVT P2P or a VPN stay on the sub stream
   // (the relay has little bandwidth), as do browsers that could not play this main stream
-  if (cam.hd !== false && !noMain.has(single) && !cam.remote) upgradeToMain(overlay, cam, sub, opts)
-  else if (cam.hd === false) overlay.querySelector('.name').after(sdBadge())
+  if (cam.hd !== false && !noMain.has(single) && !cam.remote) {
+    // debounced: the sub-stream shows at once; the HD stream is asked for only once the view settles
+    // on this camera (UPGRADE_DELAY_MS), so stepping through does not churn main streams on the NVR.
+    const o = overlay
+    upgradeTimer = setTimeout(() => {
+      upgradeTimer = null
+      if (overlay === o && !sub.closed) upgradeToMain(overlay, cam, sub, opts)
+    }, UPGRADE_DELAY_MS)
+  } else if (cam.hd === false) overlay.querySelector('.name').after(sdBadge())
   syncTiles()
   updatePager()
 }
 
 /** Back to the grid: the grid tiles pick up again straight away. */
 function closeSingle({ resumeGrid = true, keep = null } = {}) {
+  if (upgradeTimer) { clearTimeout(upgradeTimer); upgradeTimer = null } // a pending HD upgrade is cancelled
   overlayZoom = null
   for (const t of singleTiles) if (t !== keep) t.close()
   singleTiles = []
