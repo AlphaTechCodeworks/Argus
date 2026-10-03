@@ -8,7 +8,10 @@ function wire({ btn, msg, url, confirmText, waitingText, firstWaitMs, giveUpS })
     if (!confirm(confirmText)) return
     btn.disabled = true
     msg.textContent = waitingText
-    const res = await fetch(url, { method: 'POST' }).catch(() => null)
+    // the JSON content-type (and a body) are what the server's CSRF guard requires of a state-changing
+    // POST (server.mjs same-origin check); without them this was refused 403 "Forbidden" and the
+    // restart/reboot buttons never worked.
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => null)
     if (!res?.ok) {
       const body = await res?.json().catch(() => null)
       msg.textContent = body?.error ?? 'The server did not accept that.'
