@@ -270,6 +270,9 @@ function nvrPanel(n, mine, nowMs) {
       },
       { label: 'Clock', value: `${secs > 0 ? '+' : ''}${secs} s`, state: Math.abs(secs) >= 30 ? 'warn' : 'ok' },
       { label: 'Last contact', value: ago(n.lastContactMs) },
+      // How far its own recordings go back -- for a recorder that overwrites the oldest, this is both
+      // what it holds now and, near enough, how many days it will keep. The shortest disk sets it.
+      { label: 'Recording held', value: Number.isFinite(st?.days) ? `${st.days} day${st.days === 1 ? '' : 's'}` : NOT_AVAILABLE, state: Number.isFinite(st?.days) && st.days < 3 ? 'warn' : 'ok' },
       { label: 'Disks read', value: st ? `${ago(nowMs - st.at)}` : NOT_AVAILABLE }
     ]
   }
@@ -454,6 +457,42 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     return bar
   }
 
+  // The NVR's own event log (nvr-log.mjs), fetched on demand and cached, since the page repaints
+  // every 2 s and this query is heavier than the rest. Admins only (the endpoint refuses others).
+  let isAdmin = false
+  const LOG_FRESH_MS = 60_000
+  const logCache = new Map() // nvr id -> { at, items } | { at, error }
+  const renderLog = (body, entry) => {
+    if (entry.error) return body.replaceChildren(el('p', { className: 'hp-sub', textContent: `Could not load: ${entry.error}` }))
+    if (!entry.items.length) return body.replaceChildren(el('p', { className: 'hp-sub', textContent: 'No events in the last 24 h.' }))
+    const tb = el('tbody')
+    for (const it of entry.items.slice(0, 60)) {
+      tb.append(el('tr',
+        {},
+        el('td', { textContent: Number.isFinite(it.atMs) ? hhmm(it.atMs) : '' }),
+        el('td', { textContent: it.camera || (Number.isFinite(it.ch) ? `Camera ${it.ch + 1}` : '') }),
+        el('td', { textContent: it.content || it.type || '' })))
+    }
+    body.replaceChildren(el('table', { className: 'hp-table' }, tb))
+  }
+  const loadLog = async (body, id) => {
+    const hit = logCache.get(id)
+    if (hit && Date.now() - hit.at < LOG_FRESH_MS) return renderLog(body, hit)
+    body.replaceChildren(el('p', { className: 'hp-sub', textContent: 'Loading…' }))
+    try {
+      const res = await fetch(`/api/admin/nvrs/${encodeURIComponent(id)}/log`)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      const entry = { at: Date.now(), items: Array.isArray(data.items) ? data.items : [] }
+      logCache.set(id, entry)
+      renderLog(body, entry)
+    } catch (e) {
+      const entry = { at: Date.now(), error: e.message }
+      logCache.set(id, entry)
+      renderLog(body, entry)
+    }
+  }
+
   const paint = (d) => {
     const r = renderHealth(d)
 
@@ -490,6 +529,7 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     // Each NVR folded to a tile of the few numbers that matter; the full detail opens on a click.
     // Which ones are open is kept across the 15 s refresh.
     const wasOpen = new Set([...document.querySelectorAll('#nvrs details.nvr-panel[open]')].map((x) => x.dataset.id))
+    const logOpen = new Set([...document.querySelectorAll('#nvrs details.hp-log[open]')].map((x) => x.dataset.id))
     // ...and so is each disk's SMART report: the 2 s refresh rebuilt it closed a moment after it
     // was opened (the owner: "why does the SMART report drop down not stay open?")
     const smartOpen = new Set([...document.querySelectorAll('#nvrs details.hp-smart[open]')].map((x) => x.dataset.key))
@@ -608,6 +648,20 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
         table.append(thead, tbody)
         panel.append(table)
       }
+
+      // The NVR's own event log, read on demand (nvr-log.mjs; admins only). Kept behind a disclosure
+      // so it is never in the way when you are just checking the site is up.
+      if (isAdmin && n.status.state !== 'bad') {
+        const logBox = el('details', { className: 'hp-log' })
+        logBox.dataset.id = n.id
+        const body = el('div', { className: 'hp-log-body' })
+        logBox.append(el('summary', { textContent: 'Recent NVR events' }), body)
+        logBox.open = logOpen.has(n.id)
+        logBox.addEventListener('toggle', () => { if (logBox.open) loadLog(body, n.id) })
+        if (logBox.open) loadLog(body, n.id)
+        else body.append(el('p', { className: 'hp-sub', textContent: 'Open to load the NVR’s own log (last 24 h).' }))
+        panel.append(logBox)
+      }
       return panel
     }))
 
@@ -632,6 +686,7 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error('signed out'))))
     .then((me) => {
       document.getElementById('whoami').textContent = me.user
+      isAdmin = me.admin === true
       if (me.admin) {
         const sitesTab = document.getElementById('sitesTab'); if (sitesTab) sitesTab.hidden = false
         const settingsTab = document.getElementById('settingsTab'); if (settingsTab) settingsTab.hidden = false
