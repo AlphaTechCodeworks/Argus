@@ -4,7 +4,11 @@
 // which is why the banner wording lives here rather than in the page.
 import { smartRows, smartSummary } from './smart-view.js'
 
-const hhmm = (ms) => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+// Absolute times are shown on the site's wall clock, not the viewing PC's zone (a screen set to UTC
+// otherwise showed UTC): add the site offset, then read it back as UTC. siteTzMs is set from
+// /api/health (server site-time.mjs) at the top of renderHealth; until then it is this browser's.
+let siteTzMs = -new Date().getTimezoneOffset() * 60_000
+const hhmm = (ms) => new Date(ms + siteTzMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })
 
 /** "41 m" up to an hour, then "1 h 21 m": short enough to sit under a card's number. */
 const dur = (ms) => {
@@ -276,6 +280,7 @@ function nvrPanel(n, mine, nowMs) {
  * @returns {{ cards: object, systemCards: object, nvrRows: object[], nvrPanels: object[], historyRows: object[], bannerText: string, sendingProblem: string }}
  */
 export function renderHealth(d) {
+  if (Number.isFinite(d?.siteTzMin)) siteTzMs = d.siteTzMin * 60_000 // show times on the site's clock
   const cameras = d.cameras ?? []
   const nvrs = d.nvrs ?? []
   const loc = d.locations?.[0] ?? null

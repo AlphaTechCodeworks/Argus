@@ -67,7 +67,7 @@ import { handleRelays } from './relays.mjs'
 import { transparent } from './nvr-xml.mjs'
 import { readAlerts } from './alert-log.mjs'
 import { PERIODS, composeReport, countInThread, periodWindow, startDailySummary } from './reports.mjs'
-import { commonOffset, useSiteOffset } from './site-time.mjs'
+import { commonOffset, siteOffsetMin, useSiteOffset } from './site-time.mjs'
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
@@ -899,6 +899,7 @@ const handleRequest = async (req, res) => {
     const remote = adaptiveLive.summary()
     return sendJson(res, 200, healthFor({
       ...alerts.health(),
+      siteTzMin: siteOffsetMin(), // the Health page shows times on the site's clock, not the viewer's
       viewing: {
         traffic: trafficSummary(),
         people: presence.summary(),
