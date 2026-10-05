@@ -57,13 +57,25 @@ export const P2P_SERVER = p2pServerFrom(process.env.CCTV_P2P_SERVER)
 // plain-serial add-on (sdk.mjs) puts the serial back.
 export const P2P_ENABLED = process.env.CCTV_P2P !== 'off'
 const P2P_OFF = 'Adding NVRs by serial number is switched off on this server (CCTV_P2P=off). Connect by IP address (on site, over a VPN or with port forwarding).'
+const NET_SDK_CONNECT_NAT = 1 // older P2P: the SDK fetches a server list over HTTP from nat.eyeincloud.com
 const NET_SDK_CONNECT_NAT20 = 2
+// NAT 1.0 NVRs (cfg.nat === 1) register with this older cloud over HTTP (port 80 for the server list)
+// and then UDT-connect. Unlike NAT 2.0 it needs no SetNat2Addr and no plain-serial add-on -- the serial
+// is sent correctly by this path -- so it coexists with NAT 2.0 in one process. CCTV_NAT1_SERVER overrides.
+const NAT1_DEFAULT = { host: 'nat.eyeincloud.com', port: 80 }
+export const NAT1_SERVER = (() => {
+  const v = process.env.CCTV_NAT1_SERVER
+  const m = /^([^:]+):(\d+)$/.exec(String(v ?? ''))
+  if (m && Number(m[2]) > 0) return { host: m[1], port: Number(m[2]) }
+  if (v) console.warn(`CCTV_NAT1_SERVER=${v} is not host:port; using ${NAT1_DEFAULT.host}:${NAT1_DEFAULT.port}`)
+  return NAT1_DEFAULT
+})()
 // CCTV_LIVE_WORKER=on: each NVR's live video comes from its own child process (nvr-worker.mjs,
 // worker-supervisor.mjs), fanned out here by stream-hub.mjs; this process keeps a control-only
 // login (picture and stream settings, playback). Never inside a worker itself.
 export const LIVE_WORKER = process.env.CCTV_LIVE_WORKER === 'on' && !process.env.CCTV_WORKER_NVR
 /** How an NVR is reached, for messages. */
-export const whereIs = (cfg) => (cfg.sn ? `serial ${cfg.sn} (P2P cloud)` : `${cfg.host}:${cfg.port}`)
+export const whereIs = (cfg) => (cfg.sn ? `serial ${cfg.sn} (P2P cloud${Number(cfg.nat) === 1 ? ', NAT 1.0' : ''})` : `${cfg.host}:${cfg.port}`)
 
 const MAX_CHANNEL_FAILURES = 4 // ~2 minutes of failed channel refreshes -> log in again
 // camera list poll (tests with the fake SDK: CCTV_TEST_REFRESH_MS)
@@ -163,11 +175,15 @@ export const cleanNvrFields = (input, { partial = false } = {}) => {
     if (sn && !P2P_ENABLED) throw new Error(P2P_OFF)
     out.sn = sn
   }
+  // which P2P generation the NVR is on: 2 = NAT 2.0 (the default, device.eyeincloud.com), 1 = NAT 1.0
+  // (the older nat.eyeincloud.com cloud). Only meaningful for a serial NVR.
+  if (input.nat !== undefined) out.nat = Number(input.nat) === 1 ? 1 : 2
   if (out.sn) {
-    // no address is needed: the record gets the P2P server's in place of the NVR's, and an address
-    // sent along is not used (one P2P server per process; login() does not read these)
-    out.host = P2P_SERVER.host
-    out.port = P2P_SERVER.port
+    // no address is needed: the record gets the cloud server's in place of the NVR's, and an address
+    // sent along is not used (login() goes straight to the NAT 1.0 or 2.0 server)
+    const srv = Number(out.nat ?? (partial ? undefined : 2)) === 1 ? NAT1_SERVER : P2P_SERVER
+    out.host = srv.host
+    out.port = srv.port
   } else if (input.sn === '' && partial && input.host === undefined) {
     throw new Error('Enter the NVR IP address to connect to it by address')
   }
@@ -198,7 +214,7 @@ const logoutLate = (tag, nvr = '') => (userId) => {
  * One login through the connect lane (logins go one at a time: a login can block other SDK work).
  * @returns {Promise<{ userId: number, why: string }>} userId -1 on failure, with the reason
  */
-const login = async ({ host, port, user, password, sn }, { tag, nvr = '', info = {}, priority = PRIORITY.NORMAL }) => {
+const login = async ({ host, port, user, password, sn, nat }, { tag, nvr = '', info = {}, priority = PRIORITY.NORMAL }) => {
   let err = null
   // Reachability first (probe.mjs): NET_SDK_Login against an NVR that does not answer at all
   // blocks inside the SDK for well over the watchdog's limit, and one such NVR then took the
@@ -218,16 +234,21 @@ const login = async ({ host, port, user, password, sn }, { tag, nvr = '', info =
   // that on its own as a hung SDK (see watchdog.mjs), and logoutLate below already tidies up
   // a login that succeeds after we gave up on it.
   const byAddress = () => sdkCallT({ nvr, tag, mayBlock: true, onLate: logoutLate(tag, nvr) }, NET_SDK.Login, host, Number(port), user, password, info)
-  // by serial number: the plain serial registered with the add-on, the SDK pointed at the P2P server
-  // (the first time in this process; the record's own host and port are not used), then the login
+  // NAT 1.0 (older P2P): the server (nat.eyeincloud.com:80) goes straight into LoginEx with connect
+  // type 1; the SDK fetches a server list over HTTP and UDT-connects. No SetNat2Addr and no plain-serial
+  // add-on -- this path sends the serial correctly -- so it coexists with NAT 2.0 in the same process.
+  const byNat1 = () => sdkCallT({ nvr, tag, mayBlock: true, onLate: logoutLate(tag, nvr) }, NET_SDK.LoginEx, NAT1_SERVER.host, NAT1_SERVER.port, user, password, info, NET_SDK_CONNECT_NAT, sn)
+  // NAT 2.0 by serial number: the plain serial registered with the add-on, the SDK pointed at the P2P
+  // server (the first time in this process; the record's own host and port are not used), then the login
   const bySerial = async () => {
     plainSerial(sn)
     const { host: p2pHost, port: p2pPort } = P2P_SERVER
     if (!(await setP2pServer(p2pHost, p2pPort, { nvr, tag: `${tag}: P2P server` }))) throw new Error(`the SDK did not accept the P2P server ${p2pHost}:${p2pPort}`)
     return sdkCallT({ nvr, tag, mayBlock: true, onLate: logoutLate(tag, nvr) }, NET_SDK.LoginEx, p2pHost, p2pPort, user, password, info, NET_SDK_CONNECT_NAT20, sn)
   }
+  const bySerialAny = Number(nat) === 1 ? byNat1 : bySerial
   const userId = await connectLane
-    .run(sn ? bySerial : byAddress, { priority })
+    .run(sn ? bySerialAny : byAddress, { priority })
     .catch((e) => {
       err = e
       return -1
@@ -240,11 +261,11 @@ const login = async ({ host, port, user, password, sn }, { tag, nvr = '', info =
 }
 
 /** Logs in once to check an address and login; returns the model or throws with the reason. */
-export const testLogin = async ({ host, port, user, password, sn }) => {
+export const testLogin = async ({ host, port, user, password, sn, nat }) => {
   await initSdk()
   const info = {}
   const where = whereIs({ host, port, sn })
-  const { userId, why } = await login({ host, port, user, password, sn }, { tag: `test login ${where}`, info })
+  const { userId, why } = await login({ host, port, user, password, sn, nat }, { tag: `test login ${where}`, info })
   if (userId < 0) {
     console.warn(`[admin] test login to ${where} failed: ${why}`)
     throw new Error(why)
@@ -547,13 +568,13 @@ export class Nvr {
       await initSdk()
       for (let delay = RETRY_MIN_MS; !this.stopped; delay = Math.min(delay * 2, RETRY_MAX_MS)) {
         this.status = this.status === 'offline' ? 'offline' : 'connecting'
-        const { host, port, user, password, sn } = this.cfg
+        const { host, port, user, password, sn, nat } = this.cfg
         const where = whereIs(this.cfg)
         const info = {}
         const t0 = Date.now()
         // a login to an NVR that doesn't answer holds the connect lane for ~15 s: let others go first
         const priority = this.status === 'offline' ? PRIORITY.LOW : PRIORITY.NORMAL
-        const { userId, why } = await login({ host, port, user, password, sn }, { tag: 'login', nvr: this.id, info, priority })
+        const { userId, why } = await login({ host, port, user, password, sn, nat }, { tag: 'login', nvr: this.id, info, priority })
         if (this.stopped) {
           if (userId >= 0) logoutLate('login', this.id)(userId)
           return

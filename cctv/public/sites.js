@@ -182,6 +182,7 @@ function openForm(nvr = null, prefill = {}) {
   $('f-host').value = p2p ? '' : nvr?.host ?? prefill.host ?? ''
   $('f-port').value = p2p ? 6036 : nvr?.port ?? prefill.port ?? 6036
   $('f-sn').value = nvr?.sn ?? ''
+  $('f-nat').value = String(nvr?.nat === 1 ? 1 : 2) // default NAT 2.0
   $('f-remote').checked = nvr ? Boolean(nvr.remote) : Boolean(prefill.remote)
   showVia()
   $('f-user').value = nvr?.user ?? 'admin'
@@ -210,7 +211,7 @@ form.addEventListener('submit', async (e) => {
   }
   // by serial number no address or port is sent (the server uses its P2P server); sn '' switches an
   // NVR back to its address
-  if (p2p) body.sn = $('f-sn').value.trim().toUpperCase()
+  if (p2p) Object.assign(body, { sn: $('f-sn').value.trim().toUpperCase(), nat: Number($('f-nat').value) === 1 ? 1 : 2 })
   else Object.assign(body, { sn: '', host: $('f-host').value, port: Number($('f-port').value) })
   if ($('f-password').value) body.password = $('f-password').value
   formError.hidden = true

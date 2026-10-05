@@ -69,7 +69,13 @@
         <label>Serial number (cloud ID)
           <input id="f-sn" name="sn" maxlength="64" pattern=" *[A-Za-z0-9]{6,64} *" title="Letters and digits, as printed on the NVR" placeholder="as on the NVR's label or QR code" autocapitalize="characters" spellcheck="false" />
         </label>
-        <small class="st-help">Type the NVR’s serial number, which is its cloud ID: it is printed on the label on the NVR and shown on its P2P page (next to the QR code) in the network settings. No address or port is needed: the server finds the NVR through the P2P cloud these NVRs are sold with (Eye in Cloud, Provision, TVT), and the serial number and the login pass through that cloud. P2P must be switched on in the NVR’s network settings. Video is slower than on the local network, so the full-size view stays on the sub-stream.</small>
+        <label>P2P version
+          <select id="f-nat" name="nat">
+            <option value="2" selected>NAT 2.0 (newer — device.eyeincloud.com)</option>
+            <option value="1">NAT 1.0 (older — nat.eyeincloud.com)</option>
+          </select>
+        </label>
+        <small class="st-help">Type the NVR’s serial number, which is its cloud ID: it is printed on the label on the NVR and shown on its P2P page (next to the QR code) in the network settings. No address or port is needed: the server finds the NVR through the P2P cloud these NVRs are sold with (Eye in Cloud, Provision, TVT), and the serial number and the login pass through that cloud. P2P must be switched on in the NVR’s network settings. Leave <b>P2P version</b> on NAT 2.0 unless the NVR’s own P2P page shows it is on <b>NAT 1.0 (nat.eyeincloud.com)</b> — older firmware. Video is slower than on the local network, so the full-size view stays on the sub-stream.</small>
       </div>
       <label class="st-check"><input id="f-remote" type="checkbox" /> At another site (VPN or a slow link): the full-size view stays on the sub-stream</label>
       <label>NVR user name

@@ -24,6 +24,7 @@ const publicView = (cfg, vpn = { sites: [] }) => {
     host: cfg.host,
     port: cfg.port,
     sn: cfg.sn || '',
+    nat: cfg.sn ? (Number(cfg.nat) === 1 ? 1 : 2) : null, // P2P generation: 1 = NAT 1.0, 2 = NAT 2.0
     via: cfg.sn ? 'p2p' : site ? 'vpn' : 'lan',
     remote: Boolean(cfg.sn || cfg.remote),
     // reached through the VPN hub (deploy/vpn): which site, and whether its tunnel is up
@@ -106,7 +107,7 @@ export async function handleAdmin(method, pathname, readJson) {
         if (!next.sn) delete next.sn
         if (body.password) next.password = String(body.password)
         if (next.sn && cfg.nvrs.some((n) => n.id !== id && n.sn === next.sn)) throw new HttpError(409, `${whereIs(next)} is already in the list`)
-        const connectionChanged = ['host', 'port', 'user', 'password', 'sn'].some((k) => (next[k] ?? '') !== (current[k] ?? ''))
+        const connectionChanged = ['host', 'port', 'user', 'password', 'sn', 'nat'].some((k) => (next[k] ?? '') !== (current[k] ?? ''))
         const model = connectionChanged ? await tested(next, body.skipTest) : ''
         writeConfig({ nvrs: readConfig().nvrs.map((n) => (n.id === id ? next : n)) })
         console.log(`[admin] updated ${id}${connectionChanged ? ' (connection settings)' : ''}`)
