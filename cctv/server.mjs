@@ -105,6 +105,7 @@ import { pool as playbackTranscodes } from './transcode.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
 import { ADMIN_LINKS_PATH, BODY_LIMIT as LINKS_BODY_LIMIT, LINKS_PATH, handleCameraLinks } from './camera-links.mjs'
+import { handleTile } from './map-tiles.mjs'
 import { LIVE_WORKER, P2P_ENABLED, P2P_SERVER, REC_DB, allCameras, nvrs, readConfig, recIndex, startNvrs, stopNvrs } from './nvrs.mjs'
 import { housekeepingAlarms, housekeepingCandidates, runHousekeeping } from './housekeeping.mjs'
 import { playbackApi } from './playback.mjs'
@@ -624,6 +625,11 @@ const handleRequest = async (req, res) => {
     res.writeHead(302, { location: '/login.html', ...SECURITY_HEADERS }).end()
     return
   }
+
+  // Map tiles: signed in is enough. The browser asks this server for them, not OpenStreetMap/ArcGIS
+  // itself, so a viewing PC with no internet still gets maps; the server fetches and caches each
+  // tile once (map-tiles.mjs).
+  if (await handleTile(pathname, res, SECURITY_HEADERS)) return
 
   // Who is asking, in the one shape the rights and audit layers accept. Authority comes from the
   // session and nowhere else: a user named in a request body says whose settings are being

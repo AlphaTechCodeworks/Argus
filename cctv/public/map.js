@@ -55,12 +55,15 @@ import {
 const $ = (id) => document.getElementById(id)
 const LAYERS = {
   street: {
-    url: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`,
+    // served by this server (map-tiles.mjs), which fetches from OpenStreetMap and caches, so a
+    // viewing PC with no internet still gets maps. The proxy maps street to tile.openstreetmap.org.
+    url: (z, x, y) => `/api/tiles/street/${z}/${x}/${y}`,
     maxZoom: 19,
     credit: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors'
   },
   satellite: {
-    url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`,
+    // served by this server; the proxy maps satellite to ArcGIS World_Imagery (its z/y/x order)
+    url: (z, x, y) => `/api/tiles/satellite/${z}/${x}/${y}`,
     maxZoom: 19,
     credit: 'Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community'
   }
