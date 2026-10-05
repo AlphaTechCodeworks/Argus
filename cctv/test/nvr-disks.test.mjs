@@ -9,7 +9,7 @@
 // unrecognised answer has to end as "not available" rather than as a wrong-but-confident number.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { diskState, makeNvrStorage, parseDate, parseDiskStatus, parseStorageDevInfo, parseSmart, parseSystemCaps, readStorage, sizeBytes, smartRequest } from '../nvr-disks.mjs'
+import { FRESH_MS, STALE_OK_MS, carrySmart, diskState, makeNvrStorage, parseDate, parseDiskStatus, parseStorageDevInfo, parseSmart, parseSystemCaps, readStorage, sizeBytes, smartRequest } from '../nvr-disks.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -266,6 +266,64 @@ const at = (t) => () => t
   const q = async (_n, url) => (url === 'queryDiskStatus' ? DS : url === 'queryStorageDevInfo' ? SDI : url === 'queryDiskSmartInfo' ? NONSENSE : '<?xml version="1.0"?><response><status>success</status><content></content></response>')
   const r = await readStorage({ id: 'x', name: 'X', online: true }, q, () => 0)
   check('an unreadable SMART reply does not downgrade a disk that is recording', r.disks[0].state === 'ok' && r.worst === 'ok', `${r.disks[0].state} / ${r.worst}`)
+}
+
+// ---- SMART carried forward, and the last good snapshot kept while fresh reads fail over P2P --------
+// The bug this fixes: the per-disk queryDiskSmartInfo times out over the cloud often enough that a
+// disk read which otherwise worked would keep losing its SMART, and sometimes the whole read timed
+// out and blanked the panel -- "sometimes I'm not seeing the SMART results".
+{
+  const ID = '{DS1}'
+  const DS = `<?xml version="1.0"?><response cmdUrl="queryDiskStatus"><status>success</status><content type="list"><item id="${ID}"><diskStatus>read/write</diskStatus></item></content></response>`
+  const SDI = `<?xml version="1.0"?><response cmdUrl="queryStorageDevInfo"><status>success</status><content><diskList type="list"><itemType><size unit="MB"></size></itemType><item id="${ID}"><slotIndex>1</slotIndex><size>11444224</size><freeSpace>0</freeSpace><recStartDate>2026-09-10</recStartDate><recEndDate>2026-09-25</recEndDate></item></diskList></content></response>`
+  const SMART_OK = `<?xml version="1.0"?><response cmdUrl="queryDiskSmartInfo"><status>success</status><content><id>${ID}</id><diskStatus>good</diskStatus><temperature>30</temperature><powerOnDays>400</powerOnDays><smartItems type="list"><item id="194"><value>65</value><worstValue>60</worstValue><threshold>0</threshold><rawValue>30</rawValue><type>Oldage</type><smartStatus>normal</smartStatus></item></smartItems></content></response>`
+  const SMART_FAIL = '<?xml version="1.0"?><response cmdUrl="queryDiskSmartInfo"><status>fail</status><errorCode>536870923</errorCode></response>'
+  const EMPTY = '<?xml version="1.0"?><response><status>success</status><content></content></response>'
+  const ALL_FAIL = '<?xml version="1.0"?><response><status>fail</status><errorCode>1</errorCode></response>'
+  let smartXml = SMART_OK
+  let allFail = false
+  let now = T0
+  const q = async (_n, url) => {
+    if (allFail) return ALL_FAIL
+    if (url === 'queryDiskStatus') return DS
+    if (url === 'queryStorageDevInfo') return SDI
+    if (url === 'queryDiskSmartInfo') return smartXml
+    return EMPTY
+  }
+  const store = makeNvrStorage({ listNvrs: () => [nvr], query: q, now: () => now, log: () => {} })
+
+  await store.refresh()
+  const first = store.get('nvr1')
+  check('SMART is read on a good read', first?.disks?.[0]?.smart != null && first.disks[0].smartAt === first.at)
+  const smartAt0 = first.disks[0].smartAt
+
+  smartXml = SMART_FAIL // the disk list is still fine, only queryDiskSmartInfo fails now
+  now = T0 + FRESH_MS + 1
+  await store.refresh()
+  const second = store.get('nvr1')
+  check('SMART is carried forward when its query fails', second?.available === true && second.disks[0].smart != null)
+  check('  it keeps the time it was actually read, not now', second.disks[0].smartAt === smartAt0)
+  check('  the read itself is not marked stale (the disk list was fresh)', !second.stale)
+
+  allFail = true // now the whole read fails
+  now = T0 + 2 * FRESH_MS + 2
+  await store.refresh()
+  const third = store.get('nvr1')
+  check('a failed read falls back to the last good, marked stale', third?.available === true && third.stale === true && third.disks[0].smart != null)
+
+  now = T0 + FRESH_MS + STALE_OK_MS + 2 // older than staleOkMs past the last good read
+  check('beyond staleOkMs the stale snapshot is dropped', store.get('nvr1')?.available !== true)
+}
+
+// carrySmart on its own: fills only the gaps, dates what it carries, and lowers a state but never raises it
+{
+  const prev = { available: true, at: 1000, disks: [{ id: 'A', state: 'ok', smart: { state: 'warn' } }, { id: 'B', state: 'ok', smart: { state: 'ok' } }] }
+  const fresh = { available: true, at: 5000, disks: [{ id: 'A', state: 'ok' /* smart lost */ }, { id: 'B', state: 'ok', smart: { state: 'ok' } }] }
+  const out = carrySmart(prev, fresh)
+  check('carrySmart: a disk that lost its SMART gets the last one', out.disks[0].smart?.state === 'warn' && out.disks[0].smartAt === 1000)
+  check('carrySmart: a disk with fresh SMART is dated now and left alone', out.disks[1].smartAt === 5000)
+  check('carrySmart: a carried warn lowers the disk state', out.disks[0].state === 'warn')
+  check('carrySmart: an unavailable fresh read is returned untouched', carrySmart(prev, { available: false }).available === false)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

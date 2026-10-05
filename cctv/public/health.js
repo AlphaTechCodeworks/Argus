@@ -158,12 +158,18 @@ function nvrPanel(n, mine, nowMs) {
     // The drive's own SMART verdict. "read/write" only says the NVR is still using the disk; this
     // is the disk's own opinion of itself, and it is the earlier warning of the two.
     const s = disk.smart
+    // The reading was kept from an earlier poll when this one's queryDiskSmartInfo did not come back
+    // over P2P (nvr-disks.mjs carrySmart); say so and how old, so it is never read as live.
+    const carried = s && (st?.stale || (Number.isFinite(disk.smartAt) && Number.isFinite(st?.at) && disk.smartAt < st.at - 60_000))
+    const ageNote = !carried ? null : !Number.isFinite(disk.smartAt) ? 'earlier reading'
+      : (() => { const m = Math.max(0, Math.round((Date.now() - disk.smartAt) / 60_000)); return `as of ${m < 60 ? `${m} min` : `${Math.round(m / 60)} h`} ago` })()
     const health = !s
       ? NOT_AVAILABLE
       : [
           s.verdict === 'lowHealth' ? 'Low health' : s.verdict ? s.verdict[0].toUpperCase() + s.verdict.slice(1) : 'Unknown',
           Number.isFinite(s.temperature) ? `${s.temperature} °C` : null,
-          Number.isFinite(s.powerOnDays) ? `${s.powerOnDays} days on` : null
+          Number.isFinite(s.powerOnDays) ? `${s.powerOnDays} days on` : null,
+          ageNote
         ].filter(Boolean).join(' · ')
     return {
       name: disk.name,

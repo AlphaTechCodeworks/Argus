@@ -38,6 +38,9 @@ export const FRESH_MS = 10 * 60_000
 export const RETRY_MS = 2 * 60_000
 /** Nothing here is worth holding a lane for: give up well inside the SDK's own 20 s budget. */
 export const QUERY_MS = 8000
+/** How long the last good disk/SMART snapshot keeps being shown (marked stale) while fresh reads fail
+ *  over P2P. SMART changes slowly, so an hour-old reading with its age beats a blank panel. */
+export const STALE_OK_MS = 60 * 60_000
 
 const OUT_BYTES = 64 * 1024 // a disk list is a few hundred bytes per disk; system caps ~2 kB
 
@@ -631,8 +634,33 @@ export async function readStorage(nvr, query, now, reach) {
  * @param {(nvr, url, xml, tag) => Promise<string>} [o.query] injected by the tests; the default
  *   sends the command over the NVR's logged-in SDK connection.
  */
-export function makeNvrStorage({ listNvrs, query, reach, now = Date.now, freshMs = FRESH_MS, retryMs = RETRY_MS, log = console.warn } = {}) {
-  const entries = new Map() // nvr id -> entry from readStorage
+/**
+ * Keep the last-good SMART for any disk whose fresh read did not get it. queryDiskSmartInfo times out
+ * over P2P often enough that an otherwise good disk read would keep losing its SMART; SMART changes
+ * slowly, so the last reading (with its age) is far better than a blank. Matched by disk id; `smartAt`
+ * says when the SMART shown was actually read. Mutates and returns `fresh`.
+ */
+export function carrySmart(prevGood, fresh) {
+  if (!fresh?.available || !Array.isArray(fresh.disks)) return fresh
+  const prevById = prevGood?.available && Array.isArray(prevGood.disks)
+    ? new Map(prevGood.disks.filter((d) => d.id).map((d) => [d.id, d]))
+    : new Map()
+  for (const d of fresh.disks) {
+    if (d.smart) { d.smartAt = fresh.at; continue } // read just now
+    const p = d.id ? prevById.get(d.id) : null
+    if (p?.smart) {
+      d.smart = p.smart
+      d.smartAt = p.smartAt ?? prevGood.at // when it was actually read
+      const sv = d.smart.state // a carried warn/bad still lowers the disk's state, never raises it
+      if ((sv === 'warn' || sv === 'bad') && RANK[sv] < RANK[d.state]) d.state = sv
+    }
+  }
+  return fresh
+}
+
+export function makeNvrStorage({ listNvrs, query, reach, now = Date.now, freshMs = FRESH_MS, retryMs = RETRY_MS, staleOkMs = STALE_OK_MS, log = console.warn } = {}) {
+  const entries = new Map() // nvr id -> entry from readStorage (the last read; drives the schedule)
+  const lastGood = new Map() // nvr id -> last AVAILABLE snapshot, shown (stale) while fresh reads fail
   const running = new Map() // nvr id -> promise, so two ticks never ask the same NVR at once
 
   const send = query ?? sdkQuery
@@ -653,7 +681,15 @@ export function makeNvrStorage({ listNvrs, query, reach, now = Date.now, freshMs
     ])
     const p = timed
       .then((e) => {
-        entries.set(nvr.id, e)
+        // a fresh available read wins, but carries last-good SMART onto any disk whose SMART query
+        // failed; an unavailable read is stored for the schedule, and get() falls back to lastGood
+        if (e?.available) {
+          const merged = carrySmart(lastGood.get(nvr.id), e)
+          entries.set(nvr.id, merged)
+          lastGood.set(nvr.id, merged)
+        } else {
+          entries.set(nvr.id, e)
+        }
       })
       .catch((e) => {
         // readStorage promises not to throw; if that promise is ever broken, the health poll
@@ -667,8 +703,19 @@ export function makeNvrStorage({ listNvrs, query, reach, now = Date.now, freshMs
   }
 
   return {
-    /** The last snapshot for an NVR, or null if it has never been read. Never blocks. */
-    get: (id) => entries.get(id) ?? null,
+    /**
+     * The last snapshot for an NVR, or null if it has never been read. Never blocks. When the most
+     * recent read failed (a P2P timeout, the NVR briefly unreachable) the last good snapshot is shown
+     * instead, marked `stale`, until it is older than staleOkMs -- so SMART and disk health do not
+     * blink out on a single bad read.
+     */
+    get: (id) => {
+      const e = entries.get(id) ?? null
+      if (e?.available) return e
+      const good = lastGood.get(id)
+      if (good && now() - good.at < staleOkMs) return { ...good, stale: true, why: e?.why ?? good.why }
+      return e
+    },
     /** Asks every NVR that is due. Resolves when this round is done; safe to call and ignore. */
     async refresh() {
       let list = []
