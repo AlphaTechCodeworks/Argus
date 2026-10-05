@@ -83,6 +83,13 @@ const names = (list) => list.map((c) => c.name).join(', ')
   check('  auto puts everything on one page', pageOf(twelve, 'auto').keys.length === 12 && pageOf(twelve, 'auto').pages === 1)
   check('  no cameras still gives one (empty) page', pageOf([], '2x2').pages === 1 && pageOf([], '2x2').keys.length === 0)
   check('layoutFor: a few cameras want 2x2, more want 3x3', layoutFor(1) === '2x2' && layoutFor(4) === '2x2' && layoutFor(5) === '3x3')
+
+  // bigger grids: the NxN name carries its own size, so slots and columns are read off it
+  check('slots: bigger grids read NxN off the name', slotsOf('4x4') === 16 && slotsOf('8x8') === 64 && slotsOf('15x15') === 225)
+  check('columns: bigger grids are N wide', colsOf('5x5', 99) === 5 && colsOf('12x12', 1) === 12 && colsOf('15x15', 0) === 15)
+  check('paging: a 4x4 of twelve cameras is one page (16 slots)', pageOf(twelve, '4x4').pages === 1 && pageOf(twelve, '4x4').keys.length === 12)
+  check('layoutFor: large counts pick a large grid', layoutFor(16) === '4x4' && layoutFor(64) === '8x8' && layoutFor(100) === '10x10' && layoutFor(225) === '15x15' && layoutFor(999) === '15x15')
+  check('a 15x15 view may hold up to 225 cameras', checkView({ id: 'big', name: 'Everything', cameras: Array.from({ length: 225 }, (_, i) => `nvr-1/${i}`), layout: '15x15' }).ok)
 }
 
 // ---- saved views ---------------------------------------------------------------------------------

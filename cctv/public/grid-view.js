@@ -24,11 +24,12 @@
 /** A camera key, "<nvr id>/<channel>" — the same rule as wall-clock.js and user-prefs.mjs. */
 export const KEY_RE = /^[A-Za-z0-9._-]{1,64}\/\d{1,4}$/
 
-/** The grids offered. 'auto' is the old behaviour: as many columns as fit the space. */
-export const LAYOUTS = Object.freeze(['auto', '2x2', '3x3'])
+/** The grids offered. 'auto' is the old behaviour: as many columns as fit the space. The rest are
+ *  NxN; slotsOf/colsOf read the number off the name, so adding one here needs no other change. */
+export const LAYOUTS = Object.freeze(['auto', '2x2', '3x3', '4x4', '5x5', '6x6', '8x8', '10x10', '12x12', '15x15'])
 
-/** The most cameras one saved view may hold. More than a 3x3 page, so a view can be paged through. */
-export const MAX_VIEW_CAMERAS = 16
+/** The most cameras one saved view may hold. Enough to fill the largest grid (15x15 = 225). */
+export const MAX_VIEW_CAMERAS = 256
 /** A view's name is a line in a menu, not a paragraph. */
 export const MAX_VIEW_NAME = 60
 /** Enough views for a working site; a guard against a runaway client filling the preferences file. */
@@ -102,15 +103,15 @@ export function groupCameras(cameras) {
 
 /** How many tiles a layout shows at once; 0 for 'auto', which shows everything chosen. */
 export function slotsOf(layout) {
-  if (layout === '2x2') return 4
-  if (layout === '3x3') return 9
+  const m = /^(\d+)x(\d+)$/.exec(String(layout))
+  if (m) return Number(m[1]) * Number(m[2])
   return 0
 }
 
 /** The column count for a layout, for the CSS variable the grid is drawn with. */
 export function colsOf(layout, count) {
-  if (layout === '2x2') return 2
-  if (layout === '3x3') return 3
+  const m = /^(\d+)x(\d+)$/.exec(String(layout))
+  if (m) return Number(m[1])
   return Math.max(1, Math.ceil(Math.sqrt(Math.max(1, num(count, 1)))))
 }
 
@@ -135,7 +136,15 @@ export function pageOf(keys, layout, page = 0) {
 /** A sensible layout for a number of cameras, for a view saved before layouts existed. */
 export function layoutFor(count) {
   const n = Math.max(0, Math.floor(num(count, 0)))
-  return n <= 4 ? '2x2' : '3x3'
+  if (n <= 4) return '2x2'
+  if (n <= 9) return '3x3'
+  if (n <= 16) return '4x4'
+  if (n <= 25) return '5x5'
+  if (n <= 36) return '6x6'
+  if (n <= 64) return '8x8'
+  if (n <= 100) return '10x10'
+  if (n <= 144) return '12x12'
+  return '15x15'
 }
 
 // ---- saved views -----------------------------------------------------------------------------
