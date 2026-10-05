@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <!-- installable: Add to Home Screen opens Argus full screen, without the browser's bars -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Argus" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · Sites</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="sites-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+    </div>
+    <div class="controls">
+      <button id="find" type="button">Find NVRs</button>
+      <button id="add" type="button" class="st-primary">+ Add NVR</button>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="st-main">
+    <p id="notice" class="st-notice" hidden></p>
+    <section id="vpn" class="st-vpn" hidden aria-labelledby="vpn-title"></section>
+    <div id="sites"></div>
+  </main>
+
+  <dialog id="dialog" class="st-dialog">
+    <form id="form" method="dialog" autocomplete="off">
+      <h2 id="formTitle">Add NVR</h2>
+      <label>Site
+        <input id="f-site" name="site" list="siteNames" required maxlength="64" placeholder="e.g. North Yard" />
+        <datalist id="siteNames"></datalist>
+      </label>
+      <label>NVR name
+        <input id="f-name" name="name" required maxlength="64" placeholder="e.g. Gate NVR" />
+      </label>
+      <fieldset class="st-connect">
+        <legend>Connect by</legend>
+        <label class="st-check"><input type="radio" name="via" id="f-via-lan" value="lan" checked /> IP address (this network, or port forwarding)</label>
+        <label class="st-check"><input type="radio" name="via" id="f-via-p2p" value="p2p" /> Serial number (cloud ID), through the P2P cloud (NVRs at other sites)</label>
+      </fieldset>
+      <div class="st-row" id="f-lan">
+        <label class="st-grow">IP address
+          <input id="f-host" name="host" required maxlength="253" placeholder="192.168.0.x" pattern="[A-Za-z0-9.\-]+" />
+        </label>
+        <label class="st-port">Port
+          <input id="f-port" name="port" type="number" min="1" max="65535" value="6036" required />
+        </label>
+      </div>
+      <div id="f-p2p" hidden>
+        <label>Serial number (cloud ID)
+          <input id="f-sn" name="sn" maxlength="64" pattern=" *[A-Za-z0-9]{6,64} *" title="Letters and digits, as printed on the NVR" placeholder="as on the NVR's label or QR code" autocapitalize="characters" spellcheck="false" />
+        </label>
+        <label>P2P version
+          <select id="f-nat" name="nat">
+            <option value="2" selected>NAT 2.0 (newer — device.eyeincloud.com)</option>
+            <option value="1">NAT 1.0 (older — nat.eyeincloud.com)</option>
+          </select>
+        </label>
+        <small class="st-help">Type the NVR’s serial number, which is its cloud ID: it is printed on the label on the NVR and shown on its P2P page (next to the QR code) in the network settings. No address or port is needed: the server finds the NVR through the P2P cloud these NVRs are sold with (Eye in Cloud, Provision, TVT), and the serial number and the login pass through that cloud. P2P must be switched on in the NVR’s network settings. Leave <b>P2P version</b> on NAT 2.0 unless the NVR’s own P2P page shows it is on <b>NAT 1.0 (nat.eyeincloud.com)</b> — older firmware. Video is slower than on the local network, so the full-size view stays on the sub-stream.</small>
+      </div>
+      <label class="st-check"><input id="f-remote" type="checkbox" /> At another site (VPN or a slow link): the full-size view stays on the sub-stream</label>
+      <label>NVR user name
+        <input id="f-user" name="user" required maxlength="64" value="admin" autocomplete="off" />
+      </label>
+      <label>NVR password
+        <input id="f-password" name="password" type="password" autocomplete="new-password" />
+        <small id="f-password-hint">The NVR's own login. It is tested before saving and never shown again.</small>
+      </label>
+      <label class="st-check"><input id="f-skip" type="checkbox" /> Save even if the NVR can't be reached right now</label>
+      <p id="formError" class="st-error" role="alert" hidden></p>
+      <div class="st-actions">
+        <button type="button" id="cancel">Cancel</button>
+        <button type="submit" id="save" class="st-primary">Test &amp; save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="discover" class="st-dialog st-discover" aria-labelledby="d-title">
+    <form id="d-form" method="dialog" autocomplete="off">
+      <h2 id="d-title">Find NVRs on the network</h2>
+      <p class="st-help">Looks for TVT NVRs two ways: TVT’s own network search (UDP port 23456) and a check of every address below for an NVR answering on its SDK port. Nothing is logged in to or changed.</p>
+      <div class="st-row">
+        <label class="st-grow">Addresses to check
+          <input id="d-ranges" required maxlength="400" placeholder="192.168.0.0/24, 192.168.2.10-200" />
+        </label>
+        <label class="st-port">Port
+          <input id="d-port" type="number" min="1" max="65535" value="6036" required />
+        </label>
+      </div>
+      <small>Networks (192.168.0.0/24, as large as /22), ranges (192.168.2.10-200) or single addresses, up to 1024 in all.</small>
+      <div class="st-actions st-actions-start">
+        <button type="submit" id="d-search" class="st-primary">Search</button>
+        <span id="d-status" class="st-meta" role="status"></span>
+      </div>
+      <div id="d-notes" role="status"></div>
+      <ul id="d-results" class="st-found"></ul>
+      <div class="st-actions">
+        <button type="button" id="d-close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="subs" class="st-dialog st-discover" aria-labelledby="s-title">
+    <form id="s-form" method="dialog">
+      <h2 id="s-title">Sub-streams</h2>
+      <p class="st-help">Live grids play each camera’s sub-stream. Browsers on PCs without H.265 hardware decoding can only play H.264, so H.265 sub-streams stay black there. This switches the chosen cameras’ sub-stream to H.264 on the camera itself; main streams and recordings are not changed. You can undo it here.</p>
+      <p id="s-status" class="st-meta" role="status"></p>
+      <p id="s-error" class="st-error" role="alert" hidden></p>
+      <ul id="s-list" class="st-found st-subs"></ul>
+      <fieldset class="st-bitrate">
+        <legend>Bitrate after switching</legend>
+        <label class="st-check"><input type="radio" name="s-bitrate" value="match" checked /> Raise where needed to keep the picture quality (recommended: H.264 needs about 1.8× the bitrate of H.265)</label>
+        <label class="st-check"><input type="radio" name="s-bitrate" value="keep" /> Keep the current bitrate</label>
+      </fieldset>
+      <div class="st-actions st-actions-start">
+        <button type="button" id="s-all">Select all H.265</button>
+        <button type="submit" id="s-apply" class="st-primary" disabled>Switch to H.264</button>
+      </div>
+      <div class="st-actions">
+        <button type="button" id="s-close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="shell.js"></script>
+  <script type="module" src="sites.js"></script>
+  <script type="module" src="alert-banner.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>

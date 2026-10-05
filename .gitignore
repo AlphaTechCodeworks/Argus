@@ -44,3 +44,11 @@ coverage
 
 ## Quokka configuration
 .quokka
+data/
+dist/
+
+## CCTV: anything holding NVR credentials, recordings or camera images
+data.bak-*/
+backups/
+snapshots/
+*.tgz

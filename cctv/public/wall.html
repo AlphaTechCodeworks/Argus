@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <!-- installable: Add to Home Screen opens Argus full screen, without the browser's bars -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Argus" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · Many cameras</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="wall-page">
+  <header>
+    <div class="pb-mode" role="group" aria-label="View">
+      <button type="button" id="modeOne" aria-pressed="false">One camera</button>
+      <button type="button" aria-pressed="true">Many cameras</button>
+    </div>
+    <div class="brand">
+      <h1>CCTV</h1>
+    </div>
+    <div class="controls">
+      <button id="pickCameras" type="button" title="Choose the cameras on the wall">Cameras…</button>
+      <label>View
+        <select id="viewSel" title="A saved set of cameras, kept with your account">
+          <option value="">(not saved)</option>
+        </select>
+      </label>
+      <button id="saveView" type="button" title="Save these cameras and this grid as a named view">Save view…</button>
+      <button id="deleteView" type="button" title="Delete the saved view shown" hidden>Delete view</button>
+      <label>Grid
+        <select id="layout" title="A fixed grid streams only the cameras on the page; the rest wait on the next page">
+          <option value="2x2">2 × 2</option>
+          <option value="3x3">3 × 3</option>
+          <option value="4x4">4 × 4</option>
+          <option value="5x5">5 × 5</option>
+          <option value="6x6">6 × 6</option>
+          <option value="8x8">8 × 8</option>
+          <option value="10x10">10 × 10</option>
+          <option value="12x12">12 × 12</option>
+          <option value="auto">Fit them all</option>
+        </select>
+      </label>
+      <span class="wall-pager" id="pager" hidden>
+        <button id="pagePrev" type="button" aria-label="Previous page of cameras">◀</button>
+        <span id="pageLabel"></span>
+        <button id="pageNext" type="button" aria-label="Next page of cameras">▶</button>
+      </span>
+      <label>Date <input id="date" type="date" /></label>
+      <label>Quality
+        <select id="quality" title="Sub-streams are much lighter on this PC; the server's own recordings ask nothing of the NVR">
+          <option value="sd">SD (NVR sub-streams)</option>
+          <option value="hd">HD (server recordings)</option>
+        </select>
+      </label>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="wall-main">
+    <p class="wall-load" id="loadNote" role="status"></p>
+    <div class="wall-grid" id="grid" aria-label="Every chosen camera at one moment"></div>
+    <p class="wall-empty" id="empty" hidden>No cameras on the wall yet. Choose some with <b>Cameras…</b>.</p>
+  </main>
+
+  <section class="pb-bar wall-bar" aria-label="Wall playback controls">
+    <!-- 1. the one moment every tile is showing -->
+    <div class="pb-row pb-when">
+      <button id="dayPrev" type="button" title="The day before" aria-label="Previous day">◀</button>
+      <span id="wallDate" class="pb-date"></span>
+      <button id="dayNext" type="button" title="The day after" aria-label="Next day">▶</button>
+      <button id="clock" type="button" class="pb-clock" title="Click or press T to type a time">--:--:--</button>
+      <input id="clockInput" class="pb-clock-input" type="text" hidden inputmode="numeric"
+             aria-label="Go to time" placeholder="hh:mm:ss" />
+      <span id="spanLabel" class="pb-span" title="How much of the day the timeline shows"></span>
+      <div class="pb-zoom" role="group" aria-label="Zoom">
+        <button type="button" data-span="86400000">24h</button>
+        <button type="button" data-span="3600000">1h</button>
+        <button type="button" data-span="600000">10m</button>
+        <button type="button" data-span="60000">1m</button>
+      </div>
+      <button id="followBtn" type="button" aria-pressed="true" title="Keep the playhead on screen while it plays">Follow</button>
+      <span id="coverage" class="wall-coverage" title="How many of the cameras have footage at this moment"></span>
+      <span id="skewHint" class="pb-skew"></span>
+    </div>
+
+    <!-- 2. a lane per camera: where each one has footage, and where the gaps are -->
+    <div class="wall-lanes" id="lanes"
+         aria-label="Timeline, one lane per camera: click to jump, scroll to zoom, drag to pan">
+      <div class="wall-lane-names" id="laneNames" aria-hidden="true"></div>
+      <div class="wall-lane-track" id="laneTrack">
+        <div class="wall-lane-rows" id="laneRows"></div>
+        <div class="pb-now" id="tlNow" hidden></div>
+        <div class="pb-playhead" id="playhead" hidden></div>
+      </div>
+    </div>
+
+    <!-- 3. -->
+    <div class="wall-ticks-row">
+      <div class="wall-lane-names" aria-hidden="true"></div>
+      <div class="pb-ticks" id="ticks" aria-hidden="true"></div>
+    </div>
+
+    <!-- 4. one set of controls driving every tile -->
+    <!-- one set of controls driving every tile: the everyday ones, the rest under More (as on
+         the single-camera view; every id kept, so wall.js and the shortcuts are unchanged) -->
+    <div class="pb-row pb-controls pb-simple">
+      <div class="pb-transport">
+        <button id="back" type="button" title="Back 30 s (←)" aria-label="Back 30 seconds">−30s</button>
+        <button id="play" type="button" class="pb-play" title="Play / pause (Space)" aria-label="Play">▶</button>
+        <button id="fwd" type="button" title="Forward 30 s (→)" aria-label="Forward 30 seconds">+30s</button>
+        <button id="speedCycle" type="button" class="pb-speed-cycle" title="Speed: click to go faster">1×</button>
+      </div>
+      <div class="pb-tools">
+        <button id="exportView" type="button" title="Export every camera in this view over the stretch on screen">Export…</button>
+        <button id="moreBtn" type="button" class="pb-icon" title="More controls" aria-label="More controls" aria-expanded="false" aria-controls="pbMore"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/></svg></button>
+      </div>
+    </div>
+    <div id="pbMore" class="pb-more" hidden>
+      <div class="pb-more-row"><span class="pb-more-label">Speed</span><div class="pb-speeds" id="speeds" role="group" aria-label="Speed"></div></div>
+      <div class="pb-more-row"><label>Lanes
+          <select id="laneMode" title="Show a lane for the one camera you are working on, or for every camera on this page">
+            <option value="all">All cameras in view</option>
+            <option value="one">This camera only</option>
+          </select>
+        </label></div>
+      <div class="pb-shuttle-row">
+      <input id="shuttle" class="pb-shuttle" type="range" min="-100" max="100" value="0" step="1"
+             aria-label="Shuttle: push away from the middle to play faster" />
+      <span id="shuttleLabel" class="pb-shuttle-label">paused</span>
+    </div>
+      <div class="pb-legend">
+      <span class="lg-rec"></span> the server has this recorded
+      <span class="lg-gap"></span> the server's recorder missed it
+      <span class="pb-hint">Every time on this page is <b>server time</b>, whatever each NVR's own clock says.</span>
+    </div>
+      <p class="pb-more-row"><span class="pb-hint" id="wallHint">Click a lane to jump · scroll to zoom · drag to pan · click a tile's name to open it on the playback page</span></p>
+    </div>
+  </section>
+
+  <dialog id="pickDlg" class="wall-pick">
+    <form method="dialog">
+      <h2>Cameras on the wall</h2>
+      <label class="wall-pick-search">Search
+        <input id="pickSearch" type="search" placeholder="name, NVR, site or channel" autocomplete="off" />
+      </label>
+      <p class="wall-pick-note" id="pickNote" role="status"></p>
+      <div class="wall-pick-list" id="pickList"></div>
+      <div class="pb-ex-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="button" id="pickSave" class="pb-primary">Show these</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="saveViewDlg" class="wall-pick">
+    <form method="dialog">
+      <h2>Save this view</h2>
+      <p class="wall-pick-note">The cameras chosen and the grid, kept with your account so they follow you to any screen.</p>
+      <label>Name <input id="viewName" type="text" maxlength="60" placeholder="Yard and gates" /></label>
+      <p class="pb-ex-msg" id="viewMsg" role="status"></p>
+      <div class="pb-ex-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="button" id="viewSave" class="pb-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="wallExportDlg" class="wall-pick">
+    <form method="dialog">
+      <h2 id="wallExTitle">Export</h2>
+      <p class="wall-pick-note">
+        The stretch of time below is the one the timeline is showing. Every camera ticked is exported
+        over it, as one job — the same export the playback page makes.
+      </p>
+      <p><label>From <input id="wallExFrom" type="text" inputmode="numeric" placeholder="hh:mm:ss" /></label>
+         <label>To <input id="wallExTo" type="text" inputmode="numeric" placeholder="hh:mm:ss" /></label>
+         <span id="wallExSpan" class="pb-hint"></span></p>
+      <div class="wall-pick-list" id="wallExCameras"></div>
+      <p>
+        <label><input type="radio" name="wallExFormat" value="pack" checked /> Evidence pack (signed)</label>
+        <label><input type="radio" name="wallExFormat" value="mp4" /> MP4</label>
+        <label><input type="radio" name="wallExFormat" value="stills" /> Stills</label>
+      </p>
+      <label>Name <input id="wallExName" type="text" maxlength="120" /></label>
+      <label>Notes <textarea id="wallExNotes" rows="2"></textarea></label>
+      <p class="pb-ex-msg" id="wallExMsg" role="status"></p>
+      <progress id="wallExProgress" max="100" value="0" hidden></progress>
+      <div class="pb-ex-actions">
+        <button type="submit" value="cancel">Close</button>
+        <button type="button" id="wallExStart" class="pb-primary">Start the export</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="shell.js"></script>
+  <script type="module" src="wall.js"></script>
+  <script type="module" src="alert-banner.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>

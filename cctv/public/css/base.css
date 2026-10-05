@@ -1,0 +1,10 @@
+/* The ground every page stands on: background, type, focus and scrollbars. Loaded after tokens and
+   before the old style.css, so pages not yet rebuilt still get their own rules on top. */
+html { background: var(--bg); }
+body { font: var(--fs-body)/1.45 var(--font); color: var(--text); background: var(--bg); }
+/* A focus ring only for the keyboard: a ring on every mouse click is the look of an unfinished
+   page, and none at all locks keyboard users out. */
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+:focus:not(:focus-visible) { outline: none; }
+* { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.visually-hidden { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

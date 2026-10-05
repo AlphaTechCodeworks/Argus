@@ -1,0 +1,516 @@
+{
+ "file": "set/nvr1-6.bin",
+ "name": "LCL Destuffing Door (normal)",
+ "camera": {
+  "ch": 6,
+  "name": "LCL Destuffing Door"
+ },
+ "nvr": "nvr1",
+ "profile": "normal",
+ "codec": "h265",
+ "W": 3200,
+ "H": 1800,
+ "pix_fmt": "yuv420p",
+ "color_range": "tv",
+ "color_space": "gbr",
+ "videoInfo": {
+  "width": 3200,
+  "height": 1800,
+  "fullRange": false,
+  "colourDesc": null,
+  "colourCodes": [
+   0,
+   0,
+   0
+  ],
+  "fps": 20
+ },
+ "mode": "planar",
+ "frames": [
+  6,
+  12,
+  18,
+  24
+ ],
+ "keys": [
+  0
+ ],
+ "aus": 30,
+ "msPerFrame": 78,
+ "figures": {
+  "v": 2,
+  "width": 3200,
+  "height": 1800,
+  "frames": 4,
+  "sets": [
+   4
+  ],
+  "planes": "coded",
+  "stream": "main",
+  "codec": "h265",
+  "aligned": true,
+  "displayRange": "limited",
+  "displayMatrix": "bt709",
+  "mean": 86.151,
+  "centre": 86.051,
+  "p1": 27,
+  "p50": 74,
+  "p99": 254,
+  "spread": 227,
+  "black": 0,
+  "white": 0.023,
+  "highlightLoss": 0.024,
+  "clip": {
+   "surface": 0,
+   "near": 0.024,
+   "light": 0,
+   "lights": 3,
+   "text": 0
+  },
+  "osd": [
+   [
+    0.51,
+    0.062,
+    0.555,
+    0.08
+   ]
+  ],
+  "display": {
+   "range": "limited",
+   "mean": 80.712,
+   "p1": 12.808,
+   "p99": 255,
+   "spread": 242.192,
+   "black": 0.001,
+   "white": 0.03
+  },
+  "rangeMismatch": false,
+  "coded": {
+   "min": 0,
+   "max": 255,
+   "le4": 0,
+   "le16": 0.001,
+   "ge235": 0.032,
+   "ge251": 0.025
+  },
+  "neutralChroma": 1,
+  "mono": true,
+  "colour": null,
+  "saturation": 0,
+  "colourClip": 0,
+  "cast": {
+   "r": 0,
+   "b": 0,
+   "sure": false
+  },
+  "noise": {
+   "value": 0.762,
+   "spread": null,
+   "measurable": true,
+   "reason": null,
+   "comparable": true,
+   "notComparable": null,
+   "skip": 0.05,
+   "moving": 0.002,
+   "gap": 6,
+   "sets": [
+    {
+     "set": 0,
+     "value": 0.762,
+     "pairs": [
+      {
+       "a": 6,
+       "b": 12,
+       "gap": 6,
+       "sigma": 0.762,
+       "skip": 0.02,
+       "moving": 0.002,
+       "still": 4986,
+       "usable": true,
+       "why": null
+      },
+      {
+       "a": 12,
+       "b": 18,
+       "gap": 6,
+       "sigma": 0.769,
+       "skip": 0.05,
+       "moving": 0.002,
+       "still": 4970,
+       "usable": true,
+       "why": null
+      },
+      {
+       "a": 18,
+       "b": 24,
+       "gap": 6,
+       "sigma": 0.795,
+       "skip": 0.063,
+       "moving": 0.004,
+       "still": 4915,
+       "usable": true,
+       "why": null
+      }
+     ]
+    }
+   ]
+  },
+  "lines": {
+   "rise25": 1.714,
+   "rise": 2.486,
+   "overshoot": 0.116,
+   "edges": 77153,
+   "block": -0.003
+  },
+  "ab": null,
+  "ms": {
+   "frame": 76.911,
+   "plane": 9.353,
+   "exposure": 22.505,
+   "colour": 0.001,
+   "lines": 34.678,
+   "noise": 10.524
+  }
+ },
+ "describe": {
+  "exposure": "average 34%, uses 89% of the range; 0.0% pure black, 2.3% pure white; overlit areas 2.4% (infrared glare 2.4%); 3 lamps left out",
+  "colour": "black and white (infrared)",
+  "noise": "some (0.76)",
+  "focus": "edges rise over 1.71 px, overshoot 12%, block index -0.00",
+  "stream": "3.3 of 4.1 Mbit/s (80%), at the cap in 0 of 13 keyframe intervals",
+  "size": "3200×1800",
+  "lines": [
+   "Exposure: average 34%, uses 89% of the range; 0.0% pure black, 2.3% pure white; overlit areas 2.4% (infrared glare 2.4%); 3 lamps left out",
+   "Colour: black and white (infrared)",
+   "Noise: some (0.76)",
+   "Edges: edges rise over 1.71 px, overshoot 12%, block index -0.00",
+   "Stream: 3.3 of 4.1 Mbit/s (80%), at the cap in 0 of 13 keyframe intervals"
+  ]
+ },
+ "suggestionsV1": [
+  {
+   "path": "denoise.switch",
+   "label": "Noise reduction",
+   "from": false,
+   "to": true,
+   "why": "Night (infrared) pictures are usually grainy: noise reduction smooths them and lowers the bitrate.",
+   "optional": true
+  }
+ ],
+ "stream": {
+  "qoi": 4096,
+  "gop": 40,
+  "fps": 20,
+  "enct": "h265",
+  "res": "3200x1800",
+  "from": "exp/mainstream.json",
+  "clip": {
+   "windowS": 0,
+   "enough": false,
+   "mode": "gops",
+   "fps": null,
+   "kbps": null,
+   "gopS": null,
+   "gops": [],
+   "qoi": 4096,
+   "usage": null,
+   "bindShare": null,
+   "iShare": null,
+   "forced": 0,
+   "codec": "h265",
+   "width": 3200,
+   "height": 1800,
+   "fullRange": false
+  },
+  "looped": {
+   "looped": true,
+   "gop": 40,
+   "windowS": 26,
+   "enough": true,
+   "mode": "gops",
+   "fps": 20,
+   "kbps": 3265,
+   "gopS": 2,
+   "gops": [
+    {
+     "s": 2,
+     "kbps": 3271,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3239,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3283,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3272,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3250,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3276,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3275,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3247,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3279,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3272,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3245,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3276,
+     "iBytes": 347432
+    },
+    {
+     "s": 2,
+     "kbps": 3265,
+     "iBytes": 347432
+    }
+   ],
+   "qoi": 4096,
+   "usage": 0.797,
+   "bindShare": 0,
+   "iShare": 0.426,
+   "forced": 0,
+   "codec": "h265",
+   "width": 3200,
+   "height": 1800,
+   "fullRange": false
+  }
+ },
+ "settings": {
+  "nvr": {
+   "id": "nvr1",
+   "name": "NVR 1",
+   "device": "192.168.0.228:6036"
+  },
+  "camera": {
+   "ch": 6,
+   "name": "LCL Destuffing Door"
+  },
+  "profile": "normal",
+  "profiles": [
+   "normal",
+   "day",
+   "night"
+  ],
+  "schedule": {
+   "program": "normal",
+   "dayTime": "00:00",
+   "nightTime": "23:59"
+  },
+  "fields": [
+   {
+    "path": "bright",
+    "label": "Brightness",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "contrast",
+    "label": "Contrast",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "saturation",
+    "label": "Saturation",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "hue",
+    "label": "Hue",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "sharpen.switch",
+    "label": "Sharpening",
+    "section": "Picture",
+    "kind": "switch",
+    "value": false,
+    "default": false
+   },
+   {
+    "path": "sharpen.value",
+    "label": "Sharpening level",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 255,
+    "value": 128,
+    "default": 128
+   },
+   {
+    "path": "denoise.switch",
+    "label": "Noise reduction",
+    "section": "Picture",
+    "kind": "switch",
+    "value": false,
+    "default": false
+   },
+   {
+    "path": "denoise.value",
+    "label": "Noise reduction level",
+    "section": "Picture",
+    "kind": "range",
+    "min": 0,
+    "max": 255,
+    "value": 128,
+    "default": 128
+   },
+   {
+    "path": "backlightCompensation.mode",
+    "label": "Backlight",
+    "section": "Light",
+    "kind": "select",
+    "options": [
+     "OFF",
+     "HWDR",
+     "HLC",
+     "BLC"
+    ],
+    "value": "OFF",
+    "default": "OFF"
+   },
+   {
+    "path": "backlightCompensation.HWDRLevel",
+    "label": "HWDR level",
+    "section": "Light",
+    "kind": "select",
+    "options": [
+     "low",
+     "medium",
+     "high"
+    ],
+    "value": "medium",
+    "default": "medium"
+   },
+   {
+    "path": "antiflicker",
+    "label": "Anti-flicker",
+    "section": "Light",
+    "kind": "select",
+    "options": [
+     "OFF",
+     "50HZ",
+     "60HZ"
+    ],
+    "value": "OFF",
+    "default": "OFF"
+   },
+   {
+    "path": "illumination.illuminationMode",
+    "label": "Night light",
+    "section": "Light",
+    "kind": "select",
+    "options": [
+     "whiteLight",
+     "irLight",
+     "smart"
+    ],
+    "value": "smart",
+    "default": "smart"
+   },
+   {
+    "path": "whiteBalance.mode",
+    "label": "White balance",
+    "section": "Colour",
+    "kind": "select",
+    "options": [
+     "auto",
+     "indoor",
+     "outdoor",
+     "manual"
+    ],
+    "value": "auto",
+    "default": "auto"
+   },
+   {
+    "path": "whiteBalance.red",
+    "label": "Red gain",
+    "section": "Colour",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "whiteBalance.blue",
+    "label": "Blue gain",
+    "section": "Colour",
+    "kind": "range",
+    "min": 0,
+    "max": 100,
+    "value": 50,
+    "default": 50
+   },
+   {
+    "path": "mirrorSwitch",
+    "label": "Mirror",
+    "section": "Orientation",
+    "kind": "switch",
+    "value": false,
+    "default": false
+   },
+   {
+    "path": "flipSwitch",
+    "label": "Flip",
+    "section": "Orientation",
+    "kind": "switch",
+    "value": false,
+    "default": false
+   }
+  ],
+  "undo": null
+ }
+}

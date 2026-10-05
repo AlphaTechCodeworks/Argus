@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response cmdId="" cmdUrl="queryAIResourceDetail">
+	<status>success</status>
+	<types>
+		<eventType>
+			<enum>faceMatch</enum>
+			<enum>faceDetect</enum>
+			<enum>tripwire</enum>
+			<enum>perimeter</enum>
+		</eventType>
+	</types>
+	<content>
+		<chl type="list"></chl>
+		<totalResourceOccupancy>0.00</totalResourceOccupancy>
+	</content>
+</response>

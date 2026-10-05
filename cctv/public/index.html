@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <!-- installable: Add to Home Screen opens Argus full screen, without the browser's bars -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Argus" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · Live</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="colour-check.css" />
+  <link rel="stylesheet" href="grid-order.css" />
+</head>
+<body class="live-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+    </div>
+    <div class="controls">
+      <label id="siteLabel" hidden>Site
+        <select id="site"><option value="">All sites</option></select>
+      </label>
+      <label>Layout
+        <select id="layout">
+          <optgroup label="Grid">
+            <option value="g1">1</option>
+            <option value="g2">2 × 2</option>
+            <option value="g3" selected>3 × 3</option>
+            <option value="g4">4 × 4</option>
+            <option value="g5">5 × 5</option>
+            <option value="g6">6 × 6</option>
+            <option value="g8">8 × 8</option>
+            <option value="g10">10 × 10</option>
+            <option value="g12">12 × 12</option>
+          </optgroup>
+          <optgroup label="Featured">
+            <option value="1+5">1 large + 5</option>
+            <option value="1+7">1 large + 7</option>
+            <option value="1+12">1 large (centre) + 12</option>
+            <option value="2+8">2 large + 8</option>
+          </optgroup>
+        </select>
+      </label>
+      <label>View
+        <select id="viewSel" title="A saved set of cameras and layout, kept with your account">
+          <option value="">(not saved)</option>
+        </select>
+      </label>
+      <button id="saveView" type="button" title="Save the cameras shown and this layout as a named view">Save view…</button>
+      <button id="deleteView" type="button" title="Delete the saved view shown" hidden>Delete view</button>
+      <label title="Leave offline cameras out of the layout"><input id="hideOffline" type="checkbox" checked /> Hide offline</label>
+      <label title="Steadier motion: holds about 0.4 s more video (a little more delay)"><input id="smooth" type="checkbox" /> Smooth</label>
+      <button id="resetOrder" type="button" title="Your cameras are in your own order (drag a tile onto another to swap them, or onto ‹ › to move it to another page). This puts them back in the default order." hidden>Reset order</button>
+      <button id="prev" type="button" aria-label="Previous page">‹</button>
+      <span id="page">1 / 1</span>
+      <button id="next" type="button" aria-label="Next page">›</button>
+      <button id="fullscreen" type="button" title="Full screen (F)" aria-label="Full screen">⛶</button>
+    </div>
+    <span id="remoteMark" class="remote-mark" hidden title="You are connected through the internet, so the video is heavier on the link. On site, open the local address instead — it is faster.">through the internet</span>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+  <main id="grid"></main>
+  <p id="notice" hidden></p>
+  <p id="orderNote" class="order-note" role="status" hidden></p>
+  <dialog id="saveViewDlg" class="wall-pick">
+    <form method="dialog">
+      <h2>Save this view</h2>
+      <p class="wall-pick-note">The cameras shown and the layout, kept with your account so they follow you to any screen.</p>
+      <label>Name <input id="viewName" type="text" maxlength="60" placeholder="Yard and gates" /></label>
+      <p class="pb-ex-msg" id="viewMsg" role="status"></p>
+      <div class="pb-ex-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="button" id="viewSave" class="pb-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+  <script type="module" src="shell.js"></script>
+  <script type="module" src="viewer.js"></script>
+  <script type="module" src="alert-banner.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>

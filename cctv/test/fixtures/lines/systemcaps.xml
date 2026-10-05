@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response cmdId="" cmdUrl="querySystemCaps">
+	<status>success</status>
+	<content>
+		<chlMaxCount>32</chlMaxCount>
+		<analogChlCount>0</analogChlCount>
+		<switchableIpChlMaxCount>0</switchableIpChlMaxCount>
+		<poeChlMaxCount>16</poeChlMaxCount>
+		<ipChlMaxCount>32</ipChlMaxCount>
+		<previewMaxWin>36</previewMaxWin>
+		<playbackMaxWin>16</playbackMaxWin>
+		<totalBandwidth unit="Mb">192</totalBandwidth>
+		<usedTotalBandwidth unit="Kb">131072</usedTotalBandwidth>
+		<usedAutoBandwidth unit="Kb">131072</usedAutoBandwidth>
+		<usedManualBandwidth unit="Kb">131072</usedManualBandwidth>
+		<supportTalk>true</supportTalk>
+		<audioInNum>0</audioInNum>
+		<supportPlatform>true</supportPlatform>
+		<chlSupSignalType></chlSupSignalType>
+		<supportLite>false</supportLite>
+		<supportSHDB>false</supportSHDB>
+		<supportVideoType>PAL,NTSC</supportVideoType>
+		<mainStreamLimitFps>1</mainStreamLimitFps>
+		<supportPIR>false</supportPIR>
+		<supportRecorder>true</supportRecorder>
+		<supportImageRotate>false</supportImageRotate>
+		<supportWaterMark>false</supportWaterMark>
+		<supportFTP>true</supportFTP>
+		<supportPOS>true</supportPOS>
+		<supportHideNoVideoSignal>false</supportHideNoVideoSignal>
+		<supportRaid>false</supportRaid>
+		<supportSoftRaid>false</supportSoftRaid>
+		<supportModifyPoeMode>true</supportModifyPoeMode>
+		<supportPoePowerManage>true</supportPoePowerManage>
+		<supportFishEye>false</supportFishEye>
+		<FishEyeCaps>
+			<fishEyeMode>
+				<group installType="Top,Floor">
+					<enum>FISHEYE_ORIGNAL</enum>
+					<enum>2x180</enum>
+					<enum>FISH_3PTZ</enum>
+					<enum>FISH_4PTZ</enum>
+					<enum>FISH_8PTZ</enum>
+				</group>
+				<group installType="Wall">
+					<enum>FISHEYE_ORIGNAL</enum>
+					<enum>180</enum>
+					<enum>180_3PTZ</enum>
+					<enum>180_4PTZ</enum>
+					<enum>180_8PTZ</enum>
+				</group>
+			</fishEyeMode>
+			<installType>
+				<enum>Top</enum>
+				<enum>Wall</enum>
+				<enum>Floor</enum>
+			</installType>
+		</FishEyeCaps>
+		<supportLogoSetting>false</supportLogoSetting>
+		<supportSnmp>true</supportSnmp>
+		<supportCloudUpgrade>true</supportCloudUpgrade>
+		<supportCloudUpgradeNode>true</supportCloudUpgradeNode>
+		<useCloudUpgradeNewProtocol>true</useCloudUpgradeNewProtocol>
+		<showVideoLossMessage>true</showVideoLossMessage>
+		<showNat>true</showNat>
+		<showApp>true</showApp>
+		<showGDPR>true</showGDPR>
+		<showCloudUpgrade>true</showCloudUpgrade>
+		<showFaceMatch>true</showFaceMatch>
+		<supportOriginalDisplay>true</supportOriginalDisplay>
+		<supportPwdSecurityConfig>true</supportPwdSecurityConfig>
+		<supportHttpsConfig>true</supportHttpsConfig>
+		<supportAlarmServerConfig>true</supportAlarmServerConfig>
+		<supportChlTalk>true</supportChlTalk>
+		<supportZeroOprAdd>false</supportZeroOprAdd>
+		<supportFaceMatch>true</supportFaceMatch>
+		<localFaceDectMaxCount>0</localFaceDectMaxCount>
+		<localTargetDectMaxCount>0</localTargetDectMaxCount>
+		<faceMatchMaxCount>6</faceMatchMaxCount>
+		<showAIReourceDetail>true</showAIReourceDetail>
+		<supportLocalFaceDetection>false</supportLocalFaceDetection>
+		<supportToeConfig>false</supportToeConfig>
+		<IntelAndFaceConfigHide>false</IntelAndFaceConfigHide>
+		<supportAlarmAudioConfig>true</supportAlarmAudioConfig>
+		<supportPtzGroupAndTrace>true</supportPtzGroupAndTrace>
+		<faceMatchLimitMaxChlNum>0</faceMatchLimitMaxChlNum>
+		<apiServerVerityType>normal</apiServerVerityType>
+		<apiServerSwitchEditable>true</apiServerSwitchEditable>
+		<showNatCloseTip>true</showNatCloseTip>
+		<showNatServerAddress>true</showNatServerAddress>
+		<showNatVisitAddress>true</showNatVisitAddress>
+		<RecordSubResAdaptive>true</RecordSubResAdaptive>
+		<showNatAccessType>true</showNatAccessType>
+		<supportParkingLotLEDVisible>true</supportParkingLotLEDVisible>
+		<outputScreens>
+			<item index="0" isMain="true"></item>
+			<item index="1" isMain="false"></item>
+		</outputScreens>
+		<subOutputMaxWin>4</subOutputMaxWin>
+		<supportHdmiVgaSeparate>false</supportHdmiVgaSeparate>
+		<supportBootWorkMode>true</supportBootWorkMode>
+		<supportPush2>true</supportPush2>
+		<newDevice>false</newDevice>
+		<supportRecDelete>false</supportRecDelete>
+		<supportHDHealth>true</supportHDHealth>
+		<supportParkingLot>true</supportParkingLot>
+		<supportPlateMatch>true</supportPlateMatch>
+		<needP2pVersion1>true</needP2pVersion1>
+		<devSystemType>0</devSystemType>
+	</content>
+</response>

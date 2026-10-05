@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response version="1.0" cmdId="" cmdUrl="queryAlarmStatus">
+	<status>success</status>
+	<types>
+		<abnormalType>
+			<enum>ipConflict</enum>
+			<enum>diskRWError</enum>
+			<enum>diskFull</enum>
+			<enum>illegalAccess</enum>
+			<enum>noDisk</enum>
+			<enum>hddPullOut</enum>
+			<enum>RAIDHotError</enum>
+		</abnormalType>
+	</types>
+	<types>
+		<intelligentType>
+			<enum>osc</enum>
+			<enum>pea</enum>
+			<enum>san</enum>
+			<enum>sal</enum>
+			<enum>tripwire</enum>
+			<enum>avd</enum>
+			<enum>vfd</enum>
+		</intelligentType>
+	</types>
+	<content>
+		<alarmIns type="list"></alarmIns>
+		<motions type="list">
+			<item>
+				<sourceChl id="{00000003-0000-0000-0000-000000000000}">Maingate Roadway</sourceChl>
+				<triggerRecChls type="list">
+					<itemType></itemType>
+					<item id="{00000003-0000-0000-0000-000000000000}">Maingate Roadway</item>
+				</triggerRecChls>
+				<alarmTime>2026-09-27 23:27:56</alarmTime>
+				<triggerAlarmOutNames></triggerAlarmOutNames>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<triggerPresetNames></triggerPresetNames>
+				<ftpRecSwitch>false</ftpRecSwitch>
+				<snapSwitch>true</snapSwitch>
+				<ftpSnapSwitch>false</ftpSnapSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+			</item>
+			<item>
+				<sourceChl id="{0000001E-0000-0000-0000-000000000000}">JP Wharf North</sourceChl>
+				<triggerRecChls type="list">
+					<itemType></itemType>
+					<item id="{0000001E-0000-0000-0000-000000000000}">JP Wharf North</item>
+				</triggerRecChls>
+				<alarmTime>2026-09-28 00:02:41</alarmTime>
+				<triggerAlarmOutNames></triggerAlarmOutNames>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<triggerPresetNames></triggerPresetNames>
+				<ftpRecSwitch>false</ftpRecSwitch>
+				<snapSwitch>true</snapSwitch>
+				<ftpSnapSwitch>false</ftpSnapSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+			</item>
+			<item>
+				<sourceChl id="{00000005-0000-0000-0000-000000000000}">South Fence</sourceChl>
+				<triggerRecChls type="list">
+					<itemType></itemType>
+					<item id="{00000005-0000-0000-0000-000000000000}">South Fence</item>
+				</triggerRecChls>
+				<alarmTime>2026-09-28 00:04:59</alarmTime>
+				<triggerAlarmOutNames></triggerAlarmOutNames>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<triggerPresetNames></triggerPresetNames>
+				<ftpRecSwitch>false</ftpRecSwitch>
+				<snapSwitch>true</snapSwitch>
+				<ftpSnapSwitch>false</ftpSnapSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+			</item>
+			<item>
+				<sourceChl id="{00000008-0000-0000-0000-000000000000}">Lunchroom</sourceChl>
+				<triggerRecChls type="list">
+					<itemType></itemType>
+					<item id="{00000008-0000-0000-0000-000000000000}">Lunchroom</item>
+				</triggerRecChls>
+				<alarmTime>2026-09-28 00:05:51</alarmTime>
+				<triggerAlarmOutNames></triggerAlarmOutNames>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<triggerPresetNames></triggerPresetNames>
+				<ftpRecSwitch>false</ftpRecSwitch>
+				<snapSwitch>true</snapSwitch>
+				<ftpSnapSwitch>false</ftpSnapSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+			</item>
+			<item>
+				<sourceChl id="{0000001A-0000-0000-0000-000000000000}">Parking Lot</sourceChl>
+				<triggerRecChls type="list">
+					<itemType></itemType>
+					<item id="{0000001A-0000-0000-0000-000000000000}">Parking Lot</item>
+				</triggerRecChls>
+				<alarmTime>2026-09-28 00:07:09</alarmTime>
+				<triggerAlarmOutNames></triggerAlarmOutNames>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<triggerPresetNames></triggerPresetNames>
+				<ftpRecSwitch>false</ftpRecSwitch>
+				<snapSwitch>true</snapSwitch>
+				<ftpSnapSwitch>false</ftpSnapSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+			</item>
+			<item>
+				<sourceChl id="{00000001-0000-0000-0000-000000000000}">JP Wharf South</sourceChl>
+				<triggerRecChls type="list">
+					<itemType></itemType>
+					<item id="{00000001-0000-0000-0000-000000000000}">JP Wharf South</item>
+				</triggerRecChls>
+				<alarmTime>2026-09-28 00:07:16</alarmTime>
+				<triggerAlarmOutNames></triggerAlarmOutNames>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<triggerPresetNames></triggerPresetNames>
+				<ftpRecSwitch>false</ftpRecSwitch>
+				<snapSwitch>true</snapSwitch>
+				<ftpSnapSwitch>false</ftpSnapSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+			</item>
+			<item>
+				<sourceChl id="{00000019-0000-0000-0000-000000000000}">Gen Set Outfall</sourceChl>
+				<triggerRecChls type="list">
+					<itemType></itemType>
+					<item id="{00000019-0000-0000-0000-000000000000}">Gen Set Outfall</item>
+				</triggerRecChls>
+				<alarmTime>2026-09-28 00:07:17</alarmTime>
+				<triggerAlarmOutNames></triggerAlarmOutNames>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<triggerPresetNames></triggerPresetNames>
+				<ftpRecSwitch>false</ftpRecSwitch>
+				<snapSwitch>true</snapSwitch>
+				<ftpSnapSwitch>false</ftpSnapSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+			</item>
+			<item>
+				<sourceChl id="{0000001C-0000-0000-0000-000000000000}">Driveway Supplies</sourceChl>
+				<triggerRecChls type="list">
+					<itemType></itemType>
+					<item id="{0000001C-0000-0000-0000-000000000000}">Driveway Supplies</item>
+				</triggerRecChls>
+				<alarmTime>2026-09-28 00:07:17</alarmTime>
+				<triggerAlarmOutNames></triggerAlarmOutNames>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<triggerPresetNames></triggerPresetNames>
+				<ftpRecSwitch>false</ftpRecSwitch>
+				<snapSwitch>true</snapSwitch>
+				<ftpSnapSwitch>false</ftpSnapSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+			</item>
+			<item>
+				<sourceChl id="{0000000A-0000-0000-0000-000000000000}">Drive Way</sourceChl>
+				<triggerRecChls type="list">
+					<itemType></itemType>
+					<item id="{0000000A-0000-0000-0000-000000000000}">Drive Way</item>
+				</triggerRecChls>
+				<alarmTime>2026-09-28 00:07:19</alarmTime>
+				<triggerAlarmOutNames></triggerAlarmOutNames>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<triggerPresetNames></triggerPresetNames>
+				<ftpRecSwitch>false</ftpRecSwitch>
+				<snapSwitch>true</snapSwitch>
+				<ftpSnapSwitch>false</ftpSnapSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+			</item>
+		</motions>
+		<intelligents type="list">
+			<itemType>
+				<intelligentType type="intelligentType"></intelligentType>
+			</itemType>
+		</intelligents>
+		<abnormals type="list">
+			<itemType>
+				<abnormalType type="abnormalType"></abnormalType>
+			</itemType>
+		</abnormals>
+		<frontEndOffline type="list"></frontEndOffline>
+		<videoLoss type="list"></videoLoss>
+		<alarmOuts type="list"></alarmOuts>
+		<combinedAlarms type="list"></combinedAlarms>
+		<faceMatchAlarms type="list"></faceMatchAlarms>
+		<vehiclePlateMatchAlarms type="list"></vehiclePlateMatchAlarms>
+	</content>
+</response>

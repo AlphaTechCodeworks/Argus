@@ -1,0 +1,216 @@
+/* Colour check (colour-check-ui.js), laid over a camera's full-size view. The app's theme tokens
+   (style.css) are used when present; the fallbacks keep the practice page and any other host
+   dark and readable without them. Added to the page by colour-check-ui.js itself. */
+
+/* catches clicks beside the picture: the full-size tile would close on them. Transparent: a
+   colour check must never tint or dim the picture being judged. */
+.cc-shield { position: absolute; inset: 0; z-index: 6; background: transparent; cursor: default; }
+
+/* exactly over the video's visible picture (placed by the script). One finger places corners;
+   two fingers still zoom the page, for a chart too small to tap on a phone. */
+.cc-overlay { position: absolute; z-index: 7; display: block; touch-action: pinch-zoom; outline: none; cursor: default; }
+.cc-overlay.cc-picking { cursor: crosshair; }
+.cc-overlay:focus-visible { box-shadow: 0 0 0 2px var(--accent, #3ba3ff); }
+.cc-overlay[hidden] { display: none; }
+
+.cc-loupe {
+  position: absolute;
+  z-index: 9;
+  border-radius: 50%;
+  border: 2px solid var(--accent, #3ba3ff);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  background: #000;
+}
+.cc-loupe[hidden] { display: none; }
+
+.cc {
+  position: absolute;
+  z-index: 8;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: rgba(22, 26, 31, 0.97); /* --panel, a touch see-through */
+  color: var(--text, #e6e8eb);
+  border: 1px solid #2f3742;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  cursor: default;
+  text-align: left;
+}
+.cc:focus { outline: none; }
+.cc * { box-sizing: border-box; }
+.cc[data-step="intro"] {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(500px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+}
+.cc[data-step="corners"], .cc[data-step="measuring"] {
+  left: 8px;
+  right: 8px;
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 8px 12px;
+  gap: 6px;
+}
+/* a side band (a phone on its side): a narrow column; nothing to move out of the way */
+.cc.cc-column { margin: 0; max-width: none; }
+.cc.cc-column .cc-move { display: none; }
+/* over the picture (no band beside it): as short as it goes, the tips left out */
+.cc.cc-tight { padding: 6px 10px; gap: 4px; }
+.cc.cc-tight .cc-help { display: none; }
+.cc.cc-tight .cc-body { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding-right: 40px; }
+.cc.cc-tight[data-step] .cc-prompt { flex: 1 1 220px; padding-right: 0; }
+.cc.cc-tight .cc-row button { min-height: 36px; }
+.cc.cc-collapsed { max-height: none !important; }
+.cc.cc-short { gap: 6px; padding-top: 8px; }
+/* a short panel keeps its buttons in view, in one compact row (× closes too) */
+.cc.cc-short .cc-actions { padding-top: 6px; padding-bottom: 8px; }
+.cc.cc-short .cc-actions button { min-height: 36px; }
+.cc.cc-short .cc-close-2 { display: none; }
+.cc.cc-short .cc-cam { display: none; }
+.cc.cc-short .cc-head button { min-height: 32px; }
+.cc.cc-short .cc-grade { font-size: 16px; }
+.cc.cc-collapsed .cc-body { display: none; }
+
+.cc-head { display: flex; align-items: center; gap: 8px; }
+.cc-title { margin: 0; flex: 1; min-width: 0; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-title:focus { outline: none; } /* focused only as a landing point for screen readers */
+.cc[data-step="corners"] .cc-title, .cc[data-step="measuring"] .cc-title { font-size: 13px; color: var(--muted, #8a93a0); }
+.cc-cam { color: var(--muted, #8a93a0); font-weight: 400; }
+.cc-body { display: flex; flex-direction: column; gap: 10px; }
+.cc[data-step="corners"] .cc-body, .cc[data-step="measuring"] .cc-body { gap: 6px; }
+
+.cc button {
+  background: #232931;
+  color: var(--text, #e6e8eb);
+  border: 1px solid #2f3742;
+  border-radius: 6px;
+  padding: 5px 11px;
+  min-height: 32px;
+  font: inherit;
+  cursor: pointer;
+}
+.cc button:disabled { opacity: 0.4; cursor: default; }
+.cc button:focus-visible, .cc input:focus-visible, .cc summary:focus-visible, .cc textarea:focus-visible { outline: 2px solid var(--accent, #3ba3ff); outline-offset: 1px; }
+.cc .cc-primary:not(:disabled) { background: var(--accent, #3ba3ff); border-color: var(--accent, #3ba3ff); color: #041018; font-weight: 600; }
+.cc .cc-close { font-size: 18px; line-height: 1; padding: 2px 10px; }
+.cc .cc-collapse[hidden] { display: none; }
+@media (pointer: coarse) { .cc button { min-height: 44px; } }
+
+.cc p { margin: 0; }
+.cc-lead { color: var(--text, #e6e8eb); }
+.cc-sub { margin: 0; font-size: 13px; font-weight: 600; }
+.cc-modes { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 6px; }
+.cc-modes legend { padding: 0; margin-bottom: 6px; font-weight: 600; }
+.cc label { color: var(--text, #e6e8eb); }
+.cc-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #2f3742;
+  border-radius: 8px;
+  background: #0f1216;
+  cursor: pointer;
+}
+.cc-mode:has(input:checked) { border-color: var(--accent, #3ba3ff); }
+.cc-mode input { margin: 3px 0 0; accent-color: var(--accent, #3ba3ff); width: 16px; height: 16px; flex: none; }
+.cc-mode span { display: flex; flex-direction: column; gap: 2px; }
+.cc-mode small, .cc-help, .cc-note { color: var(--muted, #8a93a0); font-size: 12px; }
+.cc-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.cc-same { display: flex; align-items: center; gap: 8px; }
+.cc-same[hidden] { display: none; }
+.cc-same input, .cc-suggest input { accent-color: var(--accent, #3ba3ff); width: 16px; height: 16px; margin: 0; flex: none; }
+.cc-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; position: sticky; bottom: -12px; margin: 0 -14px -12px; padding: 8px 14px 12px; background: rgba(22, 26, 31, 0.98); border-top: 1px solid #232931; }
+.cc-actions > :first-child { margin-right: auto; }
+.cc-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cc-prompt b { color: var(--text, #e6e8eb); }
+.cc-help-coarse { display: none; }
+@media (pointer: coarse) { .cc-help-fine { display: none; } .cc-help-coarse { display: inline; } }
+.cc-status { margin: 0; min-height: 1em; font-size: 12px; color: var(--muted, #8a93a0); }
+/* empty, it takes no room but stays rendered: a live region that is display: none when a
+   message arrives may not be read out */
+.cc-status:empty { position: absolute; width: 1px; height: 1px; min-height: 0; overflow: hidden; clip-path: inset(50%); }
+
+/* results */
+.cc-grade { margin: 0; font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.cc-grade::before { content: ""; width: 12px; height: 12px; border-radius: 50%; background: currentColor; flex: none; }
+.cc-grade.cc-b-good { color: #3fb950; }
+.cc-grade.cc-b-small { color: #c9d44a; }
+.cc-grade.cc-b-clear { color: #f0a33a; }
+.cc-grade.cc-b-poor { color: #ff6b6b; }
+.cc-score b { font-size: 18px; }
+.cc-words { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
+.cc-words dt { color: var(--muted, #8a93a0); }
+.cc-words dd { margin: 0; }
+.cc-problems { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; color: #ffcf87; }
+.cc-fatal, .cc-problems .cc-fatal { color: #ff8a8a; }
+.cc-problem.cc-fatal { font-weight: 600; }
+.cc-warn { color: #ffcf87; }
+.cc-good { color: #3fb950; }
+.cc-suggest { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border-radius: 8px; background: #0f1216; }
+.cc-suggest h4 { margin: 0; font-size: 12px; color: var(--muted, #8a93a0); font-weight: 600; }
+.cc-suggest ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.cc-suggest label { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.cc-suggest small { display: block; margin: 2px 0 0 24px; color: var(--muted, #8a93a0); font-size: 11.5px; }
+
+.cc-squares summary, .cc-summary summary { cursor: pointer; color: var(--accent, #3ba3ff); }
+.cc-squares[open] { display: flex; flex-direction: column; gap: 6px; }
+.cc-limit { display: block; color: var(--muted, #8a93a0); font-size: 11px; }
+.cc-table-wrap { overflow-x: auto; }
+.cc-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.cc-table caption { text-align: left; color: var(--muted, #8a93a0); padding-bottom: 6px; }
+.cc-table th { text-align: left; font-weight: 600; color: var(--muted, #8a93a0); padding: 3px 6px; border-bottom: 1px solid #2f3742; }
+.cc-table td { padding: 2px 6px; border-bottom: 1px solid #1d232b; }
+.cc-table td.cc-swc { padding: 2px 0; width: 34px; }
+.cc-sw-ref { border-radius: 3px 0 0 3px; border-right: 0 !important; }
+.cc-sw-cam { border-radius: 0 3px 3px 0; border-left: 0 !important; }
+.cc-sw { display: inline-block; width: 34px; height: 20px; vertical-align: middle; border: 1px solid rgba(255, 255, 255, 0.15); }
+.cc-words .cc-sw { width: 28px; border-radius: 3px; margin-right: 4px; }
+.cc-worst td { background: rgba(255, 107, 107, 0.07); }
+.cc-tag { color: var(--muted, #8a93a0); font-size: 11px; }
+.cc-de { display: inline-block; min-width: 44px; padding: 1px 6px; border-radius: 4px; text-align: center; color: #041018; font-weight: 600; }
+.cc-b-good.cc-de { background: #3fb950; }
+.cc-b-small.cc-de { background: #c9d44a; }
+.cc-b-clear.cc-de { background: #f0a33a; }
+.cc-b-poor.cc-de { background: #ff6b6b; }
+.cc-b-none.cc-de { background: #5b6470; color: var(--text, #e6e8eb); font-weight: 400; }
+
+.cc-summary summary { cursor: pointer; color: var(--accent, #3ba3ff); }
+.cc-summary[open] { display: flex; flex-direction: column; gap: 6px; }
+.cc-text {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  background: #0f1216;
+  color: var(--text, #e6e8eb);
+  border: 1px solid #2f3742;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: 11.5px/1.4 ui-monospace, Consolas, monospace;
+}
+
+.cc .cc-move { min-width: 36px; padding: 2px 8px; font-size: 16px; line-height: 1; }
+/* the corner bar is kept short so it fits in the band above or below the picture: its title
+   is only for screen readers (the dialog's name) and the close button sits in its corner */
+.cc[data-step="corners"] .cc-head, .cc[data-step="measuring"] .cc-head { position: absolute; top: 6px; right: 6px; }
+.cc[data-step="corners"] .cc-title, .cc[data-step="measuring"] .cc-title {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.cc[data-step="corners"] .cc-prompt, .cc[data-step="measuring"] .cc-prompt { padding-right: 48px; }
+@media (max-width: 600px) {
+  .cc { padding: 10px 12px; }
+  .cc[data-step="corners"] .cc-row button { padding: 4px 8px; }
+  .cc[data-step="corners"] .cc-help { font-size: 11.5px; }
+  .cc-actions { margin: 0 -12px -10px; padding: 8px 12px 10px; bottom: -10px; }
+  .cc-grade { font-size: 17px; }
+  .cc[data-step="corners"], .cc[data-step="measuring"] { left: 6px; right: 6px; padding: 6px 8px; }
+}

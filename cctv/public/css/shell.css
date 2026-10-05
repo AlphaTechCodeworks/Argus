@@ -1,0 +1,72 @@
+/* The frame: sidebar, rail, phone bar. Pages keep their own layout inside .app-main. */
+/* Exactly the window's height, the main column scrolling inside it: pages built to fit the window
+   (Live, Playback, Wall) keep fitting it -- with only a minimum height, Playback's video grew and
+   pushed its controls off the bottom -- and long pages scroll with the sidebar staying put. */
+body.has-shell { display: grid; grid-template-columns: var(--shell-w) minmax(0, 1fr); height: 100vh; height: 100dvh; overflow: hidden; margin: 0; }
+body.has-shell .app-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; overflow: auto; }
+
+.app-shell { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; padding: var(--s4) var(--s3);
+  background: var(--surface-1); border-right: 1px solid var(--border); overflow-y: auto; }
+.shell-brand { display: flex; align-items: center; gap: var(--s3); padding: 2px var(--s2) var(--s5); color: var(--text);
+  font-weight: 600; font-size: var(--fs-section); text-decoration: none; }
+.shell-logo { width: 32px; height: 32px; border-radius: 9px; display: block; }
+.shell-logo .icon { width: 18px; height: 18px; }
+.shell-group-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint);
+  padding: var(--s4) var(--s3) var(--s2); }
+.shell-nav a { display: flex; align-items: center; gap: var(--s3); padding: 9px var(--s3); border-radius: 9px; color: var(--text-muted);
+  font-weight: 500; text-decoration: none; transition: background var(--t-fast), color var(--t-fast); }
+.shell-nav a:hover { background: var(--surface-hover); color: var(--text); }
+.shell-nav a[aria-current="page"] { background: var(--surface-3); color: var(--text); }
+.shell-nav a[aria-current="page"] .icon { color: var(--accent-strong); }
+.shell-nav .icon, .shell-foot .icon { width: 18px; height: 18px; flex: none; }
+.shell-foot { margin-top: auto; padding-top: var(--s3); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: var(--s2); }
+.shell-theme { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3); border: 0; background: none;
+  color: var(--text-muted); font: 500 var(--fs-dense) var(--font); border-radius: var(--r-sm); cursor: pointer; text-align: left; }
+.shell-theme:hover { background: var(--surface-hover); color: var(--text); }
+.shell-user { display: flex; align-items: center; gap: var(--s2); padding: var(--s1) var(--s2); }
+.shell-avatar { width: 32px; height: 32px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2);
+  font-weight: 600; font-size: var(--fs-dense); }
+.shell-who { flex: 1; min-width: 0; font-size: var(--fs-dense); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shell-who small { display: block; color: var(--text-faint); font-size: 11px; }
+.shell-bar, .shell-sheet { display: none; }
+
+/* the old page header's brand and tab strip are replaced by the shell */
+body.has-shell header .brand h1, body.has-shell header nav.tabs, body.has-shell header .account { display: none; }
+
+/* tablet: an icon rail; labels live in the tooltips */
+@media (max-width: 1199px) {
+  body.has-shell { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  .app-shell { padding: var(--s4) var(--s2); align-items: center; }
+  .shell-brand span:last-child, .shell-nav a span, .shell-group-label, .shell-theme span, .shell-who { display: none; }
+  .shell-brand { padding: 0 0 var(--s4); }
+  .shell-nav a { justify-content: center; width: 44px; height: 44px; padding: 0; }
+  .shell-group + .shell-group { border-top: 1px solid var(--border); margin-top: var(--s2); padding-top: var(--s2); }
+  .shell-foot { align-items: center; }
+  .shell-user { flex-direction: column; }
+}
+
+/* phone: content full width, a bar along the bottom */
+@media (max-width: 699px), (pointer: coarse) and (max-height: 500px) {
+  body.has-shell { grid-template-columns: minmax(0, 1fr); padding-bottom: calc(var(--bar-h) + env(safe-area-inset-bottom)); }
+  .app-shell { display: none; }
+  .shell-bar { display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    height: calc(var(--bar-h) + env(safe-area-inset-bottom)); padding: var(--s2) 0 env(safe-area-inset-bottom);
+    background: var(--surface-1); border-top: 1px solid var(--border); }
+  .shell-bar a, .shell-bar button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    border: 0; background: none; color: var(--text-faint); font: 500 10.5px var(--font); text-decoration: none; cursor: pointer; }
+  .shell-bar [aria-current="page"], .shell-bar .on { color: var(--accent-strong); }
+  .shell-bar .icon { width: 22px; height: 22px; }
+  .shell-sheet { position: fixed; left: var(--s3); right: var(--s3); bottom: calc(var(--bar-h) + var(--s2) + env(safe-area-inset-bottom)); z-index: 51;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-lg); padding: var(--s2); box-shadow: var(--shadow); }
+  .shell-sheet:not([hidden]) { display: grid; }
+  .shell-sheet a, .shell-sheet button { display: flex; align-items: center; gap: var(--s3); padding: var(--s3); border: 0; background: none;
+    color: var(--text); font: 500 var(--fs-body) var(--font); text-decoration: none; border-radius: var(--r-sm); cursor: pointer; text-align: left; }
+  .shell-sheet .icon { width: 20px; height: 20px; color: var(--text-muted); }
+}
+
+/* Before shell.js has run (theme-boot.js sets .shell-pending): hold the sidebar's space open and hide
+   what the shell replaces, so the first paint already has the final layout and nothing jumps. */
+html.shell-pending body { padding-left: var(--shell-w); }
+html.shell-pending body header .brand h1, html.shell-pending body header nav.tabs, html.shell-pending body header .account { display: none; }
+@media (max-width: 1199px) { html.shell-pending body { padding-left: var(--rail-w); } }
+@media (max-width: 699px), (pointer: coarse) and (max-height: 500px) { html.shell-pending body { padding-left: 0; padding-bottom: calc(var(--bar-h) + env(safe-area-inset-bottom)); } }

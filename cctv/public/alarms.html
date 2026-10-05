@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <!-- installable: Add to Home Screen opens Argus full screen, without the browser's bars -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Argus" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · Alarms</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="alarms-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="alarms">
+    <section data-tab="list" data-tab-label="Alarms" data-tab-help="What happened on the cameras, newest first. Acknowledge what you have looked at.">
+    <!-- The filters. Everything left alone means "no restriction", so the page opens on everything
+         from the last week rather than on an empty list waiting to be configured. -->
+    <form id="filters" class="al-filters" aria-label="Filters">
+      <label>Show
+        <select name="acked">
+          <option value="false">still needing a look</option>
+          <option value="">everything</option>
+          <option value="true">already acknowledged</option>
+        </select>
+      </label>
+      <label>Camera <select name="camera"><option value="">any</option></select></label>
+      <label class="al-search">Search <input type="search" name="text" placeholder="camera, kind, note" /></label>
+      <button type="submit" class="st-primary">Apply</button>
+      <details class="al-more">
+        <summary>More filters</summary>
+        <div class="al-more-body">
+          <label>From <input type="date" name="from" /></label>
+          <label>To <input type="date" name="to" /></label>
+          <label>Kind <select name="type"><option value="">any</option></select></label>
+          <label>Urgency <select name="priority"><option value="">any</option></select></label>
+        </div>
+      </details>
+    </form>
+
+    <p id="summary" class="al-summary" role="status">Loading the alarms…</p>
+
+    <table class="al-table">
+      <thead>
+        <tr><th>Urgency</th><th>When</th><th>Camera</th><th>What</th><th>Lasted</th><th>Acknowledged</th><th></th></tr>
+      </thead>
+      <tbody id="list"></tbody>
+    </table>
+
+    <!-- What this page cannot tell you. Printed, not hidden: an empty list must never be read as
+         "nothing happened" when the real answer is "we cannot see that kind of thing yet". -->
+    <details class="al-where">
+      <summary>Where these come from, and what this page cannot see</summary>
+      <div id="sources" class="al-sources"></div>
+    </details>
+    </section>
+
+    <section data-tab="rules" data-tab-label="Rules" data-tab-help="How urgent each kind of event is, and whether anyone is sent a message.">
+    <p class="hp-note">A rule decides how urgent an event is and whether anyone is told. Messages go
+      out through the same delivery the health alerts use — set up in <a href="/settings.html">Settings</a>.</p>
+    <ul id="rules" class="al-rules"></ul>
+    <form id="ruleForm" class="al-rule-form" hidden>
+      <label>Name <input name="name" required maxlength="80" /></label>
+      <label>Cameras <select name="cameras" multiple size="4"></select></label>
+      <label>Kinds <select name="types" multiple size="4"></select></label>
+      <label>From <input name="from" type="time" /></label>
+      <label>To <input name="to" type="time" /></label>
+      <label>Days <input name="days" placeholder="e.g. 1,2,3,4,5 (0 = Sunday); blank = every day" /></label>
+      <label>Urgency <select name="priority"></select></label>
+      <label><input type="checkbox" name="notify" /> Send a message when this matches</label>
+      <label>At most one message every <input name="minGapS" type="number" min="0" max="3600" value="0" /> s</label>
+      <button type="submit">Add rule</button>
+      <span id="ruleError" class="al-error" role="alert"></span>
+    </form>
+
+    <!-- Motion tuning. Its own section rather than its own page: whether a camera's sensitivity is
+         right is a question people ask while looking at that camera's alarms. -->
+    </section>
+
+    <section data-tab="tuning" data-tab-label="Motion tuning" data-tab-help="How much movement each camera sees, against what the NVR is set to trigger on.">
+    <p class="hp-note">Live activity measured by this server, against what the NVR is set to.
+      Changing the NVR's setting is a change to the owner's equipment and is confirmed per camera.</p>
+    <div class="al-tune">
+      <label class="al-tune-pick">Camera <select id="tuneCamera"></select></label>
+      <p id="tuneEmpty" class="al-tune-empty">Choose a camera to see how much movement it picks up, against what its NVR is set to trigger on.</p>
+      <div id="tuneBody" class="al-tune-body" hidden>
+        <!-- The live picture comes from the same LiveTile the grid and the map use (sub-stream, so
+             tuning one camera costs the NVR very little), with the NVR's watched zones drawn over it. -->
+        <div class="al-tune-live">
+          <div id="tuneTile" class="tile"></div>
+          <canvas id="tuneOverlay" class="al-tune-overlay"></canvas>
+        </div>
+        <div class="al-tune-side">
+          <div id="tuneMeter" class="al-meter" role="status"></div>
+          <div class="al-tune-nvr">
+            <h3>The NVR's setting</h3>
+            <p id="tuneNote" class="hp-note"></p>
+            <form id="tuneForm" hidden>
+              <label>New sensitivity <input name="threshold" type="number" min="0" max="100" /></label>
+              <button type="submit">Change it on the NVR…</button>
+              <span id="tuneError" class="al-error" role="alert"></span>
+            </form>
+            <p id="tuneResult" class="hp-note" role="status"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+    </section>
+  </main>
+
+  <script type="module" src="shell.js"></script>
+  <script type="module" src="alarms.js"></script>
+  <script type="module" src="page-tabs.js"></script>
+</body>
+</html>

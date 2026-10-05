@@ -1,0 +1,2417 @@
+#!/usr/bin/env bash
+# cctv-vpn: the CCTV server as the WireGuard hub for remote sites (hub and spoke). Run as root.
+#
+# Remote site gateways DIAL OUT to this hub on UDP 51820 (keepalive 25 s), so remote sites need
+# no port forward and may sit behind 4G / carrier NAT. Site N (2..250) gets the tunnel address
+# 10.77.0.N and the virtual subnet 10.78.N.0/24, which its gateway maps 1:1 onto its real LAN
+# (the last octet is kept): an NVR at 192.168.1.10 at site 3 is added in the CCTV app as
+# 10.78.3.10, port 6036. Sites may all use the same LAN range. There is no site 1: 10.77.0.1 is
+# the hub itself.
+# Least privilege: the hub never forwards; this machine may open only TCP 6036 and ping into
+# the tunnel; nothing from a site can open a connection to this machine (web UI, SSH, ...).
+#
+#   cctv-vpn hub-init [--endpoint HOST[:PORT]|none] [--port N] [--mtu N] [--yes] [--new-hub-key]
+#                                              set up / update (idempotent); --yes when the address
+#                                              the sites dial changes while sites exist
+#   cctv-vpn hub-info                          the main-site router / Windows instructions again
+#   cctv-vpn hub-up | hub-down                 start / stop wg0 (hub-down: stays down after reboots)
+#   cctv-vpn hub-rekey --yes                   new hub key pair (every site needs the new public key)
+#   cctv-vpn hub-purge --yes [--delete-keys]   remove the hub (keeps /etc/cctv/vpn unless --delete-keys)
+#   cctv-vpn backup --out FILE.tar.gz.gpg [--passphrase-file F] | --out FILE.tar.gz --no-encrypt
+#   cctv-vpn restore FILE [--passphrase-file F] rebuild this hub from a backup (same keys: no site visits)
+#   cctv-vpn firewall-reload                   rebuild and reload only the nftables table
+#   cctv-vpn fw-verify                         is table inet cctv_vpn exactly as generated? (reloads it if not)
+#   cctv-vpn site-add NAME --lan CIDR|none [--id N [--reuse-id]] [--pubkey KEY] [--psk-file F | --no-psk]
+#                     [--note TEXT]
+#   cctv-vpn site-set NAME|ID [--lan CIDR|none] [--rename NEW] [--note TEXT]
+#   cctv-vpn site-remove NAME|ID --yes         cut the site off at once, delete its keys, retire its id
+#   cctv-vpn site-rekey NAME|ID --yes [--pubkey KEY]
+#   cctv-vpn site-reset NAME|ID                forget the site's handshake state (its clock went back)
+#   cctv-vpn site-bundle NAME|ID [--out FILE.tar.gz|-] [--forget-key] [--no-key]
+#   cctv-vpn site-list [--retired]
+#   cctv-vpn status [--json|--write]           human view; --json for the app; --write = the 15 s timer
+#   cctv-vpn check                             PASS/WARN/FAIL of every hub item (exit 1 on a FAIL)
+#   (internal: post-up = wg0's PostUp; fw-verify --preup = wg0's PreUp; fw-watch = the watcher unit)
+#
+# Exit codes: 0 ok, 1 failed, 2 bad input or confirmation (--yes) missing, 3 conflict or not
+# allowed, 4 not found.
+#
+# Files: /etc/cctv/vpn (0700, the source of truth: hub key, site records and keys), generated
+# /etc/wireguard/wg0.conf, /etc/cctv/vpn/cctv_vpn.nft (table inet cctv_vpn), systemd units
+# cctv-vpn-firewall.service, wg-quick@wg0 (+ drop-in), cctv-vpn-status.timer, cctv-vpn-fwwatch
+# .service, /var/lib/cctv-vpn (saved site endpoints, the firewall's expected listing), and for the
+# app /run/cctv/vpn-status.json (0644, no secrets). Operator guide: deploy/vpn/README.md.
+#
+# TESTS ONLY: CCTV_VPN_ROOT=<folder> puts every file under that folder, uses no systemd and acts
+# on the current network namespace (refused in the main one); CCTV_VPN_IF / CCTV_VPN_TABLE then
+# rename the interface and the nft table. deploy/vpn/test-sim.sh uses this.
+set -euo pipefail
+umask 077
+export LC_ALL=C
+PROG=cctv-vpn
+
+# ---------------------------------------------------------------- messages
+# under systemd, "<3>"/"<4>" set the journal level (the status timer logs notice and up only)
+lvl() { [[ -n ${JOURNAL_STREAM:-} ]] && printf '<%s>' "$1"; return 0; }
+die() { local code=$1; shift; printf '%s%s: %s\n' "$(lvl 3)" "$PROG" "$*" >&2; exit "$code"; }
+warn() { printf '%s%s: WARNING: %s\n' "$(lvl 4)" "$PROG" "$*" >&2; }
+q() { printf '%q' "$1"; } # untrusted text in messages
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+note() { printf '%s%s: %s\n' "$(lvl 5)" "$PROG" "$*" >&2; }
+usage() { sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+# ---------------------------------------------------------------- validators
+# every value from the command line, a record or wg is checked before it reaches a file name,
+# a firewall rule, a config line or the JSON
+RE_OCTET='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+RE_IP4="^($RE_OCTET\\.){3}$RE_OCTET\$"
+# a DNS name as the site gateway accepts it (at least one dot, alphabetic top-level label)
+RE_HOST='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+valid_key() { [[ ${1:-} =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$ ]]; }
+valid_id() { [[ ${1:-} =~ ^([2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|250)$ ]]; } # no 1: that is the hub
+# a subset of what the app accepts ([a-z0-9-]{1,32}): no "-" at either end (a leading one reads
+# as an option)
+valid_name() { [[ ${1:-} =~ ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ ]]; }
+valid_uint() { [[ ${1:-} =~ ^[0-9]{1,18}$ ]]; } # fits bash arithmetic; printed as $((10#n))
+valid_port() { [[ ${1:-} =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$1 <= 65535)); }
+valid_listen_port() { valid_port "${1:-}" && ((10#$1 >= 1024)); }
+valid_mtu() { [[ ${1:-} =~ ^[0-9]{4}$ ]] && ((10#$1 >= 1280 && 10#$1 <= 1420)); }
+valid_time() { [[ ${1:-} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; }
+# a free-text note per site (device type, how to reach it): only in site.conf and site-list output,
+# never in a rule, a file name or the status JSON; no quotes, $, backslash, backtick or control chars
+RE_NOTE='^[A-Za-z0-9 .,:/_@()+#-]{0,100}$'
+valid_note() { [[ ${1-} =~ $RE_NOTE ]]; }
+valid_origin() { [[ ${1:-} =~ ^(hub|site|forgotten)$ ]]; } # where the site's private key was made / is
+valid_ip4() { [[ ${1:-} =~ $RE_IP4 ]]; }
+valid_ip6() { [[ ${1:-} =~ ^[0-9A-Fa-f:.]{2,45}$ && $1 == *:* ]]; }
+valid_dns() { ((${#1} <= 253)) && [[ $1 =~ $RE_HOST ]]; }
+valid_ep_host() { valid_ip4 "${1:-}" || valid_dns "${1:-}" || valid_ip6 "${1:-}"; }
+valid_endpoint() { # ip4:port or [ip6]:port, as wg prints it (copy BASH_REMATCH first: the next
+  local h p        # [[ =~ ]] inside valid_ip4/valid_port overwrites it)
+  if [[ ${1:-} =~ ^([0-9.]+):([0-9]{1,5})$ ]]; then
+    h=${BASH_REMATCH[1]} p=${BASH_REMATCH[2]}
+    valid_ip4 "$h" && valid_port "$p"
+    return
+  fi
+  if [[ ${1:-} =~ ^\[([0-9A-Fa-f:.]{2,45})(%[A-Za-z0-9_.-]{1,15})?\]:([0-9]{1,5})$ ]]; then
+    p=${BASH_REMATCH[3]}
+    valid_port "$p"
+    return
+  fi
+  return 1
+}
+ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(((a << 24) + (b << 16) + (c << 8) + d)); }
+int2ip() { echo "$((($1 >> 24) & 255)).$((($1 >> 16) & 255)).$((($1 >> 8) & 255)).$(($1 & 255))"; }
+mask_of() { if (($1 == 0)); then echo 0; else echo $(((0xFFFFFFFF << (32 - $1)) & 0xFFFFFFFF)); fi; }
+valid_cidr4() { # a.b.c.d/p with the host bits zero
+  [[ ${1:-} =~ ^([0-9.]+)/([0-9]|[12][0-9]|3[0-2])$ ]] || return 1
+  local ip=${BASH_REMATCH[1]} len=${BASH_REMATCH[2]} n m
+  valid_ip4 "$ip" || return 1
+  n=$(ip2int "$ip")
+  m=$(mask_of "$len")
+  (((n & m) == n))
+}
+net_of() { # a.b.c.d/p (any host bits) -> its network a.b.c.0/p
+  local ip=${1%/*} len=32
+  [[ $1 == */* ]] && len=${1#*/}
+  echo "$(int2ip $(($(ip2int "$ip") & $(mask_of "$len"))))/$len"
+}
+cidr_contains() { # outer-cidr inner-cidr-or-ip
+  local o=${1%/*} ol=${1#*/} i=${2%/*} il=32 m
+  [[ $2 == */* ]] && il=${2#*/}
+  ((il >= ol)) || return 1
+  m=$(mask_of "$ol")
+  ((($(ip2int "$i") & m) == ($(ip2int "$o") & m)))
+}
+cidr_overlap() { cidr_contains "$1" "$2" || cidr_contains "$2" "$1"; }
+is_private_net() { cidr_contains 10.0.0.0/8 "$1" || cidr_contains 172.16.0.0/12 "$1" || cidr_contains 192.168.0.0/16 "$1"; }
+lan_problem() { # why a site LAN is not acceptable (prints nothing when it is fine)
+  valid_cidr4 "$1" || { echo "not a network like 192.168.1.0/24 (with the host part 0)"; return 0; }
+  [[ ${1#*/} == 24 ]] || { echo "must be one /24: the virtual subnet 10.78.N.0/24 maps it host by host (for a bigger LAN give the /24 that holds the NVRs)"; return 0; }
+  is_private_net "$1" || { echo "not a private network (10/8, 172.16/12, 192.168/16)"; return 0; }
+  if cidr_overlap "$1" "$TUNNEL_NET"; then echo "overlaps the VPN tunnel network $TUNNEL_NET"; return 0; fi
+  if cidr_overlap "$1" "$VIRTUAL_NET"; then echo "overlaps the VPN virtual networks $VIRTUAL_NET"; return 0; fi
+  return 0
+}
+check_lan_arg() { # --lan value (CIDR or none), exit 2 when bad
+  [[ $1 == none ]] && return 0
+  local why
+  why=$(lan_problem "$1")
+  [[ -z $why ]] || die 2 "--lan $(q "$1"): $why"
+}
+check_new_name() {
+  valid_name "$1" || die 2 "site name $(q "$1"): use 1-32 of a-z 0-9 and -, not starting or ending with -"
+  [[ ! $1 =~ ^[0-9]+$ ]] || die 2 "site name $(q "$1"): a name of only digits would be mistaken for a site id"
+}
+
+# ---------------------------------------------------------------- paths and test mode
+netns_is_main() { # 0 = the main network namespace (or unknown: then assume the main one)
+  local a b
+  a=$(readlink /proc/self/ns/net 2>/dev/null) || return 0
+  b=$(readlink /proc/1/ns/net 2>/dev/null) || return 0
+  [[ $a == "$b" ]]
+}
+ROOT=""
+IF=wg0
+TABLE=cctv_vpn
+TEST_MODE=0
+if [[ -n ${CCTV_VPN_ROOT:-} ]]; then
+  ROOT=${CCTV_VPN_ROOT%/}
+  [[ $ROOT =~ ^/[A-Za-z0-9._/-]+$ && $ROOT != *..* && -d $ROOT ]] || die 2 "CCTV_VPN_ROOT must be an existing absolute folder (letters, digits, . _ - /)"
+  TEST_MODE=1
+  IF=${CCTV_VPN_IF:-wg0}
+  TABLE=${CCTV_VPN_TABLE:-cctv_vpn}
+  [[ $IF =~ ^[a-z][a-z0-9_-]{0,14}$ ]] || die 2 "CCTV_VPN_IF: bad interface name"
+  [[ $TABLE =~ ^[a-z][a-z0-9_]{0,31}$ ]] || die 2 "CCTV_VPN_TABLE: bad table name"
+  if netns_is_main; then die 3 "CCTV_VPN_ROOT is for tests inside a network namespace (ip netns exec ...): refused in the main namespace"; fi
+elif [[ -n ${CCTV_VPN_IF:-}${CCTV_VPN_TABLE:-} ]]; then
+  die 2 "CCTV_VPN_IF / CCTV_VPN_TABLE are for tests and work only together with CCTV_VPN_ROOT"
+fi
+VPN_DIR=$ROOT/etc/cctv/vpn
+SITES=$VPN_DIR/sites
+RETIRED=$VPN_DIR/retired
+BUNDLES=$VPN_DIR/bundles
+NFT_FILE=$VPN_DIR/cctv_vpn.nft
+WG_DIR=$ROOT/etc/wireguard
+WG_CONF=$WG_DIR/$IF.conf
+STATE_DIR=$ROOT/var/lib/cctv-vpn # last known site endpoints, the firewall's listing (not secret)
+FW_EXPECTED=$STATE_DIR/table.expected # the table as this tool loaded it (counters left out)
+FLIPS=$STATE_DIR/endpoint-changes     # recent endpoint changes per site (two holders of one key?)
+BACKUP_CONF=$VPN_DIR/backup.conf      # when the last backup was made / the last change
+RUN_DIR=$ROOT/run/cctv
+STATUS_FILE=$RUN_DIR/vpn-status.json
+UNIT_DIR=$ROOT/etc/systemd/system
+TMPFILES_CONF=$ROOT/etc/tmpfiles.d/cctv-vpn.conf
+SBIN=$ROOT/usr/local/sbin/cctv-vpn
+SHARE=$ROOT/usr/local/share/cctv-vpn
+FW_UNIT=cctv-vpn-firewall.service
+WG_UNIT=wg-quick@$IF.service
+ST_UNIT=cctv-vpn-status.service
+TIMER_UNIT=cctv-vpn-status.timer
+WATCH_UNIT=cctv-vpn-fwwatch.service
+MARKER="# managed by cctv-vpn: rebuilt from /etc/cctv/vpn on every change, edits here are lost"
+HUB_IP=10.77.0.1
+TUNNEL_NET=10.77.0.0/24
+VIRTUAL_NET=10.78.0.0/16
+NVR_PORT=6036
+KEEPALIVE=25
+CONNECTED_S=180
+if ((TEST_MODE)); then
+  POSTUP="env CCTV_VPN_ROOT=$ROOT CCTV_VPN_IF=$IF CCTV_VPN_TABLE=$TABLE $SBIN"
+else
+  POSTUP=/usr/local/sbin/cctv-vpn
+fi
+
+CLEANUP_DIRS=() # temporary folders to remove on exit (site-bundle, backup, restore)
+GPG_HOMES=()    # temporary gpg homes: their gpg-agent is stopped on exit
+GPG_RUNDIR=""   # /run/user/<uid>/gnupg when gpg made it for this command (removed again if empty)
+on_exit() {
+  local d
+  for d in "${GPG_HOMES[@]}"; do
+    HOME=$d gpgconf --homedir "$d" --kill gpg-agent >/dev/null 2>&1 || true
+    HOME=$d gpgconf --homedir "$d" --remove-socketdir >/dev/null 2>&1 || true
+  done
+  [[ -z $GPG_RUNDIR ]] || rmdir -- "$GPG_RUNDIR" 2>/dev/null || true
+  for d in "${CLEANUP_DIRS[@]}"; do [[ -z $d ]] || rm -rf -- "$d"; done
+}
+trap on_exit EXIT
+need_root() { [[ $(id -u) == 0 ]] || die 3 "run as root (sudo $PROG ...)"; }
+need_tools() {
+  local t missing=()
+  for t in "$@"; do command -v "$t" >/dev/null 2>&1 || missing+=("$t"); done
+  ((${#missing[@]} == 0)) || die 3 "missing tools: ${missing[*]} (Ubuntu: apt install wireguard-tools nftables)"
+}
+is_wsl() { [[ $(systemd-detect-virt 2>/dev/null || true) == wsl ]] || grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; }
+LOCKED=0
+lock() { # one changing command at a time
+  ((LOCKED)) && return 0
+  [[ -d $VPN_DIR ]] || die 4 "the hub is not set up ($VPN_DIR missing): run $PROG hub-init"
+  exec 9>>"$VPN_DIR/.lock"
+  flock -w 30 9 || die 3 "another $PROG command is still running (lock $VPN_DIR/.lock)"
+  LOCKED=1
+}
+
+# ---------------------------------------------------------------- records (KEY=value, never sourced)
+read_record() { # file assoc-array-name; 1 if missing or any line is not KEY=value
+  local file=$1 line k
+  local -n into=$2
+  into=()
+  [[ -f $file && ! -L $file ]] || return 1
+  # split at the FIRST "=" by hand: `IFS== read k v` drops the "=" at the end of a base64 key
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line || $line == \#* ]] && continue
+    [[ $line == *=* ]] || return 1
+    k=${line%%=*}
+    [[ $k =~ ^[A-Z_]{1,32}$ ]] || return 1
+    [[ -z ${into[$k]+x} ]] || return 1
+    into[$k]=${line#*=}
+  done <"$file"
+  return 0
+}
+write_kv_file() { # file KEY=VALUE... (values validated by the caller); atomic
+  local file=$1 tmp
+  shift
+  tmp=$(mktemp "${file%/*}/.${file##*/}.XXXXXX")
+  { printf '# written by %s (no secrets). Do not edit while a %s command runs.\n' "$PROG" "$PROG"; printf '%s\n' "$@"; } >"$tmp"
+  chmod 600 "$tmp"
+  sync "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file"
+}
+read_key_file() { # prints the key in a one-key file; 1 if missing or not a key
+  local v
+  [[ -f $1 && ! -L $1 ]] || return 1
+  v=$(head -c 200 "$1" | tr -d ' \t\r\n')
+  valid_key "$v" || return 1
+  printf '%s' "$v"
+}
+write_secret() { # file value: a 0600 key file, atomic
+  local tmp
+  tmp=$(mktemp "${1%/*}/.${1##*/}.XXXXXX")
+  printf '%s\n' "$2" >"$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$1"
+}
+
+declare -A HUB=() S=() P=() R=()
+H_ENDPOINT="" H_PUBLIC_PORT="" H_PORT="" H_MTU="" H_CREATED="" HUB_PUB="" HUB_HINT=""
+ep_join() { # host port -> host:port, [v6]:port, or nothing
+  [[ -n $1 ]] || return 0
+  if [[ $1 == *:* ]]; then printf '[%s]:%s' "$1" "$2"; else printf '%s:%s' "$1" "$2"; fi
+}
+load_hub() { # hub.conf + hub.pub -> H_* HUB_PUB HUB_HINT
+  local k
+  read_record "$VPN_DIR/hub.conf" HUB || die 4 "the hub is not set up ($VPN_DIR/hub.conf missing or unreadable): run $PROG hub-init"
+  for k in "${!HUB[@]}"; do case $k in ENDPOINT | PUBLIC_PORT | PORT | MTU | CREATED) ;; *) die 1 "hub.conf: unknown setting $k" ;; esac; done
+  H_ENDPOINT=${HUB[ENDPOINT]:-}
+  H_PORT=${HUB[PORT]:-}
+  H_PUBLIC_PORT=${HUB[PUBLIC_PORT]:-$H_PORT}
+  H_MTU=${HUB[MTU]:-1280}
+  H_CREATED=${HUB[CREATED]:-}
+  valid_listen_port "$H_PORT" || die 1 "hub.conf: bad PORT"
+  valid_port "$H_PUBLIC_PORT" || die 1 "hub.conf: bad PUBLIC_PORT"
+  valid_mtu "$H_MTU" || die 1 "hub.conf: bad MTU"
+  [[ -z $H_ENDPOINT ]] || valid_ep_host "$H_ENDPOINT" || die 1 "hub.conf: bad ENDPOINT"
+  HUB_PUB=$(read_key_file "$VPN_DIR/hub.pub") || die 1 "$VPN_DIR/hub.pub missing or not a key"
+  HUB_HINT=$(ep_join "$H_ENDPOINT" "$H_PUBLIC_PORT")
+}
+load_site() { # id [array, default S] -> that array holds the checked record; 1 when missing or bad
+  # (loops over all sites use P, so that S keeps the site a command works on)
+  local id=$1 arr=${2:-S} k
+  local -n _ls=$arr
+  valid_id "$id" || return 1
+  read_record "$SITES/$id/site.conf" "$arr" || return 1
+  for k in "${!_ls[@]}"; do case $k in ID | NAME | LAN | PUBLIC_KEY | PSK | KEY_ON_HUB | KEY_ORIGIN | CREATED | EXPORTED | NOTE) ;; *) return 1 ;; esac; done
+  [[ ${_ls[ID]:-} == "$id" ]] || return 1
+  valid_name "${_ls[NAME]:-}" || return 1
+  [[ ${_ls[LAN]:-} == none || (-n ${_ls[LAN]:-} && -z $(lan_problem "${_ls[LAN]}")) ]] || return 1
+  valid_key "${_ls[PUBLIC_KEY]:-}" || return 1
+  [[ ${_ls[PSK]:-} =~ ^(yes|no)$ && ${_ls[KEY_ON_HUB]:-} =~ ^(yes|no)$ ]] || return 1
+  valid_time "${_ls[CREATED]:-}" || return 1
+  _ls[EXPORTED]=${_ls[EXPORTED]:-never}
+  [[ ${_ls[EXPORTED]} == never ]] || valid_time "${_ls[EXPORTED]}" || return 1
+  # records written before KEY_ORIGIN existed: a key on the hub was made here, else at the site
+  if [[ -z ${_ls[KEY_ORIGIN]:-} ]]; then if [[ ${_ls[KEY_ON_HUB]} == yes ]]; then _ls[KEY_ORIGIN]=hub; else _ls[KEY_ORIGIN]=site; fi; fi
+  valid_origin "${_ls[KEY_ORIGIN]}" || return 1
+  if [[ ${_ls[KEY_ON_HUB]} == yes && ${_ls[KEY_ORIGIN]} != hub ]] || [[ ${_ls[KEY_ON_HUB]} == no && ${_ls[KEY_ORIGIN]} == hub ]]; then return 1; fi
+  _ls[NOTE]=${_ls[NOTE]:-}
+  valid_note "${_ls[NOTE]}" || return 1
+  return 0
+}
+save_site() { # folder (from S)
+  write_kv_file "$1/site.conf" "ID=${S[ID]}" "NAME=${S[NAME]}" "LAN=${S[LAN]}" "PUBLIC_KEY=${S[PUBLIC_KEY]}" \
+    "PSK=${S[PSK]}" "KEY_ON_HUB=${S[KEY_ON_HUB]}" "KEY_ORIGIN=${S[KEY_ORIGIN]}" "CREATED=${S[CREATED]}" \
+    "EXPORTED=${S[EXPORTED]}" "NOTE=${S[NOTE]:-}"
+}
+# the backup is out of date after every change of keys or site records
+mark_changed() {
+  local last="never"
+  local -A B=()
+  if read_record "$BACKUP_CONF" B 2>/dev/null && valid_time "${B[LAST_BACKUP]:-}"; then last=${B[LAST_BACKUP]}; fi
+  write_kv_file "$BACKUP_CONF" "LAST_BACKUP=$last" "LAST_CHANGE=$(now_iso)"
+  if [[ $last == never ]]; then
+    note "no backup of this hub yet: $PROG backup --out <file on another machine or a USB stick> (README: Back up the hub)"
+  else
+    note "the last backup ($last) is now out of date: make a new one ($PROG backup --out ...)"
+  fi
+}
+load_retired() { # id -> R; 1 when missing or bad
+  valid_id "$1" && read_record "$RETIRED/$1.conf" R && valid_name "${R[NAME]:-}" && valid_time "${R[REMOVED]:-}"
+}
+site_ids() { # active sites, by id
+  local d id
+  for d in "$SITES"/*/; do
+    id=${d%/}
+    id=${id##*/}
+    if valid_id "$id" && [[ -f $SITES/$id/site.conf ]]; then printf '%s\n' "$id"; fi
+  done | sort -n
+}
+retired_ids() {
+  local f id
+  for f in "$RETIRED"/*.conf; do
+    id=${f##*/}
+    id=${id%.conf}
+    if valid_id "$id" && [[ -f $f ]]; then printf '%s\n' "$id"; fi
+  done | sort -n
+}
+site_id_by_name() { # name -> id of the active site with that name; 1 if none
+  local id
+  for id in $(site_ids); do
+    if load_site "$id" P && [[ ${P[NAME]} == "$1" ]]; then
+      printf '%s' "$id"
+      return 0
+    fi
+  done
+  return 1
+}
+FOUND=""
+find_site() { # NAME|ID -> FOUND and S; exit 2/4
+  local arg=$1 id
+  [[ -n $arg ]] || die 2 "give a site name or id"
+  if valid_id "$arg" && [[ -d $SITES/$arg ]]; then
+    load_site "$arg" || die 1 "site $arg: the record $SITES/$arg/site.conf is damaged"
+    FOUND=$arg
+    return 0
+  fi
+  valid_name "$arg" || die 2 "not a site name or id: $(q "$arg")"
+  id=$(site_id_by_name "$arg") || die 4 "no active site $(q "$arg") ($PROG site-list)"
+  load_site "$id" || die 1 "site $id: damaged record"
+  FOUND=$id
+}
+next_free_id() { # lowest id that was never used (removed ids stay retired)
+  local i
+  for ((i = 2; i <= 250; i++)); do
+    if [[ ! -e $SITES/$i && ! -e $RETIRED/$i.conf ]]; then
+      printf '%s' "$i"
+      return 0
+    fi
+  done
+  return 1
+}
+used_pubkey() { # key -> name of the site using it; 1 if none
+  local id
+  for id in $(site_ids); do
+    if load_site "$id" P && [[ ${P[PUBLIC_KEY]} == "$1" ]]; then
+      printf '%s' "${P[NAME]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------- generated files
+render_nft() {
+  cat <<EOF
+#!/usr/sbin/nft -f
+# CCTV VPN hub firewall. Generated by cctv-vpn (hub-init / firewall-reload): edits here are lost.
+# Loaded with \`nft -f\` as ONE transaction that replaces only table inet $TABLE: ufw, Docker, WSL's
+# own tables etc. are never touched. A drop here is final whatever other tables say; an accept
+# here does not override their drops (with ufw active: ufw allow $H_PORT/udp).
+# Policy for $IF (least privilege):
+#   - nothing from a site may open a connection to this host (web UI, SSH, ...): only replies to
+#     connections this host opened come back in;
+#   - this host may open only TCP $NVR_PORT (TVT SDK) and ping into the tunnel;
+#   - this host never forwards to or from $IF (even if ip_forward gets switched on);
+#   - the VPN ranges never leave through any other interface (e.g. while $IF is down).
+# cctv-vpn compares the live table with what it loaded: the watcher unit and the 15 s timer put it
+# back at once when anything flushes, deletes or edits it, and take $IF down if that fails.
+
+add table inet $TABLE
+delete table inet $TABLE
+
+table inet $TABLE {
+	set vpn4 {
+		type ipv4_addr
+		flags interval
+		elements = { $TUNNEL_NET, $VIRTUAL_NET }
+	}
+
+	# WireGuard never answers strangers, so these show what reaches this host at all: every
+	# packet for the WireGuard port, and handshake initiations (message type 1)
+	counter wg_udp_in {
+	}
+	counter wg_handshake_in {
+	}
+
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname "$IF" jump from_sites
+		udp dport $H_PORT counter name "wg_udp_in"
+		udp dport $H_PORT @th,64,32 0x01000000 counter name "wg_handshake_in"
+	}
+
+	chain from_sites {
+		ct state established,related counter accept
+		limit rate 6/minute burst 5 packets log prefix "cctv-vpn drop in: " level info
+		counter drop
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		iifname "$IF" counter drop
+		oifname "$IF" counter drop
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "$IF" jump to_sites
+		oifname != "lo" ip daddr @vpn4 counter reject with icmp type admin-prohibited
+	}
+
+	chain to_sites {
+		ip daddr @vpn4 tcp dport $NVR_PORT counter accept
+		ip daddr @vpn4 icmp type echo-request counter accept
+		limit rate 6/minute burst 5 packets log prefix "cctv-vpn drop out: " level info
+		# reject, not drop: a wrong port fails at once ("no route to host") instead of timing out
+		meta nfproto ipv4 counter reject with icmp type admin-prohibited
+		counter drop
+	}
+}
+EOF
+}
+write_nft() { # render, check with nft -c, then replace the file
+  local tmp
+  tmp=$(mktemp "$VPN_DIR/.cctv_vpn.nft.XXXXXX")
+  render_nft >"$tmp"
+  chmod 600 "$tmp"
+  if ! nft -c -f "$tmp" >/dev/null; then
+    rm -f "$tmp"
+    die 1 "the generated firewall does not load (nft -c failed): nothing changed"
+  fi
+  mv -f "$tmp" "$NFT_FILE"
+}
+render_wg_conf() {
+  local id psk hubkey
+  hubkey=$(read_key_file "$VPN_DIR/hub.key") || die 1 "$VPN_DIR/hub.key missing or not a key"
+  echo "$MARKER"
+  echo "[Interface]"
+  echo "Address = $HUB_IP/24"
+  echo "ListenPort = $H_PORT"
+  echo "PrivateKey = $hubkey"
+  echo "MTU = $H_MTU"
+  echo "Table = off"
+  # wg0 never starts unless table inet $TABLE is loaded and exactly as generated (fail closed)
+  echo "PreUp = $POSTUP fw-verify --preup"
+  echo "PostUp = ip -4 route replace $VIRTUAL_NET dev %i"
+  echo "PostUp = $POSTUP post-up %i"
+  for id in $(site_ids); do
+    if ! load_site "$id" P; then
+      warn "site $id: damaged record $SITES/$id/site.conf: left out of $IF (fix or remove it)"
+      continue
+    fi
+    psk=""
+    if [[ ${P[PSK]} == yes ]] && ! psk=$(read_key_file "$SITES/$id/psk"); then
+      warn "site $id (${P[NAME]}): psk file missing or bad: left out of $IF"
+      continue
+    fi
+    echo
+    echo "[Peer]"
+    echo "# site $id ${P[NAME]} (${P[LAN]} there)"
+    echo "PublicKey = ${P[PUBLIC_KEY]}"
+    [[ -z $psk ]] || echo "PresharedKey = $psk"
+    echo "AllowedIPs = 10.77.0.$id/32, 10.78.$id.0/24"
+    # (no PersistentKeepalive here: post-up sets it once the saved endpoints are in, see ensure_keepalive)
+  done
+  return 0
+}
+write_wg_conf() { # atomic; refuses to replace a wg0.conf that this tool did not write
+  local tmp
+  if [[ -e $WG_CONF && "$(head -n1 "$WG_CONF" 2>/dev/null)" != "$MARKER" ]]; then
+    die 3 "$WG_CONF exists and was not written by $PROG: move it away first (another WireGuard setup on $IF?)"
+  fi
+  install -d -m 0700 "$WG_DIR"
+  tmp=$(mktemp "$WG_DIR/.$IF.conf.XXXXXX")
+  render_wg_conf >"$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$WG_CONF"
+}
+write_units() { # systemd units, drop-ins, tmpfiles entry (the same text in test mode, under ROOT)
+  local nft
+  nft=$(command -v nft)
+  install -d -m 0755 "$UNIT_DIR" "$UNIT_DIR/wg-quick@$IF.service.d" "$UNIT_DIR/nftables.service.d" "${TMPFILES_CONF%/*}"
+  cat >"$UNIT_DIR/$FW_UNIT" <<EOF
+# CCTV VPN hub firewall: loads ONLY table inet $TABLE (nft -f replaces it atomically).
+# Written by cctv-vpn hub-init. wg-quick@$IF requires this unit, so $IF never runs without it.
+#   systemctl status $FW_UNIT      nft list table inet $TABLE      cctv-vpn firewall-reload
+[Unit]
+Description=CCTV VPN hub firewall (nftables table inet $TABLE)
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target wg-quick@$IF.service shutdown.target
+# nftables.service starts with "flush ruleset": load after it, never before
+After=local-fs.target nftables.service ufw.service firewalld.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$nft -f /etc/cctv/vpn/cctv_vpn.nft
+# no ExecStop on purpose: the table (and its "VPN addresses never leave by another interface"
+# rule) stays loaded while $IF is down; only \`cctv-vpn hub-purge\` deletes it
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat >"$UNIT_DIR/wg-quick@$IF.service.d/cctv-vpn.conf" <<EOF
+# CCTV VPN hub (written by cctv-vpn hub-init): $IF only ever runs with its firewall loaded.
+# Stopping or failing $FW_UNIT stops $IF too (Requires=).
+[Unit]
+Requires=$FW_UNIT
+After=$FW_UNIT
+EOF
+  cat >"$UNIT_DIR/nftables.service.d/cctv-vpn.conf" <<EOF
+# CCTV VPN hub (written by cctv-vpn hub-init): nftables.service starts and reloads with
+# "flush ruleset", which would also delete table inet $TABLE. Put it straight back.
+# (Harmless if nftables.service is never used.)
+[Service]
+ExecStartPost=-$nft -f /etc/cctv/vpn/cctv_vpn.nft
+ExecReload=-$nft -f /etc/cctv/vpn/cctv_vpn.nft
+EOF
+  cat >"$UNIT_DIR/$ST_UNIT" <<EOF
+# Writes /run/cctv/vpn-status.json for the CCTV app (no secrets), keeps the last site endpoints
+# and checks that table inet $TABLE is exactly as generated (reloads it if not; takes $IF down if
+# that fails). Run every 15 s by the timer; $WATCH_UNIT reacts to changes at once.
+[Unit]
+Description=CCTV VPN status for the app (/run/cctv/vpn-status.json)
+After=$FW_UNIT wg-quick@$IF.service
+ConditionPathExists=/etc/cctv/vpn/hub.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cctv-vpn status --write
+# every 15 s: keep "Starting/Finished" out of the journal; warnings and errors still get through
+LogLevelMax=notice
+UMask=0077
+# /var/lib/cctv-vpn: last known site endpoints (restored when $IF comes back up)
+StateDirectory=cctv-vpn
+StateDirectoryMode=0700
+# root, but only what wg/nft/ip need (netlink with CAP_NET_ADMIN) and ping (CAP_NET_RAW, for the
+# idle-session ping to a gateway's tunnel address); /run/cctv is made by tmpfiles
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/cctv
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# netlink for wg/nft/ip; AF_INET/AF_INET6 for the idle-session ping and the WSL port claim (a bind
+# that is meant to fail)
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+TimeoutStartSec=10
+EOF
+  cat >"$UNIT_DIR/$TIMER_UNIT" <<EOF
+[Unit]
+Description=CCTV VPN status every 15 s
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=15s
+# the default (1 min) would bunch the runs up: the app calls a status older than 90 s stale
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
+  cat >"$UNIT_DIR/$WATCH_UNIT" <<EOF
+# CCTV VPN hub: follows nftables changes (nft monitor) and puts table inet $TABLE back at once when
+# anything flushes, deletes or edits it (a debugging "nft insert ... accept", "nft flush ruleset").
+# Takes $IF down if the table cannot be loaded. The 15 s status timer does the same as a backstop.
+[Unit]
+Description=CCTV VPN hub firewall watcher (table inet $TABLE)
+After=$FW_UNIT
+ConditionPathExists=/etc/cctv/vpn/hub.conf
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/cctv-vpn fw-watch
+Restart=always
+RestartSec=5
+UMask=0077
+StateDirectory=cctv-vpn
+StateDirectoryMode=0700
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat >"$TMPFILES_CONF" <<EOF
+# CCTV VPN (written by cctv-vpn hub-init): the folder of /run/cctv/vpn-status.json; root-owned,
+# readable by the CCTV app's dynamic user. Never add RuntimeDirectory=cctv to cctv.service.
+d /run/cctv 0755 root root -
+EOF
+  chmod 0644 "$UNIT_DIR/$FW_UNIT" "$UNIT_DIR/wg-quick@$IF.service.d/cctv-vpn.conf" "$UNIT_DIR/nftables.service.d/cctv-vpn.conf" \
+    "$UNIT_DIR/$ST_UNIT" "$UNIT_DIR/$TIMER_UNIT" "$UNIT_DIR/$WATCH_UNIT" "$TMPFILES_CONF"
+}
+install_tool() { # this script -> /usr/local/sbin/cctv-vpn; gateway scripts next to it -> share
+  local self here f
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  here=${self%/*}
+  install -d -m 0755 "${SBIN%/*}"
+  if [[ $self != "$(readlink -f "$SBIN" 2>/dev/null || true)" ]]; then install -m 0755 "$self" "$SBIN"; fi
+  for f in site-gateway.sh site-recipes.sh; do
+    if [[ -f $here/$f ]]; then
+      install -d -m 0755 "$SHARE" "$SHARE/gateway"
+      install -m 0644 "$here/$f" "$SHARE/gateway/$f"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------- wg0 and the firewall, running
+wg_exists() { ip link show dev "$IF" >/dev/null 2>&1; }
+wgq() { # wg-quick up|down <config>, quiet unless it fails
+  local out
+  if ! out=$(wg-quick "$1" "$WG_CONF" 2>&1); then
+    printf '%s\n' "$out" | sed 's/^/  wg-quick: /' >&2
+    return 1
+  fi
+}
+wg_down_now() { if wg_exists; then wgq down || ip link del dev "$IF"; fi; }
+
+# ---------------------------------------------------------------- the firewall table: load, compare, guard
+# The table must be EXACTLY what render_nft makes: a flushed table, a deleted one or one rule
+# inserted while debugging ("nft insert rule ... accept") would open wg0 to the sites. After each
+# load the listing (stateless: no counter values) is kept in $FW_EXPECTED; fw_state compares the
+# live table with it. Loads always use freshly rendered text, never the file on disk as it is (the
+# file is only for the boot unit; check reports it when someone edited it).
+fw_canon() { # the live table, without counter values; 1 if the table is missing
+  local out
+  out=$(nft -s list table inet "$TABLE" 2>/dev/null) || return 1
+  printf '%s\n' "$out" | sed -E 's/(packets|bytes) [0-9]+//g; s/[[:space:]]+$//'
+}
+fw_save_expected() {
+  local c tmp
+  c=$(fw_canon) || return 1
+  install -d -m 0700 "$STATE_DIR"
+  tmp=$(mktemp "$STATE_DIR/.table.XXXXXX")
+  printf '%s\n' "$c" >"$tmp"
+  mv -f "$tmp" "$FW_EXPECTED"
+}
+fw_load() { # load the rendered table in one transaction (replaces only our table), then remember it
+  local tmp rc=0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/cctv-vpn-nft.XXXXXX")
+  render_nft >"$tmp"
+  nft -f "$tmp" || rc=$?
+  rm -f -- "$tmp"
+  ((rc == 0)) || return "$rc"
+  fw_save_expected
+}
+fw_state() { # ok | missing | differs | unknown (no listing saved yet)
+  local live
+  live=$(fw_canon) || { echo missing; return 0; }
+  [[ -f $FW_EXPECTED ]] || { echo unknown; return 0; }
+  if [[ $live == "$(cat "$FW_EXPECTED")" ]]; then echo ok; else echo differs; fi
+}
+fw_diff() { # the first lines that differ (for messages)
+  { diff <(cat "$FW_EXPECTED" 2>/dev/null) <(fw_canon 2>/dev/null) || true; } | sed -n 's/^\([<>]\)[[:space:]]*/\1 /p' | head -n 4 | tr '\n' ';' | sed 's/;$//'
+}
+fw_file_state() { # the boot unit's file vs the rendered text: ok | edited | missing
+  [[ -f $NFT_FILE ]] || { echo missing; return 0; }
+  if [[ "$(cat "$NFT_FILE")" == "$(render_nft)" ]]; then echo ok; else echo edited; fi
+}
+# a lock for the guard (timer, watcher, PreUp): the lock file is opened read-only, because the
+# sandboxed timer and watcher cannot write /etc/cctv/vpn (flock works on any descriptor)
+GUARD_LOCKED=0
+guard_lock() { # seconds to wait; 1 when another cctv-vpn command holds the lock
+  ((LOCKED)) && return 0 # this command holds it already
+  [[ -f $VPN_DIR/.lock ]] || return 0
+  exec 8<"$VPN_DIR/.lock" || return 1
+  if ! flock -w "$1" 8; then exec 8<&-; return 1; fi
+  GUARD_LOCKED=1
+}
+guard_unlock() { if ((GUARD_LOCKED)); then flock -u 8 || true; exec 8<&-; GUARD_LOCKED=0; fi; }
+wg_fail_closed() { # the table could not be loaded: nothing may pass wg0
+  if wg_exists; then
+    warn "could not load table inet $TABLE: taking $IF down (fail closed; $PROG hub-up once the firewall loads)"
+    ip link set dev "$IF" down || ip link del dev "$IF" || true
+  fi
+}
+# the status timer and the watcher: put the table back when anything changed it; take wg0 down when
+# that fails. Nothing to do while the hub is not installed (hub-purge removes $WG_CONF).
+guard_firewall() {
+  [[ -f $WG_CONF ]] || return 0
+  local st
+  st=$(fw_state)
+  [[ $st == ok ]] && return 0
+  guard_lock 3 || return 0 # a changing command is running: it loads the table itself
+  st=$(fw_state)
+  if [[ $st == ok ]]; then guard_unlock; return 0; fi
+  case $st in
+    missing) warn "table inet $TABLE is missing (ruleset flushed or table deleted?): loading it again" ;;
+    differs) warn "table inet $TABLE was changed outside $PROG ($(fw_diff)): loading the generated one again" ;;
+  esac
+  if ! fw_load || [[ $(fw_state) != ok ]]; then
+    wg_fail_closed
+    guard_unlock
+    return 1
+  fi
+  guard_unlock
+  return 0
+}
+fw_ensure() { # before wg0 starts: its PreUp (another process) refuses a table that is not as generated
+  [[ $(fw_state) == ok ]] && return 0
+  fw_load || die 1 "could not load table inet $TABLE: $IF not started"
+}
+wg_start() {
+  fw_ensure
+  if ((TEST_MODE)); then
+    wg_exists || wgq up || die 1 "wg-quick up $IF failed"
+    return 0
+  fi
+  systemctl enable --quiet "$WG_UNIT"
+  if ! systemctl is-active --quiet "$WG_UNIT" && wg_exists; then wg_down_now; fi # started by hand: hand it to systemd
+  systemctl start "$WG_UNIT" || die 1 "systemctl start $WG_UNIT failed (journalctl -u $WG_UNIT)"
+}
+wg_restart() {
+  fw_ensure
+  if ((TEST_MODE)); then
+    wg_down_now
+    wgq up || die 1 "wg-quick up $IF failed"
+    return 0
+  fi
+  systemctl enable --quiet "$WG_UNIT"
+  systemctl restart "$WG_UNIT" || die 1 "systemctl restart $WG_UNIT failed (journalctl -u $WG_UNIT)"
+}
+wg_reload() { # apply wg0.conf to a running wg0 without touching other sessions (wg syncconf)
+  local stripped
+  wg_exists || return 0
+  if ((!TEST_MODE)) && systemctl is-active --quiet "$WG_UNIT"; then
+    systemctl reload "$WG_UNIT" || die 1 "systemctl reload $WG_UNIT failed"
+  else
+    stripped=$(wg-quick strip "$WG_CONF") || die 1 "wg-quick strip $WG_CONF failed"
+    wg syncconf "$IF" <(printf '%s\n' "$stripped") || die 1 "wg syncconf $IF failed"
+  fi
+  restore_endpoints >/dev/null || true
+  ensure_keepalive # new peers only; running sessions are not touched
+}
+wg_stop() {
+  if ((!TEST_MODE)); then systemctl disable --now --quiet "$WG_UNIT" || true; fi
+  wg_down_now
+}
+wg_endpoint_of() { # pubkey -> its current endpoint, else the saved one; nothing if unknown
+  local k e
+  if wg_exists; then
+    while read -r k e; do
+      if [[ $k == "$1" ]] && valid_endpoint "$e"; then printf '%s' "$e"; return 0; fi
+    done < <(wg show "$IF" endpoints 2>/dev/null || true)
+  fi
+  if [[ -f $STATE_DIR/endpoints ]]; then
+    while read -r k e; do
+      if [[ $k == "$1" ]] && valid_endpoint "$e"; then printf '%s' "$e"; return 0; fi
+    done <"$STATE_DIR/endpoints"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------- status (for the app) + timer jobs
+json_str() { if [[ -n ${1:-} ]]; then printf '"%s"' "$1"; else printf 'null'; fi; } # validated values only
+status_json() {
+  load_hub
+  local -A hs=() rx=() tx=() ep=()
+  local k a b sep="" id lan
+  if wg_exists; then
+    # these wg subcommands never print private or preshared keys (wg show dump would)
+    while read -r k a; do valid_key "$k" && valid_uint "$a" && hs[$k]=$((10#$a)); done < <(wg show "$IF" latest-handshakes 2>/dev/null || true)
+    while read -r k a b; do valid_key "$k" && valid_uint "$a" && valid_uint "$b" && rx[$k]=$((10#$a)) && tx[$k]=$((10#$b)); done < <(wg show "$IF" transfer 2>/dev/null || true)
+    while read -r k a; do valid_key "$k" && valid_endpoint "$a" && ep[$k]=$a; done < <(wg show "$IF" endpoints 2>/dev/null || true)
+  fi
+  printf '{"at":"%s","hub":{"publicKey":"%s","listenPort":%d,"address":"%s/24","endpointHint":%s},"sites":[' \
+    "$(now_iso)" "$HUB_PUB" "$((10#$H_PORT))" "$HUB_IP" "$(json_str "$HUB_HINT")"
+  for id in $(site_ids); do
+    if ! load_site "$id" P; then
+      warn "site $id: damaged record, left out of the status"
+      continue
+    fi
+    k=${P[PUBLIC_KEY]}
+    lan=${P[LAN]}
+    [[ $lan != none ]] || lan=""
+    printf '%s{"id":%d,"name":"%s","tunnelIp":"10.77.0.%d","virtualSubnet":"10.78.%d.0/24","realLan":%s,"endpoint":%s,"latestHandshake":%s,"rxBytes":%s,"txBytes":%s}' \
+      "$sep" "$id" "${P[NAME]}" "$id" "$id" "$(json_str "$lan")" "$(json_str "${ep[$k]:-}")" "${hs[$k]:-0}" "${rx[$k]:-0}" "${tx[$k]:-0}"
+    sep=","
+  done
+  printf ']}\n'
+}
+write_status() { # atomic, 0644 (the app's dynamic user reads it), no secrets
+  local tmp
+  install -d -m 0755 "$RUN_DIR"
+  tmp=$(mktemp "$RUN_DIR/.vpn-status.XXXXXX")
+  if status_json >"$tmp"; then
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$STATUS_FILE"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+# Two holders of one site key (a copied bundle) make the hub's endpoint for that site jump back and
+# forth: WireGuard follows whoever sent the last authenticated packet, and the app's NVR logins go
+# to either one. Every change is logged (notice); 3 or more within 10 minutes is a warning.
+FLIP_WINDOW=600
+FLIP_LIMIT=3
+endpoint_changes() { # names of two arrays: current and saved endpoints by public key
+  local -n _cur=$1 _old=$2
+  local k now t kk e n list id line tmp
+  local -a hist=() hit=()
+  local -A who=()
+  for k in "${!_cur[@]}"; do
+    if [[ -n ${_old[$k]:-} && ${_old[$k]} != "${_cur[$k]}" ]]; then hit+=("$k"); fi
+  done
+  ((${#hit[@]} > 0)) || return 0
+  now=$(date +%s)
+  if [[ -f $FLIPS ]]; then
+    while read -r t kk e; do
+      if valid_uint "$t" && valid_key "$kk" && valid_endpoint "$e" && ((now - 10#$t < FLIP_WINDOW)); then hist+=("$t $kk $e"); fi
+    done <"$FLIPS"
+  fi
+  for id in $(site_ids); do if load_site "$id" P; then who[${P[PUBLIC_KEY]}]="site $id (${P[NAME]})"; fi; done
+  for k in "${hit[@]}"; do
+    hist+=("$now $k ${_cur[$k]}")
+    note "${who[$k]:-an unknown peer} now dials from ${_cur[$k]} (was ${_old[$k]})"
+    n=0 list=""
+    for line in "${hist[@]}"; do
+      read -r t kk e <<<"$line"
+      if [[ $kk == "$k" ]]; then n=$((n + 1)); list+="${list:+, }$e"; fi
+    done
+    if ((n >= FLIP_LIMIT)); then
+      warn "${who[$k]:-a peer}: its address changed $n times in $((FLIP_WINDOW / 60)) minutes ($list). Two devices may hold this site's key (a copied bundle?), and the app's NVR logins then reach either one. Unless the site's router is restarting over and over: $PROG site-rekey <site> --yes, a new bundle, and new NVR passwords at that site"
+    fi
+  done
+  install -d -m 0700 "$STATE_DIR"
+  tmp=$(mktemp "$STATE_DIR/.flips.XXXXXX")
+  printf '%s\n' "${hist[@]}" >"$tmp"
+  mv -f "$tmp" "$FLIPS"
+}
+# Remember where each site last came from, so that after a hub restart (reboot, hub-down/up, WSL
+# restart) the hub can start the handshake itself instead of waiting up to ~3 min for each site
+# to re-handshake. Peers that have no endpoint right now keep their saved one.
+save_endpoints() {
+  wg_exists || return 0
+  local k e new line
+  local -A cur=() old=()
+  while read -r k e; do valid_key "$k" && valid_endpoint "$e" && cur[$k]=$e; done < <(wg show "$IF" endpoints 2>/dev/null || true)
+  if [[ -f $STATE_DIR/endpoints ]]; then
+    while read -r k e; do valid_key "$k" && valid_endpoint "$e" && old[$k]=$e; done <"$STATE_DIR/endpoints"
+  fi
+  endpoint_changes cur old || true
+  new=$(while read -r k; do
+    valid_key "$k" || continue
+    e=${cur[$k]:-${old[$k]:-}}
+    [[ -z $e ]] || printf '%s %s\n' "$k" "$e"
+  done < <(wg show "$IF" peers 2>/dev/null || true) | sort)
+  [[ -n $new ]] || return 0
+  if [[ -f $STATE_DIR/endpoints && "$(cat "$STATE_DIR/endpoints")" == "$new" ]]; then return 0; fi
+  install -d -m 0700 "$STATE_DIR"
+  line=$(mktemp "$STATE_DIR/.endpoints.XXXXXX")
+  printf '%s\n' "$new" >"$line"
+  mv -f "$line" "$STATE_DIR/endpoints"
+}
+forget_endpoint() { # pubkey: drop it from the saved endpoints
+  [[ -f $STATE_DIR/endpoints ]] || return 0
+  local tmp
+  tmp=$(mktemp "$STATE_DIR/.endpoints.XXXXXX")
+  awk -v k="$1" '$1 != k' "$STATE_DIR/endpoints" >"$tmp" || true
+  mv -f "$tmp" "$STATE_DIR/endpoints"
+}
+# post-up: give peers without an endpoint their last known one (never fails: wg-quick would tear
+# wg0 down again if a PostUp command failed)
+restore_endpoints() {
+  [[ -f $STATE_DIR/endpoints ]] || return 0
+  wg_exists || return 0
+  local -A have=()
+  local k e n=0
+  while read -r k e; do valid_key "$k" && have[$k]=$e; done < <(wg show "$IF" endpoints 2>/dev/null || true)
+  while read -r k e; do
+    valid_key "$k" && valid_endpoint "$e" || continue
+    [[ ${have[$k]+set} == set && ${have[$k]} == "(none)" ]] || continue # only peers that exist and have none
+    if wg set "$IF" peer "$k" endpoint "$e" 2>/dev/null; then n=$((n + 1)); fi
+  done <"$STATE_DIR/endpoints"
+  echo "$PROG: restored $n site endpoint(s)"
+}
+# The hub's own keepalive (25 s): whichever side started a session then re-keys it after 120-145 s
+# (without it, a session the hub started is re-keyed only at ~165-190 s, beyond the app's 180 s
+# "connected" limit). It is set here at runtime, AFTER the saved endpoints, not in wg0.conf: at
+# interface-up WireGuard sends a keepalive to every peer that has one, which with no endpoint known
+# yet goes nowhere and holds the real handshake back for 5 s (its rate limit). Switching a peer's
+# keepalive from off to 25 s sends the first keepalive at once, i.e. starts the handshake with the
+# restored endpoint. Peers that have it already are not touched (no effect on running sessions).
+ensure_keepalive() {
+  wg_exists || return 0
+  local k v
+  while read -r k v; do
+    valid_key "$k" || continue
+    [[ $v == off || $v == 0 ]] || continue
+    wg set "$IF" peer "$k" persistent-keepalive "$KEEPALIVE" 2>/dev/null || true
+  done < <(wg show "$IF" persistent-keepalive 2>/dev/null || true)
+}
+# Only the side that started a WireGuard session re-keys it by time, and only when it SENDS
+# something after 120 s (when it merely receives, not before 165 s). With keepalives at both ends,
+# only one end actually sends them (every received packet postpones the other end's keepalive), so
+# an idle session could go 165-190 s without a handshake, past the app's 180 s "connected" limit.
+# The 15 s status job therefore pings a site's gateway (its tunnel address) once when the handshake
+# is 118-178 s old: whichever side started the session then sends (the hub its ping, the gateway
+# its reply) and re-keys. Gateways answer the hub's ping (every recipe allows it).
+freshen_sessions() {
+  wg_exists || return 0
+  command -v ping >/dev/null 2>&1 || return 0
+  local -A tip=()
+  local k t now id n=0
+  now=$(date +%s)
+  for id in $(site_ids); do if load_site "$id" P; then tip[${P[PUBLIC_KEY]}]=10.77.0.$id; fi; done
+  while read -r k t; do
+    valid_key "$k" && valid_uint "$t" || continue
+    ((t > 0 && now - t >= 118 && now - t < 178)) || continue
+    [[ -n ${tip[$k]:-} ]] || continue
+    ping -c1 -W1 -q "${tip[$k]}" </dev/null >/dev/null 2>&1 &
+    n=$((n + 1))
+  done < <(wg show "$IF" latest-handshakes 2>/dev/null || true)
+  ((n == 0)) || wait # at most 1 s; a oneshot unit would kill pings left running
+  return 0
+}
+remember_endpoint() { # pubkey endpoint: put it in the saved endpoints (restore_endpoints then uses it)
+  valid_key "$1" && valid_endpoint "$2" || return 0
+  local tmp
+  install -d -m 0700 "$STATE_DIR"
+  tmp=$(mktemp "$STATE_DIR/.endpoints.XXXXXX")
+  { [[ ! -f $STATE_DIR/endpoints ]] || awk -v k="$1" '$1 != k' "$STATE_DIR/endpoints"; printf '%s %s\n' "$1" "$2"; } >"$tmp"
+  mv -f "$tmp" "$STATE_DIR/endpoints"
+}
+# WSL2 mirrored networking hands inbound UDP to Linux only for ports its port tracker saw being
+# bound by a userspace bind() (seccomp; its socket scan only ever RELEASES ports). WireGuard binds
+# inside the kernel, so Windows never learns that UDP 51820 belongs to Linux. A userspace bind()
+# attempt after wg0 owns the port is enough: the tracker allocates the port on Windows before the
+# kernel refuses the bind (EADDRINUSE), then keeps it while its scan still sees the port bound.
+# Checked from outside with the wg_udp_in counter (cctv-vpn hub-info, step 3).
+wsl_claim_port() {
+  is_wsl || return 0
+  netns_is_main || return 0 # the tracker only matters for the main namespace
+  command -v python3 >/dev/null 2>&1 || { warn "WSL: python3 missing, cannot claim the UDP port for Linux"; return 0; }
+  local port
+  port=$(wg show "$IF" listen-port 2>/dev/null) || return 0
+  valid_port "$port" || return 0
+  python3 - "$port" <<'PY' || warn "WSL: could not claim UDP $port for Linux: inbound WireGuard may not arrive"
+import errno, socket, sys
+port = int(sys.argv[1])
+for fam, addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+    try:
+        s = socket.socket(fam, socket.SOCK_DGRAM)
+    except OSError:  # e.g. IPv6 switched off
+        continue
+    try:
+        if fam == socket.AF_INET6:
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        s.bind((addr, port))
+        if fam == socket.AF_INET:  # we got the port, so wg0 is not listening on it
+            sys.exit(f"UDP {port} was free: the WireGuard interface is not listening on it")
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE:
+            sys.exit(f"{addr}: {e}")
+    finally:
+        s.close()
+PY
+}
+# WSL mirrored mode: Windows and Linux share one port space. A listen port inside Windows' dynamic
+# (ephemeral) UDP range can be taken by any Windows program as a temporary port, for example at
+# boot before WSL starts; inbound WireGuard then goes to Windows. Read-only look at netsh.
+WSL_SAFE_PORT=41820 # below Windows' default dynamic range (49152-65535) and WSL's own NAT range
+wsl_port_warning() { # $1 port
+  ((TEST_MODE)) && return 0
+  is_wsl || return 0
+  local netsh=/mnt/c/Windows/System32/netsh.exe out start="" count="" lo hi hit=""
+  if [[ -x $netsh ]]; then
+    out=$(timeout 10 "$netsh" int ipv4 show dynamicport udp 2>/dev/null | tr -d '\r' || true)
+    start=$(awk -F: '/Start Port/ {gsub(/[^0-9]/, "", $2); print $2; exit}' <<<"$out")
+    count=$(awk -F: '/Number of Ports/ {gsub(/[^0-9]/, "", $2); print $2; exit}' <<<"$out")
+    while read -r lo hi; do
+      if valid_port "$lo" && valid_port "$hi" && ((10#$1 >= 10#$lo && 10#$1 <= 10#$hi)); then hit="$lo-$hi"; fi
+    done < <(timeout 10 "$netsh" int ipv4 show excludedportrange protocol=udp 2>/dev/null | tr -d '\r' | awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {print $1, $2}' || true)
+  fi
+  if ! valid_port "$start" || ! [[ $count =~ ^[0-9]{1,5}$ ]]; then start=49152 count=16384; fi
+  if ((10#$1 >= 10#$start && 10#$1 < 10#$start + 10#$count)); then
+    warn "WSL: UDP $1 is inside Windows' dynamic port range ($start-$((10#$start + 10#$count - 1))): any Windows program may take it as a temporary port, and inbound WireGuard then never reaches Linux. Listen outside it and keep the public port: $PROG hub-init --port $WSL_SAFE_PORT --endpoint ${H_ENDPOINT:-<public IP or DNS name>}:${H_PUBLIC_PORT} (the router then forwards external UDP ${H_PUBLIC_PORT} to port $WSL_SAFE_PORT)"
+  fi
+  if [[ -n $hit ]]; then warn "WSL: UDP $1 is in a range Windows has excluded ($hit, netsh int ipv4 show excludedportrange protocol=udp): choose another --port"; fi
+  return 0
+}
+# a DNS endpoint with an IPv6 (AAAA) address: gateways with IPv6 (common on 4G) would dial it, and
+# the main site forwards only IPv4. Site gateways resolve IPv4 only; routers may not.
+endpoint_aaaa() { # $1 host -> prints its IPv6 addresses, if any
+  local h=$1
+  valid_dns "$h" || return 0
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$h" <<'PY' 2>/dev/null || true
+import socket, sys
+try:
+    print(" ".join(sorted({a[4][0] for a in socket.getaddrinfo(sys.argv[1], None, socket.AF_INET6)})))
+except (socket.gaierror, UnicodeError):
+    pass
+PY
+  else
+    { getent ahostsv6 "$h" 2>/dev/null || true; } | awk '$1 !~ /^::ffff:/ {print $1}' | sort -u | tr '\n' ' '
+  fi
+}
+status_write() { # what the 15 s timer does; also run after every change
+  local rc=0
+  load_hub
+  guard_firewall || rc=1
+  ensure_keepalive || true
+  freshen_sessions || true
+  write_status || rc=1
+  save_endpoints || true
+  wsl_claim_port || true
+  return "$rc"
+}
+status_after_change() { status_write || warn "could not refresh $STATUS_FILE"; }
+counter_of() { { nft list counter inet "$TABLE" "$1" 2>/dev/null || true; } | awk '/packets/ {for (i = 1; i <= NF; i++) if ($i == "packets") {print $(i + 1); exit}}'; }
+human_bytes() { awk -v n="$1" 'BEGIN { split("B kB MB GB TB", u, " "); i = 1; while (n >= 1000 && i < 5) { n /= 1000; i++ }; if (i == 1) printf "%d %s", n, u[i]; else printf "%.1f %s", n, u[i] }'; }
+
+# ---------------------------------------------------------------- what hub-init / hub-info print
+hub_info_block() {
+  local lanip router ep host sq="'" fwnote=""
+  lanip=$({ ip -4 route get 1.1.1.1 2>/dev/null || true; } | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+  lanip=${lanip%%$'\n'*}
+  router=$({ ip -4 route show default 2>/dev/null || true; } | awk '{for (i = 1; i <= NF; i++) if ($i == "via") {print $(i + 1); exit}}')
+  ep=${HUB_HINT:-"<public IP or DNS name of the main site>:$H_PUBLIC_PORT"}
+  host=${H_ENDPOINT:-"<public IP or DNS name>"}
+  [[ -n $lanip ]] || lanip="<this machine's LAN address>"
+  [[ -n $router ]] || router="<main-site router>"
+  echo "== CCTV VPN hub $(if wg_exists; then echo "is up"; else echo "is DOWN ($PROG hub-up)"; fi)"
+  echo "  hub public key : $HUB_PUB"
+  echo "  listens on     : UDP $H_PORT on this machine, LAN address $lanip   (from: ip -4 route get 1.1.1.1)"
+  echo "  sites dial     : $ep"
+  [[ -n $H_ENDPOINT ]] || echo "                   (no --endpoint yet: $PROG hub-init --endpoint <public IP or DNS name>; site bundles need it)"
+  echo "== 1. Main-site router ($router), once"
+  echo "  Port forward (\"virtual server\" / \"NAT rule\"): UDP (not TCP), external port $H_PUBLIC_PORT -> $lanip port $H_PORT."
+  echo "  Nothing else: no other ports, no DMZ, never 8443/8080."
+  echo "  Give $lanip a DHCP reservation (static lease), or the forward breaks when the address changes."
+  echo "  Compare the router's WAN address with the address the sites dial. If the WAN address starts with 10.,"
+  echo "  100.64-100.127., 172.16-172.31. or 192.168., the main site is behind carrier-grade NAT and no port"
+  echo "  forward can work (README: \"hub behind CGNAT\")."
+  echo "  If the public address changes from time to time: use a dynamic-DNS name as --endpoint, with an A"
+  echo "  record only (no AAAA: routers at the sites would dial IPv6, which this forward does not carry)."
+  echo "  If a site's network blocks UDP $H_PUBLIC_PORT (some 4G APNs), forward a second external port"
+  echo "  (e.g. UDP 443) to the same $lanip:$H_PORT and make that site's bundle with"
+  echo "  $PROG site-bundle <site> --endpoint <host>:443 (README: Operating many sites)."
+  if is_wsl; then
+    echo "== 2. Windows on this PC (WSL): PowerShell as Administrator, once"
+    printf '  New-NetFirewallRule -Name cctv-vpn-wg -DisplayName "CCTV VPN hub (WireGuard UDP %s)" -Direction Inbound -Action Allow -Protocol UDP -LocalPort %s -Profile Any\n' "$H_PORT" "$H_PORT"
+    printf "  New-NetFirewallHyperVRule -Name cctv-vpn-wg-wsl -DisplayName \"CCTV VPN hub (WireGuard UDP %s) for WSL\" -Direction Inbound -Action Allow -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol UDP -LocalPorts %s\n" "$H_PORT" "$H_PORT"
+    echo "  Check: Get-NetFirewallHyperVRule -Name cctv-vpn-wg-wsl ; Get-NetFirewallRule -Name cctv-vpn-wg | Get-NetFirewallPortFilter"
+    echo "  Undo:  Remove-NetFirewallHyperVRule -Name cctv-vpn-wg-wsl ; Remove-NetFirewallRule -Name cctv-vpn-wg"
+    echo "  Keep .wslconfig networkingMode=mirrored, no sleep (powercfg /change standby-timeout-ac 0), WSL running."
+    if ((10#$H_PORT >= 49152)); then
+      echo "  UDP $H_PORT is in Windows' default dynamic port range: prefer --port $WSL_SAFE_PORT (see the warning above)."
+    fi
+  else
+    if command -v ufw >/dev/null 2>&1 && [[ $(ufw status 2>/dev/null || true) == *"Status: active"* ]]; then
+      fwnote="  ufw is active: ufw allow $H_PORT/udp comment cctv-vpn"
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+      fwnote+="${fwnote:+$'\n'}  firewalld is running: firewall-cmd --permanent --add-port=$H_PORT/udp && firewall-cmd --reload"
+    fi
+    echo "== 2. This machine's own firewall"
+    echo "${fwnote:-  no ufw/firewalld active: nothing to do (table inet $TABLE never blocks UDP $H_PORT)}"
+  fi
+  echo "== 3. Test from OUTSIDE this network (e.g. a laptop on a phone hotspot), PowerShell:"
+  printf '  $u = New-Object System.Net.Sockets.UdpClient; [void]$u.Send([byte[]](1,2,3), 3, %s%s%s, %s)\n' "$sq" "$host" "$sq" "$H_PUBLIC_PORT"
+  echo "  then here: $PROG status  ->  \"UDP $H_PORT packets received\" must have gone up."
+  echo "== 4. Next: $PROG site-add <name> --lan <site LAN, e.g. 192.168.1.0/24>"
+}
+
+# ---------------------------------------------------------------- check (also used by hub-init)
+CHK_FAIL=0
+chk() { # PASS|WARN|FAIL|SKIP number text
+  [[ $1 == FAIL ]] && CHK_FAIL=$((CHK_FAIL + 1))
+  printf '%-4s %2s  %s\n' "$1" "$2" "$3"
+}
+check_items() { # $1 = last item to run (6 for hub-init, 13 for check)
+  local upto=$1 u a mtu port pub id want have first="" rt fwd n st age mode bad f
+  if ((TEST_MODE)); then
+    chk SKIP 1 "systemd units (test root: no systemd)"
+  else
+    bad=""
+    for u in "$FW_UNIT" "$WG_UNIT" "$TIMER_UNIT" "$WATCH_UNIT"; do systemctl is-active --quiet "$u" || bad+=" $u"; done
+    if [[ -z $bad ]]; then chk PASS 1 "$FW_UNIT, $WG_UNIT, $TIMER_UNIT, $WATCH_UNIT active"; else chk FAIL 1 "not active:$bad"; fi
+  fi
+  # the table must be exactly what this tool loaded: a flushed, deleted or edited table fails here
+  st=$(fw_state)
+  case $st in
+    ok) chk PASS 2 "table inet $TABLE loaded and exactly as generated (5 chains; counters aside)" ;;
+    missing) chk FAIL 2 "table inet $TABLE is not loaded: $PROG firewall-reload" ;;
+    differs) chk FAIL 2 "table inet $TABLE was changed outside $PROG ($(fw_diff)): $PROG firewall-reload (the 15 s timer and the watcher also put it back)" ;;
+    *) chk FAIL 2 "table inet $TABLE: no saved listing to compare with: $PROG firewall-reload" ;;
+  esac
+  case $(fw_file_state) in
+    ok) ;;
+    missing) chk FAIL 2 "$NFT_FILE is missing (the boot unit loads it): $PROG firewall-reload" ;;
+    *) chk FAIL 2 "$NFT_FILE was edited (the boot unit loads it; edits are not used): $PROG firewall-reload writes it again" ;;
+  esac
+  if wg_exists; then
+    a=$({ ip -4 -o addr show dev "$IF" 2>/dev/null || true; } | awk '{print $4}' | tr '\n' ' ')
+    mtu=$(cat "/sys/class/net/$IF/mtu" 2>/dev/null || true)
+    port=$(wg show "$IF" listen-port 2>/dev/null || true)
+    pub=$(wg show "$IF" public-key 2>/dev/null || true)
+    if [[ $a == "$HUB_IP/24 " && $mtu == "$H_MTU" && $port == "$H_PORT" && $pub == "$HUB_PUB" ]]; then
+      chk PASS 3 "$IF: $HUB_IP/24, mtu $mtu, UDP $port, public key = hub.pub"
+    else
+      chk FAIL 3 "$IF: address '${a% }' mtu $mtu port $port key $([[ $pub == "$HUB_PUB" ]] && echo ok || echo WRONG) (want $HUB_IP/24, $H_MTU, $H_PORT)"
+    fi
+    want=$(for id in $(site_ids); do if load_site "$id" P; then printf '%s 10.77.0.%s/32\n%s 10.78.%s.0/24\n' "${P[PUBLIC_KEY]}" "$id" "${P[PUBLIC_KEY]}" "$id"; fi; done | sort)
+    have=$({ wg show "$IF" allowed-ips 2>/dev/null || true; } | awk '{for (i = 2; i <= NF; i++) if ($i != "(none)") print $1, $i}' | sort)
+    if [[ $want == "$have" ]]; then chk PASS 4 "$IF peers match the $(site_ids | wc -l) site record(s)"; else chk FAIL 4 "$IF peers differ from the site records ($PROG site-list; wg show $IF allowed-ips)"; fi
+    n=$({ wg show "$IF" persistent-keepalive 2>/dev/null || true; } | awk -v k="$KEEPALIVE" '$2 != k' | wc -l)
+    ((n == 0)) || chk WARN 4 "$n peer(s) without the hub's $KEEPALIVE s keepalive (the 15 s timer sets it; now: $PROG status --write)"
+  else
+    chk FAIL 3 "$IF is not running ($PROG hub-up)"
+    chk FAIL 4 "$IF is not running"
+  fi
+  first=$(site_ids)
+  first=${first%%$'\n'*}
+  rt=$(ip -4 route get "10.78.${first:-2}.10" ipproto tcp dport "$NVR_PORT" 2>&1 || true)
+  rt=${rt%%$'\n'*}
+  if [[ $rt == *" dev $IF "* && $rt == *" src $HUB_IP "* ]]; then chk PASS 5 "route to 10.78.${first:-2}.10: dev $IF src $HUB_IP"; else chk FAIL 5 "route to 10.78.${first:-2}.10: $rt"; fi
+  fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "?")
+  if [[ $fwd == 0 ]]; then chk PASS 6 "ip_forward 0 (this hub does not route)"; else chk WARN 6 "ip_forward $fwd: the forward chain still drops all $IF traffic, but nothing here needs forwarding"; fi
+  ((upto > 6)) || return 0
+  n=$(counter_of wg_udp_in)
+  if [[ ${n:-0} -gt 0 ]]; then chk PASS 7 "UDP $H_PORT packets received: $n (handshake initiations: $(counter_of wg_handshake_in))"; else chk WARN 7 "no UDP $H_PORT packet received since the last firewall load: run the outside test ($PROG hub-info, step 3)"; fi
+  local -A hs=()
+  local k t now
+  now=$(date +%s)
+  while read -r k t; do valid_key "$k" && valid_uint "$t" && hs[$k]=$t; done < <(wg show "$IF" latest-handshakes 2>/dev/null || true)
+  for id in $(site_ids); do
+    load_site "$id" P || { chk FAIL 8 "site $id: damaged record"; continue; }
+    t=${hs[${P[PUBLIC_KEY]}]:-0}
+    if ((t > 0 && now - t < CONNECTED_S)); then
+      chk PASS 8 "site $id ${P[NAME]}: handshake $((now - t)) s ago"
+      if ((upto >= 9)); then
+        if ping -c1 -W2 "10.77.0.$id" >/dev/null 2>&1; then chk PASS 9 "site $id ${P[NAME]}: gateway 10.77.0.$id answers ping"; else chk WARN 9 "site $id ${P[NAME]}: gateway 10.77.0.$id does not answer ping (some routers never do; test an NVR: timeout 5 bash -c '</dev/tcp/10.78.$id.<x>/$NVR_PORT')"; fi
+      fi
+    elif ((t > 0)); then
+      chk WARN 8 "site $id ${P[NAME]}: last handshake $((now - t)) s ago (not connected)"
+    else
+      chk WARN 8 "site $id ${P[NAME]}: never connected"
+    fi
+  done
+  chk SKIP 10 "site side (from the gateway): nc -vz -w3 $HUB_IP 8443 must time out; ping $HUB_IP gets no reply"
+  if [[ -f $STATUS_FILE ]]; then
+    mode=$(stat -c %a "$STATUS_FILE")
+    age=$((now - $(stat -c %Y "$STATUS_FILE")))
+    st=ok
+    if command -v python3 >/dev/null 2>&1; then python3 -m json.tool "$STATUS_FILE" >/dev/null 2>&1 || st="does not parse"; fi
+    if [[ $mode == 644 && $age -lt 45 && $st == ok ]]; then chk PASS 11 "$STATUS_FILE: mode 644, $age s old, valid JSON"; else chk FAIL 11 "$STATUS_FILE: mode $mode, $age s old, JSON $st ($TIMER_UNIT running?)"; fi
+  else
+    chk FAIL 11 "$STATUS_FILE missing ($TIMER_UNIT running?)"
+  fi
+  bad=""
+  [[ $(stat -c '%a %U' "$VPN_DIR") == "700 root" ]] || bad+=" $VPN_DIR"
+  for f in "$VPN_DIR/hub.key" "$VPN_DIR"/sites/*/private.key "$VPN_DIR"/sites/*/psk "$WG_CONF"; do
+    [[ -e $f ]] || continue
+    [[ $(stat -c '%a %U' "$f") == "600 root" ]] || bad+=" $f"
+  done
+  if [[ -z $bad ]]; then chk PASS 12 "permissions: $VPN_DIR 0700, keys and $WG_CONF 0600 root"; else chk FAIL 12 "wrong permissions:$bad"; fi
+  # bundles kept in the default place that still hold a key the hub is meant to have forgotten
+  bad=""
+  for f in "$BUNDLES"/cctv-site-*.tar.gz; do
+    [[ -f $f ]] || continue
+    id=${f##*/cctv-site-}
+    id=${id%%-*}
+    if load_site "$id" P && [[ ${P[KEY_ON_HUB]} == no ]] && tar -tzf "$f" 2>/dev/null | grep -q '/site\.key$'; then bad+=" ${f##*/}"; fi
+  done
+  if [[ -n $bad ]]; then chk WARN 12 "bundles that still hold a private key the hub no longer keeps:$bad (move them off this machine or delete them)"; fi
+  chk SKIP 13 "leak guard (disruptive, by hand): systemctl stop $WG_UNIT; timeout 3 bash -c '</dev/tcp/10.78.${first:-2}.10/$NVR_PORT' must fail at once; systemctl start $WG_UNIT"
+  local -A B=()
+  if read_record "$BACKUP_CONF" B && valid_time "${B[LAST_BACKUP]:-}"; then
+    if [[ ${B[LAST_CHANGE]:-} > ${B[LAST_BACKUP]} ]]; then chk WARN 14 "backup out of date: last backup ${B[LAST_BACKUP]}, last change ${B[LAST_CHANGE]} ($PROG backup --out ...)"; else chk PASS 14 "backup ${B[LAST_BACKUP]} is up to date (keep it off this machine)"; fi
+  else
+    chk WARN 14 "no backup yet: losing this machine would mean visiting every site ($PROG backup --out ..., README: Back up the hub)"
+  fi
+}
+
+# ---------------------------------------------------------------- hub commands
+range_conflicts() { # addresses/routes (not on our interface) that overlap the VPN ranges
+  local dev a net line pfx typ i
+  local -a w
+  while read -r dev a; do
+    [[ $dev == "$IF" ]] && continue
+    valid_ip4 "${a%/*}" || continue
+    net=$(net_of "$a")
+    if cidr_overlap "$net" "$TUNNEL_NET" || cidr_overlap "$net" "$VIRTUAL_NET"; then echo "address $a on $dev"; fi
+  done < <(ip -4 -o addr show 2>/dev/null | awk '{print $2, $4}')
+  while IFS= read -r line; do
+    read -ra w <<<"$line"
+    ((${#w[@]} > 0)) || continue
+    typ=unicast
+    pfx=${w[0]}
+    case ${w[0]} in local | broadcast | anycast | multicast | unicast | unreachable | blackhole | prohibit | throw | nat) typ=${w[0]}; pfx=${w[1]:-} ;; esac
+    [[ $typ == local || $typ == broadcast || $pfx == default ]] && continue
+    dev=""
+    for ((i = 0; i < ${#w[@]} - 1; i++)); do [[ ${w[$i]} == dev ]] && dev=${w[$((i + 1))]}; done
+    [[ $dev == "$IF" ]] && continue
+    [[ $pfx == */* ]] || pfx="$pfx/32"
+    valid_cidr4 "$pfx" || continue
+    if ((${pfx#*/} >= 16)); then
+      if cidr_overlap "$pfx" "$TUNNEL_NET" || cidr_overlap "$pfx" "$VIRTUAL_NET"; then echo "route '$line'"; fi
+    elif cidr_contains "$pfx" "$HUB_IP"; then
+      warn "route '$line' also covers the VPN ranges; the VPN's own, more specific routes win"
+    fi
+  done < <(ip -4 route show table all 2>/dev/null)
+  return 0
+}
+endpoint_warning() { # warn when the address the sites dial cannot be public
+  local h=$1 a
+  [[ -n $h ]] || return 0
+  if valid_ip6 "$h"; then
+    case ${h,,} in ::1 | fe8* | fe9* | fea* | feb* | fc* | fd*) warn "--endpoint $h is not a public IPv6 address: remote sites cannot reach it" ;; esac
+    return 0
+  fi
+  a=$h
+  if ! valid_ip4 "$h"; then
+    local v6
+    v6=$(endpoint_aaaa "$h")
+    v6=${v6% }
+    if [[ -n $v6 ]]; then
+      warn "--endpoint $h also has an IPv6 (AAAA) address ($v6). Linux site gateways dial its IPv4 address, but routers (MikroTik, OpenWrt, RutOS, pfSense, ...) and WireGuard for Windows may dial the IPv6 one, and the main site forwards only IPv4: give the sites a name with an A record only (or also forward UDP $H_PUBLIC_PORT over IPv6 to this machine)"
+    fi
+    a=$(getent ahostsv4 "$h" 2>/dev/null | awk '{print $1; exit}' || true)
+    if [[ -z $a ]]; then
+      warn "--endpoint $h does not resolve here (yet?): sites must be able to resolve it"
+      return 0
+    fi
+  fi
+  if is_private_net "$a/32" || cidr_contains 100.64.0.0/10 "$a" || cidr_contains 127.0.0.0/8 "$a" || cidr_contains 169.254.0.0/16 "$a"; then
+    warn "--endpoint $h ($a) is a private, CGNAT, loopback or link-local address: remote sites on the internet cannot reach it (it must be the main site's PUBLIC address)"
+  fi
+  return 0
+}
+EP_HOST="" EP_PORT=""
+parse_endpoint_arg() { # host[:port] | [ipv6]:port | ipv6 -> EP_HOST EP_PORT (port may stay empty); exit 2 when bad
+  local v=$1
+  EP_HOST="" EP_PORT=""
+  if [[ $v =~ ^\[([0-9A-Fa-f:.]+)\]:([0-9]+)$ ]]; then EP_HOST=${BASH_REMATCH[1]} EP_PORT=${BASH_REMATCH[2]}
+  elif [[ $v =~ ^\[([0-9A-Fa-f:.]+)\]$ ]]; then EP_HOST=${BASH_REMATCH[1]}
+  elif [[ $v == *:*:* ]]; then EP_HOST=$v
+  elif [[ $v =~ ^([^:]+):([0-9]+)$ ]]; then EP_HOST=${BASH_REMATCH[1]} EP_PORT=${BASH_REMATCH[2]}
+  else EP_HOST=$v; fi
+  valid_ep_host "$EP_HOST" || die 2 "--endpoint: $(q "$EP_HOST") is not an IPv4 address, an IPv6 address or a DNS name (like vpn.example.com)"
+  [[ -z $EP_PORT ]] || valid_port "$EP_PORT" || die 2 "--endpoint: bad port $(q "$EP_PORT")"
+}
+print_endpoint_todo() { # what each site needs after the address it dials changed ($1 new hint)
+  local id
+  for id in $(site_ids); do
+    load_site "$id" P || continue
+    if [[ ${P[KEY_ON_HUB]} == yes ]]; then
+      echo "  site $id ${P[NAME]}: $PROG site-bundle ${P[NAME]} and install it there again, or set only Endpoint = $1 on its device"
+    else
+      echo "  site $id ${P[NAME]}: set Endpoint = $1 on its device (Linux: a new bundle, installed with --key; its own key is not on this hub)"
+    fi
+    [[ -z ${P[NOTE]} ]] || echo "      note: ${P[NOTE]}"
+  done
+}
+cmd_hub_init() {
+  local ep_opt="" ep_set=0 port_opt="" mtu_opt="" yes=0 newkey=0 v
+  while (($#)); do
+    case $1 in
+      --endpoint) (($# >= 2)) || die 2 "--endpoint needs a value"; ep_opt=$2; ep_set=1; shift 2 ;;
+      --port) (($# >= 2)) || die 2 "--port needs a value"; port_opt=$2; shift 2 ;;
+      --mtu) (($# >= 2)) || die 2 "--mtu needs a value"; mtu_opt=$2; shift 2 ;;
+      --yes) yes=1; shift ;;
+      --new-hub-key) newkey=1; shift ;;
+      *) die 2 "hub-init: unknown option $(q "$1")" ;;
+    esac
+  done
+  EP_HOST="" EP_PORT=""
+  if ((ep_set)) && [[ $ep_opt != none ]]; then parse_endpoint_arg "$ep_opt"; fi
+  [[ -z $port_opt ]] || valid_listen_port "$port_opt" || die 2 "--port must be 1024..65535"
+  [[ -z $mtu_opt ]] || valid_mtu "$mtu_opt" || die 2 "--mtu must be 1280..1420 (1280 fits every 4G path)"
+  need_root
+  need_tools wg wg-quick nft ip ss flock tar gzip sha256sum awk
+  ((TEST_MODE)) || need_tools systemctl systemd-tmpfiles
+  if [[ ! -d /sys/module/wireguard ]] && ! modprobe wireguard 2>/dev/null; then
+    die 3 "WireGuard is not available in this kernel (no /sys/module/wireguard, modprobe wireguard failed)"
+  fi
+  if ((!TEST_MODE)) && is_wsl; then
+    v=$(wslinfo --networking-mode 2>/dev/null || true)
+    [[ $v == mirrored ]] || die 3 "WSL networking mode is '${v:-unknown}', not mirrored: in NAT mode Windows cannot pass UDP from outside to Linux (set networkingMode=mirrored in .wslconfig, wsl --shutdown)"
+    need_tools python3
+  fi
+
+  # previous settings (hub-init is re-run to change them)
+  local old_port="" old_mtu="" old_ep="" old_pport="" created=""
+  local -A OLD=()
+  if [[ -f $VPN_DIR/hub.conf ]]; then
+    read_record "$VPN_DIR/hub.conf" OLD || die 1 "$VPN_DIR/hub.conf is damaged: fix or remove it"
+    old_port=${OLD[PORT]:-} old_mtu=${OLD[MTU]:-} old_ep=${OLD[ENDPOINT]:-} old_pport=${OLD[PUBLIC_PORT]:-} created=${OLD[CREATED]:-}
+    valid_listen_port "$old_port" || old_port=""
+    valid_mtu "$old_mtu" || old_mtu=""
+    valid_ep_host "$old_ep" || old_ep=""
+    valid_port "$old_pport" || old_pport=""
+    valid_time "$created" || created=""
+  fi
+  H_PORT=${port_opt:-${old_port:-51820}}
+  H_MTU=${mtu_opt:-${old_mtu:-1280}}
+  if ((ep_set)); then
+    H_ENDPOINT=$EP_HOST
+    H_PUBLIC_PORT=${EP_PORT:-$H_PORT}
+  else
+    H_ENDPOINT=$old_ep
+    if [[ -n $old_pport && $old_pport != "$old_port" ]]; then H_PUBLIC_PORT=$old_pport; else H_PUBLIC_PORT=$H_PORT; fi
+  fi
+  H_CREATED=${created:-$(now_iso)}
+
+  local nsites=0
+  if [[ -d $SITES ]]; then nsites=$(site_ids | wc -l); fi
+  # the hub key is gone but sites are recorded: a new key would cut every one of them off
+  if ((nsites > 0 && !newkey)) && [[ ! -e $VPN_DIR/hub.key ]]; then
+    die 3 "$VPN_DIR/hub.key is missing, but $nsites site(s) are recorded: a new hub key would cut every one of them off until someone visits it. Restore the hub from its backup ($PROG restore FILE) or put the old hub.key back. Only if the old key is truly lost: $PROG hub-init --new-hub-key (every site then needs a new bundle)"
+  fi
+  # the address every site dials: changing it means changing every site's gateway
+  local old_hint="" new_hint ep_changed=0
+  if [[ -n $old_ep ]]; then old_hint=$(ep_join "$old_ep" "${old_pport:-$old_port}"); fi
+  new_hint=$(ep_join "$H_ENDPOINT" "$H_PUBLIC_PORT")
+  if ((nsites > 0)) && [[ -n $old_hint && -n $new_hint && $old_hint != "$new_hint" ]]; then ep_changed=1; fi
+  if ((ep_changed && !yes)); then
+    echo "hub-init would change the address the sites dial from $old_hint to $new_hint."
+    echo "Every site gateway keeps dialing $old_hint until it is changed, so all $nsites site(s) go dark"
+    echo "together when $old_hint stops working. There is no remote way in: each one needs"
+    print_endpoint_todo "$new_hint"
+    echo "Keep $old_hint working (the router forward) until every site dials $new_hint. Add --yes to do it."
+    exit 2
+  fi
+
+  # conflicts: nothing is changed before these pass
+  if [[ -e $WG_CONF && "$(head -n1 "$WG_CONF" 2>/dev/null)" != "$MARKER" ]]; then die 3 "$WG_CONF exists and was not written by $PROG: move it away first"; fi
+  if wg_exists && [[ ! -f $WG_CONF ]]; then die 3 "an interface $IF exists that $PROG did not make: remove it first"; fi
+  if ! { wg_exists && [[ "$(wg show "$IF" listen-port 2>/dev/null)" == "$H_PORT" ]]; }; then
+    v=$(ss -Hlun "sport = :$H_PORT" 2>/dev/null || true)
+    [[ -z $v ]] || die 3 "UDP port $H_PORT is already in use here: $(printf '%s' "$v" | head -n1) (use --port)"
+  fi
+  v=$(range_conflicts)
+  [[ -z $v ]] || die 3 "the VPN ranges $TUNNEL_NET / $VIRTUAL_NET are already used here: $(printf '%s' "$v" | tr '\n' ';')"
+  endpoint_warning "$H_ENDPOINT"
+  if [[ -z $old_ep ]] && valid_ip4 "$H_ENDPOINT"; then
+    note "--endpoint is a bare IP address: if the main site's public IP ever changes, every site needs a visit. A DNS name you control (A record only) can be pointed elsewhere instead."
+  fi
+  wsl_port_warning "$H_PORT"
+  [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == 0 ]] || warn "net.ipv4.ip_forward is 1 on this machine: the VPN firewall still drops everything routed through $IF"
+
+  # files
+  local before after newhub=0
+  before=$({ cat "$VPN_DIR/hub.conf" "$VPN_DIR/hub.pub" 2>/dev/null || true; } | sha256sum)
+  install -d -m 0700 "$VPN_DIR"
+  lock
+  install -d -m 0700 "$SITES" "$RETIRED" "$BUNDLES"
+  if ! read_key_file "$VPN_DIR/hub.key" >/dev/null; then
+    [[ ! -e $VPN_DIR/hub.key ]] || die 1 "$VPN_DIR/hub.key exists but is not a key: fix or remove it"
+    write_secret "$VPN_DIR/hub.key" "$(wg genkey)"
+    echo "new hub key pair made"
+    ((nsites == 0)) || newhub=1
+  fi
+  write_secret "$VPN_DIR/hub.pub" "$(wg pubkey <"$VPN_DIR/hub.key")"
+  write_kv_file "$VPN_DIR/hub.conf" "ENDPOINT=$H_ENDPOINT" "PUBLIC_PORT=$H_PUBLIC_PORT" "PORT=$H_PORT" "MTU=$H_MTU" "CREATED=$H_CREATED"
+  after=$({ cat "$VPN_DIR/hub.conf" "$VPN_DIR/hub.pub" 2>/dev/null || true; } | sha256sum)
+  # hub.conf holds the creation time and the settings; unchanged settings give the same file
+  [[ $before == "$after" ]] || mark_changed
+  load_hub
+  write_nft
+  write_wg_conf
+  write_units
+  install_tool
+  if ((TEST_MODE)); then
+    install -d -m 0755 "$RUN_DIR"
+  else
+    systemd-tmpfiles --create "$TMPFILES_CONF"
+    systemctl daemon-reload
+  fi
+
+  # start: firewall first (its listing is remembered: the guard compares against it), then wg0,
+  # then the status timer and the watcher (restarted: it runs this script, maybe a new version)
+  if ((!TEST_MODE)); then
+    systemctl enable --quiet "$FW_UNIT"
+    systemctl is-active --quiet "$FW_UNIT" || systemctl start "$FW_UNIT" || die 1 "systemctl start $FW_UNIT failed (journalctl -u $FW_UNIT)"
+  fi
+  fw_load || die 1 "could not load table inet $TABLE"
+  if wg_exists && { ((TEST_MODE)) || systemctl is-active --quiet "$WG_UNIT"; }; then
+    if [[ -n $old_port && ($old_port != "$H_PORT" || $old_mtu != "$H_MTU") ]] || ((newhub)); then wg_restart; else wg_reload; fi
+  else
+    wg_start
+  fi
+  if ((!TEST_MODE)); then
+    systemctl enable --now --quiet "$TIMER_UNIT"
+    systemctl enable --quiet "$WATCH_UNIT"
+    systemctl restart "$WATCH_UNIT" || warn "systemctl restart $WATCH_UNIT failed (journalctl -u $WATCH_UNIT): the 15 s timer still guards the table"
+  fi
+  status_after_change
+  if ((ep_changed)); then
+    echo "== the sites still dial $old_hint: each one needs"
+    print_endpoint_todo "$new_hint"
+  fi
+  if ((newhub)); then
+    echo "== NEW hub key $HUB_PUB: every site is cut off until its gateway has it"
+    print_endpoint_todo "$new_hint" | sed 's/set only Endpoint = [^ ]*/set only [Peer] PublicKey to the new key/; s/set Endpoint = [^ ]* on its device/set [Peer] PublicKey to the new key on its device/'
+  fi
+
+  echo "== checks"
+  CHK_FAIL=0
+  check_items 6
+  hub_info_block
+  ((CHK_FAIL == 0)) || die 1 "$CHK_FAIL check(s) failed (above)"
+}
+cmd_hub_info() {
+  (($# == 0)) || die 2 "hub-info takes no options"
+  need_root
+  load_hub
+  hub_info_block
+}
+cmd_hub_up() {
+  (($# == 0)) || die 2 "hub-up takes no options"
+  need_root
+  load_hub
+  lock
+  [[ -f $WG_CONF ]] || die 4 "$WG_CONF missing: run $PROG hub-init"
+  write_nft # the boot unit's file matches the generated table again
+  if ((!TEST_MODE)); then
+    systemctl enable --quiet "$FW_UNIT" "$WG_UNIT"
+    systemctl is-active --quiet "$FW_UNIT" || systemctl start "$FW_UNIT" || die 1 "systemctl start $FW_UNIT failed (journalctl -u $FW_UNIT)"
+  fi
+  fw_load || die 1 "could not load table inet $TABLE: $IF stays down"
+  if ((TEST_MODE)); then
+    wg_restart
+  else
+    # restart, not start: after a fail-closed guard the unit is active but wg0 is down
+    systemctl restart "$WG_UNIT" || die 1 "systemctl restart $WG_UNIT failed (journalctl -u $WG_UNIT)"
+  fi
+  status_after_change
+  echo "$IF is up (UDP $H_PORT); $(site_ids | wc -l) site(s). Sites reconnect by themselves (saved endpoints restored)."
+}
+cmd_hub_down() {
+  (($# == 0)) || die 2 "hub-down takes no options"
+  need_root
+  load_hub
+  lock
+  wg_stop
+  status_after_change
+  echo "$IF is down and stays down after reboots ($PROG hub-up starts it)."
+  echo "The firewall table stays loaded: VPN addresses cannot leak out of another interface meanwhile."
+}
+cmd_hub_rekey() {
+  local yes=0 id
+  while (($#)); do case $1 in --yes) yes=1; shift ;; *) die 2 "hub-rekey: unknown option $(q "$1")" ;; esac; done
+  need_root
+  load_hub
+  if ((!yes)); then
+    echo "hub-rekey would make a NEW hub key pair and delete the old one. Every site is cut off until its"
+    echo "gateway has the new hub public key ([Peer] PublicKey). Only do this if the hub key may be compromised."
+    echo "Add --yes to do it."
+    exit 2
+  fi
+  lock
+  write_secret "$VPN_DIR/hub.key" "$(wg genkey)"
+  write_secret "$VPN_DIR/hub.pub" "$(wg pubkey <"$VPN_DIR/hub.key")"
+  mark_changed
+  load_hub
+  write_wg_conf
+  if wg_exists; then wg_restart; fi
+  status_after_change
+  echo "new hub public key: $HUB_PUB"
+  echo "every site must now get it:"
+  for id in $(site_ids); do
+    load_site "$id" P || continue
+    if [[ ${P[KEY_ON_HUB]} == yes ]]; then
+      echo "  site $id ${P[NAME]}: $PROG site-bundle ${P[NAME]} and install it there again, or change only [Peer] PublicKey to the key above"
+    else
+      echo "  site $id ${P[NAME]}: on its gateway change only [Peer] PublicKey to the key above (its own key is not on this hub)"
+    fi
+  done
+}
+cmd_hub_purge() {
+  local yes=0 delkeys=0 u
+  while (($#)); do
+    case $1 in
+      --yes) yes=1; shift ;;
+      --delete-keys) delkeys=1; shift ;;
+      *) die 2 "hub-purge: unknown option $(q "$1")" ;;
+    esac
+  done
+  need_root
+  if ((!yes)); then
+    echo "hub-purge would stop and remove $IF, the firewall table inet $TABLE, the units, $WG_CONF,"
+    echo "$STATUS_FILE and $STATE_DIR. $VPN_DIR (keys, sites) is kept unless --delete-keys is given"
+    echo "(give it when this machine is decommissioned, after the hub was restored elsewhere)."
+    echo "Add --yes to do it."
+    exit 2
+  fi
+  if [[ -d $VPN_DIR ]]; then lock; fi
+  if ((!TEST_MODE)); then
+    for u in "$WATCH_UNIT" "$TIMER_UNIT" "$ST_UNIT" "$WG_UNIT" "$FW_UNIT"; do systemctl disable --now --quiet "$u" 2>/dev/null || true; done
+  fi
+  wg_down_now
+  rm -f "$WG_CONF" # without it the guard (timer, watcher) no longer puts the table back
+  nft delete table inet "$TABLE" 2>/dev/null || true
+  rm -f "$UNIT_DIR/$FW_UNIT" "$UNIT_DIR/$ST_UNIT" "$UNIT_DIR/$TIMER_UNIT" "$UNIT_DIR/$WATCH_UNIT" "$UNIT_DIR/wg-quick@$IF.service.d/cctv-vpn.conf" \
+    "$UNIT_DIR/nftables.service.d/cctv-vpn.conf" "$TMPFILES_CONF" "$STATUS_FILE"
+  rmdir "$UNIT_DIR/wg-quick@$IF.service.d" "$UNIT_DIR/nftables.service.d" 2>/dev/null || true
+  rm -rf -- "$STATE_DIR"
+  if ((!TEST_MODE)); then
+    systemctl daemon-reload
+    systemctl reset-failed "$FW_UNIT" "$WG_UNIT" "$ST_UNIT" "$TIMER_UNIT" "$WATCH_UNIT" 2>/dev/null || true
+  fi
+  if ((delkeys)); then
+    rm -rf -- "$VPN_DIR"
+    echo "removed the hub, including $VPN_DIR (all keys and site records)"
+  else
+    echo "removed the hub; $VPN_DIR (keys, site records) is kept: $PROG hub-init brings the same hub back"
+    echo "(decommissioning this machine? Run it again with --delete-keys, so no key stays behind)"
+  fi
+  echo "the tool itself stays at /usr/local/sbin/cctv-vpn (delete it by hand if you like)"
+  echo "undo elsewhere (by hand):"
+  echo "  main-site router: delete the UDP port forward to this machine"
+  if is_wsl; then echo "  Windows (PowerShell as Administrator): Remove-NetFirewallHyperVRule -Name cctv-vpn-wg-wsl ; Remove-NetFirewallRule -Name cctv-vpn-wg"; fi
+  echo "  each site: sudo cctv-site-gateway uninstall (Linux) or the remove steps of its recipe"
+  echo "  the CCTV app: remove the NVRs at 10.78.x.x"
+}
+cmd_firewall_reload() {
+  (($# == 0)) || die 2 "firewall-reload takes no options"
+  need_root
+  load_hub
+  lock
+  write_nft
+  if ! fw_load; then
+    wg_fail_closed
+    die 1 "could not load table inet $TABLE"
+  fi
+  echo "table inet $TABLE reloaded, $NFT_FILE written again ($IF and its sessions untouched)"
+}
+
+# ---------------------------------------------------------------- site commands
+print_site() { # from S
+  local id=${S[ID]} ex
+  if [[ ${S[LAN]} == none ]]; then ex="<site LAN>.10"; else ex="${S[LAN]%.*}.10"; fi
+  echo "  id               $id"
+  echo "  tunnel IP        10.77.0.$id (the site gateway)"
+  echo "  virtual subnet   10.78.$id.0/24 = the LAN there ($([[ ${S[LAN]} == none ]] && echo "not recorded: $PROG site-set ${S[NAME]} --lan CIDR" || echo "${S[LAN]}")), host by host"
+  echo "  in the app       NVR $ex there = 10.78.$id.10 in the app, port $NVR_PORT"
+}
+check_note_arg() { valid_note "$1" || die 2 "--note: up to 100 of letters, digits, space and . , : / _ @ ( ) + # - (no quotes)"; }
+cmd_site_add() {
+  local name="" lan="" lan_set=0 id="" reuse=0 pubkey="" nopsk=0 pskfile="" psk="" notetext="" note_set=0 existing tmpd pub keyon who
+  (($# >= 1)) || die 2 "usage: $PROG site-add NAME --lan CIDR|none [--id N [--reuse-id]] [--pubkey KEY] [--psk-file F | --no-psk] [--note TEXT]"
+  name=$1
+  shift
+  while (($#)); do
+    case $1 in
+      --lan) (($# >= 2)) || die 2 "--lan needs a value"; lan=$2; lan_set=1; shift 2 ;;
+      --id) (($# >= 2)) || die 2 "--id needs a value"; id=$2; shift 2 ;;
+      --reuse-id) reuse=1; shift ;;
+      --pubkey) (($# >= 2)) || die 2 "--pubkey needs a value"; pubkey=$2; shift 2 ;;
+      --no-psk) nopsk=1; shift ;;
+      --psk-file) (($# >= 2)) || die 2 "--psk-file needs a value"; pskfile=$2; shift 2 ;;
+      --note) (($# >= 2)) || die 2 "--note needs a value"; notetext=$2; note_set=1; shift 2 ;;
+      *) die 2 "site-add: unknown option $(q "$1")" ;;
+    esac
+  done
+  check_new_name "$name"
+  ((lan_set)) || die 2 "site-add: --lan is required (the site's LAN, e.g. 192.168.1.0/24, or none)"
+  check_lan_arg "$lan"
+  [[ -z $id ]] || valid_id "$id" || die 2 "--id $(q "$id"): site ids are 2..250 (10.77.0.1 is the hub itself, so there is no site 1)"
+  ((reuse == 0)) || [[ -n $id ]] || die 2 "--reuse-id needs --id N"
+  [[ -z $pubkey ]] || valid_key "$pubkey" || die 2 "--pubkey is not a WireGuard public key (44 characters of base64, from: wg genkey | wg pubkey)"
+  ((note_set == 0)) || check_note_arg "$notetext"
+  if [[ -n $pskfile ]]; then
+    ((nopsk == 0)) || die 2 "--psk-file and --no-psk exclude each other"
+    [[ -n $pubkey ]] || die 2 "--psk-file re-adds a site whose gateway already has its keys: give its public key with --pubkey too"
+    psk=$(read_key_file "$pskfile") || die 2 "--psk-file $(q "$pskfile"): not a file holding one WireGuard preshared key (site.psk from its bundle)"
+  fi
+  need_root
+  load_hub
+  lock
+  if existing=$(site_id_by_name "$name"); then
+    load_site "$existing" || die 1 "site $existing: damaged record"
+    [[ ${S[LAN]} == "$lan" ]] || die 3 "site $name already exists (id $existing) with LAN ${S[LAN]}: change that with $PROG site-set $name --lan $lan"
+    [[ -z $id || $id == "$existing" ]] || die 3 "site $name already exists with id $existing, not $id"
+    [[ -z $pubkey || $pubkey == "${S[PUBLIC_KEY]}" ]] || die 3 "site $name already exists with another key: $PROG site-rekey $name --yes --pubkey KEY"
+    write_wg_conf
+    wg_reload
+    echo "site $name already exists: nothing changed"
+    print_site
+    return 0
+  fi
+  if [[ -n $id ]]; then
+    if [[ -e $SITES/$id ]]; then
+      if load_site "$id" P; then die 3 "id $id belongs to the active site ${P[NAME]} (virtual subnet 10.78.$id.0/24 is taken)"; fi
+      die 3 "id $id is in use ($SITES/$id)"
+    fi
+    if [[ -e $RETIRED/$id.conf ]]; then
+      load_retired "$id" || R=([NAME]="?" [REMOVED]="?")
+      ((reuse)) || die 3 "id $id belonged to site ${R[NAME]} (removed ${R[REMOVED]}); removed ids are never reused automatically. NVRs in the app at 10.78.$id.x would reach the new site: remove them from the app first, then add --reuse-id"
+      warn "reusing id $id of the removed site ${R[NAME]} (removed ${R[REMOVED]}): NVRs in the app at 10.78.$id.x will now reach the new site: remove them first"
+    fi
+  else
+    id=$(next_free_id) || die 3 "no site id left (2..250; removed ids are never reused automatically: --id N --reuse-id)"
+  fi
+  if [[ -n $pubkey ]]; then
+    [[ $pubkey != "$HUB_PUB" ]] || die 3 "--pubkey is the hub's own public key"
+    if who=$(used_pubkey "$pubkey"); then die 3 "--pubkey is already the key of site $who"; fi
+  fi
+  tmpd=$SITES/.new-$id
+  rm -rf -- "$tmpd"
+  mkdir -m 0700 "$tmpd"
+  if [[ -n $pubkey ]]; then
+    pub=$pubkey
+    keyon=no
+  else
+    write_secret "$tmpd/private.key" "$(wg genkey)"
+    pub=$(wg pubkey <"$tmpd/private.key")
+    keyon=yes
+  fi
+  write_secret "$tmpd/public.key" "$pub"
+  if [[ -n $psk ]]; then
+    write_secret "$tmpd/psk" "$psk"
+  elif ((!nopsk)); then
+    write_secret "$tmpd/psk" "$(wg genpsk)"
+  fi
+  S=([ID]=$id [NAME]=$name [LAN]=$lan [PUBLIC_KEY]=$pub [PSK]=$( ((nopsk)) && echo no || echo yes) [KEY_ON_HUB]=$keyon
+    [KEY_ORIGIN]=$([[ $keyon == yes ]] && echo hub || echo site) [CREATED]=$(now_iso) [EXPORTED]=never [NOTE]=$notetext)
+  save_site "$tmpd"
+  sync "$tmpd"/* 2>/dev/null || true
+  mv -T "$tmpd" "$SITES/$id"
+  mark_changed
+  # a removed site re-added with its own keys: dial it where it was last seen (restored by wg_reload)
+  if ((reuse)) && [[ ${R[PUBLIC_KEY]:-} == "$pub" ]] && valid_endpoint "${R[LAST_ENDPOINT]:-}"; then
+    remember_endpoint "$pub" "${R[LAST_ENDPOINT]}"
+  fi
+  write_wg_conf
+  wg_reload
+  status_after_change
+  load_site "$id" || die 1 "site $id: record not readable after writing it"
+  echo "site $name added"
+  print_site
+  if [[ -n $psk ]]; then
+    echo "re-added with the gateway's own public key and preshared key: a gateway that still has them reconnects by itself, no new bundle needed"
+    return 0
+  fi
+  if [[ $keyon == yes ]]; then
+    echo "next: $PROG site-bundle $name   (then install it at the site: deploy/vpn/README.md)"
+  else
+    echo "next: $PROG site-bundle $name   (it holds no private key: the gateway uses the one it made, e.g. site-gateway.sh install BUNDLE --key FILE)"
+  fi
+}
+cmd_site_set() {
+  local target lan="" lan_set=0 new="" other oldlan notetext="" note_set=0
+  (($# >= 1)) || die 2 "usage: $PROG site-set NAME|ID [--lan CIDR|none] [--rename NEW] [--note TEXT]"
+  target=$1
+  shift
+  while (($#)); do
+    case $1 in
+      --lan) (($# >= 2)) || die 2 "--lan needs a value"; lan=$2; lan_set=1; shift 2 ;;
+      --rename) (($# >= 2)) || die 2 "--rename needs a value"; new=$2; shift 2 ;;
+      --note) (($# >= 2)) || die 2 "--note needs a value"; notetext=$2; note_set=1; shift 2 ;;
+      *) die 2 "site-set: unknown option $(q "$1")" ;;
+    esac
+  done
+  ((lan_set || note_set)) || [[ -n $new ]] || die 2 "site-set: give --lan, --rename and/or --note"
+  ((lan_set == 0)) || check_lan_arg "$lan"
+  [[ -z $new ]] || check_new_name "$new"
+  ((note_set == 0)) || check_note_arg "$notetext"
+  need_root
+  load_hub
+  lock
+  find_site "$target"
+  if [[ -n $new ]] && other=$(site_id_by_name "$new") && [[ $other != "$FOUND" ]]; then die 3 "the name $new is already used by site $other"; fi
+  load_site "$FOUND"
+  oldlan=${S[LAN]}
+  ((lan_set == 0)) || S[LAN]=$lan
+  [[ -z $new ]] || S[NAME]=$new
+  ((note_set == 0)) || S[NOTE]=$notetext
+  save_site "$SITES/$FOUND"
+  mark_changed
+  write_wg_conf # the peer comments carry the name and LAN; nothing in $IF itself changes
+  status_after_change
+  echo "site $FOUND is now ${S[NAME]}, LAN ${S[LAN]}${S[NOTE]:+, note: ${S[NOTE]}}"
+  if ((lan_set)) && [[ $lan != "$oldlan" ]]; then
+    echo "the gateway still maps the LAN it was installed with: make a new bundle ($PROG site-bundle ${S[NAME]}) and install it there again"
+  fi
+}
+cmd_site_remove() {
+  local target yes=0 id name pub
+  (($# >= 1)) || die 2 "usage: $PROG site-remove NAME|ID --yes"
+  target=$1
+  shift
+  while (($#)); do case $1 in --yes) yes=1; shift ;; *) die 2 "site-remove: unknown option $(q "$1")" ;; esac; done
+  need_root
+  load_hub
+  lock
+  find_site "$target"
+  id=$FOUND name=${S[NAME]} pub=${S[PUBLIC_KEY]}
+  if ((!yes)); then
+    echo "site-remove would remove site $id ($name): its peer leaves $IF at once (the tunnel is cut off), its keys"
+    echo "are deleted and id $id is retired (never handed out again automatically)."
+    echo "Remove the NVRs at 10.78.$id.* from the CCTV app. Add --yes to do it."
+    exit 2
+  fi
+  # the last endpoint lets a re-added site (--reuse-id --pubkey --psk-file) be dialed at once
+  write_kv_file "$RETIRED/$id.conf" "ID=$id" "NAME=$name" "LAN=${S[LAN]}" "PUBLIC_KEY=$pub" "PSK=${S[PSK]}" \
+    "KEY_ON_HUB=${S[KEY_ON_HUB]}" "KEY_ORIGIN=${S[KEY_ORIGIN]}" "CREATED=${S[CREATED]}" "EXPORTED=${S[EXPORTED]}" \
+    "NOTE=${S[NOTE]}" "LAST_ENDPOINT=$(wg_endpoint_of "$pub")" "REMOVED=$(now_iso)"
+  rm -rf -- "$SITES/.del-$id"
+  mv -T "$SITES/$id" "$SITES/.del-$id"
+  mark_changed
+  write_wg_conf
+  wg_reload
+  if wg_exists && [[ $'\n'$(wg show "$IF" peers 2>/dev/null || true)$'\n' == *$'\n'"$pub"$'\n'* ]]; then wg set "$IF" peer "$pub" remove; fi
+  forget_endpoint "$pub"
+  rm -rf -- "$SITES/.del-$id"
+  rm -f -- "$BUNDLES/cctv-site-$id-"*.tar.gz # its bundles (default place) hold a now useless key
+  status_after_change
+  echo "removed site $id ($name): its tunnel is cut off, its keys are deleted, id $id is retired."
+  echo "Remove the NVRs at 10.78.$id.* from the CCTV app."
+}
+cmd_site_rekey() {
+  local target yes=0 pubkey="" id ep tmpd pub keyon who oldpub
+  (($# >= 1)) || die 2 "usage: $PROG site-rekey NAME|ID --yes [--pubkey KEY]"
+  target=$1
+  shift
+  while (($#)); do
+    case $1 in
+      --yes) yes=1; shift ;;
+      --pubkey) (($# >= 2)) || die 2 "--pubkey needs a value"; pubkey=$2; shift 2 ;;
+      *) die 2 "site-rekey: unknown option $(q "$1")" ;;
+    esac
+  done
+  [[ -z $pubkey ]] || valid_key "$pubkey" || die 2 "--pubkey is not a WireGuard public key"
+  need_root
+  load_hub
+  lock
+  find_site "$target"
+  id=$FOUND oldpub=${S[PUBLIC_KEY]}
+  if [[ -n $pubkey ]]; then
+    [[ $pubkey != "$HUB_PUB" ]] || die 3 "--pubkey is the hub's own public key"
+    if who=$(used_pubkey "$pubkey"); then die 3 "--pubkey is already the key of site $who"; fi
+    load_site "$id"
+  fi
+  if ((!yes)); then
+    echo "site-rekey would give site $id (${S[NAME]}) a new key pair$([[ ${S[PSK]} == yes ]] && echo " and a new preshared key"). The old key stops"
+    echo "working at once: the site is down until its new bundle is installed. Add --yes to do it."
+    exit 2
+  fi
+  ep=$(wg_endpoint_of "$oldpub")
+  tmpd=$SITES/.new-$id
+  rm -rf -- "$tmpd" "$SITES/.old-$id"
+  mkdir -m 0700 "$tmpd"
+  if [[ -n $pubkey ]]; then
+    pub=$pubkey
+    keyon=no
+  else
+    write_secret "$tmpd/private.key" "$(wg genkey)"
+    pub=$(wg pubkey <"$tmpd/private.key")
+    keyon=yes
+  fi
+  write_secret "$tmpd/public.key" "$pub"
+  [[ ${S[PSK]} != yes ]] || write_secret "$tmpd/psk" "$(wg genpsk)"
+  S[PUBLIC_KEY]=$pub S[KEY_ON_HUB]=$keyon S[EXPORTED]=never
+  if [[ $keyon == yes ]]; then S[KEY_ORIGIN]=hub; else S[KEY_ORIGIN]=site; fi
+  save_site "$tmpd"
+  sync "$tmpd"/* 2>/dev/null || true
+  mv -T "$SITES/$id" "$SITES/.old-$id"
+  mv -T "$tmpd" "$SITES/$id"
+  rm -rf -- "$SITES/.old-$id"
+  mark_changed
+  rm -f -- "$BUNDLES/cctv-site-$id-"*.tar.gz # old bundles (default place) hold the old key
+  forget_endpoint "$oldpub"
+  [[ -z $ep ]] || remember_endpoint "$pub" "$ep" # the new key is dialed where the site was
+  write_wg_conf
+  wg_reload
+  status_after_change
+  echo "site $id (${S[NAME]}) has a new key; the old one no longer works."
+  echo "next: $PROG site-bundle ${S[NAME]} and install it at the site"
+  echo "If an old bundle or the old device may be in someone else's hands: whoever held that key could"
+  echo "stand in for this site's gateway and receive the app's NVR logins, so also change the passwords"
+  echo "of that site's NVRs (on the NVRs, then in the app)."
+}
+cmd_site_reset() {
+  local target id ep pub
+  (($# == 1)) || die 2 "usage: $PROG site-reset NAME|ID"
+  target=$1
+  need_root
+  load_hub
+  lock
+  find_site "$target"
+  id=$FOUND pub=${S[PUBLIC_KEY]}
+  wg_exists || die 3 "$IF is not running ($PROG hub-up)"
+  ep=$(wg_endpoint_of "$pub")
+  [[ -z $ep ]] || remember_endpoint "$pub" "$ep" # wg_reload puts it back on the new peer entry
+  wg set "$IF" peer "$pub" remove
+  wg_reload
+  status_after_change
+  echo "site $id (${S[NAME]}): handshake state cleared (same keys${ep:+, endpoint $ep restored}); the next handshake from the site is accepted again"
+}
+B_HINT="" # the address this bundle dials (the hub's, or site-bundle --endpoint)
+render_site_env() { # bundle format 1 (read field by field by site-gateway.sh, never sourced); no secrets
+  echo "# CCTV VPN site bundle (format 1), made by cctv-vpn on $(hostname 2>/dev/null || echo hub) at $(now_iso). No secrets in this file."
+  echo "CCTV_VPN_BUNDLE=1"
+  echo "SITE_ID=${S[ID]}"
+  echo "SITE_NAME=${S[NAME]}"
+  echo "TUNNEL_IP=10.77.0.${S[ID]}"
+  echo "VIRTUAL_SUBNET=10.78.${S[ID]}.0/24"
+  echo "REAL_LAN=$([[ ${S[LAN]} == none ]] || echo "${S[LAN]}")"
+  echo "HUB_TUNNEL_IP=$HUB_IP"
+  echo "HUB_ENDPOINT=$B_HINT"
+  echo "HUB_PUBLIC_KEY=$HUB_PUB"
+  echo "SITE_PUBLIC_KEY=${S[PUBLIC_KEY]}"
+  echo "NVR_PORT=$NVR_PORT"
+  echo "KEEPALIVE=$KEEPALIVE"
+  echo "MTU=$H_MTU"
+}
+render_bundle_wgconf() { # $1 private key or empty, $2 psk or empty
+  echo "# CCTV VPN: site ${S[ID]} (${S[NAME]}) -> the CCTV server. For routers and WireGuard for Windows."
+  echo "# Linux gateways: do not use this file; run site-gateway.sh install <bundle> instead."
+  echo "[Interface]"
+  if [[ -n $1 ]]; then echo "PrivateKey = $1"; else echo "# PrivateKey = (not in this bundle: the gateway's own key, which is already on the device)"; fi
+  echo "Address = 10.77.0.${S[ID]}/32"
+  echo "MTU = $H_MTU"
+  echo
+  echo "[Peer]"
+  echo "# the CCTV server (hub)"
+  echo "PublicKey = $HUB_PUB"
+  [[ -z $2 ]] || echo "PresharedKey = $2"
+  echo "Endpoint = $B_HINT"
+  echo "AllowedIPs = $HUB_IP/32"
+  echo "PersistentKeepalive = $KEEPALIVE"
+}
+bundle_key_text() { # $1 has key (yes/no): what the bundle's README says about the private key
+  if [[ $1 == yes ]]; then
+    echo "This bundle holds the site's WireGuard PRIVATE KEY (site.key, wg0.conf): treat it like a password."
+    echo "Whoever has a copy can stand in for this site's gateway from anywhere and receive the CCTV app's"
+    echo "NVR logins for this site. Copy it to the site over a secure channel, install it, then delete every copy."
+  elif [[ ${S[KEY_ORIGIN]} == site ]]; then
+    echo "This bundle holds NO private key: the gateway uses the key it made itself (its public key is below)."
+  elif [[ ${S[KEY_ORIGIN]} == forgotten ]]; then
+    echo "This bundle holds NO private key: the site's key was exported on ${S[EXPORTED]} and then forgotten on"
+    echo "the CCTV server. The gateway must still have it (Linux: the PrivateKey line of"
+    echo "/etc/wireguard/wg-cctv.conf, given to the install with --key FILE); if not: cctv-vpn site-rekey."
+  else
+    echo "This bundle was made without the private key (--no-key): the gateway must still have it"
+    echo "(Linux: the PrivateKey line of /etc/wireguard/wg-cctv.conf, given to the install with --key FILE)."
+  fi
+}
+render_bundle_readme() { # $1 folder name, $2 has key (yes/no)
+  local id=${S[ID]} lanword
+  if [[ ${S[LAN]} == none ]]; then lanword="not recorded on the hub: the Linux gateway uses its own /24"; else lanword="${S[LAN]} (10.78.$id.x on the CCTV server = ${S[LAN]%.*}.x here)"; fi
+  cat <<EOF
+CCTV VPN: bundle for site $id (${S[NAME]}), made at $(now_iso)
+$(bundle_key_text "$2")
+
+  site id           $id
+  site name         ${S[NAME]}
+  tunnel address    10.77.0.$id/32  (the site gateway inside the VPN)
+  virtual subnet    10.78.$id.0/24  (how the CCTV server sees this site's LAN)
+  site LAN          $lanword
+  CCTV server       $B_HINT (UDP; the site dials out: no port forward is needed at the site)
+  hub public key    $HUB_PUB
+  site public key   ${S[PUBLIC_KEY]}
+  preshared key     ${S[PSK]}$([[ ${S[PSK]} == yes ]] && echo " (site.psk)")
+  MTU / keepalive   $H_MTU / $KEEPALIVE s
+  allowed           only TCP $NVR_PORT (TVT SDK) and ping from $HUB_IP to the site LAN; nothing else,
+                    and nothing from the site into the tunnel
+
+Linux gateway (Raspberry Pi OS, Debian, Ubuntu), on the site box as root:
+  tar -xzf $1.tar.gz
+  bash $1/site-gateway.sh check   $1.tar.gz
+  bash $1/site-gateway.sh install $1.tar.gz$([[ $2 == yes ]] || echo " --key /root/cctv-site.key")
+Router, firewall or Windows PC (filled-in steps for that device):
+  bash $1/site-recipes.sh $1.tar.gz mikrotik|openwrt|rutos|pfsense|opnsense|edgeos|unifi|windows [--nvr IP,IP]
+  or import wg0.conf by hand and follow deploy/vpn/README.md.
+Test: the gateway shows a WireGuard handshake less than 2 minutes old (ping $HUB_IP is NOT answered,
+by design). Then, in the CCTV app, add each NVR as 10.78.$id.<last octet of its LAN address>, port $NVR_PORT.
+EOF
+}
+cmd_site_bundle() {
+  local target out="" forget=0 nokey=0 ep_opt="" id folder work key="" psk="" tmp sum size f dest vd dd
+  (($# >= 1)) || die 2 "usage: $PROG site-bundle NAME|ID [--out FILE.tar.gz|-] [--forget-key] [--no-key] [--endpoint HOST[:PORT]]"
+  target=$1
+  shift
+  while (($#)); do
+    case $1 in
+      --out) (($# >= 2)) || die 2 "--out needs a value"; out=$2; shift 2 ;;
+      --forget-key) forget=1; shift ;;
+      --no-key) nokey=1; shift ;;
+      --endpoint) (($# >= 2)) || die 2 "--endpoint needs a value"; ep_opt=$2; shift 2 ;;
+      *) die 2 "site-bundle: unknown option $(q "$1")" ;;
+    esac
+  done
+  ((!(forget && nokey))) || die 2 "--forget-key and --no-key exclude each other"
+  EP_HOST="" EP_PORT=""
+  [[ -z $ep_opt ]] || parse_endpoint_arg "$ep_opt"
+  if [[ -n $out && $out != - ]]; then
+    [[ $out =~ ^[A-Za-z0-9._/+@-]+$ && $out != *..* ]] || die 2 "--out: use a plain path (letters, digits, . _ - / + @)"
+    [[ $out == *.tar.gz || $out == *.tgz ]] || die 2 "--out must end in .tar.gz or .tgz (the gateway script expects that)"
+    [[ $out == /* ]] || out=$PWD/$out
+    [[ -d ${out%/*} ]] || die 2 "--out: folder ${out%/*} does not exist"
+    [[ ! -d $out ]] || die 2 "--out is a folder"
+  fi
+  if [[ $out == - ]]; then
+    [[ ! -t 1 ]] || die 2 "--out - writes a binary archive to stdout: redirect it (> file) or pipe it"
+    ((!forget)) || die 2 "--forget-key needs a file (--out FILE): this tool cannot tell whether a pipe's reader kept the bundle"
+  fi
+  if ((forget)); then
+    # a bundle kept under /etc/cctv/vpn would still hold the key the hub is meant to forget
+    [[ -n $out ]] || die 2 "--forget-key needs --out FILE outside $VPN_DIR (a transfer folder or a USB stick): a bundle in $BUNDLES would still hold the key"
+    vd=$(realpath -m "$VPN_DIR")
+    dd=$(realpath -m "${out%/*}")
+    [[ $dd != "$vd" && $dd != "$vd"/* ]] || die 2 "--forget-key: --out must be outside $VPN_DIR (a bundle kept there would still hold the key)"
+  fi
+  need_root
+  load_hub
+  lock
+  find_site "$target"
+  id=$FOUND
+  if [[ -n $EP_HOST ]]; then
+    B_HINT=$(ep_join "$EP_HOST" "${EP_PORT:-$H_PUBLIC_PORT}")
+    endpoint_warning "$EP_HOST"
+  else
+    B_HINT=$HUB_HINT
+  fi
+  [[ -n $B_HINT ]] || die 3 "the hub has no public endpoint yet: $PROG hub-init --endpoint <public IP or DNS name of the main site>"
+  if [[ ${S[KEY_ORIGIN]} == forgotten ]] && ((!nokey)); then
+    die 3 "site $id (${S[NAME]}): its private key was exported on ${S[EXPORTED]} and then forgotten on this hub, so a new bundle cannot hold it. If the gateway still has its key: site-bundle ${S[NAME]} --no-key (install it with --key). Otherwise: $PROG site-rekey ${S[NAME]} --yes, then a new bundle"
+  fi
+  if [[ ${S[KEY_ON_HUB]} == yes ]] && ((!nokey)); then key=$(read_key_file "$SITES/$id/private.key") || die 1 "site $id: private.key missing or bad"; fi
+  if [[ ${S[PSK]} == yes ]]; then psk=$(read_key_file "$SITES/$id/psk") || die 1 "site $id: psk missing or bad"; fi
+  folder=cctv-site-$id-${S[NAME]}
+  work=$(mktemp -d "$BUNDLES/.work.XXXXXX")
+  CLEANUP_DIRS+=("$work")
+  mkdir -m 0700 "$work/$folder"
+  render_site_env >"$work/$folder/site.env"
+  render_bundle_wgconf "$key" "$psk" >"$work/$folder/wg0.conf"
+  render_bundle_readme "$folder" "$([[ -n $key ]] && echo yes || echo no)" >"$work/$folder/README.txt"
+  [[ -z $key ]] || printf '%s\n' "$key" >"$work/$folder/site.key"
+  [[ -z $psk ]] || printf '%s\n' "$psk" >"$work/$folder/site.psk"
+  for f in site-gateway.sh site-recipes.sh; do
+    if [[ -f $SHARE/gateway/$f ]]; then cp "$SHARE/gateway/$f" "$work/$folder/$f"; fi
+  done
+  chmod 600 "$work/$folder"/*
+  if [[ $out == - ]]; then
+    tar -C "$work" --owner=0 --group=0 --numeric-owner -czf - "$folder"
+    echo "bundle for site $id (${S[NAME]}) written to stdout; copy it to the site over a secure channel, then delete it" >&2
+    return 0
+  fi
+  dest=${out:-$BUNDLES/$folder.tar.gz}
+  tmp=$(mktemp "${dest%/*}/.bundle.XXXXXX")
+  tar -C "$work" --owner=0 --group=0 --numeric-owner -czf "$tmp" "$folder"
+  chmod 600 "$tmp"
+  sync "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$dest"
+  sync "${dest%/*}" 2>/dev/null || true
+  size=$(stat -c %s "$dest")
+  sum=$(sha256sum "$dest" | awk '{print $1}')
+  [[ -z $key ]] || S[EXPORTED]=$(now_iso)
+  if ((forget)) && [[ ${S[KEY_ON_HUB]} == yes ]]; then
+    # only now that the archive is complete and on disk
+    tar -tzf "$dest" "$folder/site.key" >/dev/null 2>&1 || die 1 "the bundle does not read back: the key was NOT forgotten"
+    rm -f -- "$SITES/$id/private.key"
+    S[KEY_ON_HUB]=no S[KEY_ORIGIN]=forgotten
+    mark_changed
+  fi
+  save_site "$SITES/$id"
+  echo "bundle for site $id (${S[NAME]}): $dest"
+  echo "  $size bytes, sha256 $sum; it dials $B_HINT"
+  if ((forget)); then
+    if [[ ${S[KEY_ORIGIN]} == forgotten && -n $key ]]; then warn "the site's private key is no longer on this hub: this bundle is now the ONLY copy"; else echo "  (the site's private key was not on this hub anyway)"; fi
+  fi
+  if [[ -n $key ]]; then
+    echo "  it holds the site's private key: whoever copies it can stand in for this site's gateway (and"
+    echo "  receive the app's NVR logins for it). Copy it to the site over a secure channel, install it, delete every copy."
+  fi
+  echo "  at the site: tar -xzf ${dest##*/} && sudo bash $folder/site-gateway.sh install ${dest##*/}$([[ -n $key ]] || echo " --key <its own key file>")"
+}
+cmd_site_list() {
+  local retired=0 id
+  while (($#)); do case $1 in --retired) retired=1; shift ;; *) die 2 "site-list: unknown option $(q "$1")" ;; esac; done
+  need_root
+  load_hub
+  printf '%-4s %-32s %-11s %-15s %-18s %-9s %-4s %-20s %s\n' ID NAME TUNNEL VIRTUAL REAL-LAN KEY PSK CREATED NOTE
+  for id in $(site_ids); do
+    if load_site "$id" P; then
+      printf '%-4s %-32s %-11s %-15s %-18s %-9s %-4s %-20s %s\n' "$id" "${P[NAME]}" "10.77.0.$id" "10.78.$id.0/24" "${P[LAN]}" "${P[KEY_ORIGIN]}" "${P[PSK]}" "${P[CREATED]}" "${P[NOTE]}"
+    else
+      printf '%-4s %s\n' "$id" "(damaged record $SITES/$id/site.conf)"
+    fi
+  done
+  echo "(KEY: hub = made here and kept here, site = made at the site, forgotten = exported, then deleted here)"
+  if ((retired)); then
+    echo
+    echo "retired ids (never handed out again automatically):"
+    printf '%-4s %-32s %-18s %s\n' ID NAME REAL-LAN REMOVED
+    for id in $(retired_ids); do
+      if load_retired "$id"; then printf '%-4s %-32s %-18s %s\n' "$id" "${R[NAME]}" "${R[LAN]:-?}" "${R[REMOVED]}"; fi
+    done
+  fi
+}
+cmd_status() {
+  local opt=${1:-} n id t k now state fw
+  (($# <= 1)) || die 2 "usage: $PROG status [--json|--write]"
+  need_root
+  case $opt in
+    --json) status_json; return 0 ;;
+    --write) status_write; return $? ;;
+    "") ;;
+    *) die 2 "status: unknown option $(q "$opt")" ;;
+  esac
+  load_hub
+  local -A hs=() rx=() tx=() ep=()
+  local a b
+  if wg_exists; then
+    while read -r k a; do valid_key "$k" && valid_uint "$a" && hs[$k]=$a; done < <(wg show "$IF" latest-handshakes 2>/dev/null || true)
+    while read -r k a b; do valid_key "$k" && valid_uint "$a" && valid_uint "$b" && rx[$k]=$a && tx[$k]=$b; done < <(wg show "$IF" transfer 2>/dev/null || true)
+    while read -r k a; do valid_key "$k" && ep[$k]=$a; done < <(wg show "$IF" endpoints 2>/dev/null || true)
+    state="up"
+    [[ $(ip -o link show dev "$IF" 2>/dev/null) == *"<"*UP*">"* ]] || state="DOWN (link down: $PROG hub-up)"
+  else
+    state="DOWN"
+  fi
+  case $(fw_state) in
+    ok) fw="ok (exactly as generated)" ;;
+    missing) fw="MISSING" ;;
+    differs) fw="CHANGED outside $PROG" ;;
+    *) fw="loaded (not compared yet)" ;;
+  esac
+  echo "hub  $IF $state, UDP $H_PORT, sites dial ${HUB_HINT:-(no endpoint set)}, firewall $fw, ip_forward $(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo '?')"
+  echo "     UDP $H_PORT packets received: $(counter_of wg_udp_in || true); handshake initiations received: $(counter_of wg_handshake_in || true) (since the last firewall load)"
+  now=$(date +%s)
+  printf '%-4s %-24s %-11s %-15s %-16s %-10s %-10s %-22s %s\n' ID NAME TUNNEL VIRTUAL REAL-LAN STATE HANDSHAKE ENDPOINT "RX / TX"
+  for id in $(site_ids); do
+    load_site "$id" P || { printf '%-4s %s\n' "$id" "(damaged record)"; continue; }
+    k=${P[PUBLIC_KEY]}
+    t=${hs[$k]:-0}
+    if ((t == 0)); then n="never"; a="-"; elif ((now - t < CONNECTED_S)); then n="connected"; a="$((now - t)) s ago"; else n="stale"; a="$((now - t)) s ago"; fi
+    printf '%-4s %-24s %-11s %-15s %-16s %-10s %-10s %-22s %s / %s\n' "$id" "${P[NAME]}" "10.77.0.$id" "10.78.$id.0/24" "${P[LAN]}" "$n" "$a" "${ep[$k]:-(none)}" "$(human_bytes "${rx[$k]:-0}")" "$(human_bytes "${tx[$k]:-0}")"
+  done
+}
+cmd_check() {
+  (($# == 0)) || die 2 "check takes no options"
+  need_root
+  load_hub
+  CHK_FAIL=0
+  check_items 14
+  if ((CHK_FAIL > 0)); then
+    echo "$CHK_FAIL item(s) FAILED"
+    exit 1
+  fi
+  echo "no failures"
+}
+cmd_post_up() { # run by wg-quick after wg0 is up; must never fail (wg-quick would tear wg0 down)
+  [[ ${1:-} == "$IF" ]] || { warn "post-up: unexpected interface $(q "${1:-}")"; exit 0; }
+  restore_endpoints || true
+  ensure_keepalive || true # after the endpoints: this starts the handshakes with them
+  wsl_claim_port || true
+  exit 0
+}
+# fw-verify: by hand, and as wg0's PreUp (--preup: quiet when all is well; a failure stops wg0 from
+# starting). The PreUp runs in a child of wg-quick: when the table is fine it needs no lock (the
+# command that started wg0 may hold it); only a repair waits for the lock.
+cmd_fw_verify() {
+  local preup=0 st
+  if [[ ${1:-} == --preup ]]; then preup=1; shift; fi
+  (($# == 0)) || die 2 "fw-verify: unknown option $(q "$1")"
+  need_root
+  load_hub
+  st=$(fw_state)
+  if [[ $st == ok ]]; then
+    ((preup)) || echo "table inet $TABLE is exactly as generated"
+    return 0
+  fi
+  local what
+  case $st in missing) what="is missing" ;; differs) what="was changed outside $PROG" ;; *) what="was not compared yet" ;; esac
+  guard_lock 10 || die 1 "table inet $TABLE $what and another $PROG command holds the lock: refusing to go on without the firewall"
+  st=$(fw_state)
+  if [[ $st != ok ]]; then
+    [[ $st == unknown ]] || warn "table inet $TABLE $what$([[ $st == differs ]] && echo " ($(fw_diff))"): loading the generated one"
+    if ! fw_load || [[ $(fw_state) != ok ]]; then
+      guard_unlock
+      ((preup)) || wg_fail_closed
+      die 1 "could not load table inet $TABLE: $IF must not run without it"
+    fi
+  fi
+  guard_unlock
+  ((preup)) || echo "table inet $TABLE $what: the generated table is loaded again"
+}
+# fw-watch: the watcher unit. nft monitor reports every ruleset change at once; after a burst of
+# events has settled (0.3 s) the guard compares and, if needed, loads the table again. Its own
+# reload causes events too, and the next comparison then finds the table as generated.
+cmd_fw_watch() {
+  (($# == 0)) || die 2 "fw-watch takes no options"
+  need_root
+  need_tools nft
+  load_hub
+  guard_firewall || true
+  while :; do
+    while IFS= read -r _; do
+      while IFS= read -r -t 0.3 _; do :; done
+      [[ -f $VPN_DIR/hub.conf ]] || exit 0 # purged
+      load_hub                              # hub-init may have changed the port
+      guard_firewall || true
+    done < <(nft monitor 2>/dev/null)
+    sleep 1 # nft monitor ended: start it again
+  done
+}
+
+# ---------------------------------------------------------------- backup and restore
+# A backup holds the hub key, every site record and key, the retired ids and the saved site
+# endpoints: enough to rebuild the hub on a new machine with no change at any site (the sites keep
+# dialing the same address with the same keys). Encrypted with gpg (AES256, passphrase) unless
+# --no-encrypt. Never kept under /etc/cctv/vpn.
+backup_members() { # paths relative to the root, one per line
+  local f id
+  for f in hub.conf hub.key hub.pub; do [[ -f $VPN_DIR/$f ]] && echo "${VPN_DIR#"$ROOT"/}/$f"; done
+  for id in $(site_ids); do
+    for f in site.conf public.key private.key psk; do [[ -f $SITES/$id/$f ]] && echo "${SITES#"$ROOT"/}/$id/$f"; done
+  done
+  for id in $(retired_ids); do echo "${RETIRED#"$ROOT"/}/$id.conf"; done
+  if [[ -f $STATE_DIR/endpoints ]]; then echo "${STATE_DIR#"$ROOT"/}/endpoints"; fi
+  return 0
+}
+read_passphrase() { # $1 passphrase file or empty, $2 ask twice (1) -> PASS
+  PASS=""
+  if [[ -n $1 ]]; then
+    [[ -f $1 && ! -L $1 ]] || die 2 "--passphrase-file $(q "$1"): not a plain file"
+    PASS=$(head -n1 -- "$1" | tr -d '\r')
+  else
+    [[ -t 0 ]] || die 2 "no terminal to ask for the passphrase: give --passphrase-file FILE"
+    local again
+    read -rs -p "backup passphrase: " PASS && echo >&2
+    if (($2)); then
+      read -rs -p "the same again: " again && echo >&2
+      [[ $PASS == "$again" ]] || die 2 "the two passphrases differ"
+    fi
+  fi
+  ((${#PASS} >= 12)) || die 2 "the passphrase must have at least 12 characters"
+}
+gpg_home() { # a temporary gpg home (its agent is stopped on exit) -> GHOME
+  local rd
+  rd=/run/user/$(id -u)/gnupg
+  [[ -e $rd || ! -d ${rd%/gnupg} ]] || GPG_RUNDIR=$rd # gpg-agent puts its sockets there
+  GHOME=$(mktemp -d "${TMPDIR:-/tmp}/cctv-vpn-gpg.XXXXXX")
+  GPG_HOMES+=("$GHOME")
+  CLEANUP_DIRS+=("$GHOME")
+}
+PASS="" GHOME=""
+cmd_backup() {
+  local out="" passfile="" noenc=0 vd dd tmpd host n tmp sum size last_change
+  local -a members=()
+  while (($#)); do
+    case $1 in
+      --out) (($# >= 2)) || die 2 "--out needs a value"; out=$2; shift 2 ;;
+      --passphrase-file) (($# >= 2)) || die 2 "--passphrase-file needs a value"; passfile=$2; shift 2 ;;
+      --no-encrypt) noenc=1; shift ;;
+      *) die 2 "backup: unknown option $(q "$1")" ;;
+    esac
+  done
+  [[ -n $out ]] || die 2 "backup: --out FILE is required (then keep the file on another machine or a USB stick)"
+  [[ $out =~ ^[A-Za-z0-9._/+@-]+$ && $out != *..* ]] || die 2 "--out: use a plain path (letters, digits, . _ - / + @)"
+  if ((noenc)); then
+    [[ -z $passfile ]] || die 2 "--no-encrypt takes no passphrase"
+    [[ $out == *.tar.gz ]] || die 2 "--out must end in .tar.gz with --no-encrypt"
+  else
+    [[ $out == *.tar.gz.gpg ]] || die 2 "--out must end in .tar.gz.gpg (encrypted; --no-encrypt writes a plain .tar.gz)"
+  fi
+  [[ $out == /* ]] || out=$PWD/$out
+  [[ -d ${out%/*} ]] || die 2 "--out: folder ${out%/*} does not exist"
+  [[ ! -e $out ]] || die 3 "--out $(q "$out") exists already: a backup is never overwritten, choose a new name"
+  vd=$(realpath -m "$VPN_DIR")
+  dd=$(realpath -m "${out%/*}")
+  [[ $dd != "$vd" && $dd != "$vd"/* ]] || die 2 "--out must be outside $VPN_DIR"
+  need_root
+  need_tools tar gzip sha256sum
+  ((noenc)) || need_tools gpg gpgconf
+  load_hub
+  lock
+  ((noenc)) || read_passphrase "$passfile" 1
+  mapfile -t members < <(backup_members)
+  ((${#members[@]} >= 3)) || die 1 "nothing to back up (no hub key?)"
+  n=$(site_ids | wc -l)
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/cctv-vpn-backup.XXXXXX")
+  CLEANUP_DIRS+=("$tmpd")
+  host=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9.-' | cut -c1-63)
+  write_kv_file "$tmpd/cctv-vpn-backup.conf" "BACKUP=1" "CREATED=$(now_iso)" "HOST=${host:-hub}" "HUB_PUBLIC_KEY=$HUB_PUB" "SITES=$n"
+  tar --owner=0 --group=0 --numeric-owner -czf "$tmpd/b.tar.gz" -C "$tmpd" cctv-vpn-backup.conf -C "${ROOT:-/}" "${members[@]}"
+  if ((noenc)); then
+    mv "$tmpd/b.tar.gz" "$tmpd/out"
+  else
+    gpg_home
+    HOME=$GHOME gpg --homedir "$GHOME" --batch --yes --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-fd 3 \
+      --symmetric --cipher-algo AES256 --output "$tmpd/out" "$tmpd/b.tar.gz" 3< <(printf '%s\n' "$PASS") ||
+      die 1 "gpg could not encrypt the backup: nothing written"
+    # read it back before calling it a backup
+    HOME=$GHOME gpg --homedir "$GHOME" --batch --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-fd 3 \
+      --decrypt "$tmpd/out" 3< <(printf '%s\n' "$PASS") 2>/dev/null | cmp -s - "$tmpd/b.tar.gz" ||
+      die 1 "the encrypted backup does not read back: nothing written"
+  fi
+  tmp=$(mktemp "${out%/*}/.cctv-vpn-backup.XXXXXX")
+  cat "$tmpd/out" >"$tmp"
+  chmod 600 "$tmp"
+  sync "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$out"
+  size=$(stat -c %s "$out")
+  sum=$(sha256sum "$out" | awk '{print $1}')
+  local -A B=()
+  last_change=$(now_iso)
+  if read_record "$BACKUP_CONF" B && valid_time "${B[LAST_CHANGE]:-}"; then last_change=${B[LAST_CHANGE]}; fi
+  write_kv_file "$BACKUP_CONF" "LAST_BACKUP=$(now_iso)" "LAST_CHANGE=$last_change"
+  echo "backup of the hub (key $HUB_PUB, $n site(s)): $out"
+  echo "  $size bytes, sha256 $sum"
+  if ((noenc)); then
+    warn "this file holds every private key IN PLAIN: keep it only on an encrypted medium"
+  else
+    echo "  encrypted (gpg, AES256): without the passphrase it is useless, so keep the passphrase apart from it"
+  fi
+  echo "  Keep it OFF this machine (another computer, a USB stick in a safe). A new one is needed after every"
+  echo "  site-add / site-remove / site-rekey / hub-rekey ($PROG check, item 14, says when)."
+  echo "  Rebuild a hub from it: $PROG restore ${out##*/}   (on the new machine; no site needs a visit)"
+}
+cmd_restore() {
+  local file="" passfile="" tmpd x m names types n=0 id f k e
+  (($# >= 1)) || die 2 "usage: $PROG restore FILE.tar.gz.gpg|FILE.tar.gz [--passphrase-file F]"
+  file=$1
+  shift
+  while (($#)); do
+    case $1 in
+      --passphrase-file) (($# >= 2)) || die 2 "--passphrase-file needs a value"; passfile=$2; shift 2 ;;
+      *) die 2 "restore: unknown option $(q "$1")" ;;
+    esac
+  done
+  [[ $file =~ ^[A-Za-z0-9._/+@-]+$ && $file != *..* ]] || die 2 "restore: use a plain path (letters, digits, . _ - / + @)"
+  [[ $file == *.tar.gz.gpg || $file == *.tar.gz ]] || die 2 "restore: a backup ends in .tar.gz.gpg (or .tar.gz)"
+  [[ -f $file && ! -L $file ]] || die 4 "restore: $(q "$file") not found"
+  (($(stat -c %s "$file") <= 20971520)) || die 2 "restore: bigger than 20 MB, not a hub backup"
+  need_root
+  need_tools tar gzip wg
+  local fl
+  for fl in "$VPN_DIR/hub.key" "$VPN_DIR/hub.conf"; do
+    [[ ! -e $fl ]] || die 3 "a hub is already set up here ($fl): restore only onto a machine without one (to replace this one: $PROG hub-purge --yes --delete-keys first)"
+  done
+  if [[ -n $(site_ids 2>/dev/null) || -n $(retired_ids 2>/dev/null) ]]; then die 3 "$SITES or $RETIRED holds records already: refusing to mix them with a backup"; fi
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/cctv-vpn-restore.XXXXXX")
+  CLEANUP_DIRS+=("$tmpd")
+  if [[ $file == *.gpg ]]; then
+    need_tools gpg gpgconf
+    read_passphrase "$passfile" 0
+    gpg_home
+    HOME=$GHOME gpg --homedir "$GHOME" --batch --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-fd 3 \
+      --output "$tmpd/b.tar.gz" --decrypt "$file" 3< <(printf '%s\n' "$PASS") 2>"$tmpd/gpg.err" ||
+      die 1 "cannot decrypt $(q "$file") (wrong passphrase, or not a cctv-vpn backup): nothing changed"
+  else
+    cp -- "$file" "$tmpd/b.tar.gz"
+  fi
+  # only plain files and folders, only the names a backup has
+  names=$(tar -tzf "$tmpd/b.tar.gz" 2>/dev/null) || die 1 "not a readable archive: nothing changed"
+  types=$(tar -tvzf "$tmpd/b.tar.gz" | cut -c1 | sort -u | tr -d '\n')
+  [[ $types =~ ^[-d]+$ ]] || die 2 "the backup holds links or special files: refused, nothing changed"
+  while IFS= read -r m; do
+    [[ $m =~ ^(cctv-vpn-backup\.conf|etc/|etc/cctv/|etc/cctv/vpn/|etc/cctv/vpn/(hub\.conf|hub\.key|hub\.pub)|etc/cctv/vpn/(sites|retired)/|etc/cctv/vpn/sites/[0-9]{1,3}/|etc/cctv/vpn/sites/[0-9]{1,3}/(site\.conf|public\.key|private\.key|psk)|etc/cctv/vpn/retired/[0-9]{1,3}\.conf|var/|var/lib/|var/lib/cctv-vpn/|var/lib/cctv-vpn/endpoints)$ ]] ||
+      die 2 "unexpected entry in the backup: $(q "$m"): refused, nothing changed"
+  done <<<"$names"
+  x=$tmpd/x
+  mkdir -m 0700 "$x"
+  tar -xzf "$tmpd/b.tar.gz" -C "$x" --no-same-owner --no-same-permissions
+  local -A M=()
+  read_record "$x/cctv-vpn-backup.conf" M && [[ ${M[BACKUP]:-} == 1 ]] && valid_time "${M[CREATED]:-}" ||
+    die 2 "not a cctv-vpn backup (cctv-vpn-backup.conf missing or wrong): nothing changed"
+  # check everything in the copy before anything is put in place (the loaders follow these paths)
+  local real_vpn=$VPN_DIR real_sites=$SITES real_ret=$RETIRED hk hp
+  VPN_DIR=$x/etc/cctv/vpn SITES=$x/etc/cctv/vpn/sites RETIRED=$x/etc/cctv/vpn/retired
+  load_hub
+  hk=$(read_key_file "$VPN_DIR/hub.key") || die 2 "the backup's hub.key is missing or not a key"
+  hp=$(printf '%s' "$hk" | wg pubkey)
+  [[ $hp == "$HUB_PUB" && $hp == "${M[HUB_PUBLIC_KEY]:-}" ]] || die 2 "the backup's hub.key does not match its hub.pub: refused"
+  for id in $(site_ids); do
+    load_site "$id" P || die 2 "the backup's record of site $id is damaged: refused"
+    [[ $(read_key_file "$SITES/$id/public.key" || true) == "${P[PUBLIC_KEY]}" ]] || die 2 "site $id: public.key does not match its record"
+    if [[ ${P[KEY_ON_HUB]} == yes ]]; then
+      k=$(read_key_file "$SITES/$id/private.key") || die 2 "site $id: private.key missing or bad"
+      [[ $(printf '%s' "$k" | wg pubkey) == "${P[PUBLIC_KEY]}" ]] || die 2 "site $id: private.key does not match its public key"
+    fi
+    if [[ ${P[PSK]} == yes ]]; then read_key_file "$SITES/$id/psk" >/dev/null || die 2 "site $id: psk missing or bad"; fi
+    n=$((n + 1))
+  done
+  for id in $(retired_ids); do load_retired "$id" || die 2 "the backup's retired record $id is damaged: refused"; done
+  VPN_DIR=$real_vpn SITES=$real_sites RETIRED=$real_ret
+  # put it in place
+  install -d -m 0700 "$VPN_DIR" "$SITES" "$RETIRED" "$BUNDLES"
+  lock
+  for f in hub.conf hub.key hub.pub; do install -m 0600 "$x/etc/cctv/vpn/$f" "$VPN_DIR/$f"; done
+  for m in "$x"/etc/cctv/vpn/sites/*/; do
+    [[ -d $m ]] || continue
+    id=${m%/}
+    id=${id##*/}
+    valid_id "$id" || continue
+    install -d -m 0700 "$SITES/.new-$id"
+    for f in site.conf public.key private.key psk; do [[ ! -f $m$f ]] || install -m 0600 "$m$f" "$SITES/.new-$id/$f"; done
+    mv -T "$SITES/.new-$id" "$SITES/$id"
+  done
+  for m in "$x"/etc/cctv/vpn/retired/*.conf; do [[ ! -f $m ]] || install -m 0600 "$m" "$RETIRED/${m##*/}"; done
+  if [[ -f $x/var/lib/cctv-vpn/endpoints ]]; then
+    install -d -m 0700 "$STATE_DIR"
+    while read -r k e; do if valid_key "$k" && valid_endpoint "$e"; then printf '%s %s\n' "$k" "$e"; fi; done <"$x/var/lib/cctv-vpn/endpoints" >"$STATE_DIR/endpoints"
+    chmod 600 "$STATE_DIR/endpoints"
+  fi
+  write_kv_file "$BACKUP_CONF" "LAST_BACKUP=${M[CREATED]}" "LAST_CHANGE=${M[CREATED]}"
+  echo "restored the hub from $(q "${file##*/}") (made ${M[CREATED]} on ${M[HOST]:-?}): hub key $HUB_PUB, $n site(s)"
+  echo "== hub-init with the restored settings"
+  cmd_hub_init
+}
+
+[[ ${BASH_SOURCE[0]} == "$0" ]] || return 0 # sourced (tests): functions only
+cmd=${1:-help}
+shift || true
+case $cmd in
+  hub-init) cmd_hub_init "$@" ;;
+  hub-info) cmd_hub_info "$@" ;;
+  hub-up) cmd_hub_up "$@" ;;
+  hub-down) cmd_hub_down "$@" ;;
+  hub-rekey) cmd_hub_rekey "$@" ;;
+  hub-purge) cmd_hub_purge "$@" ;;
+  backup) cmd_backup "$@" ;;
+  restore) cmd_restore "$@" ;;
+  firewall-reload) cmd_firewall_reload "$@" ;;
+  fw-verify) cmd_fw_verify "$@" ;;
+  fw-watch) cmd_fw_watch "$@" ;;
+  site-add) cmd_site_add "$@" ;;
+  site-set) cmd_site_set "$@" ;;
+  site-remove) cmd_site_remove "$@" ;;
+  site-rekey) cmd_site_rekey "$@" ;;
+  site-reset) cmd_site_reset "$@" ;;
+  site-bundle) cmd_site_bundle "$@" ;;
+  site-list) cmd_site_list "$@" ;;
+  status) cmd_status "$@" ;;
+  check) cmd_check "$@" ;;
+  post-up) cmd_post_up "$@" ;;
+  help | -h | --help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

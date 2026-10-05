@@ -1,0 +1,865 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response cmdId="" cmdUrl="queryNodeList">
+	<status>success</status>
+	<content type="list" total="25">
+		<item id="{00000001-0000-0000-0000-000000000000}">
+			<name>JP Wharf South</name>
+			<devDesc>JP Wharf South</devDesc>
+			<devID>{00000001-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.41</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normalOccupyPoe</addType>
+			<poeIndex>1</poeIndex>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000002-0000-0000-0000-000000000000}">
+			<name>JP Bond</name>
+			<devDesc>JP Bond</devDesc>
+			<devID>{00000002-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.38</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normalOccupyPoe</addType>
+			<poeIndex>2</poeIndex>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000003-0000-0000-0000-000000000000}">
+			<name>Maingate Roadway</name>
+			<devDesc>Maingate Roadway</devDesc>
+			<devID>{00000003-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.241</ip>
+			<productModel factoryName="Eyeonet" identity="Eyeonet">IP619E5W-28-S4</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normalOccupyPoe</addType>
+			<poeIndex>3</poeIndex>
+			<chlType>digital</chlType>
+			<supportOsc>false</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>false</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000004-0000-0000-0000-000000000000}">
+			<name>Bond SE</name>
+			<devDesc>Bond SE</devDesc>
+			<devID>{00000004-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.45</ip>
+			<productModel factoryName="Eyeonet">CAM-IP6196G-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normalOccupyPoe</addType>
+			<poeIndex>4</poeIndex>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>false</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000005-0000-0000-0000-000000000000}">
+			<name>South Fence</name>
+			<devDesc>South Fence</devDesc>
+			<devID>{00000005-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.201</ip>
+			<productModel factoryName="Eyeonet">CAM-IP6196G-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normalOccupyPoe</addType>
+			<poeIndex>5</poeIndex>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>false</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000006-0000-0000-0000-000000000000}">
+			<name>South Extension</name>
+			<devDesc>South Extension</devDesc>
+			<devID>{00000006-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.200</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normalOccupyPoe</addType>
+			<poeIndex>6</poeIndex>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000007-0000-0000-0000-000000000000}">
+			<name>Bike Parking</name>
+			<devDesc>Bike Parking</devDesc>
+			<devID>{00000007-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.93</ip>
+			<productModel factoryName="Eyeonet" identity="Eyeonet">IP619E5W-28-S4</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normalOccupyPoe</addType>
+			<poeIndex>7</poeIndex>
+			<chlType>digital</chlType>
+			<supportOsc>false</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>false</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000008-0000-0000-0000-000000000000}">
+			<name>Lunchroom</name>
+			<devDesc>Lunchroom</devDesc>
+			<devID>{00000008-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.50</ip>
+			<productModel factoryName="Eyeonet">CAM-IP6196G-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normalOccupyPoe</addType>
+			<poeIndex>8</poeIndex>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>false</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{0000000A-0000-0000-0000-000000000000}">
+			<name>Drive Way</name>
+			<devDesc>Drive Way</devDesc>
+			<devID>{0000000A-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.194</ip>
+			<productModel factoryName="Eyeonet">IP6798W-28-4K-SI-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normalOccupyPoe</addType>
+			<poeIndex>10</poeIndex>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000011-0000-0000-0000-000000000000}">
+			<name>MainGATE</name>
+			<devDesc>MainGATE</devDesc>
+			<devID>{00000011-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.11</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000012-0000-0000-0000-000000000000}">
+			<name>Wharf South</name>
+			<devDesc>Wharf South</devDesc>
+			<devID>{00000012-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.40</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000013-0000-0000-0000-000000000000}">
+			<name>Gear Room</name>
+			<devDesc>Gear Room</devDesc>
+			<devID>{00000013-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.20</ip>
+			<productModel factoryName="Eyeonet" identity="Eyeonet">IP619E5W-28-S4</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>false</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>false</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000014-0000-0000-0000-000000000000}">
+			<name>Lockers</name>
+			<devDesc>Lockers</devDesc>
+			<devID>{00000014-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.13</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000015-0000-0000-0000-000000000000}">
+			<name>GG Ferto</name>
+			<devDesc>GG Ferto</devDesc>
+			<devID>{00000015-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.17</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000016-0000-0000-0000-000000000000}">
+			<name>B Bond H bridge</name>
+			<devDesc>B Bond H bridge</devDesc>
+			<devID>{00000016-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.18</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000017-0000-0000-0000-000000000000}">
+			<name>Omar River</name>
+			<devDesc>Omar River</devDesc>
+			<devID>{00000017-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.23</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000018-0000-0000-0000-000000000000}">
+			<name>JPB DOOR</name>
+			<devDesc>JPB DOOR</devDesc>
+			<devID>{00000018-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.25</ip>
+			<productModel factoryName="Eyeonet">IP679E5W-Z</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>false</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000019-0000-0000-0000-000000000000}">
+			<name>Gen Set Outfall</name>
+			<devDesc>Gen Set Outfall</devDesc>
+			<devID>{00000019-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.31</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{0000001A-0000-0000-0000-000000000000}">
+			<name>Parking Lot</name>
+			<devDesc>Parking Lot</devDesc>
+			<devID>{0000001A-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.35</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{0000001B-0000-0000-0000-000000000000}">
+			<name>Driveway Gate</name>
+			<devDesc>Driveway Gate</devDesc>
+			<devID>{0000001B-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.126</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{0000001C-0000-0000-0000-000000000000}">
+			<name>Driveway Supplies</name>
+			<devDesc>Driveway Supplies</devDesc>
+			<devID>{0000001C-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.217</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{0000001D-0000-0000-0000-000000000000}">
+			<name>Gess yard</name>
+			<devDesc>Gess yard</devDesc>
+			<devID>{0000001D-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.112</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{0000001E-0000-0000-0000-000000000000}">
+			<name>JP Wharf North</name>
+			<devDesc>JP Wharf North</devDesc>
+			<devID>{0000001E-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.116</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{0000001F-0000-0000-0000-000000000000}">
+			<name>Omar Bond</name>
+			<devDesc>Omar Bond</devDesc>
+			<devID>{0000001F-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.14</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+		<item id="{00000020-0000-0000-0000-000000000000}">
+			<name>JP Wharf Outfall</name>
+			<devDesc>JP Wharf Outfall</devDesc>
+			<devID>{00000020-0000-0000-0000-000000000000}</devID>
+			<ip>192.168.10.12</ip>
+			<productModel factoryName="Eyeonet">IP6196W-28-S4-IL-AI</productModel>
+			<manufacturer>TVT</manufacturer>
+			<protocolType>TVT_IPCAMERA</protocolType>
+			<addType>normal</addType>
+			<chlType>digital</chlType>
+			<supportOsc>true</supportOsc>
+			<supportCpc>false</supportCpc>
+			<supportCdd>false</supportCdd>
+			<supportIpd>false</supportIpd>
+			<supportVfd>false</supportVfd>
+			<supportAvd>true</supportAvd>
+			<supportPea>true</supportPea>
+			<supportPeaTrigger>false</supportPeaTrigger>
+			<supportTripwire>true</supportTripwire>
+			<supportAOIEntry>false</supportAOIEntry>
+			<supportAOILeave>false</supportAOILeave>
+			<supportPassLine>false</supportPassLine>
+			<supportAudioAlarmOut>false</supportAudioAlarmOut>
+			<supportWhiteLightAlarmOut>false</supportWhiteLightAlarmOut>
+			<supportVehiclePlate>false</supportVehiclePlate>
+			<supportAutoTrack>false</supportAutoTrack>
+			<supportFire>false</supportFire>
+			<supportTemperature>false</supportTemperature>
+			<supportVideoMetadata>false</supportVideoMetadata>
+			<supportASD>false</supportASD>
+			<supportLoitering>false</supportLoitering>
+			<supportPvd>false</supportPvd>
+			<supportInvokeEventTypeConfig>true</supportInvokeEventTypeConfig>
+		</item>
+	</content>
+</response>

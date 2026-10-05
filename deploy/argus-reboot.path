@@ -1,0 +1,12 @@
+# Argus: reboot the machine when the app asks (Settings > Server > Reboot the machine).
+# The app (unprivileged, DynamicUser) writes reboot-request in its own data folder; this watches for
+# it and starts argus-reboot.service as root. Install: see argus-reboot.sh.
+[Unit]
+Description=Argus: reboot when the CCTV app asks (Settings > Server)
+
+[Path]
+PathExists=/var/lib/private/cctv/reboot-request
+Unit=argus-reboot.service
+
+[Install]
+WantedBy=paths.target

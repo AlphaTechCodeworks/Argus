@@ -1,0 +1,54 @@
+/* ---- the live grid's own camera order: dragging tiles (grid-drag.js, viewer.js) ---- */
+
+/* a long press or a drag must not select the labels or open the phone's image menu */
+#grid .tile { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+
+/* touch: held long enough, the tile can now be dragged */
+#grid .tile.drag-armed { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* the tile being dragged follows the pointer (a transform, so its video keeps playing) */
+#grid .tile.dragging {
+  z-index: 10;
+  opacity: 0.85;
+  /* the element under the pointer is then the drop target, not this tile */
+  pointer-events: none;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+}
+
+/* where it would land */
+#grid .tile.drop-target { outline: 3px solid var(--accent); outline-offset: -3px; }
+#grid .tile.drop-target::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(59, 163, 255, 0.18);
+  pointer-events: none;
+}
+#prev.drop-target,
+#next.drop-target { outline: 3px solid var(--accent); outline-offset: 1px; background: #1d3a57; }
+
+body.grid-dragging,
+body.grid-dragging * { cursor: grabbing !important; }
+
+#resetOrder[hidden] { display: none; }
+
+/* "not saved" note: small, out of the way, goes by itself */
+.order-note {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 20;
+  max-width: min(420px, calc(100vw - 32px));
+  margin: 0;
+  padding: 8px 12px;
+  background: #3a2a10;
+  color: #ffcf87;
+  border: 1px solid #5a4318;
+  border-radius: 6px;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+.order-note[hidden] { display: none; }

@@ -1,0 +1,32 @@
+{
+  "root": ["/dev/sda"],
+  "lsblk": {
+    "blockdevices": [
+      {"name":"loop0","path":"/dev/loop0","model":null,"serial":null,"size":67108864,"tran":null,"type":"loop","fstype":"squashfs","label":null,"mountpoints":["/snap/core/1"],"pkname":null},
+      {"name":"sda","path":"/dev/sda","model":"Samsung SSD 870","serial":"S6PNNX0T123456","size":500107862016,"tran":"sata","type":"disk","fstype":null,"label":null,"mountpoints":[null],"pkname":null,
+        "children":[
+          {"name":"sda1","path":"/dev/sda1","model":null,"serial":null,"size":1127219200,"tran":null,"type":"part","fstype":"vfat","label":null,"mountpoints":["/boot/efi"],"pkname":"sda"},
+          {"name":"sda2","path":"/dev/sda2","model":null,"serial":null,"size":498978717696,"tran":null,"type":"part","fstype":"ext4","label":null,"mountpoints":["/"],"pkname":"sda"}
+        ]},
+      {"name":"sdb","path":"/dev/sdb","model":"Expansion HDD","serial":"NAABC123","size":4000787030016,"tran":"usb","type":"disk","fstype":null,"label":null,"mountpoints":[null],"pkname":null,
+        "children":[
+          {"name":"sdb1","path":"/dev/sdb1","model":null,"serial":null,"size":4000650887168,"tran":null,"type":"part","fstype":"ntfs","label":"Seagate","mountpoints":[null],"pkname":"sdb"}
+        ]},
+      {"name":"sdc","path":"/dev/sdc","model":"My Passport","serial":"WX11A","size":"2000365289472","tran":"usb","type":"disk","fstype":null,"label":null,"mountpoints":[null],"pkname":null,
+        "children":[
+          {"name":"sdc1","path":"/dev/sdc1","model":null,"serial":null,"size":2000363192320,"tran":null,"type":"part","fstype":"exfat","label":"Photos","mountpoints":["/media/owner/Photos"],"pkname":"sdc"}
+        ]},
+      {"name":"sdd","path":"/dev/sdd","model":"WDC WD40","serial":"WD-LVM1","size":4000787030016,"tran":"sata","type":"disk","fstype":"LVM2_member","label":null,"mountpoints":[null],"pkname":null,
+        "children":[
+          {"name":"vg-data","path":"/dev/mapper/vg-data","model":null,"serial":null,"size":4000783007744,"tran":null,"type":"lvm","fstype":"ext4","label":null,"mountpoints":[null],"pkname":"sdd"}
+        ]},
+      {"name":"nvme0n1","path":"/dev/nvme0n1","model":"Pool disk","serial":"ZFS0001","size":1000204886016,"tran":"nvme","type":"disk","fstype":null,"label":null,"mountpoints":[null],"pkname":null,
+        "children":[
+          {"name":"nvme0n1p1","path":"/dev/nvme0n1p1","model":null,"serial":null,"size":1000194703360,"tran":null,"type":"part","fstype":"zfs_member","label":"tank","mountpoints":[null],"pkname":"nvme0n1"}
+        ]},
+      {"name":"sde","path":"/dev/sde","model":"Blank USB","serial":"BLANK42","size":1000204886016,"tran":"usb","type":"disk","fstype":null,"label":null,"mountpoints":[null],"pkname":null},
+      {"name":"sdf","path":"/dev/sdf","model":"Odd serial","serial":"has space","size":1000204886016,"tran":"usb","type":"disk","fstype":null,"label":null,"mountpoints":[null],"pkname":null},
+      {"name":"sr0","path":"/dev/sr0","model":"DVD","serial":"DVD1","size":1073741312,"tran":"sata","type":"rom","fstype":null,"label":null,"mountpoints":[null],"pkname":null}
+    ]
+  }
+}

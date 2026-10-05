@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <!-- installable: Add to Home Screen opens Argus full screen, without the browser's bars -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Argus" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · Health</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="health-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="health">
+    <div id="hero" class="hp-hero" role="status"><div class="hp-hero-text"><strong>Checking the system…</strong></div></div>
+    <p id="sending" class="hp-sending" role="status"></p>
+
+    <div id="cards" class="cards"></div>
+
+    <h2>Remote viewing</h2>
+    <div id="viewing" class="cards"></div>
+    <h2>This server</h2>
+    <div id="system" class="cards"></div>
+
+    <h2>NVRs</h2>
+    <!-- One panel per NVR. Its own disks are the headline: the NVR's copy of roughly the last
+         30 days is the only redundancy this system has, and nothing used to look at it. -->
+    <div id="nvrs" class="nvr-panels"></div>
+
+    <h2>Administrators</h2>
+    <!-- Who can change anything. From rights.mjs adminList(), shown here because this is the page
+         people actually look at. -->
+    <p id="admins" class="hp-note"></p>
+    <p class="hp-note">Rights and the audit trail are on the <a href="/audit.html">Audit</a> page.</p>
+
+    <!-- folded away: it is history, not what is wrong now (the cards above say that); the summary
+         carries the count so nothing is hidden by the fold -->
+    <details class="hp-history">
+      <summary><h2>Alerts in the last 7 days <span id="historyCount" class="hp-count"></span></h2></summary>
+      <table class="hp-table">
+        <thead>
+          <tr><th>Problem</th><th>Started</th><th>Cleared</th></tr>
+        </thead>
+        <tbody id="history"></tbody>
+      </table>
+      <p class="hp-note">Where these are sent is set in <a href="/settings.html">Settings</a>.</p>
+    </details>
+  </main>
+
+  <script type="module" src="shell.js"></script>
+  <script type="module" src="health.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>

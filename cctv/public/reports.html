@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <!-- installable: Add to Home Screen opens Argus full screen, without the browser's bars -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Argus" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · Reports</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="st-main rp-main">
+    <div class="rp-head">
+      <h2 id="rpTitle">Reports</h2>
+      <nav class="rp-periods" aria-label="Period">
+        <button type="button" data-period="today">Today</button>
+        <button type="button" data-period="yesterday">Yesterday</button>
+        <button type="button" data-period="week">7 days</button>
+        <button type="button" data-period="month">30 days</button>
+      </nav>
+    </div>
+    <p id="rpStatus" class="hp-note" role="status">Working it out…</p>
+
+    <section class="rp-cards" id="rpCards" aria-label="Summary"></section>
+
+    <section class="se-section" aria-labelledby="rp-look">
+      <h2 id="rp-look">Cameras to look at</h2>
+      <p class="st-help">Recorded less than 90% of the time, worst first. The reason is what the recorder wrote down for each stretch it could not record.</p>
+      <div id="rpWorst"></div>
+    </section>
+
+    <section class="se-section" aria-labelledby="rp-gaps">
+      <h2 id="rp-gaps">Why footage is missing</h2>
+      <div id="rpGaps"></div>
+    </section>
+
+    <section class="se-section" aria-labelledby="rp-events">
+      <h2 id="rp-events">Events</h2>
+      <div id="rpEvents"></div>
+    </section>
+
+    <section class="se-section" aria-labelledby="rp-storage">
+      <h2 id="rp-storage">Storage</h2>
+      <div id="rpStorage"></div>
+    </section>
+
+    <details class="se-section rp-all">
+      <summary><h2>Every camera</h2></summary>
+      <div id="rpAll"></div>
+    </details>
+
+    <p class="hp-note">A summary of yesterday goes to your phone at 07:00 through the same ntfy topic and webhooks as the alerts (Settings, Alerts).</p>
+  </main>
+
+  <script type="module" src="shell.js"></script>
+  <script type="module" src="reports.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>

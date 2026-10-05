@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response version="1.0" cmdId="" cmdUrl="queryChlVideoParam">
+	<status>success</status>
+	<types>
+		<whiteBalance>
+			<enum>auto</enum>
+			<enum>indoor</enum>
+			<enum>outdoor</enum>
+			<enum>manual</enum>
+		</whiteBalance>
+		<BLCMode>
+			<enum>OFF</enum>
+			<enum>HWDR</enum>
+			<enum>HLC</enum>
+			<enum>BLC</enum>
+		</BLCMode>
+		<HWDRLevel>
+			<enum>low</enum>
+			<enum>medium</enum>
+			<enum>high</enum>
+		</HWDRLevel>
+		<configFileType>
+			<enum>normal</enum>
+			<enum>day</enum>
+			<enum>night</enum>
+		</configFileType>
+		<frequency>
+			<enum>60HZ</enum>
+			<enum>50HZ</enum>
+		</frequency>
+		<imageRotaoMode>
+			<enum>0</enum>
+			<enum>90</enum>
+			<enum>180</enum>
+			<enum>270</enum>
+		</imageRotaoMode>
+		<antiflickerMode>
+			<enum>OFF</enum>
+			<enum>50HZ</enum>
+			<enum>60HZ</enum>
+		</antiflickerMode>
+		<gainMode>
+			<enum>auto</enum>
+		</gainMode>
+		<shutterValue>
+			<enum>1/4</enum>
+			<enum>1/6</enum>
+			<enum>1/12</enum>
+			<enum>1/15</enum>
+			<enum>1/30</enum>
+			<enum>1/50</enum>
+			<enum>1/60</enum>
+			<enum>1/75</enum>
+			<enum>1/120</enum>
+			<enum>1/150</enum>
+			<enum>1/200</enum>
+			<enum>1/250</enum>
+			<enum>1/300</enum>
+			<enum>1/500</enum>
+			<enum>1/750</enum>
+			<enum>1/1000</enum>
+			<enum>1/2000</enum>
+			<enum>1/10000</enum>
+			<enum>1/100000</enum>
+		</shutterValue>
+		<shutterMode>
+			<enum>auto</enum>
+		</shutterMode>
+		<illuminationMode>
+			<enum>whiteLight</enum>
+			<enum>irLight</enum>
+			<enum>smart</enum>
+		</illuminationMode>
+	</types>
+	<content>
+		<chl id="{00000017-0000-0000-0000-000000000000}">
+			<bright min="0" max="100" default="50">50</bright>
+			<contrast min="0" max="100" default="50">50</contrast>
+			<hue min="0" max="100" default="50">50</hue>
+			<saturation min="0" max="100" default="50">50</saturation>
+			<sharpen>
+				<switch type="boolean" default="false">false</switch>
+				<value min="0" max="255" default="128">128</value>
+			</sharpen>
+			<denoise>
+				<switch type="boolean" default="false">false</switch>
+				<value min="0" max="255" default="128">128</value>
+			</denoise>
+			<cfgFile default="normal">day</cfgFile>
+			<frequency default="60HZ">60HZ</frequency>
+			<antiflicker default="OFF">OFF</antiflicker>
+			<gain>
+				<mode default="0">0</mode>
+				<value default="50" min="0" max="100">50</value>
+				<AGC default="50" min="0" max="100">50</AGC>
+			</gain>
+			<whiteBalance>
+				<mode default="auto">auto</mode>
+				<red min="0" max="100" default="50">50</red>
+				<blue min="0" max="100" default="50">50</blue>
+			</whiteBalance>
+			<mirrorSwitch default="false">false</mirrorSwitch>
+			<flipSwitch default="false">false</flipSwitch>
+			<imageRotate default="0">0</imageRotate>
+			<backlightCompensation>
+				<mode default="OFF">HWDR</mode>
+				<HWDRLevel default="medium">medium</HWDRLevel>
+			</backlightCompensation>
+			<shutter>
+				<mode type="shutterMode" default="0">0</mode>
+				<value type="shutterValue" default="4">5</value>
+				<upLimit type="shutterValue" default="4">4</upLimit>
+			</shutter>
+			<illumination>
+				<illuminationMode type="illuminationMode" default="smart">smart</illuminationMode>
+			</illumination>
+		</chl>
+	</content>
+</response>

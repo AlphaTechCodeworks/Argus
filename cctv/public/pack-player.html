@@ -1,0 +1,1382 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evidence pack</title>
+<!--
+  The player that is copied into every evidence pack (Task 4 of the evidence export plan).
+
+  One file, opened by double-clicking it from a USB stick. No install, no build step, no network:
+  there is no CDN link, no web font and no external resource of any kind in here, deliberately, so
+  that it behaves identically on a machine that has never been online.
+
+  What it does:
+    - re-hashes every file the manifest lists (WebCrypto SHA-256) and checks the Ed25519 signature
+      over the manifest bytes exactly as they sit on disk, which is what export-pack.mjs signed;
+    - says, in one sentence at the top, whether the pack is intact, and if not, which file and in
+      what way (changed, missing, the wrong size, or present but unaccounted for);
+    - says plainly what that does and does not prove;
+    - shows the manifest, including both clocks where an NVR's was wrong;
+    - plays MP4 clips in a <video> element and raw .h264 / .h265 segments through WebCodecs.
+
+  Two things it deliberately does not do:
+    - It does not decrypt an encrypted pack. export-pack.mjs derives the key with scrypt, which
+      WebCrypto does not provide; hand-rolling scrypt here and getting it subtly wrong would mean
+      telling a reader "wrong password" when the password was right. So an encrypted file is
+      recognised by its header and the reader is told where to get the password instead.
+    - It does not claim to know who signed the pack. See the note on the page.
+
+  Reading a folder from file:// is the one awkward part: a page on file:// may not fetch its
+  neighbours in Chrome or Firefox. So the page tries fetch first (which works when the pack is
+  served over http, or in some older browsers), and otherwise asks the reader to drop the pack
+  folder onto the page or pick it. That path is better anyway: it can also spot files that are in
+  the folder but not in the manifest.
+-->
+<style>
+  :root {
+    --bg: #14161a; --panel: #1d2026; --panel2: #23272f; --line: #343a44;
+    --ink: #eef1f5; --dim: #a7b0bd;
+    --good: #2f9e5e; --good-ink: #d6f5e3;
+    --bad: #c23a2f; --bad-ink: #ffdedb;
+    --warn: #b07515; --warn-ink: #ffeccb;
+    --accent: #6ea8fe;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f6f9; --panel: #ffffff; --panel2: #eef1f5; --line: #d3d9e2;
+      --ink: #16191d; --dim: #55606e;
+      --good: #1d7a45; --good-ink: #ffffff;
+      --bad: #a82a20; --bad-ink: #ffffff;
+      --warn: #8a5a0a; --warn-ink: #ffffff;
+      --accent: #1d5fd0;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    padding: 0 16px 64px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 24px 0 4px; font-weight: 600; }
+  h2 { font-size: 18px; margin: 32px 0 8px; font-weight: 600; }
+  h3 { font-size: 15px; margin: 0 0 6px; font-weight: 600; }
+  p { margin: 8px 0; }
+  .sub { color: var(--dim); margin: 0 0 8px; }
+  code, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace; font-size: 13px; }
+
+  /* The verdict. Impossible to miss is the whole point. */
+  #verdict {
+    border-radius: 10px; padding: 18px 20px; margin: 16px 0 8px;
+    border: 2px solid var(--line); background: var(--panel);
+  }
+  #verdict .headline { font-size: 24px; font-weight: 700; line-height: 1.25; }
+  #verdict .detail { margin-top: 6px; font-size: 15px; }
+  #verdict.good { background: var(--good); border-color: var(--good); color: var(--good-ink); }
+  #verdict.bad  { background: var(--bad);  border-color: var(--bad);  color: var(--bad-ink); }
+  #verdict.warn { background: var(--warn); border-color: var(--warn); color: var(--warn-ink); }
+  #verdict.busy { border-style: dashed; }
+  #verdict a { color: inherit; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+  .note { border-left: 4px solid var(--accent); }
+  ul.problems { margin: 10px 0 0; padding-left: 20px; }
+  ul.problems li { margin: 4px 0; }
+  .tag { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 600; vertical-align: 1px; }
+  .tag.ok { background: var(--good); color: var(--good-ink); }
+  .tag.no { background: var(--bad); color: var(--bad-ink); }
+  .tag.hm { background: var(--warn); color: var(--warn-ink); }
+
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 14px; }
+  th { color: var(--dim); font-weight: 600; white-space: nowrap; }
+  td.num { text-align: right; white-space: nowrap; }
+  .clock { color: var(--warn); font-size: 13px; display: block; }
+  @media (prefers-color-scheme: light) { .clock { color: #8a5a0a; } }
+
+  button {
+    font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--panel2); color: var(--ink); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .5; cursor: default; }
+  input[type=text] {
+    font: inherit; font-size: 13px; padding: 7px 10px; width: 100%;
+    border-radius: 7px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink);
+  }
+  textarea {
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; width: 100%; min-height: 84px;
+    border-radius: 7px; border: 1px solid var(--line); background: var(--panel2); color: var(--ink); padding: 8px;
+  }
+
+  #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 26px; text-align: center; }
+  #drop.over { border-color: var(--accent); background: var(--panel2); }
+  .hidden { display: none !important; }
+
+  .clip { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 12px 0; }
+  .clip .head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; justify-content: space-between; }
+  .stage { margin-top: 10px; background: #000; border-radius: 8px; overflow: hidden; display: none; }
+  .stage video, .stage canvas, .stage img { display: block; width: 100%; max-height: 62vh; object-fit: contain; background: #000; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .controls input[type=range] { flex: 1 1 200px; min-width: 120px; }
+  .msg { font-size: 13px; color: var(--dim); margin-top: 6px; }
+  .msg.bad { color: var(--bad); font-weight: 600; }
+  @media (prefers-color-scheme: light) { .msg.bad { color: #a82a20; } }
+  footer { color: var(--dim); font-size: 13px; margin-top: 40px; border-top: 1px solid var(--line); padding-top: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Evidence pack</h1>
+  <p class="sub">CCTV export. This page checks the pack has not been altered, shows what is in it and plays the footage. Everything happens on this computer; nothing is sent anywhere.</p>
+
+  <div id="verdict" class="busy">
+    <div class="headline" id="verdict-headline">Checking the pack&hellip;</div>
+    <div class="detail" id="verdict-detail">Reading the list of files and working out a fingerprint for each one.</div>
+  </div>
+
+  <div class="panel" id="problems-panel" style="display:none">
+    <h3 id="problems-title">What is wrong</h3>
+    <ul class="problems" id="problems"></ul>
+  </div>
+
+  <div class="panel" id="drop-panel">
+    <h3>Open the pack</h3>
+    <p class="sub" id="drop-why">Looking for the pack&hellip;</p>
+    <div id="drop">
+      <p><strong>Drag the whole pack folder onto this box</strong></p>
+      <p class="sub">or</p>
+      <p>
+        <button id="pick-folder" type="button">Choose the pack folder&hellip;</button>
+        <button id="pick-files" type="button">Choose the files instead&hellip;</button>
+      </p>
+      <input id="folder-input" type="file" webkitdirectory directory multiple class="hidden">
+      <input id="files-input" type="file" multiple class="hidden">
+      <p class="sub">Nothing leaves this computer. The files are only read.</p>
+    </div>
+  </div>
+
+  <div class="panel note" id="meaning">
+    <h3>What this check does and does not prove</h3>
+    <p>
+      If the check passes, it proves two things: every file in this pack is exactly as it was when
+      the pack was signed, and they were all signed together by whoever held the signing key.
+      Change one byte of one video file and this page will say so.
+    </p>
+    <p>
+      <strong>It does not prove who signed it.</strong> Anyone can make their own signing key, build
+      a pack of their own footage with it, and that pack will also say it passed. What proves the
+      pack came from the recording system you think it did is the signing key itself. To be sure of
+      that, you need the recording system's public key from somewhere other than this USB stick or
+      download &mdash; from the system's own settings page, or from whoever ran the export, given to
+      you separately &mdash; and then compare it with the key below.
+    </p>
+    <h3 style="margin-top:14px">The key this pack was signed with</h3>
+    <p class="sub">Fingerprint (SHA-256 of the public key):</p>
+    <p class="mono" id="key-fingerprint">&mdash;</p>
+    <p class="sub" style="margin-top:10px">If you have been given the expected key or fingerprint from another source, paste it here to compare:</p>
+    <input id="expected-key" type="text" placeholder="Paste the expected fingerprint, or the whole -----BEGIN PUBLIC KEY----- block">
+    <p class="msg" id="key-compare">Not compared yet.</p>
+    <details style="margin-top:8px">
+      <summary class="sub">Show the full public key from this pack</summary>
+      <textarea id="key-pem" readonly></textarea>
+    </details>
+  </div>
+
+  <div id="encrypted" class="panel hidden">
+    <h3>This pack is protected with a password</h3>
+    <p>
+      One or more of the files you opened is an encrypted pack (its contents are scrambled until the
+      password is supplied). This page cannot unscramble it, and does not try: getting that wrong
+      could tell you a correct password was wrong.
+    </p>
+    <p>
+      Ask whoever sent you the pack for the password. They set it when they made the export; it is
+      not stored anywhere in these files and cannot be recovered from them. With the password, the
+      pack can be unlocked on the recording system that produced it, or with the export tool that
+      came with it, and the unlocked folder can then be opened here.
+    </p>
+    <p class="mono sub" id="encrypted-files"></p>
+  </div>
+
+  <div id="body" class="hidden">
+    <h2>What this pack says it contains</h2>
+    <div class="panel" id="summary"></div>
+
+    <h3 style="margin-top:20px">Clips</h3>
+    <div id="clips-wrap"></div>
+
+    <h2>The footage</h2>
+    <p class="sub" id="play-note"></p>
+    <div id="players"></div>
+
+    <h2>Every file in the pack</h2>
+    <p class="sub">Each file was read back and a fingerprint worked out from its contents, then compared with the fingerprint recorded when the pack was signed.</p>
+    <div id="files-wrap"></div>
+  </div>
+
+  <footer>
+    <p>
+      This page is part of the evidence pack and works with no internet connection. The check it
+      performs is SHA-256 for each file and an Ed25519 signature over the list of files, the same
+      checks the recording system performs itself.
+    </p>
+  </footer>
+</div>
+
+<script>
+'use strict'
+
+// ---------------------------------------------------------------- small helpers
+
+const $ = (id) => document.getElementById(id)
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n }
+const hex = (buf) => Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('')
+const esc = (s) => String(s)
+
+/** Bytes as something a person can read: 4.2 MB, not 4404019. */
+function human(bytes) {
+  if (bytes === null || bytes === undefined) return '—'
+  const n = Number(bytes)
+  if (!Number.isFinite(n)) return '—'
+  if (n < 1024) return `${n} bytes`
+  const units = ['kB', 'MB', 'GB', 'TB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`
+}
+
+/** An ISO time from the manifest, shown in full and unambiguously. */
+function showTime(iso) {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return String(iso)
+  const p = (n, w = 2) => String(n).padStart(w, '0')
+  return `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()} ` +
+    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`
+}
+
+function shiftTime(iso, offsetMs) {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return String(iso)
+  return showTime(new Date(d.getTime() + offsetMs).toISOString())
+}
+
+/** "3 minutes 40 seconds fast" / "0.04 seconds slow". */
+function describeOffset(ms) {
+  const fast = ms >= 0
+  const s = Math.abs(ms) / 1000
+  let text
+  if (s < 1) text = `${s.toFixed(2)} seconds`
+  else if (s < 90) text = `${s.toFixed(s < 10 ? 1 : 0)} seconds`
+  else {
+    const m = Math.floor(s / 60)
+    const r = Math.round(s - m * 60)
+    text = `${m} minute${m === 1 ? '' : 's'}${r ? ` ${r} second${r === 1 ? '' : 's'}` : ''}`
+  }
+  return `${text} ${fast ? 'fast' : 'slow'}`
+}
+
+function duration(startIso, endIso) {
+  const a = new Date(startIso).getTime()
+  const b = new Date(endIso).getTime()
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return '—'
+  const s = Math.round((b - a) / 1000)
+  const m = Math.floor(s / 60)
+  const r = s - m * 60
+  if (m === 0) return `${r} seconds`
+  return `${m} minute${m === 1 ? '' : 's'}${r ? ` ${r} seconds` : ''}`
+}
+
+const EXT = (p) => (String(p).match(/\.([A-Za-z0-9]+)$/) || [, ''])[1].toLowerCase()
+const BASENAME = (p) => String(p).split('/').pop()
+
+// ---------------------------------------------------------------- the verdict banner
+
+function verdict(kind, headline, detail) {
+  const box = $('verdict')
+  box.className = kind
+  $('verdict-headline').textContent = headline
+  $('verdict-detail').textContent = detail || ''
+}
+
+function listProblems(problems, title) {
+  const panel = $('problems-panel')
+  if (!problems.length) { panel.style.display = 'none'; return }
+  $('problems-title').textContent = title || 'What is wrong'
+  const ul = $('problems')
+  ul.textContent = ''
+  for (const p of problems) ul.appendChild(el('li', null, p))
+  panel.style.display = ''
+}
+
+// ---------------------------------------------------------------- where the files come from
+//
+// Two ways in. `fetch` works when the pack is served over http, and on some browsers from
+// file://. Otherwise the reader hands us the folder (drag and drop, or the file picker), which
+// has the advantage that we can also see files that the manifest does not mention.
+
+const ENCRYPTED_MAGIC = [0x43, 0x43, 0x54, 0x56, 0x50, 0x41, 0x43, 0x4b, 0x31] // "CCTVPACK1"
+
+function looksEncrypted(bytes) {
+  if (!bytes || bytes.length < ENCRYPTED_MAGIC.length) return false
+  for (let i = 0; i < ENCRYPTED_MAGIC.length; i++) if (bytes[i] !== ENCRYPTED_MAGIC[i]) return false
+  return true
+}
+
+/** A source backed by the files the reader selected. Knows the whole list, so can spot extras. */
+function folderSource(files) {
+  // webkitRelativePath is "<the folder they picked>/clips/cam1.h264"; the manifest paths are
+  // relative to the pack root, so the first segment goes. Plain file selections have no path.
+  const entries = []
+  for (const f of files) {
+    const rel = f.webkitRelativePath || f._rel || f.name
+    entries.push([rel, f])
+  }
+  const roots = new Set(entries.map(([r]) => (r.includes('/') ? r.split('/')[0] : '')))
+  const strip = roots.size === 1 && [...roots][0] !== '' ? [...roots][0] + '/' : ''
+  const map = new Map()
+  for (const [rel, f] of entries) map.set(strip && rel.startsWith(strip) ? rel.slice(strip.length) : rel, f)
+  // A file picked on its own (no folder) is also reachable by its bare name.
+  for (const [rel, f] of entries) { const b = BASENAME(rel); if (!map.has(b)) map.set(b, f) }
+  return {
+    kind: 'folder',
+    names: new Set(map.keys()),
+    file: (path) => map.get(path) || null,
+    async get(path) {
+      const f = map.get(path)
+      if (!f) return null
+      return new Uint8Array(await f.arrayBuffer())
+    },
+    url(path) {
+      const f = map.get(path)
+      return f ? URL.createObjectURL(f) : null
+    },
+  }
+}
+
+/** A source backed by fetch, relative to this page. Cannot list the folder. */
+function fetchSource() {
+  const enc = (p) => p.split('/').map(encodeURIComponent).join('/')
+  return {
+    kind: 'fetch',
+    names: null,
+    async get(path) {
+      try {
+        const r = await fetch(enc(path), { cache: 'no-store' })
+        if (!r.ok) return null
+        return new Uint8Array(await r.arrayBuffer())
+      } catch { return null }
+    },
+    url: (path) => enc(path),
+  }
+}
+
+// ---------------------------------------------------------------- verification
+
+/** Everything after the PEM header, as bytes. */
+function pemToDer(pem) {
+  const body = String(pem).replace(/-----[^-]+-----/g, '').replace(/\s+/g, '')
+  const bin = atob(body)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(String(b64).replace(/\s+/g, ''))
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+/** Browsers disagree on the name; try both before giving up. */
+async function importEd25519(der) {
+  const tries = [{ name: 'Ed25519' }, { name: 'NODE-ED25519', namedCurve: 'NODE-ED25519' }]
+  for (const algo of tries) {
+    try {
+      const key = await crypto.subtle.importKey('spki', der, algo, true, ['verify'])
+      return { key, algo }
+    } catch { /* try the next name */ }
+  }
+  return null
+}
+
+const sha256 = async (bytes) => hex(await crypto.subtle.digest('SHA-256', bytes))
+
+/** Fingerprint of the public key, grouped so a person can read it out over the telephone. */
+async function keyFingerprint(der) {
+  const h = await sha256(der)
+  return h.toUpperCase().match(/.{1,4}/g).join(' ')
+}
+
+/**
+ * The whole check. Mirrors verifyPack() in export-pack.mjs: the signature is checked over the
+ * manifest bytes as they are on disk (not re-serialised), then every listed file is re-hashed,
+ * then anything in the folder that the manifest does not account for is reported.
+ *
+ * Collects every problem rather than stopping at the first: "one file is wrong" and "all of them
+ * are" mean very different things to someone in a dispute.
+ */
+async function verify(source) {
+  const problems = []
+  const state = { manifest: null, signature: null, publicKeyPem: null, fingerprint: null, signatureOk: null, fileState: new Map() }
+
+  const raw = await source.get('manifest.json')
+  if (!raw) {
+    problems.push('manifest.json is missing. Without it there is no list of files to check against, so nothing about this pack can be confirmed.')
+    return { ok: false, problems, state }
+  }
+  if (raw.length === 0) { problems.push('manifest.json is empty.'); return { ok: false, problems, state } }
+
+  let manifest
+  try { manifest = JSON.parse(new TextDecoder().decode(raw)) } catch (e) {
+    problems.push(`manifest.json is damaged and cannot be read (${e.message}).`)
+    return { ok: false, problems, state }
+  }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || !Array.isArray(manifest.files)) {
+    problems.push('manifest.json is not a list of files in the expected form.')
+    return { ok: false, problems, state }
+  }
+  state.manifest = manifest
+
+  // ---- the signature
+  const sigRaw = await source.get('signature.json')
+  if (!sigRaw) {
+    problems.push('signature.json is missing, so the pack is unsigned. The files below can still be compared with the list, but nothing vouches for the list itself.')
+  } else {
+    let sig = null
+    try { sig = JSON.parse(new TextDecoder().decode(sigRaw)) } catch (e) { problems.push(`signature.json is damaged and cannot be read (${e.message}).`) }
+    if (sig) {
+      state.signature = sig
+      if (!sig.publicKey) problems.push('The signature does not include the key it was made with, so it cannot be checked.')
+      else if (!sig.signature) problems.push('signature.json contains no signature.')
+      else {
+        state.publicKeyPem = String(sig.publicKey).trim()
+        let der = null
+        try { der = pemToDer(sig.publicKey) } catch { problems.push('The public key in signature.json is not readable.') }
+        if (der) {
+          state.fingerprint = await keyFingerprint(der)
+          const imported = await importEd25519(der)
+          if (!imported) {
+            state.signatureOk = 'unchecked'
+            problems.push('This browser cannot check Ed25519 signatures, so the signature was not checked. The file fingerprints below were checked normally. Try a recent version of Chrome, Edge or Firefox for the signature.')
+          } else {
+            let ok = false
+            try {
+              ok = await crypto.subtle.verify(imported.algo, imported.key, base64ToBytes(sig.signature), raw)
+            } catch (e) {
+              state.signatureOk = 'unchecked'
+              problems.push(`The signature could not be checked in this browser (${e.message}).`)
+            }
+            if (state.signatureOk !== 'unchecked') {
+              state.signatureOk = ok
+              if (!ok) problems.push('The signature does not match the list of files. Either the list has been edited since it was signed, or the signature belongs to a different pack.')
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ---- every file the manifest lists
+  const listed = new Set()
+  for (const entry of manifest.files) {
+    if (!entry || typeof entry.path !== 'string' || typeof entry.sha256 !== 'string') {
+      problems.push('One of the entries in the list of files is malformed, so that file cannot be checked.')
+      continue
+    }
+    const path = entry.path
+    listed.add(path)
+    // A path that climbs out of the pack could make the manifest "verify" against some other file
+    // on this computer.
+    if (path.startsWith('/') || path.includes('..') || /^[A-Za-z]:/.test(path)) {
+      problems.push(`${path}: the list points at a location outside the pack, which it should never do.`)
+      state.fileState.set(path, { status: 'bad', text: 'unsafe path' })
+      continue
+    }
+    const bytes = await source.get(path)
+    if (!bytes) {
+      problems.push(`${path}: listed in the pack but the file is not there. Part of the evidence is missing.`)
+      state.fileState.set(path, { status: 'missing', text: 'missing' })
+      continue
+    }
+    if (looksEncrypted(bytes)) state.encrypted = (state.encrypted || []).concat(path)
+    let trouble = false
+    if (entry.bytes !== null && entry.bytes !== undefined && bytes.length !== entry.bytes) {
+      problems.push(`${path}: the file is ${human(bytes.length)} but should be ${human(entry.bytes)}. It has been changed.`)
+      trouble = true
+    }
+    const got = await sha256(bytes)
+    if (got !== String(entry.sha256).toLowerCase()) {
+      if (!trouble) problems.push(`${path}: the contents have been changed since the pack was signed. It is the same size, but not the same file.`)
+      trouble = true
+    }
+    state.fileState.set(path, trouble ? { status: 'bad', text: 'changed', got } : { status: 'ok', text: 'unchanged', got })
+  }
+
+  // ---- anything in the folder the manifest does not mention
+  if (source.names) {
+    for (const name of source.names) {
+      if (name === 'manifest.json' || name === 'signature.json') continue
+      if (listed.has(name)) continue
+      // The bare-name aliases folderSource adds for loose files are not separate files.
+      if (!name.includes('/') && [...listed].some((p) => BASENAME(p) === name)) continue
+      problems.push(`${name}: this file is in the folder but is not in the pack's list, so nothing vouches for it. It may have been added after the pack was made.`)
+    }
+  } else {
+    state.cannotSeeExtras = true
+  }
+
+  return { ok: problems.length === 0, problems, state }
+}
+
+// ---------------------------------------------------------------- showing the manifest
+
+function renderSummary(m, state, source) {
+  const box = $('summary')
+  box.textContent = ''
+  const t = el('table')
+  const row = (k, v) => {
+    const tr = el('tr')
+    tr.appendChild(el('th', null, k))
+    const td = el('td')
+    if (v instanceof Node) td.appendChild(v); else td.textContent = v
+    tr.appendChild(td)
+    t.appendChild(tr)
+  }
+  row('Exported by', m.exportedBy || '—')
+  row('Exported at', m.exportedAt ? `${showTime(m.exportedAt)} (server time)` : '—')
+  row('Notes', m.notes && String(m.notes).trim() ? m.notes : 'none given')
+  row('Files in the pack', `${m.files.length}`)
+  row('Made by', `${m.app ? `recording system version ${m.app}` : 'unknown'}`)
+  const alg = m.algorithm || {}
+  row('Checks used', `${alg.hash || 'SHA-256'} fingerprints, ${alg.signature || 'Ed25519'} signature`)
+  box.appendChild(t)
+
+  if (Array.isArray(m.clocks) && m.clocks.length) {
+    const wrong = m.clocks.filter((c) => Math.abs(c.offsetMs || 0) >= 1000)
+    const p = el('p', 'sub')
+    if (wrong.length) {
+      p.textContent = 'One or more recorders had a clock that did not agree with the server. Every time below is given twice where that is the case: what the server recorded, and what that recorder itself believed the time was.'
+    } else {
+      p.textContent = 'Every recorder’s clock agreed with the server to within a second at the time of export.'
+    }
+    box.appendChild(p)
+    const ct = el('table')
+    const head = el('tr')
+    for (const h of ['Recorder', 'Its clock was', 'Effect on its times']) head.appendChild(el('th', null, h))
+    ct.appendChild(head)
+    for (const c of m.clocks) {
+      const tr = el('tr')
+      tr.appendChild(el('td', null, c.nvr))
+      const off = Number(c.offsetMs) || 0
+      tr.appendChild(el('td', null, Math.abs(off) < 1000 ? `correct (within ${describeOffset(off)})` : describeOffset(off)))
+      tr.appendChild(el('td', null, Math.abs(off) < 1000 ? 'none worth stating' : `its own display would have read ${off > 0 ? 'later' : 'earlier'} than the true time`))
+      ct.appendChild(tr)
+    }
+    box.appendChild(ct)
+  }
+}
+
+function renderClips(m) {
+  const wrap = $('clips-wrap')
+  wrap.textContent = ''
+  const clips = Array.isArray(m.clips) ? m.clips : []
+  if (!clips.length) { wrap.appendChild(el('p', 'sub', 'The pack lists no clips.')); return }
+  const offsets = new Map((Array.isArray(m.clocks) ? m.clocks : []).map((c) => [c.nvr, Number(c.offsetMs) || 0]))
+  const t = el('table')
+  const head = el('tr')
+  for (const h of ['Camera', 'Recorder', 'From', 'To', 'Length']) head.appendChild(el('th', null, h))
+  t.appendChild(head)
+  for (const c of clips) {
+    const tr = el('tr')
+    tr.appendChild(el('td', null, c.camera))
+    tr.appendChild(el('td', null, c.nvr))
+    const off = offsets.get(c.nvr) || 0
+    const big = Math.abs(off) >= 1000
+    for (const key of ['startServer', 'endServer']) {
+      const td = el('td')
+      td.appendChild(el('div', null, showTime(c[key])))
+      if (big) {
+        const s = el('span', 'clock')
+        s.textContent = `the recorder’s own clock read ${shiftTime(c[key], off)} — it was ${describeOffset(off)}`
+        td.appendChild(s)
+      }
+      tr.appendChild(td)
+    }
+    tr.appendChild(el('td', null, duration(c.startServer, c.endServer)))
+    t.appendChild(tr)
+  }
+  wrap.appendChild(t)
+  if ([...offsets.values()].some((o) => Math.abs(o) >= 1000)) {
+    wrap.appendChild(el('p', 'sub', 'The first time on each line is the server’s time, which is the one to rely on. The second is what the recorder’s own clock said, which is what would appear stamped on its own screens and menus.'))
+  }
+}
+
+function renderFiles(m, state) {
+  const wrap = $('files-wrap')
+  wrap.textContent = ''
+  const t = el('table')
+  const head = el('tr')
+  for (const h of ['File', 'Size', 'Result']) head.appendChild(el('th', null, h))
+  t.appendChild(head)
+  for (const f of m.files) {
+    const tr = el('tr')
+    const td = el('td')
+    td.appendChild(el('div', 'mono', f.path))
+    const st = state.fileState.get(f.path)
+    if (st && st.got && st.status !== 'ok') {
+      td.appendChild(el('div', 'sub mono', `recorded fingerprint ${String(f.sha256).slice(0, 16)}…`))
+      td.appendChild(el('div', 'sub mono', `fingerprint now      ${st.got.slice(0, 16)}…`))
+    } else {
+      td.appendChild(el('div', 'sub mono', `${String(f.sha256).slice(0, 16)}…`))
+    }
+    tr.appendChild(td)
+    tr.appendChild(el('td', 'num', human(f.bytes)))
+    const res = el('td')
+    if (!st) res.appendChild(el('span', 'tag hm', 'not checked'))
+    else if (st.status === 'ok') res.appendChild(el('span', 'tag ok', 'unchanged'))
+    else if (st.status === 'missing') res.appendChild(el('span', 'tag no', 'missing'))
+    else res.appendChild(el('span', 'tag no', 'changed'))
+    tr.appendChild(res)
+    t.appendChild(tr)
+  }
+  wrap.appendChild(t)
+}
+
+// ---------------------------------------------------------------- playback: MP4 and stills
+
+const VIDEO_EXT = new Set(['mp4', 'm4v', 'mov', 'webm', 'mkv'])
+const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'webp'])
+const RAW_EXT = new Set(['h264', 'h265', '264', '265', 'hevc'])
+
+/**
+ * Which clip a file belongs to. The export job names its folders after the recorder and channel
+ * (clips/nvr1-ch3/...), and the manifest names the camera, so neither alone is enough: try the
+ * camera's name in the path first, then the recorder's, and only claim a match when it is the
+ * recorder's one and only clip. An honest "no idea" is better than the wrong camera's name over
+ * a piece of evidence.
+ */
+function clipFor(path, clips) {
+  const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '')
+  const p = slug(path)
+  let best = null
+  for (const c of clips || []) {
+    const s = slug(c.camera)
+    if (s && p.includes(s) && (!best || s.length > slug(best.camera).length)) best = c
+  }
+  if (best) return best
+  const m = /(?:^|\/)([^/]+?)-ch\d+/.exec(String(path))
+  if (m) {
+    const same = (clips || []).filter((c) => slug(c.nvr) === slug(m[1]))
+    if (same.length === 1) return same[0]
+  }
+  return null
+}
+
+function renderPlayers(m, state, source) {
+  const wrap = $('players')
+  wrap.textContent = ''
+  const playable = m.files.filter((f) => {
+    const e = EXT(f.path)
+    return VIDEO_EXT.has(e) || IMAGE_EXT.has(e) || RAW_EXT.has(e)
+  })
+  if (!playable.length) {
+    $('play-note').textContent = 'This pack contains no video or picture files that this page can show.'
+    return
+  }
+  const rawCount = playable.filter((f) => RAW_EXT.has(EXT(f.path))).length
+  $('play-note').textContent = rawCount
+    ? 'Some of this footage is stored exactly as the camera produced it, with no container around it, so that not one pixel has been altered. This page decodes it directly. Nothing is re-encoded here either: what you see is what was recorded.'
+    : 'The video below is the recording itself. It has not been re-encoded at any point.'
+
+  for (const f of playable) {
+    const st = state.fileState.get(f.path)
+    const card = el('div', 'clip')
+    const head = el('div', 'head')
+    const left = el('div')
+    const clip = clipFor(f.path, m.clips)
+    left.appendChild(el('h3', null, clip ? `${clip.camera} — ${clip.nvr}` : BASENAME(f.path)))
+    const meta = el('div', 'sub')
+    meta.textContent = clip
+      ? `${showTime(clip.startServer)} to ${showTime(clip.endServer)} · ${BASENAME(f.path)} · ${human(f.bytes)}`
+      : `${f.path} · ${human(f.bytes)}`
+    left.appendChild(meta)
+    head.appendChild(left)
+    const badge = el('div')
+    if (st && st.status === 'ok') badge.appendChild(el('span', 'tag ok', 'unchanged'))
+    else if (st && st.status === 'missing') badge.appendChild(el('span', 'tag no', 'missing'))
+    else badge.appendChild(el('span', 'tag no', 'changed — do not rely on this'))
+    head.appendChild(badge)
+    card.appendChild(head)
+
+    if (clip) {
+      const off = ((m.clocks || []).find((c) => c.nvr === clip.nvr) || {}).offsetMs || 0
+      if (Math.abs(off) >= 1000) {
+        card.appendChild(el('p', 'clock', `This recorder’s clock was ${describeOffset(off)}. By its own clock this clip ran from ${shiftTime(clip.startServer, off)} to ${shiftTime(clip.endServer, off)}.`))
+      }
+    }
+
+    const stage = el('div', 'stage')
+    const controls = el('div', 'controls')
+    const msg = el('div', 'msg')
+    card.appendChild(stage)
+    card.appendChild(controls)
+    card.appendChild(msg)
+    wrap.appendChild(card)
+
+    if (st && st.status === 'missing') { msg.className = 'msg bad'; msg.textContent = 'This file is not in the folder, so there is nothing to play.'; continue }
+    setUpPlayer({ file: f, stage, controls, msg, source })
+  }
+}
+
+function setUpPlayer({ file, stage, controls, msg, source }) {
+  const ext = EXT(file.path)
+  const open = el('button', null, IMAGE_EXT.has(ext) ? 'Show the picture' : 'Load and play')
+  controls.appendChild(open)
+  open.addEventListener('click', async () => {
+    open.disabled = true
+    open.textContent = 'Loading…'
+    try {
+      if (IMAGE_EXT.has(ext)) {
+        const img = el('img')
+        img.src = source.url(file.path)
+        stage.appendChild(img)
+        stage.style.display = 'block'
+        open.remove()
+        return
+      }
+      if (VIDEO_EXT.has(ext)) {
+        const v = el('video')
+        v.controls = true
+        v.preload = 'metadata'
+        v.src = source.url(file.path)
+        v.addEventListener('error', () => {
+          msg.className = 'msg bad'
+          msg.textContent = 'This browser will not play this video file. Try opening it directly with a video player such as VLC; the file itself is in this folder and its fingerprint has been checked above.'
+        })
+        stage.appendChild(v)
+        stage.style.display = 'block'
+        open.remove()
+        await v.play().catch(() => {})
+        return
+      }
+      const bytes = await source.get(file.path)
+      if (!bytes) throw new Error('the file could not be read')
+      // The recorder writes a sibling .idx holding the real time of every keyframe. When the pack
+      // carries it, the clip can be shown at its true times instead of an assumed frame rate.
+      const idxBytes = await source.get(`${file.path}.idx`)
+      open.remove()
+      await playRaw({ bytes, idxBytes, codecId: /265|hevc/.test(ext) ? 1 : 0, stage, controls, msg })
+    } catch (e) {
+      msg.className = 'msg bad'
+      msg.textContent = `This clip could not be opened: ${e.message}`
+      open.disabled = false
+      open.textContent = 'Try again'
+    }
+  })
+}
+
+// ---------------------------------------------------------------- playback: raw H.264 / H.265
+//
+// Lifted in spirit from player.js and sps.js in the recording system, cut down to what a pack
+// needs: the frames are all in memory, there is no live stream to keep up with, and there is no
+// picture measurement. The picture size still has to come from the SPS, because WebCodecs
+// configured without one assumes 1280x720 and some hardware H.265 decoders then show only the
+// top-left corner of a larger picture.
+
+class Bits {
+  constructor(bytes) { this.b = bytes; this.pos = 0 }
+  u(n) {
+    let v = 0
+    for (let i = 0; i < n; i++) {
+      const byte = this.b[this.pos >> 3]
+      if (byte === undefined) throw new Error('SPS too short')
+      v = v * 2 + ((byte >> (7 - (this.pos & 7))) & 1)
+      this.pos++
+    }
+    return v
+  }
+  skip(n) { this.pos += n; if (this.pos > this.b.length * 8) throw new Error('SPS too short') }
+  ue() { let z = 0; while (this.u(1) === 0) if (++z > 31) throw new Error('bad code'); return 2 ** z - 1 + this.u(z) }
+  se() { const k = this.ue(); return k & 1 ? (k + 1) / 2 : -(k / 2) }
+}
+
+function findSps(data, h265) {
+  for (let i = 0; i + 4 < data.length; i++) {
+    if (data[i] !== 0 || data[i + 1] !== 0 || data[i + 2] !== 1) continue
+    const type = h265 ? (data[i + 3] >> 1) & 0x3f : data[i + 3] & 0x1f
+    if (type !== (h265 ? 33 : 7)) continue
+    const start = i + 3 + (h265 ? 2 : 1)
+    let end = start
+    while (end + 2 < data.length && !(data[end] === 0 && data[end + 1] === 0 && data[end + 2] <= 1)) end++
+    if (end + 2 >= data.length) end = data.length
+    const out = []
+    for (let j = start, zeros = 0; j < end && out.length < 512; j++) {
+      if (zeros >= 2 && data[j] === 3) { zeros = 0; continue }
+      zeros = data[j] === 0 ? zeros + 1 : 0
+      out.push(data[j])
+    }
+    return new Uint8Array(out)
+  }
+  return null
+}
+
+function h265Size(r) {
+  r.skip(4)
+  const maxSub = r.u(3)
+  r.skip(1)
+  r.skip(2 + 1 + 5 + 32 + 4 + 43 + 1 + 8)
+  const present = []
+  for (let i = 0; i < maxSub; i++) present.push([r.u(1), r.u(1)])
+  if (maxSub > 0) r.skip(2 * (8 - maxSub))
+  for (const [p, l] of present) r.skip((p ? 88 : 0) + (l ? 8 : 0))
+  r.ue()
+  const chroma = r.ue()
+  const separate = chroma === 3 ? r.u(1) : 0
+  let width = r.ue()
+  let height = r.ue()
+  if (r.u(1)) {
+    const format = separate ? 0 : chroma
+    const sx = format === 1 || format === 2 ? 2 : 1
+    const sy = format === 1 ? 2 : 1
+    const [left, right, top, bottom] = [r.ue(), r.ue(), r.ue(), r.ue()]
+    width -= sx * (left + right)
+    height -= sy * (top + bottom)
+  }
+  return { width, height }
+}
+
+function h264Size(r) {
+  const profile = r.u(8)
+  r.skip(16)
+  r.ue()
+  let chroma = 1
+  let separate = 0
+  if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(profile)) {
+    chroma = r.ue()
+    if (chroma === 3) separate = r.u(1)
+    r.ue(); r.ue(); r.skip(1)
+    if (r.u(1)) {
+      for (let i = 0; i < (chroma !== 3 ? 8 : 12); i++) {
+        if (!r.u(1)) continue
+        let last = 8, next = 8
+        for (let j = 0; j < (i < 6 ? 16 : 64) && next !== 0; j++) { next = (last + r.se() + 256) % 256; last = next === 0 ? last : next }
+      }
+    }
+  }
+  r.ue()
+  const pocType = r.ue()
+  if (pocType === 0) r.ue()
+  else if (pocType === 1) { r.skip(1); r.se(); r.se(); const n = r.ue(); for (let i = 0; i < n; i++) r.se() }
+  r.ue(); r.skip(1)
+  const widthMbs = r.ue() + 1
+  const heightUnits = r.ue() + 1
+  const frameMbsOnly = r.u(1)
+  if (!frameMbsOnly) r.skip(1)
+  r.skip(1)
+  let width = widthMbs * 16
+  let height = (2 - frameMbsOnly) * heightUnits * 16
+  if (r.u(1)) {
+    const format = separate ? 0 : chroma
+    const cx = format === 0 || format === 3 ? 1 : 2
+    const cy = (format === 0 ? 1 : format === 1 ? 2 : 1) * (2 - frameMbsOnly)
+    const [left, right, top, bottom] = [r.ue(), r.ue(), r.ue(), r.ue()]
+    width -= cx * (left + right)
+    height -= cy * (top + bottom)
+  }
+  return { width, height }
+}
+
+const sizeOk = (v) => Number.isInteger(v) && v >= 16 && v <= 16384
+
+function pictureSize(codecId, data) {
+  const sps = findSps(data, codecId === 1)
+  if (!sps) return null
+  try {
+    const s = codecId === 1 ? h265Size(new Bits(sps)) : h264Size(new Bits(sps))
+    return sizeOk(s.width) && sizeOk(s.height) ? s : null
+  } catch { return null }
+}
+
+function h264CodecString(data) {
+  for (let i = 0; i + 7 < data.length; i++) {
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1 && (data[i + 3] & 0x1f) === 7) {
+      const h = (b) => b.toString(16).padStart(2, '0')
+      return `avc1.${h(data[i + 4])}${h(data[i + 5])}${h(data[i + 6])}`
+    }
+  }
+  return 'avc1.640033'
+}
+
+const H265_CODECS = ['hev1.1.6.L153.B0', 'hvc1.1.6.L153.B0', 'hev1.1.6.L120.90', 'hvc1.1.6.L120.90', 'hev1.1.6.L93.B0', 'hvc1.1.6.L93.B0']
+
+async function pickConfig(codecId, data, size) {
+  const codecs = codecId === 1 ? H265_CODECS : [h264CodecString(data)]
+  const dims = size ? { codedWidth: size.width, codedHeight: size.height } : {}
+  for (const hardwareAcceleration of ['prefer-hardware', 'no-preference']) {
+    for (const codec of codecs) {
+      const config = { codec, hardwareAcceleration, optimizeForLatency: true, ...dims }
+      const { supported } = await VideoDecoder.isConfigSupported(config).catch(() => ({ supported: false }))
+      if (supported) return config
+    }
+  }
+  return null
+}
+
+const START_264 = new Set([6, 7, 8, 9, 14, 15, 16, 17, 18])
+const START_265 = new Set([32, 33, 34, 35, 39, 41, 42, 43, 44, 48, 49, 50, 51, 52, 53, 54, 55])
+
+/**
+ * Splits Annex B bytes into access units (one coded picture each), the same rule the recorder's
+ * reader uses. Keyframes are units holding an H.264 IDR or an H.265 IRAP NAL.
+ */
+function splitUnits(buf, codecId) {
+  const h265 = codecId === 1
+  const units = []
+  const n = buf.length
+  let cur = null
+  let sawVcl = false
+  let from = 0
+  for (;;) {
+    let p = -1
+    for (let i = from; i + 2 < n; i++) if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 1) { p = i; break }
+    if (p < 0) break
+    const h = p + 3
+    if (h + 2 >= n) break
+    const s = p - 1 >= 0 && buf[p - 1] === 0 ? p - 1 : p
+    let vcl, first, begins, key
+    if (h265) {
+      const t = (buf[h] >> 1) & 0x3f
+      vcl = t < 32
+      first = vcl && (buf[h + 2] & 0x80) !== 0
+      begins = START_265.has(t)
+      key = t >= 16 && t <= 21
+    } else {
+      const t = buf[h] & 0x1f
+      vcl = t >= 1 && t <= 5
+      first = vcl && (buf[h + 1] & 0x80) !== 0
+      begins = START_264.has(t)
+      key = t === 5
+    }
+    if (!cur || (sawVcl && (begins || first))) {
+      if (cur) cur.end = s
+      cur = { start: s, end: n, isKey: false }
+      units.push(cur)
+      sawVcl = false
+    }
+    if (key) cur.isKey = true
+    if (vcl) sawVcl = true
+    from = h + 1
+  }
+  return units
+}
+
+const DEFAULT_STEP_MS = 40 // 25 fps, the recorder's own assumption when nothing better is known
+
+/**
+ * Frame times. The recorder stores one 16-byte row per keyframe in a sibling .idx file
+ * ([offset, time in ms]); when the pack includes it, the keyframes get their real times and the
+ * frames between them are spaced evenly. Without it, a steady 25 frames a second is assumed and
+ * the page says so.
+ */
+function frameTimes(units, idxBytes) {
+  const times = new Array(units.length)
+  const known = []
+  if (idxBytes && idxBytes.length >= 16) {
+    const dv = new DataView(idxBytes.buffer, idxBytes.byteOffset, idxBytes.byteLength)
+    const byOffset = new Map()
+    for (let i = 0; i + 16 <= idxBytes.length; i += 16) {
+      byOffset.set(Number(dv.getBigUint64(i, true)), Number(dv.getBigInt64(i + 8, true)))
+    }
+    for (let i = 0; i < units.length; i++) {
+      if (byOffset.has(units[i].start)) { times[i] = byOffset.get(units[i].start); known.push(i) }
+    }
+  }
+  if (known.length >= 2) {
+    for (let k = 0; k < known.length - 1; k++) {
+      const a = known[k], b = known[k + 1]
+      const step = (times[b] - times[a]) / (b - a)
+      for (let i = a + 1; i < b; i++) times[i] = times[a] + step * (i - a)
+    }
+    const first = known[0], last = known[known.length - 1]
+    const lastStep = (times[last] - times[known[known.length - 2]]) / (last - known[known.length - 2]) || DEFAULT_STEP_MS
+    for (let i = last + 1; i < units.length; i++) times[i] = times[last] + lastStep * (i - last)
+    for (let i = first - 1; i >= 0; i--) times[i] = times[first] - lastStep * (first - i)
+    const base = times[0]
+    return { times: times.map((t) => t - base), startMs: base, measured: true }
+  }
+  for (let i = 0; i < units.length; i++) times[i] = i * DEFAULT_STEP_MS
+  return { times, startMs: null, measured: false }
+}
+
+const hhmmss = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  const m = Math.floor(s / 60)
+  return `${String(m).padStart(2, '0')}:${String(s - m * 60).padStart(2, '0')}`
+}
+
+/**
+ * Decodes and plays the raw segment on a canvas. Deliberately simple: frames are decoded a little
+ * ahead of time and drawn at their own timestamps against a wall clock, which is enough for
+ * reviewing evidence and has no live stream to chase.
+ */
+async function playRaw({ bytes, codecId, stage, controls, msg, idxBytes }) {
+  if (!('VideoDecoder' in window)) {
+    msg.className = 'msg bad'
+    msg.textContent = 'This browser cannot decode raw camera video (it has no WebCodecs support). Try a recent Chrome or Edge. The file itself is in this folder and its fingerprint has been checked above.'
+    return
+  }
+  const units = splitUnits(bytes, codecId)
+  if (!units.length) {
+    msg.className = 'msg bad'
+    msg.textContent = 'No video frames could be found in this file.'
+    return
+  }
+  const firstKey = units.findIndex((u) => u.isKey)
+  if (firstKey < 0) {
+    msg.className = 'msg bad'
+    msg.textContent = 'This segment contains no complete starting frame, so it cannot be decoded on its own.'
+    return
+  }
+  const keyBytes = bytes.subarray(units[firstKey].start, units[firstKey].end)
+  const size = pictureSize(codecId, keyBytes)
+  const config = await pickConfig(codecId, keyBytes, size)
+  if (!config) {
+    msg.className = 'msg bad'
+    msg.textContent = codecId === 1
+      ? 'This browser cannot decode H.265 (HEVC) video, which is what this camera recorded. Nothing is wrong with the file. Try Microsoft Edge or Google Chrome on a recent Windows or macOS machine, or open the file with VLC.'
+      : 'This browser cannot decode H.264 video. Nothing is wrong with the file; try a recent Chrome, Edge or Firefox, or open the file with VLC.'
+    return
+  }
+
+  const { times, startMs, measured } = frameTimes(units, idxBytes)
+  const total = times[times.length - 1]
+
+  const canvas = el('canvas')
+  canvas.width = size ? size.width : 1280
+  canvas.height = size ? size.height : 720
+  stage.appendChild(canvas)
+  stage.style.display = 'block'
+  const ctx = canvas.getContext('2d', { alpha: false })
+
+  const playBtn = el('button', null, 'Pause')
+  const scrub = el('input')
+  scrub.type = 'range'
+  scrub.min = '0'
+  scrub.max = String(Math.max(1, Math.round(total)))
+  scrub.value = '0'
+  const clock = el('span', 'mono', '00:00')
+  controls.appendChild(playBtn)
+  controls.appendChild(scrub)
+  controls.appendChild(clock)
+
+  msg.className = 'msg'
+  msg.textContent = `${units.length} frames, ${size ? `${size.width} by ${size.height}` : 'size unknown'}, decoded as ${config.codec}. ` +
+    (measured ? `Frame times come from the recording’s own index.` : `The recording carries no frame times in this pack, so the frames are shown at a steady 25 a second; the clip’s length may differ a little from the times in the list above.`)
+
+  let decoder = null
+  let queue = []          // decoded frames waiting to be drawn: { frame, t }
+  let next = 0            // the next unit to feed the decoder
+  let playing = true
+  let anchorWall = 0      // performance.now() at anchorT
+  let anchorT = 0         // clip time (ms) the anchor refers to
+  let stopped = false
+  let seeking = false
+
+  const clipTime = () => (playing ? anchorT + (performance.now() - anchorWall) : anchorT)
+
+  function makeDecoder() {
+    decoder = new VideoDecoder({
+      output: (frame) => {
+        if (stopped) { frame.close(); return }
+        queue.push({ frame, t: frame.timestamp / 1000 })
+      },
+      error: (e) => {
+        msg.className = 'msg bad'
+        msg.textContent = `The decoder stopped: ${e.message}`
+      },
+    })
+    decoder.configure(config)
+  }
+  makeDecoder()
+
+  function feed() {
+    while (next < units.length && decoder.state === 'configured' && decoder.decodeQueueSize < 8 && queue.length < 24) {
+      const u = units[next]
+      decoder.decode(new EncodedVideoChunk({
+        type: u.isKey ? 'key' : 'delta',
+        timestamp: Math.round(times[next] * 1000),
+        data: bytes.subarray(u.start, u.end),
+      }))
+      next++
+    }
+  }
+
+  function draw(frame) {
+    if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+      canvas.width = frame.displayWidth
+      canvas.height = frame.displayHeight
+    }
+    ctx.drawImage(frame, 0, 0, canvas.width, canvas.height)
+  }
+
+  function tick() {
+    if (stopped) return
+    feed()
+    const now = clipTime()
+    let due = -1
+    for (let i = 0; i < queue.length && queue[i].t <= now; i++) due = i
+    if (due >= 0) {
+      for (let i = 0; i < due; i++) queue[i].frame.close()
+      const { frame } = queue[due]
+      queue.splice(0, due + 1)
+      draw(frame)
+      frame.close()
+    }
+    if (!seeking) {
+      scrub.value = String(Math.min(Number(scrub.max), Math.round(now)))
+      clock.textContent = hhmmss(now) + (startMs !== null ? ` · ${showTime(new Date(startMs + now).toISOString())}` : '')
+    }
+    if (playing && now > total + 500 && next >= units.length && queue.length === 0) {
+      playing = false
+      playBtn.textContent = 'Play again'
+      anchorT = total
+    }
+    requestAnimationFrame(tick)
+  }
+
+  playBtn.addEventListener('click', () => {
+    if (playing) { anchorT = clipTime(); playing = false; playBtn.textContent = 'Play' }
+    else {
+      if (anchorT >= total) seekTo(0)
+      anchorWall = performance.now()
+      playing = true
+      playBtn.textContent = 'Pause'
+    }
+  })
+
+  /** Seeks to the keyframe at or before t, which is where decoding can start from. */
+  function seekTo(t) {
+    let k = 0
+    for (let i = 0; i < units.length; i++) if (units[i].isKey && times[i] <= t) k = i
+    for (const q of queue) q.frame.close()
+    queue = []
+    try { decoder.reset(); decoder.configure(config) } catch { try { decoder.close() } catch {} makeDecoder() }
+    next = k
+    anchorT = times[k]
+    anchorWall = performance.now()
+    scrub.value = String(Math.round(anchorT))
+    // Seeking back from the end leaves the clip paused part way through, not finished, so the
+    // button must stop saying "Play again".
+    if (!playing) playBtn.textContent = 'Play'
+  }
+
+  scrub.addEventListener('input', () => { seeking = true; clock.textContent = hhmmss(Number(scrub.value)) })
+  scrub.addEventListener('change', () => { seeking = false; seekTo(Number(scrub.value)) })
+
+  anchorWall = performance.now()
+  requestAnimationFrame(tick)
+}
+
+// ---------------------------------------------------------------- putting it together
+
+function finalVerdict(result) {
+  const { ok, problems, state } = result
+  if (ok) {
+    const caveats = []
+    if (state.cannotSeeExtras) caveats.push('this page could not look at the folder itself, so it cannot tell you whether anything extra was added alongside the pack')
+    verdict('good', 'This pack is intact.',
+      'Every file listed is present and unchanged, and the list itself carries a valid signature. ' +
+      (caveats.length ? `One thing to note: ${caveats.join('; ')}.` : '') +
+      ' The signature does not by itself say who made the pack — see the note below.')
+    listProblems([])
+    return
+  }
+  if (state.signatureOk === 'unchecked' && problems.length === 1) {
+    verdict('warn', 'The files are unchanged, but the signature could not be checked here.',
+      'Every file matches the list exactly. This browser is too old to check the signature itself, so open this page in a recent Chrome, Edge or Firefox to complete the check.')
+    listProblems(problems, 'What could not be checked')
+    return
+  }
+  const changed = [...state.fileState.values()].filter((s) => s.status === 'bad').length
+  const missing = [...state.fileState.values()].filter((s) => s.status === 'missing').length
+  let headline = 'This pack has been altered. Do not rely on it.'
+  let detail = ''
+  if (changed && missing) detail = `${changed} file${changed === 1 ? ' has' : 's have'} been changed and ${missing} ${missing === 1 ? 'is' : 'are'} missing.`
+  else if (changed) detail = `${changed} file${changed === 1 ? '' : 's'} no longer match${changed === 1 ? 'es' : ''} what was recorded when the pack was signed.`
+  else if (missing) { headline = 'Part of this pack is missing.'; detail = `${missing} file${missing === 1 ? ' that the pack lists is' : 's that the pack lists are'} not here.` }
+  else if (state.signatureOk === false) detail = 'The files themselves match the list, but the list does not match its signature, so the list has been edited.'
+  else detail = 'The details are below.'
+  verdict('bad', headline, `${detail} Everything that is wrong is listed below, in full.`)
+  listProblems(problems)
+}
+
+let currentKeyPem = null
+
+function updateKeyComparison() {
+  const out = $('key-compare')
+  const typed = $('expected-key').value.trim()
+  if (!typed) { out.className = 'msg'; out.textContent = 'Not compared yet.'; return }
+  if (!currentKeyPem) { out.className = 'msg'; out.textContent = 'There is no key in this pack to compare with.'; return }
+  const norm = (s) => s.replace(/-----[^-]+-----/g, '').replace(/[^A-Za-z0-9+/=]/g, '').toUpperCase()
+  const mine = [norm(currentKeyPem), norm($('key-fingerprint').textContent)]
+  const theirs = norm(typed)
+  if (!theirs) { out.className = 'msg'; out.textContent = 'That does not look like a key or a fingerprint.'; return }
+  if (mine.some((m) => m === theirs)) {
+    out.className = 'msg'
+    out.style.color = 'var(--good)'
+    out.textContent = 'It matches. This pack was signed by the key you were given, so it came from the system you expected.'
+  } else {
+    out.className = 'msg bad'
+    out.style.color = ''
+    out.textContent = 'It does not match. This pack was signed by a different key from the one you were given. Treat that as a serious problem and ask whoever supplied the pack about it.'
+  }
+}
+
+async function run(source, why) {
+  $('drop-panel').classList.add('hidden')
+  verdict('busy', 'Checking the pack…', why || 'Reading each file back and working out its fingerprint. Large packs take a little while.')
+  let result
+  try {
+    result = await verify(source)
+  } catch (e) {
+    verdict('bad', 'The pack could not be checked.', `Something went wrong while reading it: ${e.message}. That is not the same as the pack being sound or unsound — it means the check did not complete.`)
+    return
+  }
+  const { state } = result
+
+  if (state.publicKeyPem) {
+    currentKeyPem = state.publicKeyPem
+    $('key-pem').value = state.publicKeyPem
+    $('key-fingerprint').textContent = state.fingerprint || '—'
+  }
+
+  if (state.encrypted && state.encrypted.length) {
+    $('encrypted').classList.remove('hidden')
+    $('encrypted-files').textContent = state.encrypted.join('\n')
+  }
+
+  finalVerdict(result)
+
+  if (state.manifest) {
+    $('body').classList.remove('hidden')
+    renderSummary(state.manifest, state, source)
+    renderClips(state.manifest)
+    renderPlayers(state.manifest, state, source)
+    renderFiles(state.manifest, state)
+  }
+}
+
+// ---- the encrypted-pack case where there is no manifest at all to read
+
+async function checkLooseEncrypted(files) {
+  const bad = []
+  for (const f of files) {
+    const head = new Uint8Array(await f.slice(0, 16).arrayBuffer())
+    if (looksEncrypted(head)) bad.push(f.webkitRelativePath || f.name)
+  }
+  return bad
+}
+
+// ---- input plumbing
+
+function fileListFrom(dt) {
+  // Drag and drop of a folder gives directory entries, which have to be walked.
+  const items = dt.items ? [...dt.items] : []
+  const entries = items.map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)).filter(Boolean)
+  if (!entries.length) return Promise.resolve([...dt.files])
+  const out = []
+  const readDir = (reader) => new Promise((res, rej) => reader.readEntries(res, rej))
+  async function walk(entry, prefix) {
+    if (entry.isFile) {
+      const file = await new Promise((res, rej) => entry.file(res, rej))
+      file._rel = prefix + entry.name
+      out.push(file)
+      return
+    }
+    if (entry.isDirectory) {
+      const reader = entry.createReader()
+      for (;;) {
+        const batch = await readDir(reader)
+        if (!batch.length) break
+        for (const e of batch) await walk(e, prefix + entry.name + '/')
+      }
+    }
+  }
+  return (async () => {
+    for (const e of entries) await walk(e, '')
+    return out
+  })()
+}
+
+async function useFiles(files) {
+  if (!files || !files.length) return
+  const source = folderSource(files)
+  if (!source.names.has('manifest.json')) {
+    const enc = await checkLooseEncrypted(files)
+    if (enc.length) {
+      $('drop-panel').classList.add('hidden')
+      $('encrypted').classList.remove('hidden')
+      $('encrypted-files').textContent = enc.join('\n')
+      verdict('warn', 'This pack is locked with a password.', 'Nothing can be checked or played until it is unlocked. See below for what to do.')
+      return
+    }
+    verdict('warn', 'That does not look like an evidence pack.',
+      'There is no manifest.json in what you chose. Choose the folder that contains manifest.json, signature.json and the video files — usually the folder this page is in.')
+    $('drop-panel').classList.remove('hidden')
+    return
+  }
+  await run(source)
+}
+
+function setUpInputs() {
+  $('pick-folder').addEventListener('click', () => $('folder-input').click())
+  $('pick-files').addEventListener('click', () => $('files-input').click())
+  $('folder-input').addEventListener('change', (e) => useFiles([...e.target.files]))
+  $('files-input').addEventListener('change', (e) => useFiles([...e.target.files]))
+  const drop = $('drop')
+  for (const type of ['dragenter', 'dragover']) {
+    document.addEventListener(type, (e) => { e.preventDefault(); drop.classList.add('over') })
+  }
+  document.addEventListener('dragleave', (e) => { if (e.target === drop) drop.classList.remove('over') })
+  document.addEventListener('drop', async (e) => {
+    e.preventDefault()
+    drop.classList.remove('over')
+    $('drop-panel').classList.remove('hidden')
+    useFiles(await fileListFrom(e.dataTransfer))
+  })
+  $('expected-key').addEventListener('input', updateKeyComparison)
+}
+
+async function start() {
+  setUpInputs()
+  if (!window.crypto || !crypto.subtle) {
+    verdict('warn', 'This browser cannot check the pack.',
+      'It has no built-in cryptography for pages, which this check needs. Open this page in a recent Chrome, Edge, Firefox or Safari. This is a limitation of the browser, not a sign that anything is wrong with the pack.')
+    $('drop-panel').classList.add('hidden')
+    return
+  }
+  // Try the files next to this page first. On file:// most browsers refuse, and that is expected.
+  const direct = fetchSource()
+  const probe = await direct.get('manifest.json')
+  if (probe) { await run(direct); return }
+  const fromFile = location.protocol === 'file:'
+  verdict('warn', 'Waiting for the pack folder.',
+    (fromFile
+      ? 'For safety, browsers do not let a page opened straight from a file read the files around it. '
+      : 'There is no manifest.json next to this page. ') +
+    'Drag the pack folder onto the box below, or choose it, and the check will run at once. Nothing is uploaded.')
+  $('drop-why').textContent = fromFile
+    ? 'This page was opened directly from a file, so it cannot read its neighbours by itself. Point it at the pack folder — the one holding manifest.json.'
+    : 'manifest.json was not found next to this page. Point it at the pack folder instead.'
+}
+
+start()
+</script>
+</body>
+</html>

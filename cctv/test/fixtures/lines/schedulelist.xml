@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response version="1.0" cmdId="" cmdUrl="queryScheduleList">
+	<status>success</status>
+	<content type="list">
+		<item id="{ED0F2AE8-6E54-4D89-BE10-E85445FAC8FB}"><![CDATA[24x7]]></item>
+		<item id="{BD47C3AC-7BF3-4AAF-A84E-494855859247}"><![CDATA[24x5]]></item>
+		<item id="{5511AE78-D495-4340-AF26-05DFEFC7A94A}"><![CDATA[24x2]]></item>
+	</content>
+</response>

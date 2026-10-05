@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Argus" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · NVR register</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    .cm-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .cm-tools input[type="search"] { min-width: 220px; padding: 6px 10px; border-radius: 6px; }
+    .rp-main .al-table th { white-space: nowrap; }
+    .cm-mid { text-align: center; }
+    tr.cm-off td { opacity: .6; }
+  </style>
+</head>
+<body class="sites-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="st-main rp-main">
+    <div class="rp-head">
+      <h2 id="rgTitle">NVR register</h2>
+      <div class="cm-tools">
+        <input id="rgFilter" type="search" placeholder="Filter by site, NVR, serial, user…" autocomplete="off" />
+        <button id="rgRefresh" type="button">Refresh</button>
+        <button id="rgXlsx" type="button">Download Excel</button>
+      </div>
+    </div>
+    <p id="rgStatus" class="hp-note" role="status">Loading the register…</p>
+    <div id="rgTable"></div>
+    <p class="hp-note">Live from the NVR list and the current connection status each time you open or refresh this page.</p>
+  </main>
+
+  <script type="module" src="shell.js"></script>
+  <script type="module" src="register.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>

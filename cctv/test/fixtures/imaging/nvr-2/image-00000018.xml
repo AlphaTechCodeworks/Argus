@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response version="1.0" cmdId="" cmdUrl="queryChlVideoParam">
+	<status>success</status>
+	<types>
+		<whiteBalance>
+			<enum>auto</enum>
+			<enum>indoor</enum>
+			<enum>outdoor</enum>
+			<enum>manual</enum>
+		</whiteBalance>
+		<BLCMode>
+			<enum>OFF</enum>
+			<enum>HLC</enum>
+			<enum>BLC</enum>
+		</BLCMode>
+		<HWDRLevel>
+			<enum>low</enum>
+			<enum>medium</enum>
+			<enum>high</enum>
+		</HWDRLevel>
+		<configFileType>
+			<enum>normal</enum>
+			<enum>day</enum>
+			<enum>night</enum>
+		</configFileType>
+		<frequency>
+			<enum>60HZ</enum>
+			<enum>50HZ</enum>
+		</frequency>
+		<imageRotaoMode>
+			<enum>0</enum>
+			<enum>90</enum>
+			<enum>180</enum>
+			<enum>270</enum>
+		</imageRotaoMode>
+		<IRCutMode>
+			<enum>auto</enum>
+			<enum>day</enum>
+			<enum>night</enum>
+			<enum>time</enum>
+		</IRCutMode>
+		<IRCutConvSen>
+			<enum>high</enum>
+			<enum>mid</enum>
+			<enum>low</enum>
+		</IRCutConvSen>
+		<antiflickerMode>
+			<enum>OFF</enum>
+			<enum>50HZ</enum>
+			<enum>60HZ</enum>
+		</antiflickerMode>
+		<InfraredMode>
+			<enum>on</enum>
+			<enum>off</enum>
+			<enum>auto</enum>
+		</InfraredMode>
+		<autoExposureMode>
+			<enum>auto</enum>
+			<enum>manual</enum>
+		</autoExposureMode>
+		<autoExposureValue>
+			<enum>1</enum>
+			<enum>1/2</enum>
+			<enum>1/5</enum>
+			<enum>1/10</enum>
+			<enum>1/15</enum>
+			<enum>1/30</enum>
+			<enum>1/50</enum>
+			<enum>1/60</enum>
+			<enum>1/100</enum>
+			<enum>1/250</enum>
+			<enum>1/500</enum>
+			<enum>1/1000</enum>
+			<enum>1/2000</enum>
+			<enum>1/10000</enum>
+			<enum>1/100000</enum>
+		</autoExposureValue>
+		<gainMode>
+			<enum>auto</enum>
+			<enum>manual</enum>
+		</gainMode>
+	</types>
+	<content>
+		<chl id="{00000018-0000-0000-0000-000000000000}">
+			<bright min="0" max="100" default="25">33</bright>
+			<contrast min="0" max="100" default="50">50</contrast>
+			<hue min="0" max="100" default="50">50</hue>
+			<saturation min="0" max="100" default="50">50</saturation>
+			<sharpen>
+				<switch type="boolean" default="false">false</switch>
+				<value min="0" max="255" default="50">50</value>
+			</sharpen>
+			<WDR>
+				<switch type="boolean" default="false">false</switch>
+				<value min="0" max="255" default="128">128</value>
+			</WDR>
+			<denoise>
+				<switch type="boolean" default="false">false</switch>
+				<value min="0" max="255" default="30">30</value>
+			</denoise>
+			<cfgFile default="normal">normal</cfgFile>
+			<frequency default="50HZ">60HZ</frequency>
+			<fogReduction>
+				<switch default="false">false</switch>
+				<value default="50" min="0" max="255">50</value>
+			</fogReduction>
+			<antiflicker default="OFF">OFF</antiflicker>
+			<autoExposureMode>
+				<mode default="auto">auto</mode>
+				<value default="33333" min="10" max="1000000">33333</value>
+			</autoExposureMode>
+			<IRCutDelayTime default="2" min="2" max="120">2</IRCutDelayTime>
+			<InfraredMode default="auto">auto</InfraredMode>
+			<gain>
+				<mode default="0">0</mode>
+				<value default="50" min="0" max="100">15</value>
+				<AGC default="50" min="0" max="100">50</AGC>
+			</gain>
+			<whiteBalance>
+				<mode default="auto">auto</mode>
+				<red min="0" max="100" default="50">50</red>
+				<blue min="0" max="100" default="50">50</blue>
+			</whiteBalance>
+			<mirrorSwitch default="false">false</mirrorSwitch>
+			<flipSwitch default="false">false</flipSwitch>
+			<imageRotate default="0">0</imageRotate>
+			<IRCutMode default="auto">auto</IRCutMode>
+			<IRCutDayTime>07:00</IRCutDayTime>
+			<IRCutNightTime>19:00</IRCutNightTime>
+			<IRCutConvSen default="mid">mid</IRCutConvSen>
+			<backlightCompensation>
+				<mode default="OFF">OFF</mode>
+				<HWDRLevel default="medium">medium</HWDRLevel>
+			</backlightCompensation>
+			<scheduleInfo>
+				<types>
+					<progType>
+						<enum>normal</enum>
+						<enum>day</enum>
+						<enum>night</enum>
+						<enum>time</enum>
+						<enum>auto</enum>
+					</progType>
+				</types>
+				<program>normal</program>
+				<dayTime>00:00</dayTime>
+				<nightTime>23:59</nightTime>
+			</scheduleInfo>
+		</chl>
+	</content>
+</response>

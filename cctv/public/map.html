@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <!-- installable: Add to Home Screen opens Argus full screen, without the browser's bars -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Argus" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · Map</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="map-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+    </div>
+    <div class="controls">
+      <label title="Satellite pictures instead of the street map"><input id="sat" type="checkbox" /> Satellite</label>
+      <label title="Show camera names on the map"><input id="names" type="checkbox" checked /> Names</label>
+      <button id="edit" type="button" hidden>Edit map</button>
+      <button id="links" type="button" hidden title="Say which camera leads to which, so a follow can step from one to the next">Edit links</button>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <!-- every site on the one map: a button each, filled in by map.js; scrolls sideways on a phone -->
+  <nav id="sites" class="map-sites" aria-label="Sites on the map"></nav>
+
+  <main class="map-main">
+    <div id="map" class="map-view" tabindex="0" aria-label="Map of every site's cameras. The site buttons above and the camera list beside it reach the same sites and cameras.">
+      <div class="map-tiles"></div>
+      <img class="map-plan" alt="" hidden />
+      <svg class="map-overlay" aria-hidden="true"></svg>
+      <div class="map-zoom">
+        <button type="button" id="zoomIn" aria-label="Zoom in">+</button>
+        <button type="button" id="zoomOut" aria-label="Zoom out">−</button>
+        <button type="button" id="fit" aria-label="Show every camera" title="Show every camera">⤢</button>
+      </div>
+      <div class="map-credit" hidden></div>
+      <div id="empty" class="map-empty" hidden></div>
+      <div id="live" class="map-live" hidden></div>
+    </div>
+    <aside id="side" class="map-side" aria-label="Cameras"></aside>
+  </main>
+
+  <script type="module" src="shell.js"></script>
+  <script type="module" src="map.js"></script>
+  <script type="module" src="alert-banner.js"></script>
+  <script type="module" src="build-badge.js"></script>
+</body>
+</html>

@@ -2,7 +2,11 @@
   "name": "@2bad/tvt",
   "version": "2.0.0",
   "description": "",
-  "keywords": ["tvt", "ipc", "cctv"],
+  "keywords": [
+    "tvt",
+    "ipc",
+    "cctv"
+  ],
   "homepage": "https://github.com/2BAD/tvt#readme",
   "bugs": {
     "url": "https://github.com/2BAD/tvt/issues"
@@ -23,7 +27,10 @@
   "type": "module",
   "exports": "./build/device.js",
   "types": "./build/device.d.ts",
-  "files": ["bin", "build"],
+  "files": [
+    "bin",
+    "build"
+  ],
   "scripts": {
     "prebuild": "rimraf build",
     "build": "run-p build:*",
@@ -45,7 +52,8 @@
   "dependencies": {
     "debug": "4.4.3",
     "koffi": "2.16.2",
-    "p-series": "3.0.0"
+    "p-series": "3.0.0",
+    "ws": "8.22.0"
   },
   "devDependencies": {
     "@2bad/axiom": "1.0.3",

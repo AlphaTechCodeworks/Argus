@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response version="1.0" cmdId="" cmdUrl="queryChlVideoParam">
+	<status>success</status>
+	<types>
+		<whiteBalance>
+			<enum>auto</enum>
+			<enum>manual</enum>
+			<enum>outdoor</enum>
+			<enum>indoor</enum>
+			<enum>atw</enum>
+			<enum>lamp</enum>
+		</whiteBalance>
+		<BLCMode>
+			<enum>OFF</enum>
+			<enum>BLC</enum>
+		</BLCMode>
+		<HWDRLevel>
+			<enum>low</enum>
+			<enum>medium</enum>
+			<enum>high</enum>
+		</HWDRLevel>
+	</types>
+	<content>
+		<chl id="{00000011-0000-0000-0000-000000000000}">
+			<bright min="0" max="100" default="50">50</bright>
+			<contrast min="0" max="100" default="50">50</contrast>
+			<hue min="0" max="100" default="50">-1</hue>
+			<saturation min="0" max="100" default="50">50</saturation>
+			<sharpen>
+				<switch type="boolean" default="true">true</switch>
+				<value min="0" max="255" default="127">128</value>
+			</sharpen>
+		</chl>
+	</content>
+</response>

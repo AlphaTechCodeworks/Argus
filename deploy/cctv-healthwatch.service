@@ -1,0 +1,21 @@
+# The outside watcher for the CCTV server (deploy/cctv-healthwatch.mjs).
+#
+# Deliberately its own service with no dependency on cctv.service: it exists to notice when that
+# service is running but frozen, which is exactly when anything inside it -- logging, alerts -- has
+# stopped. It runs as root because reading another process's kernel stack and the kernel log needs
+# it, and so does the one fix it makes itself: remounting a stale network share and restarting cctv.
+[Unit]
+Description=Outside watcher for the CCTV server
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/node /opt/cctv/current/deploy/cctv-healthwatch.mjs
+Restart=always
+RestartSec=10
+Nice=5
+# its own output is one JSON line per event, so `journalctl -u cctv-healthwatch -o cat | jq` reads it
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

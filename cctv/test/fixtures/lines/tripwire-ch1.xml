@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response cmdId="" cmdUrl="queryTripwire">
+	<status>success</status>
+	<content>
+		<chl id="{00000001-0000-0000-0000-000000000000}" scheduleGuid="{ED0F2AE8-6E54-4D89-BE10-E85445FAC8FB}">
+			<param>
+				<mutexList type="list" itemType="mutexObjectType"></mutexList>
+				<switch>false</switch>
+				<holdTimeNote>3,5,10,20,30,60,120</holdTimeNote>
+				<alarmHoldTime uint="s">3</alarmHoldTime>
+				<saveTargetPicture>false</saveTargetPicture>
+				<saveSourcePicture>false</saveSourcePicture>
+				<objectFilter>
+					<car>
+						<switch>true</switch>
+						<sensitivity min="1" max="100">50</sensitivity>
+						<minDetectTarget>
+							<width min="0" max="10000" default="300">100</width>
+							<height min="0" max="10000" default="600">100</height>
+						</minDetectTarget>
+						<maxDetectTarget>
+							<width min="0" max="10000" default="9000">9000</width>
+							<height min="0" max="10000" default="9000">9000</height>
+						</maxDetectTarget>
+					</car>
+					<person>
+						<switch>true</switch>
+						<sensitivity min="1" max="100">50</sensitivity>
+						<minDetectTarget>
+							<width min="0" max="10000" default="300">100</width>
+							<height min="0" max="10000" default="600">100</height>
+						</minDetectTarget>
+						<maxDetectTarget>
+							<width min="0" max="10000" default="9000">9000</width>
+							<height min="0" max="10000" default="9000">9000</height>
+						</maxDetectTarget>
+					</person>
+					<motor>
+						<switch>true</switch>
+						<sensitivity min="1" max="100">50</sensitivity>
+						<minDetectTarget>
+							<width min="0" max="10000" default="300">100</width>
+							<height min="0" max="10000" default="600">100</height>
+						</minDetectTarget>
+						<maxDetectTarget>
+							<width min="0" max="10000" default="9000">9000</width>
+							<height min="0" max="10000" default="9000">9000</height>
+						</maxDetectTarget>
+					</motor>
+				</objectFilter>
+				<triggerAudio>false</triggerAudio>
+				<triggerWhiteLight>false</triggerWhiteLight>
+				<line type="list" count="4">
+					<itemType>
+						<direction type="direction"></direction>
+					</itemType>
+					<item>
+						<sensitivity min="0" max="0">0</sensitivity>
+						<direction type="direction">rightortop</direction>
+						<startPoint>
+							<X>0</X>
+							<Y>0</Y>
+						</startPoint>
+						<endPoint>
+							<X>0</X>
+							<Y>0</Y>
+						</endPoint>
+					</item>
+					<item>
+						<sensitivity min="0" max="0">0</sensitivity>
+						<direction type="direction">rightortop</direction>
+						<startPoint>
+							<X>0</X>
+							<Y>0</Y>
+						</startPoint>
+						<endPoint>
+							<X>0</X>
+							<Y>0</Y>
+						</endPoint>
+					</item>
+					<item>
+						<sensitivity min="0" max="0">0</sensitivity>
+						<direction type="direction">rightortop</direction>
+						<startPoint>
+							<X>0</X>
+							<Y>0</Y>
+						</startPoint>
+						<endPoint>
+							<X>0</X>
+							<Y>0</Y>
+						</endPoint>
+					</item>
+					<item>
+						<sensitivity min="0" max="0">0</sensitivity>
+						<direction type="direction">rightortop</direction>
+						<startPoint>
+							<X>0</X>
+							<Y>0</Y>
+						</startPoint>
+						<endPoint>
+							<X>0</X>
+							<Y>0</Y>
+						</endPoint>
+					</item>
+				</line>
+			</param>
+			<trigger>
+				<sysRec>
+					<switch>true</switch>
+					<chls type="list">
+						<item id="{00000001-0000-0000-0000-000000000000}">JP Wharf South</item>
+					</chls>
+				</sysRec>
+				<alarmOut>
+					<switch>false</switch>
+					<alarmOuts type="list"></alarmOuts>
+				</alarmOut>
+				<preset>
+					<switch>false</switch>
+					<presets type="list"></presets>
+				</preset>
+				<sysSnap>
+					<switch>false</switch>
+					<chls type="list"></chls>
+				</sysSnap>
+				<msgPushSwitch>true</msgPushSwitch>
+				<snapSwitch>false</snapSwitch>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<sysAudio id="{00000000-0000-0000-0000-000000000000}"></sysAudio>
+				<manualAudioSwitch>false</manualAudioSwitch>
+				<manualLightSwitch>false</manualLightSwitch>
+			</trigger>
+		</chl>
+	</content>
+	<types>
+		<mutexObjectType></mutexObjectType>
+		<direction>
+			<enum>none</enum>
+			<enum>rightortop</enum>
+			<enum>leftorbotton</enum>
+		</direction>
+	</types>
+</response>

@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <!-- installable: Add to Home Screen opens Argus full screen, without the browser's bars -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Argus" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · Settings</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="sites-page">
+  <header>
+    <div class="brand">
+      <h1>CCTV</h1>
+    </div>
+    <div class="account">
+      <span id="build" class="build" title="Running build"></span>
+      <span id="whoami"></span>
+      <button id="logout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="st-main">
+    <p id="notice" class="st-notice" hidden></p>
+
+    <section class="se-section" data-tab="recording" aria-labelledby="rec-title">
+      <h2 id="rec-title">Recording</h2>
+      <p class="st-help">Server recording of each camera's main stream. Off for every camera until you turn it on here. Motion and AI modes record continuously until event support arrives.</p>
+      <form id="defaults" class="se-grid" autocomplete="off">
+        <label>Mode <select id="d-mode"></select></label>
+        <label>Full video kept (days) <input id="d-fullDays" type="number" min="1" max="366" required /></label>
+        <label>After that <select id="d-after"></select></label>
+        <label>Time-lapse: one picture every (s) <input id="d-timelapseS" type="number" min="1" max="3600" required /></label>
+        <label>Total retention (days) <input id="d-retentionDays" type="number" min="1" max="366" required /></label>
+        <label>Before an event (s) <input id="d-preS" type="number" min="0" max="300" required /></label>
+        <label>After an event (s) <input id="d-postS" type="number" min="0" max="600" required /></label>
+        <div class="se-actions"><button type="submit" class="st-primary">Save defaults</button><span id="d-msg" class="st-meta"></span></div>
+      </form>
+      <h3>Per camera</h3>
+      <p class="st-help">Empty fields use the defaults above. Open an NVR to change its cameras.</p>
+      <div class="se-cam-tools">
+        <input id="camSearch" type="search" placeholder="Find a camera" aria-label="Find a camera" />
+        <label class="st-check"><input id="camChanged" type="checkbox" /> Only cameras set differently</label>
+      </div>
+      <div class="se-table-wrap">
+        <table class="se-table" id="cams">
+          <thead><tr><th>Camera</th><th>Mode</th><th>Full days</th><th>After that</th><th>Retention days</th><th>Location</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="se-actions"><button id="saveCams" type="button" class="st-primary" disabled>Save camera changes</button><span id="c-msg" class="st-meta"></span></div>
+    </section>
+
+    <section class="se-section" data-tab="overlay" aria-labelledby="osd-title">
+      <h2 id="osd-title">Camera name and time on the picture</h2>
+      <p class="st-help">
+        Drawn over the picture as you watch. <strong>The clock is this server's, not the camera's</strong> —
+        nothing is changed on the NVR, so moving it is always reversible.
+      </p>
+      <details class="se-more">
+        <summary>Why the server's clock, and why it is not in an export</summary>
+        <p class="st-help">
+          The server is the clock we keep correct; a camera's own burnt-in time can be minutes out without anyone
+          noticing. On the Recordings page the overlay shows the moment being played, written the same way as the
+          timeline underneath it.
+        </p>
+        <p class="st-help">
+          It is drawn while you watch, so it is <strong>not</strong> in an exported MP4: exports copy the recorded
+          video exactly as the camera made it, which is what keeps them good evidence.
+        </p>
+      </details>
+      <form id="osd" class="se-grid" autocomplete="off">
+        <label class="se-wide">Settings for <select id="o-cam"></select></label>
+        <label class="st-check"><input id="o-name" type="checkbox" /> Show the name</label>
+        <label class="st-check"><input id="o-time" type="checkbox" /> Show the time (this server's clock)</label>
+        <label class="se-wide">Text <input id="o-text" maxlength="40" placeholder="the camera's own name" /></label>
+        <fieldset class="se-wide osd-place">
+          <legend>Where on the picture</legend>
+          <!-- Controls on the left, the picture on the right: the preview is the thing being
+               adjusted, so it belongs beside the buttons rather than underneath them, where it
+               was previously out of sight while you clicked. -->
+          <div class="osd-controls">
+            <div class="osd-corners" id="o-corners"></div>
+            <div class="osd-fine">
+              <label>Across <span class="st-meta">0 left – 1 right</span><input id="o-x" type="number" min="0" max="1" step="0.01" class="se-num" /></label>
+              <label>Down <span class="st-meta">0 top – 1 bottom</span><input id="o-y" type="number" min="0" max="1" step="0.01" class="se-num" /></label>
+              <label>Size <span class="st-meta">% of picture height</span><input id="o-size" type="number" min="1" max="12" step="0.1" class="se-num" /></label>
+            </div>
+            <p class="st-help">Held as a fraction of the picture, so it stays put on a phone, a 1080p screen and a 4K one alike.</p>
+          </div>
+          <div class="osd-preview">
+            <canvas id="o-preview" width="480" height="270" aria-label="Preview of the overlay"></canvas>
+            <p class="st-meta">Preview</p>
+          </div>
+        </fieldset>
+        <div class="se-actions">
+          <button type="submit" class="st-primary">Save</button>
+          <button type="button" id="o-reset" hidden>Use the default for this camera</button>
+          <span id="o-msg" class="st-meta"></span>
+        </div>
+      </form>
+    </section>
+
+    <section class="se-section" data-tab="alerts" aria-labelledby="al-title">
+      <h2 id="al-title">Alerts</h2>
+      <p class="st-help">Where to send a message when something is wrong. Leave a method empty to switch it off.</p>
+      <form id="alerts" class="se-grid" autocomplete="off">
+        <label class="se-wide">Phone push topic
+          <input id="a-topic" placeholder="at least 8 letters, digits, - or _" maxlength="64" />
+        </label>
+        <div class="se-actions se-wide">
+          <button type="button" id="a-new">Make one up</button>
+          <button type="button" id="a-test">Send a test</button>
+          <span id="a-test-msg" class="st-meta"></span>
+        </div>
+        <p class="st-help se-wide">Install the free ntfy app on your phone and subscribe to this topic. Keep it secret: anyone who knows it can send you messages.</p>
+
+        <label>A camera counts as stopped after <input id="a-notrec" type="number" min="1" max="120" required /> minutes</label>
+        <label>An NVR clock is wrong beyond <input id="a-skew" type="number" min="5" max="3600" required /> seconds</label>
+
+        <fieldset class="se-wide" id="a-kinds">
+          <legend>Tell me about</legend>
+        </fieldset>
+
+        <details class="se-wide">
+          <summary>Email (not sending yet)</summary>
+          <p class="st-help">These are stored but nothing is sent by email yet. The watcher that reports the server being down can already use them.</p>
+          <label>Mail server <input id="a-host" placeholder="smtp.gmail.com" /></label>
+          <label>Port <input id="a-port" type="number" min="1" max="65535" /></label>
+          <label>TLS from the start (port 465) <input id="a-secure" type="checkbox" /></label>
+          <label>User <input id="a-user" autocomplete="off" /></label>
+          <label>Password <input id="a-pass" type="password" autocomplete="new-password" placeholder="leave as it is to keep" /></label>
+          <label>From <input id="a-from" placeholder="cctv@yourplace.com" /></label>
+          <label class="se-wide">To <input id="a-to" placeholder="one or more addresses, separated by commas" /></label>
+        </details>
+
+        <details class="se-wide">
+          <summary>Other systems (webhooks)</summary>
+          <p class="st-help">Each alert, and the daily summary, is also sent as JSON to these addresses: an access-control or building system, a chat bot, a script. With a secret, every message is signed: its <code>X-Argus-Signature</code> header is <code>sha256=</code> followed by the HMAC-SHA256 of the body, so the other end can tell it came from here. At most five.</p>
+          <div id="a-hooks" class="a-hooks"></div>
+          <p><button type="button" id="a-hook-add">Add a webhook</button> <button type="button" id="a-hook-test">Send a test</button> <span id="a-hook-msg" class="st-meta" role="status"></span></p>
+        </details>
+        <label class="se-wide"><input id="a-daily" type="checkbox" /> Send a summary of yesterday at 07:00 through the same channels (the same figures as the Reports page)</label>
+
+        <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="a-msg" class="st-meta"></span></div>
+      </form>
+    </section>
+
+    <section class="se-section" data-tab="storage" aria-labelledby="sr-title">
+      <h2 id="sr-title">Overview</h2>
+      <p id="sr-totals" class="st-help" role="status"></p>
+      <!-- storage.js: how far back the footage goes against the target, and who is short of it (retention-target.mjs) -->
+      <p id="sr-target" class="st-help"></p>
+      <ul id="sr-warnings" class="hp-note"></ul>
+      <!-- storage.js: one panel per location, how full, how fast it fills, how far back each camera goes -->
+      <div id="sr-locations" class="nvr-panels"></div>
+    </section>
+
+    <section class="se-section" data-tab="storage" aria-labelledby="sj-title">
+      <h2 id="sj-title">Time-lapse and retention</h2>
+      <p class="st-help">The two jobs that rewrite and delete recordings on purpose, every 5 minutes while the server records: time-lapse turns footage past its full-video days into one picture every few seconds, and retention deletes footage past its total days. The days are set on the Recording tab. These two jobs keep bookmarked and exported stretches.</p>
+      <!-- storage.js paints the plan and the last runs, and saves the switch (asking first before On) -->
+      <p id="sj-plan" class="st-help"></p>
+      <!-- the switch as the server has it: a choice clicked but not saved is only the radio (review 2026-09-29) -->
+      <p id="sj-now" class="sj-now"></p>
+      <form id="sj-form" autocomplete="off">
+        <fieldset id="sj-choices" class="sj-choices"><legend>The switch</legend></fieldset>
+        <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="sj-msg" class="st-meta" role="status"></span></div>
+      </form>
+      <!-- not a live region: repainted every minute, and #sj-msg already announces saves -->
+      <ul id="sj-runs" class="sj-runs"></ul>
+      <!-- housekeeping.mjs keeps bookmarked stretches too since 2026-09-29 -->
+      <p class="hp-note">Separate from this switch, and whatever it is set to: the clean-up rules delete the oldest footage when a location runs low on space or goes over its space limit (set on each location below), and footage past a camera's total days, except bookmarked and exported stretches (a bookmark keeps the cameras it names; the automatic ones around line crossings end with their camera's total days).</p>
+    </section>
+
+    <section class="se-section" data-tab="storage" aria-labelledby="loc-title">
+      <h2 id="loc-title">Your locations</h2>
+      <p class="st-help">Folders where recordings are written. Each holds a marker file; a location without it (drive unplugged, share down) is never written and recording moves to the next one. Each can have a space limit for Argus's recordings and free-space marks of its own.</p>
+      <p class="st-help">The space limit is enforced: when Argus's recordings on a location go over it, the oldest are deleted down to it from the next clean-up (every 5 minutes, at most about 240 GB each), footage past its full-video days first; never the newest 24 hours, nor bookmarked or exported stretches. It is in GB of 1,000,000,000 bytes, at most the size of the drive or share. A limit saved before limits were enforced (29 September 2026) is not enforced until it is saved again on its card. Below a location's low mark, footage past its full-video days is deleted; below its hard floor, any footage, oldest first, and recording moves elsewhere. Empty: no limit, and the default marks (Clean-up rules, below).</p>
+      <div id="locations" class="st-cards"></div>
+      <details class="se-fold se-add">
+        <summary>Add a folder…</summary>
+      <form id="addLoc" class="se-grid" autocomplete="off">
+        <div class="se-wide se-path-row">
+          <label>Folder <input id="l-path" required maxlength="256" placeholder="/srv/cctv-rec/usb1" /></label>
+          <button id="l-browse" type="button">Browse…</button>
+        </div>
+        <label>Type <select id="l-type"><option value="usb">External disk (USB/eSATA)</option><option value="internal">Internal (ZFS pool, disk)</option><option value="network">Network share (NFS, SMB, iSCSI)</option></select></label>
+        <label>Role <select id="l-role"><option value="main">Main</option><option value="overflow">Overflow</option><option value="archive">Archive</option></select></label>
+        <label>Space limit for Argus (GB of 1,000,000,000 bytes; empty = none; enforced) <input id="l-limit" type="number" min="1" step="any" /></label>
+        <label class="st-check se-wide" id="l-same-row" hidden><input id="l-same" type="checkbox" /> Same disk as the system (recordings could fill the system disk)</label>
+        <div class="se-actions"><button type="submit">Add location</button><span id="l-msg" class="st-meta"></span></div>
+      </form>
+      </details>
+    </section>
+
+    <section class="se-section" data-tab="storage" aria-labelledby="nas-title">
+      <details class="se-fold">
+        <summary><h2 id="nas-title">Add a network drive (NAS)</h2></summary>
+      <p class="st-help">Adds a NAS share (SMB or NFS) as a place for recordings. The whole share is mounted under /srv/cctv-net and, if you name a folder inside it, that folder is used. Test first: it mounts, writes a file, reads it back and undoes everything. The password is only ever held by the machine itself, never by this page and never in the settings file.</p>
+      <div id="netshares" class="st-cards"></div>
+      <form id="addShare" class="se-grid" autocomplete="off">
+        <label>Protocol <select id="n-proto"><option value="smb">SMB (Windows share)</option><option value="nfs">NFS</option></select></label>
+        <label>Server <input id="n-server" required maxlength="253" placeholder="192.168.0.121" spellcheck="false" autocapitalize="off" /></label>
+        <label id="n-share-row">Share <input id="n-share" required maxlength="64" placeholder="Backups" spellcheck="false" autocapitalize="off" /></label>
+        <label>Folder inside the share (optional) <input id="n-subdir" maxlength="255" placeholder="CCTV Backup" spellcheck="false" autocapitalize="off" /></label>
+        <label id="n-user-row">User name <input id="n-user" maxlength="64" placeholder="cctv" spellcheck="false" autocapitalize="off" autocomplete="off" /></label>
+        <label id="n-pass-row">Password <input id="n-pass" type="password" maxlength="256" autocomplete="new-password" /></label>
+        <label>Role <select id="n-role"><option value="main">Main</option><option value="overflow">Overflow</option><option value="archive">Archive</option></select></label>
+        <div class="se-actions"><button type="button" id="n-test">Test</button><button type="submit" id="n-add">Add</button><span id="n-msg" class="st-meta"></span></div>
+      </form>
+      <div id="netjob" class="se-job" hidden></div>
+      </details>
+    </section>
+
+    <section class="se-section" data-tab="storage" aria-labelledby="usb-title">
+      <details class="se-fold">
+        <summary><h2 id="usb-title">Add a USB drive</h2></summary>
+      <p class="st-help">Erases a USB/eSATA drive, formats it for recordings and adds it as a location. Only drives that are not the system disk, not mounted and not in a pool are offered.</p>
+      <div class="se-actions"><button id="refreshDisks" type="button">Look for drives</button><span id="u-msg" class="st-meta"></span></div>
+      <div id="disks" class="st-cards"></div>
+      <div id="job" class="se-job" hidden></div>
+      </details>
+    </section>
+
+    <section class="se-section" data-tab="storage" aria-labelledby="mem-title">
+      <details class="se-fold">
+        <summary><h2 id="mem-title">Clean-up rules and memory</h2></summary>
+      <form id="misc" class="se-grid" autocomplete="off">
+        <label>Recent footage kept in RAM <select id="m-recent"></select></label>
+        <label>Timeline thumbnails <select id="m-thumbs"></select></label>
+        <label>Low space: delete oldest below (% free; the default, a location can have its own) <input id="m-low" type="number" min="1" max="50" required /></label>
+        <label>Hard floor: full-video period touched only below (% free; the default, a location can have its own) <input id="m-floor" type="number" min="1" max="49" required /></label>
+        <p id="m-ram" class="st-help se-wide" hidden></p>
+        <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="m-msg" class="st-meta"></span></div>
+      </form>
+      </details>
+    </section>
+    <section class="se-section" data-tab="server" aria-labelledby="srv-title">
+      <h2 id="srv-title">Restart the server</h2>
+      <p class="st-help">Stops and starts the Argus server. Live video and server recording pause for about 10 seconds, then every camera reconnects by itself. The NVRs keep recording to their own disks throughout. Only an admin can do this.</p>
+      <p><button type="button" id="restartBtn" class="danger">Restart server</button> <span id="restartMsg" class="st-meta" role="status"></span></p>
+    </section>
+    <section class="se-section" data-tab="server" aria-labelledby="reboot-title" id="rebootSection" hidden>
+      <h2 id="reboot-title">Reboot the machine</h2>
+      <p class="st-help">Restarts the whole Linux machine the server runs on: for when restarting the server is not enough. Live video and server recording stop for about a minute or two while it starts up again and logs back in to the NVRs. The NVRs keep recording to their own disks throughout. Not possible within 5 minutes of the last start. Only an admin can do this.</p>
+      <p><button type="button" id="rebootBtn" class="danger">Reboot the machine</button> <span id="rebootMsg" class="st-meta" role="status"></span></p>
+    </section>
+  </main>
+
+  <dialog id="prep" class="st-dialog">
+    <form id="prepForm" method="dialog" autocomplete="off">
+      <h2>Prepare <span id="p-name"></span></h2>
+      <p class="se-danger">Everything on this drive will be erased and cannot be recovered.</p>
+      <p id="p-info" class="st-meta"></p>
+      <ul id="p-parts" class="se-parts"></ul>
+      <label>File system
+        <select id="p-fs"><option value="xfs">XFS (recommended)</option><option value="ext4">ext4</option></select>
+      </label>
+      <label>Type the drive's serial number to confirm: <strong id="p-serial"></strong>
+        <input id="p-typed" required spellcheck="false" autocapitalize="off" />
+      </label>
+      <p id="p-error" class="st-error" hidden></p>
+      <div class="st-actions">
+        <button type="button" id="p-cancel">Cancel</button>
+        <button type="submit" id="p-go" class="se-erase" disabled>Erase and prepare</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="folders" class="st-dialog" aria-labelledby="f-title">
+    <form id="foldersForm" method="dialog" autocomplete="off">
+      <h2 id="f-title">Choose a folder</h2>
+      <p class="st-meta">Folders under /srv/cctv-rec, /mnt and /media. Pick the folder where a drive or share is mounted, or make a new one.</p>
+      <div class="se-folder-path"><button type="button" id="f-up">Up</button><code id="f-path"></code></div>
+      <ul id="f-list" class="se-folder-list" role="listbox" aria-label="Folders"></ul>
+      <div class="se-folder-new">
+        <input id="f-name" maxlength="64" placeholder="New folder name" spellcheck="false" autocapitalize="off" aria-label="New folder name" />
+        <button type="button" id="f-new">New folder</button>
+      </div>
+      <p id="f-error" class="st-error" hidden></p>
+      <div class="st-actions">
+        <button type="button" id="f-cancel">Cancel</button>
+        <button type="button" id="f-select" disabled>Select</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="shell.js"></script>
+  <script type="module" src="settings.js"></script>
+  <script type="module" src="settings-tabs.js"></script>
+  <script type="module" src="storage.js"></script>
+  <script type="module" src="alert-banner.js"></script>
+  <script type="module" src="build-badge.js"></script>
+  <script type="module" src="server-restart.js"></script>
+</body>
+</html>

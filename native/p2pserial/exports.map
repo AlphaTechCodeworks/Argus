@@ -1,0 +1,9 @@
+/* The only symbols libp2pserial.so exports (no version name, so no symbol versions are added). */
+{
+  global:
+    p2pserial_add;
+    p2pserial_clear;
+    p2pserial_count;
+    _Z21NAT_CLIENT_ConnectDevRK24_tag_client_connect_infobi;
+  local: *;
+};
