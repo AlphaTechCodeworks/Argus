@@ -398,6 +398,12 @@ export function renderHealth(d) {
   const cap = vw ? vw.conversions.playback.cap + vw.conversions.phones.cap : 0
   const cpu = vw?.conversions.cpu?.percent
   const viewingCards = !vw ? null : {
+    people: {
+      label: 'People connected',
+      value: String(vw.people?.people ?? 0),
+      state: 'ok',
+      note: `${vw.people?.local ?? 0} on the network · ${vw.people?.remote ?? 0} over the internet`
+    },
     internet: {
       label: 'Out to the internet',
       value: mbps(vw.traffic.internet.bps),

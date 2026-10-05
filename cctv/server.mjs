@@ -96,7 +96,8 @@ import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs
 import { PhoneLive } from './phone-live.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
-import { liveAttacher } from './live-attach.mjs'
+import { liveAttacher, viewerOf } from './live-attach.mjs'
+import { makePresence } from './presence.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
@@ -900,6 +901,7 @@ const handleRequest = async (req, res) => {
       ...alerts.health(),
       viewing: {
         traffic: trafficSummary(),
+        people: presence.summary(),
         remote,
         conversions: {
           playback: { running: playbackTranscodes.active, cap: playbackTranscodes.max },
@@ -1001,6 +1003,8 @@ keepAlive(muxWss, { quiet: (ws) => pageSockets.get(ws)?.quiet() ?? true })
 const watch = accessWatch({ currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), can })
 onRightsSaved(watch.sweepSoon)
 auth.onUsersChanged(watch.sweepSoon)
+// who is connected right now (presence.mjs): one viewer per browser, over the internet or on the network
+const presence = makePresence()
 const onConnection = (ws, req) => {
   // A frame ws cannot parse (a text frame with invalid UTF-8, a bad opcode) is an 'error' event on
   // the socket, which then closes; with no listener Node treats it as unhandled and exits: one
@@ -1008,6 +1012,10 @@ const onConnection = (ws, req) => {
   ws.on('error', () => {})
   const url = new URL(req.url, 'http://localhost')
   meterSocket(ws, req.socket.remoteAddress)
+  // count this browser among the people connected now; its other tiles/tabs share the one key
+  const vkey = viewerOf(req, currentUser)
+  presence.join(vkey, ws, { remote: isRemoteAddress(req.socket.remoteAddress) })
+  ws.on('close', () => presence.leave(vkey, ws))
   // every live tile of a page on this one socket (live-mux.mjs)
   if (url.pathname === '/live-mux') {
     pageSockets.set(ws, serveMux(ws, {

@@ -28,7 +28,7 @@ export const PHONE_SPARE = 4
 export const H265_QUIET_MS = 10 * 60_000
 
 /** One key per browser, from the upgrade request: a page's /live and /live-mux sockets are one viewer. */
-const viewerOf = (req, currentUser) => createHash('sha1').update(`${currentUser(req) ?? '?'}|${req.headers['user-agent'] ?? ''}|${req.headers.cookie ?? ''}`).digest('hex')
+export const viewerOf = (req, currentUser) => createHash('sha1').update(`${currentUser(req) ?? '?'}|${req.headers['user-agent'] ?? ''}|${req.headers.cookie ?? ''}`).digest('hex')
 
 /**
  * What stands in for a sub-stream that is not running (sub-bridge.mjs): the camera's main stream,
