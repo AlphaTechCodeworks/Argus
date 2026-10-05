@@ -26,15 +26,15 @@ export const KEY_RE = /^[A-Za-z0-9._-]{1,64}\/\d{1,4}$/
 
 /** The grids offered on the Wall. 'auto' is the old behaviour: as many columns as fit the space.
  *  The rest are NxN; slotsOf/colsOf read the number off the name, so adding one needs no other change. */
-export const LAYOUTS = Object.freeze(['auto', '2x2', '3x3', '4x4', '5x5', '6x6', '8x8', '10x10', '12x12', '15x15'])
+export const LAYOUTS = Object.freeze(['auto', '2x2', '3x3', '4x4', '5x5', '6x6', '8x8', '10x10', '12x12'])
 
 /** The live grid's own layout ids (viewer.js): square grids and the "featured" big-tile arrangements.
  *  A view saved on the live page carries one of these; checkView accepts them so the same saved-views
  *  store serves both pages. The Wall falls back to a fitting grid for an id it does not draw. */
-export const LIVE_LAYOUTS = Object.freeze(['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', 'g15', '1+5', '1+7', '1+12', '2+8'])
+export const LIVE_LAYOUTS = Object.freeze(['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', '1+5', '1+7', '1+12', '2+8'])
 
-/** The most cameras one saved view may hold. Enough to fill the largest grid (15x15 = 225). */
-export const MAX_VIEW_CAMERAS = 256
+/** The most cameras one saved view may hold. Enough to fill the largest grid (12x12 = 144). */
+export const MAX_VIEW_CAMERAS = 144
 /** A view's name is a line in a menu, not a paragraph. */
 export const MAX_VIEW_NAME = 60
 /** Enough views for a working site; a guard against a runaway client filling the preferences file. */
@@ -148,8 +148,7 @@ export function layoutFor(count) {
   if (n <= 36) return '6x6'
   if (n <= 64) return '8x8'
   if (n <= 100) return '10x10'
-  if (n <= 144) return '12x12'
-  return '15x15'
+  return '12x12'
 }
 
 // ---- saved views -----------------------------------------------------------------------------
