@@ -105,6 +105,7 @@ const names = (list) => list.map((c) => c.name).join(', ')
   check('  repeated cameras are kept once', checkView({ ...good, cameras: ['nvr-1/0', 'nvr-1/0', 'nvr-2/17'] }).value.cameras.length === 2)
   check('  a view with no id is refused rather than given one, so an edit cannot become a copy', !checkView({ ...good, id: undefined }).ok)
   check('  an unknown layout falls back to one that fits the camera count', checkView({ ...good, layout: 'wall' }).value.layout === '2x2')
+  check('  a live-page layout id is accepted (views are shared with the live grid)', checkView({ ...good, layout: 'g8' }).value.layout === 'g8' && checkView({ ...good, layout: '1+5' }).value.layout === '1+5')
   check('  a camera that no longer exists is dropped, not made unsaveable',
     checkView(good, { known: new Set(['nvr-1/0']) }).value.cameras.join() === 'nvr-1/0')
   check('  but a view left with no cameras at all is then refused', !checkView(good, { known: new Set() }).ok)

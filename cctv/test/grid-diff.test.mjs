@@ -80,11 +80,11 @@ const edit = (list, i, fields) => list.map((c, j) => (j === i ? { ...c, ...field
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8')
   const load = src.slice(src.indexOf('async function loadCameras'))
-  check('loadCameras updates tiles in place when nothing moved', /diffCameras\(before, list, view\)/.test(load) && /if \(!diff\.full\) return updateTiles\(diff\.changed\)/.test(load))
+  check('loadCameras updates tiles in place when nothing moved', /diffCameras\(before, gridCameras\(\), view\)/.test(load) && /if \(!diff\.full\) return updateTiles\(diff\.changed\)/.test(load))
   // a camera coming onto or leaving the page moves the tiles that stay (relayout), not a rebuild
   // of every tile (9-13 new connections at once, behind an open full-size view)
   check('... and a camera arriving or leaving moves tiles (relayout), rebuilding only when the page frame changed', /relayout\(\)/.test(load.slice(0, load.indexOf('\n}\n'))) && /if \(!sameFrame \|\| !labelsSame\) return render\(\{ keepSingle: true \}\)/.test(load))
-  check('render uses the same visible set as the diff', /visibleCameras\(cameras, gridView\(perPage\)\)/.test(src))
+  check('render uses the same visible set as the diff', /visibleCameras\(gridCameras\(\), gridView\(perPage\)\)/.test(src))
 }
 
 // ---- Live HD per camera (stream rights) -----------------------------------------------------------------
@@ -94,7 +94,7 @@ const edit = (list, i, fields) => list.map((c, j) => (j === i ? { ...c, ...field
   check('hd the same: no change', diffCameras(edit(base(), 1, { hd: true }), edit(base(), 1, { hd: true }), view()).changed.length === 0)
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-  check('viewer.js: full screen goes to main only with Live HD (and not remote, and not a browser that failed main)', /if \(cam\.hd !== false && !noMain\.has\(single\) && !cam\.remote\) upgradeToMain\(overlay, cam, sub, opts\)/.test(src))
+  check('viewer.js: full screen goes to main only with Live HD (and not remote, and not a browser that failed main)', /if \(cam\.hd !== false && !noMain\.has\(single\) && !cam\.remote\)/.test(src) && /upgradeToMain\(overlay, cam, sub, opts\)/.test(src))
   check('viewer.js: without it, the SD badge', /else if \(cam\.hd === false\) overlay\.querySelector\('\.name'\)\.after\(sdBadge\(\)\)/.test(src))
   check('viewer.js: the full-size view is rebuilt when Live HD flips', /if \(keep && Boolean\(singleCam\?\.hd\) === Boolean\(cam\.hd\)\)/.test(src))
   check('viewer.js: "Recordings" only with a playback right', /if \(cam\.playback !== false\) \{/.test(src))

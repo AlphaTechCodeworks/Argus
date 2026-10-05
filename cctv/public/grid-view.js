@@ -24,9 +24,14 @@
 /** A camera key, "<nvr id>/<channel>" — the same rule as wall-clock.js and user-prefs.mjs. */
 export const KEY_RE = /^[A-Za-z0-9._-]{1,64}\/\d{1,4}$/
 
-/** The grids offered. 'auto' is the old behaviour: as many columns as fit the space. The rest are
- *  NxN; slotsOf/colsOf read the number off the name, so adding one here needs no other change. */
+/** The grids offered on the Wall. 'auto' is the old behaviour: as many columns as fit the space.
+ *  The rest are NxN; slotsOf/colsOf read the number off the name, so adding one needs no other change. */
 export const LAYOUTS = Object.freeze(['auto', '2x2', '3x3', '4x4', '5x5', '6x6', '8x8', '10x10', '12x12', '15x15'])
+
+/** The live grid's own layout ids (viewer.js): square grids and the "featured" big-tile arrangements.
+ *  A view saved on the live page carries one of these; checkView accepts them so the same saved-views
+ *  store serves both pages. The Wall falls back to a fitting grid for an id it does not draw. */
+export const LIVE_LAYOUTS = Object.freeze(['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', 'g15', '1+5', '1+7', '1+12', '2+8'])
 
 /** The most cameras one saved view may hold. Enough to fill the largest grid (15x15 = 225). */
 export const MAX_VIEW_CAMERAS = 256
@@ -177,7 +182,7 @@ export function checkView(raw, { known = null } = {}) {
   }
   if (cameras.length === 0) return bad('A view needs at least one camera')
   if (cameras.length > MAX_VIEW_CAMERAS) return bad(`A view holds at most ${MAX_VIEW_CAMERAS} cameras`)
-  const layout = LAYOUTS.includes(raw.layout) ? raw.layout : layoutFor(cameras.length)
+  const layout = LAYOUTS.includes(raw.layout) || LIVE_LAYOUTS.includes(raw.layout) ? raw.layout : layoutFor(cameras.length)
   const id = typeof raw.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(raw.id) ? raw.id : null
   if (!id) return bad('A view needs an id')
   return { ok: true, error: null, value: { id, name, cameras, layout } }
