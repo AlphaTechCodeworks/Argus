@@ -21,6 +21,7 @@ import { createPlayback } from './playback.mjs'
 import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastError, lateCalls, nvrCooling, plainSerial, sdkCallT, sdkStuck, setP2pServer } from './sdk.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
 import { XML_HEADER, transparent, xmlSettled } from './nvr-xml.mjs'
+import { parseOnlineChlList } from './nvr-online.mjs'
 import { startWorker } from './worker-supervisor.mjs'
 import { openRecIndex } from './rec-index.mjs'
 import { createWarmer } from './rec-cache.mjs'
@@ -80,20 +81,22 @@ const CHANNEL_SETTLED_MS = CHANNEL_REFRESH_MS * 20 // 10 minutes after a change:
 const SILENT_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1' && Number(process.env.CCTV_TEST_SILENT_MS)) || 3000
 const CHANNEL_LOG_MS = CHANNEL_REFRESH_MS * 120 // an hour: how often the list was read, and why not (#logListTurns)
 /**
- * Corrects a P2P NVR's camera online flags in place. Over the cloud, GetDeviceIPCInfo only reports a
- * channel "online" when it has an active media session, so cameras that are plainly working but not
- * being streamed read as offline; believed at face value this raised false "camera offline" alerts,
- * hid the cameras, and (since offline slots are not recorded) kept them from recording at all. So a
- * configured channel is trusted online — a genuinely down camera is caught by the not-recording and
- * stalled alerts (positive evidence: a stream that will not start, or that loses video), not by this
- * flag. An empty slot (no camera address and no name) stays offline. A channel delivering video is
- * online whatever its configured flag reads, in case a flaky read blanks it. Pure, so it can be
- * tested on its own; mutates `list`.
+ * Corrects a P2P NVR's camera online flags in place. Over the cloud, GetDeviceIPCInfo's own online
+ * flag is unreliable (the whole read comes back empty at random, wiping every state), so the NVR's
+ * authoritative queryOnlineChlList is used instead when we have it (#onlineChannels): a configured
+ * channel is online iff the NVR lists it online, or it is delivering video right now (which no status
+ * read can argue with). An empty slot (no camera address and no name) stays offline. When the online
+ * list could not be read this turn and none was ever read, it falls back to the as-read flag plus
+ * video. Pure, so it can be tested on its own; mutates `list`.
  * @param {Array<{ch:number, configured:boolean, online:boolean}>} list
- * @param {{ hasVideo:(ch:number)=>boolean }} ctx
+ * @param {{ hasVideo:(ch:number)=>boolean, onlineSet?:Set<number>|null }} ctx onlineSet: the NVR's
+ *   online channels (queryOnlineChlList), or null to fall back to the as-read flag.
  */
-export function applyP2pOnline(list, { hasVideo }) {
-  for (const c of list) c.online = Boolean(c.configured) || hasVideo(c.ch)
+export function applyP2pOnline(list, { hasVideo, onlineSet = null }) {
+  for (const c of list) {
+    if (!c.configured) { c.online = false; continue } // an empty slot is never online
+    c.online = onlineSet ? onlineSet.has(c.ch) || hasVideo(c.ch) : c.online || hasVideo(c.ch)
+  }
 }
 /** The camera list as far as a change to it matters (the order is the channels'). */
 const listSig = (list) => list.map((c) => `${c.ch}|${c.online}|${c.configured}|${c.name}|${c.ip}|${c.httpPort}|${c.model}|${c.maker}`).join('\n')
@@ -422,6 +425,7 @@ export class Nvr {
     this.model = ''
     this.serial = '' // the NVR's serial number, read at login (to add it elsewhere by serial)
     this.channels = []
+    this.p2pOnlineSet = null // P2P NVRs: the NVR's last good online-channel list (queryOnlineChlList)
     this.streams = new Map()
     this.scans = new Set() // abort functions of running motion searches
     this.codecSeen = new Map() // "ch:stream" -> { codec: 'h264' | 'h265', width, height, at }
@@ -616,10 +620,9 @@ export class Nvr {
       const httpPort = Number(ipc.nHttpPort) || null
       list.push({ ch: ipc.channel, name: ipc.szChlname || `Camera ${ipc.channel + 1}`, online: ipc.status === 1, configured, model, maker, ip, httpPort })
     }
-    // A P2P (serial) NVR's per-camera status above is unreliable over the cloud: cameras that are
-    // plainly streaming can read as offline, and a read can even come back empty, so believing it at
-    // face value raised false "camera offline" alerts and hid working cameras (#reconcileP2pOnline).
-    if (this.sn && list.length > 0) this.#reconcileP2pOnline(list)
+    // A P2P (serial) NVR's per-camera status above is unreliable over the cloud (it even comes back
+    // empty at random), so the NVR's own queryOnlineChlList is the authority instead (#reconcileP2pOnline).
+    if (this.sn && list.length > 0) await this.#reconcileP2pOnline(list)
     if (list.length > 0) {
       list.sort((a, b) => a.ch - b.ch)
       // (the first list of this process is no change: there was nothing to compare it with)
@@ -636,9 +639,26 @@ export class Nvr {
     return false
   }
 
-  /** Corrects a P2P NVR's camera online flags (see applyP2pOnline): the cloud status flag is unreliable. */
-  #reconcileP2pOnline(list) {
-    applyP2pOnline(list, { hasVideo: (ch) => this.#channelHasVideo(ch) })
+  /**
+   * Corrects a P2P NVR's camera online flags from the NVR's own queryOnlineChlList (see
+   * applyP2pOnline). The list is small and answers in ~100 ms over the cloud; the last good one is
+   * kept, so a read that fails does not blank the states, and a brand-new process with no list yet
+   * falls back to the as-read flag plus video.
+   */
+  async #reconcileP2pOnline(list) {
+    const set = await this.#onlineChannels()
+    if (set) this.p2pOnlineSet = set
+    applyP2pOnline(list, { hasVideo: (ch) => this.#channelHasVideo(ch), onlineSet: set ?? this.p2pOnlineSet ?? null })
+  }
+
+  /** The NVR's online channels (queryOnlineChlList), or null if the read failed. Never throws. */
+  async #onlineChannels() {
+    if (this.userId < 0) return null
+    try {
+      return parseOnlineChlList(String((await transparent(this, 'queryOnlineChlList', `${XML_HEADER}</request>`, 'online channels', { outBytes: 64 * 1024 })) ?? ''))
+    } catch {
+      return null
+    }
   }
 
   /**
