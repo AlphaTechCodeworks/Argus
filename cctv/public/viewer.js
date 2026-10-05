@@ -96,15 +96,17 @@ let singleCam = null // the camera shown full-size
 /** The player on screen in the full-size view: { player, stream: 'main' | 'sub', remote }, or null. */
 const shownPlayer = () => {
   const t = [...singleTiles].reverse().find((x) => !x.closed && x.player.videoWidth && !x.tile.classList.contains('pending'))
-  return t ? { player: t.player, stream: t.streamType === MAIN_STREAM ? 'main' : 'sub', remote: Boolean(singleCam?.remote) } : null
+  // "remote" here means effectively sub-only: a P2P/VPN camera stays on its sub stream only for a
+  // viewer over the internet; on the local network it gets (and the Picture panel measures) the main.
+  return t ? { player: t.player, stream: t.streamType === MAIN_STREAM ? 'main' : 'sub', remote: Boolean(singleCam?.remote) && REMOTE_PAGE } : null
 }
 /** Waits (up to ms) for the main stream to replace the sub stream on screen; the player shown then. */
 const waitForMain = async (ms) => {
   const until = Date.now() + ms
   while (Date.now() < until) {
     const v = shownPlayer()
-    // P2P/VPN cameras and browsers without H.265 stay on the sub stream: no point waiting
-    if (v?.stream === 'main' || !singleCam || singleCam.remote || noMain.has(camKey(singleCam))) return v
+    // a P2P/VPN camera over the internet, and browsers without H.265, stay on the sub stream: no point waiting
+    if (v?.stream === 'main' || !singleCam || (singleCam.remote && REMOTE_PAGE) || noMain.has(camKey(singleCam))) return v
     await new Promise((r) => setTimeout(r, 200))
   }
   return shownPlayer()
@@ -161,7 +163,6 @@ const LAYOUTS = {
   g8: { size: 8 },
   g10: { size: 10 },
   g12: { size: 12 },
-  g15: { size: 15 },
   '1+5': { size: 3, big: [[1, 1, 2, 2]] },
   '1+7': { size: 4, big: [[1, 1, 3, 3]] },
   '1+12': { size: 4, big: [[2, 2, 2, 2]] },
@@ -809,10 +810,11 @@ function openSingle(cam, { fromTap = false } = {}) {
   const sub = new LiveTile(overlay, cam, SUB_STREAM, 0, { ...opts, borrowFrom: lenderFor(cam) })
   singleTiles.push(sub)
   startAhead(cam)
-  // full screen at full quality (the main stream) only with Live HD on the camera (/api/cameras hd;
-  // the server refuses it anyway); cameras reached through TVT P2P or a VPN stay on the sub stream
-  // (the relay has little bandwidth), as do browsers that could not play this main stream
-  if (cam.hd !== false && !noMain.has(single) && !cam.remote) {
+  // full screen at full quality (the main stream) with Live HD on the camera (/api/cameras hd; the
+  // server refuses it anyway). A P2P/VPN camera's main stream rides its relay, so it is pulled for a
+  // viewer on the local network but not for one coming in over the internet (the tunnel is the narrow
+  // part); a browser that could not play this main stream stays on the sub stream too.
+  if (cam.hd !== false && !noMain.has(single) && !(cam.remote && REMOTE_PAGE)) {
     // debounced: the sub-stream shows at once; the HD stream is asked for only once the view settles
     // on this camera (UPGRADE_DELAY_MS), so stepping through does not churn main streams on the NVR.
     const o = overlay
