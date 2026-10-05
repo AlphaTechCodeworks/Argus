@@ -79,40 +79,21 @@ const CHANNEL_QUIET_MS = CHANNEL_REFRESH_MS * 4 // 2 minutes (from ~120 reads an
 const CHANNEL_SETTLED_MS = CHANNEL_REFRESH_MS * 20 // 10 minutes after a change: a rebooting camera is seen back within a turn
 const SILENT_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1' && Number(process.env.CCTV_TEST_SILENT_MS)) || 3000
 const CHANNEL_LOG_MS = CHANNEL_REFRESH_MS * 120 // an hour: how often the list was read, and why not (#logListTurns)
-// P2P (serial) NVRs only: a camera read as "offline" is believed only after it has stayed that way
-// this long with no video, since the cloud read's per-camera status is unreliable (#reconcileP2pOnline)
-const P2P_OFFLINE_GRACE_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1' && Number(process.env.CCTV_TEST_P2P_GRACE_MS)) || 8 * 60_000
-
 /**
- * Corrects a P2P NVR's camera online flags in place: the cloud read's per-camera status is
- * unreliable (a streaming camera can read as offline), so a camera is online while it delivers
- * video, and a status of "offline" is believed only once it has held for `graceMs` with no video.
- * A genuinely down camera still ends up offline after the grace; a one-off bad read does not flip a
- * working camera. Pure (given the inputs) so it can be tested on its own. Mutates `list` and
- * `offlineSince` (ch -> ms the camera first read offline).
+ * Corrects a P2P NVR's camera online flags in place. Over the cloud, GetDeviceIPCInfo only reports a
+ * channel "online" when it has an active media session, so cameras that are plainly working but not
+ * being streamed read as offline; believed at face value this raised false "camera offline" alerts,
+ * hid the cameras, and (since offline slots are not recorded) kept them from recording at all. So a
+ * configured channel is trusted online — a genuinely down camera is caught by the not-recording and
+ * stalled alerts (positive evidence: a stream that will not start, or that loses video), not by this
+ * flag. An empty slot (no camera address and no name) stays offline. A channel delivering video is
+ * online whatever its configured flag reads, in case a flaky read blanks it. Pure, so it can be
+ * tested on its own; mutates `list`.
  * @param {Array<{ch:number, configured:boolean, online:boolean}>} list
- * @param {{ hasVideo:(ch:number)=>boolean, offlineSince:Map<number,number>, now:number, graceMs:number }} ctx
+ * @param {{ hasVideo:(ch:number)=>boolean }} ctx
  */
-export function applyP2pOnline(list, { hasVideo, offlineSince, now, graceMs }) {
-  const seen = new Set()
-  for (const c of list) {
-    seen.add(c.ch)
-    if (!c.configured) {
-      offlineSince.delete(c.ch)
-      continue
-    }
-    if (c.online || hasVideo(c.ch)) {
-      c.online = true
-      offlineSince.delete(c.ch)
-      continue
-    }
-    // read as offline with no video: hold it online through the grace, then believe it
-    const since = offlineSince.get(c.ch) ?? now
-    offlineSince.set(c.ch, since)
-    c.online = now - since < graceMs
-  }
-  // forget cameras no longer in the list, so a removed camera's grace does not linger
-  for (const ch of offlineSince.keys()) if (!seen.has(ch)) offlineSince.delete(ch)
+export function applyP2pOnline(list, { hasVideo }) {
+  for (const c of list) c.online = Boolean(c.configured) || hasVideo(c.ch)
 }
 /** The camera list as far as a change to it matters (the order is the channels'). */
 const listSig = (list) => list.map((c) => `${c.ch}|${c.online}|${c.configured}|${c.name}|${c.ip}|${c.httpPort}|${c.model}|${c.maker}`).join('\n')
@@ -442,9 +423,6 @@ export class Nvr {
     this.serial = '' // the NVR's serial number, read at login (to add it elsewhere by serial)
     this.channels = []
     this.streams = new Map()
-    // P2P NVRs only: when a camera first read as offline, so a flaky cloud read is not believed at
-    // once (#reconcileP2pOnline). ch -> ms; cleared as soon as the camera reads online or has video.
-    this.p2pOfflineSince = new Map()
     this.scans = new Set() // abort functions of running motion searches
     this.codecSeen = new Map() // "ch:stream" -> { codec: 'h264' | 'h265', width, height, at }
     // from the live worker's stats (workerStats): viewers' sub-streams held at the NVR's sub-stream
@@ -658,14 +636,9 @@ export class Nvr {
     return false
   }
 
-  /**
-   * Corrects a P2P NVR's camera online flags in place (the raw status flag is unreliable over the
-   * cloud): a camera is online while it delivers video, and a status of "offline" is believed only
-   * once it has held that way for P2P_OFFLINE_GRACE_MS with no video. A genuinely down camera still
-   * ends up offline after the grace; a one-off bad read no longer flips a working camera.
-   */
+  /** Corrects a P2P NVR's camera online flags (see applyP2pOnline): the cloud status flag is unreliable. */
   #reconcileP2pOnline(list) {
-    applyP2pOnline(list, { hasVideo: (ch) => this.#channelHasVideo(ch), offlineSince: this.p2pOfflineSince, now: Date.now(), graceMs: P2P_OFFLINE_GRACE_MS })
+    applyP2pOnline(list, { hasVideo: (ch) => this.#channelHasVideo(ch) })
   }
 
   /**

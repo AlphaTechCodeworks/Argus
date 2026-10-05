@@ -1,6 +1,7 @@
-// Tests for applyP2pOnline (nvrs.mjs): a P2P NVR's per-camera "offline" flag is unreliable over the
-// cloud, so a camera is taken online while it delivers video, and "offline" is believed only once it
-// has held that way for the grace period with no video. No SDK, no NVR, no network.
+// Tests for applyP2pOnline (nvrs.mjs): over the cloud a P2P NVR's per-camera "online" flag only
+// reflects channels with an active media session, so a configured camera is trusted online (down
+// cameras are caught by the not-recording/stalled alerts instead). An empty slot stays offline; a
+// channel delivering video is online even if a flaky read blanks its configured flag. No SDK, no NVR.
 //   Run:  node cctv/test/p2p-online.test.mjs
 import { applyP2pOnline } from '../nvrs.mjs'
 
@@ -11,82 +12,47 @@ const check = (name, ok, extra = '') => {
 }
 const cam = (ch, online, configured = true) => ({ ch, name: `Camera ${ch}`, online, configured })
 const noVideo = () => false
-const GRACE = 1000
 
-// a camera read online stays online and holds no grace entry
+// a configured camera read offline is trusted online (the cloud status flag is unreliable)
 {
-  const off = new Map()
+  const list = [cam(3, false)]
+  applyP2pOnline(list, { hasVideo: noVideo })
+  check('configured camera read offline is online', list[0].online === true)
+}
+
+// a configured camera read online stays online
+{
   const list = [cam(0, true)]
-  applyP2pOnline(list, { hasVideo: noVideo, offlineSince: off, now: 100, graceMs: GRACE })
-  check('online camera stays online', list[0].online === true && off.size === 0)
+  applyP2pOnline(list, { hasVideo: noVideo })
+  check('configured camera read online stays online', list[0].online === true)
 }
 
-// a camera read offline but delivering video is online, no grace entry
+// an empty (unconfigured) slot stays offline, even if the status flag reads online
 {
-  const off = new Map()
-  const list = [cam(5, false)]
-  applyP2pOnline(list, { hasVideo: (ch) => ch === 5, offlineSince: off, now: 100, graceMs: GRACE })
-  check('streaming camera overrides the offline flag', list[0].online === true && off.size === 0)
+  const list = [cam(1, true, false)]
+  applyP2pOnline(list, { hasVideo: noVideo })
+  check('empty slot stays offline', list[0].online === false)
 }
 
-// offline + no video: online through the grace, then believed offline
+// a channel delivering video is online even if a flaky read blanked its configured flag
 {
-  const off = new Map()
-  let list = [cam(3, false)]
-  applyP2pOnline(list, { hasVideo: noVideo, offlineSince: off, now: 100, graceMs: GRACE })
-  check('first offline read is held online (grace)', list[0].online === true && off.get(3) === 100)
-  list = [cam(3, false)]
-  applyP2pOnline(list, { hasVideo: noVideo, offlineSince: off, now: 500, graceMs: GRACE })
-  check('still online within the grace', list[0].online === true)
-  list = [cam(3, false)]
-  applyP2pOnline(list, { hasVideo: noVideo, offlineSince: off, now: 1200, graceMs: GRACE })
-  check('believed offline after the grace', list[0].online === false, 'now-since >= grace')
+  const list = [cam(5, false, false)]
+  applyP2pOnline(list, { hasVideo: (ch) => ch === 5 })
+  check('streaming channel is online despite a blanked configured flag', list[0].online === true)
 }
 
-// a camera that recovers (reads online again) clears its grace
+// the g-port case: 16 slots, 14 configured cameras, 2 empty -> all 14 online, 2 empty offline,
+// regardless of which read online/offline or which happen to be streaming
 {
-  const off = new Map([[7, 100]])
-  const list = [cam(7, true)]
-  applyP2pOnline(list, { hasVideo: noVideo, offlineSince: off, now: 400, graceMs: GRACE })
-  check('recovered camera is online and grace cleared', list[0].online === true && off.size === 0)
-}
-
-// a camera that starts streaming clears its grace
-{
-  const off = new Map([[9, 100]])
-  const list = [cam(9, false)]
-  applyP2pOnline(list, { hasVideo: (ch) => ch === 9, offlineSince: off, now: 400, graceMs: GRACE })
-  check('camera that begins streaming is online and grace cleared', list[0].online === true && off.size === 0)
-}
-
-// an empty (unconfigured) slot keeps its as-read offline and never holds a grace entry
-{
-  const off = new Map([[1, 100]])
-  const list = [cam(1, false, false)]
-  applyP2pOnline(list, { hasVideo: noVideo, offlineSince: off, now: 400, graceMs: GRACE })
-  check('empty slot stays offline, grace cleared', list[0].online === false && off.size === 0)
-}
-
-// a camera that drops out of the list has its grace forgotten
-{
-  const off = new Map([[2, 100], [4, 100]])
-  const list = [cam(2, false)] // ch4 is gone this read
-  applyP2pOnline(list, { hasVideo: noVideo, offlineSince: off, now: 400, graceMs: GRACE })
-  check('grace of a camera no longer in the list is forgotten', off.has(2) && !off.has(4))
-}
-
-// the exact g-port case: 8 online, 6 configured-offline, 2 empty; ch5 & ch10 stream -> they are online
-{
-  const off = new Map()
-  const online = new Set([2, 4, 8, 9, 12, 13, 14, 15])
-  const streaming = new Set([5, 10])
   const empty = new Set([1, 11])
+  const online = new Set([2, 4, 8, 9, 12, 13, 14, 15]) // the 8 the cloud happened to confirm
+  const streaming = new Set([5, 10])
   const list = []
   for (let ch = 0; ch < 16; ch++) list.push(cam(ch, online.has(ch), !empty.has(ch)))
-  applyP2pOnline(list, { hasVideo: (ch) => streaming.has(ch), offlineSince: off, now: 100, graceMs: GRACE })
+  applyP2pOnline(list, { hasVideo: (ch) => streaming.has(ch) })
   const onlineNow = list.filter((c) => c.online).map((c) => c.ch)
-  check('g-port: streaming ch5 & ch10 become online', list[5].online === true && list[10].online === true)
-  check('g-port: the non-streaming unconfirmed ones held online in grace', [0, 3, 6, 7].every((ch) => list[ch].online === true), onlineNow.join(','))
+  check('g-port: all 14 configured cameras online', onlineNow.length === 14, onlineNow.join(','))
+  check('g-port: the cameras the cloud read offline are now online', [0, 3, 6, 7].every((ch) => list[ch].online === true))
   check('g-port: empty slots stay offline', list[1].online === false && list[11].online === false)
 }
 
