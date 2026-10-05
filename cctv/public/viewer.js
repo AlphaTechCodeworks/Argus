@@ -1111,6 +1111,7 @@ layoutSelect.addEventListener('change', () => {
   page = 0
   markPhoneLayout()
   try { localStorage.setItem(LAYOUT_KEY, layoutSelect.value) } catch {}
+  freshenForPageChange() // the cameras on the page change: drop a big grid's backlog (like the pager)
   render({ keepSingle: true })
 })
 try {
@@ -1119,6 +1120,7 @@ try {
 hideOffline.addEventListener('change', () => {
   page = 0
   try { localStorage.setItem('cctv.hideOffline', hideOffline.checked ? '1' : '0') } catch {}
+  freshenForPageChange()
   render({ keepSingle: true })
 })
 siteSelect.addEventListener('change', () => {
@@ -1126,6 +1128,9 @@ siteSelect.addEventListener('change', () => {
   activeView = null // browsing by site leaves the saved view; the dropdown goes back to "(not saved)"
   renderViewSel()
   try { localStorage.setItem('cctv.site', siteSelect.value) } catch {}
+  // a whole different set of cameras is about to subscribe; drop the old site's video still draining
+  // on the shared socket, or on a big grid the new site's streams queue behind it (never switching)
+  freshenForPageChange()
   render({ keepSingle: true })
 })
 
@@ -1187,6 +1192,7 @@ function selectView(id) {
   }
   page = 0
   renderViewSel()
+  freshenForPageChange() // a view is a different set of cameras; drop the old set's backlog first
   render({ keepSingle: true })
 }
 
