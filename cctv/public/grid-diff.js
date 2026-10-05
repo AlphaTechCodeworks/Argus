@@ -6,11 +6,13 @@
 const key = (c) => `${c.nvr}/${c.ch}`
 
 /**
- * Every camera the grid shows (on all its pages), in list order: the site filter and "Hide offline".
- * @param {{ site: string, online: boolean }[]} cameras
- * @param {{ site: string, hideOffline: boolean }} view
+ * Every camera the grid shows (on all its pages), in list order: the site (or single-NVR) filter and
+ * "Hide offline". `nvr` narrows a multi-NVR site to one of its NVRs (the live page's site submenu).
+ * @param {{ site: string, nvr: string, online: boolean }[]} cameras
+ * @param {{ site?: string, nvr?: string, hideOffline: boolean }} view
  */
-export const shownCameras = (cameras, { site, hideOffline }) => cameras.filter((c) => (!site || c.site === site) && (c.online || !hideOffline))
+export const shownCameras = (cameras, { site, nvr, hideOffline }) =>
+  cameras.filter((c) => (!site || c.site === site) && (!nvr || c.nvr === nvr) && (c.online || !hideOffline))
 
 /**
  * Cameras on the current page.
@@ -18,8 +20,8 @@ export const shownCameras = (cameras, { site, hideOffline }) => cameras.filter((
  * @param {{ site: string, hideOffline: boolean, perPage: number, page: number }} view
  * @returns {{ visible: object[], pages: number, page: number }} page is clamped to the last page
  */
-export function visibleCameras(cameras, { site, hideOffline, perPage, page }) {
-  const shown = shownCameras(cameras, { site, hideOffline })
+export function visibleCameras(cameras, { site, nvr, hideOffline, perPage, page }) {
+  const shown = shownCameras(cameras, { site, nvr, hideOffline })
   const pages = Math.max(1, Math.ceil(shown.length / perPage))
   const p = Math.min(Math.max(page, 0), pages - 1)
   return { visible: shown.slice(p * perPage, (p + 1) * perPage), pages, page: p }

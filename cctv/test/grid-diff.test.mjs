@@ -29,6 +29,10 @@ const edit = (list, i, fields) => list.map((c, j) => (j === i ? { ...c, ...field
   const s = shownCameras(all, view({ site: 'A', hideOffline: true }))
   check('shownCameras: every page\'s cameras under the same filters, in list order', s.map((c) => `${c.nvr}/${c.ch}`).join() === 'n1/0,n1/2,n1/3,n2/0,n2/1')
   check('  the pages are slices of it', visibleCameras(all, view({ site: 'A', hideOffline: true, page: 1 })).visible[0] === s[4])
+  // the site submenu: `nvr` narrows a multi-NVR site to one of its NVRs
+  const byNvr = shownCameras(all, view({ nvr: 'n2', hideOffline: false }))
+  check('nvr filter: only that NVR\'s cameras', byNvr.length > 0 && byNvr.every((c) => c.nvr === 'n2'))
+  check('nvr filter: a filter for nobody shows nothing', shownCameras(all, view({ nvr: 'nope', hideOffline: false })).length === 0)
 }
 
 // ---- nothing changed ---------------------------------------------------------------------------

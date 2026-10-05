@@ -288,9 +288,29 @@ function gridCameras() {
 }
 
 /** The grid's filters and page, for visibleCameras / diffCameras. A view carries its own set, so the
- *  site filter is left off while one is selected (it would only hide cameras the view names). */
+ *  site filter is left off while one is selected (it would only hide cameras the view names). The site
+ *  dropdown's value is a site name, or "@nvr:<id>" for one NVR of a multi-NVR site (its submenu). */
 function gridView(perPage = layoutCells(layoutSelect.value).cells.length) {
-  return { site: activeView ? '' : siteSelect.value, hideOffline: hideOffline.checked, perPage, page }
+  const v = activeView ? '' : siteSelect.value
+  const nvr = v.startsWith('@nvr:') ? v.slice(5) : ''
+  return { site: nvr ? '' : v, nvr, hideOffline: hideOffline.checked, perPage, page }
+}
+
+/** The site dropdown's options: every site, and under a site with more than one NVR, an indented
+ *  option per NVR (value "@nvr:<id>") so a reader can drill into just that NVR — the site submenu. */
+function siteOptions(sites) {
+  const bySite = new Map()
+  for (const s of sites) { const k = s.site || ''; (bySite.get(k) ?? bySite.set(k, []).get(k)).push(s) }
+  const out = [new Option('All sites', '')]
+  for (const name of [...bySite.keys()].sort((a, b) => a.localeCompare(b))) {
+    const list = bySite.get(name)
+    if (list.length <= 1) { out.push(new Option(name, name)); continue }
+    out.push(new Option(`${name} — all (${list.length})`, name)) // the whole site
+    for (const n of list.slice().sort((a, b) => String(a.name ?? '').localeCompare(String(b.name ?? '')))) {
+      out.push(new Option(` ${n.name}`, `@nvr:${n.id}`)) // one NVR of the site, indented
+    }
+  }
+  return out
 }
 
 /** A new tile element for slot.cam (offline tile, or a LiveTile started after startDelayMs). */
@@ -1374,12 +1394,13 @@ async function loadCameras(pre = null) {
   const beforeView = gridView() // (the site list below can reset the site filter)
   cameras = list
 
-  // site filter, shown only when there is more than one site
-  const names = [...new Set(sites.map((s) => s.site))].sort()
+  // site filter, shown only when there is more than one site; a multi-NVR site gets an NVR submenu
+  const names = [...new Set(sites.map((s) => s.site))]
   document.getElementById('siteLabel').hidden = names.length < 2
   const current = siteSelect.value || (() => { try { return localStorage.getItem('cctv.site') ?? '' } catch { return '' } })()
-  siteSelect.replaceChildren(new Option('All sites', ''), ...names.map((n) => new Option(n, n)))
-  siteSelect.value = names.includes(current) ? current : ''
+  const opts = siteOptions(sites)
+  siteSelect.replaceChildren(...opts)
+  siteSelect.value = opts.some((o) => o.value === current) ? current : ''
 
   const down = sites.filter((s) => s.status !== 'online')
   notice.hidden = down.length === 0 && cameras.length > 0
