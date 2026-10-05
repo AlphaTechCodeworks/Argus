@@ -105,7 +105,7 @@ import { pool as playbackTranscodes } from './transcode.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
 import { SAVE_LIMIT, UPLOAD_LIMIT, handleMapsAdmin, handleMapsRead, readMaps } from './maps.mjs'
 import { ADMIN_LINKS_PATH, BODY_LIMIT as LINKS_BODY_LIMIT, LINKS_PATH, handleCameraLinks } from './camera-links.mjs'
-import { LIVE_WORKER, P2P_ENABLED, REC_DB, allCameras, nvrs, readConfig, recIndex, startNvrs, stopNvrs } from './nvrs.mjs'
+import { LIVE_WORKER, P2P_ENABLED, P2P_SERVER, REC_DB, allCameras, nvrs, readConfig, recIndex, startNvrs, stopNvrs } from './nvrs.mjs'
 import { housekeepingAlarms, housekeepingCandidates, runHousekeeping } from './housekeeping.mjs'
 import { playbackApi } from './playback.mjs'
 import { timelineApi } from './rec-api.mjs'
@@ -379,7 +379,8 @@ const alerts = startAlerts({
       error: n.error,
       model: n.model,
       serial: n.serial,
-      host: n.cfg?.host ?? null,
+      // by serial number: the P2P server this process uses (the record's own address is not used)
+      host: n.cfg?.sn ? P2P_SERVER.host : (n.cfg?.host ?? null),
       via: n.cfg?.sn ? 'p2p' : 'lan',
       streams: n.worker ? (n.worker.stats()?.streams ?? null) : n.streams.size,
       cooling: nvrCooling(n.id),

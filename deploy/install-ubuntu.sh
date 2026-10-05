@@ -94,6 +94,9 @@ if [ ! -f /etc/cctv/cctv.env ]; then
     echo "# one child process per NVR for live video, which is also what server recording needs;"
     echo "# without this the app views cameras but records nothing"
     echo "CCTV_LIVE_WORKER=on"
+    echo "# NVRs added by serial number go through the P2P cloud (Eye in Cloud, Provision, TVT) over"
+    echo "# UDP, by default through cli-nat20.eyeincloud.com:9969; CCTV_P2P=off switches them off"
+    echo "#CCTV_P2P_SERVER=cli-nat20.eyeincloud.com:9969"
     if [ "$test_mode" = 1 ]; then
       echo "# TEST INSTALL: sign-in is off. Only for machines reachable from trusted PCs."
       echo "CCTV_AUTH=off"

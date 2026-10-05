@@ -55,7 +55,7 @@
       <fieldset class="st-connect">
         <legend>Connect by</legend>
         <label class="st-check"><input type="radio" name="via" id="f-via-lan" value="lan" checked /> IP address (this network, or port forwarding)</label>
-        <label class="st-check"><input type="radio" name="via" id="f-via-p2p" value="p2p" /> Serial number, through TVT P2P (NVRs at other sites)</label>
+        <label class="st-check"><input type="radio" name="via" id="f-via-p2p" value="p2p" /> Serial number (cloud ID), through the P2P cloud (NVRs at other sites)</label>
       </fieldset>
       <div class="st-row" id="f-lan">
         <label class="st-grow">IP address
@@ -66,10 +66,10 @@
         </label>
       </div>
       <div id="f-p2p" hidden>
-        <label>Serial number
+        <label>Serial number (cloud ID)
           <input id="f-sn" name="sn" maxlength="64" pattern=" *[A-Za-z0-9]{6,64} *" title="Letters and digits, as printed on the NVR" placeholder="as on the NVR's label or QR code" autocapitalize="characters" spellcheck="false" />
         </label>
-        <small class="st-help">Connects through TVT’s cloud relay (c2020.autonat.com): the serial number and the login pass through TVT’s servers. P2P must be switched on in the NVR’s network settings. Video is slower than on the local network, so the full-size view stays on the sub-stream.</small>
+        <small class="st-help">Type the NVR’s serial number, which is its cloud ID: it is printed on the label on the NVR and shown on its P2P page (next to the QR code) in the network settings. No address or port is needed: the server finds the NVR through the P2P cloud these NVRs are sold with (Eye in Cloud, Provision, TVT), and the serial number and the login pass through that cloud. P2P must be switched on in the NVR’s network settings. Video is slower than on the local network, so the full-size view stays on the sub-stream.</small>
       </div>
       <label class="st-check"><input id="f-remote" type="checkbox" /> At another site (VPN or a slow link): the full-size view stays on the sub-stream</label>
       <label>NVR user name

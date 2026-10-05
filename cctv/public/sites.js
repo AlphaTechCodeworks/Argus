@@ -146,7 +146,7 @@ async function load() {
 
 /** How an NVR is reached, for cards and messages. */
 const whereText = (n) =>
-  n.via === 'p2p' ? `TVT P2P · serial ${n.sn}` : n.vpnSite ? `${n.host} via VPN site ${n.vpnSite.name}` : `${n.host}:${n.port}`
+  n.via === 'p2p' ? `P2P cloud · serial ${n.sn}` : n.vpnSite ? `${n.host} via VPN site ${n.vpnSite.name}` : `${n.host}:${n.port}`
 
 /** "12 s", "4 min", "3 h", "2 days" */
 const agoS = (s) => (s < 90 ? `${s} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days`)
@@ -208,14 +208,15 @@ form.addEventListener('submit', async (e) => {
     remote: $('f-remote').checked,
     skipTest: $('f-skip').checked
   }
-  // by serial number the server fills in TVT's relay; sn '' switches an NVR back to its address
+  // by serial number no address or port is sent (the server uses its P2P server); sn '' switches an
+  // NVR back to its address
   if (p2p) body.sn = $('f-sn').value.trim().toUpperCase()
   else Object.assign(body, { sn: '', host: $('f-host').value, port: Number($('f-port').value) })
   if ($('f-password').value) body.password = $('f-password').value
   formError.hidden = true
   saveBtn.disabled = true
   // an unreachable address takes the SDK ~20 s (3 tries x 5 s) to give up on
-  saveBtn.textContent = body.skipTest ? 'Saving…' : p2p ? 'Testing login through TVT P2P (up to 40 s)…' : 'Testing login (up to 20 s)…'
+  saveBtn.textContent = body.skipTest ? 'Saving…' : p2p ? 'Testing login through the P2P cloud (up to 40 s)…' : 'Testing login (up to 20 s)…'
   try {
     if (editing) await api('PUT', `/api/admin/nvrs/${encodeURIComponent(editing)}`, body)
     else await api('POST', '/api/admin/nvrs', body)
@@ -578,7 +579,7 @@ $('logout').addEventListener('click', async () => {
 const me = await fetch('/api/me').then((r) => (r.ok ? r.json() : null))
 if (!me) location.href = '/login.html'
 $('whoami').textContent = me.user
-// adding by serial number (TVT P2P) only where the server has it switched on
+// adding by serial number (P2P cloud) unless the server has it switched off (CCTV_P2P=off)
 $('f-via-p2p').closest('label').hidden = !me.p2p
 $('f-via-p2p').disabled = !me.p2p
 if (!me.admin) {

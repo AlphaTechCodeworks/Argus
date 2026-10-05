@@ -2,8 +2,12 @@
 // cooling.test.mjs does), so nothing can reach a real NVR. Logins to *.invalid hosts succeed,
 // GetDeviceIPCInfo answers with no cameras, and each LivePlay handle gets a fake video stream
 // (25 frames/s, a keyframe every 25 frames) delivered through liveFrames like the real callback.
+// Logins by serial number (LoginEx) succeed for serials starting with FAKE; any other is not found
+// (GetLastError 8, "cannot connect", as the real SDK says after ~20 s). SetNat2Addr says true once
+// and false after that, as the real SDK does (it takes one P2P server per process). The plain-serial
+// add-on is faked too: its registrations are logged as 'p2pserial_add' calls.
 // Every call is logged in globalThis.__fakeSdk.log ({ fn, args, at }).
-import { NET_SDK, liveFrames, FRAME_TYPE_VIDEO } from '../sdk.mjs'
+import { NET_SDK, P2P_SERIAL, liveFrames, FRAME_TYPE_VIDEO } from '../sdk.mjs'
 
 const log = []
 const feeds = new Map() // handle -> { fn, timer, n }
@@ -22,10 +26,20 @@ const MAX_SUBS = Number(process.env.CCTV_FAKE_MAX_SUBS || 0)
 const STOP_MS = Number(process.env.CCTV_FAKE_STOP_MS || 5)
 const subHandles = new Set()
 let lastErr = 0
+let nat2Started = false
 
 const answers = {
   Login: (host) => (/\.invalid$/.test(String(host)) ? nextUser++ : -1),
-  LoginEx: () => -1,
+  LoginEx: (_host, _port, _user, _password, _info, _type, sn) => {
+    if (/^FAKE/.test(String(sn))) return nextUser++
+    lastErr = 8
+    return -1
+  },
+  SetNat2Addr: () => {
+    if (nat2Started) return false
+    nat2Started = true
+    return true
+  },
   GetLastError: () => lastErr,
   LivePlay: (_user, info) => {
     if (MAX_SUBS && info?.streamType === 1 && subHandles.size >= MAX_SUBS) {
@@ -61,6 +75,12 @@ for (const name of Object.keys(NET_SDK)) {
   }
 }
 if (!Object.values(NET_SDK).every((f) => f.fake)) throw new Error('the SDK is not fully faked: not running')
+// the add-on is called directly (not on a worker thread), so its registration is logged in order
+// with the SDK calls: a test can see that a serial was registered before its LoginEx
+P2P_SERIAL.add = (sn) => {
+  log.push({ fn: 'p2pserial_add', args: [sn], at: Date.now() })
+  return 1
+}
 
 function stopFeed(h) {
   const f = feeds.get(h)

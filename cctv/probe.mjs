@@ -62,14 +62,15 @@ export function tcpReachable(host, port, timeoutMs = PROBE_MS) {
 
 /**
  * The address to probe for an NVR config, or null when no sensible probe can be made
- * (then we skip the probe rather than guess). An NVR reached by serial number through
- * TVT's P2P relay (cfg.sn) has the relay's address in host/port, which is exactly what
- * the SDK connects to, so the same probe applies.
- * @param {{ host?: string, port?: number|string }} cfg
+ * (then we skip the probe rather than guess). An NVR reached by serial number (cfg.sn) is
+ * never probed: the SDK reaches it through the P2P cloud over UDP only, so a TCP connect
+ * to any address says nothing about it, and the host/port in its record are not used.
+ * @param {{ host?: string, port?: number|string, sn?: string }} cfg
  */
-export function probeTarget({ host, port } = {}) {
+export function probeTarget({ host, port, sn } = {}) {
   const h = String(host ?? '').trim()
   const p = Number(port)
+  if (sn) return null
   if (!h) return null
   if (!(PROBE_MS > 0)) return null // CCTV_PROBE_MS=0 switches the probe off entirely
   if (!Number.isInteger(p) || p < 1 || p > 65535) return null

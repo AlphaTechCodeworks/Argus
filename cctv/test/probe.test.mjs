@@ -81,8 +81,9 @@ const listen = () =>
   check('a nonsense port: no probe', probeTarget({ host: '10.0.0.1', port: 'x' }) === null)
   check('a nonsense host: no probe', probeTarget({ host: 'not a host!', port: 6036 }) === null)
   check('nothing at all: no probe', probeTarget() === null && probeTarget({}) === null)
-  // a relay/P2P NVR has the relay's address in host/port, which is what the SDK connects to
-  check('a relay address is probed like any other', probeTarget({ host: 'c2020.autonat.com', port: 7968 })?.host === 'c2020.autonat.com')
+  // an NVR reached by serial number goes through the P2P cloud over UDP: a TCP connect says nothing
+  check('an NVR by serial number is not probed (its record carries the old relay address)', probeTarget({ host: 'c2020.autonat.com', port: 7968, sn: 'N63432AB12CD' }) === null)
+  check('... nor without an address at all', probeTarget({ sn: 'N63432AB12CD' }) === null)
 }
 
 check('the default probe timeout is short', PROBE_MS > 0 && PROBE_MS <= 5000, String(PROBE_MS))

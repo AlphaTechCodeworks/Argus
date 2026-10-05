@@ -5,8 +5,9 @@
 //   node cctv/nvr.mjs rename-site "<old>" "<new>" rename a site on all of its NVRs
 //   node cctv/nvr.mjs password <id>              change the login an NVR is accessed with
 //   node cctv/nvr.mjs remove <id>                remove an NVR
-import { NVRS_FILE, readConfig, testLogin, uniqueId, writeConfig } from './nvrs.mjs'
+import { NVRS_FILE, readConfig, testLogin, uniqueId, whereIs, writeConfig } from './nvrs.mjs'
 import { ask, askHidden } from './prompt.mjs'
+import { cleanupSdk } from './sdk.mjs'
 
 const [cmd, ...args] = process.argv.slice(2)
 const cfg = readConfig()
@@ -34,7 +35,7 @@ const askLogin = async (defaults = {}) => {
 }
 
 const tryLogin = async (nvr) => {
-  process.stdout.write(`Testing login to ${nvr.host}:${nvr.port}... `)
+  process.stdout.write(`Testing login to ${whereIs(nvr)}... `)
   try {
     const model = await testLogin(nvr)
     console.log(`OK (${model})`)
@@ -43,6 +44,10 @@ const tryLogin = async (nvr) => {
     console.log(`FAILED: ${e.message}`)
     const keep = await ask('Save anyway? (y/N)', 'n')
     return keep.toLowerCase().startsWith('y')
+  } finally {
+    // this tool exits right after: once a login by serial number has started the SDK's NAT threads,
+    // an exit without NET_SDK_Cleanup can end in a segfault (sdk.mjs cleanupSdk)
+    if (nvr.sn) await cleanupSdk()
   }
 }
 
@@ -56,7 +61,7 @@ switch (cmd) {
     const bySite = Map.groupBy(cfg.nvrs, (n) => n.site || 'Unassigned')
     for (const [site, list] of [...bySite].sort(([a], [b]) => a.localeCompare(b))) {
       console.log(`${site}`)
-      for (const n of list) console.log(`  ${n.id.padEnd(20)} ${n.name.padEnd(24)} ${n.host}:${n.port}  (user ${n.user})`)
+      for (const n of list) console.log(`  ${n.id.padEnd(20)} ${n.name.padEnd(24)} ${whereIs(n)}  (user ${n.user})`)
     }
     break
   }
@@ -110,7 +115,7 @@ switch (cmd) {
 
   case 'remove': {
     const nvr = find(args[0])
-    const sure = await ask(`Remove ${nvr.id} (${nvr.name}, ${nvr.host})? (y/N)`, 'n')
+    const sure = await ask(`Remove ${nvr.id} (${nvr.name}, ${whereIs(nvr)})? (y/N)`, 'n')
     if (!sure.toLowerCase().startsWith('y')) break
     cfg.nvrs = cfg.nvrs.filter((n) => n !== nvr)
     save(`Removed ${nvr.id}.`)

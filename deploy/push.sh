@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Pushes the current code to another machine and (re)starts it there, over SSH (key login).
 #   deploy/push.sh                          test PC: Ubuntu in WSL on 192.168.3.147 (test install, sign-in off)
-#   deploy/push.sh --code-only              ... only the app code, laid over a copy of the release already
-#                                           installed there (no Docker needed on this PC; refused if
-#                                           package.json changed, as the npm packages would differ)
+#   deploy/push.sh --code-only              ... only the app code (and bin/linux/libp2pserial.so), laid over a
+#                                           copy of the release already installed there (no Docker needed
+#                                           on this PC; refused if package.json changed, as the npm
+#                                           packages would differ)
 #   deploy/push.sh --data                   ... and on the first install copy this PC's NVR list (data/nvrs.json)
 #   deploy/push.sh --linux user@server      a Linux server (runs the installer with sudo; normal sign-in)
 # Each push installs a new release next to the previous ones (the last 3 are kept); see deploy/install-ubuntu.sh.
@@ -41,7 +42,9 @@ if [ "$code_only" = 1 ]; then
   echo "== packing the app code (no Docker)" >&2
   echo "$release" > "$work/RELEASE"
   bundle="$work/cctv-code-$release.tar"
-  tar -cf "$bundle" -C "$root" --exclude=cctv/test cctv deploy package.json VERSION -C "$work" RELEASE
+  # with the plain-serial add-on (logins by serial number, see cctv/sdk.mjs): it is the app's own
+  # library, not the vendor SDK's, and a release installed before it came has no copy of it
+  tar -cf "$bundle" -C "$root" --exclude=cctv/test cctv deploy package.json VERSION bin/linux/libp2pserial.so -C "$work" RELEASE
 else
   echo "== building the release" >&2
   bundle="$(bash "$root/deploy/bundle.sh")"

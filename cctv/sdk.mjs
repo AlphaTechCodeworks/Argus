@@ -28,6 +28,28 @@ if (process.env.CCTV_KOFFI_DEFAULTS !== '1') {
   koffi.config({ ...koffi.config(), max_async_calls: 1024, resident_async_pools: 16, async_stack_size: 1 << 20 })
 }
 
+// Logins by serial number need the plain-serial add-on, bin/linux/libp2pserial.so (native/p2pserial).
+// For such a login the SDK gives the P2P cloud the upper-case MD5 of the serial as the device code,
+// but the cloud knows these NVRs by the plain serial, so it answered "not online" and every login
+// failed ("cannot connect" after ~20 s). The SDK calls the NAT library's NAT_CLIENT_ConnectDev through
+// its PLT; the add-on stands in front of that function and puts the plain serial back for the serials
+// registered with it (plainSerial below), passing every other call through unchanged. For that it has
+// to come before the SDK in the symbol search order: it is loaded first, with its symbols global
+// (RTLD_GLOBAL). For the same reason the SDK must never be loaded with { deep: true }: RTLD_DEEPBIND
+// makes the SDK look in its own dependencies first, which goes straight past the add-on. Without the
+// add-on everything else works, and logins by serial number are still tried (plainSerial warns once).
+const P2P_SERIAL_LIB = join(import.meta.dirname, '../bin/linux/libp2pserial.so')
+let p2pSerialLib = null
+let p2pSerialMissing = '' // why the add-on is not loaded, for plainSerial's warning
+if (!existsSync(P2P_SERIAL_LIB)) p2pSerialMissing = `${P2P_SERIAL_LIB} is missing`
+else {
+  try {
+    p2pSerialLib = koffi.load(P2P_SERIAL_LIB, { global: true })
+  } catch (e) {
+    p2pSerialMissing = `${P2P_SERIAL_LIB} could not be loaded (${e.message})`
+  }
+}
+
 export const lib = koffi.load(join(import.meta.dirname, '../bin/linux/libdvrnetsdk.so'))
 
 // ---- tracked, time-limited calls ------------------------------------------
@@ -40,8 +62,9 @@ const MAX_NATIVE = Math.max(4, POOL - 16)
 // per-function budgets (ms); anything slower is "late"
 const BUDGETS = {
   NET_SDK_Login: 20_000, // SetConnectTime 5 s x 3 tries
-  NET_SDK_LoginEx: 40_000, // by serial number through TVT's P2P relay: slower than a LAN login
+  NET_SDK_LoginEx: 40_000, // by serial number through the P2P cloud: the SDK gives up by itself after ~20 s
   NET_SDK_SetNat2Addr: 10_000,
+  NET_SDK_Cleanup: 10_000, // 0.5-3 s after a login by serial number
   NET_SDK_Logout: 10_000,
   NET_SDK_LivePlay: 15_000,
   NET_SDK_StopLivePlay: 10_000,
@@ -451,12 +474,14 @@ export const FrameCallback = koffi.proto(
 
 export const NET_SDK = {
   Init: bind('bool NET_SDK_Init()'),
+  // only for a one-shot tool about to exit (cleanupSdk): it ends every session of the process
+  Cleanup: bind('bool NET_SDK_Cleanup()'),
   SetConnectTime: bind('bool NET_SDK_SetConnectTime(uint32 waitMs, uint32 tries)'),
   SetReconnect: bind('bool NET_SDK_SetReconnect(uint32 intervalMs, int enable)'),
   GetLastError: bind('uint32 NET_SDK_GetLastError()'),
   Login: bind('NET_SDK_Login', 'long', ['str', 'uint16', 'str', 'str', koffi.out(koffi.pointer(LPNET_SDK_DEVICEINFO))]),
-  // by serial number through TVT's P2P relay (connect type NET_SDK_CONNECT_NAT20 = 2); the
-  // relay's address goes where the NVR's would, after SetNat2Addr (DVR_NET_SDK.h)
+  // by serial number through the P2P cloud (connect type NET_SDK_CONNECT_NAT20 = 2, DVR_NET_SDK.h),
+  // after SetNat2Addr (setP2pServer); with this connect type the address given here is not used
   LoginEx: bind('NET_SDK_LoginEx', 'long', ['str', 'uint16', 'str', 'str', koffi.out(koffi.pointer(LPNET_SDK_DEVICEINFO)), 'int', 'str']),
   SetNat2Addr: bind('bool NET_SDK_SetNat2Addr(str serverAddr, uint16 port)'),
   Logout: bind('bool NET_SDK_Logout(long userId)'),
@@ -510,6 +535,80 @@ export const initSdk = () => {
     await sdkCall(NET_SDK.SetReconnect, 10_000, 1)
   })()
   return initialised
+}
+
+// ---- logins by serial number --------------------------------------------------
+
+// The add-on's registration (see the top of this file). Called directly, not on a worker thread like
+// the SDK's functions: it only adds the serial to a small table and never waits on the SDK.
+// (test/fake-sdk.mjs replaces add, to see what is registered)
+export const P2P_SERIAL = { add: p2pSerialLib?.func('int p2pserial_add(const char *serial)') ?? null }
+let p2pSerialWarned = false
+/**
+ * Registers a serial number with the plain-serial add-on, before a login by that serial number, so
+ * the P2P cloud is asked for the NVR by its plain serial. Returns whether the add-on is active and
+ * took it. Without the add-on the login is still tried (the SDK then sends the MD5, which the cloud
+ * does not know), and one warning says why it will fail.
+ */
+export const plainSerial = (sn) => {
+  if (!P2P_SERIAL.add) {
+    if (!p2pSerialWarned) {
+      p2pSerialWarned = true
+      console.warn(`[sdk] ${p2pSerialMissing || 'the plain-serial add-on is not loaded'}: logins by serial number are tried, but the SDK asks the P2P cloud for an MD5 of the serial, which the cloud does not know, so they fail ("cannot connect" after ~20 s). Install bin/linux/libp2pserial.so with the app.`)
+    }
+    return false
+  }
+  if (P2P_SERIAL.add(String(sn)) === 1) return true
+  console.warn(`[sdk] the plain-serial add-on did not take serial ${sn} (empty, too long, or its table is full); this login asks the cloud for its MD5`)
+  return false
+}
+
+// The P2P server the SDK was pointed at in this process (setP2pServer): { addr, ok }, or null
+let p2pServer = null
+/**
+ * Points the SDK at the P2P cloud's server for logins by serial number (NET_SDK_SetNat2Addr). The SDK
+ * takes that once per process: the first call starts its NAT client and returns true, every later one
+ * returns false and changes nothing (until NET_SDK_Cleanup and NET_SDK_Init). So the first call here
+ * is the real one, and the address is remembered once the SDK has taken it; a later call with the same
+ * address resolves true without asking the SDK, and one with another address is refused, naming the
+ * address this process is bound to. Resolves the SDK's answer to the real call.
+ * @param {object} [opts] sdkCallT options for the real call (nvr, tag)
+ */
+export const setP2pServer = (host, port, opts = {}) => {
+  const addr = `${host}:${port}`
+  if (p2pServer && p2pServer.addr !== addr) {
+    return Promise.reject(new Error(`the P2P server ${addr} cannot be used: this process is bound to the P2P server ${p2pServer.addr} (the SDK takes one per process; a restart is needed to change it)`))
+  }
+  if (!p2pServer) {
+    const mine = { addr }
+    const forget = () => {
+      if (p2pServer === mine) p2pServer = null
+    }
+    // a call that came back after its time limit may still have started the NAT client: bound after all
+    const onLate = (ok) => {
+      if (ok && !p2pServer) p2pServer = { addr, ok: Promise.resolve(true) }
+    }
+    mine.ok = sdkCallT({ ...opts, onLate }, NET_SDK.SetNat2Addr, String(host), Number(port)).then(Boolean)
+    // refused or failed: no NAT client was started, so the next login asks again
+    mine.ok.then((ok) => ok || forget(), forget)
+    p2pServer = mine
+  }
+  return p2pServer.ok
+}
+
+/**
+ * NET_SDK_Cleanup, for a one-shot tool about to exit after a login by serial number (nvr.mjs): a
+ * process that exits normally within ~30 s of such a login without it can segfault in the SDK's NAT
+ * threads (exit code 139). Takes 0.5-3 s; resolves false if it failed. Never in the server or an NVR
+ * worker: it ends every session of the process (they end with SIGKILL). Afterwards initSdk starts
+ * the SDK afresh, and the P2P server can be set again.
+ */
+export const cleanupSdk = async () => {
+  if (!initialised) return true
+  await initialised.catch(() => {})
+  initialised = null
+  p2pServer = null
+  return sdkCall(NET_SDK.Cleanup).catch(() => false)
 }
 
 // ---- frames ---------------------------------------------------------------

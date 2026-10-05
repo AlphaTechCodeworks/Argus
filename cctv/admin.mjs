@@ -3,8 +3,8 @@
 //
 //   GET    /api/admin/nvrs        -> [{ id, site, name, host, port, sn, via, user, status, error, model, cameras, camerasOnline }]
 //   POST   /api/admin/nvrs        { site, name, host, port, user, password, skipTest? } -> { id, model }
-//                                  or { site, name, sn, user, password, skipTest? }: by serial number,
-//                                  through TVT's P2P relay (host/port default to the relay)
+//                                  or { site, name, sn, user, password, skipTest? }: by serial number (the
+//                                  NVR's cloud ID), through the P2P cloud; no host/port (any sent are not used)
 //   PUT    /api/admin/nvrs/:id    { site?, name?, host?, port?, sn?, user?, password?, skipTest? } -> { id, model? }
 //                                  (sn: '' switches back to connecting by address; send host then)
 //   DELETE /api/admin/nvrs/:id

@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- NVRs by serial number: Sites -> Add NVR -> **Serial number (cloud ID)** takes the NVR's serial
+  number, as printed on it and shown on its P2P page, and needs no address or port. The server
+  reaches the NVR through the P2P cloud these NVRs are sold with (Eye in Cloud, Provision and TVT
+  are one cloud), over UDP. It is on by default now; `CCTV_P2P=off` switches it off. On upgrade,
+  NVRs saved by serial number during an earlier `CCTV_P2P=on` trial, which were skipped since, start
+  connecting; set `CCTV_P2P=off` (or remove them) to keep the old behaviour. Logins go one at a
+  time, and a login by serial number to an NVR the cloud does not find takes about 20 s before it
+  fails (retried while the NVR is offline), so other NVRs' logins can wait behind it. Every login
+  by serial number in a process goes through one cloud server, `cli-nat20.eyeincloud.com:9969` by
+  default, or `CCTV_P2P_SERVER=host:port`; the host and port stored in a serial NVR's record
+  (older records: `c2020.autonat.com:7968`) are not used, and no TCP check is made before such a
+  login. Logins by serial number used to fail with "cannot connect" after 20 s because the vendor
+  SDK asks the cloud for an MD5 of the serial: the new add-on `bin/linux/libp2pserial.so`
+  (`native/p2pserial`, loaded ahead of the SDK by `cctv/sdk.mjs`) puts the plain serial back; the
+  vendor libraries are unchanged. Without the add-on such logins are still tried, with one warning
+  in the log. `deploy/push.sh --code-only` carries the add-on too. `node cctv/nvr.mjs` calls
+  `NET_SDK_Cleanup` before it exits after a login by serial number (it could end in a segfault).
 - Line crossing: an admin draws up to four lines on a camera's live picture (full-size Live view,
   **Lines**) and Argus writes them into the camera's own line-crossing detection through the NVR
   (`/api/admin/nvrs/:id/channels/:ch/lines`, `cctv/tripwire.mjs`): confirmed, logged before it is

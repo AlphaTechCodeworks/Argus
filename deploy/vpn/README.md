@@ -479,7 +479,9 @@ forward can work. In this order:
    router pinhole for UDP 51820 to the server.
 3. A small VPS as a dumb UDP relay (a separate design; it never holds site keys).
 
-TVT P2P stays off the table.
+Without the VPN, a site's NVRs can also be added by serial number through the P2P cloud they are
+sold with (Sites, Add NVR, Serial number): no port forward at either end, but the login and the
+video then pass through that cloud.
 
 ## Security notes
 

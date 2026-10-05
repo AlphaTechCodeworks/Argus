@@ -18,7 +18,7 @@ import { DATA_DIR } from './auth.mjs'
 import { Lane, PRIORITY, connectLane } from './lanes.mjs'
 import { LiveStream } from './live.mjs'
 import { createPlayback } from './playback.mjs'
-import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastError, lateCalls, nvrCooling, sdkCallT, sdkStuck } from './sdk.mjs'
+import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastError, lateCalls, nvrCooling, plainSerial, sdkCallT, sdkStuck, setP2pServer } from './sdk.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
 import { XML_HEADER, transparent, xmlSettled } from './nvr-xml.mjs'
 import { startWorker } from './worker-supervisor.mjs'
@@ -33,23 +33,36 @@ import { noteRecorderGap, noteRecorderQueues } from './thin-pace.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
 
-// NVRs added by serial number connect through TVT's P2P 2.0 relay instead of by address (for
-// sites without port forwarding). The relay is TVT's cloud service: the serial number and the
-// login go through it. Address as in TVT's own web client (autonat config: natIp_2_0/natPort_2_0).
-export const P2P_RELAY = { host: 'c2020.autonat.com', port: 7968 }
-// Off unless CCTV_P2P=on. Tested 2026-09-24 with this SDK (1.2.1.036) against a P2P-enabled NVR
-// (P2P 2.0, connected): the relay login fails ("cannot connect" after ~22 s), probably because
-// these NVRs require P2P 2.0's security code, which this SDK's LoginEx cannot pass, and the
-// process then segfaulted in the SDK's P2P threads on exit. Needs a newer TVT SDK.
-export const P2P_ENABLED = process.env.CCTV_P2P === 'on'
-const P2P_OFF = 'Adding NVRs by serial number is switched off: this TVT SDK cannot log in through TVT\u2019s P2P cloud to these NVRs yet. Connect by IP address (on site, over a VPN or with port forwarding).'
+// NVRs added by serial number (the NVR's cloud ID) are reached through the P2P cloud they are sold
+// with instead of by address, for sites without port forwarding or a VPN. Eye in Cloud, Provision
+// and TVT are one cloud; the serial number and the login go through it, over UDP (P2P 2.0). The SDK
+// takes one cloud server per process (sdk.mjs setP2pServer), so every login by serial number uses
+// P2P_SERVER: cli-nat20.eyeincloud.com port 9969, the address a login was proven through end to end
+// (2026-10-04), or CCTV_P2P_SERVER=host:port (device.provisionisr-nat2.com:9968 and
+// c2020.autonat.com:7968 reach the same cloud). A serial NVR's record has a host and port like every
+// other (the P2P server it was saved with; older records: c2020.autonat.com:7968), but they are not
+// used to connect.
+const P2P_DEFAULT = { host: 'cli-nat20.eyeincloud.com', port: 9969 }
+const p2pServerFrom = (value) => {
+  if (!value) return P2P_DEFAULT
+  const m = /^([A-Za-z0-9.-]{1,253}):(\d{1,5})$/.exec(value.trim())
+  if (m && Number(m[2]) >= 1 && Number(m[2]) <= 65535) return { host: m[1], port: Number(m[2]) }
+  console.warn(`CCTV_P2P_SERVER=${value} is not host:port; using ${P2P_DEFAULT.host}:${P2P_DEFAULT.port}`)
+  return P2P_DEFAULT
+}
+export const P2P_SERVER = p2pServerFrom(process.env.CCTV_P2P_SERVER)
+// On unless CCTV_P2P=off. Until 2026-10 it was off: this SDK asks the cloud for an MD5 of the serial
+// instead of the serial, so every login by serial number failed ("cannot connect" after ~20 s); the
+// plain-serial add-on (sdk.mjs) puts the serial back.
+export const P2P_ENABLED = process.env.CCTV_P2P !== 'off'
+const P2P_OFF = 'Adding NVRs by serial number is switched off on this server (CCTV_P2P=off). Connect by IP address (on site, over a VPN or with port forwarding).'
 const NET_SDK_CONNECT_NAT20 = 2
 // CCTV_LIVE_WORKER=on: each NVR's live video comes from its own child process (nvr-worker.mjs,
 // worker-supervisor.mjs), fanned out here by stream-hub.mjs; this process keeps a control-only
 // login (picture and stream settings, playback). Never inside a worker itself.
 export const LIVE_WORKER = process.env.CCTV_LIVE_WORKER === 'on' && !process.env.CCTV_WORKER_NVR
 /** How an NVR is reached, for messages. */
-export const whereIs = (cfg) => (cfg.sn ? `serial ${cfg.sn} (TVT P2P)` : `${cfg.host}:${cfg.port}`)
+export const whereIs = (cfg) => (cfg.sn ? `serial ${cfg.sn} (P2P cloud)` : `${cfg.host}:${cfg.port}`)
 
 const MAX_CHANNEL_FAILURES = 4 // ~2 minutes of failed channel refreshes -> log in again
 // camera list poll (tests with the fake SDK: CCTV_TEST_REFRESH_MS)
@@ -91,7 +104,7 @@ export const uniqueId = (base, taken) => {
   return id
 }
 
-/** @returns {{ nvrs: Array<{ id: string, site: string, name: string, host: string, port: number, user: string, password: string, sn?: string }> }} (sn: reached by serial number through TVT's P2P relay; host/port are then the relay) */
+/** @returns {{ nvrs: Array<{ id: string, site: string, name: string, host: string, port: number, user: string, password: string, sn?: string }> }} (sn: reached by serial number through the P2P cloud; host/port are then not used) */
 export const readConfig = () => {
   if (!existsSync(NVRS_FILE)) return { nvrs: [] }
   const cfg = JSON.parse(readFileSync(NVRS_FILE, 'utf8'))
@@ -124,7 +137,7 @@ export const cleanNvrFields = (input, { partial = false } = {}) => {
   text('user', 64, true)
   // at another site (VPN or a slow link): the full-size view stays on the sub stream
   if (input.remote !== undefined) out.remote = input.remote === true
-  // serial number: connect through TVT's P2P relay ('' = connect by address)
+  // serial number: connect through the P2P cloud ('' = connect by address)
   if (input.sn !== undefined) {
     const sn = String(input.sn ?? '').trim().toUpperCase()
     if (sn && !/^[A-Z0-9]{6,64}$/.test(sn)) throw new Error('Serial number: letters and digits only, as printed on the NVR')
@@ -132,9 +145,10 @@ export const cleanNvrFields = (input, { partial = false } = {}) => {
     out.sn = sn
   }
   if (out.sn) {
-    // the relay's address takes the place of the NVR's
-    if (input.host === undefined || input.host === '') out.host = P2P_RELAY.host
-    if (input.port === undefined || input.port === '') out.port = P2P_RELAY.port
+    // no address is needed: the record gets the P2P server's in place of the NVR's, and an address
+    // sent along is not used (one P2P server per process; login() does not read these)
+    out.host = P2P_SERVER.host
+    out.port = P2P_SERVER.port
   } else if (input.sn === '' && partial && input.host === undefined) {
     throw new Error('Enter the NVR IP address to connect to it by address')
   }
@@ -173,22 +187,25 @@ const login = async ({ host, port, user, password, sn }, { tag, nvr = '', info =
   // seconds and can really be abandoned, so when it fails we never make the blocking call and
   // this counts as an ordinary failed login attempt, with the usual backoff. The probe is done
   // before taking the connect lane, so an unreachable NVR does not hold up healthy ones either.
-  const target = probeTarget({ host, port })
+  // An NVR reached by serial number is not probed: the P2P cloud answers over UDP only.
+  const target = probeTarget({ host, port, sn })
   if (target) {
     const reach = await tcpReachable(target.host, target.port)
     if (!reach.ok) {
-      return { userId: -1, why: `${sn ? 'TVT’s P2P relay' : 'The NVR'} ${reach.why}` }
+      return { userId: -1, why: `The NVR ${reach.why}` }
     }
   }
   // mayBlock: a login is known to sit inside this SDK for minutes; the watchdog must not read
   // that on its own as a hung SDK (see watchdog.mjs), and logoutLate below already tidies up
   // a login that succeeds after we gave up on it.
   const byAddress = () => sdkCallT({ nvr, tag, mayBlock: true, onLate: logoutLate(tag, nvr) }, NET_SDK.Login, host, Number(port), user, password, info)
-  // by serial number: point the SDK at the relay, then log in through it (one lane task, so no
-  // other login changes the relay address in between)
+  // by serial number: the plain serial registered with the add-on, the SDK pointed at the P2P server
+  // (the first time in this process; the record's own host and port are not used), then the login
   const bySerial = async () => {
-    if (!(await sdkCallT({ nvr, tag: `${tag}: relay address` }, NET_SDK.SetNat2Addr, host, Number(port)))) throw new Error(`the SDK did not accept the P2P relay ${host}:${port}`)
-    return sdkCallT({ nvr, tag, mayBlock: true, onLate: logoutLate(tag, nvr) }, NET_SDK.LoginEx, host, Number(port), user, password, info, NET_SDK_CONNECT_NAT20, sn)
+    plainSerial(sn)
+    const { host: p2pHost, port: p2pPort } = P2P_SERVER
+    if (!(await setP2pServer(p2pHost, p2pPort, { nvr, tag: `${tag}: P2P server` }))) throw new Error(`the SDK did not accept the P2P server ${p2pHost}:${p2pPort}`)
+    return sdkCallT({ nvr, tag, mayBlock: true, onLate: logoutLate(tag, nvr) }, NET_SDK.LoginEx, p2pHost, p2pPort, user, password, info, NET_SDK_CONNECT_NAT20, sn)
   }
   const userId = await connectLane
     .run(sn ? bySerial : byAddress, { priority })
@@ -198,7 +215,7 @@ const login = async ({ host, port, user, password, sn }, { tag, nvr = '', info =
     })
   if (userId >= 0) return { userId, why: '' }
   // a timeout is not an SDK error (the SDK would report "success")
-  const late = sn ? 'The NVR did not answer through TVT’s P2P relay in time (is it online, with P2P switched on in its network settings?)' : 'The NVR did not answer in time'
+  const late = sn ? 'The NVR did not answer through the P2P cloud in time (is it online, with P2P switched on in its network settings?)' : 'The NVR did not answer in time'
   const why = err ? (err.name === 'SdkTimeout' ? late : err.message) : await lastError()
   return { userId: -1, why }
 }
@@ -1091,7 +1108,7 @@ async function syncNow() {
   }
   // NVRs by serial number only while P2P is switched on (see P2P_ENABLED)
   const skipped = cfg.nvrs.filter((n) => n?.sn && !P2P_ENABLED)
-  if (skipped.length) console.warn(`${skipped.map((n) => n.id).join(', ')}: by serial number (TVT P2P), which is switched off; not connecting`)
+  if (skipped.length) console.warn(`${skipped.map((n) => n.id).join(', ')}: by serial number (P2P cloud), which is switched off on this server (CCTV_P2P=off); not connecting`)
   const wanted = new Map(cfg.nvrs.filter((n) => n && n.id && n.host && (!n.sn || P2P_ENABLED)).map((n) => [n.id, n]))
   for (const [id, nvr] of nvrs) {
     if (!wanted.has(id)) {
