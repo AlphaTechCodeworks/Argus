@@ -58,6 +58,11 @@ const LINK_DOWN_ERROR = 9
 // a valid handle that sends no video this long after the start: the NVR refused it silently
 // (nvr-2 does this at its stream limit); treated as a fast refusal
 export const FIRST_FRAME_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1' && Number(process.env.CCTV_TEST_FIRST_FRAME_MS)) || 8000
+// A P2P main stream (full screen) is the heavy one -- a big-sensor H.265 picture pulled over a cloud
+// relay -- and its first keyframe can take longer than the 8 s above to arrive when the tunnel is
+// busy, tripping the watchdog and restarting a stream that was about to play (seen on site-3, 5 MP
+// over NAT 1.0). Give that case a wider window; the sub stream and LAN main keep the 8 s default.
+export const FIRST_FRAME_P2P_MAIN_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1' && Number(process.env.CCTV_TEST_FIRST_FRAME_MS)) || 20_000
 
 // Viewers' starts are paced in the NVR workers, where recording shares the NVR's login with them.
 // The main process without workers (CCTV_LIVE_WORKER off) starts them as it always has.
@@ -179,6 +184,14 @@ export class LiveStream {
   async #start() {
     this.state = 'starting'
     const nvr = this.nvr
+    // A P2P NVR caps how many streams it will serve at once (and the tunnel its bandwidth): with a
+    // grid's worth of sub-streams open it refuses a main stream outright ("cannot connect"). Those
+    // subs have no viewer once a full-size view is open -- they only linger (SUB_LINGER_MS) for a
+    // quick return to the grid -- yet they held the NVR's slots for ~3 minutes, which is why the
+    // main (full screen) took that long to appear. Free the viewer-less ones now so the main gets a
+    // slot; they reconnect when the grid comes back. Through the idle-stop queue, which paces stops
+    // one at a time (several stops together inside the SDK once corrupted its heap).
+    if (this.streamType === 0 && nvr.cfg?.sn) this.#freeIdleSubs()
     const info = { lChannel: this.ch, streamType: this.streamType, hPlayWnd: null, bNoDecode: 1 }
     this.nativeStarting = true
     let cooling = false
@@ -280,11 +293,12 @@ export class LiveStream {
     for (const ws of this.clients) ws.waitForKey = true
     this.gotVideo = false
     clearTimeout(this.firstFrameTimer)
+    const firstFrameMs = this.streamType === 0 && this.nvr.cfg?.sn ? FIRST_FRAME_P2P_MAIN_MS : FIRST_FRAME_MS
     this.firstFrameTimer = setTimeout(() => {
       if (this.state !== 'playing' || this.handle !== handle || this.gotVideo) return
-      this.lastFailure = { at: Date.now(), ms: FIRST_FRAME_MS, fast: true, silent: true, reason: `no video within ${FIRST_FRAME_MS / 1000} s of starting (refused by the NVR?)` }
+      this.lastFailure = { at: Date.now(), ms: firstFrameMs, fast: true, silent: true, reason: `no video within ${firstFrameMs / 1000} s of starting (refused by the NVR?)` }
       this.restart(this.lastFailure.reason)
-    }, FIRST_FRAME_MS)
+    }, firstFrameMs)
     this.firstFrameTimer.unref?.()
     liveFrames.claim(handle, this.onFrame) // delivers frames that arrived before LivePlay returned
     nvr.liveStarted()
@@ -365,6 +379,18 @@ export class LiveStream {
     if (this.clients.size === 0 && !this.stopped) {
       clearTimeout(this.stopTimer)
       this.stopTimer = setTimeout(() => this.stopWhenIdle(), STOP_DELAY_MS[this.streamType] ?? 10_000)
+    }
+  }
+
+  /**
+   * A main stream is starting on this NVR: stop its sub-streams that no viewer wants any more (they
+   * are only lingering for a quick return to the grid, SUB_LINGER_MS), so their slots at the NVR free
+   * up for the main. The one the full-size view borrows keeps its viewer, so it is left running.
+   * Stops go through the idle-stop queue (paced; cancelled if the sub is wanted again before its turn).
+   */
+  #freeIdleSubs() {
+    for (const s of this.nvr.streams.values()) {
+      if (s !== this && s.streamType === 1 && !s.stopped && s.clients.size === 0 && s.stopTimer) s.stopWhenIdle()
     }
   }
 

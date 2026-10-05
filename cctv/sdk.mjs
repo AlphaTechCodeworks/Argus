@@ -66,6 +66,8 @@ const BUDGETS = {
   NET_SDK_SetNat2Addr: 10_000,
   NET_SDK_Cleanup: 10_000, // 0.5-3 s after a login by serial number
   NET_SDK_Logout: 10_000,
+  NET_SDK_RebootDVR: 10_000,
+  NET_SDK_ShutDownDVR: 10_000,
   NET_SDK_LivePlay: 15_000,
   NET_SDK_StopLivePlay: 10_000,
   NET_SDK_MakeKeyFrame: 5000,
@@ -493,7 +495,10 @@ export const NET_SDK = {
   // the NVR's XML config API over the logged-in SDK connection (NVMS-9000 web commands)
   TransparentConfig: bind(
     'bool NET_SDK_TransparentConfig(long userId, const char *sendXML, const char *strUrl, void *out, uint32 outSize, void *bytesReturned)'
-  )
+  ),
+  // maintenance: reboot or power off the device, on the logged-in session (DVR_NET_SDK.h)
+  RebootDVR: bind('bool NET_SDK_RebootDVR(long userId)'),
+  ShutDownDVR: bind('bool NET_SDK_ShutDownDVR(long userId)')
 }
 
 // NET_SDK_ERROR, as far as needed for messages (see DVR_NET_SDK.h)
@@ -525,6 +530,16 @@ export const errorText = (code) => ERRORS[code] ?? `error ${code}`
 export const lastErrorCode = () => sdkCall(NET_SDK.GetLastError).catch(() => -1)
 /** Last SDK error as text. A hint only: the SDK may keep it per thread and calls run on pool threads. */
 export const lastError = async () => errorText(await lastErrorCode())
+/**
+ * The last SDK error as the reason a call failed, or `fallback` when the SDK reports none. A failed
+ * call that did not throw (e.g. Login/LoginEx returning -1) leaves its code in a thread-local slot
+ * that, read back on a pool thread or after another NVR's call, often reads 0 ("success") or -1
+ * (unreadable). Those must never become the reason a call "failed" (the "failed: success" log/line).
+ */
+export const lastErrorReason = async (fallback) => {
+  const code = await lastErrorCode()
+  return code > 0 ? errorText(code) : fallback
+}
 
 let initialised = null
 /** Initialises the SDK once (idempotent). */

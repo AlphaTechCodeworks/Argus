@@ -114,7 +114,9 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
   vertical-align: 1px;
 }
 .tile.offline { cursor: default; }
-.tile.offline .status { color: var(--offline); }
+/* readable muted grey, not the faint --offline (~3:1 on the dark pill, under AA for this small text);
+   the offline state still reads from the word itself, the dimmed tile and the dot. */
+.tile.offline .status { color: var(--muted); }
 .tile.single { cursor: zoom-out; }
 
 #notice {
@@ -123,6 +125,8 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
   background: #3a2a10;
   color: #ffcf87;
 }
+/* A benign "no cameras yet / none shared with you" message is not a fault: neutral, not amber. */
+#notice.as-info { background: transparent; color: var(--muted); border-bottom: 1px solid var(--border); }
 
 .account { display: flex; align-items: center; gap: 8px; color: var(--muted); }
 
@@ -715,6 +719,10 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-find { display: flex; align-items: flex-end; gap: 6px; }
 .map-find label { flex: 1; min-width: 0; }
 .map-help { margin: 0; color: var(--muted); font-size: 12px; }
+.map-lens { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.map-lens-lbl { color: var(--muted); font-size: 12px; margin-right: 2px; }
+.map-lens-btn { padding: 2px 8px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-variant-numeric: tabular-nums; }
+.map-lens-btn:hover { border-color: var(--accent); }
 .map-note { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .map-cams { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .map-cams li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px; font-size: 13px; }
@@ -970,6 +978,11 @@ body.phone-full .single-overlay > .zoom-badge { top: calc(8px + env(safe-area-in
 .ip-dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .ip-dialog .ip-go { background: var(--accent); border-color: var(--accent); color: #041018; font-weight: 600; }
 .ip-dialog .ip-danger { background: #5a2412; border-color: #b3542a; color: #ffd8c8; font-weight: 600; }
+/* input dialogs (alarms ack note / bookmark, in place of the browser's prompt) */
+.ip-dialog.al-input label { display: block; margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.ip-dialog.al-input input[type="text"], .ip-dialog.al-input textarea { width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px; font: inherit; }
+.ip-dialog.al-input textarea { resize: vertical; min-height: 54px; }
+.ip-dialog.al-input input[type="text"]:focus, .ip-dialog.al-input textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (max-width: 600px) {
   .img-panel { top: auto; left: 8px; right: 8px; width: auto; height: 62%; }
 }
@@ -1782,6 +1795,9 @@ body.has-shell .app-main > header {
 }
 body.has-shell .app-main > header .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; flex: 1; min-width: 0; }
 body.has-shell .app-main > header .brand:empty, body.has-shell .app-main > header .account { display: none; }
+/* Health/Alarms/Settings/Reports keep only the (hidden) brand + account in the header, so it was a
+   blank 56px bar above the content. With no real controls there is nothing to show: hide the bar. */
+body.has-shell .app-main > header:not(:has(.controls)) { display: none; }
 body.has-shell .app-main > header label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); white-space: nowrap; }
 body.has-shell .app-main > header button { white-space: nowrap; }
 body.has-shell .app-main > header select, body.has-shell .app-main > header input[type="date"],

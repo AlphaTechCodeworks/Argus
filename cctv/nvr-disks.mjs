@@ -288,7 +288,8 @@ export function bandwidthOf(caps) {
   const total = caps?.totalBandwidthMbps
   const usedKb = caps?.usedBandwidthKbps
   if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(usedKb)) return null
-  const used = Math.round((usedKb / 1024) * 10) / 10
+  // kbit/s -> Mbit/s is decimal (1 Mbit/s = 1000 kbit/s), as totalBandwidthMbps is; 1024 under-read it ~2.3%
+  const used = Math.round((usedKb / 1000) * 10) / 10
   return { usedMbps: used, totalMbps: total, pct: Math.round((used / total) * 100) }
 }
 

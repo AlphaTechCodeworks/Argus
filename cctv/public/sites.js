@@ -577,9 +577,11 @@ $('logout').addEventListener('click', async () => {
   location.href = '/login.html'
 })
 
-const me = await fetch('/api/me').then((r) => (r.ok ? r.json() : null))
-if (!me) location.href = '/login.html'
-$('whoami').textContent = me.user
+let me = await fetch('/api/me').then((r) => (r.ok ? r.json() : null))
+// location.href only queues the navigation, so the rest of init still runs this tick: an empty object
+// keeps it from throwing on me.user/.admin (which stopped the redirect finishing) while the page leaves.
+if (!me) { location.href = '/login.html'; me = {} }
+$('whoami').textContent = me.user ?? ''
 // adding by serial number (P2P cloud) unless the server has it switched off (CCTV_P2P=off)
 $('f-via-p2p').closest('label').hidden = !me.p2p
 $('f-via-p2p').disabled = !me.p2p

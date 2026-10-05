@@ -5,7 +5,7 @@
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { PRIORITY } from './lanes.mjs'
-import { NET_SDK, lastError, lateCalls, sdkCallT, sdkStuck } from './sdk.mjs'
+import { NET_SDK, lastErrorReason, lateCalls, sdkCallT, sdkStuck } from './sdk.mjs'
 import { kid, parseXml } from './xml.mjs'
 // The parser itself lives in xml.mjs, which imports nothing: modules that only read an NVR's
 // answer can use it without loading the native SDK. Re-exported here so nothing else had to change.
@@ -240,9 +240,37 @@ export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes 
   }
   release()
   if (read) noteRead(nvr, false)
-  if (!ok) throw new Error(`the NVR did not accept the request (${await lastError()})`)
+  if (!ok) throw new Error(`the NVR did not accept the request (${await lastErrorReason('no reason given')})`)
   // some answers end with stray NUL bytes
   return out.toString('utf8', 0, Math.min(len.readUInt32LE(0), out.length)).replace(/\0+$/, '')
+}
+
+/**
+ * Reboot or power the NVR off (NET_SDK_RebootDVR / NET_SDK_ShutDownDVR), on its control login. One
+ * SDK call, taken on this NVR's lane and the process-wide turn like every other, so it never overlaps
+ * another call (overlapping SDK calls have corrupted the heap). The device drops right after, so there
+ * is nothing to read back: the boolean is only whether the NVR accepted the command.
+ * @param {import('./nvrs.mjs').Nvr} nvr
+ * @param {'reboot'|'shutdown'} action
+ * @returns {Promise<boolean>}
+ */
+export async function power(nvr, action) {
+  if (!nvr.online || nvr.userId < 0) throw new Error(`${nvr.name} is offline`)
+  const fn = action === 'shutdown' ? NET_SDK.ShutDownDVR : NET_SDK.RebootDVR
+  const gen = nvr.gen
+  return nvr.lane.run(
+    async () => {
+      const passTurn = await takeTurn()
+      try {
+        const userId = nvr.userId
+        if (userId < 0 || nvr.gen !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
+        return Boolean(await sdkCallT({ nvr: nvr.id, tag: action }, fn, userId))
+      } finally {
+        passTurn()
+      }
+    },
+    { priority: PRIORITY.HIGH }
+  )
 }
 
 /** Waits (up to maxMs) until no XML call to this NVR is queued or inside the SDK. Resolves true if none is. */

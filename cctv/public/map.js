@@ -1796,6 +1796,11 @@ function removePlacement(key, name = siteOfKey(key)) {
   view.requestRender()
 }
 
+// Typical horizontal field of view for common fixed CCTV lenses (≈ a 1/2.8" sensor): a sensible
+// starting cone angle when you know the lens, which the Field-of-view slider still fine-tunes. A 2.5 mm
+// lens sees far wider than a 4 mm, so a single default angle for every camera was wrong.
+const LENS_FOV = { '2.5': 106, '2.8': 98, '3.6': 82, '4': 75, '6': 52, '8': 40, '12': 27 }
+
 function selectedPanel(m, c) {
   const cam = camByKey(selected)
   const slider = (label, key, min, max, unit) => {
@@ -1818,13 +1823,27 @@ function selectedPanel(m, c) {
       view.requestRender()
     }
   })
+  const fovField = slider('Field of view', 'fov', 5, 360, '°')
+  const fovInput = fovField.querySelector('[data-field="fov"]')
+  // Lens buttons: set the cone angle to match the camera's lens (2.5 mm is wide, 12 mm is narrow), then
+  // the slider fine-tunes. Reuses the fov slider's own input handler by dispatching an input event.
+  const lensRow = el('div', { className: 'map-lens' }, el('span', { className: 'map-lens-lbl', textContent: 'Lens (mm)' }))
+  for (const [mm, deg] of Object.entries(LENS_FOV)) {
+    const b = el('button', { type: 'button', className: 'map-lens-btn', textContent: mm, title: `${mm} mm ≈ ${deg}° (a starting point — fine-tune with the slider)` })
+    b.addEventListener('click', () => {
+      fovInput.value = String(deg)
+      fovInput.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    lensRow.append(b)
+  }
   return el('section', { className: 'map-selected' },
     el('h2', { textContent: camLabel(cam, selected) }),
     slider('Direction', 'dir', 0, 359, '°'),
-    slider('Field of view', 'fov', 5, 360, '°'),
+    fovField,
+    lensRow,
     el('label', {}, m.mode === 'geo' ? 'Range (metres)' : 'Range (plan pixels)', range),
     coneColorControl(c),
-    el('p', { className: 'map-help', textContent: 'On the map: drag the camera to move it, the white handle to aim it and set its range, the small handle to widen or narrow its view.' }))
+    el('p', { className: 'map-help', textContent: 'On the map: drag the camera to move it, the white handle to aim it and set its range, the small handle to widen or narrow its view. The Lens buttons set the view angle for a 2.5–12 mm lens.' }))
 }
 
 /** Keeps the selected camera's inputs in step while its handles are dragged. */

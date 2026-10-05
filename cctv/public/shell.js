@@ -72,10 +72,10 @@ export function mountShell() {
 
   const side = document.createElement('aside')
   side.className = 'app-shell'
-  side.setAttribute('aria-label', 'Main')
+  side.setAttribute('aria-label', 'Primary navigation') // not "Main": this is the nav, not the main content
   const bar = document.createElement('nav')
   bar.className = 'shell-bar'
-  bar.setAttribute('aria-label', 'Main')
+  bar.setAttribute('aria-label', 'Primary navigation')
   const sheet = document.createElement('div')
   sheet.className = 'shell-sheet'
   sheet.hidden = true

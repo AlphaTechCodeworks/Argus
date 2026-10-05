@@ -20,7 +20,9 @@ export const NAV_GROUPS = Object.freeze([
     { id: 'sites', label: 'Sites', href: '/sites.html', icon: 'site' },
     { id: 'settings', label: 'Settings', href: '/settings.html', icon: 'cog' },
     { id: 'storage', label: 'Storage', href: '/settings.html#storage', icon: 'disk' },
-    { id: 'reports', label: 'Reports', href: '/reports.html', icon: 'chart' }
+    { id: 'reports', label: 'Reports', href: '/reports.html', icon: 'chart' },
+    { id: 'cameras', label: 'Cameras', href: '/cameras.html', icon: 'list' },
+    { id: 'register', label: 'NVR register', href: '/register.html', icon: 'list' }
   ] }
 ])
 

@@ -898,6 +898,7 @@ export class ImagePanel {
       }
     }
     let r = await send(body)
+    let sentAck = Array.isArray(body.ack) ? body.ack : [] // the ack keys actually sent, for the caller
     for (let round = 0; round < 2 && r.status === 409 && Array.isArray(r.data?.needsAck); round++) {
       const list = r.data.needsAck
       const already = shown && sameTexts(list, shown)
@@ -905,10 +906,11 @@ export class ImagePanel {
         const ok = await this.dialog({ title: title ?? 'This change needs your confirmation', lead, items: list.map((i) => i.text), action, danger })
         if (!ok) return { cancelled: true }
       }
-      r = await send({ ...body, ack: list.map((i) => i.key), ackToken: r.data.ackToken })
+      sentAck = list.map((i) => i.key)
+      r = await send({ ...body, ack: sentAck, ackToken: r.data.ackToken })
       shown = list.map((i) => i.text)
     }
-    return r
+    return { ...r, sentAck }
   }
 
   // ---- Apply, Undo, Defaults -------------------------------------------------------------------
@@ -1038,7 +1040,11 @@ export class ImagePanel {
     }
     if (applied && measuredBefore && (fromAuto || restart) && seq === this.seq) {
       const paths = Object.keys(body.changes ?? {}).length ? Object.keys(body.changes) : (result.groups ?? []).flatMap((g) => g.paths)
-      const restarted = restart || (body.ack ?? []).some((k) => k === 'restart' || k === 'recording-gap') || Object.keys(result.paths ?? {}).some((p) => /^(backlightCompensation\.mode|WDR\.switch)$/.test(p))
+      // the server asks the user to confirm 'restart'/'recording-gap' before any restart-causing change,
+      // so the keys actually sent (r.sentAck) tell us reliably whether the camera restarts -- not body.ack,
+      // which was never set on body (the ack is added to a fresh object inside post). Keeps the path regex
+      // as a backstop for the two paths that cause a gap without a confirmation.
+      const restarted = restart || (r.sentAck ?? []).some((k) => k === 'restart' || k === 'recording-gap') || Object.keys(result.paths ?? {}).some((p) => /^(backlightCompensation\.mode|WDR\.switch)$/.test(p))
       await this.settleAndMeasure({ paths, restarted, before: measuredBefore })
     }
   }

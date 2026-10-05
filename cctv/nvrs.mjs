@@ -18,10 +18,10 @@ import { DATA_DIR } from './auth.mjs'
 import { Lane, PRIORITY, connectLane } from './lanes.mjs'
 import { LiveStream } from './live.mjs'
 import { createPlayback } from './playback.mjs'
-import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastError, lateCalls, nvrCooling, plainSerial, sdkCallT, sdkStuck, setP2pServer } from './sdk.mjs'
+import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastErrorReason, lateCalls, nvrCooling, plainSerial, sdkCallT, sdkStuck, setP2pServer } from './sdk.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
 import { XML_HEADER, transparent, xmlSettled } from './nvr-xml.mjs'
-import { parseOnlineChlList } from './nvr-online.mjs'
+import { parseOnlineChlList, parseRecStatus } from './nvr-online.mjs'
 import { startWorker } from './worker-supervisor.mjs'
 import { openRecIndex } from './rec-index.mjs'
 import { createWarmer } from './rec-cache.mjs'
@@ -256,7 +256,11 @@ const login = async ({ host, port, user, password, sn, nat }, { tag, nvr = '', i
   if (userId >= 0) return { userId, why: '' }
   // a timeout is not an SDK error (the SDK would report "success")
   const late = sn ? 'The NVR did not answer through the P2P cloud in time (is it online, with P2P switched on in its network settings?)' : 'The NVR did not answer in time'
-  const why = err ? (err.name === 'SdkTimeout' ? late : err.message) : await lastError()
+  // Login returns -1 without throwing on a refusal (busy/at its session cap): read the real code, but
+  // never let an empty/0 ("success") slot become the failure reason -- that was the "failed: success" line
+  const why = err
+    ? (err.name === 'SdkTimeout' ? late : err.message)
+    : await lastErrorReason(sn ? 'the NVR did not let us in (it may be busy or at its connection limit on the P2P cloud)' : 'the NVR did not let us in')
   return { userId: -1, why }
 }
 
@@ -437,6 +441,18 @@ const RELOGIN_BACKOFF_MS = [0, 5000, 15_000, 60_000, 5 * 60_000] // by relogins 
 const RELOGIN_WINDOW_MS = 10 * 60_000
 const LOGOUT_WAIT_MS = 30_000 // longest wait for live calls still inside the SDK before a logout
 
+/**
+ * A camera's SDK guid (IPC_INFO.guid, uchar[48]) as a stable id for the export: its ASCII text when
+ * printable (some firmware stores a UUID string there), else hex. Null when empty. This is the closest
+ * thing the SDK gives to a per-camera serial -- it is a guid/id, not a real serial number.
+ */
+const guidHex = (g) => {
+  const bytes = Array.from(g ?? []).map((n) => Number(n) & 0xff)
+  while (bytes.length && bytes[bytes.length - 1] === 0) bytes.pop()
+  if (!bytes.length) return null
+  return bytes.every((b) => b >= 32 && b < 127) ? Buffer.from(bytes).toString('ascii') : bytes.map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 export class Nvr {
   constructor(cfg) {
     this.apply(cfg)
@@ -546,8 +562,13 @@ export class Nvr {
       sn: this.cfg.sn || '',
       via: this.cfg.sn ? 'p2p' : 'lan',
       remote: Boolean(this.cfg.sn || this.cfg.remote),
-      status: this.status,
-      error: this.error,
+      // Video is flowing even though the control login is down (e.g. a P2P NVR at its session cap:
+      // the worker holds the video login while this process's second, control login can't get in):
+      // report online, not the control login's offline. Health and the nvr-offline alert read this.
+      // allCameras() still uses the control login for per-camera events, so a worker restart does not
+      // read as every camera going offline.
+      status: !this.online && this.liveOnline ? 'online' : this.status,
+      error: !this.online && this.liveOnline ? '' : this.error,
       model: this.model,
       serial: this.serial,
       cameras: this.channels.length,
@@ -572,8 +593,10 @@ export class Nvr {
         const where = whereIs(this.cfg)
         const info = {}
         const t0 = Date.now()
-        // a login to an NVR that doesn't answer holds the connect lane for ~15 s: let others go first
-        const priority = this.status === 'offline' ? PRIORITY.LOW : PRIORITY.NORMAL
+        // a login to an NVR that doesn't answer holds the connect lane for ~15 s: let others go first.
+        // Also a repeatedly-reconnecting NVR (relogins.length > 1), so one flapping P2P site does not
+        // keep the healthy NVRs' logins waiting behind it, even while it still shows "connecting".
+        const priority = this.status === 'offline' || this.relogins.length > 1 ? PRIORITY.LOW : PRIORITY.NORMAL
         const { userId, why } = await login({ host, port, user, password, sn, nat }, { tag: 'login', nvr: this.id, info, priority })
         if (this.stopped) {
           if (userId >= 0) logoutLate('login', this.id)(userId)
@@ -643,7 +666,7 @@ export class Nvr {
     }
     // A P2P (serial) NVR's per-camera status above is unreliable over the cloud (it even comes back
     // empty at random), so the NVR's own queryOnlineChlList is the authority instead (#reconcileP2pOnline).
-    if (this.sn && list.length > 0) await this.#reconcileP2pOnline(list)
+    if (this.cfg.sn && list.length > 0) await this.#reconcileP2pOnline(list)
     if (list.length > 0) {
       list.sort((a, b) => a.ch - b.ch)
       // (the first list of this process is no change: there was nothing to compare it with)
@@ -680,6 +703,77 @@ export class Nvr {
     } catch {
       return null
     }
+  }
+
+  /**
+   * Full per-camera detail for the localhost export (camera-export.mjs): a fresh GetDeviceIPCInfo for
+   * identity and the extra IPC_INFO fields the routine poll drops, queryRecStatus for main/sub
+   * resolution, frame rate and recording status, and the sub-stream codec as last seen in live video.
+   * Read-only -- never mutates this.channels. Runs on this process's own login (the control login when
+   * a worker holds the video). Returns [] if the NVR did not answer; a failed queryRecStatus just
+   * leaves the resolution fields null.
+   */
+  async cameraDetail() {
+    const cams = await this.#queryChannelsFull()
+    if (cams.length === 0) return cams
+    let rec = null
+    try {
+      rec = parseRecStatus(String((await transparent(this, 'queryRecStatus', `${XML_HEADER}</request>`, 'rec status', { outBytes: 256 * 1024 })) ?? ''))
+    } catch {
+      rec = null
+    }
+    for (const c of cams) {
+      const r = rec?.get(c.ch) ?? null
+      c.recStatus = r?.recStatus ?? null
+      c.mainRes = r?.main?.resolution ?? null
+      c.mainFps = r?.main?.fps ?? null
+      c.subRes = r?.sub?.resolution ?? null
+      c.subFps = r?.sub?.fps ?? null
+      c.subCodec = this.codecSeen.get(`${c.ch}:1`)?.codec ?? null // as seen in live video (null if never streamed here)
+    }
+    return cams
+  }
+
+  /** A fresh GetDeviceIPCInfo decoded in full (identity + the extra fields the routine poll drops); configured slots only. Never mutates state. */
+  async #queryChannelsFull() {
+    const max = 64
+    const size = koffi.sizeof(IPC_INFO)
+    const buf = Buffer.alloc(size * max)
+    const count = Buffer.alloc(8)
+    const userId = this.userId
+    if (userId < 0) return []
+    // same exclusive key as #queryChannels: two overlapping GetDeviceIPCInfo once preceded a heap-corruption crash
+    const ok = await this.lane
+      .run(() => sdkCallT({ nvr: this.id, tag: 'camera detail', exclusive: `${this.id}/channels` }, NET_SDK.GetDeviceIPCInfo, userId, buf, buf.length, count), { priority: PRIORITY.LOW })
+      .catch(() => false)
+    if (!ok || userId !== this.userId) return []
+    const n = Math.min(Number(count.readBigInt64LE(0)), max)
+    const str = (v) => String(v ?? '').replace(/\0.*$/, '').trim()
+    const out = []
+    for (let i = 0; i < n; i++) {
+      const ipc = koffi.decode(buf, i * size, IPC_INFO)
+      const ip = str(ipc.szServer)
+      const name = str(ipc.szChlname)
+      if (!(ip || name)) continue // empty slot, no camera in it
+      out.push({
+        ch: ipc.channel,
+        name: name || `Camera ${ipc.channel + 1}`,
+        online: ipc.status === 1,
+        ip: ip || null,
+        httpPort: Number(ipc.nHttpPort) || null,
+        model: str(ipc.productModel) || null,
+        maker: str(ipc.manufacturerName) || null,
+        // extras the routine poll does not keep
+        uid: guidHex(ipc.guid), // closest thing to a camera serial the SDK gives (a guid/id, not a real serial)
+        mac: str(ipc.szEtherName) || null,
+        camId: str(ipc.szID) || null,
+        dataPort: Number(ipc.nPort) || null,
+        ctrlPort: Number(ipc.nCtrlPort) || null,
+        nvrLogin: str(ipc.username) || null,
+        poe: Boolean(ipc.bPOEDevice)
+      })
+    }
+    return out
   }
 
   /**
@@ -792,7 +886,10 @@ export class Nvr {
     const wait = RELOGIN_BACKOFF_MS[Math.min(this.relogins.length, RELOGIN_BACKOFF_MS.length - 1)]
     this.relogins.push(now)
     console.log(`[${this.id}] ${why}, logging in again${wait ? ` in ${wait / 1000} s` : ''}`)
-    this.status = 'offline'
+    // "connecting", not "offline", through the backoff wait: a quick recovery then never registers as
+    // an outage. #connect marks it offline only once a login attempt has actually failed (and the
+    // nvr-offline alert still needs the condition to hold its 2 min either way).
+    this.status = 'connecting'
     this.error = why
     try {
       await this.#closeSession()

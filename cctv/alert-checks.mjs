@@ -15,7 +15,10 @@ import { appendAlert, pruneAlerts, readAlerts } from './alert-log.mjs'
 
 const CHECK_MS = 30_000
 const RAISE_MS = 2 * 60_000
-const CLEAR_MS = 60_000
+// Slow to clear, on purpose: an NVR that dips, recovers for a minute, then dips again (a P2P control
+// login that keeps getting "NVR busy") stays ONE open alert instead of clearing and re-notifying each
+// cycle. The raise is still 2 min, so the alert is just as quick to appear.
+const CLEAR_MS = 5 * 60_000
 const GRACE_MS = 3 * 60_000
 const HISTORY_DAYS = 30
 const HISTORY_SHOWN_DAYS = 7

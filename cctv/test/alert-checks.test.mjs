@@ -108,7 +108,8 @@ const fakeSender = (sent = [], pending = {}) => ({
   const a = startAlerts({ ...d, now: () => t, sender: { ...fakeSender(), deliver: async (alerts, kind) => { sent.push(kind) } }, autoStart: false })
   a.tick(); t += 3 * MIN; a.tick()
   mounted = true
-  t += 2 * MIN; a.tick()
+  // the clear is held 5 min now (CLEAR_MS, anti-flap): a drive back for less than that is not cleared yet
+  t += 6 * MIN; a.tick()
   check('the clear is sent once the drive is back', sent.join() === 'opened,cleared', sent.join())
   check('the clear is in the history', readAlerts(d.dataDir, 0).some((r) => r.event === 'cleared'))
   check('health() is empty again', a.health().open.length === 0)
@@ -168,7 +169,7 @@ const fakeSender = (sent = [], pending = {}) => ({
   space = { limitBytes: 50_000e9, freeBytes: 55e12, totalBytes: 70e12 }
   oldest = t - 30 * DAY
   a.tick()
-  t += 2 * MIN
+  t += 6 * MIN // the clear is held 5 min now (CLEAR_MS, anti-flap)
   a.tick()
   check('... the target met again: cleared, once', sent.length === 2 && sent[1].kind === 'cleared' && sent[1].alerts[0].kind === 'retention-short', JSON.stringify(sent.map((s) => s.kind)))
   a.stop()

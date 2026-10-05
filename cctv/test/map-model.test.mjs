@@ -323,9 +323,11 @@ const SIZE = { w: 1000, h: 600 }
 
 // ---- the page is wired to it -------------------------------------------------------------------------
 {
-  const js = readFileSync(new URL('../public/map.js', import.meta.url), 'utf8')
-  const html = readFileSync(new URL('../public/map.html', import.meta.url), 'utf8')
-  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8')
+  // normalise CRLF -> LF so the source-scan regexes (some with literal \n) hold on a Windows checkout
+  // with git autocrlf, as grid-diff.test does for viewer.js
+  const js = readFileSync(new URL('../public/map.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const html = readFileSync(new URL('../public/map.html', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   check('the page has a row for the site buttons, and no site list to pick one map from', /<nav id="sites"/.test(html) && !/id="site"/.test(html))
   check('the row has "All sites" and real buttons', /textContent: 'All sites'/.test(js) && /el\('button', \{ type: 'button', 'data-fid': fid/.test(js))
   check('  which say which is chosen', /'aria-pressed'/.test(js))

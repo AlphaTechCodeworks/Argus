@@ -64,7 +64,7 @@ import { clientIpOf, localProbe, securityHeaders } from './security.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleNetStatus } from './nvr-netstatus.mjs'
 import { handleRelays } from './relays.mjs'
-import { transparent } from './nvr-xml.mjs'
+import { power as nvrPower, transparent } from './nvr-xml.mjs'
 import { readAlerts } from './alert-log.mjs'
 import { PERIODS, composeReport, countInThread, periodWindow, startDailySummary } from './reports.mjs'
 import { commonOffset, siteOffsetMin, useSiteOffset } from './site-time.mjs'
@@ -85,6 +85,8 @@ import { handleLines } from './tripwire.mjs'
 import { ADMIN_OSD_PATH, OSD_PATH, handleCameraNotes, handleOsd as handleCameraOsd, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
+import { cameraExport, camerasReport, camerasXlsx, startCameraReportSchedule } from './camera-export.mjs'
+import { nvrRegister, registerXlsx } from './register.mjs'
 import { handleClockWrite, measuredDrift, startClockSync, zoneOffsets } from './nvr-clock.mjs'
 import { handleSettings } from './settings-api.mjs'
 import { cameraRecording, getSettings } from './settings.mjs'
@@ -170,6 +172,9 @@ startMemoryLog({
   const delay = startupDelayMs()
   if (delay) console.warn(`Several watchdog restarts recently; connecting to NVRs in ${Math.round(delay / 1000)} s`)
   setTimeout(startNvrs, delay)
+  // The Cameras report serves a saved snapshot and reads every NVR only at 2 AM site time (or on the
+  // page's Refresh), so opening the page never hits a live NVR. Loads the last snapshot now.
+  startCameraReportSchedule(nvrs, { dataDir: auth.DATA_DIR })
 }
 
 /**
@@ -377,8 +382,10 @@ const alerts = startAlerts({
     [...nvrs.values()].map((n) => ({
       id: n.id,
       name: n.name,
-      status: n.status,
-      error: n.error,
+      // online when the worker is serving video even if the control login is down (a P2P NVR at its
+      // session cap): Health and the nvr-offline alert then don't read it as offline while it streams.
+      status: !n.online && n.liveOnline ? 'online' : n.status,
+      error: !n.online && n.liveOnline ? '' : n.error,
       model: n.model,
       serial: n.serial,
       // by serial number: the P2P server this process uses (the record's own address is not used)
@@ -607,6 +614,12 @@ const handleRequest = async (req, res) => {
     const full = localProbe(req.socket.remoteAddress, req.headers['cf-connecting-ip']) || Boolean(u && (AUTH_OFF || auth.isAdmin(u)))
     return sendJson(res, ok ? 200 : 503, full ? body : { ok })
   }
+  // Per-camera export (camera-export.mjs): a read-only inventory report. Localhost only -- like the
+  // full /healthz body, it is for the box itself, never reachable off it, so it needs no sign-in.
+  if (pathname === '/api/cameras-export') {
+    if (!localProbe(req.socket.remoteAddress, req.headers['cf-connecting-ip'])) return sendJson(res, 403, { error: 'This report is only available on the server itself.' })
+    return sendJson(res, 200, { at: new Date().toISOString(), nvrs: await cameraExport(nvrs) })
+  }
   if (pathname === '/api/login' && req.method === 'POST') return handleLogin(req, res)
   if (pathname === '/api/logout' && req.method === 'POST') {
     // Read before the cookie is cleared, or there is nobody to name in the entry.
@@ -667,6 +680,47 @@ const handleRequest = async (req, res) => {
     return sendJson(res, 200, [...nvrs.values()].flatMap((n) => n.channels.filter((c) => c.configured !== false).map((c) => ({
       nvr: n.id, site: n.site, ch: c.ch, name: c.name, online: c.online, ip: c.ip || null, httpPort: c.httpPort ?? null, model: c.model || null, maker: c.maker || null
     }))))
+  }
+  // The Cameras report page (camera-export.mjs): live per-camera inventory for admins, cached ~30 s
+  // (?fresh=1 forces a re-read), as JSON for the page and as a spreadsheet download.
+  if (pathname === '/api/admin/cameras') {
+    if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    return sendJson(res, 200, await camerasReport(nvrs, { fresh: url.searchParams.get('fresh') === '1' }))
+  }
+  if (pathname === '/api/admin/cameras.xlsx') {
+    if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    const report = await camerasReport(nvrs, { fresh: url.searchParams.get('fresh') === '1' })
+    const buf = camerasXlsx(report)
+    const stamp = new Date(report.at).toISOString().slice(0, 16).replace(/[:T]/g, '-')
+    res.writeHead(200, {
+      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'content-disposition': `attachment; filename="cameras-${stamp}.xlsx"`,
+      'content-length': buf.length,
+      'cache-control': 'no-store'
+    })
+    return res.end(buf)
+  }
+  // NVR register (register.mjs): per-NVR site, connection, live status, camera counts AND the stored
+  // login + password. The one place passwords are shown, so admin-only; built live each request.
+  if (pathname === '/api/admin/register') {
+    if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    return sendJson(res, 200, { at: new Date().toISOString(), nvrs: nvrRegister(nvrs) })
+  }
+  if (pathname === '/api/admin/register.xlsx') {
+    if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    const buf = registerXlsx(nvrRegister(nvrs))
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')
+    res.writeHead(200, {
+      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'content-disposition': `attachment; filename="nvr-register-${stamp}.xlsx"`,
+      'content-length': buf.length,
+      'cache-control': 'no-store'
+    })
+    return res.end(buf)
   }
   // NVR alarm outputs, read only (relays.mjs)
   const relays = await handleRelays(req.method, pathname, { nvrs, admin: who.admin, query: transparent })
@@ -806,6 +860,38 @@ const handleRequest = async (req, res) => {
       } catch (e) {
         return sendJson(res, 502, { error: e.message })
       }
+    }
+    // POST /api/admin/nvrs/:id/power { action: 'reboot' | 'shutdown', confirm: true } — reboot or
+    // power off the NVR itself (NET_SDK_RebootDVR / NET_SDK_ShutDownDVR), on its control session.
+    // Admin-only and same-origin (both checked above). The NVR drops for a minute or two after.
+    const powerRoute = /^\/api\/admin\/nvrs\/([^/]+)\/power$/.exec(pathname)
+    if (powerRoute) {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' }, { allow: 'POST' })
+      let id
+      try {
+        id = decodeURIComponent(powerRoute[1])
+      } catch {
+        return sendJson(res, 400, { error: 'Bad NVR id' })
+      }
+      const nvr = nvrs.get(id)
+      if (!nvr) return sendJson(res, 404, { error: 'No such NVR' })
+      const body = await readJsonObject(req, 1024).catch(() => ({}))
+      const action = body.action === 'shutdown' ? 'shutdown' : body.action === 'reboot' ? 'reboot' : null
+      if (!action) return sendJson(res, 400, { error: 'action must be "reboot" or "shutdown"' })
+      if (body.confirm !== true) return sendJson(res, 400, { error: `${action} needs confirm: true` })
+      if (!nvr.online || nvr.userId < 0) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
+      let ok = false
+      let err = null
+      try {
+        ok = await nvrPower(nvr, action)
+      } catch (e) {
+        err = e.message
+      }
+      audit(auth.DATA_DIR, { user: who.user, action: `nvr-${action}`, target: id, ok, detail: err ?? undefined })
+      console.log(`[admin] NVR ${action} ${id} (${nvr.name}) by ${who.user}: ${err ? `failed: ${err}` : ok ? 'accepted' : 'refused'}`)
+      if (err) return sendJson(res, 502, { error: `Could not ${action} ${nvr.name}: ${err}` })
+      if (!ok) return sendJson(res, 502, { error: `${nvr.name} did not accept the ${action}` })
+      return sendJson(res, 200, { id, action, message: `${nvr.name} is ${action === 'reboot' ? 'rebooting' : 'shutting down'} — it will drop off for a minute or two` })
     }
     const sub = /^\/api\/admin\/nvrs\/([^/]+)\/substreams(\/job)?$/.exec(pathname)
     if (sub) {

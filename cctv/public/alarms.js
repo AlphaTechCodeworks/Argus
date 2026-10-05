@@ -28,6 +28,54 @@ const noPicture = new Set()
 const jsonOf = (r) => r.json().catch(() => ({}))
 const say = (el, text) => { el.textContent = text }
 
+let dlgSeq = 0
+/**
+ * A themed input dialog in place of prompt(): resolves the entered text, or null if cancelled. Esc or
+ * Cancel gives null; the action button (or Enter, single line) submits; showModal traps focus. Uses the
+ * app's .ip-dialog look, so it matches every other dialog instead of the browser's own chrome.
+ * @param {{ title: string, label?: string, value?: string, placeholder?: string, multiline?: boolean, action?: string }} o
+ */
+function inputDialog({ title, label = '', value = '', placeholder = '', multiline = false, action = 'Save' }) {
+  const d = document.createElement('dialog')
+  d.className = 'ip-dialog al-input'
+  const tid = `al-d-${++dlgSeq}`
+  d.setAttribute('aria-labelledby', tid)
+  const h = document.createElement('h3')
+  h.id = tid
+  h.textContent = title
+  const field = document.createElement(multiline ? 'textarea' : 'input')
+  if (multiline) field.rows = 3
+  else field.type = 'text'
+  field.value = value
+  field.placeholder = placeholder
+  field.id = `${tid}-f`
+  const lab = document.createElement('label')
+  lab.htmlFor = field.id
+  lab.textContent = label
+  const buttons = document.createElement('div')
+  buttons.className = 'ip-dialog-buttons'
+  const cancel = document.createElement('button')
+  cancel.type = 'button'
+  cancel.textContent = 'Cancel'
+  const ok = document.createElement('button')
+  ok.type = 'button'
+  ok.className = 'ip-go'
+  ok.textContent = action
+  buttons.append(cancel, ok)
+  d.append(h, ...(label ? [lab] : []), field, buttons)
+  document.body.append(d)
+  return new Promise((resolve) => {
+    const done = (v) => { try { d.close() } catch {} d.remove(); resolve(v) }
+    ok.addEventListener('click', () => done(field.value))
+    cancel.addEventListener('click', () => done(null))
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(null) }, { once: true }) // Esc
+    if (!multiline) field.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); done(field.value) } })
+    d.showModal()
+    field.focus()
+    field.select?.()
+  })
+}
+
 /** A date input's value as milliseconds, or null when it is empty. */
 const dayMs = (v, endOfDay = false) => {
   if (!v) return null
@@ -186,27 +234,27 @@ function showLinked() {
 }
 
 async function acknowledge(row) {
-  const note = prompt(`What did you find? (${row.what} on ${row.camera})`, '')
+  const note = await inputDialog({ title: 'Acknowledge alarm', label: `What did you find? (${row.what} on ${row.camera})`, placeholder: 'e.g. checked the area — all clear', multiline: true, action: 'Acknowledge' })
   if (note === null) return
   const res = await fetch(`/api/alarms/${row.id}/ack`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ note }) })
   const body = await jsonOf(res)
-  if (!res.ok) alert(body.error ?? 'It could not be acknowledged.')
-  loadAlarms()
+  if (res.ok) loadAlarms()
+  else say($('summary'), body.error ?? 'It could not be acknowledged.')
 }
 
 async function bookmark(row) {
-  const title = prompt('Bookmark this alarm as:', `${row.what} — ${row.camera}`)
+  const title = await inputDialog({ title: 'Bookmark alarm', label: 'Save this alarm as:', value: `${row.what} — ${row.camera}`, action: 'Bookmark' })
   if (title === null) return
   const res = await fetch(`/api/alarms/${row.id}/bookmark`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title }) })
   const body = await jsonOf(res)
-  alert(res.ok ? 'Bookmarked. Housekeeping will now leave this footage alone.' : body.error ?? 'It could not be bookmarked.')
+  say($('summary'), res.ok ? 'Bookmarked. Housekeeping will now leave this footage alone.' : body.error ?? 'It could not be bookmarked.')
 }
 
 /** Exporting stays entirely in the exports page; this only hands it the times to open on. */
 async function exportClip(row) {
   const res = await fetch(`/api/alarms/${row.id}/clip`)
   const body = await jsonOf(res)
-  if (!res.ok) return void alert(body.error ?? 'The clip times could not be read.')
+  if (!res.ok) return void say($('summary'), body.error ?? 'The clip times could not be read.')
   const c = body.clip
   location.href = `/playback.html?nvr=${encodeURIComponent(row.nvr)}&ch=${row.ch}&t=${c.startMs}&markIn=${c.startMs}&markOut=${c.endMs}&export=1`
 }

@@ -649,6 +649,34 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
         panel.append(table)
       }
 
+      // Maintenance: reboot or power the NVR off (admins only; the endpoint refuses others and offline
+      // NVRs). Each is behind a confirm, since the whole site drops for a minute or two.
+      if (isAdmin) {
+        const doPower = async (action) => {
+          const warn = action === 'reboot'
+            ? `Reboot ${n.name}?\n\nEvery camera on it goes offline for 1–2 minutes while it restarts, and the NVR's own recording pauses until it is back.`
+            : `Shut DOWN ${n.name}?\n\nIt powers OFF and CANNOT be turned back on remotely — someone must switch it on at the site.`
+          if (!confirm(warn)) return
+          try {
+            const res = await fetch(`/api/admin/nvrs/${encodeURIComponent(n.id)}/power`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, confirm: true }) })
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+            alert(data.message || 'Sent.')
+          } catch (e) {
+            alert(`Could not ${action === 'reboot' ? 'reboot' : 'shut down'} ${n.name}: ${e.message}`)
+          }
+        }
+        const btn = (label, action, danger) => {
+          const b = el('button', { type: 'button', textContent: label, style: `font:inherit;padding:.25rem .7rem;border-radius:6px;border:1px solid ${danger ? '#b4433a' : '#555'};background:transparent;color:${danger ? '#e06a5f' : 'inherit'};cursor:pointer;margin-right:.5rem` })
+          b.addEventListener('click', () => doPower(action))
+          return b
+        }
+        panel.append(el('div', { className: 'nvr-power', style: 'margin-top:.8rem;padding-top:.6rem;border-top:1px solid #333' },
+          el('span', { className: 'hp-sub', textContent: 'Maintenance: ', style: 'margin-right:.5rem' }),
+          btn('Reboot NVR', 'reboot', false),
+          btn('Shut down', 'shutdown', true)))
+      }
+
       // The NVR's own event log, read on demand (nvr-log.mjs; admins only). Kept behind a disclosure
       // so it is never in the way when you are just checking the site is up.
       if (isAdmin && n.status.state !== 'bad') {

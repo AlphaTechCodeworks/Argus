@@ -234,7 +234,7 @@ function render({ keepSingle = false } = {}) {
   grid.classList.toggle('show-stats', showStats)
   // the kept view and its panel stay in place (moving them would close an open dialog)
   const kept = keep ? [overlay, imagePanel.el, linesPanel?.el, osdPanel?.el].filter((n) => n?.parentNode === grid) : []
-  for (const n of [...grid.children]) if (!kept.includes(n)) n.remove()
+  for (const n of [...grid.children]) if (!kept.includes(n)) { inView?.unobserve(n); n.remove() } // unobserve: phone-list tiles must not leak into the observer
   const before = kept[0] ?? null
 
   const { size, cells } = layoutCells(layoutSelect.value)
@@ -1010,6 +1010,7 @@ function relayout() {
   const leaving = unused.map((i) => gridSlots[i])
   for (const s of leaving) {
     s.live?.close()
+    inView?.unobserve(s.el) // phone list: stop watching the element before it leaves the DOM (no leak)
     s.el.remove()
   }
   gridTiles = gridTiles.filter((t) => !leaving.some((s) => s.live === t))
@@ -1151,7 +1152,10 @@ siteSelect.addEventListener('change', () => {
   // a whole different set of cameras is about to subscribe; drop the old site's video still draining
   // on the shared socket, or on a big grid the new site's streams queue behind it (never switching)
   freshenForPageChange()
-  render({ keepSingle: true })
+  // a camera open full-size belongs to the site being left: close it so switching site shows the new
+  // site's grid, not the old camera stuck over it. (Layout and "hide offline" keep it; a site does not.)
+  if (single !== null) closeSingle()
+  render()
 })
 
 // ---- saved views (grid-view.js, /api/me/views) -------------------------------------------------
@@ -1404,8 +1408,11 @@ async function loadCameras(pre = null) {
 
   const down = sites.filter((s) => s.status !== 'online')
   notice.hidden = down.length === 0 && cameras.length > 0
+  // an empty roster is a normal first state, not a fault: show it neutral, keep amber for NVRs down
+  const benign = cameras.length === 0 && down.length === 0
+  notice.classList.toggle('as-info', benign)
   // (a viewer is told only the site, name and state of an NVR: /api/sites, rights.mjs sitesFor)
-  notice.textContent = cameras.length === 0 && down.length === 0
+  notice.textContent = benign
     ? (isAdmin ? 'No cameras yet. Add an NVR with: docker exec -it tvt-cctv node cctv/nvr.mjs add' : 'No cameras have been shared with you yet. Ask an admin for access.')
     : down.map((s) => `${s.site} · ${s.name}${s.sn ? ` (serial ${s.sn})` : s.host ? ` (${s.host})` : ''} is ${s.status}${s.error ? `: ${s.error}` : ''}`).join(' — ')
   // another camera coming or going must not rebuild the full-size view (a running measurement or

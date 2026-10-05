@@ -12,7 +12,9 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault()
   error.hidden = true
   const button = form.querySelector('button')
+  const label = button.textContent
   button.disabled = true
+  button.textContent = 'Signing in…'
   try {
     const res = await fetch('/api/login', {
       method: 'POST',
@@ -36,5 +38,6 @@ form.addEventListener('submit', async (e) => {
     error.hidden = false
   } finally {
     button.disabled = false
+    button.textContent = label
   }
 })
