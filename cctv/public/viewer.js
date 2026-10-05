@@ -208,6 +208,9 @@ let upgradeTimer = null // the pending HD upgrade (debounced; cleared by closeSi
 // Wait this long on a camera before asking the NVR for its HD (main) stream, so stepping quickly
 // through cameras does not churn main streams the NVR opens and closes (seconds each on a busy NVR).
 const UPGRADE_DELAY_MS = 1000
+// On a direct open (a click, not stepping) there is nothing to churn, so the HD is asked for almost
+// at once -- just enough for the sub stream to paint first -- rather than after the full debounce.
+const QUICK_UPGRADE_MS = 200
 
 const syncTiles = () => {
   tiles = [...gridTiles, ...singleTiles]
@@ -642,7 +645,7 @@ function stopAhead() {
   ahead.clear()
 }
 
-function openSingle(cam, { fromTap = false } = {}) {
+function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   // the camera being left (a step with ‹ ›): the connection that carries its stream is kept, started
   // ahead as the new camera's neighbour, rather than closed and opened again a moment later
   const leftCam = singleCam
@@ -815,13 +818,13 @@ function openSingle(cam, { fromTap = false } = {}) {
   // viewer on the local network but not for one coming in over the internet (the tunnel is the narrow
   // part); a browser that could not play this main stream stays on the sub stream too.
   if (cam.hd !== false && !noMain.has(single) && !(cam.remote && REMOTE_PAGE)) {
-    // debounced: the sub-stream shows at once; the HD stream is asked for only once the view settles
-    // on this camera (UPGRADE_DELAY_MS), so stepping through does not churn main streams on the NVR.
+    // the sub-stream shows at once; the HD is asked for almost immediately on a direct open, but only
+    // once the view settles while stepping (UPGRADE_DELAY_MS), so stepping does not churn main streams.
     const o = overlay
     upgradeTimer = setTimeout(() => {
       upgradeTimer = null
       if (overlay === o && !sub.closed) upgradeToMain(overlay, cam, sub, opts)
-    }, UPGRADE_DELAY_MS)
+    }, stepping ? UPGRADE_DELAY_MS : QUICK_UPGRADE_MS)
   } else if (cam.hd === false) overlay.querySelector('.name').after(sdBadge())
   syncTiles()
   updatePager()
@@ -1458,7 +1461,7 @@ function stepCamera(dir) {
   if (list.length < 2 || single === null) return
   const i = list.findIndex((c) => camKey(c) === single)
   const next = list[(i + dir + list.length) % list.length]
-  if (imagePanel.confirmDiscard() && linesDiscard() && osdDiscard()) openSingle(next)
+  if (imagePanel.confirmDiscard() && linesDiscard() && osdDiscard()) openSingle(next, { stepping: true })
 }
 
 /** The ‹ › on a phone's full-size camera: they say a flick works, and a tap on one works too. */
