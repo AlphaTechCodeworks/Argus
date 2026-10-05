@@ -40,6 +40,7 @@ import { dirname, join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 import { HttpError, cameraOf, deviceOf, errorAnswer, isPlainObject, readLogCached, rotateLog } from './nvr-xml.mjs'
 import { nvrs } from './nvrs.mjs'
+import { siteOffsetMin } from './site-time.mjs'
 import { DEFAULT_OSD, cleanOsdSettings, osdFor } from './public/osd-overlay.js'
 
 const NOTES_FILE = join(DATA_DIR, 'camera-notes.json')
@@ -258,7 +259,10 @@ export async function handleOsd(method, pathname, readJson, ctx = {}) {
       if (method !== 'GET') return [405, { error: 'Method not allowed' }]
       // Never cached: an overlay moved on one screen should be right on the next page load.
       const all = osdSettings()
-      if (ctx.admin === true) return [200, all, { 'cache-control': 'no-store' }]
+      // The live OSD clock must read the site's wall time, not the viewing PC's zone (a screen set
+      // to UTC otherwise drew UTC over the picture). site-time.mjs: the NVRs' zone, else the env.
+      const siteTzMin = siteOffsetMin()
+      if (ctx.admin === true) return [200, { ...all, siteTzMin }, { 'cache-control': 'no-store' }]
       // default deny: an overlay's text is a camera's name, so anyone else gets only the cameras
       // they may see (and the default, which every page draws with)
       const see = typeof ctx.canSee === 'function' ? ctx.canSee : () => false
@@ -266,7 +270,7 @@ export async function handleOsd(method, pathname, readJson, ctx = {}) {
         const slash = k.lastIndexOf('/')
         return slash > 0 && see(k.slice(0, slash), Number(k.slice(slash + 1)))
       }))
-      return [200, { default: all.default, cameras }, { 'cache-control': 'no-store' }]
+      return [200, { default: all.default, cameras, siteTzMin }, { 'cache-control': 'no-store' }]
     }
     if (!ctx.admin) return [403, { error: 'Only admins can change the overlay' }]
     if (method !== 'PUT') return [405, { error: 'Method not allowed' }]

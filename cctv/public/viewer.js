@@ -394,8 +394,14 @@ let osdSettings = { default: DEFAULT_OSD, cameras: {} }
  */
 let clockOffsetMs = 0
 const serverNow = () => Date.now() + clockOffsetMs
-/** The time zone the overlay is written in: this browser's, the same one the rest of the page uses. */
-const osdTzMs = () => -new Date().getTimezoneOffset() * 60_000
+/**
+ * The time zone the overlay is written in: the site's wall clock (minutes to add to UTC), sent by
+ * /api/osd (server site-time.mjs). A viewing PC may be nowhere near the site and set to any zone —
+ * one set to UTC drew UTC over the picture — so the overlay must not follow this browser. Until the
+ * site offset has loaded, fall back to this browser's zone (the old behaviour) rather than UTC.
+ */
+let siteTzMin = null
+const osdTzMs = () => (Number.isFinite(siteTzMin) ? siteTzMin : -new Date().getTimezoneOffset()) * 60_000
 
 /** Takes the server's clock off any response that carries a Date header. */
 function noteServerClock(res) {
@@ -409,6 +415,7 @@ async function loadOsd() {
   noteServerClock(res)
   const data = await res.json().catch(() => null)
   if (data?.default) osdSettings = { default: data.default, cameras: data.cameras ?? {} }
+  if (Number.isFinite(data?.siteTzMin)) siteTzMin = data.siteTzMin
 }
 
 /** What a tile should draw: this camera's settings over the site-wide default, and the moment. */
