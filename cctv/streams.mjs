@@ -56,6 +56,7 @@ import {
   withNvrLock
 } from './nvr-xml.mjs'
 import { nvrs } from './nvrs.mjs'
+import { parseRecStatus } from './nvr-online.mjs'
 import { normEnct, qualityList, recommendedRange } from './substreams.mjs'
 
 const QUERY_URL = 'queryNodeEncodeInfo'
@@ -158,6 +159,28 @@ async function readChannel(nvr, chlId, gen) {
   const item = (await readAll(nvr, gen, true)).items.find((i) => sameId(i.id, chlId))
   if (!item) throw new HttpError(502, 'The NVR lists no main stream for this camera')
   return item
+}
+
+/**
+ * A read-only resolution for one channel from queryRecStatus, for when the heavy queryNodeEncodeInfo
+ * times out over P2P. Fast and light; carries the main (and sub) resolution + fps, nothing editable.
+ * @returns {Promise<null | { partial: true, current: {res, fps}, sub: string|null, why: string }>}
+ */
+async function recStatusResolution(nvr, ch, gen) {
+  try {
+    const m = parseRecStatus(await transparent(nvr, 'queryRecStatus', `${XML_HEADER}</request>`, 'rec status (resolution)', { gen, outBytes: 256 * 1024 }))
+    const row = m?.get(ch)
+    const main = row?.main ?? row?.sub
+    if (!main) return null
+    return {
+      partial: true,
+      current: { res: main.resolution, fps: main.fps },
+      sub: row.main && row.sub ? row.sub.resolution : null,
+      why: 'the NVR did not return its full stream settings over this link; this is the resolution it is recording at'
+    }
+  } catch {
+    return null
+  }
 }
 
 /** Record mode, cycle recording, bandwidth and PoE mode (each may be missing). Cached 5 s. */
@@ -542,7 +565,18 @@ export async function handleStreams(what, method, nvrId, ch, params, readJson, u
       const u = params.get('usage')
       const usage = u === null || u === '' ? undefined : Number(u)
       if (usage !== undefined && !Number.isFinite(usage)) throw new HttpError(400, 'Bad usage')
-      const item = await readChannel(nvr, chlId, ctx.gen)
+      let item
+      try {
+        item = await readChannel(nvr, chlId, ctx.gen)
+      } catch (e) {
+        // queryNodeEncodeInfo is heavy (~500 KB/channel) and times out over P2P. Rather than show
+        // nothing, fall back to the resolution the recorder reports (queryRecStatus, ~fast), marked
+        // as read-only. The full, editable settings still need the NVR on a fatter link.
+        if (nvr.gen !== ctx.gen) throw e
+        const partial = await recStatusResolution(nvr, ch, ctx.gen)
+        if (partial) return [200, { stream: partial }]
+        throw e
+      }
       return [200, { stream: streamView(ctx, item, await readSystem(nvr, ctx.gen), usage) }]
     }
     if (method !== 'POST') return [405, { error: 'Method not allowed' }]

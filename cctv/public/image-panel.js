@@ -1425,6 +1425,14 @@ export class ImagePanel {
       return
     }
     const c = si.current ?? {}
+    // Read-only fallback (streams.mjs): the full settings would not load over this link, but the
+    // recorder still reports the resolution it is writing at.
+    if (si.partial) {
+      kids.push(el('p', {}, `${c.res ?? '—'}${c.fps ? ` at ${c.fps} fps` : ''}${si.sub ? ` · sub ${si.sub}` : ''}`))
+      kids.push(el('p', { className: 'ip-muted' }, si.why ? `${si.why[0].toUpperCase()}${si.why.slice(1)}.` : 'Read from the recorder; the full settings could not be loaded.'))
+      box.replaceChildren(...kids)
+      return
+    }
     kids.push(el('p', {}, `${String(c.enct ?? '').toUpperCase()} ${c.res} at ${c.fps} fps, bitrate cap ${c.QoI} kbit/s (${c.bitType}), quality ${c.level}.`))
     kids.push(el('p', { className: 'ip-stream-line ip-muted' }, ''))
     if (!si.candidate) kids.push(el('p', { className: 'ip-muted' }, `Changes are not offered here: ${si.why}.`))
