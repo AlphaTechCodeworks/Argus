@@ -146,5 +146,23 @@ check('frames for an unwanted stream are ignored', !hub.streams.has('18:0') && a
   check('... a main stream\'s linger is left as it was (foreground)', msgs.length === before && m7.fg === true)
 }
 
+{
+  // the box-wide cap (live-cap.mjs) preempts a background warm-up with remove(ws, { linger: false }):
+  // the stream stops now, not after the sub-stream linger, so the freed slot is the viewer's at once
+  const msgs = []
+  const h = new StreamHub('n11', (m) => msgs.push(m), { stopDelayMs: { 0: 50, 1: 50 } })
+  const s = h.getStream(2, 1)
+  s.add({ ...fakeWs(), background: true })
+  check('a warm-up is wanted', s.wanted === true && h.streams.has('2:1'))
+  s.remove([...s.clients][0], { linger: false })
+  check('remove linger false: unwant now, no linger timer, dropped from the hub', msgs.at(-1).t === 'unwant' && s.wanted === false && s.stopTimer === null && !h.streams.has('2:1'))
+  // the default remove still lingers (byte-for-byte today when the cap is off)
+  const s2 = h.getStream(3, 1)
+  s2.add({ ...fakeWs(), background: true })
+  const unwants = msgs.filter((m) => m.t === 'unwant').length
+  s2.remove([...s2.clients][0])
+  check('default remove still lingers (no immediate unwant)', msgs.filter((m) => m.t === 'unwant').length === unwants && s2.stopTimer !== null && h.streams.has('3:1'))
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

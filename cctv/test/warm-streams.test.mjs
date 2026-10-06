@@ -154,5 +154,56 @@ const fake = () => ({ clients: new Set(), add(v) { this.clients.add(v) }, remove
   }
   check(`dropping 16 keys releases ${RELEASE_PER_RUN} per run`, RELEASE_PER_RUN === 2 && sizes.join() === '14,12,10,8,6,4,2,0,0', sizes.join())
 }
+{
+  // item 2: remote (P2P / serial) NVRs are never warmed -- their cameras are dropped from the picks
+  const cams = [
+    ...Array.from({ length: 12 }, (_, i) => ({ nvr: 'lan', ch: i, online: true })),
+    ...Array.from({ length: 12 }, (_, i) => ({ nvr: 'p2p', ch: i, online: true }))
+  ]
+  check('without isRemote: remote cameras can be warmed', pickWarm({ cameras: cams, orders: {}, roomy: () => true }).some((k) => k.startsWith('p2p/')))
+  const lanOnly = pickWarm({ cameras: cams, orders: {}, roomy: () => true, isRemote: (id) => id === 'p2p' })
+  check('isRemote: only LAN cameras are warmed', lanOnly.every((k) => k.startsWith('lan/')) && lanOnly.length === 12, lanOnly.join(' '))
+}
+{
+  // the box-wide cap: warm-ups stop at the warm budget, and a viewer preempts one (release)
+  let box = 0
+  const streams = new Map()
+  const streamOf = (n, ch) => {
+    const k = `${n}/${ch}`
+    if (!streams.has(k)) streams.set(k, { clients: new Set(), add(v) { this.clients.add(v); box++ }, remove(v) { if (this.clients.delete(v)) box-- } })
+    return streams.get(k)
+  }
+  const cams = Array.from({ length: 20 }, (_, i) => ({ nvr: 'a', ch: i, online: true }))
+  const liveCap = { enabled: () => true, warmBudget: () => 5 }
+  const w = startWarmStreams({ cameras: () => cams, orders: () => ({}), streamOf, roomy: () => true, liveCap, count: () => box, log: () => {}, everyMs: 1e9, firstRunMs: 0, outFile: null })
+  w.run()
+  check('warm-ups stop at the warm budget', w.held.size === 5 && box === 5, `${w.held.size}/${box}`)
+  check('release drops background warm-ups and frees the slots at once', w.release(2) === 2 && w.held.size === 3 && box === 3, `${w.held.size} ${box}`)
+  // a camera a real viewer has joined is never dropped
+  const kept = [...w.held.values()][0].stream
+  kept.clients.add({ real: true })
+  check('a warm-up a viewer joined is never dropped', w.release(10) === 2 && w.held.size === 1 && [...w.held.values()][0].stream === kept, `${w.held.size}`)
+}
+{
+  // cap OFF == today: with the cap off the budget and the remote-skip are inert (the caller gates
+  // isRemote on enabled(), as server.mjs does), so run() warms exactly what it warms today
+  let box = 0
+  const streams = new Map()
+  const streamOf = (n, ch) => {
+    const k = `${n}/${ch}`
+    if (!streams.has(k)) streams.set(k, { clients: new Set(), add(v) { this.clients.add(v); box++ }, remove(v) { if (this.clients.delete(v)) box-- } })
+    return streams.get(k)
+  }
+  const cams = [
+    ...Array.from({ length: 12 }, (_, i) => ({ nvr: 'lan', ch: i, online: true })),
+    ...Array.from({ length: 12 }, (_, i) => ({ nvr: 'p2p', ch: i, online: true }))
+  ]
+  const off = { enabled: () => false, warmBudget: () => 5 }
+  const w = startWarmStreams({ cameras: () => cams, orders: () => ({}), streamOf, roomy: () => true, liveCap: off, count: () => box, isRemote: (id) => off.enabled() && id === 'p2p', log: () => {}, everyMs: 1e9, firstRunMs: 0, outFile: null })
+  w.run()
+  const plain = pickWarm({ cameras: cams, orders: {}, roomy: () => true }) // what today warms, with no cap
+  check('cap off: the budget does not limit warm-ups', w.held.size === plain.length && box === plain.length, `${w.held.size} vs ${plain.length}`)
+  check('cap off: remote cameras are still warmed (no skip)', [...w.held.keys()].some((k) => k.startsWith('p2p/')))
+}
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

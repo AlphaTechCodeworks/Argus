@@ -248,6 +248,17 @@
       </form>
       </details>
     </section>
+    <section class="se-section" data-tab="server" aria-labelledby="cap-title">
+      <h2 id="cap-title">Limit how many camera streams run at once</h2>
+      <p class="st-help">Caps the number of camera streams running at once across every NVR, so opening many screens or sites at the same time cannot overload this server. At the limit a camera you open takes priority: streams kept warm in the background are dropped first to make room, and room is always kept for a full-size HD view. Off: no limit, exactly as before.</p>
+      <form id="liveCap" class="se-grid" autocomplete="off">
+        <label class="st-check se-wide"><input id="lc-enabled" type="checkbox" /> Limit how many camera streams run at once</label>
+        <label id="lc-max-row">Most streams at once <input id="lc-max" type="number" min="1" max="500" required /></label>
+        <label id="lc-hd-row">Slots kept free for full-size HD views <input id="lc-hd" type="number" min="0" max="50" required /></label>
+        <label class="st-check se-wide" id="lc-warm-row"><input id="lc-warm" type="checkbox" /> Keep remote (P2P) cameras warm too — they open faster, but each uses one of the slots above</label>
+        <div class="se-actions"><button type="submit" class="st-primary">Save</button><span id="lc-msg" class="st-meta"></span></div>
+      </form>
+    </section>
     <section class="se-section" data-tab="server" aria-labelledby="srv-title">
       <h2 id="srv-title">Restart the server</h2>
       <p class="st-help">Stops and starts the Argus server. Live video and server recording pause for about 10 seconds, then every camera reconnects by itself. The NVRs keep recording to their own disks throughout. Only an admin can do this.</p>

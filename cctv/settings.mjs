@@ -76,7 +76,16 @@ export const DEFAULTS = Object.freeze({
     maxGapMinutes: 60,
     perNvrMbps: 8,
     restSeconds: 30
-  }
+  },
+  // Box-wide live-stream cap (live-cap.mjs). On the 8-core box ~70 open live streams saturate the CPU
+  // and a full-size HD main can no longer start (it falls back to the sub stream); this caps the
+  // concurrent live streams the server asks the workers to run. `enabled` off is exactly today (no cap,
+  // warm-ups unchanged). maxStreams: the box-wide ceiling -- ~4-5 streams a core keeps the CPU below the
+  // ~70 that saturated it while still serving the first-screen grids (warm-streams.mjs CAP 16). hdHeadroom:
+  // slots kept clear of warm-ups so opening one camera full-size can always pull its main stream.
+  // warmRemote: whether remote (P2P / serial) NVRs are warmed too -- off, a remote stream is a cloud
+  // pull plus an H.265 -> H.264 transcode, the most expensive kind, so those open on demand only.
+  liveCap: { enabled: true, maxStreams: 36, warmRemote: false, hdHeadroom: 2 }
 })
 
 const CAMERA_KEY = /^[A-Za-z0-9._-]{1,64}\/\d{1,3}$/
@@ -151,6 +160,12 @@ const BACKFILL_FIELDS = {
   perNvrMbps: int('backfill.perNvrMbps', 1, 200),
   restSeconds: int('backfill.restSeconds', 0, 3600)
 }
+const LIVECAP_FIELDS = {
+  enabled: (v) => Boolean(v),
+  maxStreams: int('liveCap.maxStreams', 1, 500),
+  warmRemote: (v) => Boolean(v),
+  hdHeadroom: int('liveCap.hdHeadroom', 0, 50)
+}
 
 const knownKeys = (obj, keys, where) => {
   for (const k of Object.keys(obj)) if (!keys.includes(k)) throw new HttpError(400, `unknown setting ${where}${k}`)
@@ -213,6 +228,12 @@ function validate(s) {
   // An empty window (both ends the same) would mean "never", which is what `enabled: false` is
   // for; saying it plainly avoids a job that silently never runs.
   if (isPlainObject(s.backfill) && s.backfill.windowStart === s.backfill.windowEnd) throw new HttpError(400, 'the backfill window must not start and end at the same time')
+  if (isPlainObject(s.liveCap)) {
+    for (const [k, f] of Object.entries(LIVECAP_FIELDS)) f(s.liveCap[k])
+    // the headroom is slots the cap keeps clear of warm-ups for full-size mains, so it must leave room
+    // for at least one other stream (hdHeadroom === maxStreams would warm nothing and serve nothing)
+    if (s.liveCap.hdHeadroom >= s.liveCap.maxStreams) throw new HttpError(400, 'liveCap.hdHeadroom must be below liveCap.maxStreams')
+  }
 }
 
 /** Settings from the file, each part falling back to the default when missing or invalid. */
@@ -304,6 +325,10 @@ function fromFile(j) {
   if (isPlainObject(j.backfill)) {
     for (const [k, f] of Object.entries(BACKFILL_FIELDS)) tryPart(() => (s.backfill[k] = f(j.backfill[k])))
     if (s.backfill.windowStart === s.backfill.windowEnd) s.backfill = structuredClone(DEFAULTS.backfill)
+  }
+  if (isPlainObject(j.liveCap)) {
+    for (const [k, f] of Object.entries(LIVECAP_FIELDS)) tryPart(() => (s.liveCap[k] = f(j.liveCap[k])))
+    if (s.liveCap.hdHeadroom >= s.liveCap.maxStreams) s.liveCap = structuredClone(DEFAULTS.liveCap)
   }
   return s
 }
@@ -474,6 +499,12 @@ export function saveSettings(patch, user, { internal = false } = {}) {
     const b = needObject(patch.backfill, 'backfill')
     knownKeys(b, Object.keys(BACKFILL_FIELDS), 'backfill.')
     for (const [k, v] of Object.entries(b)) next.backfill[k] = BACKFILL_FIELDS[k](v)
+  }
+  if ('liveCap' in patch) {
+    const l = needObject(patch.liveCap, 'liveCap')
+    knownKeys(l, Object.keys(LIVECAP_FIELDS), 'liveCap.')
+    next.liveCap ??= structuredClone(DEFAULTS.liveCap)
+    for (const [k, v] of Object.entries(l)) next.liveCap[k] = LIVECAP_FIELDS[k](v)
   }
   validate(next)
   write(next)

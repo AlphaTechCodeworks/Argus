@@ -87,7 +87,7 @@ import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
 import { handleClockWrite, measuredDrift, startClockSync, zoneOffsets } from './nvr-clock.mjs'
 import { handleSettings } from './settings-api.mjs'
-import { cameraRecording, getSettings } from './settings.mjs'
+import { cameraRecording, getSettings, onSettingsChange } from './settings.mjs'
 import { startAlerts } from './alert-checks.mjs'
 import { makeSysinfo } from './sysinfo.mjs'
 import { makeSender } from './alert-send.mjs'
@@ -100,6 +100,7 @@ import { liveAttacher } from './live-attach.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
+import { makeLiveCap } from './live-cap.mjs'
 import { allGridOrders } from './user-prefs.mjs'
 import { pool as playbackTranscodes } from './transcode.mjs'
 import { estimateRecentRam } from './rec-cache.mjs'
@@ -1083,8 +1084,15 @@ const onConnection = (ws, req) => {
 wss.on('connection', onConnection)
 muxWss.on('connection', onConnection)
 const phoneLive = new PhoneLive()
+// Box-wide live-stream cap (live-cap.mjs, settings.liveCap): the count of live streams the server is
+// asking the workers to run, box-wide. The same reduce the /healthz handler uses, but only the wanted
+// ones (a just-created hub entry not yet asked for does not count). Lives in this one process, so the
+// cap is counted and granted here with no worker messaging.
+const liveStreamCount = () => [...nvrs.values()].reduce((n, nvr) => n + (nvr.worker ? [...nvr.worker.hub.streams.values()].filter((s) => s.wanted).length : nvr.streams.size), 0)
+const liveCap = makeLiveCap({ settings: () => getSettings().liveCap, count: liveStreamCount })
+const isRemoteNvr = (id) => { const n = nvrs.get(id); return Boolean(n && (n.cfg.sn || n.cfg.remote)) }
 // each user's first screen of cameras, streaming before anyone opens Live (warm-streams.mjs)
-startWarmStreams({
+const warm = startWarmStreams({
   cameras: () => allCameras({ live: true }),
   orders: allGridOrders,
   // every camera of an NVR with no refused stream in the last 10 minutes (warm-streams.mjs)
@@ -1095,12 +1103,21 @@ startWarmStreams({
   streamOf: (id, ch) => {
     const n = nvrs.get(id)
     return n?.liveOnline ? n.getStream(ch, 1) : null
-  }
+  },
+  // the cap: warm-ups stop at maxStreams - hdHeadroom and are shed back to it; remote (P2P) NVRs are
+  // never warmed while the cap is on and remote warm-ups are off (a cloud pull + transcode is dear)
+  liveCap,
+  count: liveStreamCount,
+  isRemote: (id) => liveCap.enabled() && liveCap.warmRemote() === false && isRemoteNvr(id)
 })
+liveCap.attachWarm(warm) // so a viewer's start can preempt a warm-up
+// A Settings change to the cap applies live: re-reconcile the warm-ups (shed any now over the cap, stop
+// warming remote NVRs). No worker messaging -- the cap is enforced entirely in this process.
+onSettingsChange(() => { try { warm.run() } catch (e) { console.warn(`[warm] ${e.message}`) } })
 const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on conversions for phones and remote viewers together
 // one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs); isAdmin: a
 // remote main moved between streams asks Live HD again, with the account's role as it is then
-const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, track: watch.track })
+const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, track: watch.track, liveCap })
 
 // This listener is synchronous and nothing above it catches: anything that throws here takes the
 // whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27

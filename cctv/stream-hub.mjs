@@ -53,7 +53,13 @@ export class HubStream {
     else ws.waitForKey = true
   }
 
-  remove(ws) {
+  /**
+   * @param {{ linger?: boolean }} [o] linger false: stop the stream now rather than after the usual
+   *   delay, used when the box-wide cap preempts a background warm-up (live-cap.mjs) -- the viewer it
+   *   makes room for is on a different camera and will not re-use this one, so there is nothing to keep
+   *   it ready for. Default true: today's behaviour.
+   */
+  remove(ws, { linger = true } = {}) {
     this.clients.delete(ws)
     // only warm-ups left: the worker may start it behind real viewers again. A sub-stream nobody
     // watches any more (its linger) is background too: at an NVR's sub-stream limit a viewer's
@@ -64,15 +70,22 @@ export class HubStream {
     }
     if (this.clients.size > 0 || this.closed) return
     clearTimeout(this.stopTimer)
+    this.stopTimer = null
+    if (!linger) return this.#stop()
     this.stopTimer = setTimeout(() => {
       this.stopTimer = null
       if (this.clients.size > 0) return
-      this.wanted = false
-      this.fg = false
-      this.gop = []
-      this.hub.send(unwant(this.ch, this.type))
-      if (this.hub.streams.get(this.key) === this) this.hub.streams.delete(this.key)
+      this.#stop()
     }, this.hub.stopDelayMs[this.type] ?? 10_000)
+  }
+
+  /** Unwant the stream and drop it from the hub (the end of the linger, or a cap preemption). */
+  #stop() {
+    this.wanted = false
+    this.fg = false
+    this.gop = []
+    this.hub.send(unwant(this.ch, this.type))
+    if (this.hub.streams.get(this.key) === this) this.hub.streams.delete(this.key)
   }
 
   onFrame(buf, isKey) {

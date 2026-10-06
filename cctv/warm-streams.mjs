@@ -41,9 +41,12 @@ export const OUT_SAVE_STEP_MS = 10 * 60_000
  * Which cameras to keep ready: each user's first screen in their own order (the default order for
  * a user who has none), online ones only, the first users' first, at most `cap`. Pure.
  * @param {{ cameras: {nvr:string,ch:number,online:boolean,configured?:boolean}[], orders: Record<string,string[]> }} o
+ *   isRemote: a predicate that drops a remote (P2P / serial) NVR's cameras from the candidates, so they
+ *   are never warmed -- a remote stream is a cloud pull plus a transcode (live-cap.mjs); null keeps them
  * @returns {string[]} "nvr/ch" keys
  */
-export function pickWarm({ cameras, orders, perUser = FIRST_SCREEN, cap = CAP, roomy = null }) {
+export function pickWarm({ cameras, orders, perUser = FIRST_SCREEN, cap = CAP, roomy = null, isRemote = null }) {
+  if (isRemote) cameras = cameras.filter((c) => !isRemote(c.nvr))
   const first = pickFirst({ cameras, orders, perUser, cap })
   if (!roomy) return first
   const out = [...first]
@@ -93,10 +96,14 @@ function readOut(file, t) {
 /**
  * Keeps the picked sub-streams running.
  * @param {{ cameras: () => object[], orders: () => object, streamOf: (nvrId: string, ch: number) => {add: Function, remove: Function}|null,
- *   log?: Function, everyMs?: number, now?: () => number, firstRunMs?: number, outFile?: string|null }} o
- *   outFile: where the kept-out NVRs are saved (null: memory only)
+ *   log?: Function, everyMs?: number, now?: () => number, firstRunMs?: number, outFile?: string|null,
+ *   liveCap?: { enabled: () => boolean, warmBudget: () => number }|null, count?: (() => number)|null,
+ *   isRemote?: ((nvrId: string) => boolean)|null }} o
+ *   outFile: where the kept-out NVRs are saved (null: memory only); liveCap + count: the box-wide cap
+ *   (live-cap.mjs) -- warm-ups stop at warmBudget and are shed back to it; isRemote: remote NVRs skipped.
+ *   All three default to off, so without them run() is exactly today's.
  */
-export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log = console.log, everyMs = EVERY_MS, now = Date.now, firstRunMs = FIRST_RUN_MS, outFile = OUT_FILE }) {
+export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log = console.log, everyMs = EVERY_MS, now = Date.now, firstRunMs = FIRST_RUN_MS, outFile = OUT_FILE, liveCap = null, count = null, isRemote = null }) {
   const startedAt = now()
   const held = new Map() // key -> { stream, viewer }
   // an NVR that refused is kept out of the extra warm-up for STAY_OUT_MS, not just while it refuses,
@@ -132,25 +139,39 @@ export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log 
   })
   const run = () => {
     if (now() - startedAt < firstRunMs) return
+    const capOn = Boolean(liveCap?.enabled())
+    const budget = capOn ? liveCap.warmBudget() : Infinity
     let want
     try {
-      want = new Set(pickWarm({ cameras: cameras(), orders: orders(), roomy: calm }))
+      want = new Set(pickWarm({ cameras: cameras(), orders: orders(), roomy: calm, isRemote }))
     } catch (e) {
       return log(`[warm] ${e.message}`)
     }
-    const released = new Map() // NVR id -> streams let go in this pass
-    for (const [k, h] of held) {
-      if (want.has(k)) continue
+    const released = new Map() // NVR id -> streams let go in this pass (at most RELEASE_PER_RUN each)
+    const spare = (nvrId) => (released.get(nvrId) ?? 0) < RELEASE_PER_RUN
+    const letGo = (k, h, o) => {
       const nvrId = k.slice(0, k.lastIndexOf('/'))
-      const n = released.get(nvrId) ?? 0
-      if (n >= RELEASE_PER_RUN) continue // the rest in the next passes
-      released.set(nvrId, n + 1)
-      h.stream.remove(h.viewer)
+      released.set(nvrId, (released.get(nvrId) ?? 0) + 1)
+      h.stream.remove(h.viewer, o)
       held.delete(k)
+    }
+    for (const [k, h] of held) {
+      if (want.has(k) || !spare(k.slice(0, k.lastIndexOf('/')))) continue // the rest in the next passes
+      letGo(k, h)
+    }
+    // box over the warm-up budget (the cap was lowered, remote warm-ups were turned off, or viewers
+    // grew between passes): drop extra background warm-ups now so a full-size main keeps its headroom
+    // (live-cap.mjs). Same 2-per-NVR limit, and stopped at once (linger false) so the slots free today.
+    if (capOn && count) {
+      for (const [k, h] of held) {
+        if (count() <= budget) break
+        if (spare(k.slice(0, k.lastIndexOf('/')))) letGo(k, h, { linger: false })
+      }
     }
     let added = 0
     for (const k of want) {
       if (held.has(k)) continue
+      if (capOn && count && count() >= budget) break // at the warm-up budget: real viewers get the rest
       const i = k.lastIndexOf('/')
       const stream = streamOf(k.slice(0, i), Number(k.slice(i + 1)))
       if (!stream) continue
@@ -162,8 +183,22 @@ export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log 
     }
     if (added) log(`[warm] keeping ${held.size} camera${held.size === 1 ? '' : 's'} streaming, ready for Live`)
   }
+  // The box-wide cap preempts a background warm-up when a real viewer needs the slot (live-cap.mjs):
+  // drop up to n warm-ups that no viewer has joined, stopping each at once. Returns the slots freed.
+  const release = (n) => {
+    let freed = 0
+    for (const [k, h] of held) {
+      if (freed >= n) break
+      const others = (h.stream.clients ?? h.stream.viewers)?.size ?? 1
+      if (others > 1) continue // a viewer joined this camera: never drop a stream someone is watching
+      h.stream.remove(h.viewer, { linger: false })
+      held.delete(k)
+      freed++
+    }
+    return freed
+  }
   const t = setInterval(run, everyMs)
   t.unref?.()
   setTimeout(run, firstRunMs).unref?.() // viewers still go first
-  return { run, held, outUntil }
+  return { run, held, outUntil, release }
 }

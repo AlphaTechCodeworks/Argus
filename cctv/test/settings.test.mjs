@@ -8,7 +8,7 @@ import { join } from 'node:path'
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'cctv-settings-test-'))
 const DATA = process.env.DATA_DIR
 writeFileSync(join(DATA, 'users.json'), JSON.stringify({ boss: { hash: 'x', role: 'admin' }, viewer: { hash: 'x', role: 'viewer' } }))
-const { getSettings, saveSettings, cameraRecording, DEFAULTS, SETTINGS_FILE } = await import('../settings.mjs')
+const { getSettings, saveSettings, cameraRecording, onSettingsChange, DEFAULTS, SETTINGS_FILE } = await import('../settings.mjs')
 const { handleSettings } = await import('../settings-api.mjs')
 
 let failures = 0
@@ -241,6 +241,50 @@ check('null removes an NVR override', !('nvr-2' in getSettings().recording.nvrs)
   }
   check('... and the next save is not refused because of them', saved)
   saveSettings({ storage: { locations: [] } }, 'storage.mjs', { internal: true })
+}
+
+// ---- the box-wide live-stream cap (settings.liveCap, live-cap.mjs) ----------------------------------
+{
+  writeFileSync(SETTINGS_FILE, '{}')
+  const lc = getSettings().liveCap
+  check('liveCap defaults: on, 36 streams, no remote warm-ups, 2 headroom',
+    lc.enabled === true && lc.maxStreams === 36 && lc.warmRemote === false && lc.hdHeadroom === 2, JSON.stringify(lc))
+  check('DEFAULTS carries liveCap', JSON.stringify(DEFAULTS.liveCap) === JSON.stringify({ enabled: true, maxStreams: 36, warmRemote: false, hdHeadroom: 2 }))
+  // validation
+  check('maxStreams below 1 refused', refused({ liveCap: { maxStreams: 0 } }, /maxStreams/))
+  check('maxStreams above 500 refused', refused({ liveCap: { maxStreams: 501 } }, /maxStreams/))
+  check('fractional maxStreams refused', refused({ liveCap: { maxStreams: 12.5 } }))
+  check('hdHeadroom negative refused', refused({ liveCap: { hdHeadroom: -1 } }, /hdHeadroom/))
+  check('hdHeadroom >= maxStreams refused', refused({ liveCap: { maxStreams: 4, hdHeadroom: 4 } }, /hdHeadroom.*below.*maxStreams/))
+  check('an unknown liveCap field refused', refused({ liveCap: { maxStreams: 20, turbo: true } }, /turbo/))
+  check('nothing was written by the refused liveCap saves', JSON.stringify(getSettings().liveCap) === JSON.stringify(DEFAULTS.liveCap))
+  // round trip (the exact shape the Settings page POSTs)
+  const sv = saveSettings({ liveCap: { enabled: false, maxStreams: 24, hdHeadroom: 3, warmRemote: true } }, 'boss')
+  check('save returns the new liveCap', sv.liveCap.enabled === false && sv.liveCap.maxStreams === 24 && sv.liveCap.hdHeadroom === 3 && sv.liveCap.warmRemote === true)
+  check('a partial patch merges (just the number)', saveSettings({ liveCap: { maxStreams: 30 } }, 'boss').liveCap.maxStreams === 30 && getSettings().liveCap.enabled === false)
+  check('round trip through the file', JSON.parse(readFileSync(SETTINGS_FILE, 'utf8')).liveCap.maxStreams === 30)
+  // a hand-edited file: a bad field falls back to its default, the rest of the section is kept
+  writeFileSync(SETTINGS_FILE, JSON.stringify({ liveCap: { enabled: false, maxStreams: 99, hdHeadroom: 'lots', warmRemote: true } }))
+  const back = getSettings().liveCap
+  check('from the file: a bad field falls back, good ones kept', back.enabled === false && back.maxStreams === 99 && back.hdHeadroom === 2 && back.warmRemote === true, JSON.stringify(back))
+  // a file whose headroom is not below maxStreams: the whole section falls back
+  writeFileSync(SETTINGS_FILE, JSON.stringify({ liveCap: { maxStreams: 3, hdHeadroom: 3 } }))
+  check('from the file: headroom not below maxStreams falls the section back to defaults', JSON.stringify(getSettings().liveCap) === JSON.stringify(DEFAULTS.liveCap))
+  // the setting reaches the workers/warm-ups live through onSettingsChange (how recording settings do)
+  writeFileSync(SETTINGS_FILE, '{}')
+  let heard = null
+  const off = onSettingsChange((s) => { heard = s.liveCap })
+  saveSettings({ liveCap: { maxStreams: 28 } }, 'boss')
+  off()
+  check('a save fires onSettingsChange with the new liveCap (applies live)', heard?.maxStreams === 28, JSON.stringify(heard))
+  // through the admin route, as the Settings page does it
+  writeFileSync(SETTINGS_FILE, '{}')
+  const [pa, ba] = await handleSettings('POST', '/api/admin/settings', json({ liveCap: { enabled: true, maxStreams: 40, hdHeadroom: 4, warmRemote: false } }), 'boss')
+  check('POST liveCap through the API: 200 and saved', pa === 200 && ba.settings.liveCap.maxStreams === 40 && ba.settings.liveCap.hdHeadroom === 4)
+  const [gv] = await handleSettings('POST', '/api/admin/settings', json({ liveCap: { maxStreams: 10 } }), 'viewer')
+  check('a non-admin cannot change the cap (403), nothing changes', gv === 403 && getSettings().liveCap.maxStreams === 40)
+  const [gg, bg] = await handleSettings('GET', '/api/admin/settings', json({}), 'boss')
+  check('GET exposes liveCap to the page', gg === 200 && bg.settings.liveCap.maxStreams === 40)
 }
 
 // The data folder goes with the run: the runs of 2026-09-29 left six in the production server's

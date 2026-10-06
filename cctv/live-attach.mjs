@@ -69,15 +69,17 @@ const standInHandle = (ws, bridge, wait) => ({
  * @param {{ can: Function, currentUser: (req: object) => string|null, isAdmin?: (user: string) => boolean,
  *   adaptiveLive: { attach: Function }, phoneLive: { attach: Function }, track?: Function,
  *   waitTimers?: { every?: Function, clear?: Function, now?: () => number },
+ *   liveCap?: { enabled: () => boolean, admitViewer: Function, admitMain: Function },
  *   log?: (line: string) => void, now?: () => number }} o
  *   can: rights.mjs can; currentUser: the request's signed-in user; isAdmin: the account's role now
  *   (without it, the `who` a socket was let in with, for the same user); track: access-watch.mjs's,
  *   which asks the rights again while the socket or channel is open; waitTimers: live-wait.mjs's timers
- *   (tests); log: the stand-ins' lines; now: the clock (tests)
+ *   (tests); liveCap: the box-wide stream cap (live-cap.mjs); log: the stand-ins' lines; now: the clock (tests)
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
  *   clientH265: boolean, phone15: boolean }) => void} attachLive
  */
-export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now }) {
+const NO_CAP = { enabled: () => false, admitViewer: () => 0, admitMain: () => 0 }
+export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, track = () => {}, waitTimers = {}, liveCap = NO_CAP, log = (line) => console.log(line), now = Date.now }) {
   const quiet = new Map() // camera and viewer -> { at, left }: its H.265 stand-in line last said, and those left out since
   /** The H.265 stand-in line for a camera and viewer, or null when it was said less than H265_QUIET_MS ago. */
   const h265Line = (line, key) => {
@@ -170,6 +172,13 @@ export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, p
     // which a phone may not play as it is (a sub tile that cannot decode its stream closes for good)
     const subH265 = nvr.codecSeen?.get?.(`${ch}:1`)?.codec === 'h265'
     if (phone && (!held || subH265) && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws, { camera: `${nvr.id}/${ch + 1}` })) return
+    // box-wide cap (live-cap.mjs): a real viewer never piles on at the cap. A full-size main (streamType
+    // 0) drops background warm-ups so it starts rather than fall back to the sub; a sub tile drops one so
+    // the box stays at the cap. Only a new stream needs room (a tile back within its linger is already
+    // wanted). A stream a viewer is watching is never dropped. Off: a no-op, this path is today's.
+    const fresh = stream.wanted !== true
+    if (streamType === 0) liveCap.admitMain(fresh)
+    else liveCap.admitViewer(fresh)
     stream.add(ws)
     ws.on('close', () => stream.remove(ws))
   }

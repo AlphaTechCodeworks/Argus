@@ -271,7 +271,7 @@ check('(f) nothing closed is left in the watch', watch.size() === 1, `${watch.si
   const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
   check('server.mjs: one watch, with the session and the rights as the upgrade has them', /const watch = accessWatch\(\{ currentUser, isAdmin: \(u\) => AUTH_OFF \|\| auth\.isAdmin\(u\), can \}\)/.test(src))
   check('server.mjs: a sweep when rights or accounts are saved', /onRightsSaved\(watch\.sweepSoon\)/.test(src) && /auth\.onUsersChanged\(watch\.sweepSoon\)/.test(src))
-  check('server.mjs: every /live socket and mux channel is tracked (liveAttacher)', /const attachLive = liveAttacher\(\{ can, currentUser, isAdmin: \(u\) => AUTH_OFF \|\| auth\.isAdmin\(u\), adaptiveLive, phoneLive, track: watch\.track \}\)/.test(src))
+  check('server.mjs: every /live socket and mux channel is tracked (liveAttacher)', /const attachLive = liveAttacher\(\{ can, currentUser, isAdmin: \(u\) => AUTH_OFF \|\| auth\.isAdmin\(u\), adaptiveLive, phoneLive, track: watch\.track, liveCap \}\)/.test(src))
   const pb = src.slice(src.indexOf("if (url.pathname === '/playback') {"))
   check('server.mjs: a /playback socket is watched for what connectPlayback decided', /connectPlayback\(\{[^}]*allowedMain, onMain \}\)[\s\S]{0,400}if \(session\) watch\.track\(ws, req, \{ actions: session\.actions, nvr: nvr\.id, ch: target\.ch \}\)/.test(pb.slice(0, 3000)))
   check('server.mjs: an NVR session going over to main is watched for the main-stream rights, and asked at once (a sweep)', /const onMain = \(\) => \{\s*watch\.track\(ws, req, \{ actions: NVR_MAIN_ACTIONS, nvr: nvr\.id, ch: target\.ch \}\)\s*watch\.sweepSoon\(\)\s*\}/.test(pb.slice(0, 3000)))

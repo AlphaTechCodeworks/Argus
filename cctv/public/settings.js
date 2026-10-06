@@ -994,11 +994,55 @@ async function loadOsd() {
   renderOsd()
 }
 
+// ---- box-wide live-stream cap (Server tab) -------------------------------------------------------
+//
+// The cap on how many camera streams run at once across all NVRs, the HD headroom kept for a
+// full-size view, and whether remote (P2P) cameras are kept warm. Off == exactly today's behaviour
+// (live-cap.mjs short-circuits), so the number and warm-up controls only show when it is on. The
+// server checks every value again (settings.mjs liveCap), as with every other form here.
+function renderLiveCap() {
+  const c = settings.liveCap ?? {}
+  $('lc-enabled').checked = c.enabled !== false // default on
+  $('lc-max').value = c.maxStreams ?? ''
+  $('lc-hd').value = c.hdHeadroom ?? ''
+  $('lc-warm').checked = c.warmRemote === true
+  showLiveCap()
+}
+// The limit, HD-headroom and warm-up controls mean nothing with the cap off, so they are hidden
+// then. Inline display, not the hidden attribute: these labels are .se-grid children and
+// `.se-grid label { display: flex }` would win over the [hidden] rule, leaving them showing.
+function showLiveCap() {
+  const on = $('lc-enabled').checked
+  for (const id of ['lc-max-row', 'lc-hd-row', 'lc-warm-row']) $(id).style.display = on ? '' : 'none'
+}
+$('lc-enabled').addEventListener('change', showLiveCap)
+$('liveCap').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  // The numbers are sent even while off, so turning the cap off and on again keeps what was set.
+  try {
+    settings = (
+      await api('POST', '/api/admin/settings', {
+        liveCap: {
+          enabled: $('lc-enabled').checked,
+          maxStreams: Number($('lc-max').value),
+          hdHeadroom: Number($('lc-hd').value),
+          warmRemote: $('lc-warm').checked
+        }
+      })
+    ).settings
+    say('lc-msg', 'Saved')
+    renderLiveCap()
+  } catch (err) {
+    say('lc-msg', err.message, true)
+  }
+})
+
 function render() {
   renderDefaults()
   renderCameras()
   renderMisc()
   renderAlerts()
+  renderLiveCap()
 }
 
 $('logout').addEventListener('click', async () => {
