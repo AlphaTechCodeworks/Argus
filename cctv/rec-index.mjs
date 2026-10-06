@@ -485,8 +485,12 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     spans: db.prepare(SCAN_SQL.spans),
     spanAfter: db.prepare(SCAN_SQL.after),
     gap: db.prepare('INSERT INTO gaps (nvr, ch, from_ms, to_ms, reason) VALUES (?, ?, ?, ?, ?)'),
-    // (start_ms bounded below as in at(): the rows just before the range, never the camera's whole history)
-    segs: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? AND end_ms >= ? ORDER BY start_ms`),
+    // start_ms bounded below as in at(): the rows just before the range, never the camera's whole
+    // history; then (UNION) the files longer than MAX_SEGMENT_MS that began before it (segments_long),
+    // which that bound would otherwise drop — a false hole at the window's start (as SCAN_SQL.spans does)
+    segs: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? AND end_ms >= ?
+      UNION ALL SELECT ${SEG_COLS} FROM segments INDEXED BY segments_long WHERE nvr = ? AND ch = ? AND end_ms >= ? AND start_ms < ? AND ${LONG_ROW}
+      ORDER BY startMs`),
     byPath: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE path = ?`),
     gaps: db.prepare('SELECT nvr, ch, from_ms AS fromMs, to_ms AS toMs, reason FROM gaps WHERE nvr = ? AND ch = ? AND to_ms >= ? AND from_ms <= ? ORDER BY from_ms'),
     oldest: db.prepare(`SELECT ${SEG_COLS} FROM segments ORDER BY start_ms LIMIT ?`),
@@ -504,14 +508,22 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     firstCh: db.prepare(CAMERA_SQL.firstCh),
     nextCh: db.prepare(CAMERA_SQL.nextCh),
     oldGaps: db.prepare('DELETE FROM gaps WHERE to_ms < ?'),
-    // playback lookups: all served by segments_cam (nvr, ch, start_ms)
-    at: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms <= ? AND start_ms >= ? AND end_ms >= ? ORDER BY start_ms DESC LIMIT 1`),
+    // playback lookups: served by segments_cam (nvr, ch, start_ms); at() also asks segments_long for
+    // the files longer than MAX_SEGMENT_MS that cover t but began before t - MAX_SEGMENT_MS (the lower
+    // bound would otherwise drop them: a time inside such a file read as a gap). start_ms < that bound
+    // in the long arm keeps the two arms disjoint, so no row is returned twice.
+    at: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms <= ? AND start_ms >= ? AND end_ms >= ?
+      UNION ALL SELECT ${SEG_COLS} FROM segments INDEXED BY segments_long WHERE nvr = ? AND ch = ? AND end_ms >= ? AND start_ms < ? AND ${LONG_ROW}
+      ORDER BY startMs DESC LIMIT 1`),
     next: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms > ? ORDER BY start_ms LIMIT 1`),
     prev: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? AND start_ms < ? ORDER BY start_ms DESC LIMIT 1`),
     first: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? ORDER BY start_ms LIMIT 1`),
     newest: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? ORDER BY start_ms DESC LIMIT 1`),
     recent: db.prepare(`SELECT ${SEG_COLS} FROM segments WHERE nvr = ? AND ch = ? ORDER BY start_ms DESC LIMIT ?`),
-    window: db.prepare('SELECT path, start_ms AS s, end_ms AS e FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? AND end_ms >= ? ORDER BY start_ms'),
+    // bounded below as at()/segs, then the over-long files that began before the window (segments_long)
+    window: db.prepare(`SELECT path, start_ms AS s, end_ms AS e FROM segments WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? AND end_ms >= ?
+      UNION ALL SELECT path, start_ms AS s, end_ms AS e FROM segments INDEXED BY segments_long WHERE nvr = ? AND ch = ? AND end_ms >= ? AND start_ms < ? AND ${LONG_ROW}
+      ORDER BY s`),
     newestStart: db.prepare(CAMERA_SQL.newestStart),
     endSince: db.prepare(CAMERA_SQL.endSince),
     longEnd: db.prepare(CAMERA_SQL.longEnd),
@@ -717,8 +729,12 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     addGap(g) {
       q.gap.run(String(g.nvr), Number(g.ch), Math.round(g.fromMs), Math.round(g.toMs), g.reason ?? null)
     },
-    /** Segments of one camera overlapping [fromMs, toMs], oldest first. */
-    segments: (nvr, ch, fromMs, toMs) => q.segs.all(String(nvr), Number(ch), fromMs - MAX_SEGMENT_MS, toMs, fromMs).map(plain),
+    /** Segments of one camera overlapping [fromMs, toMs], oldest first (over-long files included: segments_long). */
+    segments: (nvr, ch, fromMs, toMs) => {
+      const n = String(nvr)
+      const c = Number(ch)
+      return q.segs.all(n, c, fromMs - MAX_SEGMENT_MS, toMs, fromMs, n, c, fromMs, Math.min(fromMs - MAX_SEGMENT_MS, toMs + 1)).map(plain)
+    },
     /**
      * Every file of one camera overlapping [fromMs, toMs], files longer than MAX_SEGMENT_MS that began
      * before it included, as { startMs, endMs } in no set order (SCAN_SQL; backfill.mjs scan()).
@@ -821,7 +837,9 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     // ---- playback lookups (one camera)
     /** The segment holding t (start and end inclusive; the latest-starting one), else the open file when t is in it; else null. */
     at(nvr, ch, t) {
-      const row = one(q.at.get(String(nvr), Number(ch), t, t - MAX_SEGMENT_MS, t))
+      const n = String(nvr)
+      const c = Number(ch)
+      const row = one(q.at.get(n, c, t, t - MAX_SEGMENT_MS, t, n, c, t, t - MAX_SEGMENT_MS))
       if (row) return row
       const o = openFor(nvr, ch)
       return o && t >= o.startMs && t <= o.startMs + OPEN_MAX_MS ? openSeg(o) : null
@@ -857,7 +875,7 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     timeline(nvr, ch, fromMs, toMs, now = Date.now()) {
       const n = String(nvr)
       const c = Number(ch)
-      const rows = q.window.all(n, c, fromMs - MAX_SEGMENT_MS, toMs, fromMs)
+      const rows = q.window.all(n, c, fromMs - MAX_SEGMENT_MS, toMs, fromMs, n, c, fromMs, Math.min(fromMs - MAX_SEGMENT_MS, toMs + 1))
       const spans = rows.map((r) => [r.s, r.e])
       let newest = rows.at(-1) ?? null
       const o = openFor(n, c)
