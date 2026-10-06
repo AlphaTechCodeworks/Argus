@@ -304,8 +304,7 @@ process.on('SIGINT', shutdown)
 /**
  * One command from the main process, sent on this worker's own NVR login because the NVR refuses
  * the main process a second one (nvr-xml.mjs viaWorker). It goes through the same transparent() /
- * power() as any other call here, so it takes this NVR's lane and can never overlap another SDK
- * call to it. `gen`: the session the main process believes it is talking to; null means any.
+ * power() as any other call here: one XML call at a time to this NVR, on its lane, and nothing new is started beside a call that is late. `gen`: the session the main process believes it is talking to; null means any.
  */
 async function answer(m) {
   const reply = (r) => {
@@ -317,7 +316,6 @@ async function answer(m) {
     if (m.gen != null && m.gen !== nvr.gen) throw new Error(`${nvr.name} reconnected; nothing was sent`)
     if (m.op === 'xml') reply({ ok: true, text: await transparent(nvr, m.url, m.xml, m.tag, { outBytes: m.outBytes }) })
     else if (m.op === 'power') reply({ ok: true, accepted: await power(nvr, m.action === 'shutdown' ? 'shutdown' : 'reboot') })
-    else if (m.op === 'detail') reply({ ok: true, list: await nvr.cameraDetail() })
     else throw new Error(`unknown request ${m.op}`)
   } catch (e) {
     reply({ ok: false, error: { message: e?.message ?? String(e), name: e?.name ?? 'Error', status: e?.status ?? null, extra: e?.extra ?? null } })

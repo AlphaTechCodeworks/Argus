@@ -254,6 +254,12 @@ export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBy
         if ((!borrowed && userId < 0) || xmlGen(nvr) !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
         sentAt = Date.now()
         if (borrowed) {
+          // nothing of this call enters this process's SDK, so the process-wide turn is passed on
+          // at once (0: no native call started here, so no gap is kept): other NVRs' XML calls must
+          // not wait out a round trip to this NVR's worker. This NVR's own queue still holds until
+          // the answer is back, so the worker gets one request at a time.
+          passTurn?.(0)
+          passTurn = null
           text = String((await viaWorker(nvr, { op: 'xml', url, xml, tag, outBytes }, !read)).text ?? '')
           return true
         }
@@ -296,7 +302,10 @@ export async function power(nvr, action) {
         const borrowed = nvr.borrowing === true
         const userId = nvr.userId
         if ((!borrowed && userId < 0) || xmlGen(nvr) !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
-        if (borrowed) return Boolean((await viaWorker(nvr, { op: 'power', action }, true)).accepted)
+        if (borrowed) {
+          passTurn() // as in transparent(): the turn is this process's SDK's, which this call never enters
+          return Boolean((await viaWorker(nvr, { op: 'power', action }, true)).accepted)
+        }
         return Boolean(await sdkCallT({ nvr: nvr.id, tag: action }, fn, userId))
       } finally {
         passTurn()

@@ -303,7 +303,7 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   const pw = await sup.request({ op: 'power', action: 'reboot', gen: sup.stats().gen }).catch((e) => e)
   check('request: reboot is answered', pw?.ok === true && pw.accepted === true, pw?.message ?? JSON.stringify(pw))
   const det = await sup.request({ op: 'detail' }).catch((e) => e)
-  check('request: camera detail is answered with a list', det?.ok === true && Array.isArray(det.list), det?.message ?? JSON.stringify(det))
+  check('request: camera detail is not something the worker does', det instanceof Error && /unknown request detail/.test(det.message), det?.message)
   const odd = await sup.request({ op: 'nonsense' }).catch((e) => e)
   check('request: an unknown request is refused', odd instanceof Error && /unknown request nonsense/.test(odd.message), odd?.message)
   const last = sup._child()

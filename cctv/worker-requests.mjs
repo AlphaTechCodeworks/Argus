@@ -6,7 +6,7 @@
 // worker-supervisor.mjs supplies `send` and feeds the replies in.
 import { MSG } from './worker-ipc.mjs'
 
-export const REQUEST_TIMEOUT_MS = 95_000 // nvr-xml.mjs XML_CAP_MS plus 5 s: the worker's own cap comes first
+export const REQUEST_TIMEOUT_MS = 95_000 // nvr-xml.mjs XML_CAP_MS plus 5 s: the caller's own cap has freed its queue by then; this ends the wait itself
 
 const named = (name, message, more = {}) => Object.assign(new Error(message), { name, ...more })
 

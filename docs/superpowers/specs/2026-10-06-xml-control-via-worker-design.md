@@ -25,8 +25,7 @@ In, while the control login is down and the worker's login is up:
 - every command sent with `transparent()` (`nvr-xml.mjs`), whichever module asks: disk health,
   clock, imaging, lens, OSD, streams and sub-streams, tripwire, event settings, probe, and the
   modules that are handed `transparent` rather than importing it;
-- reboot and shutdown (`power()`);
-- the camera-detail read behind the localhost export (`GetDeviceIPCInfo`, `camera-export.mjs`).
+- reboot and shutdown (`power()`).
 
 Out:
 
@@ -36,11 +35,12 @@ Out:
   unaffected, as today.
 - Freeing a slot on the NVR. If the worker's login is refused as well, nothing here helps.
 - Any change for an NVR whose control login is up.
+- The camera-detail read behind the localhost export (`camera-export.mjs`). It is a heavy read that runs unattended every night; a slow one on a borrowed session would hold up the process that records. It keeps needing the control login.
 
 ## Approach
 
 `transparent()` and `power()` stay the one place a command leaves the main process. Their queue,
-process-wide turn, read breaker, full-queue refusal and 90 s cap are unchanged. Only the last
+process-wide turn, read breaker, full-queue refusal and 90 s cap are unchanged. One exception: a borrowed command passes the process-wide turn on as soon as it is handed to the worker, because that turn guards this process's SDK, which the command never enters. Only the last
 step differs: with no control session, the command is handed to that NVR's worker, which sends
 it on its own login and returns the answer.
 
@@ -114,10 +114,9 @@ Two additions to `worker-ipc.mjs`, the first request/reply pair in the protocol:
 
 - `REQ` (parent to worker): `{ t, id, op, gen, ... }`, with `op` one of
   - `xml`: `url`, `xml`, `tag`, `outBytes`;
-  - `power`: `action` (`reboot` or `shutdown`);
-  - `detail`: no arguments (the worker runs its own `cameraDetail()`).
+  - `power`: `action` (`reboot` or `shutdown`).
 - `RES` (worker to parent): `{ t, id, ok: true, text }` for `xml`, `{ ..., accepted }` for
-  `power`, `{ ..., list }` for `detail`; or `{ t, id, ok: false, error: { message, name, status,
+  `power`; or `{ t, id, ok: false, error: { message, name, status,
   extra } }` (`extra` carries the retry hint).
 
 The supervisor gains `request(msg, { timeoutMs })`, which returns a promise, and rejects every
@@ -150,6 +149,7 @@ The worker records live video, so settings traffic must not hold it up.
   on a borrowed session costs a few seconds of recording on that NVR, where today it would cost
   none. Accepted, because the alternative is no settings at all; recorded here so it is not a
   surprise.
+- A settings call that is slow but not hung (past the SDK's 20 s budget, as the large encode reads can be over P2P) makes the worker hold back new stream starts until it returns, and viewers' new streams for 60 s after. Recording already running is not interrupted. This is new for a borrowing NVR: before, the same slow call sat in the main process. Accepted for calls an admin makes; it is why the unattended camera-detail read is not borrowed.
 
 ## What the user sees
 

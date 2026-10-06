@@ -751,19 +751,10 @@ export class Nvr {
    * identity and the extra IPC_INFO fields the routine poll drops, queryRecStatus for main/sub
    * resolution, frame rate and recording status, the sub-stream codec as last seen in live video, and
    * the main-stream encoder (incl. whether H.265+ is on and offered). Read-only -- never mutates
-   * this.channels. Runs on this process's own login (the control login when a worker holds the video), or is asked of the worker while that login is refused (borrowing).
+   * this.channels. Runs on this process's own login (the control login when a worker holds the video) and is never borrowed from the worker: it is a heavy, unattended read (the nightly export), and a slow one would hold up the process that records.
    * Returns [] if the NVR did not answer; a failed queryRecStatus / encode read just leaves those fields null.
    */
   async cameraDetail() {
-    if (this.borrowing) {
-      // this login is refused: the worker reads it on its own (its cameraDetail runs this same code
-      // there). Three reads over a slow link, so a longer wait than a single command's.
-      try {
-        return (await this.worker.request({ op: 'detail' }, { timeoutMs: 200_000 })).list ?? []
-      } catch {
-        return [] // as an NVR that did not answer
-      }
-    }
     const cams = await this.#queryChannelsFull()
     if (cams.length === 0) return cams
     let rec = null
@@ -907,7 +898,10 @@ export class Nvr {
       if (gen !== this.gen) return // the session changed meanwhile
       if (ok) {
         this.health.channelFailures = 0
-        if (!this.online && !this.relogging) this.status = 'online'
+        if (!this.online && !this.relogging) {
+          this.status = 'online'
+          this.controlFailed = false // up again: see borrowing
+        }
       } else if (++this.health.channelFailures >= MAX_CHANNEL_FAILURES) {
         this.#relogin('NVR not answering').catch((e) => this.#log('relogin', e))
       }

@@ -14,7 +14,7 @@ const check = (name, ok, extra = '') => {
 const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')
 const lines = (f, re) => src(f).split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => re.test(l)).map(([n]) => n)
 
-const XML_MODULES = ['imaging', 'lens', 'streams', 'substreams', 'tripwire', 'osd', 'nvr-clock', 'nvr-log', 'nvr-netstatus', 'nvr-probe', 'relays', 'alarm-watch', 'nvr-disks', 'camera-export']
+const XML_MODULES = ['imaging', 'lens', 'streams', 'substreams', 'tripwire', 'osd', 'nvr-clock', 'nvr-log', 'nvr-netstatus', 'nvr-probe', 'relays', 'alarm-watch', 'nvr-disks']
 for (const m of XML_MODULES) {
   const f = `${m}.mjs`
   const left = lines(f, /\bnvr\??\.(online|degraded|gen)\b/)
@@ -38,13 +38,14 @@ check('server.mjs: the power route asks the XML session', /if \(body\.confirm !=
 check('server.mjs: playback still needs the control login', /if \(!nvr\.online\) return ws\.close\(1013, 'NVR offline'\)/.test(sv))
 
 // and the ones that must stay on the control login
-for (const f of ['playback.mjs', 'motion.mjs', 'backfill.mjs', 'rec-playback.mjs', 'rec-fallback.mjs']) {
+for (const f of ['playback.mjs', 'motion.mjs', 'backfill.mjs', 'rec-playback.mjs', 'rec-fallback.mjs', 'camera-export.mjs']) {
   check(`${f}: does not use the XML session helpers`, !/xml-session\.mjs/.test(src(f)))
 }
 check('playback.mjs: its route still needs the control login', /if \(!nvr\.online\) return \[503/.test(src('playback.mjs')))
 
-// the camera-detail read
-check('nvrs.mjs: camera detail is asked of the worker while borrowing', /async cameraDetail\(\) \{\s*if \(this\.borrowing\)[\s\S]{0,300}op: 'detail'/.test(src('nvrs.mjs')))
+// the camera-detail read stays on the control login: heavy and unattended (the nightly export)
+check('nvrs.mjs: camera detail is never asked of the worker', !/op: 'detail'/.test(src('nvrs.mjs')) && !/op === 'detail'/.test(src('nvr-worker.mjs')))
+check('camera-export.mjs: still needs the control login', /if \(!nvr\.online\) \{/.test(src('camera-export.mjs')))
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
