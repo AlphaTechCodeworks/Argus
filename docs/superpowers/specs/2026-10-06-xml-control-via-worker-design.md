@@ -1,6 +1,6 @@
 # NVR settings through the worker's login — design
 
-Date: 2026-10-06. Status: approach A approved in chat, awaiting spec review.
+Date: 2026-10-06. Status: built on branch `xml-control-via-worker`; not deployed.
 
 ## Goal
 
@@ -100,7 +100,7 @@ Two getters on `Nvr`:
 Each of the roughly 40 `!nvr.online`, `nvr.userId < 0` and `nvr.degraded` checks outside
 `nvrs.mjs` is sorted into one of two groups:
 
-- guards a path that only uses `transparent()`, `power()` or the camera-detail read: switch to
+- guards a path that only uses `transparent()` or `power()`: switch to
   `xmlOnline` / `xmlDegraded`;
 - guards playback, search, live or backfill: leave alone.
 
