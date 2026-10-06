@@ -270,9 +270,11 @@ function refuseNow(nvr, read) {
   if (sdkStuck()) throw new HttpError(503, `The connection to the NVRs is stuck on an earlier call; nothing was sent. Try again in a minute`, { retryAfterS: STUCK_RETRY_S })
   // at the door, so a caller is not queued only to be refused at the last moment (enterSdk). Not while
   // the worker's login is borrowed: such a call enters no SDK of this process, so a call of this
-  // NVR still inside it (held from before the control login was lost, say) is nothing it can run
-  // beside, and the worker's login is the way round exactly that. The worker's own transparent()
-  // keeps the record for the worker's SDK.
+  // NVR still inside it is nothing it can run beside; the worker's own transparent() keeps the
+  // record for the worker's SDK. (Hardly reachable today: a held call is a late call unless it was
+  // given a long timeoutMs, and a late call keeps nvrs.mjs from the relogin that would start
+  // borrowing; it takes an Nvr object made again under the same id. It is not a way round a call
+  // wedged on the control login: that NVR stays on its own login, and refused.)
   if (nvr.borrowing !== true) refuseHeld(nvr)
   const b = readFails.get(nvr.id)
   if (read && b?.openUntil > now()) {
@@ -306,10 +308,12 @@ const noOwnSession = (nvr) => nvr.borrowing !== true && nvr.userId < 0
 
 /**
  * The same command on the worker's login (nvrs.mjs Nvr borrowing): the NVR refuses this process a
- * second one. The worker runs it through its own transparent() / power(), on its own lane. Errors
- * are marked viaWorker: no native call of this process is left running behind them, so the queue is
- * released at once even after a timeout. `write`: a change or a power command, whose loss with the
- * worker leaves it unknown whether the NVR acted.
+ * second one. The worker runs it through its own transparent() / power(), on its own lane. No
+ * native call of this process is left running behind an error from here, so the caller's queue place
+ * is given back at once even after a timeout: such a call has no record of being inside this
+ * process's SDK (transparent()'s catch). Errors are marked viaWorker; nothing reads the mark now.
+ * `write`: a change or a power command, whose loss with the worker leaves it unknown whether the NVR
+ * acted.
  */
 async function viaWorker(nvr, req, write) {
   try {
@@ -333,6 +337,9 @@ async function viaWorker(nvr, req, write) {
  * default (budgetOf) applies. It may be longer than XML_CAP_MS, for a heavy read that rightly takes
  * minutes: the call still gets its answer, the cap still frees the queue and the process-wide turn
  * for other NVRs after 90 s, and this NVR's other XML calls are refused until it has returned.
+ * On this process's own login only: a command sent through the worker (borrowing) runs on the
+ * worker's default limit, and the wait for the worker's answer has a limit of its own
+ * (worker-requests.mjs).
  */
 export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBytes = 256 * 1024, timeoutMs } = {}) {
   if (!xmlOnline(nvr) || noOwnSession(nvr)) throw new Error(`${nvr.name} is offline`)
@@ -405,12 +412,21 @@ export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBy
           // runs it through its own transparent(), which keeps the record for the worker's SDK), and
           // the process-wide turn is passed on at once (0: no native call started here, so no gap is
           // kept): other NVRs' XML calls must not wait out a round trip to this NVR's worker. This
-          // NVR's own queue still holds until the answer is back, so the worker gets one request at
-          // a time.
+          // NVR's own queue still holds until the answer is back or the cap passes, so its XML
+          // commands reach the worker one after another (a reboot does not use this queue; in the
+          // worker, its own turn and record are what keep two of them apart).
           sentAt = Date.now()
           passTurn?.(0)
           passTurn = null
-          text = String((await viaWorker(nvr, { op: 'xml', url, xml, tag, outBytes }, !read)).text ?? '')
+          try {
+            text = String((await viaWorker(nvr, { op: 'xml', url, xml, tag, outBytes }, !read)).text ?? '')
+          } catch (e) {
+            // turned away with nothing sent (the worker's own 503s, or it is not ready): not a read
+            // that came back, so it does not start the read breaker's count over, as the refusals
+            // of this process do not either. A read the worker sent and gave up on still counts.
+            if (e?.status === 503 || e?.name === 'WorkerNotReady') sentAt = 0
+            throw e
+          }
           return true
         }
         // From here to the native call nothing is awaited: the session check above, the record and

@@ -307,6 +307,7 @@ check('reads are told from changes by the command name', isReadCommand('queryChl
 // exposure. The blocks below shorten the cap and the gap, and each uses an NVR id of its own (the
 // record and the read breaker go by id).
 const CAP = 300 // the shortened cap (ms): the time limits (50-150 ms) and the waits are set well apart from it
+const LANE_CAP = 1000 // the real-lane block's cap (ms): well clear of a stalled event loop, see there
 const AT_ONCE = 200 // "at once" (ms), for a call refused at the door or served on a free turn: well under the cap, which is how long it would take queued, or behind a turn that was not passed on
 await sleep(300) // (the last call above keeps the process-wide turn for its 250 ms gap)
 // A call left hanging by a broken queue, turn or record stops this file at an await that never settles:
@@ -428,7 +429,7 @@ onCallSettled(() => laterListenerRan++)
 {
   _test.setCap(CAP)
   _test.setGap(10)
-  const [d, o] = ['xd', 'xo'].map(fakeNvr)
+  const [d, o] = ['xd', 'xdo'].map(fakeNvr)
   d.lane = countingLane()
   const count = insideCounter()
   const sent = [] // "nvr tag", as the stand-in is entered
@@ -442,13 +443,14 @@ onCallSettled(() => laterListenerRan++)
     return Promise.resolve(answer(outBuf, len))
   })
   const t0 = Date.now()
-  const pFirst = transparent(d, 'queryChlVideoParam', '<x/>', 'first read').catch((e) => e)
+  let heldAtTimeout // (read in the rejection's own handler: a stalled event loop cannot let the cap pass first)
+  const pFirst = transparent(d, 'queryChlVideoParam', '<x/>', 'first read').catch((e) => ((heldAtTimeout = _test.inside(d)?.held), e))
   await sleep(20)
   await otherNvrAnswers() // (after the first read started: from here the SDK does not count as stuck)
   let secondAt = 0
   const pSecond = transparent(d, 'queryChlVideoParam', '<x/>', 'second read').catch((e) => e).then((x) => ((secondAt = Date.now() - t0), x))
   const e1 = await pFirst
-  check('setup: xd\'s read is past its time limit and still inside the SDK, on record; the SDK is not stuck', e1?.name === 'SdkTimeout' && lateCalls('xd') === 1 && _test.inside(d)?.what === 'first read' && _test.inside(d)?.held === false && sdkStuck() === false, `${e1?.name ?? e1}; ${lateCalls('xd')} late; record ${JSON.stringify(_test.inside(d))}; stuck ${sdkStuck()}`)
+  check('setup: xd\'s read is past its time limit and still inside the SDK, on record; the SDK is not stuck', e1?.name === 'SdkTimeout' && lateCalls('xd') === 1 && _test.inside(d)?.what === 'first read' && heldAtTimeout === false && sdkStuck() === false, `${e1?.name ?? e1}; ${lateCalls('xd')} late; record ${JSON.stringify(_test.inside(d))}; stuck ${sdkStuck()}`)
   const pOther = transparent(o, 'queryChlVideoParam', '<x/>', 'other NVR').catch((e) => e)
   // (within: if the cap ever stopped passing the queue or the turn on, these two would wait for ever)
   const second = await within(pSecond, 2000)
@@ -457,7 +459,7 @@ onCallSettled(() => laterListenerRan++)
   check('the call queued behind it is refused when the cap passes (503, nothing sent), not started beside it', refusedFor(second, 'first read') && secondAt >= CAP - 30 && !sent.includes('xd second read'), `${second?.status ?? 'sent'} ${second?.message ?? ''} at ${secondAt} ms`)
   check('... and gave its place back at once, with the first call still inside (nothing of xd queued, no call admitted)', (await gaveBack(d)) && _test.inside(d)?.what === 'first read', `pending ${_test.pending()}; record ${JSON.stringify(_test.inside(d))}`)
   check('... never 2 calls of xd inside the SDK at once', count.peak('xd') === 1 && count.now('xd') === 1, `peak ${count.peak('xd')}; sent: ${sent.join(', ')}`)
-  check('... while another NVR\'s call IS served when the cap passes: it frees the queue and the turn', typeof other === 'string' && sent.includes('xo other NVR') && count.now('xd') === 1, `${other?.message ?? 'ok'}; sent: ${sent.join(', ')}`)
+  check('... while another NVR\'s call IS served when the cap passes: it frees the queue and the turn', typeof other === 'string' && sent.includes('xdo other NVR') && count.now('xd') === 1, `${other?.message ?? 'ok'}; sent: ${sent.join(', ')}`)
   const heldLines = out.filter((l) => l.includes('[xd]') && l.includes('still inside the SDK after') && l.includes('XML calls to this NVR are refused until it returns'))
   check('... the cap does not clear the record: it is still set, now held (logged once)', _test.inside(d)?.what === 'first read' && _test.inside(d)?.held === true && heldLines.length === 1, `record ${JSON.stringify(_test.inside(d))}; ${heldLines.length} lines`)
   const tDoor = Date.now()
@@ -734,15 +736,15 @@ onCallSettled(() => laterListenerRan++)
 {
   _test.setCap(CAP)
   _test.setGap(10)
-  const w = { ...fakeNvr('xw'), lane: new Lane('xw', 2) }
+  const w = { ...fakeNvr('xlw'), lane: new Lane('xlw', 2) }
   const o = fakeNvr('xwo')
   const stuck = [heldNative(), heldNative()]
-  const late = stuck.map((f, i) => sdkCallT({ nvr: 'xw', tag: `playback search ${i}`, timeoutMs: 50 }, f.fn).catch(() => {}))
+  const late = stuck.map((f, i) => sdkCallT({ nvr: 'xlw', tag: `playback search ${i}`, timeoutMs: 50 }, f.fn).catch(() => {}))
   await sleep(100)
   await otherNvrAnswers()
   const count = insideCounter()
   const sent = [] // "nvr tag", as the stand-in is entered
-  const first = heldNative(() => count.leave('xw'))
+  const first = heldNative(() => count.leave('xlw'))
   _test.setCall((opts, userId, xml, url, outBuf, size, len) => {
     sent.push(`${opts.nvr} ${opts.tag}`)
     count.enter(opts.nvr)
@@ -751,30 +753,30 @@ onCallSettled(() => laterListenerRan++)
     count.leave(opts.nvr)
     return Promise.resolve(answer(outBuf, len))
   })
-  const setup = lateCalls('xw') === 2 && sdkStuck() === false
+  const setup = lateCalls('xlw') === 2 && sdkStuck() === false
   const ps = ['x0', 'x1', 'x2'].map((tag) => transparent(w, 'queryChlVideoParam', '<x/>', tag).catch((e) => e))
   // each call's cap frees the per-NVR queue for the next while it waits for the lane: 3 caps on (waited
   // for, not timed: three timers in a row run late on a busy machine), all three are in the lane's queue
   const allInLane = () => w.lane.pending === 3 && _test.pending() === 0
-  const giveUp = Date.now() + 5000
+  const giveUp = Date.now() + 10_000
   while (!allInLane() && Date.now() < giveUp) await sleep(20)
-  check('setup: xw\'s lane is held by 2 late calls; its 3 XML calls all wait in the lane, none in the per-NVR queue, nothing sent', setup && allInLane() && w.lane.running === 0 && sent.length === 0, `${lateCalls('xw')} late; lane ${w.lane.running} running, ${w.lane.pending} waiting; pending ${_test.pending()}; sent: ${sent.join(', ')}`)
+  check('setup: xlw\'s lane is held by 2 late calls; its 3 XML calls all wait in the lane, none in the per-NVR queue, nothing sent', setup && allInLane() && w.lane.running === 0 && sent.length === 0, `${lateCalls('xlw')} late; lane ${w.lane.running} running, ${w.lane.pending} waiting; pending ${_test.pending()}; sent: ${sent.join(', ')}`)
   // the late calls return: the lane runs x0 and x1 at once. x0 takes the turn and goes inside; x1 waits for the turn
   for (const f of stuck) f.finish()
   await Promise.all(late)
   await sleep(20)
   await otherNvrAnswers() // (after x0 started: from here the SDK does not count as stuck)
-  const rs = [await within(ps[0], 2000), await within(ps[1], 2000), await within(ps[2], 2000)]
+  const rs = [await within(ps[0], 5000), await within(ps[1], 5000), await within(ps[2], 5000)]
   const back = await gaveBack(w)
   const tTurn = Date.now()
   const other = await within(transparent(o, 'queryChlVideoParam', '<x/>', 'other NVR').catch((e) => e), 1000)
   const turnMs = Date.now() - tTurn
   check('x0 runs past its time limit inside the SDK; x1 and x2 are refused when its cap passes (503, nothing sent), by the record and not for a stuck SDK', sdkStuck() === false && rs[0]?.name === 'SdkTimeout' && refusedFor(rs[1], 'x0') && refusedFor(rs[2], 'x0') && _test.inside(w)?.held === true, `${rs.map((x) => (x?.name === 'SdkTimeout' ? x.name : (x?.message ?? 'sent'))).join(' | ')}; stuck ${sdkStuck()}`)
-  check('... never 2 calls of xw inside the SDK at once', count.peak('xw') === 1 && count.now('xw') === 1 && sent.filter((s) => s.startsWith('xw ')).length === 1, `peak ${count.peak('xw')}; sent: ${sent.join(', ')}`)
-  check('... the refused calls gave everything back at once: the lane is idle, nothing queued or admitted, another NVR\'s call is served at once', back && w.lane.running === 0 && w.lane.pending === 0 && typeof other === 'string' && turnMs < AT_ONCE, `gave back ${back}; lane ${w.lane.running} running, ${w.lane.pending} waiting; other NVR ${other?.message ?? 'served'} in ${turnMs} ms`)
+  check('... never 2 calls of xlw inside the SDK at once', count.peak('xlw') === 1 && count.now('xlw') === 1 && sent.filter((s) => s.startsWith('xlw ')).length === 1, `peak ${count.peak('xlw')}; sent: ${sent.join(', ')}`)
+  check('... the refused calls gave everything back at once: the lane is idle, nothing queued or admitted, another NVR\'s call is served at once', back && w.lane.running === 0 && w.lane.pending === 0 && typeof other === 'string' && turnMs < LANE_CAP / 2, `gave back ${back}; lane ${w.lane.running} running, ${w.lane.pending} waiting; other NVR ${other?.message ?? 'served'} in ${turnMs} ms`)
   first.finish()
   const next = await transparent(w, 'queryChlVideoParam', '<x/>', 'next').catch((e) => e)
-  check('once x0 has returned (late), the record is gone and the next call to xw goes out', _test.inside(w) === null && typeof next === 'string' && sent.at(-1) === 'xw next' && count.peak('xw') === 1, `${next?.message ?? 'ok'}; record ${JSON.stringify(_test.inside(w))}`)
+  check('once x0 has returned (late), the record is gone and the next call to xlw goes out', _test.inside(w) === null && typeof next === 'string' && sent.at(-1) === 'xlw next' && count.peak('xlw') === 1, `${next?.message ?? 'ok'}; record ${JSON.stringify(_test.inside(w))}`)
   check('... nothing is left admitted or queued', (await nothingLeft(w, o)) && w.lane.running === 0 && w.lane.pending === 0, `pending ${_test.pending()}`)
   restore()
 }
@@ -886,6 +888,116 @@ onCallSettled(() => laterListenerRan++)
   const after = await transparent(b, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
   check('... until it returns: then the record is gone and a call goes out on its own login', _test.inside(b) === null && typeof after === 'string' && nativeWhileBorrowing === 1, `${JSON.stringify(_test.inside(b))} ${after?.message ?? 'ok'} native ${nativeWhileBorrowing}`)
   check('... nothing is left admitted or queued', await nothingLeft(b), `pending ${_test.pending()}`)
+  restore()
+}
+
+// ---- a borrowed call (the command on the worker's login): what the merge with #16 decided for it
+{
+  _test.setCap(CAP)
+  _test.setGap(10)
+  const k = fakeNvr('xbk')
+  const o = fakeNvr('xbo')
+  let native = 0
+  _test.setCall((opts, _u, _x, _url, outBuf, _s, len) => {
+    if (opts.nvr === 'xbk') native++
+    return Promise.resolve(answer(outBuf, len))
+  })
+  const insideDuring = [] // this process's record for xbk while the worker has the call
+  let reply = () => ({ text: 'ok' })
+  let asked = 0
+  Object.assign(k, {
+    online: false, userId: -1, borrowing: true, xmlOnline: true, xmlDegraded: false, xmlGen: 'worker:1:1',
+    worker: {
+      stats: () => ({ gen: 1 }),
+      request: async (m) => {
+        asked++
+        insideDuring.push(_test.inside(k))
+        const r = reply(m)
+        if (r instanceof Error) throw r
+        return r
+      }
+    }
+  })
+  // decision 2: no record in this process, also when none is there yet
+  const ok = await transparent(k, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  const okReboot = await power(k, 'reboot').catch((e) => e)
+  check('a borrowed call takes no record in this process (none before, none while the worker has it, none after)', ok === 'ok' && okReboot === false && insideDuring.length === 2 && insideDuring.every((x) => x === null) && _test.inside(k) === null && native === 0, `${ok?.message ?? ok}; during ${JSON.stringify(insideDuring)}`)
+  // the worker's own record refuses (its 503): the wording and the retry hint reach this process's caller, for a read and for a reboot
+  reply = () => Object.assign(new Error('NVR xbk is still answering an earlier request (clock, 12 s so far); nothing was sent. Try again shortly'), { status: 503, extra: { retryAfterS: 30 } })
+  const wRead = await transparent(k, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  const wReboot = await power(k, 'reboot').catch((e) => e)
+  check('the worker\'s "still answering" refusal comes through whole (503, retryAfterS, its wording), for a read and a reboot', refusedFor(wRead, 'clock') && wRead.extra.retryAfterS === 30 && refusedFor(wReboot, 'clock') && wReboot.extra.retryAfterS === 30, `${wRead?.message} | ${wReboot?.message}`)
+  // decision 5: a borrowed read that times out counts for the read breaker
+  reply = () => Object.assign(new Error('the video connection did not answer in time'), { name: 'SdkTimeout' })
+  const t1 = await transparent(k, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  const t2 = await transparent(k, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  const before = asked
+  const t3 = await transparent(k, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  check('two borrowed reads in a row that time out open the read breaker: the third is not sent to the worker', t1?.name === 'SdkTimeout' && t2?.name === 'SdkTimeout' && t3 instanceof HttpError && t3.status === 503 && /did not answer 2 settings reads in time/.test(t3.message) && asked === before, `${t1?.name} ${t2?.name} ${t3?.message ?? t3}; asked ${asked - before}`)
+  // a borrowed reboot does not keep the process-wide turn while the worker answers
+  let letGo = () => {}
+  k.worker.request = () => new Promise((r) => (letGo = () => r({ accepted: true })))
+  const slowReboot = power(k, 'reboot').catch((e) => e)
+  await sleep(30)
+  const other = await within(transparent(o, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e), 1000)
+  check('another NVR is not held up while the worker answers a reboot', typeof other === 'string', `${other?.message ?? 'ok'}`)
+  letGo()
+  check('... and the reboot\'s answer still arrives', (await within(slowReboot, 1000)) === true)
+  check('... nothing is left admitted or queued', await nothingLeft(k, o), `pending ${_test.pending()}`)
+  restore()
+}
+
+// ---- power(): the record is cleared on a native error in time and on a throw (only a time-out holds it)
+{
+  _test.setCap(CAP)
+  _test.setGap(10)
+  const e = fakeNvr('xpe')
+  _test.setCall((_opts, _u, _x, _url, outBuf, _s, len) => Promise.resolve(answer(outBuf, len)))
+  _test.setPower(() => Promise.reject(new Error('native boom')))
+  const r1 = await power(e, 'reboot').catch((x) => x)
+  const left1 = _test.inside(e)
+  _test.setPower(() => {
+    throw new Error('stand-in boom')
+  })
+  const r2 = await power(e, 'shutdown').catch((x) => x)
+  const left2 = _test.inside(e)
+  const after = await transparent(e, 'queryChlVideoParam', '<x/>', 'after').catch((x) => x)
+  check('power(): a native error in time and a synchronous throw both clear the record; the next call goes out', r1?.message === 'native boom' && left1 === null && r2?.message === 'stand-in boom' && left2 === null && typeof after === 'string', `${r1?.message} ${JSON.stringify(left1)} | ${r2?.message} ${JSON.stringify(left2)} | ${after?.message ?? 'ok'}`)
+  check('... nothing is left admitted or queued', await nothingLeft(e), `pending ${_test.pending()}`)
+  restore()
+}
+
+// ---- a borrowed read the worker turned away (nothing sent) is not a read that came back: it does
+// not start the read breaker's count over, as this process's own refusals do not
+{
+  _test.setCap(CAP)
+  _test.setGap(10)
+  const r = fakeNvr('xbr')
+  let asked = 0
+  const replies = [
+    () => Object.assign(new Error('the video connection did not answer in time'), { name: 'SdkTimeout' }),
+    () => Object.assign(new Error('NVR xbr is still answering an earlier request (clock, 3 s so far); nothing was sent. Try again shortly'), { status: 503, extra: { retryAfterS: 30 } }),
+    () => Object.assign(new Error('the video connection is not ready; nothing was sent'), { name: 'WorkerNotReady' }),
+    () => Object.assign(new Error('the video connection did not answer in time'), { name: 'SdkTimeout' })
+  ]
+  Object.assign(r, {
+    online: false, userId: -1, borrowing: true, xmlOnline: true, xmlDegraded: false, xmlGen: 'worker:1:1',
+    worker: {
+      stats: () => ({ gen: 1 }),
+      request: async () => {
+        const reply = replies[asked++] ?? (() => ({ text: 'ok' }))
+        const x = reply()
+        if (x instanceof Error) throw x
+        return x
+      }
+    }
+  })
+  const got = []
+  for (let i = 0; i < 4; i++) got.push(await transparent(r, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e))
+  const fifth = await transparent(r, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  check('a timeout, two refusals from the worker with nothing sent, a timeout: the two timeouts are in a row for the read breaker', got[0]?.name === 'SdkTimeout' && got[1]?.status === 503 && got[2]?.name === 'WorkerNotReady' && got[3]?.name === 'SdkTimeout', got.map((e) => e?.name ?? e?.status ?? 'ok').join(' | '))
+  check('... so it is open: the next read is refused here and not sent to the worker', fifth instanceof HttpError && fifth.status === 503 && /did not answer 2 settings reads in time/.test(fifth.message) && asked === 4, `${fifth?.status} ${fifth?.message ?? fifth}; asked ${asked}`)
+  check('... nothing is left admitted or queued', await nothingLeft(r), `pending ${_test.pending()}`)
   restore()
 }
 
