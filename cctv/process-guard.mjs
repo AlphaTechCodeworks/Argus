@@ -1,33 +1,37 @@
-// The net under a promise rejection nobody catches. Node ends the process on one (its default, and
-// nothing starts this app with --unhandled-rejections), and nothing here listened for it. In the
-// main process that takes every viewer's socket, a running export and every NVR worker with it, so
-// recording stops on every camera for about a minute; in a worker, that NVR's video and recording
-// until the supervisor has a new one logged in. One was found in 2026-10: a playback command of
-// 'null' threw inside an async handler nobody awaited. That one is fixed where it was; this is for
-// the next: it is logged and counted, and the process carries on.
+// The net under a promise rejection nobody catches, for the main server. Node ends the process on
+// one (its default, and nothing starts this app with --unhandled-rejections), and nothing here
+// listened for it. In the main process that takes every viewer's socket, a running export and every
+// NVR worker with it, so recording stops on every camera for about a minute. One was found in
+// 2026-10: a playback command of 'null' threw inside an async handler nobody awaited (put right in
+// playback.mjs, a change of its own). This is for the next: it is logged and counted, and the
+// process carries on.
 //
 //   guardProcess({ name })  -> this process's one 'unhandledRejection' listener
-//   processErrors()         -> { unhandledRejections, lastAt, lastMessage }, for the Health page
+//   processErrors()         -> { unhandledRejections, lastAt, lastMessage }, in /healthz
 //
-// For the two processes that live long and hold other people's work, server.mjs and nvr-worker.mjs.
-// Each imports, before any other module of the app, a module that makes the call
-// (process-guard-server.mjs, process-guard-worker.mjs): a file's imports are all loaded before its
-// own first line runs, so a call in the file itself would leave them, and the timers and I/O that
-// already run while they load, without the net. Not for share-helper.mjs (its parent turns an exit
-// into a new helper, which is the right outcome there), report-worker.mjs or the command-line
-// tools: those should end, loudly.
+// For server.mjs, which imports, before any other module, a module that makes the call
+// (process-guard-server.mjs): a file's imports are all loaded before its own first line runs, so a
+// call in the file itself would leave them, and the timers and I/O that already run while they
+// load, without the net.
+//
+// Not for an NVR worker (nvr-worker.mjs), on purpose. A worker that ends is replaced by its
+// supervisor within seconds, logged in afresh, and only its own NVR waits. Kept running after a job
+// of its own stopped part-way it would go on reporting ready, with nothing to say whether it still
+// records and nothing to start another: its count could not leave the process, and nothing would
+// act on it. Until both exist, ending is the better outcome there. Nor for share-helper.mjs (its
+// parent turns an exit into a new helper), report-worker.mjs or the command-line tools: those
+// should end, loudly.
 //
 // No 'uncaughtException' listener, on purpose. Node documents carrying on after one as unsafe: the
 // throw cut off whatever was calling the code that threw (the rest of an event's listeners, Node's
 // own stream and socket code part-way through), and nothing puts that right; a rejection ended only
-// the async job it happened in. And something already starts each process again: systemd the main
-// one, worker-supervisor.mjs a worker. So an exception nobody catches ends the process, as it
-// always did.
+// the async job it happened in. And systemd starts the process again. So an exception nobody
+// catches ends the process, as it always did.
 //
 // Kept running is not nothing wrong: the job that rejected stopped part-way. So each one is a line
-// in the log and a count for Health, to be found and fixed where it is. And a job whose last line
-// is what ends the process (shutdown() in server.mjs and nvr-worker.mjs) has that line in a finally:
-// stopped part-way, it would otherwise leave the process running, half shut down.
+// in the log and a count in /healthz (no page or alert shows it yet), to be found and fixed where
+// it is. And a job whose last line is what ends the process (shutdown() in server.mjs) has that
+// line in a finally: stopped part-way, it would otherwise leave the process running, half shut down.
 //
 // Imports nothing, so it is the same on any machine and its test runs it for real (no SDK).
 
@@ -37,6 +41,9 @@
 const MAX_LINES = 20
 const MINUTE_MS = 60_000
 const LAST_CHARS = 300 // lastMessage is for a page: the first line of the reason, no longer than this
+// The limit above is on lines, not on their size: one reason (a message that carries a whole reply,
+// a stack of a deep recursion) is logged up to this many characters, and the line says it was cut.
+const LOG_CHARS = 8000
 
 let guard = null // { name, log, now } once guardProcess() has run
 let count = 0
@@ -93,7 +100,8 @@ function onRejection(reason) {
     }
     tellRest() // (the timer may be late, or the clock not the timer's: say it before the next line)
     logged.push(at)
-    log(`[${name}] unhandled rejection (kept running): ${text}`)
+    const shown = text.length > LOG_CHARS ? `${text.slice(0, LOG_CHARS)}\n[${name}] (that reason was ${text.length} characters: the first ${LOG_CHARS} are logged)` : text
+    log(`[${name}] unhandled rejection (kept running): ${shown}`)
   } catch {}
 }
 
@@ -110,7 +118,7 @@ export function guardProcess({ name, log = console.error, now = Date.now } = {})
 }
 
 /**
- * This process's unhandled rejections since it started (plain data, so a worker's can cross its pipe).
+ * This process's unhandled rejections since it started (plain data: /healthz sends it as it is).
  * @returns {{ unhandledRejections: number, lastAt: number|null, lastMessage: string|null }}
  *   lastAt: ms since 1970, by the guard's clock; lastMessage: the first line of the last reason
  */
