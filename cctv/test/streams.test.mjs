@@ -12,7 +12,7 @@ const xmlMod = await import('../nvr-xml.mjs')
 const { nvrs } = await import('../nvrs.mjs')
 const { Lane } = await import('../lanes.mjs')
 
-const { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, recommendedRange, TIMING } = _test
+const { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, recommendedRange, optimisePlan, TIMING } = _test
 const dir = process.argv[2] ?? join(import.meta.dirname, 'fixtures', 'streams')
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -229,6 +229,21 @@ check('not a candidate (LCL Cage) -> refused', s10 === 400)
 const [s11] = await handleStreams('stream', 'POST', nvr.id, 13, q(), async () => null, 'tester')
 check('a JSON null body is a 400', s11 === 400)
 check('never written: record mode, dual-stream switch', !calls.some((c) => /editRecordDistributeInfo/.test(c.url)))
+
+// ---- bulk optimiser: the H.265 + VBR plan (optimisePlan), against the real captures ----
+{
+  const sys = { recMode: 'auto', loopRecSwitch: false, totalBandwidth: null, usedTotalBandwidth: null, mainStreamLimitFps: null, poeMode: null }
+  const plansFor = (file) => parseEncode(readFileSync(join(dir, file), 'utf8')).items.map((i) => ({ name: i.name, ...optimisePlan(i, sys, true) }))
+  const n1 = plansFor('nvr1-queryNodeEncodeInfo.xml')
+  const n2 = plansFor('nvr-2-queryNodeEncodeInfo.xml')
+  const changed = (ps) => ps.filter((p) => p.change)
+  const toH265 = (ps) => ps.filter((p) => p.moves?.some((m) => m.startsWith('enct h264→h265')))
+  check('optimise: nvr1 proposes nothing (already H.265/H.265+, or its H.264 camera only offers H.264)', changed(n1).length === 0, changed(n1).map((p) => p.moves).join(';'))
+  check('optimise: nvr-2 moves its 4 H.264 cameras to H.265', toH265(n2).length === 4, `h264→h265 ${toH265(n2).length}`)
+  check('optimise: never moves off a smart codec (H.265+ left alone)', [...n1, ...n2].every((p) => !p.moves?.some((m) => /h26\dp→|h26\ds→/.test(m))))
+  check('optimise: only ever H.264→H.265 and/or CBR→VBR', changed([...n1, ...n2]).every((p) => p.moves.every((m) => m.startsWith('enct h264→h265') || m.startsWith('bitType CBR→VBR'))))
+  check('optimise: never lowers cap, fps, resolution or quality level', changed([...n1, ...n2]).every((p) => p.to.QoI === p.from.QoI && p.to.fps === p.from.fps && p.to.res === p.from.res && p.to.level === p.from.level))
+}
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
