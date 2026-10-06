@@ -7,6 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { PRIORITY } from './lanes.mjs'
 import { NET_SDK, lastErrorReason, lateCalls, sdkCallT, sdkStuck } from './sdk.mjs'
 import { kid, parseXml } from './xml.mjs'
+import { xmlDegraded, xmlGen, xmlOnline } from './xml-session.mjs'
 // The parser itself lives in xml.mjs, which imports nothing: modules that only read an NVR's
 // answer can use it without loading the native SDK. Re-exported here so nothing else had to change.
 export { XML_HEADER, esc, kid, kids, parseXml } from './xml.mjs'
@@ -71,10 +72,10 @@ export function cameraOf(nvrs, nvrId, ch) {
   return { nvr, chlId: chlIdOf(ch), name: nvr.channels.find((c) => c.ch === ch)?.name ?? `Camera ${ch + 1}` }
 }
 
-/** Refuses (409) unless the NVR is online and not recovering. */
+/** Refuses (409) unless an XML command can be sent to the NVR and its session is not recovering. */
 export function requireOnline(nvr) {
-  if (!nvr.online) throw new HttpError(409, `${nvr.name} is ${nvr.status}; try again when it is online`)
-  if (nvr.degraded) throw new HttpError(409, `${nvr.name} is busy or recovering; try again in a minute`)
+  if (!xmlOnline(nvr)) throw new HttpError(409, `${nvr.name} is ${nvr.status}; try again when it is online`)
+  if (xmlDegraded(nvr)) throw new HttpError(409, `${nvr.name} is busy or recovering; try again in a minute`)
 }
 
 /** [status, body] for an error thrown by a handler. */
@@ -174,14 +175,35 @@ function noteRead(nvr, timedOut) {
 // replaced by the offline tests: (opts, userId, xml, url, out, outSize, len) => Promise<bool>
 let call = (opts, ...args) => sdkCallT(opts, NET_SDK.TransparentConfig, ...args)
 
+/** No session of this process's own to send on (the worker's is borrowed, or there is none). */
+const noOwnSession = (nvr) => nvr.borrowing !== true && nvr.userId < 0
+
+/**
+ * The same command on the worker's login (nvrs.mjs Nvr borrowing): the NVR refuses this process a
+ * second one. The worker runs it through its own transparent() / power(), on its own lane. Errors
+ * are marked viaWorker: no native call of this process is left running behind them, so the queue is
+ * released at once even after a timeout. `write`: a change or a power command, whose loss with the
+ * worker leaves it unknown whether the NVR acted.
+ */
+async function viaWorker(nvr, req, write) {
+  try {
+    return await nvr.worker.request({ ...req, gen: nvr.worker.stats()?.gen ?? null })
+  } catch (e) {
+    const err = e?.status ? new HttpError(e.status, e.message, e.extra ?? undefined) : e instanceof Error ? e : new Error(String(e))
+    if (err.name === 'WorkerLost') err.message = write ? `${nvr.name}: the connection was lost; the change may or may not have been made` : `${nvr.name}: the connection was lost; try again`
+    err.viaWorker = true
+    throw err
+  }
+}
+
 /**
  * Sends one command and returns the answer. Refuses (nothing sent) if the session changed
  * while the call waited its turn: `gen` is the session the caller's data came from. Refuses with
  * 503 while the SDK is stuck, while the process-wide queue is full (reads) and while this NVR's
  * read breaker is open (reads): see above.
  */
-export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes = 256 * 1024 } = {}) {
-  if (!nvr.online || nvr.userId < 0) throw new Error(`${nvr.name} is offline`)
+export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBytes = 256 * 1024 } = {}) {
+  if (!xmlOnline(nvr) || noOwnSession(nvr)) throw new Error(`${nvr.name} is offline`)
   const read = isReadCommand(url)
   refuseNow(nvr, read)
   if (read && xmlPending > XML_MAX_WAITING) {
@@ -212,6 +234,7 @@ export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes 
   // never block the queues for ever (the watchdog handles calls stuck longer): from here while it
   // waits for its lane, and again from its process-wide turn
   cap = setTimeout(release, XML_CAP_MS)
+  let text = null // the answer when it came from the worker (nothing is written to `out` then)
   let ok
   try {
     // things may have changed while it waited: the SDK stuck, the breaker opened
@@ -224,10 +247,16 @@ export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes 
         cap = setTimeout(release, XML_CAP_MS)
         // and once more after that wait: the SDK stuck, the breaker opened
         refuseNow(nvr, read)
-        // the session as it is when the call really starts (a relogin may have happened while queued)
+        // the session as it is when the call really starts: a relogin may have happened while it was
+        // queued, or the path may have changed between this login and the worker's
+        const borrowed = nvr.borrowing === true
         const userId = nvr.userId
-        if (userId < 0 || nvr.gen !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
+        if ((!borrowed && userId < 0) || xmlGen(nvr) !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
         sentAt = Date.now()
+        if (borrowed) {
+          text = String((await viaWorker(nvr, { op: 'xml', url, xml, tag, outBytes }, !read)).text ?? '')
+          return true
+        }
         return call({ nvr: nvr.id, tag, onLate: release }, userId, xml, url, out, out.length, len)
       },
       { priority: PRIORITY.NORMAL }
@@ -235,18 +264,20 @@ export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes 
   } catch (e) {
     if (read && sentAt) noteRead(nvr, e?.name === 'SdkTimeout')
     // after a timeout the native call is still running: onLate releases the queues when it returns
-    if (e?.name !== 'SdkTimeout') release()
+    // (a call that went to the worker leaves no native call running here, timed out or not)
+    if (e?.name !== 'SdkTimeout' || e.viaWorker) release()
     throw e
   }
   release()
   if (read) noteRead(nvr, false)
   if (!ok) throw new Error(`the NVR did not accept the request (${await lastErrorReason('no reason given')})`)
+  if (text !== null) return text
   // some answers end with stray NUL bytes
   return out.toString('utf8', 0, Math.min(len.readUInt32LE(0), out.length)).replace(/\0+$/, '')
 }
 
 /**
- * Reboot or power the NVR off (NET_SDK_RebootDVR / NET_SDK_ShutDownDVR), on its control login. One
+ * Reboot or power the NVR off (NET_SDK_RebootDVR / NET_SDK_ShutDownDVR), on its control login, or the worker's while that is borrowed. One
  * SDK call, taken on this NVR's lane and the process-wide turn like every other, so it never overlaps
  * another call (overlapping SDK calls have corrupted the heap). The device drops right after, so there
  * is nothing to read back: the boolean is only whether the NVR accepted the command.
@@ -255,15 +286,17 @@ export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes 
  * @returns {Promise<boolean>}
  */
 export async function power(nvr, action) {
-  if (!nvr.online || nvr.userId < 0) throw new Error(`${nvr.name} is offline`)
+  if (!xmlOnline(nvr) || noOwnSession(nvr)) throw new Error(`${nvr.name} is offline`)
   const fn = action === 'shutdown' ? NET_SDK.ShutDownDVR : NET_SDK.RebootDVR
-  const gen = nvr.gen
+  const gen = xmlGen(nvr)
   return nvr.lane.run(
     async () => {
       const passTurn = await takeTurn()
       try {
+        const borrowed = nvr.borrowing === true
         const userId = nvr.userId
-        if (userId < 0 || nvr.gen !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
+        if ((!borrowed && userId < 0) || xmlGen(nvr) !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
+        if (borrowed) return Boolean((await viaWorker(nvr, { op: 'power', action }, true)).accepted)
         return Boolean(await sdkCallT({ nvr: nvr.id, tag: action }, fn, userId))
       } finally {
         passTurn()

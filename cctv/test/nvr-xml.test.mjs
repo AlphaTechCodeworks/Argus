@@ -184,6 +184,67 @@ check('reads are told from changes by the command name', isReadCommand('queryChl
   check('... and nothing is left queued', (await xmlSettled(h, 1000)) && (await xmlSettled(b, 1000)))
 }
 
+// ---- borrowing: the control login is refused, the command goes out on the worker's login.
+// Same queue, same refusals; the native call in this process is never made.
+{
+  let native = 0
+  _test.setCall(async () => {
+    native++
+    throw new Error('the SDK must not be called while borrowing')
+  })
+  _test.setNow(null)
+  const sent = []
+  let reply = (m) => ({ ok: true, text: `<answer for="${m.url}"/>` })
+  const w = fakeNvr('xw')
+  Object.assign(w, {
+    online: false, userId: -1, borrowing: true, xmlOnline: true, xmlDegraded: false, xmlGen: 'worker:111:5',
+    worker: {
+      stats: () => ({ gen: 5 }),
+      request: async (m) => {
+        sent.push(m)
+        const r = reply(m)
+        if (r instanceof Error) throw r
+        return r
+      }
+    }
+  })
+  const text = await transparent(w, 'queryTimeCfg', '<request/>', 'clock', { outBytes: 2048 })
+  check('borrowing: the answer is the worker\'s', text === '<answer for="queryTimeCfg"/>', text)
+  check('borrowing: the worker got the whole command and its own session generation', sent.length === 1 && sent[0].op === 'xml' && sent[0].url === 'queryTimeCfg' && sent[0].xml === '<request/>' && sent[0].tag === 'clock' && sent[0].outBytes === 2048 && sent[0].gen === 5, JSON.stringify(sent[0]))
+  check('borrowing: nothing went to the SDK here', native === 0)
+
+  const stale = await transparent(w, 'queryTimeCfg', '<request/>', 'clock', { gen: 'own:1' }).catch((e) => e)
+  check('borrowing: a caller holding the control login\'s session is refused, nothing sent', stale instanceof Error && /reconnected; nothing was sent/.test(stale.message) && sent.length === 1, stale?.message)
+
+  reply = () => Object.assign(new Error('Too many NVR settings requests at once'), { status: 503, extra: { retryAfterS: 5 } })
+  const busy = await transparent(w, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  check("borrowing: the worker's own refusal comes through as the same HTTP error", busy instanceof HttpError && busy.status === 503 && busy.extra?.retryAfterS === 5, `${busy?.status} ${JSON.stringify(busy?.extra)}`)
+
+  reply = () => Object.assign(new Error('the video connection restarted'), { name: 'WorkerLost' })
+  const lostWrite = await transparent(w, 'editTimeCfg', '<request/>', 'clock write').catch((e) => e)
+  check('borrowing: a change lost with the worker says it may have been made', /NVR xw: the connection was lost; the change may or may not have been made/.test(lostWrite?.message), lostWrite?.message)
+  const lostRead = await transparent(w, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  check('borrowing: a read lost with the worker says try again', /NVR xw: the connection was lost; try again/.test(lostRead?.message), lostRead?.message)
+
+  reply = () => Object.assign(new Error('the video connection did not answer in time'), { name: 'SdkTimeout' })
+  const late = await transparent(w, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  check('borrowing: a timeout is a timeout', late?.name === 'SdkTimeout')
+  reply = () => ({ ok: true, text: 'after' })
+  const after = await Promise.race([transparent(w, 'queryTimeCfg', '<request/>', 'clock'), sleep(3000).then(() => 'stuck')])
+  check('borrowing: a timeout does not hold the queue (no native call is left running here)', after === 'after', after)
+
+  // the control login comes back: the next command uses it
+  Object.assign(w, { online: true, userId: 9, borrowing: false, xmlGen: 'own:2' })
+  const before = sent.length
+  _test.setCall(async (_opts, userId, _xml, _url, outBuf, _size, len) => {
+    native = userId
+    return answer(outBuf, len)
+  })
+  await transparent(w, 'queryTimeCfg', '<request/>', 'clock')
+  check('borrowing ended: the command goes out on the control login', native === 9 && sent.length === before)
+  _test.setCall(null)
+}
+
 _test.setCall(null)
 _test.resetBreakers()
 print(failures ? `\n${failures} failed` : '\nall passed')
