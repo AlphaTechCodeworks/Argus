@@ -1,8 +1,10 @@
 name: CCTV tests (Linux)
 
 # The cctv app's own tests are standalone node scripts (cctv/test/*.test.mjs, a custom check()
-# harness), not the library's vitest suite that test.yml runs. They load the native TVT SDK through
-# koffi (cctv/sdk.mjs -> bin/linux/*.so), so they only run on Linux with bin/linux on the library path.
+# harness), not the library's vitest suite. They load the native TVT SDK through koffi
+# (cctv/sdk.mjs -> bin/linux/*.so) and import the compiled library structs from build/ (produced by
+# `npm run build`), so they need Linux, a build, and bin/linux on the library path. A few need a
+# browser runtime (WebCodecs VideoDecoder) that node has no equivalent for and are skipped here.
 on:
   pull_request:
     paths-ignore:
@@ -32,7 +34,13 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      - name: Install ffmpeg (several tests shell out to ffmpeg/ffprobe)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - run: npm ci
+
+      # cctv/sdk.mjs imports the compiled library structs from build/lib (gitignored); build them first
+      - run: npm run build
 
       - name: Run cctv app test suite
         env:
@@ -42,10 +50,17 @@ jobs:
         run: |
           mkdir -p "$DATA_DIR"
           shopt -s nullglob
+          # need a browser runtime (WebCodecs VideoDecoder), which node does not provide
+          skip=" live-replay.test.mjs player.test.mjs playout-speed.test.mjs "
           pass=0
           fail=0
+          skipped=0
           failed=()
           for f in cctv/test/*.test.mjs; do
+            b=$(basename "$f")
+            case "$skip" in
+              *" $b "*) echo "skip $f (needs WebCodecs)"; skipped=$((skipped + 1)); continue ;;
+            esac
             echo "::group::$f"
             if timeout 300 node "$f"; then
               pass=$((pass + 1))
@@ -57,7 +72,9 @@ jobs:
             fi
             echo "::endgroup::"
           done
-          echo "## cctv tests: $pass passed, $fail failed" >> "$GITHUB_STEP_SUMMARY"
-          for f in "${failed[@]}"; do echo "- $f" >> "$GITHUB_STEP_SUMMARY"; done
-          echo "passed: $pass  failed: $fail"
+          {
+            echo "## cctv tests: $pass passed, $fail failed, $skipped skipped (WebCodecs)"
+            for f in "${failed[@]}"; do echo "- $f"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "passed: $pass  failed: $fail  skipped: $skipped"
           test "$fail" -eq 0
