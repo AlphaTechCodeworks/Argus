@@ -184,6 +184,20 @@ check('reads are told from changes by the command name', isReadCommand('queryChl
   check('... and nothing is left queued', (await xmlSettled(h, 1000)) && (await xmlSettled(b, 1000)))
 }
 
+// ---- an interactive read may ask for a longer SDK budget (slow P2P links); default reads do not
+{
+  _test.resetBreakers()
+  let seen
+  _test.setCall((opts, _u, _x, _url, outBuf, _s, len) => {
+    seen = opts
+    return answer(outBuf, len)
+  })
+  await transparent(a, 'queryNodeEncodeInfo', '<x/>', 'default read')
+  check('a read with no timeoutMs leaves the budget to the SDK default (budgetOf)', seen?.timeoutMs === undefined, JSON.stringify(seen?.timeoutMs))
+  await transparent(a, 'queryNodeEncodeInfo', '<x/>', 'slow-link read', { timeoutMs: 240_000 })
+  check('a read may set a longer SDK budget, and it reaches the native call', seen?.timeoutMs === 240_000, JSON.stringify(seen?.timeoutMs))
+}
+
 _test.setCall(null)
 _test.resetBreakers()
 print(failures ? `\n${failures} failed` : '\nall passed')

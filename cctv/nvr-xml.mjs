@@ -179,8 +179,12 @@ let call = (opts, ...args) => sdkCallT(opts, NET_SDK.TransparentConfig, ...args)
  * while the call waited its turn: `gen` is the session the caller's data came from. Refuses with
  * 503 while the SDK is stuck, while the process-wide queue is full (reads) and while this NVR's
  * read breaker is open (reads): see above.
+ *
+ * timeoutMs: the SDK time budget for this one call (sdk.mjs); left out, each command's own default
+ * (budgetOf) applies. A heavy read a user is waiting on over a slow link (streams.mjs) sets a longer
+ * one — XML_CAP_MS still frees the queue and the process-wide turn at 90 s, so others are not held up.
  */
-export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes = 256 * 1024 } = {}) {
+export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes = 256 * 1024, timeoutMs } = {}) {
   if (!nvr.online || nvr.userId < 0) throw new Error(`${nvr.name} is offline`)
   const read = isReadCommand(url)
   refuseNow(nvr, read)
@@ -228,7 +232,7 @@ export async function transparent(nvr, url, xml, tag, { gen = nvr.gen, outBytes 
         const userId = nvr.userId
         if (userId < 0 || nvr.gen !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
         sentAt = Date.now()
-        return call({ nvr: nvr.id, tag, onLate: release }, userId, xml, url, out, out.length, len)
+        return call({ nvr: nvr.id, tag, onLate: release, timeoutMs }, userId, xml, url, out, out.length, len)
       },
       { priority: PRIORITY.NORMAL }
     )
