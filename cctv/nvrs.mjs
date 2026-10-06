@@ -728,7 +728,7 @@ export class Nvr {
     // full form is what the NAT 1.0 relay NVRs refuse. A failed read just leaves the encoder fields null.
     let enc = null
     try {
-      enc = parseMainEncoders(String((await transparent(this, 'queryNetworkNodeEncodeInfo', `${XML_HEADER}<requireField><name/><mainCaps/><main/></requireField></request>`, 'encode info', { outBytes: 2 * 1024 * 1024 })) ?? ''))
+      enc = parseMainEncoders(String((await transparent(this, 'queryNetworkNodeEncodeInfo', `${XML_HEADER}<requireField><name/><mainCaps/><main/><an/></requireField></request>`, 'encode info', { outBytes: 2 * 1024 * 1024 })) ?? ''))
     } catch {
       enc = null
     }
@@ -742,6 +742,7 @@ export class Nvr {
       c.subCodec = this.codecSeen.get(`${c.ch}:1`)?.codec ?? null // as seen in live video (null if never streamed here)
       const e = enc?.get(c.ch) ?? null
       c.mainEnct = e?.enct ?? null // 'h264' | 'h265' | 'h265p' (H.265+) | 'h265s' | ... ; null if the read failed
+      c.mainBitType = e?.bitType || null // 'VBR' | 'CBR' | null
       c.h265pCapable = e ? e.h265pCapable : null // null = unknown (encode read failed)
     }
     return cams

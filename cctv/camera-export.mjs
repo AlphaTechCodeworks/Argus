@@ -112,7 +112,7 @@ export function startCameraReportSchedule(nvrs, { dataDir, hour = 2 } = {}) {
   arm()
 }
 
-export const CAMERA_COLUMNS = ['NVR', 'Site', 'Ch', 'Camera Name', 'Online', 'IP Address', 'Make', 'Model', 'Main Res', 'Main FPS', 'Main Codec', 'H.265+ Capable', 'Sub Res', 'Sub FPS', 'Sub Codec', 'Recording', 'PoE', 'NVR Login', 'Port']
+export const CAMERA_COLUMNS = ['NVR', 'Site', 'Ch', 'Camera Name', 'Online', 'IP Address', 'Make', 'Model', 'Main Res', 'Main FPS', 'Main Codec', 'Bitrate', 'H.265+ Capable', 'Sub Res', 'Sub FPS', 'Sub Codec', 'Recording', 'PoE', 'NVR Login', 'Port']
 
 // The NVR's encoder codes -> how they read in the report. "+" is H.26x+ (adaptive), "Smart" the smart variant.
 const ENCT_LABEL = { h264: 'H.264', h264p: 'H.264+', h264s: 'H.264 Smart', h265: 'H.265', h265p: 'H.265+', h265s: 'H.265 Smart' }
@@ -126,13 +126,13 @@ export function cameraRows(report) {
     const cams = n.cameras ?? []
     if (cams.length === 0) {
       const why = n.nvrOnline ? n.error || 'no cameras returned' : 'offline at this read — no cameras listed'
-      rows.push([n.nvrName || n.nvr, n.site || '', null, `(${why})`, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null])
+      rows.push([n.nvrName || n.nvr, n.site || '', null, `(${why})`, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null])
       continue
     }
     for (const c of [...cams].sort((a, b) => (a.ch ?? 0) - (b.ch ?? 0))) {
       rows.push([
         n.nvrName || n.nvr, n.site || '', c.ch, c.name || '', c.online ? 'Yes' : 'No', c.ip || '',
-        c.maker || '', c.model || '', c.mainRes || '', c.mainFps ?? '', enctLabel(c.mainEnct), yesNoNull(c.h265pCapable),
+        c.maker || '', c.model || '', c.mainRes || '', c.mainFps ?? '', enctLabel(c.mainEnct), c.mainBitType || '', yesNoNull(c.h265pCapable),
         c.subRes || '', c.subFps ?? '', (c.subCodec || '').toUpperCase(), c.recStatus || '', c.poe ? 'Yes' : 'No', c.nvrLogin || '',
         c.dataPort || c.ctrlPort || ''
       ])

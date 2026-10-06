@@ -47,6 +47,7 @@ check('a non-GUID is null', chOfGuid('') === null && chOfGuid('nope') === null &
   const nvr1 = parseMainEncoders(readFileSync(join(dir, 'nvr1-queryNodeEncodeInfo.xml'), 'utf8'))
   check('main encoders: 5 channels on nvr1', nvr1?.size === 5, `size=${nvr1?.size}`)
   check('PW Exit (ch1) main encoder is h265p (H.265+ is ON)', nvr1.get(1)?.enct === 'h265p', nvr1.get(1)?.enct)
+  check('PW Exit (ch1) records on VBR', nvr1.get(1)?.bitType === 'VBR', nvr1.get(1)?.bitType)
   check('PW Exit (ch1) is H.265+ capable', nvr1.get(1)?.h265pCapable === true)
   const cap1 = [...nvr1.values()].filter((e) => e.h265pCapable).length
   const use1 = [...nvr1.values()].filter((e) => e.enct === 'h265p').length
