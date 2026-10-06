@@ -13,6 +13,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { buildXlsx } from './xlsx-writer.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 /**
  * @param {Map<string, import('./nvrs.mjs').Nvr>} nvrs
@@ -21,8 +22,8 @@ import { buildXlsx } from './xlsx-writer.mjs'
 export async function cameraExport(nvrs) {
   const out = []
   for (const nvr of nvrs.values()) {
-    const base = { nvr: nvr.id, nvrName: nvr.name, site: nvr.site, via: nvr.cfg.sn ? 'p2p' : 'lan', nvrModel: nvr.model || null, nvrOnline: nvr.online }
-    if (!nvr.online) {
+    const base = { nvr: nvr.id, nvrName: nvr.name, site: nvr.site, via: nvr.cfg.sn ? 'p2p' : 'lan', nvrModel: nvr.model || null, nvrOnline: xmlOnline(nvr) }
+    if (!xmlOnline(nvr)) {
       out.push({ ...base, cameras: [] })
       continue
     }

@@ -751,10 +751,19 @@ export class Nvr {
    * identity and the extra IPC_INFO fields the routine poll drops, queryRecStatus for main/sub
    * resolution, frame rate and recording status, the sub-stream codec as last seen in live video, and
    * the main-stream encoder (incl. whether H.265+ is on and offered). Read-only -- never mutates
-   * this.channels. Runs on this process's own login (the control login when a worker holds the video).
+   * this.channels. Runs on this process's own login (the control login when a worker holds the video), or is asked of the worker while that login is refused (borrowing).
    * Returns [] if the NVR did not answer; a failed queryRecStatus / encode read just leaves those fields null.
    */
   async cameraDetail() {
+    if (this.borrowing) {
+      // this login is refused: the worker reads it on its own (its cameraDetail runs this same code
+      // there). Three reads over a slow link, so a longer wait than a single command's.
+      try {
+        return (await this.worker.request({ op: 'detail' }, { timeoutMs: 200_000 })).list ?? []
+      } catch {
+        return [] // as an NVR that did not answer
+      }
+    }
     const cams = await this.#queryChannelsFull()
     if (cams.length === 0) return cams
     let rec = null
