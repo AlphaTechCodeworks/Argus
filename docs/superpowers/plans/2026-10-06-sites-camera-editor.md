@@ -2,6 +2,22 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Implementation notes (deviations from the base assumptions)
+
+The plan was drafted against the `maptiles` tree, which carried another session's
+uncommitted work. Built instead on `origin/master` (what prod runs), which forced three
+adjustments — all implemented and tested:
+
+- **Task 1:** `camerasForNvr` lives in `camera-choice.js` (an existing, committed,
+  camera-picker module), not a new `sites-model.js` (that file exists only in the other
+  session's uncommitted tree). The test imports it from `camera-choice.js`.
+- **Task 3:** `sites.js` imports `camerasForNvr`/`cameraLabel` from `camera-choice.js`.
+  Master's `render()` rebuilds the whole list every 5 s and lacked the "skip while a
+  dropdown is open" guard, so that guard was added here (`if (sitesEl.querySelector('details[open]')) return`).
+- **Task 4:** moving the Lines panel out of `viewer.js` made one source-scan assertion in
+  `lines-panel.test.mjs` stale; it now checks `camera-editor.js` instead. Pre-existing Node
+  failures in `playout`/`player-rewind`/`frame-trace` are unrelated (they fail on `origin/master` too).
+
 **Goal:** Move the per-camera Picture / OSD / Lines settings out of the live full-size view into an inline editor on the Sites page, opened from a per-NVR camera dropdown and backed by a live main-stream preview.
 
 **Architecture:** A new `camera-editor.js` re-hosts the existing panel classes (`ImagePanel`, `OsdPanel`, `LinesPanel`) beside a single main-stream `LiveTile` preview, one camera and one active panel at a time. `sites.js` adds a per-NVR `<details>` camera dropdown that mounts the editor. `viewer.js` loses the three settings buttons and becomes view-only.
