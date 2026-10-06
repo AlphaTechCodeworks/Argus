@@ -396,7 +396,8 @@ const alerts = startAlerts({
       cooling: nvrCooling(n.id),
       lastContactMs: lastContactOf(n.id),
       clockSkewMs: freshSkewMs(n),
-      refusalsLast10Min: refusalsOf(n)
+      refusalsLast10Min: refusalsOf(n),
+      borrowing: n.borrowing
     })),
   // Only slots that actually hold a camera: an NVR reports all 32 of its channels whether or not
   // anything is plugged into them, and empty slots are permanently "offline". By either login, as
