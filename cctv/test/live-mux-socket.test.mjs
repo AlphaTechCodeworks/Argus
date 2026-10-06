@@ -77,8 +77,17 @@ client._socket.resume()
 for (let i = 0; i < 1000 && channel.writtenBytes === 0; i++) await sleep(20)
 check('read to the end: written, nothing pending', channel.writtenBytes > FRAME && channel.socketPending === 0 && channel.sharedBufferedAmount === 0, `${channel.writtenBytes} ${channel.socketPending}`)
 
+// Both ends closed, nothing left open, and the process ends by itself: no process.exit() here. After a
+// frame this size the heap is over what V8 allows itself before a collection, and a compilation on one of
+// its worker threads that needs memory then waits for the main thread to collect. process.exit() waits for
+// those threads and never collects, so each waits for the other: on the GitHub runner (node 24.21) 12 runs
+// in 40 stayed alive after "all passed" until timeout killed them (6 Oct, gdb: the main thread in
+// node::WorkerThreadsTaskRunner::Shutdown, two workers in Maglev's
+// CollectionBarrier::AwaitCollectionBackground). A program that ends by itself stops those jobs first:
+// none in 770 there.
+for (const ws of wss.clients) ws.terminate()
 client.terminate()
 wss.close()
 http.close()
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
-process.exit(failures ? 1 : 0)
+process.exitCode = failures ? 1 : 0
