@@ -13,6 +13,10 @@ const check = (name, ok, extra = '') => {
 }
 const J = (v) => JSON.stringify(v)
 
+// the book's timers are unref'd (a waiting request must not keep a stopping server alive), so
+// something else has to keep this script running while it waits on one
+const keepAlive = setInterval(() => {}, 1000)
+
 check('the messages exist', MSG.REQ === 'req' && MSG.RES === 'res')
 check('the default wait is the XML cap plus 5 s', REQUEST_TIMEOUT_MS === 95_000)
 
@@ -72,6 +76,8 @@ check('the default wait is the XML cap plus 5 s', REQUEST_TIMEOUT_MS === 95_000)
   check('and none are left', r.size() === 0)
   await sleep(10)
 }
+
+clearInterval(keepAlive)
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
