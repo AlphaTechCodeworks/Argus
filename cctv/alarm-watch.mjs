@@ -20,6 +20,7 @@
 // does not import nvr-xml.mjs, which loads the native SDK: the tests run on a PC without it.
 import { chOfGuid, parseUtcText } from './nvr-log.mjs'
 import { kid, kids, parseXml } from './xml.mjs'
+import { xmlDegraded, xmlOnline } from './xml-session.mjs' // (xml-session.mjs imports nothing: still no SDK here)
 
 export const WATCH_EVERY_MS = 5000
 /** A failing NVR is logged at most this often: the watcher asks it every 5 s. */
@@ -224,7 +225,7 @@ export function startAlarmWatch({ nvrs, linesOn, query, onCrossing, everyMs = WA
     for (const nvr of nvrs()) {
       listed.add(nvr.id)
       const mine = cams.get(nvr.id)
-      if (!mine || !nvr.online || nvr.degraded || nvr.stopped) continue
+      if (!mine || !xmlOnline(nvr) || xmlDegraded(nvr) || nvr.stopped) continue
       const s = stateOf(nvr.id)
       // its last query has not come back yet: never two at once to one NVR
       if (s.busy) continue

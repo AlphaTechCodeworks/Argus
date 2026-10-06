@@ -5,7 +5,8 @@
 // (restart: parent -> worker, restart stream ch/type in place, e.g. after a sub-stream codec change)
 // (events: parent -> worker, the stretches each event-mode camera should be recording; rec-modes.mjs)
 // (linkreset: parent -> worker, the worker's SDK printed that the NVR dropped its links; worker-supervisor.mjs)
-export const MSG = { WANT: 'want', UNWANT: 'unwant', RESTART: 'restart', STOP: 'stop', READY: 'ready', STATE: 'state', FRAME: 'frame', STATS: 'stats', SETTINGS: 'settings', EVENTS: 'events', SEGOPEN: 'segopen', SEGMENT: 'segment', RECGAP: 'recgap', LINKRESET: 'linkreset' }
+// (req / res: parent -> worker, one command to send on the worker's own NVR login, and its answer; worker-requests.mjs)
+export const MSG = { WANT: 'want', UNWANT: 'unwant', RESTART: 'restart', STOP: 'stop', READY: 'ready', STATE: 'state', FRAME: 'frame', STATS: 'stats', SETTINGS: 'settings', EVENTS: 'events', SEGOPEN: 'segopen', SEGMENT: 'segment', RECGAP: 'recgap', LINKRESET: 'linkreset', REQ: 'req', RES: 'res' }
 export const restart = (ch, type, why) => ({ t: MSG.RESTART, ch, type, why })
 export const streamKey = (ch, type) => `${ch}:${type}`
 /**

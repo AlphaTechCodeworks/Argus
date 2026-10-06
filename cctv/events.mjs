@@ -68,6 +68,7 @@
 import { XML_HEADER, kid, kids, parseXml } from './xml.mjs'
 import { typesFromRecordBits } from './event-rules.mjs'
 import { SOURCE_RECORDINGS, addEvent, intakeCursorMs } from './events-db.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 const OUT_BYTES = 64 * 1024
 
@@ -600,7 +601,7 @@ export async function handleEvents(method, pathname, readJson, deps = {}) {
     if (!admin) return [403, { error: 'Admins only' }]
     const nvr = nvrs?.get(decodeURIComponent(probe[1]))
     if (!nvr) return [404, { error: 'Unknown NVR' }]
-    if (!nvr.online) return [409, { error: `${nvr.name ?? nvr.id} is offline` }]
+    if (!xmlOnline(nvr)) return [409, { error: `${nvr.name ?? nvr.id} is offline` }]
     const run = await probeEvents(nvr, query)
     return [200, { ...run, summary: summariseProbe(run) }, NO_STORE]
   }
@@ -610,7 +611,7 @@ export async function handleEvents(method, pathname, readJson, deps = {}) {
     if (!admin) return [403, { error: 'Admins only' }]
     const nvr = nvrs?.get(decodeURIComponent(tune[1]))
     if (!nvr) return [404, { error: 'Unknown NVR' }]
-    if (!nvr.online) return [409, { error: `${nvr.name ?? nvr.id} is offline` }]
+    if (!xmlOnline(nvr)) return [409, { error: `${nvr.name ?? nvr.id} is offline` }]
     const ch = Number(tune[2])
     const { readMotion, writeMotionThreshold } = await import('./motion-tune.mjs')
     try {

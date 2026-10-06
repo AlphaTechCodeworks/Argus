@@ -266,5 +266,13 @@ const fakeSender = (sent = [], pending = {}) => ({
   a.stop()
 }
 
+// ---- borrowing reaches the snapshot
+{
+  const src = (await import('node:fs')).readFileSync(new URL('../alert-checks.mjs', import.meta.url), 'utf8')
+  check('the snapshot carries borrowing', /borrowing: Boolean\(n\.borrowing\)/.test(src))
+  const sv = (await import('node:fs')).readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  check('listNvrs reports borrowing', /refusalsLast10Min: refusalsOf\(n\),\s*borrowing: n\.borrowing/.test(sv))
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

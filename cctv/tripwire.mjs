@@ -71,6 +71,7 @@ import {
 import { nvrs } from './nvrs.mjs'
 import { getSettings } from './settings.mjs'
 import { applyChange, buildEditTripwire, checkChange, compareReadBack, flatten, parseSchedules, parseSupport, parseTripwire } from './tripwire-xml.mjs'
+import { xmlDegraded, xmlGen, xmlOnline } from './xml-session.mjs'
 
 export const LINES_LOG = join(DATA_DIR, 'tripwire-changes.log')
 export const LINES_ON_FILE = join(DATA_DIR, 'lines-on.json') // { "<nvrId>/<ch>": true }, ch 0-based
@@ -244,7 +245,7 @@ async function readSchedules(ctx, { strict = false } = {}) {
     if (a.status !== 'success') throw new HttpError(502, `The NVR refused to list its schedules (${a.errorCode || a.status || 'no status'})`)
     return parseSchedules(xml)
   } catch (e) {
-    if (strict || nvr.gen !== gen) throw e
+    if (strict || xmlGen(nvr) !== gen) throw e
     return []
   }
 }
@@ -320,7 +321,7 @@ async function readUntil(nvr, gen, read, shows) {
       last = await read()
       if (shows(last)) break
     } catch {
-      if (nvr.gen !== gen || !nvr.online) break
+      if (xmlGen(nvr) !== gen || !xmlOnline(nvr)) break
     }
   }
   return last
@@ -343,7 +344,7 @@ async function apply(ctx, cfg, change, { action, undoes, body, schedules, tokenP
   requireAck(warnings, token, body)
   // the document first: one that can't be built means nothing is logged or sent
   const xml = buildEditTripwire(next)
-  if (nvr.degraded || nvr.gen !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
+  if (xmlDegraded(nvr) || xmlGen(nvr) !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
   const seq = newSeq()
   const acked = warnings.map((w) => w.key)
   // write-ahead: if the "before" can't be recorded, nothing is sent
@@ -470,10 +471,10 @@ export async function handleLines(method, nvrId, ch, params, readJson, user, dep
       const hit = supportFresh(nvr, device)
       if (hit) return [200, { lines: { supported: tripwireOf(hit, chlId) } }]
       requireOnline(nvr)
-      return [200, { lines: { supported: await supported({ nvr, ch, chlId, name, gen: nvr.gen, user, device, deps: d }) } }]
+      return [200, { lines: { supported: await supported({ nvr, ch, chlId, name, gen: xmlGen(nvr), user, device, deps: d }) } }]
     }
     requireOnline(nvr)
-    const ctx = { nvr, ch, chlId, name, gen: nvr.gen, user, device, deps: d }
+    const ctx = { nvr, ch, chlId, name, gen: xmlGen(nvr), user, device, deps: d }
     if (method === 'GET') {
       if (!(await supported(ctx))) return [200, { lines: view(ctx, false, null, []) }]
       const cfg = await readCfg(ctx)
