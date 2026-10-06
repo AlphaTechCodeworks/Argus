@@ -312,7 +312,7 @@ Then, directly above the file's last two lines (`print(failures ? ...` and `proc
   const { readFileSync } = await import('node:fs')
   const sup = readFileSync(new URL('../worker-supervisor.mjs', import.meta.url), 'utf8')
   const exit = sup.split("c.on('exit'")[1] ?? ''
-  check('request: a worker that exits fails the requests still waiting, before anything else', /^[^\n]*\n\s*if \(c === child\) requests\.failAll\(/.test(exit), exit.slice(0, 120))
+  check('request: a worker that exits fails the requests still waiting, before anything else', /^[^\n]*\s+if \(c === child\) requests\.failAll\(/.test(exit), exit.slice(0, 120))
 }
 ```
 
@@ -835,17 +835,10 @@ to
 
 ```js
 export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBytes = 256 * 1024 } = {}) {
-  if (!xmlOnline(nvr) || noOwnSession(nvr) === (nvr.borrowing !== true)) throw new Error(`${nvr.name} is offline`)
-```
-
-That second condition reads: "not borrowing and no session of its own". Write it plainly instead:
-
-```js
-export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBytes = 256 * 1024 } = {}) {
   if (!xmlOnline(nvr) || noOwnSession(nvr)) throw new Error(`${nvr.name} is offline`)
 ```
 
-(Use this second form. `noOwnSession` is already false while borrowing.)
+(`noOwnSession` is false while borrowing, so a borrowing NVR passes this line with `userId` at -1.)
 
 Directly above the line `let ok` add:
 
@@ -987,14 +980,14 @@ for (const m of XML_MODULES) {
 
 // the two admin routes in events.mjs that only send XML
 const ev = src('events.mjs')
-check('events.mjs: the probe route asks the XML session', /if \(!xmlOnline\(nvr\)\) return \[409[^\n]*\n\s*const run = await probeEvents/.test(ev))
-check('events.mjs: the motion-tune route asks the XML session', /if \(!xmlOnline\(nvr\)\) return \[409[^\n]*\n\s*const ch = Number\(tune\[2\]\)/.test(ev))
-check('events.mjs: the search poll still needs the control login', /export function pollable[\s\S]{0,200}if \(!nvr\.online\)/.test(ev) && /if \(nvr\.degraded\) return \{ ok: false/.test(ev))
+check('events.mjs: the probe route asks the XML session', /if \(!xmlOnline\(nvr\)\) return \[409[^\n]*\s+const run = await probeEvents/.test(ev))
+check('events.mjs: the motion-tune route asks the XML session', /if \(!xmlOnline\(nvr\)\) return \[409[^\n]*\s+const ch = Number\(tune\[2\]\)/.test(ev))
+check('events.mjs: the search poll still needs the control login', /export function pollable[\s\S]{0,400}if \(!nvr\.online\)/.test(ev) && /if \(nvr\.degraded\) return \{ ok: false/.test(ev))
 
 // server.mjs: the disks route and the power route
 const sv = src('server.mjs')
-check('server.mjs: the NVR disks route asks the XML session', /if \(!xmlOnline\(nvr\)\) return sendJson\(res, 409[^\n]*\n\s*try \{\n\s*if \(url\.searchParams\.get\('discover'\)\)/.test(sv))
-check('server.mjs: the power route asks the XML session', /if \(body\.confirm !== true\)[^\n]*\n\s*if \(!xmlOnline\(nvr\)\) return sendJson\(res, 409/.test(sv))
+check('server.mjs: the NVR disks route asks the XML session', /if \(!xmlOnline\(nvr\)\) return sendJson\(res, 409[^\n]*\s+try \{\s+if \(url\.searchParams\.get\('discover'\)\)/.test(sv))
+check('server.mjs: the power route asks the XML session', /if \(body\.confirm !== true\)[^\n]*\s+if \(!xmlOnline\(nvr\)\) return sendJson\(res, 409/.test(sv))
 check('server.mjs: playback still needs the control login', /if \(!nvr\.online\) return ws\.close\(1013, 'NVR offline'\)/.test(sv))
 
 // and the ones that must stay on the control login
@@ -1004,7 +997,7 @@ for (const f of ['playback.mjs', 'motion.mjs', 'backfill.mjs', 'rec-playback.mjs
 check('playback.mjs: its route still needs the control login', /if \(!nvr\.online\) return \[503/.test(src('playback.mjs')))
 
 // the camera-detail read
-check('nvrs.mjs: camera detail is asked of the worker while borrowing', /async cameraDetail\(\) \{\n\s*if \(this\.borrowing\)[\s\S]{0,300}op: 'detail'/.test(src('nvrs.mjs')))
+check('nvrs.mjs: camera detail is asked of the worker while borrowing', /async cameraDetail\(\) \{\s*if \(this\.borrowing\)[\s\S]{0,300}op: 'detail'/.test(src('nvrs.mjs')))
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
@@ -1028,7 +1021,7 @@ cd ..
 git diff --stat
 ```
 
-Expected `git diff --stat`: exactly those 14 files, with these line counts changed — imaging 5, lens 5, streams 11, substreams 8, tripwire 5, osd 1, nvr-clock 2, nvr-log 1, nvr-netstatus 3, nvr-probe 2, relays 1, alarm-watch 1, nvr-disks 1, camera-export 2. If a count differs, read that file's diff before going on: a line may hold two matches, which is fine, but a match inside a longer name is not (there were none when this plan was written).
+Expected `git diff --stat`: exactly those 14 files, with these line counts changed — imaging 5, lens 3, streams 10, substreams 8, tripwire 5, osd 1, nvr-clock 2, nvr-log 1, nvr-netstatus 3, nvr-probe 2, relays 1, alarm-watch 1, nvr-disks 1, camera-export 2. If a count differs, read that file's diff before going on: a line may hold two matches, which is fine, but a match inside a longer name is not (there were none when this plan was written).
 
 Read the whole diff once (`git diff cctv/`). Every changed line must still be valid JavaScript and mean the same thing with the helper in place of the property. Two to look at by eye:
 
@@ -1216,7 +1209,7 @@ In `cctv/test/health-page.test.mjs`, directly above its final summary lines, add
 }
 ```
 
-In `cctv/test/alert-checks.test.mjs`, open the file and find the first test that builds a snapshot from a `listNvrs` stub (search for `listNvrs:`). Directly above the file's final summary lines add a block that reuses that test's way of building the snapshot. The file's helper for this is whatever function that first test calls with its `deps`; call it the same way:
+In `cctv/test/alert-checks.test.mjs`, directly above the file's final summary lines, add:
 
 ```js
 // ---- borrowing reaches the snapshot
@@ -1224,7 +1217,7 @@ In `cctv/test/alert-checks.test.mjs`, open the file and find the first test that
   const src = (await import('node:fs')).readFileSync(new URL('../alert-checks.mjs', import.meta.url), 'utf8')
   check('the snapshot carries borrowing', /borrowing: Boolean\(n\.borrowing\)/.test(src))
   const sv = (await import('node:fs')).readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
-  check('listNvrs reports borrowing', /refusalsLast10Min: refusalsOf\(n\),\n\s*borrowing: n\.borrowing/.test(sv))
+  check('listNvrs reports borrowing', /refusalsLast10Min: refusalsOf\(n\),\s*borrowing: n\.borrowing/.test(sv))
 }
 ```
 

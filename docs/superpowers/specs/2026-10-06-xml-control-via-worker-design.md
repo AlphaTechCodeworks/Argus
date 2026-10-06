@@ -115,10 +115,10 @@ Two additions to `worker-ipc.mjs`, the first request/reply pair in the protocol:
 - `REQ` (parent to worker): `{ t, id, op, gen, ... }`, with `op` one of
   - `xml`: `url`, `xml`, `tag`, `outBytes`;
   - `power`: `action` (`reboot` or `shutdown`);
-  - `ipcinfo`: no arguments.
+  - `detail`: no arguments (the worker runs its own `cameraDetail()`).
 - `RES` (worker to parent): `{ t, id, ok: true, text }` for `xml`, `{ ..., accepted }` for
-  `power`, `{ ..., list }` for `ipcinfo`; or `{ t, id, ok: false, error: { message, name, status,
-  retryAfterS } }`.
+  `power`, `{ ..., list }` for `detail`; or `{ t, id, ok: false, error: { message, name, status,
+  extra } }` (`extra` carries the retry hint).
 
 The supervisor gains `request(msg, { timeoutMs })`, which returns a promise, and rejects every
 pending request when the child exits or is restarted.
