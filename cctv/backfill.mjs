@@ -38,7 +38,8 @@
 //   GET  /api/admin/backfill        -> { enabled, running, window, state, gaps, permanent, ... }
 //   POST /api/admin/backfill/run    -> starts the job (still only works inside the window)
 //   POST /api/admin/backfill/stop   -> stops it; anything in flight is closed cleanly
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { writeFileAtomicSync } from './atomic-write.mjs'
 import { siteMinutesOfDay } from './site-time.mjs'
 import { join } from 'node:path'
 import { DATA_DIR, isAdmin } from './auth.mjs'
@@ -419,9 +420,7 @@ function readRunFlag(file = STATE_FILE()) {
 function writeRunFlag(running, who, file = STATE_FILE()) {
   try {
     mkdirSync(DATA_DIR, { recursive: true })
-    const tmp = `${file}.tmp-${process.pid}`
-    writeFileSync(tmp, `${JSON.stringify({ running, by: who ?? null, at: new Date().toISOString() }, null, 1)}\n`)
-    renameSync(tmp, file)
+    writeFileAtomicSync(file, `${JSON.stringify({ running, by: who ?? null, at: new Date().toISOString() }, null, 1)}\n`)
   } catch (e) {
     console.warn(`[backfill] could not remember the run flag: ${e.message}`)
   }
