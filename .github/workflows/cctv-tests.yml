@@ -54,9 +54,8 @@ jobs:
           #   live-replay, player, playout-speed  need a browser runtime (WebCodecs VideoDecoder)
           #   sps, substreams                     read lab captures from /work that are not in the repo
           skip=" live-replay.test.mjs player.test.mjs playout-speed.test.mjs sps.test.mjs substreams.test.mjs "
-          # Run and reported, but not gating until they are fixed on Linux:
-          #   live-mux-socket    every check passes, then process.exit() does not return (capped at 60 s)
-          known=" live-mux-socket.test.mjs "
+          # Run and reported, but not gating until they are fixed on Linux (none now):
+          known=" "
           pass=0
           fail=0
           skipped=0
@@ -67,10 +66,8 @@ jobs:
             case "$skip" in
               *" $b "*) echo "skip $f"; skipped=$((skipped + 1)); continue ;;
             esac
-            cap=300
-            if [ "$b" = "live-mux-socket.test.mjs" ]; then cap=60; fi
             echo "::group::$f"
-            if timeout "$cap" node "$f"; then
+            if timeout 300 node "$f"; then
               pass=$((pass + 1))
             else
               code=$?
