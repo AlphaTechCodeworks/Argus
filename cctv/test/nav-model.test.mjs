@@ -22,6 +22,24 @@ check('an admin sees all ten', ids(navFor({ admin: true })).length === 10)
 check('a viewer never sees the admin pages', !ids(navFor({ admin: false })).some((i) => ['sites', 'settings', 'storage', 'reports', 'audit'].includes(i)))
 check('an unknown user is treated as a viewer', ids(navFor({})).length === 5)
 
+// partial admins: only the admin links their capabilities reach, and the Admin group
+// disappears when none remain
+check('a camera manager sees Sites only in Admin', ids(navFor({ admin: false, adminCaps: ['cameras'] })).filter((i) => ['audit', 'sites', 'settings', 'storage', 'reports'].includes(i)).join() === 'sites')
+// a deputy holds `audit`, which reaches the Users & access page for the log; account management
+// inside that page is gated separately (mayEditAdmin, audit.js), not by hiding the link
+check('a deputy admin (all but users) sees every admin link (users-management is gated in-page)', (() => { const a = ids(navFor({ admin: false, adminCaps: ['cameras', 'settings', 'storage', 'reports', 'audit', 'reboot', 'diagnostics'] })); return ['audit', 'sites', 'settings', 'storage', 'reports'].every((i) => a.includes(i)) })())
+check('a deputy WITHOUT the audit cap does not see the Users & access link', !ids(navFor({ admin: false, adminCaps: ['cameras', 'settings', 'storage', 'reports', 'reboot', 'diagnostics'] })).includes('audit'))
+check('the `users` capability shows Users & access', ids(navFor({ admin: false, adminCaps: ['users'] })).includes('audit'))
+check('the `audit` capability alone also shows Users & access (the log lives there)', ids(navFor({ admin: false, adminCaps: ['audit'] })).includes('audit'))
+check('a partial admin with no mapped area sees no Admin group', navFor({ admin: false, adminCaps: ['reboot'] }).some((g) => g.id === 'admin') === false)
+check('a reboot/diagnostics-only admin still sees the viewer groups', ids(navFor({ admin: false, adminCaps: ['reboot'] })).join() === 'live,playback,map,alarms,health')
+
+// the Map page can be turned off per person (rights.mjs canSeeMap): the nav link then disappears
+check('Map on by default', ids(navFor({ admin: false })).includes('map'))
+check('a viewer with the Map turned off does not see the Map link', !ids(navFor({ admin: false, map: false })).includes('map'))
+check('...but still sees the other Watch items', ids(navFor({ admin: false, map: false })).filter((i) => ['live', 'playback', 'alarms', 'health'].includes(i)).join() === 'live,playback,alarms,health')
+check('a full admin always sees the Map even if map:false', ids(navFor({ admin: true, map: false })).includes('map'))
+
 check('/ is live', currentId('/') === 'live')
 check('/index.html is live', currentId('/index.html') === 'live')
 check('/playback.html is playback', currentId('/playback.html') === 'playback')

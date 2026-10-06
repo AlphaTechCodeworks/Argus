@@ -25,7 +25,7 @@
 <body class="live-page">
   <header>
     <div class="brand">
-      <h1>CCTV</h1>
+      <h1>Live</h1>
     </div>
     <div class="controls">
       <label id="siteLabel" hidden>Site
@@ -50,8 +50,24 @@
           </optgroup>
         </select>
       </label>
+      <label>View
+        <select id="viewSel" title="A saved set of cameras and layout, kept with your account">
+          <option value="">(not saved)</option>
+        </select>
+      </label>
+      <button id="saveView" type="button" title="Save the cameras shown and this layout as a named view">Save view…</button>
+      <button id="deleteView" type="button" title="Delete the saved view shown" hidden>Delete view</button>
       <label title="Leave offline cameras out of the layout"><input id="hideOffline" type="checkbox" checked /> Hide offline</label>
       <label title="Steadier motion: holds about 0.4 s more video (a little more delay)"><input id="smooth" type="checkbox" /> Smooth</label>
+      <label id="gridFpsLabel" hidden title="One frame rate for every grid tile, so the picture is even and the connection is shared equally. Faster cameras are capped to it; a slower camera keeps its own rate. Auto leaves each camera at its own rate.">Grid fps
+        <select id="gridFps">
+          <option value="">Auto</option>
+          <option value="4">4</option>
+          <option value="8">8</option>
+          <option value="10">10</option>
+          <option value="15">15</option>
+        </select>
+      </label>
       <button id="resetOrder" type="button" title="Your cameras are in your own order (drag a tile onto another to swap them, or onto ‹ › to move it to another page). This puts them back in the default order." hidden>Reset order</button>
       <button id="prev" type="button" aria-label="Previous page">‹</button>
       <span id="page">1 / 1</span>
@@ -68,6 +84,18 @@
   <main id="grid"></main>
   <p id="notice" hidden></p>
   <p id="orderNote" class="order-note" role="status" hidden></p>
+  <dialog id="saveViewDlg" class="wall-pick">
+    <form method="dialog">
+      <h2>Save this view</h2>
+      <p class="wall-pick-note">The cameras shown and the layout, kept with your account so they follow you to any screen.</p>
+      <label>Name <input id="viewName" type="text" maxlength="60" placeholder="Yard and gates" /></label>
+      <p class="pb-ex-msg" id="viewMsg" role="status"></p>
+      <div class="pb-ex-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="button" id="viewSave" class="pb-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
   <script type="module" src="shell.js"></script>
   <script type="module" src="viewer.js"></script>
   <script type="module" src="alert-banner.js"></script>

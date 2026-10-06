@@ -489,6 +489,8 @@ export class Nvr {
       via: this.cfg.sn ? 'p2p' : 'lan',
       remote: Boolean(this.cfg.sn || this.cfg.remote),
       status: this.status,
+      videoOnline: this.liveOnline,
+      managementOnline: this.online,
       error: this.error,
       model: this.model,
       serial: this.serial,
@@ -1309,6 +1311,9 @@ export const allCameras = ({ live = false } = {}) =>
         name: c.name,
         // live: the video login (Live waited for the control login, one NVR at a time, up to ~31 s)
         online: c.online && (live ? nvr.liveOnline : nvr.online),
+        nvrOnline: Boolean(nvr.online),
+        nvrVideoOnline: Boolean(nvr.liveOnline),
+        cameraOnline: Boolean(c.online),
         // false for an empty channel slot on the NVR: there is no camera there to be offline
         configured: c.configured !== false,
         model: c.model || null,

@@ -327,5 +327,54 @@ check('Live HD kept through the editor: fromRow then toRow gives the same list',
   check('on a phone the editor is 100vw - 16px wide, past the browser\'s own cap on a modal dialog', /^\s*\.ac-dialog \{ width: calc\(100vw - 16px\); max-width: calc\(100vw - 16px\); padding: 10px; \}/m.test(phone.slice(0, phone.indexOf('\n}'))))
 }
 
+// ---- admin capabilities and the role presets -----------------------------------------------
+{
+  check('the page\'s CAPS mirrors rights.mjs exactly', J(M.CAPS) === J(R.CAPS))
+  // cleanRow keeps only known caps, de-duped, in CAPS order
+  check('cleanRow drops unknown caps and orders them', J(M.cleanRow({ admin: false, adminCaps: ['cameras', 'nope', 'users', 'cameras'] }).adminCaps) === J(['users', 'cameras']))
+  // adminCaps round-trips through fromRow -> toRow (tree-independent for the caps)
+  const rt = M.toRow(M.fromRow({ admin: false, adminCaps: ['diagnostics', 'cameras'], grants: {}, formats: [] }, []))
+  check('adminCaps survive fromRow -> toRow in CAPS order', J(rt.adminCaps) === J(['cameras', 'diagnostics']))
+  // setCap ticks and unticks, keeping CAPS order
+  let st = M.fromRow({ admin: false, grants: {}, formats: [] }, [])
+  st = M.setCap(st, 'reports', true)
+  st = M.setCap(st, 'cameras', true)
+  check('setCap ticks areas, kept in CAPS order', J(M.toRow(st).adminCaps) === J(['cameras', 'reports']))
+  st = M.setCap(st, 'cameras', false)
+  check('setCap unticks an area', J(M.toRow(st).adminCaps) === J(['reports']))
+  check('setCap ignores an unknown area', M.setCap(st, 'nonsense', true) === st)
+
+  // every preset is a row rights.mjs would store unchanged (the editor never invents a shape)
+  for (const p of M.PRESETS) {
+    const row = M.toRow(M.preset(p.id))
+    check(`preset ${p.id}: a row rights.mjs stores unchanged`, J(R.cleanRights(row)) === J(row), J(row))
+  }
+  check('preset full-admin: admin, no caps needed', (() => { const r = M.toRow(M.preset('full-admin')); return r.admin === true && J(r.adminCaps) === J([]) })())
+  check('preset deputy-admin: every area but users, sees everything', (() => { const r = M.toRow(M.preset('deputy-admin')); return r.admin === false && J(r.adminCaps) === J(R.CAPS.filter((c) => c !== 'users')) && r.grants.live.join() === '*' && r.grants.export.join() === '*' && r.formats.length === M.FORMATS.length })())
+  check('preset camera-manager: cameras + diagnostics, sees cameras, no export', (() => { const r = M.toRow(M.preset('camera-manager')); return J(r.adminCaps) === J(['cameras', 'diagnostics']) && r.grants.live.join() === '*' && r.grants['playback-server'].join() === '*' && r.grants.export.length === 0 })())
+  check('preset operator: no admin, live + playback, no HD-only, no export', (() => { const r = M.toRow(M.preset('operator')); return J(r.adminCaps) === J([]) && r.grants.live.join() === '*' && r.grants['playback-nvr'].join() === '*' && r.grants['playback-server'].join() === '*' && r.grants['live-hd'].length === 0 && r.grants.export.length === 0 })())
+  check('preset guard: no admin, live only', (() => { const r = M.toRow(M.preset('guard')); return J(r.adminCaps) === J([]) && r.grants.live.join() === '*' && r.grants['playback-nvr'].length === 0 && r.grants['live-hd'].length === 0 })())
+  check('preset custom: nothing at all', (() => { const r = M.toRow(M.preset('custom')); return r.admin === false && J(r.adminCaps) === J([]) && M.GRANTABLE.every((a) => r.grants[a].length === 0) })())
+  check('preset of an unknown name is null', M.preset('nope') === null)
+  check('every preset has the Map on', M.PRESETS.every((p) => M.toRow(M.preset(p.id)).map === true))
+  // the Map toggle round-trips and is independent of the camera buttons
+  check('cleanRow: Map on unless map:false', M.cleanRow({}).map === true && M.cleanRow({ map: false }).map === false)
+  check('Map survives fromRow -> toRow', M.toRow(M.fromRow({ admin: false, map: false, grants: {}, formats: [] }, [])).map === false)
+  let ms = M.setMap(M.fromRow({ admin: false, grants: {}, formats: [] }, []), false)
+  check('setMap off then on', M.toRow(ms).map === false && M.toRow(M.setMap(ms, true)).map === true)
+  check('Everything / Nothing leave the Map alone (it is its own toggle)', M.toRow(M.setAll(ms, true)).map === false && M.toRow(M.setAll(M.setMap(ms, true), false)).map === true)
+  // the sharing permission (off by default, the opposite of the Map)
+  check('every preset has sharing off', M.PRESETS.every((p) => M.toRow(M.preset(p.id)).share === false))
+  check('cleanRow: share off unless the literal true', M.cleanRow({}).share === false && M.cleanRow({ share: true }).share === true && M.cleanRow({ share: 'yes' }).share === false)
+  check('share survives fromRow -> toRow', M.toRow(M.fromRow({ admin: false, share: true, grants: {}, formats: [] }, [])).share === true)
+  let ss = M.fromRow({ admin: false, grants: {}, formats: [] }, [])
+  check('setShare on then off', M.toRow(M.setShare(ss, true)).share === true && M.toRow(M.setShare(M.setShare(ss, true), false)).share === false)
+  check('copyFrom keeps my own sharing, not the source’s', M.toRow(M.copyFrom(M.setShare(ss, true), { admin: false, share: false, grants: { live: ['*'] }, formats: [] }, [])).share === true)
+  // copyFrom keeps this user's own admin areas, never the source's
+  const mine = M.setCap(M.fromRow({ admin: false, grants: {}, formats: [] }, []), 'settings', true)
+  const copied = M.copyFrom(mine, { admin: false, adminCaps: ['users', 'cameras'], grants: { live: ['*'] }, formats: [] }, [])
+  check('copyFrom takes the source\'s viewing but keeps my own admin areas', J(M.toRow(copied).adminCaps) === J(['settings']) && M.toRow(copied).grants.live.join() === '*')
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

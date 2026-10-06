@@ -1,0 +1,33 @@
+.has-shell { letter-spacing: 0; }
+.has-shell .shell-brand { min-height: 56px; gap: 10px; font-size: 17px; font-weight: 600; }
+.has-shell .shell-logo { width: 32px; height: 32px; flex: none; object-fit: contain; }
+.has-shell .shell-group-label { font-size: 11px; letter-spacing: 0; }
+.has-shell header .brand h1 { font-size: 20px; line-height: 1.3; letter-spacing: 0; }
+.has-shell .app-main button, .has-shell .app-main select, .has-shell .app-main input:not([type=checkbox]):not([type=radio]):not([type=range]) { border-radius: 4px; font: inherit; letter-spacing: 0; }
+.has-shell .app-main header button, .has-shell .app-main header select { min-height: 34px; }
+.has-shell button:focus-visible, .has-shell a:focus-visible, .has-shell summary:focus-visible, .has-shell input:focus-visible, .has-shell select:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.has-shell .app-main .icon { width: 18px; height: 18px; flex: none; }
+.has-shell .app-main .st-meta, .has-shell .app-main small { color: var(--text-muted); }
+.has-shell .st-online, .has-shell [data-stream-state=live] .status { color: var(--ok); }
+.has-shell .st-partial, .has-shell .st-connecting { color: var(--warn); }
+.has-shell .st-offline { color: var(--bad); }
+.has-shell .st-dot.st-partial, .has-shell .st-dot.st-connecting { background: var(--warn); }
+.has-shell .st-dot.st-offline { background: var(--bad); }
+.has-shell .st-dot.st-online { background: var(--ok); }
+.has-shell .st-status-label, .has-shell .card-figure, .has-shell .st-nvr-cams { font-variant-numeric: tabular-nums; }
+.has-shell .tile .label { row-gap: 2px; padding: 6px 8px; }
+.has-shell .tile .stream-metrics { color: var(--on-accent); font-size: 11px; line-height: 1.35; font-variant-numeric: tabular-nums; }
+.has-shell .connection-label { font-size: 11px; font-weight: 500; letter-spacing: 0; }
+.has-shell .connection-online { color: var(--ok); }
+.has-shell .connection-partial, .has-shell .connection-connecting { color: var(--warn); }
+.has-shell .connection-offline { color: var(--bad); }
+.has-shell .map-cam-name .connection-label { display: block; margin-top: 2px; }
+.has-shell .tile .connection-label { flex: 0 1 auto; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.has-shell #grid[data-size="5"] .connection-label, .has-shell #grid[data-size="6"] .connection-label, .has-shell #grid[data-size="8"] .connection-label, .has-shell #grid[data-size="10"] .connection-label, .has-shell #grid[data-size="12"] .connection-label { display: none; }
+.has-shell .st-empty { padding: 28px 0; color: var(--text-muted); text-align: left; }
+.has-shell .st-notice { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.has-shell .st-notice[hidden] { display: none; }
+.has-shell .st-notice button { min-height: 34px; }
+@media (prefers-reduced-motion: reduce) {
+  .has-shell *, .has-shell *::before, .has-shell *::after { scroll-behavior: auto; animation-duration: .01ms; transition-duration: .01ms; }
+}

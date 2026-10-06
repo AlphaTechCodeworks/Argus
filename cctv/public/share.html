@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <title>Argus · Shared clip</title>
+  <!-- served at /s/<token>, so every asset path is absolute (a relative one would resolve under /s/) -->
+  <script src="/theme-boot.js"></script>
+  <link rel="stylesheet" href="/css/tokens.css" />
+  <link rel="stylesheet" href="/css/base.css" />
+  <link rel="stylesheet" href="/css/components.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="share-page">
+  <!-- The public clip-share landing page: no account needed. share.js reads the token from the URL,
+       asks /s/<token>/info and fills this in, or shows that the link is no longer valid. -->
+  <main class="share-box">
+    <img class="share-logo" src="/logo.svg" alt="Argus" width="40" height="40" />
+    <h1>Shared clip</h1>
+    <div id="share-body" class="share-body"><p class="st-meta" role="status">Loading…</p></div>
+  </main>
+  <script type="module" src="/share.js"></script>
+</body>
+</html>

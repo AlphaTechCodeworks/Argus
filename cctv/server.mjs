@@ -61,6 +61,7 @@
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
 import { clientIpOf, localProbe, securityHeaders } from './security.mjs'
+import { handleMapTile } from './map-tiles.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleNetStatus } from './nvr-netstatus.mjs'
 import { handleRelays } from './relays.mjs'
@@ -96,7 +97,7 @@ import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs
 import { PhoneLive } from './phone-live.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
-import { liveAttacher } from './live-attach.mjs'
+import { liveAttacher, viewerOf } from './live-attach.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
@@ -109,7 +110,7 @@ import { LIVE_WORKER, P2P_ENABLED, REC_DB, allCameras, nvrs, readConfig, recInde
 import { housekeepingAlarms, housekeepingCandidates, runHousekeeping } from './housekeeping.mjs'
 import { playbackApi } from './playback.mjs'
 import { timelineApi } from './rec-api.mjs'
-import { downloadExport, handleExports } from './export-api.mjs'
+import { downloadExport, handleExports, streamExportZip } from './export-api.mjs'
 import { listExports } from './export-job.mjs'
 import { NVR_MAIN_ACTIONS, connectPlayback } from './rec-playback.mjs'
 import { accessWatch } from './access-watch.mjs'
@@ -122,7 +123,8 @@ import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
 import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
 import { retentionCandidates, startRetentionWatch } from './retention-target.mjs'
-import { can, canPlayAnyOn, handleRights, liveCameras, mayHd, onRightsSaved, playbackCameras, sitesFor } from './rights.mjs'
+import { can, canAdmin, canPlayAnyOn, canSeeMap, canShare, capForAdminPath, handleRights, isFullAdmin, liveCameras, mayHd, onRightsSaved, playbackCameras, rightsOf, sitesFor } from './rights.mjs'
+import { getShare, handleShares, shareInfo } from './share-links.mjs'
 import { streamParam } from './stream-param.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
@@ -450,7 +452,9 @@ const MIME = {
   '.webmanifest': 'application/manifest+json'
 }
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz', '/share.html', '/share.js'])
+// a clip share link: /s/<token>, with /info (the landing page's JSON) and /download (the one export)
+const SHARE_ROUTE = /^\/s\/([A-Za-z0-9_-]{1,64})(\/info|\/download)?$/
 const SECURITY_HEADERS = securityHeaders()
 
 // CCTV_AUTH=off is for local development only: never publish such an instance beyond 127.0.0.1
@@ -617,6 +621,23 @@ const handleRequest = async (req, res) => {
   }
   if (PUBLIC_PATHS.has(pathname)) return serveFile(res, pathname, req)
 
+  // Public clip share links (share-links.mjs): no account needed, so handled before the login gate.
+  // Only this exact shape is public; a missing/expired/revoked token looks the same (404) so a link
+  // reveals nothing, and a download streams only the one export its token names.
+  const shareM = SHARE_ROUTE.exec(pathname)
+  if (shareM) {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    const [, token, suffix] = shareM
+    if (!suffix) return serveFile(res, '/share.html', req) // the landing page reads the token from the URL
+    if (suffix === '/info') { const info = shareInfo(token); return sendJson(res, info.ok ? 200 : 404, info) }
+    // suffix === '/download'
+    const s = getShare(token)
+    if (!s) return sendJson(res, 404, { error: 'This link is no longer valid' })
+    audit(auth.DATA_DIR, { user: 'anonymous', action: 'share-download', target: s.jobId, detail: token, from: req.socket.remoteAddress ?? '' })
+    if (!(await streamExportZip({ res, dataDir: auth.DATA_DIR, id: s.jobId, headers: SECURITY_HEADERS }))) sendJson(res, 404, { error: 'This clip is no longer available' })
+    return
+  }
+
   const user = currentUser(req)
   if (!user) {
     if (pathname.startsWith('/api/')) return sendJson(res, 401, { error: 'Not logged in' })
@@ -627,13 +648,21 @@ const handleRequest = async (req, res) => {
   // Who is asking, in the one shape the rights and audit layers accept. Authority comes from the
   // session and nowhere else: a user named in a request body says whose settings are being
   // changed, never who is doing the changing.
-  const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
+  const admin = AUTH_OFF || auth.isAdmin(user)
+  // adminCaps: the admin areas a partial admin holds (empty for a full admin, who implies all, and
+  // for AUTH_OFF). canAdmin/isFullAdmin re-read the store themselves, so this copy is for /api/me and
+  // the nav; the server never trusts it for a decision.
+  const who = { user, admin, adminCaps: admin ? [] : rightsOf(user).adminCaps }
   // What this user may see of a camera at all: watching it live or playing it back (rights.mjs). The
   // routes that tell about cameras rather than show them (events, alarms, bookmarks, health, maps,
   // links, overlays) keep every other camera out of their answers with it.
   const canSee = (nvr, ch) => who.admin || ['live', 'playback-server', 'playback-nvr'].some((a) => can(who, a, { nvr, ch }))
 
-  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
+  // remote: reached through the tunnel or the tailnet (adaptive-live.mjs), so the Live grid shows the grid-fps control
+  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, adminCaps: who.adminCaps, map: canSeeMap(who), share: canShare(who), remote: isRemoteAddress(req.socket.remoteAddress), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: canAdmin(who, 'reboot') && machineRebootAvailable() })
+  // managing one's own clip share links (creating one is POST /api/exports/:id/share)
+  const sharesRoute = handleShares(req.method, pathname, who)
+  if (sharesRoute) return sendJson(res, ...sharesRoute)
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
 
   // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
@@ -648,26 +677,26 @@ const handleRequest = async (req, res) => {
   if (snapRoute) return handleSnapshot(req, res, snapRoute[1], who)
   // alarms and events of cameras this user may not see stay out of their lists (canSee above):
   // watching live or playing back that camera is what lets them see what happened on it
-  const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: who.admin, intake: null, canSee })
+  const ev = await handleEvents(req.method, pathname + url.search, () => readJsonObject(req, 4096), { nvrs, user, admin: canAdmin(who, 'cameras'), intake: null, canSee })
   if (ev) return sendJson(res, ...ev)
-  const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: who.admin, cameras: allCameras, canSee })
+  const al = await handleAlarms(req.method, pathname + url.search, () => readJsonObject(req, 8192), { user, admin: canAdmin(who, 'settings'), cameras: allCameras, canSee })
   // every camera's own address and web port, as its NVR connects to it (admins): for the settings an
   // NVR cannot pass on, such as day/night on some models, made on the camera's own page
   if (pathname === '/api/admin/camera-addresses') {
-    if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+    if (!canAdmin(who, 'cameras')) return sendJson(res, 403, { error: 'Admins only' })
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
     return sendJson(res, 200, [...nvrs.values()].flatMap((n) => n.channels.filter((c) => c.configured !== false).map((c) => ({
       nvr: n.id, site: n.site, ch: c.ch, name: c.name, online: c.online, ip: c.ip || null, httpPort: c.httpPort ?? null, model: c.model || null, maker: c.maker || null
     }))))
   }
   // NVR alarm outputs, read only (relays.mjs)
-  const relays = await handleRelays(req.method, pathname, { nvrs, admin: who.admin, query: transparent })
+  const relays = await handleRelays(req.method, pathname, { nvrs, admin: canAdmin(who, 'diagnostics'), query: transparent })
   if (relays) return sendJson(res, ...relays)
   // an NVR's own event log, read only (nvr-log.mjs)
-  const nvrLog = await handleNvrLog(req.method, pathname, url.search, { nvrs, admin: who.admin, query: transparent })
+  const nvrLog = await handleNvrLog(req.method, pathname, url.search, { nvrs, admin: canAdmin(who, 'diagnostics'), query: transparent })
   if (nvrLog) return sendJson(res, ...nvrLog)
   // an NVR's network status: how much of its send budget, shared by every client, is left (nvr-netstatus.mjs)
-  const netStatus = await handleNetStatus(req.method, pathname, { nvrs, admin: who.admin, query: transparent })
+  const netStatus = await handleNetStatus(req.method, pathname, { nvrs, admin: canAdmin(who, 'diagnostics'), query: transparent })
   if (netStatus) return sendJson(res, ...netStatus)
   if (al) return sendJson(res, ...al)
   const store = await handleStorage(req.method, pathname, () => readJsonObject(req, 4096), who)  // accepts the { user, admin } shape
@@ -685,11 +714,16 @@ const handleRequest = async (req, res) => {
   // text is a name); changed by admins only, which the handler checks for itself. The NVRs refuse
   // to say or set their own OSD, so this is the app's.
   if (pathname === OSD_PATH || pathname === ADMIN_OSD_PATH) {
-    const answer = await handleCameraOsd(req.method, pathname, () => readJsonObject(req, 16 * 1024), { admin: who.admin, canSee })
+    const answer = await handleCameraOsd(req.method, pathname, () => readJsonObject(req, 16 * 1024), { admin: canAdmin(who, 'cameras'), canSee })
     if (answer) return sendJson(res, ...answer)
   }
   if (pathname.startsWith('/api/admin/')) {
-    if (!AUTH_OFF && !auth.isAdmin(user)) return sendJson(res, 403, { error: 'Only admins can manage NVRs and sites' })
+    // One gate for every /api/admin/* route, by capability: a path maps to one of the admin areas
+    // (rights.mjs capForAdminPath) and the user must hold it; a path that maps to nothing demands a
+    // full admin, so a new admin route is never accidentally opened to a partial admin. A full admin
+    // and AUTH_OFF pass everything. Handlers may still re-check their own capability (defence in depth).
+    const needed = capForAdminPath(pathname)
+    if (!(needed ? canAdmin(who, needed) : isFullAdmin(who))) return sendJson(res, 403, { error: 'You do not have access to that admin area' })
     // changes only from the app's own pages, as JSON (blocks cross-site form posts)
     if (req.method !== 'GET') {
       const origin = req.headers.origin
@@ -731,7 +765,7 @@ const handleRequest = async (req, res) => {
     if (usersRoute) return sendJson(res, ...usersRoute)
     // Settings > Server: restart. The answer goes out first; systemd (Restart=always) starts it again.
     if (req.method === 'POST' && pathname === '/api/admin/restart') {
-      if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can restart the server' })
+      if (!canAdmin(who, 'reboot')) return sendJson(res, 403, { error: 'Only an admin can restart the server' })
       audit(auth.DATA_DIR, { user: who.user, action: 'server-restart', target: 'server', ok: true })
       console.log(`[server] restart asked for by ${who.user}`)
       sendJson(res, 200, { restarting: true })
@@ -740,7 +774,7 @@ const handleRequest = async (req, res) => {
     }
     // Reports: a day, a week or a month of recording, per camera and in total (reports.mjs, admins)
     if (req.method === 'GET' && pathname === '/api/admin/reports') {
-      if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can see reports' })
+      if (!canAdmin(who, 'reports')) return sendJson(res, 403, { error: 'Only an admin can see reports' })
       const period = PERIODS.includes(url.searchParams.get('period')) ? url.searchParams.get('period') : 'week'
       try {
         return sendJson(res, 200, await reportFor(period))
@@ -750,7 +784,7 @@ const handleRequest = async (req, res) => {
     }
     // Settings > Server: reboot the whole machine (machine-reboot.mjs: a root unit does it)
     if (req.method === 'POST' && pathname === '/api/admin/reboot') {
-      if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can reboot the machine' })
+      if (!canAdmin(who, 'reboot')) return sendJson(res, 403, { error: 'Only an admin can reboot the machine' })
       let r
       try {
         r = requestReboot({ dataDir: auth.DATA_DIR })
@@ -876,7 +910,9 @@ const handleRequest = async (req, res) => {
     }
     // (the RAM estimate: the NVRs' cameras, not a scan of the whole index; one small query per camera)
     const ramEstimate = () => estimateRecentRam({ index: recIndex(), settings: getSettings(), list: allCameras() })
-    const settingsAnswer = await handleSettings(req.method, pathname, () => readJsonObject(req, 16384), user, AUTH_OFF || auth.isAdmin(user), { ramEstimate, params: url.searchParams })
+    // settings vs storage config is gated per path by the capability block above; pass that same
+    // decision through as this handler's admin flag so a settings- or storage-only admin is let in
+    const settingsAnswer = await handleSettings(req.method, pathname, () => readJsonObject(req, 16384), user, AUTH_OFF || canAdmin(who, capForAdminPath(pathname)), { ramEstimate, params: url.searchParams })
     if (settingsAnswer) return sendJson(res, settingsAnswer[0], settingsAnswer[1], settingsAnswer[2])
     const readJson = async () => JSON.parse((await readBody(req, 8192)) || '{}')
     const [status, body] = await handleAdmin(req.method, pathname, readJson)
@@ -913,6 +949,10 @@ const handleRequest = async (req, res) => {
   // a map shows where cameras are and what they cover: only the sites and cameras this user may see
   // (maps.mjs mapsFor; a site is visible when one of its NVRs' cameras is)
   const siteVisible = (site) => [...nvrs.values()].some((n) => n.site === site && n.channels.some((c) => canSee(n.id, c.ch)))
+  // the Map page can be turned off per person (rights.mjs canSeeMap): deny its data too, not only the
+  // page and the nav link, so it cannot be reached by asking the API directly
+  if (pathname === '/api/maps' && !canSeeMap(who)) return sendJson(res, 403, { error: 'You do not have access to the map' })
+  if (await handleMapTile(req, res, pathname, canSeeMap(who))) return
   if (handleMapsRead(pathname, res, sendJson, SECURITY_HEADERS, who.admin ? null : { canSee, siteVisible })) return
   if (pathname.startsWith('/api/exports')) {
     const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
@@ -964,6 +1004,9 @@ const handleRequest = async (req, res) => {
     const [status, body, headers] = await playbackApi(nvrs.get(url.searchParams.get('nvr') ?? ''), pathname, url.searchParams)
     return sendJson(res, status, body, headers)
   }
+  // the Map page can be turned off per person (rights.mjs canSeeMap): send them back to Live rather
+  // than a blank map. The data is refused above as well, so this is not the only guard.
+  if (pathname === '/map.html' && !canSeeMap(who)) return res.writeHead(302, { location: '/', ...SECURITY_HEADERS }).end()
   serveFile(res, pathname, req)
 }
 
@@ -1015,7 +1058,10 @@ const onConnection = (ws, req) => {
         // (attachLive tracks it), so a change also ends the tiles already playing
         const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
         attachLive(channel, req, { nvr, who, ch: sub.ch, streamType: sub.stream, clientH265: sub.h265, phone15: sub.fps === 15 })
-      }
+      },
+      // the viewer's chosen grid fps for the live grid (adaptive-live.mjs): a remote viewer's only --
+      // local-network viewers get the cameras' own streams, untouched, and never show the control
+      gridFps: (fps) => { if (isRemoteAddress(req.socket.remoteAddress)) adaptiveLive.setGridFps(viewerOf(req, currentUser), fps) }
     }))
     return
   }

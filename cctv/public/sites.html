@@ -19,11 +19,12 @@
   <link rel="stylesheet" href="css/components.css" />
   <link rel="stylesheet" href="css/shell.css" />
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="sites-layout.css" />
 </head>
 <body class="sites-page">
   <header>
     <div class="brand">
-      <h1>CCTV</h1>
+      <h1>Sites</h1>
     </div>
     <div class="controls">
       <button id="find" type="button">Find NVRs</button>
@@ -37,6 +38,12 @@
   </header>
 
   <main class="st-main">
+    <section class="st-overview" aria-label="Inventory summary">
+      <div><span>Sites</span><strong id="st-site-count">--</strong></div>
+      <div><span>NVRs</span><strong id="st-nvr-count">--</strong></div>
+      <div><span>Connected</span><strong id="st-online-count">--</strong></div>
+      <div><span>Cameras</span><strong id="st-camera-count">--</strong></div>
+    </section>
     <p id="notice" class="st-notice" hidden></p>
     <section id="vpn" class="st-vpn" hidden aria-labelledby="vpn-title"></section>
     <div id="sites"></div>

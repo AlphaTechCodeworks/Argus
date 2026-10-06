@@ -9,6 +9,7 @@
 # Each push installs a new release next to the previous ones (the last 3 are kept); see deploy/install-ubuntu.sh.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
+bash "$root/deploy/check-gui.sh"
 target=wsl
 host="admin@192.168.3.147"
 distro="Ubuntu"

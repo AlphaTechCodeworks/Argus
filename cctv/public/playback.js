@@ -24,6 +24,7 @@
 // Switching between them (quality "SD (NVR)", or a camera or day in the other mode) converts the
 // position by the NVR's clock skew.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { followSuggestionsFor } from './camera-follow.js'
 import { PLAYBACK_CLOCK, REMOTE_PLAYBACK_CLOCK } from './playout.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
@@ -341,6 +342,7 @@ const TL_REUSE_MS = 5000
 const TL_OFF_REUSE_MS = 60_000
 
 async function fetchTimeline({ fresh = false } = {}) {
+  const requestedCamera = camKey()
   const from = Math.round(dayStartOf(state.date))
   const key = `${camKey()}/${from}`
   const c = tlCache
@@ -355,7 +357,7 @@ async function fetchTimeline({ fresh = false } = {}) {
     body = { available: false } // (the page works as before without it)
   }
   body.receivedAt = performance.now() // when body.now was read (a reused answer keeps it: the live edge)
-  tlCache = { key, cam: camKey(), at: body.receivedAt, body }
+  tlCache = { key, cam: requestedCamera, at: body.receivedAt, body }
   return body
 }
 
@@ -1216,14 +1218,15 @@ function drawTimeline() {
   })
 
   playheadEl.hidden = state.position === null || !inView(state.position)
+  timeline.setAttribute('aria-label', `Recording timeline${state.position === null ? '' : `, playhead ${fmtTime(state.position)}`}`)
   if (!playheadEl.hidden) playheadEl.style.left = `${pct(state.position)}%`
   nowEl.hidden = !inView(state.nvrNow)
   if (!nowEl.hidden) nowEl.style.left = `${pct(state.nvrNow)}%`
 
   ticksEl.replaceChildren(
-    ...ticks(v, state.tz).map((t) => {
+    ...ticks(v, state.tz, Math.max(2, Math.min(8, Math.floor(timeline.clientWidth / 72)))).map((t) => {
       const s = document.createElement('span')
-      s.style.left = `${pct(t.ms)}%`
+      s.style.setProperty('--tick-left', `${pct(t.ms)}%`)
       s.textContent = t.label
       return s
     })
@@ -1438,6 +1441,18 @@ overview.addEventListener('pointerup', endOvDrag)
 overview.addEventListener('pointercancel', endOvDrag)
 
 new ResizeObserver(() => drawTimeline()).observe(timeline)
+timeline.tabIndex = 0
+timeline.setAttribute('role', 'group')
+timeline.addEventListener('keydown', (e) => {
+  if (e.target !== timeline || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return
+  e.preventDefault()
+  e.stopPropagation()
+  const v = state.view
+  const current = state.position ?? v.startMs
+  const step = e.shiftKey ? 300_000 : 30_000
+  const target = e.key === 'Home' ? v.startMs : e.key === 'End' ? v.endMs - 1000 : current + (e.key === 'ArrowRight' ? step : -step)
+  seek(Math.max(v.dayStartMs, Math.min(v.dayEndMs - 1000, target)))
+})
 
 // ---- controls -------------------------------------------------------------
 
@@ -1980,6 +1995,7 @@ async function reloadKeepingPosition() {
 }
 
 cameraSel.addEventListener('change', async () => {
+  stopCameraTransport()
   const [nvr, ch] = cameraSel.value.split('/')
   state.nvr = nvr
   state.ch = Number(ch)
@@ -1998,6 +2014,7 @@ async function loadNvrInfo() {
     api(`/api/playback/now?${nvrQ()}`).catch((e) => e),
     api(`/api/playback/dates?${nvrQ()}`).catch((e) => e)
   ])
+  if (nvr !== state.nvr) return null
   const busy = [now, dates].find((r) => r?.retryAfterS)
   if (busy) return busy
   const clock = now instanceof Error ? { now: Date.now() } : now
@@ -2700,6 +2717,8 @@ async function followExport(id) {
       a.textContent = 'Download the export'
       a.className = 'pb-ex-download'
       exMsg.append(' ', a)
+      // a public, time-limited link to send this clip to someone without an account (share-links.mjs)
+      if (me.share) exMsg.append(' ', shareControl(id))
       exStart.disabled = false
       return
     }
@@ -2710,6 +2729,84 @@ async function followExport(id) {
       return
     }
     exSay(job.progress?.message ?? job.progress?.step ?? 'Working…')
+  }
+}
+
+/** The "Share…" control on a finished export (users with the sharing permission): pick an expiry,
+ *  create a public link, then show it to copy. */
+function shareControl(id) {
+  const wrap = document.createElement('span')
+  wrap.className = 'pb-ex-share'
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.textContent = 'Share…'
+  btn.className = 'pb-ex-sharebtn'
+  btn.addEventListener('click', () => {
+    wrap.replaceChildren('Expires: ')
+    const days = document.createElement('select')
+    for (const [v, label] of [[7, '7 days'], [1, '1 day'], [30, '30 days']]) {
+      const o = document.createElement('option')
+      o.value = String(v)
+      o.textContent = label
+      days.append(o)
+    }
+    const make = document.createElement('button')
+    make.type = 'button'
+    make.textContent = 'Create link'
+    make.className = 'pb-ex-sharebtn'
+    make.addEventListener('click', async () => {
+      make.disabled = true
+      try {
+        const r = await fetch(`/api/exports/${encodeURIComponent(id)}/share`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ days: Number(days.value) })
+        }).then(async (res) => {
+          const d = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`)
+          return d
+        })
+        showShareLink(wrap, `${location.origin}${r.url}`, r.expiresAt)
+      } catch (e) {
+        make.disabled = false
+        const err = document.createElement('span')
+        err.className = 'pb-ex-bad'
+        err.textContent = ` ${e.message}`
+        wrap.append(err)
+      }
+    })
+    wrap.append(days, ' ', make)
+  })
+  wrap.append(btn)
+  return wrap
+}
+
+function showShareLink(wrap, url, expiresAt) {
+  wrap.replaceChildren()
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.readOnly = true
+  input.value = url
+  input.className = 'pb-ex-shareurl'
+  input.addEventListener('focus', () => input.select())
+  const copy = document.createElement('button')
+  copy.type = 'button'
+  copy.textContent = 'Copy'
+  copy.className = 'pb-ex-sharebtn'
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(url)
+      copy.textContent = 'Copied'
+    } catch {
+      input.select()
+    }
+  })
+  wrap.append(input, ' ', copy)
+  if (Number.isFinite(expiresAt)) {
+    const e = document.createElement('small')
+    e.className = 'pb-ex-msg'
+    e.textContent = ` · expires ${new Date(expiresAt).toLocaleString()}`
+    wrap.append(e)
   }
 }
 
@@ -2757,7 +2854,7 @@ function drawFollow() {
   const links = cameraLinks[key] ?? []
   // suggestions are guesses from the map: offered only when nothing has been drawn for this
   // camera, and always labelled as guesses so nobody mistakes one for a known route
-  const guesses = links.length ? [] : followSuggestions.filter((s) => s.from === key)
+  const guesses = links.length ? [] : followSuggestionsFor(followSuggestions, key)
   const show = links.length > 0 || guesses.length > 0 || followTrail.length > 0
   followEl.hidden = !show
   followBackEl.hidden = followTrail.length === 0
@@ -2803,6 +2900,7 @@ followBackEl.addEventListener('click', async () => {
 
 /** The camera switch the select does, but driven from code and with a moment to land on. */
 async function goToCamera(nvr, ch, atMs) {
+  stopCameraTransport()
   state.nvr = nvr
   state.ch = ch
   cameraSel.value = keyOf(nvr, ch)
@@ -2812,6 +2910,22 @@ async function goToCamera(nvr, ch, atMs) {
   if (Number.isFinite(atMs)) state.position = atMs
   await reloadKeepingPosition()
   drawFollow()
+}
+
+/** Stop old-camera frames before changing the camera used by the shared player state. */
+function stopCameraTransport() {
+  dayToken++
+  clearTimeout(busyTimer)
+  clearTimeout(nvrSideTimer)
+  throttle.cancel()
+  if (ws) {
+    ws.onmessage = null
+    ws.onclose = null
+    ws.close()
+    ws = null
+  }
+  player.seekReset()
+  showMessage('Switching camera...')
 }
 
 cameraSel.addEventListener('change', () => {

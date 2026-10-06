@@ -4,7 +4,7 @@
 // It works on the page as it stands: the page's own content is moved into <div class="app-main">
 // and the shell goes beside it, so no page's markup had to be restructured to adopt it. It replaces
 // the ten hand-copied header links and admin-tabs.js.
-import { PHONE_BAR, currentId, navFor } from './nav-model.js'
+import { PHONE_BAR, NAV_GROUPS, currentId, navFor } from './nav-model.js'
 import { icon } from './icons.js'
 import { nextTheme, readTheme, saveTheme } from './theme.js'
 
@@ -32,7 +32,7 @@ const themeButton = (t, cls) => `<button type="button" class="${cls}" data-theme
 /** Fills the sidebar, phone bar and More sheet for this user. Safe to call again. */
 function render(parts, me) {
   const { side, bar, sheet } = parts
-  const groups = navFor({ admin: me.admin === true })
+  const groups = navFor({ admin: me.admin === true, adminCaps: me.adminCaps, map: me.map })
   // Storage is a tab of Settings (settings.html#storage), but has its own place in the menu
   // Many cameras (wall.html) is a view of Playback, not a page of its own in the menu
   const here = /wall.html$/.test(location.pathname) ? 'playback' : location.hash === '#storage' && /settings.html$/.test(location.pathname) ? 'storage' : currentId(location.pathname)
@@ -46,7 +46,7 @@ function render(parts, me) {
     <div class="shell-foot">
       ${themeButton(theme, 'shell-theme btn-ghost')}
       <div class="shell-user"><span class="shell-avatar">${esc((me.user ?? '?').slice(0, 1).toUpperCase())}</span>
-        <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small></span>
+        <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : me.adminCaps?.length ? 'Admin (limited)' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small></span>
         <button type="button" class="btn-ghost btn-icon" data-sign-out title="Sign out" aria-label="Sign out">${icon('out')}</button></div>
     </div>`
   // the phone bar: the four used most, then More for everything else
@@ -62,6 +62,16 @@ function render(parts, me) {
 export function mountShell() {
   if (document.body.classList.contains('has-shell')) return
   applyTheme(readTheme(store))
+  const polish = document.createElement('link')
+  polish.rel = 'stylesheet'
+  polish.href = '/css/polish.css'
+  document.head.append(polish)
+  const page = NAV_GROUPS.flatMap((g) => g.items).find((item) => item.id === currentId(location.pathname))
+  if (page) {
+    document.title = `Argus \u00b7 ${page.label}`
+    const heading = document.querySelector('header .brand h1')
+    if (heading) heading.textContent = page.label
+  }
 
   // the page's own content, moved as it is into the main column. This runs before the page's own
   // scripts (shell.js is the first module on every page), so no video has started yet: a playing
@@ -121,8 +131,8 @@ export function mountShell() {
     .then((r) => (r.ok ? r.json() : null))
     .then((fresh) => {
       if (!fresh) return
-      try { session?.setItem(ME_KEY, JSON.stringify({ user: fresh.user, admin: fresh.admin, build: fresh.build })) } catch {}
-      const changed = fresh.user !== me.user || fresh.admin !== me.admin || fresh.build?.version !== me.build?.version
+      try { session?.setItem(ME_KEY, JSON.stringify({ user: fresh.user, admin: fresh.admin, adminCaps: fresh.adminCaps, map: fresh.map, build: fresh.build })) } catch {}
+      const changed = fresh.user !== me.user || fresh.admin !== me.admin || (fresh.adminCaps ?? []).join() !== (me.adminCaps ?? []).join() || (fresh.map !== false) !== (me.map !== false) || fresh.build?.version !== me.build?.version
       me = fresh
       if (changed) render(parts, me)
     })

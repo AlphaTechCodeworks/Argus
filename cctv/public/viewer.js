@@ -5,14 +5,19 @@ import { diffCameras, shownCameras, visibleCameras } from './grid-diff.js'
 import { enableGridDrag } from './grid-drag.js'
 import { activeTrace, downloadTrace, startTrace, stopTrace } from './frame-trace.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
+import { MAX_VIEW_CAMERAS, applyViews, checkView, normaliseViews } from './grid-view.js'
 import { ImagePanel } from './image-panel.js'
 import { LinesPanel, linesSupportAsker } from './lines-panel.js'
 import { OsdPanel } from './osd-panel.js'
-import { freshenForPageChange, muxState, useMux } from './live-mux.js'
+import { freshenForPageChange, muxState, setGridFps, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
+import { createViewStore } from './view-preferences.js'
+import { icon } from './icons.js'
+import { notify } from './feedback.js'
+import { offlineHealth } from './stream-health.js'
 // ?pacing=off draws frames as soon as they decode (for before/after comparison)
 const PACING = new URLSearchParams(location.search).get('pacing') !== 'off'
 // Every tile's stream on one connection (live-mux.js): the browser opens WebSockets one at a time,
@@ -34,6 +39,12 @@ const smoothBox = document.getElementById('smooth')
 const fullBtn = document.getElementById('fullscreen')
 const resetBtn = document.getElementById('resetOrder')
 const orderNoteEl = document.getElementById('orderNote')
+const viewSel = document.getElementById('viewSel')
+const saveViewBtn = document.getElementById('saveView')
+const deleteViewBtn = document.getElementById('deleteView')
+const viewDlg = document.getElementById('saveViewDlg')
+const viewNameEl = document.getElementById('viewName')
+const viewMsgEl = document.getElementById('viewMsg')
 // "Smooth": a bigger playout buffer absorbs uneven delivery (more delay, steadier motion)
 const SMOOTH_CLOCK = { startDelayMs: 400, minDelayMs: 300, maxDelayMs: 1200 }
 // A page opened through the Cloudflare tunnel or the tailnet, not on a local address (device.js): its
@@ -67,7 +78,21 @@ const rememberNoMain = (key) => {
 let cameras = [] // every camera on every NVR, in this user's order: { nvr, site, nvrName, ch, name, online }
 let serverList = [] // the same, as the server sends them (the default order: site, NVR, channel)
 let user = null
+let favorites = null
+const favoriteLabel = document.createElement('label')
+const favoriteOnly = document.createElement('input')
+favoriteOnly.type = 'checkbox'
+favoriteOnly.id = 'favoritesOnly'
+favoriteLabel.append(favoriteOnly, document.createTextNode(' Favorites'))
+smoothBox.closest('label')?.after(favoriteLabel)
+favoriteOnly.addEventListener('change', () => { page = 0; render({ keepSingle: true }) })
 let page = 0
+// saved views (grid-view.js, /api/me/views): a named set of cameras + a layout, kept with the
+// account and shared with the Wall. activeView restricts the grid to its cameras in its order; null
+// is "(not saved)" — every camera, filtered by site as before. views/viewsVersion mirror the server.
+let views = []
+let viewsVersion = 0
+let activeView = null
 let fastUntil = Date.now() + 60_000 // the camera list is re-read every 5 s until then (listSoon)
 let overlayZoom = null // the full-size view's zoom (pinch-zoom.js), while it is open
 let single = null // key (nvr/ch) of the camera shown full-size, or null for the grid
@@ -91,7 +116,7 @@ const waitForMain = async (ms) => {
   while (Date.now() < until) {
     const v = shownPlayer()
     // P2P/VPN cameras and browsers without H.265 stay on the sub stream: no point waiting
-    if (v?.stream === 'main' || !singleCam || singleCam.remote || noMain.has(camKey(singleCam))) return v
+    if (v?.stream === 'main' || !singleCam || noMain.has(camKey(singleCam))) return v
     await new Promise((r) => setTimeout(r, 200))
   }
   return shownPlayer()
@@ -188,6 +213,7 @@ let gridStale = false // the camera list changed while the tab was hidden
 let singleTiles = [] // LiveTiles of the full-size view (sub, then main)
 let overlay = null // the full-size tile, laid over the (suspended) grid
 let upgradeTimer = null // the pending HD upgrade (debounced; cleared by closeSingle on a step or close)
+let controlsTimer = null
 // Wait this long on a camera before asking the NVR for its HD (main) stream, so stepping quickly
 // through cameras does not churn main streams the NVR opens and closes (seconds each on a busy NVR).
 const UPGRADE_DELAY_MS = 1000
@@ -224,7 +250,7 @@ function render({ keepSingle = false } = {}) {
   grid.dataset.size = String(size)
 
   gridStale = false
-  const v = visibleCameras(cameras, gridView(perPage))
+  const v = visibleCameras(gridCameras(), gridView(perPage))
   page = v.page
   const pages = v.pages
   const visible = v.visible
@@ -256,9 +282,22 @@ function render({ keepSingle = false } = {}) {
 /** A layout cell [column, row, width, height] as a CSS grid-area. */
 const gridArea = ([c, r, w, h]) => `${r} / ${c} / span ${h} / span ${w}`
 
-/** The grid's filters and page, for visibleCameras / diffCameras. */
+/**
+ * The cameras the grid draws from: a selected view's cameras in its own order (the ones that still
+ * exist), or every camera when none is selected. Everything downstream — render, the diff, the
+ * pager, the full-size ‹ › — reads this, so a view needs no special case in any of them.
+ */
+function gridCameras() {
+  if (!activeView) return favorites?.filter(cameras, favoriteOnly.checked) ?? cameras
+  const byKey = new Map(cameras.map((c) => [camKey(c), c]))
+  const selected = activeView.cameras.map((k) => byKey.get(k)).filter(Boolean)
+  return favorites?.filter(selected, favoriteOnly.checked) ?? selected
+}
+
+/** The grid's filters and page, for visibleCameras / diffCameras. A view carries its own set, so the
+ *  site filter is left off while one is selected (it would only hide cameras the view names). */
 function gridView(perPage = layoutCells(layoutSelect.value).cells.length) {
-  return { site: siteSelect.value, hideOffline: hideOffline.checked, perPage, page }
+  return { site: activeView ? '' : siteSelect.value, hideOffline: hideOffline.checked, perPage, page }
 }
 
 /** A new tile element for slot.cam (offline tile, or a LiveTile started after startDelayMs). */
@@ -271,10 +310,34 @@ function fillSlot(slot, gridArea, startDelayMs = 0) {
   if (!cam) return
   if (!cam.online) {
     tile.classList.add('offline')
-    tile.querySelector('.status').textContent = 'offline'
+    tile.querySelector('.status').textContent = offlineHealth(cam)
+    tile.dataset.streamState = 'offline'
     return
   }
   tile.addEventListener('click', () => openSingle(slot.cam, { fromTap: true }))
+  tile.tabIndex = 0
+  tile.setAttribute('role', 'group')
+  tile.setAttribute('aria-label', `${cam.site ?? ''} / ${cam.name}`)
+  tile.addEventListener('keydown', (e) => {
+    if (e.target !== tile || !['Enter', ' '].includes(e.key)) return
+    e.preventDefault()
+    openSingle(slot.cam)
+    overlay?.querySelector('.single-close')?.focus()
+  })
+  const pin = document.createElement('button')
+  pin.type = 'button'
+  pin.className = 'camera-pin'
+  pin.innerHTML = icon('star')
+  pin.title = 'Favorite camera'
+  pin.setAttribute('aria-label', `Favorite ${cam.name}`)
+  pin.setAttribute('aria-pressed', String(favorites?.has(camKey(cam)) ?? false))
+  pin.addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (!favorites?.toggle(camKey(slot.cam))) return notify('Favorites could not be saved.', { error: true })
+    pin.setAttribute('aria-pressed', String(favorites.has(camKey(slot.cam))))
+    if (favoriteOnly.checked) render({ keepSingle: true })
+  })
+  tile.querySelector('.label').prepend(pin)
   // the phone list: a camera streams only while it is on screen (48 at once would swamp a phone)
   if (LAYOUTS[layoutSelect.value]?.list) return watchInView(slot, tile)
   slot.live = new LiveTile(tile, cam, SUB_STREAM, startDelayMs, tileOptions(cam))
@@ -321,7 +384,7 @@ function watchInView(slot, tile) {
  * pictures keep playing.
  */
 function updateTiles(changed) {
-  for (const { index, cam, online, name } of changed) {
+  for (const { index, cam, online, name, health } of changed) {
     const slot = gridSlots[index]
     if (!slot) continue
     slot.cam = cam
@@ -338,6 +401,7 @@ function updateTiles(changed) {
     } else if (name) {
       slot.el.querySelector('.name').textContent = tileLabel(cam)
     }
+    if (health && !cam.online) slot.el.querySelector('.status').textContent = offlineHealth(cam)
   }
   syncTiles()
   const keep = single !== null && overlay !== null && singleTiles.some((t) => !t.closed)
@@ -577,7 +641,7 @@ function lenderFor(cam) {
 }
 /** Starts the cameras either side of this one (not already on the grid page), and lets others go. */
 function startAhead(cam) {
-  const list = shownCameras(cameras, { site: siteSelect.value, hideOffline: hideOffline.checked })
+  const list = shownCameras(gridCameras(), gridView())
   const i = list.findIndex((c) => camKey(c) === camKey(cam))
   const want = new Map()
   if (i >= 0 && list.length > 1) {
@@ -607,6 +671,18 @@ function stopAhead() {
 }
 
 function openSingle(cam, { fromTap = false } = {}) {
+  const displayedPicture = shownPlayer()?.player?.canvas
+  const oldPicture = displayedPicture ?? overlay?.querySelector('.switch-poster')
+  const previousName = !displayedPicture && oldPicture ? overlay?.querySelector('.switch-note')?.dataset.previousName :
+    singleCam ? `${singleCam.site ?? ''} / ${singleCam.name}` : ''
+  let poster = null
+  if (oldPicture?.width > 1 && single !== camKey(cam)) {
+    poster = document.createElement('canvas')
+    poster.width = oldPicture.width
+    poster.height = oldPicture.height
+    poster.getContext('2d')?.drawImage(oldPicture, 0, 0)
+    poster.className = 'switch-poster'
+  }
   // the camera being left (a step with ‹ ›): the connection that carries its stream is kept, started
   // ahead as the new camera's neighbour, rather than closed and opened again a moment later
   const leftCam = singleCam
@@ -627,12 +703,31 @@ function openSingle(cam, { fromTap = false } = {}) {
   for (const t of gridTiles) { if (t === lender) t.suspend(); else t.release() }
   overlay = makeTile(cam)
   overlay.classList.add('single', 'single-overlay')
+  for (const slot of gridSlots) slot.el?.setAttribute('inert', '')
+  const previousNote = document.createElement('span')
+  previousNote.className = 'switch-note'
+  previousNote.setAttribute('role', 'status')
+  if (poster) {
+    previousNote.dataset.previousName = previousName
+    previousNote.textContent = `Previous camera: ${previousName} (paused) - connecting`
+    overlay.append(poster, previousNote)
+  }
   // links sit next to the name (not in it): a long name is cut short, the links never are
   const links = document.createElement('span')
   links.className = 'links'
   // a tap anywhere in the controls strip (on a button or the gap beside one) must not fall through to
   // the view's close-on-tap: near-misses at the bottom edge were closing the camera (map/viewer).
   links.addEventListener('click', (e) => e.stopPropagation())
+  const closeButton = document.createElement('button')
+  closeButton.type = 'button'
+  closeButton.className = 'single-close pb-link'
+  closeButton.innerHTML = icon('close')
+  closeButton.title = 'Close camera'
+  closeButton.setAttribute('aria-label', 'Close camera')
+  closeButton.addEventListener('click', () => {
+    if (imagePanel.confirmDiscard() && linesDiscard() && osdDiscard()) closeSingle()
+  })
+  links.append(closeButton)
   // Recordings only for someone who may play this camera back (/api/cameras playback)
   if (cam.playback !== false) {
     const link = document.createElement('a')
@@ -759,6 +854,19 @@ function openSingle(cam, { fromTap = false } = {}) {
   badge.hidden = true
   overlay.append(badge)
   grid.append(overlay)
+  const wakeControls = () => {
+    currentView.classList.remove('controls-idle')
+    clearTimeout(controlsTimer)
+    if (isPhone()) return
+    controlsTimer = setTimeout(() => {
+      if (overlay === currentView && !currentView.contains(document.activeElement) && !imagePanel.key && !linesPanel && !osdPanel) {
+        currentView.classList.add('controls-idle')
+      }
+    }, 3500)
+  }
+  const currentView = overlay
+  for (const event of ['pointermove', 'pointerdown', 'keydown', 'focusin', 'focusout']) currentView.addEventListener(event, wakeControls)
+  wakeControls()
   // inside the tap itself: a browser allows full screen only in answer to one
   if (fromTap) enterPhoneFull()
   // open for this camera: keep it (and its unsent changes) across a rebuild of the view
@@ -771,13 +879,18 @@ function openSingle(cam, { fromTap = false } = {}) {
   if (osdPanel?.key === single) grid.append(osdPanel.el)
   else osdPanel?.close()
   const opts = tileOptions(cam)
-  const sub = new LiveTile(overlay, cam, SUB_STREAM, 0, { ...opts, borrowFrom: lenderFor(cam) })
+  const currentOverlay = overlay
+  const sub = new LiveTile(overlay, cam, SUB_STREAM, 0, { ...opts, borrowFrom: lenderFor(cam),
+    onFirstFrame: () => {
+      if (overlay !== currentOverlay) return
+      poster?.remove()
+      previousNote.remove()
+    } })
   singleTiles.push(sub)
   startAhead(cam)
-  // full screen at full quality (the main stream) only with Live HD on the camera (/api/cameras hd;
-  // the server refuses it anyway); cameras reached through TVT P2P or a VPN stay on the sub stream
-  // (the relay has little bandwidth), as do browsers that could not play this main stream
-  if (cam.hd !== false && !noMain.has(single) && !cam.remote) {
+  // Full-size views request main when Live HD is allowed, including cloud/VPN cameras.
+  // Keep the sub-stream visible until a decoded main frame arrives.
+  if (cam.hd !== false && !noMain.has(single)) {
     // debounced: the sub-stream shows at once; the HD stream is asked for only once the view settles
     // on this camera (UPGRADE_DELAY_MS), so stepping through does not churn main streams on the NVR.
     const o = overlay
@@ -792,9 +905,11 @@ function openSingle(cam, { fromTap = false } = {}) {
 
 /** Back to the grid: the grid tiles pick up again straight away. */
 function closeSingle({ resumeGrid = true, keep = null } = {}) {
+  clearTimeout(controlsTimer)
+  const returnCamera = single
   if (upgradeTimer) { clearTimeout(upgradeTimer); upgradeTimer = null } // a pending HD upgrade is cancelled
   overlayZoom = null
-  for (const t of singleTiles) if (t !== keep) t.close()
+  for (const t of singleTiles) if (t !== keep) { clearTimeout(t.upgradeTimeout); t.close() }
   singleTiles = []
   overlay?.remove()
   overlay = null
@@ -806,6 +921,7 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   osdPanel?.close()
   single = null
   singleCam = null
+  for (const slot of gridSlots) slot.el?.removeAttribute('inert')
   // A phone rebuilds its grid instead: under the full-size view the list's tiles were scrolled out,
   // covered or stopped, and after the screen turned some never came back (blank tiles). A fresh
   // grid shows each camera's last picture at once and reconnects.
@@ -820,6 +936,7 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   for (const t of gridTiles) t.resume()
   syncTiles()
   updatePager()
+  gridSlots.find((slot) => slot.cam && camKey(slot.cam) === returnCamera)?.el?.focus()
 }
 
 /** The full-size view's note that it stays on the sub-stream: no Live HD on this camera. */
@@ -842,6 +959,7 @@ function upgradeToMain(tile, cam, sub, opts) {
     ...opts,
     noStill: true, // the sub-stream below it already shows the still
     onFirstFrame: () => {
+      clearTimeout(main.upgradeTimeout)
       layer.classList.remove('pending')
       const links = tile.querySelector(':scope > .label .links')
       if (links) layer.querySelector('.name').after(links)
@@ -851,6 +969,7 @@ function upgradeToMain(tile, cam, sub, opts) {
       sub.close()
     },
     onUnsupported: () => {
+      clearTimeout(main.upgradeTimeout)
       rememberNoMain(camKey(cam))
       main.close()
       layer.remove()
@@ -858,12 +977,20 @@ function upgradeToMain(tile, cam, sub, opts) {
     // refused for want of Live HD before it showed anything: this layer goes, the sub-stream under it
     // stays; once shown (its sub-stream closed), the tile goes over to the sub-stream itself (live-tile.js)
     onHdRefused: () => {
+      clearTimeout(main.upgradeTimeout)
       if (!layer.classList.contains('pending')) return false
       main.close()
       layer.remove()
       return true
     }
   })
+  main.upgradeTimeout = setTimeout(() => {
+    if (main.closed || !layer.classList.contains('pending')) return
+    main.close()
+    layer.remove()
+    rememberNoMain(camKey(cam))
+    if (overlay === tile) notify('Main stream did not start. Keeping the SD picture.', { error: true })
+  }, 30000)
   singleTiles.push(main)
 }
 
@@ -942,7 +1069,7 @@ function showOrder() {
 function relayout() {
   const { cells } = layoutCells(layoutSelect.value)
   const perPage = cells.length
-  const v = visibleCameras(cameras, gridView(perPage))
+  const v = visibleCameras(gridCameras(), gridView(perPage))
   if (gridSlots.length !== perPage || v.page !== page) return render({ keepSingle: true })
   const before = [overlay, imagePanel.el, linesPanel?.el, osdPanel?.el].find((n) => n?.parentNode === grid) ?? null
   const keys = cells.map((_, i) => (v.visible[i] ? camKey(v.visible[i]) : null))
@@ -993,7 +1120,7 @@ function dropTile(dragged, target) {
   if (!cam || single !== null) return
   if (target === prevBtn || target === nextBtn) {
     const perPage = layoutCells(layoutSelect.value).cells.length
-    sync.change(moveOp(camKey(cam), page + (target === nextBtn ? 1 : -1), perPage, shownCameras(cameras, gridView(perPage))))
+    sync.change(moveOp(camKey(cam), page + (target === nextBtn ? 1 : -1), perPage, shownCameras(gridCameras(), gridView(perPage))))
     return
   }
   const other = gridSlots.find((s) => s.el === target)?.cam
@@ -1001,8 +1128,9 @@ function dropTile(dragged, target) {
 }
 
 const drag = enableGridDrag(grid, {
-  // the grid's tiles with a camera (offline ones too), not while the full-size view is open
-  tileOf: (el) => (single === null ? (gridSlots.find((s) => s.cam && s.el.contains(el))?.el ?? null) : null),
+  // the grid's tiles with a camera (offline ones too); not while the full-size view is open, and not
+  // while a saved view is shown (the view fixes its own order — change it by re-saving the view)
+  tileOf: (el) => (single === null && !activeView ? (gridSlots.find((s) => s.cam && s.el.contains(el))?.el ?? null) : null),
   // another camera's tile, or a pager arrow that can be used
   targetOf: (el, dragged) => {
     const arrow = el.closest?.('#prev, #next')
@@ -1080,9 +1208,127 @@ hideOffline.addEventListener('change', () => {
   try { localStorage.setItem('cctv.hideOffline', hideOffline.checked ? '1' : '0') } catch {}
   render({ keepSingle: true })
 })
+// Balanced grid fps (remote viewers only; revealed below once /api/me says this is a remote viewer).
+// One uniform rate for every grid tile, so the picture is even and the uplink is shared equally: the
+// server caps faster cameras to it and leaves a slower one on its own rate (adaptive-live.mjs). The
+// grid only -- full screen (Live HD) keeps its own path. Remembered per browser, read defensively
+// (absent or corrupt => Auto). Changing it re-targets the open grid live (live-mux.js tells the
+// server), no reload: tiles move at the next keyframe like any level change.
+const gridFpsSelect = document.getElementById('gridFps')
+const gridFpsLabel = document.getElementById('gridFpsLabel')
+try {
+  const saved = localStorage.getItem('cctv.gridFps')
+  if (saved && gridFpsSelect && [...gridFpsSelect.options].some((o) => o.value === saved)) gridFpsSelect.value = saved
+} catch {}
+gridFpsSelect?.addEventListener('change', () => {
+  try { localStorage.setItem('cctv.gridFps', gridFpsSelect.value) } catch {}
+  setGridFps(Number(gridFpsSelect.value) || 0)
+})
 siteSelect.addEventListener('change', () => {
   page = 0
+  activeView = null // browsing by site leaves the saved view; the dropdown goes back to "(not saved)"
+  renderViewSel()
   try { localStorage.setItem('cctv.site', siteSelect.value) } catch {}
+  render({ keepSingle: true })
+})
+
+// ---- saved views (grid-view.js, /api/me/views) -------------------------------------------------
+// A named set of cameras and a layout, kept with the account and shared with the Wall. Selecting one
+// restricts the grid to its cameras in its order; "(not saved)" shows every camera again. Versioned
+// exactly as the camera order is: a save on a stale version is refused and the list reloaded.
+async function loadViews() {
+  try {
+    const res = await fetch('/api/me/views')
+    if (!res.ok) throw new Error(String(res.status))
+    const got = await res.json()
+    views = normaliseViews(got.views).views
+    viewsVersion = Number.isSafeInteger(got.version) ? got.version : 0
+  } catch {
+    views = [] // a page that cannot read its views still shows the grid
+  }
+  renderViewSel()
+}
+
+function renderViewSel() {
+  viewSel.replaceChildren(new Option('(not saved)', ''), ...views.map((v) => new Option(v.name, v.id)))
+  viewSel.value = activeView?.id ?? ''
+  deleteViewBtn.hidden = !activeView
+}
+
+/** Saves the views as they now are, telling the viewer when another screen got there first. */
+async function putViews(next) {
+  if (!applyViews({ views, version: viewsVersion }, { views: next, version: viewsVersion }).saved) {
+    return { ok: false, error: 'Your views were changed on another screen. Reloading them.' }
+  }
+  const res = await fetch('/api/me/views', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ views: next, version: viewsVersion })
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    if (res.status === 409) { views = normaliseViews(body.views).views; viewsVersion = body.version ?? viewsVersion; renderViewSel() }
+    return { ok: false, error: body.error ?? `HTTP ${res.status}` }
+  }
+  views = normaliseViews(body.views).views
+  viewsVersion = body.version
+  renderViewSel()
+  return { ok: true, error: null }
+}
+
+/** The cameras a view saved now would hold: those on the grid (a view's, or every shown camera), capped. */
+const currentViewCameras = () => shownCameras(gridCameras(), gridView()).slice(0, MAX_VIEW_CAMERAS).map(camKey)
+
+function selectView(id) {
+  activeView = views.find((v) => v.id === id) ?? null
+  // a live-page layout rides with the view; a Wall layout ('3x3' etc.) the live grid cannot draw is
+  // left as it is (layoutCells falls back anyway), rather than blanking the dropdown
+  if (activeView && LAYOUTS[activeView.layout]) {
+    layoutSelect.value = activeView.layout
+    markPhoneLayout()
+    try { localStorage.setItem(LAYOUT_KEY, layoutSelect.value) } catch {}
+  }
+  page = 0
+  renderViewSel()
+  render({ keepSingle: true })
+}
+
+viewSel.addEventListener('change', () => selectView(viewSel.value))
+
+saveViewBtn.addEventListener('click', () => {
+  if (currentViewCameras().length === 0) return
+  viewNameEl.value = activeView?.name ?? ''
+  viewMsgEl.textContent = ''
+  viewDlg.showModal()
+  viewNameEl.focus()
+})
+
+document.getElementById('viewSave').addEventListener('click', async () => {
+  // a view saved under a name already in use replaces it, rather than leaving two the menu cannot tell apart
+  const name = viewNameEl.value
+  const existing = views.find((v) => v.name.trim().toLowerCase() === name.trim().toLowerCase())
+  const candidate = {
+    id: existing?.id ?? activeView?.id ?? `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
+    name,
+    cameras: currentViewCameras(),
+    layout: layoutSelect.value
+  }
+  const { ok, error, value } = checkView(candidate)
+  if (!ok) return (viewMsgEl.textContent = error)
+  const saved = await putViews([...views.filter((v) => v.id !== value.id), value])
+  if (!saved.ok) return (viewMsgEl.textContent = saved.error)
+  activeView = views.find((v) => v.id === value.id) ?? value
+  renderViewSel()
+  render({ keepSingle: true })
+  viewDlg.close()
+})
+
+deleteViewBtn.addEventListener('click', async () => {
+  if (!activeView) return
+  const saved = await putViews(views.filter((v) => v.id !== activeView.id))
+  if (!saved.ok) return
+  activeView = null
+  renderViewSel()
   render({ keepSingle: true })
 })
 // drop a big grid's backed-up shared connection before the new page subscribes, so it starts clean
@@ -1202,12 +1448,20 @@ document.getElementById('logout').addEventListener('click', async () => {
 const fetchLists = () => Promise.all([fetch('/api/cameras').then((r) => r.json()), fetch('/api/sites').then((r) => r.json())])
 const prefetched = fetchLists()
 prefetched.catch(() => {}) // (handled where it is used; a signed-out session is sent to sign-in first)
-const early = Promise.all([sync.load(), loadOsd().catch(() => {})])
+const early = Promise.all([sync.load(), loadOsd().catch(() => {}), loadViews().catch(() => {})])
 const me = await checkSession()
 if (me) document.getElementById('whoami').textContent = me.user
 if (me?.admin) { const st = document.getElementById('sitesTab'); if (st) st.hidden = false; const se = document.getElementById('settingsTab'); if (se) se.hidden = false }
 isAdmin = Boolean(me?.admin)
 user = me?.user ?? null
+// a remote viewer (the server's own rule, isRemoteAddress): show the grid-fps control and push the
+// stored choice to the server. A local viewer's streams are untouched, so the control stays hidden.
+if ((me?.remote ?? REMOTE_PAGE) && gridFpsLabel) {
+  gridFpsLabel.hidden = false
+  setGridFps(Number(gridFpsSelect.value) || 0)
+}
+try { favorites = createViewStore(localStorage, `cctv.favorites.${user ?? 'guest'}`) }
+catch { favorites = createViewStore(null, `cctv.favorites.${user ?? 'guest'}`) }
 setInterval(checkSession, 60_000)
 
 function multiSite() {
@@ -1221,7 +1475,7 @@ async function loadCameras(pre = null) {
   const list = applyOrder(fresh, sync.order) // this user's order (the grid, the diff and the pages all use it)
   resetBtn.hidden = sync.order.length === 0
   const changed = JSON.stringify(list) !== JSON.stringify(cameras)
-  const before = cameras
+  const before = gridCameras() // what is on the grid now (a view's subset, or every camera)
   const beforeView = gridView() // (the site list below can reset the site filter)
   cameras = list
 
@@ -1250,7 +1504,7 @@ async function loadCameras(pre = null) {
   // rebuilt only when the page shows other cameras (or in another order) than before
   const view = gridView()
   const sameFrame = gridSlots.length > 0 && view.site === beforeView.site
-  const diff = sameFrame ? diffCameras(before, list, view) : { full: true }
+  const diff = sameFrame ? diffCameras(before, gridCameras(), view) : { full: true }
   if (!diff.full) return updateTiles(diff.changed)
   // A camera came onto or left the page (Hide offline: cameras on nvr1/nvr-2 drop out together for
   // a minute or two when their network blips). The tiles that stay move and keep playing; only a
@@ -1278,6 +1532,7 @@ if (sync.unsaved) sync.refresh()
 setInterval(() => {
   loadCameras().catch(() => {})
   loadOsd().catch(() => {}) // an overlay changed in Settings reaches every screen within half a minute
+  loadViews().catch(() => {}) // a view saved or deleted on another screen reaches this one too
   sync.refresh()
 }, 30_000)
 // ...and every 5 s for a minute after the page opens or its streams drop: after a server restart the
@@ -1313,7 +1568,7 @@ setInterval(() => {
 // ---- phones: flick left and right to go through the cameras ----
 /** The next (dir 1) or previous (-1) camera of the grid, full-size. */
 function stepCamera(dir) {
-  const list = shownCameras(cameras, { site: siteSelect.value, hideOffline: hideOffline.checked })
+  const list = shownCameras(gridCameras(), gridView())
   if (list.length < 2 || single === null) return
   const i = list.findIndex((c) => camKey(c) === single)
   const next = list[(i + dir + list.length) % list.length]

@@ -72,12 +72,22 @@ export const ACTIONS = Object.freeze(['live', 'live-hd', 'playback-server', 'pla
 /** Export formats, matching export-job.mjs's FORMATS. An export grant with no format is useless. */
 export const FORMATS = Object.freeze(['pack', 'mp4', 'stills'])
 
+/**
+ * The admin areas a partial admin can be given one at a time, between "viewer" and "full admin".
+ * A full admin (the account's role) holds all of them implicitly; a row's `adminCaps` only matters
+ * when `admin` is false. Anything not in this set is dropped from a row and never grants anything.
+ */
+export const CAPS = Object.freeze(['users', 'cameras', 'settings', 'storage', 'reports', 'audit', 'reboot', 'diagnostics'])
+const CAP_SET = new Set(CAPS)
+
 const GRANTABLE = ACTIONS.filter((a) => a !== 'admin') // 'admin' is a flag, not a per-camera grant
 
 const emptyGrants = () => Object.fromEntries(GRANTABLE.map((a) => [a, []]))
 
-/** A rights row with nothing granted: what an unknown user gets, and what "deny" looks like. */
-export const emptyRights = () => ({ admin: false, grants: emptyGrants(), formats: [] })
+/** A rights row with nothing granted: what an unknown user gets, and what "deny" looks like. The
+ *  Map page is the one thing on by default (map: true), so existing viewers keep seeing it; it is
+ *  turned off per person by storing map: false. */
+export const emptyRights = () => ({ admin: false, adminCaps: [], grants: emptyGrants(), formats: [], map: true, share: false })
 
 // ------------------------------------------------------------------- reading and cleaning rows
 
@@ -109,6 +119,10 @@ export function cleanRights(raw) {
   const out = emptyRights()
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
   out.admin = raw.admin === true // only the literal true; 'true', 1 and {} are not admin
+  // the admin areas a partial admin holds: only the known ones, de-duplicated and in CAPS order, so
+  // an unknown or repeated capability on disk or in a POST can never grant anything (fail-closed)
+  const caps = Array.isArray(raw.adminCaps) ? new Set(raw.adminCaps.filter((c) => CAP_SET.has(c))) : new Set()
+  out.adminCaps = CAPS.filter((c) => caps.has(c))
   const grants = raw.grants && typeof raw.grants === 'object' && !Array.isArray(raw.grants) ? raw.grants : {}
   for (const action of GRANTABLE) {
     const list = Array.isArray(grants[action]) ? grants[action] : []
@@ -121,6 +135,12 @@ export function cleanRights(raw) {
   }
   const formats = Array.isArray(raw.formats) ? raw.formats : []
   out.formats = FORMATS.filter((f) => formats.includes(f))
+  // the Map page: on unless explicitly turned off (anything but the literal false is "on", so a row
+  // from before this setting, which has no map field, keeps the map)
+  out.map = raw.map !== false
+  // making public share links: off unless explicitly turned on (only the literal true), because a
+  // public link is sensitive and nobody should get one by default
+  out.share = raw.share === true
   return out
 }
 
@@ -503,7 +523,7 @@ function rowsOfAccounts(users, accounts) {
  * admin there is). Rows left behind by accounts that no longer exist are dropped on the way.
  * @throws {Error & {status:number}}
  */
-export function saveRights(name, raw) {
+export function saveRights(name, raw, { by } = {}) {
   const bad = (status, message) => Object.assign(new Error(message), { status })
   if (!isString(name) || !/^[\w.@-]{1,64}$/.test(name)) throw bad(400, 'user name is missing or not allowed')
   const accounts = loadUsers()
@@ -511,6 +531,15 @@ export function saveRights(name, raw) {
   const store = loadRights()
   if (store.newer) throw bad(409, `rights.json was written by a newer version of Argus (version ${store.newer}); this version will not change it`)
   const row = cleanRights(raw)
+  // The escalation safeguard: only a full admin may change who is an admin or what admin areas
+  // anyone holds. A partial admin with `users` reaches this to edit viewing grants and formats, but
+  // any attempt by them to move the Admin switch or the capabilities is refused (not silently kept:
+  // a refusal is auditable, a silent no-op is not). `by` omitted ⇒ a trusted internal caller.
+  if (by !== undefined && !isFullAdmin(by)) {
+    const current = rightsOf(name)
+    if (row.admin !== current.admin) throw bad(403, 'only a full admin can change who is an admin')
+    if (JSON.stringify(row.adminCaps) !== JSON.stringify(current.adminCaps)) throw bad(403, 'only a full admin can change which admin areas someone has')
+  }
   // Count admins as they will be: every account's role, with this one's as it is being saved.
   const admins = Object.keys(accounts).filter((u) => (u === name ? row.admin : accounts[u]?.role === 'admin'))
   if (admins.length === 0) throw bad(400, 'there must be at least one admin; make someone else an admin first')
@@ -647,6 +676,86 @@ export function canAny(who, action) {
   if (action === 'live-hd' && rights.grants.live.length === 0) return false // HD counts only with Live
   // An export grant over cameras but no format allowed is not an export permission at all.
   return action !== 'export' || rights.formats.length > 0
+}
+
+/**
+ * May this person use one admin area? A full admin (a session admin, or the account's admin role)
+ * holds every capability; a partial admin is granted one area at a time by the stored `adminCaps`.
+ * cap must be one of CAPS; anything else is refused. This is THE admin-area decision — every
+ * admin-only route asks it with its own capability, the way can() guards viewing. It reads the
+ * stored row fresh, so it is authoritative even when the session's own copy is out of date.
+ */
+export function canAdmin(who, cap) {
+  if (!CAP_SET.has(cap)) return false
+  if (who !== null && typeof who === 'object' && who.admin === true) return true // session/full admin
+  const name = isString(who) ? who : isString(who?.user) ? who.user : null
+  if (!name) return false
+  const rights = rightsOf(name)
+  return rights.admin || rights.adminCaps.includes(cap)
+}
+
+/**
+ * May this person open the Map page (every site on one map)? A full admin always; anyone else
+ * unless their row turns it off (map: false). Default on, so existing viewers are unchanged. The
+ * cameras the map then shows them are still each filtered by canSee, exactly as the Live grid is.
+ */
+export function canSeeMap(who) {
+  if (who !== null && typeof who === 'object' && who.admin === true) return true
+  const name = isString(who) ? who : isString(who?.user) ? who.user : null
+  if (!name) return false
+  const rights = rightsOf(name)
+  return rights.admin || rights.map !== false
+}
+
+/**
+ * May this person make a public, time-limited share link for a clip? A full admin always; anyone
+ * else only when their row turns it on (share: true). Off by default. Holding this is not enough to
+ * share a *particular* export — export-api.mjs also requires they could reach that export today.
+ */
+export function canShare(who) {
+  if (who !== null && typeof who === 'object' && who.admin === true) return true
+  const name = isString(who) ? who : isString(who?.user) ? who.user : null
+  if (!name) return false
+  const rights = rightsOf(name)
+  return rights.admin || rights.share === true
+}
+
+/**
+ * A full admin: the account's admin role, or a session admin (CCTV_AUTH=off, a fresh install). The
+ * ONLY one who may change who is an admin or what admin areas anyone holds, or create and delete
+ * accounts — the rule that stops a partial admin handing themselves more power (saveRights `by`,
+ * users-api). A partial admin, even with the `users` capability, is not a full admin.
+ */
+export function isFullAdmin(who) {
+  if (who !== null && typeof who === 'object' && who.admin === true) return true
+  const name = isString(who) ? who : isString(who?.user) ? who.user : null
+  return name ? rightsOf(name).admin : false
+}
+
+/**
+ * Which capability a server-side admin path needs, so one gate can guard every `/api/admin/...`
+ * route by capability instead of by the single admin flag. A path not listed falls through to
+ * null, which the gate treats as full-admin-only — a new admin route is never accidentally opened
+ * to a partial admin. Per-NVR sub-resources split: the monitoring/probe reads are `diagnostics`,
+ * everything else under a camera or NVR is camera configuration (`cameras`). A few admin actions
+ * live outside `/api/admin/` and ask canAdmin directly (their caps, for reference: `/api/storage`
+ * → storage, `/api/alarms/rules…` → settings); this function only maps the `/api/admin/` tree.
+ */
+export function capForAdminPath(pathname) {
+  const p = String(pathname ?? '')
+  if (!p.startsWith('/api/admin/')) return null
+  // a per-NVR sub-resource: /api/admin/nvrs/<id>/<sub...>
+  const sub = /^\/api\/admin\/nvrs\/[^/]+\/(.+)$/.exec(p)?.[1]
+  if (sub) return /^(log|netstatus|alarm-outputs|event-probe)\b/.test(sub) ? 'diagnostics' : 'cameras'
+  if (/^\/api\/admin\/(users|rights)\b/.test(p)) return 'users'
+  if (/^\/api\/admin\/(nvrs|camera-addresses|osd|camera-links|maps|sites|lines|discovery|nvr-clocks|substreams)\b/.test(p)) return 'cameras'
+  if (/^\/api\/admin\/(settings|alerts)\b/.test(p)) return 'settings'
+  if (/^\/api\/admin\/(storage|disks|netshares|backfill)\b/.test(p)) return 'storage'
+  if (/^\/api\/admin\/reports\b/.test(p)) return 'reports'
+  if (/^\/api\/admin\/audit\b/.test(p)) return 'audit'
+  if (/^\/api\/admin\/(restart|reboot)\b/.test(p)) return 'reboot'
+  if (/^\/api\/admin\/(alarm-outputs|vpn)\b/.test(p)) return 'diagnostics'
+  return null
 }
 
 /**
@@ -788,9 +897,12 @@ export function rightsChangeDetail(before, after) {
     if (added.length) changes.push(`added ${label}: ${added.join('|')}`)
     if (removed.length) changes.push(`removed ${label}: ${removed.join('|')}`)
   }
+  diff('areas', before.adminCaps ?? [], after.adminCaps ?? [])
   for (const a of GRANTABLE) diff(a, before.grants?.[a] ?? [], after.grants?.[a] ?? [])
   diff('formats', before.formats ?? [], after.formats ?? [])
-  const now = `${GRANTABLE.map((a) => `${a}=${after.grants[a].join('|') || 'none'}`).join(' ')} formats=${after.formats.join('|') || 'none'}`
+  if ((before.map !== false) !== (after.map !== false)) changes.push(after.map !== false ? 'map on' : 'map off')
+  if ((before.share === true) !== (after.share === true)) changes.push(after.share === true ? 'sharing on' : 'sharing off')
+  const now = `${GRANTABLE.map((a) => `${a}=${after.grants[a].join('|') || 'none'}`).join(' ')} formats=${after.formats.join('|') || 'none'} areas=${(after.adminCaps ?? []).join('|') || 'none'} map=${after.map !== false ? 'on' : 'off'} share=${after.share === true ? 'on' : 'off'}`
   return `${roleNote}${changes.length ? changes.join('; ') : 'no changes'} | now: ${now}`
 }
 
@@ -807,8 +919,11 @@ export async function handleRights(method, pathname, readJson, who) {
   if (!methods.includes(method)) return [405, { error: 'Method not allowed' }, { allow: methods.join(', ') }]
 
   const name = isString(who) ? who : isString(who?.user) ? who.user : null
-  if (!can(who, 'admin')) return [403, { error: 'Only admins can change rights' }]
-  if (method === 'GET') return [200, { users: listRights(), actions: ACTIONS, formats: FORMATS, admins: adminList() }]
+  // the `users` admin area reaches this screen; the escalation safeguard (saveRights `by` below)
+  // then stops a partial admin here from handing out admin power — they may edit viewing grants only
+  if (!canAdmin(who, 'users')) return [403, { error: 'Only admins can change rights' }]
+  // whether the editor may show and change the "Can administer" section: only a full admin
+  if (method === 'GET') return [200, { users: listRights(), actions: ACTIONS, caps: CAPS, formats: FORMATS, admins: adminList(), mayEditAdmin: isFullAdmin(who) }]
 
   try {
     const body = await readJson()
@@ -834,15 +949,16 @@ export async function handleRights(method, pathname, readJson, who) {
     if (Object.hasOwn(loadUsers(), user) && body?.seen !== rightsToken(before)) {
       return [409, { error: 'Someone changed this person\'s access since you opened it; reopen to see it', stale: true }]
     }
-    const rights = saveRights(user, body?.rights)
+    const rights = saveRights(user, body?.rights, { by: who })
     // "Who gave them permission" is the first question after "who did it", so a rights change is
     // itself an audited event: the stored row (not what was posted), the change first.
     audit(DATA_DIR, { user: name ?? 'dev', action: 'rights-change', target: user, detail: rightsChangeDetail(before, rights) })
     return [200, { user, rights }]
   } catch (e) {
-    // Everything that can go wrong here is the caller's fault (unknown account, bad name, bad
-    // JSON, the last-admin rule), so 400 with the reason. Nothing else is leaked.
-    return [400, { error: e?.message ?? 'bad request' }]
+    // Most of what can go wrong here is the caller's fault (unknown account, bad name, bad JSON, the
+    // last-admin rule) → 400; the escalation safeguard throws 403, which is kept as 403. Nothing else
+    // is leaked.
+    return [Number.isInteger(e?.status) ? e.status : 400, { error: e?.message ?? 'bad request' }]
   }
 }
 

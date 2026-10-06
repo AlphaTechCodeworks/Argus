@@ -650,7 +650,7 @@ const S = 1000
 {
   const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
   const calls = server.match(/handleEvents\(.*$/gm) ?? []
-  const ok = calls.length > 0 && calls.every((c) => /\{ nvrs, user, admin: who\.admin, intake: null, canSee \}\)$/.test(c))
+  const ok = calls.length > 0 && calls.every((c) => /\{ nvrs, user, admin: canAdmin\(who, 'cameras'\), intake: null, canSee \}\)$/.test(c))
   check('server.mjs passes handleEvents a canSee hook, on every call', ok, ok ? '' : calls.join(' | ') || 'no call found')
 }
 

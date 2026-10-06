@@ -378,7 +378,7 @@ const json = (o) => async () => o
   const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
   check(
     'server.mjs passes handleAlarms a canSee hook',
-    /handleAlarms\(req\.method, pathname \+ url\.search, \(\) => readJsonObject\(req, 8192\), \{ user, admin: who\.admin, cameras: allCameras, canSee \}\)/.test(server)
+    /handleAlarms\(req\.method, pathname \+ url\.search, \(\) => readJsonObject\(req, 8192\), \{ user, admin: canAdmin\(who, 'settings'\), cameras: allCameras, canSee \}\)/.test(server)
   )
 }
 
