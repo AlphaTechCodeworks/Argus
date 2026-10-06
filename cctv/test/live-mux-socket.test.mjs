@@ -58,14 +58,23 @@ if (partial) check('a reader that stopped, one 48 MB frame queued: none of it ca
 if (partial) check('  what is pending stands still', pending > 0 && pending === channel.socketPending, `${pending} ${channel.socketPending}`)
 if (partial) check('  the system took part of the frame before it stopped (less pending than the frame)', pending < FRAME, `${pending}`)
 
-// it reads again, a little at a time (a slow link): the frame is still going out, and the number moves
+// it reads again, a little at a time (a slow link): the frame is still going out, and the number moves.
+// A little by the byte, not by the clock: SIP more each time, however long the client takes over it. It
+// was 5 ms of reading, and on the GitHub runner (kernel 6.17) 8 runs in 310 failed here (6 Oct): now and
+// then the system gave the client next to nothing in its 5 ms (455 KB, then 0 bytes, with 28 MB still
+// waiting at the sender) for a look or two before it came again by itself, and the number rightly stood
+// still. A look now comes after the reader has really taken something: none in 500 failed, and the slowest
+// look took 44 ms.
+const SIP = 8 * MB
 const seen = [pending]
 for (let i = 0; i < 6 && channel.writtenBytes === 0; i++) {
+  const upTo = client._socket.bytesRead + SIP
   client._socket.resume()
-  await sleep(5)
+  // (got: the whole frame has reached the client, and there is no more to read)
+  for (let j = 0; j < 2000 && client._socket.bytesRead < upTo && got === 0; j++) await sleep(1)
   client._socket.pause()
   await sleep(60)
-  // (only while the frame is still going: how much a reader takes in 5 ms is the machine's doing)
+  // (only while the frame is still going: the last of it may go in one of these)
   if (channel.writtenBytes === 0) seen.push(channel.socketPending)
 }
 const moved = seen.filter((p, i) => i > 0 && p < seen[i - 1]).length
