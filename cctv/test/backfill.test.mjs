@@ -707,6 +707,61 @@ check('a job given no settings at all still has sane values', new BackfillJob({ 
   check('a tick before the index is open no-ops instead of throwing', !threw)
 }
 
+// A tick that throws must not end the job. tick() arms the next one only on the paths it returns from,
+// and the timer's catch only logged: one failure (the scan or the pick throwing) left a job that read as
+// running and never ran again until someone stopped and started it, while the holes it could have filled
+// aged out on the NVR.
+{
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms))
+  const warned = []
+  const realWarn = console.warn
+  console.warn = (...a) => warned.push(a.join(' '))
+  try {
+    // the first scan throws, the ones after it find nothing to do
+    let scans = 0
+    const job = makeJob({ stateFile: 'rearm.json', extra: { tickMs: 20 } })
+    job.scan = async () => {
+      if (++scans === 1) throw new Error('the index is busy')
+    }
+    job.pick = async () => ({ row: null, why: 'nothing to fill' })
+    job.start('test')
+    for (let i = 0; i < 100 && scans < 3; i++) await pause(20)
+    check('a tick that throws is tried again: the job goes on running', scans >= 3, `${scans} scans`)
+    check('  the failure is counted and said where an admin looks', job.status().state.errors === 1 && warned.some((l) => /the index is busy/.test(l)), `${J(job.status().state)} | ${warned.join(' | ')}`)
+    job.stop('test')
+    const stoppedAt = scans
+    await pause(120)
+    check('  a stopped job stays stopped', scans === stoppedAt, `${scans} vs ${stoppedAt}`)
+
+    // every scan throws: it keeps trying, and waits longer each time rather than every tick
+    let fails = 0
+    const broken = makeJob({ stateFile: 'rearm-broken.json', extra: { tickMs: 20 } })
+    broken.scan = async () => {
+      fails++
+      throw new Error('still broken')
+    }
+    broken.start('test')
+    await pause(700) // every tick would be about 35 tries; doubling up to ten ticks is about 6
+    broken.stop('test')
+    check('a fault that stays: tried again and again, each wait longer than the last (not every tick)', fails >= 3 && fails <= 12, `${fails} tries in 700 ms at a 20 ms tick`)
+    check('  and each failure is counted', broken.status().state.errors === fails, `${broken.status().state.errors} vs ${fails}`)
+
+    // stopped while the failing tick was running: nothing arms it again
+    let late = 0
+    const stopping = makeJob({ stateFile: 'rearm-stop.json', extra: { tickMs: 20 } })
+    stopping.scan = async () => {
+      late++
+      stopping.stop('test')
+      throw new Error('failed while stopping')
+    }
+    stopping.start('test')
+    await pause(200)
+    check('a job stopped during the tick that failed is not started again by the failure', late === 1 && stopping.running === false, `${late} scans, running ${stopping.running}`)
+  } finally {
+    console.warn = realWarn
+  }
+}
+
 index.close()
 console.log(`\n${checks - failures} of ${checks} passed`)
 if (failures) console.log(`${failures} failed`)

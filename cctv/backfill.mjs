@@ -502,6 +502,7 @@ export class BackfillJob {
     this.running = readRunFlag(this.stateFile)
     this.timer = null
     this.working = false
+    this.failsInARow = 0 // ticks that threw since the last one that did not (#tickFailed waits longer for each)
     this.busyNvrs = new Set()
     this.nvrBackoff = new Map() // NVR id -> when it may be asked again (a refusal covers every camera on it)
     this.nextTry = new Map() // ledger row id -> the time it may be tried again (memory only)
@@ -725,9 +726,30 @@ export class BackfillJob {
   #arm(ms) {
     clearTimeout(this.timer)
     this.timer = setTimeout(() => {
-      this.tick().catch((e) => console.warn(`[backfill] tick failed: ${e.message}`))
+      this.tick().then(
+        () => {
+          this.failsInARow = 0
+        },
+        (e) => this.#tickFailed(e)
+      )
     }, ms)
     this.timer.unref?.()
+  }
+
+  /**
+   * A tick that threw (the scan, the pick or a pull): say so where an admin looks, and try again.
+   * tick() arms the next one only on the paths it returns from, and this used to log and no more: one
+   * failure left a job that read as running and never ran again until it was stopped and started, while
+   * the holes it could have filled aged out on the NVR. Each failure in a row waits twice as long, up to
+   * ten ticks, so a fault that stays is tried about every five minutes and does not fill the journal.
+   */
+  #tickFailed(e) {
+    this.failsInARow++
+    const waitMs = Math.min(this.tickMs * 10, this.tickMs * 2 ** (this.failsInARow - 1))
+    const message = `a run failed (${e?.message ?? e}); trying again in ${Math.round(waitMs / 1000)} s`
+    this.last = { ...this.last, at: this.now(), what: message, errors: this.last.errors + 1 }
+    console.warn(`[backfill] ${message}`)
+    if (this.running) this.#arm(waitMs)
   }
 
   /**
