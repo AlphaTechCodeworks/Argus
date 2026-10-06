@@ -204,7 +204,8 @@ await checkHealth() // a helper of the hanging kind, answering while the share s
   const took = Date.now() - t0
   const h = listLocations().find((l) => l.id === 'loc-good').health
   check('a share that never answers is called down', h.ok === false && h.reason === 'share not answering', h.reason)
-  check('within the answer time, not forever', took >= 1000 && took < 2500, `${took} ms`)
+  // (990, not 1000: Node rounds a timer's start down to a whole ms, so it can fire 1 ms early)
+  check('within the answer time, not forever', took >= 990 && took < 2500, `${took} ms`)
   check('and the server kept running meanwhile', ticks >= 8 && worst < 50, `${ticks} ticks, longest hold ${worst.toFixed(1)} ms`)
   check('the listeners were told (recording moves elsewhere)', seen.length === n0 + 1 && seen.at(-1).some((l) => l.id === 'loc-good' && !l.health.ok))
   check('the hung helper is killed', await until(() => !alive(oldPid)))
