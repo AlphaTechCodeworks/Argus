@@ -21,7 +21,7 @@ import { createPlayback } from './playback.mjs'
 import { CODEC_H265, IPC_INFO, NET_SDK, exclusiveSettled, initSdk, lastErrorReason, lateCalls, nvrCooling, plainSerial, sdkCallT, sdkStuck, setP2pServer } from './sdk.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
 import { XML_HEADER, transparent, xmlSettled } from './nvr-xml.mjs'
-import { parseOnlineChlList, parseRecStatus } from './nvr-online.mjs'
+import { parseMainEncoders, parseOnlineChlList, parseRecStatus } from './nvr-online.mjs'
 import { startWorker } from './worker-supervisor.mjs'
 import { openRecIndex } from './rec-index.mjs'
 import { createWarmer } from './rec-cache.mjs'
@@ -708,10 +708,10 @@ export class Nvr {
   /**
    * Full per-camera detail for the localhost export (camera-export.mjs): a fresh GetDeviceIPCInfo for
    * identity and the extra IPC_INFO fields the routine poll drops, queryRecStatus for main/sub
-   * resolution, frame rate and recording status, and the sub-stream codec as last seen in live video.
-   * Read-only -- never mutates this.channels. Runs on this process's own login (the control login when
-   * a worker holds the video). Returns [] if the NVR did not answer; a failed queryRecStatus just
-   * leaves the resolution fields null.
+   * resolution, frame rate and recording status, the sub-stream codec as last seen in live video, and
+   * the main-stream encoder (incl. whether H.265+ is on and offered). Read-only -- never mutates
+   * this.channels. Runs on this process's own login (the control login when a worker holds the video).
+   * Returns [] if the NVR did not answer; a failed queryRecStatus / encode read just leaves those fields null.
    */
   async cameraDetail() {
     const cams = await this.#queryChannelsFull()
@@ -722,6 +722,16 @@ export class Nvr {
     } catch {
       rec = null
     }
+    // Main-stream encoder, incl. whether H.265+ is on and whether the camera offers it. H.265+ is an
+    // encoder mode, not a distinct bitstream, so it is readable only here, never from the video. Ask for
+    // the main fields only (not the big per-bitrate quality caps) to keep the answer small -- the heavy
+    // full form is what the NAT 1.0 relay NVRs refuse. A failed read just leaves the encoder fields null.
+    let enc = null
+    try {
+      enc = parseMainEncoders(String((await transparent(this, 'queryNetworkNodeEncodeInfo', `${XML_HEADER}<requireField><name/><mainCaps/><main/><an/></requireField></request>`, 'encode info', { outBytes: 2 * 1024 * 1024 })) ?? ''))
+    } catch {
+      enc = null
+    }
     for (const c of cams) {
       const r = rec?.get(c.ch) ?? null
       c.recStatus = r?.recStatus ?? null
@@ -730,6 +740,10 @@ export class Nvr {
       c.subRes = r?.sub?.resolution ?? null
       c.subFps = r?.sub?.fps ?? null
       c.subCodec = this.codecSeen.get(`${c.ch}:1`)?.codec ?? null // as seen in live video (null if never streamed here)
+      const e = enc?.get(c.ch) ?? null
+      c.mainEnct = e?.enct ?? null // 'h264' | 'h265' | 'h265p' (H.265+) | 'h265s' | ... ; null if the read failed
+      c.mainBitType = e?.bitType || null // 'VBR' | 'CBR' | null
+      c.h265pCapable = e ? e.h265pCapable : null // null = unknown (encode read failed)
     }
     return cams
   }

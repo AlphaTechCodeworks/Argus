@@ -1,6 +1,8 @@
 // Offline tests for nvr-online.mjs: the fixtures are the exact shapes g-port answered with over P2P
 // on 2026-10-05. No SDK, no network.  node cctv/test/nvr-online.test.mjs
-import { chOfGuid, parseOnlineChlList, parseRecStatus } from '../nvr-online.mjs'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { chOfGuid, parseMainEncoders, parseOnlineChlList, parseRecStatus } from '../nvr-online.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -37,6 +39,24 @@ check('a non-GUID is null', chOfGuid('') === null && chOfGuid('nope') === null &
   check('sub resolution parses', m.get(2)?.sub?.resolution === '704x480' && m.get(2).sub.w === 704)
   check('the recording channel reads as on (main wins)', m.get(2)?.recStatus === 'on')
   check('a non-success answer is null', parseRecStatus('<?xml?><response><status>fail</status></response>') === null)
+}
+
+// ---- queryNetworkNodeEncodeInfo: MAIN-stream encoder (H.265+ detection), real captures ----
+{
+  const dir = join(import.meta.dirname, 'fixtures', 'streams')
+  const nvr1 = parseMainEncoders(readFileSync(join(dir, 'nvr1-queryNodeEncodeInfo.xml'), 'utf8'))
+  check('main encoders: 5 channels on nvr1', nvr1?.size === 5, `size=${nvr1?.size}`)
+  check('PW Exit (ch1) main encoder is h265p (H.265+ is ON)', nvr1.get(1)?.enct === 'h265p', nvr1.get(1)?.enct)
+  check('PW Exit (ch1) records on VBR', nvr1.get(1)?.bitType === 'VBR', nvr1.get(1)?.bitType)
+  check('PW Exit (ch1) is H.265+ capable', nvr1.get(1)?.h265pCapable === true)
+  const cap1 = [...nvr1.values()].filter((e) => e.h265pCapable).length
+  const use1 = [...nvr1.values()].filter((e) => e.enct === 'h265p').length
+  check('nvr1: 3 cameras support H.265+, 1 is using it', cap1 === 3 && use1 === 1, `capable=${cap1} usingP=${use1}`)
+  const nvr2 = parseMainEncoders(readFileSync(join(dir, 'nvr-2-queryNodeEncodeInfo.xml'), 'utf8'))
+  const cap2 = [...nvr2.values()].filter((e) => e.h265pCapable).length
+  const use2 = [...nvr2.values()].filter((e) => e.enct === 'h265p').length
+  check('nvr-2: 4 cameras support H.265+, 0 are using it', cap2 === 4 && use2 === 0, `capable=${cap2} usingP=${use2}`)
+  check('no <response> is null (keep what we had)', parseMainEncoders('<?xml?><nope/>') === null)
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
