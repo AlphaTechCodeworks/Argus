@@ -708,11 +708,16 @@ check('a job given no settings at all still has sane values', new BackfillJob({ 
 }
 
 // A tick that throws must not end the job. tick() arms the next one only on the paths it returns from,
-// and the timer's catch only logged: one failure (the scan or the pick throwing) left a job that read as
-// running and never ran again until someone stopped and started it, while the holes it could have filled
-// aged out on the NVR.
+// and the timer's catch only logged: one failure (the scan, the pick or a pull throwing) left a job that
+// read as running and never ran again until someone stopped and started it, while the holes it could
+// have filled aged out on the NVR (2026-10 code audit, H2).
 {
   const pause = (ms) => new Promise((r) => setTimeout(r, ms))
+  const until = async (pred, ms = 5000) => {
+    const t0 = Date.now()
+    while (!pred() && Date.now() - t0 < ms) await pause(5)
+    return pred()
+  }
   const warned = []
   const realWarn = console.warn
   console.warn = (...a) => warned.push(a.join(' '))
@@ -725,29 +730,46 @@ check('a job given no settings at all still has sane values', new BackfillJob({ 
     }
     job.pick = async () => ({ row: null, why: 'nothing to fill' })
     job.start('test')
-    for (let i = 0; i < 100 && scans < 3; i++) await pause(20)
+    await until(() => scans >= 3)
     check('a tick that throws is tried again: the job goes on running', scans >= 3, `${scans} scans`)
-    check('  the failure is counted and said where an admin looks', job.status().state.errors === 1 && warned.some((l) => /the index is busy/.test(l)), `${J(job.status().state)} | ${warned.join(' | ')}`)
+    const st = job.status().state
+    check('  the failure is counted and logged', st.errors === 1 && warned.some((l) => /a run failed \(the index is busy\); trying again in/.test(l)), `${J(st)} | ${warned.join(' | ')}`)
+    check('  and stays in the job state after later runs have written over what it is doing', st.what === 'nothing to fill' && st.lastFailure?.message === 'the index is busy' && st.lastFailure.inARow === 1 && st.lastFailure.at === NOW && st.failsInARow === 0, J(st))
     job.stop('test')
     const stoppedAt = scans
     await pause(120)
-    check('  a stopped job stays stopped', scans === stoppedAt, `${scans} vs ${stoppedAt}`)
+    check('  a stopped job stays stopped', scans === stoppedAt && job.timer === null, `${scans} vs ${stoppedAt}`)
 
-    // every scan throws: it keeps trying, and waits longer each time rather than every tick
-    let fails = 0
+    // every scan throws: the wait each tick was armed with doubles from one tick up to ten, and stays there
+    // (the timer that is running a tick is still job.timer inside it; a wait of 0 reads as 1 ms)
+    const waits = []
     const broken = makeJob({ stateFile: 'rearm-broken.json', extra: { tickMs: 20 } })
     broken.scan = async () => {
-      fails++
+      waits.push(broken.timer?._idleTimeout)
       throw new Error('still broken')
     }
     broken.start('test')
-    await pause(700) // every tick would be about 35 tries; doubling up to ten ticks is about 6
+    await until(() => waits.length >= 7)
     broken.stop('test')
-    check('a fault that stays: tried again and again, each wait longer than the last (not every tick)', fails >= 3 && fails <= 12, `${fails} tries in 700 ms at a 20 ms tick`)
-    check('  and each failure is counted', broken.status().state.errors === fails, `${broken.status().state.errors} vs ${fails}`)
+    check('a fault that stays: each wait twice the last, from one tick up to ten ticks, then ten', J(waits.slice(0, 7)) === J([1, 20, 40, 80, 160, 200, 200]), J(waits))
+    check('  and each failure is counted, with how many in a row', broken.status().state.errors === waits.length && broken.status().state.lastFailure?.inARow === waits.length && broken.status().state.failsInARow === waits.length, J(broken.status().state))
 
-    // stopped while the failing tick was running: nothing arms it again
+    // a run that completes starts the count again: fail, fail, a good run, fail, fail
+    const seq = []
+    const mixed = makeJob({ stateFile: 'rearm-mixed.json', extra: { tickMs: 20 } })
+    mixed.scan = async () => {
+      seq.push(mixed.timer?._idleTimeout)
+      if (seq.length !== 3) throw new Error(`fault ${seq.length}`)
+    }
+    mixed.pick = async () => ({ row: null, why: 'nothing to fill' })
+    mixed.start('test')
+    await until(() => seq.length >= 5)
+    mixed.stop('test')
+    check('a run that completes starts the count again: waits of 1, 2 ticks, the ordinary tick, then 1 tick again', J(seq.slice(0, 5)) === J([1, 20, 40, 20, 20]), J(seq))
+
+    // stopped while the failing tick was running: nothing arms it again, and it does not say it will try
     let late = 0
+    const before = warned.length
     const stopping = makeJob({ stateFile: 'rearm-stop.json', extra: { tickMs: 20 } })
     stopping.scan = async () => {
       late++
@@ -755,8 +777,33 @@ check('a job given no settings at all still has sane values', new BackfillJob({ 
       throw new Error('failed while stopping')
     }
     stopping.start('test')
-    await pause(200)
-    check('a job stopped during the tick that failed is not started again by the failure', late === 1 && stopping.running === false, `${late} scans, running ${stopping.running}`)
+    await until(() => late >= 1 && warned.length > before)
+    await pause(150)
+    const said = warned.slice(before).join(' | ')
+    check('a job stopped during the tick that failed is not started again by the failure', late === 1 && stopping.running === false && stopping.timer === null, `${late} scans, running ${stopping.running}, timer ${stopping.timer === null ? 'none' : 'armed'}`)
+    check('  and it says the job is stopped, not that it will try again', /failed while stopping/.test(said) && /the job is stopped/.test(said) && !/trying again/.test(said), said)
+
+    // a pull that throws part-way (the index refusing the write after the footage was pulled): none of what
+    // fill() does for a failed try has happened, so without more the same hole was picked at the next tick
+    // and pulled from the same NVR again, a tick later, for as long as the fault lasted
+    index.backfillNote({ nvr: 'nvr-2', ch: 9, fromMs: NOW - 3 * DAY, toMs: NOW - 3 * DAY + 3 * MIN, reason: 'no video from the NVR', kind: 'gap' }, NOW)
+    const pulled = []
+    const thrower = makeJob({ stateFile: 'rearm-fill.json', extra: { tickMs: 20 } })
+    thrower.scan = async () => {}
+    thrower.fill = async (row) => {
+      pulled.push(row)
+      throw new Error('the index refused the write')
+    }
+    thrower.start('test')
+    await until(() => pulled.length >= 1)
+    await pause(400) // 1, 20, 40, 80 and 160 ms waits: five more ticks, each free to pick again
+    thrower.stop('test')
+    const first = pulled[0]
+    const keys = pulled.map((r) => `${r.nvr}/${r.ch}/${r.fromMs}`)
+    check('a pull that throws is not tried again at the next tick: each hole is pulled once', pulled.length >= 1 && new Set(keys).size === keys.length, keys.join(' '))
+    check('  nor is another hole of the same NVR', new Set(pulled.map((r) => r.nvr)).size === pulled.length, keys.join(' '))
+    check('  the hole and its NVR are left alone for an error\'s back-off (in memory: the index may be what failed)', first != null && thrower.nextTry.get(first.id) === NOW + bf.backoffMs((first.attempts ?? 0) + 1, bf.ERROR_BACKOFF_MS) && thrower.nvrBackoff.get(first.nvr) === thrower.nextTry.get(first.id), first ? `${thrower.nextTry.get(first.id) - NOW} ms, NVR ${thrower.nvrBackoff.get(first.nvr) - NOW} ms` : 'nothing was pulled')
+    check('  and the run still counts as failed', thrower.status().state.errors === pulled.length && thrower.status().state.lastFailure?.message === 'the index refused the write', J(thrower.status().state.lastFailure))
   } finally {
     console.warn = realWarn
   }

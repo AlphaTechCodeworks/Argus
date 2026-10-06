@@ -503,6 +503,7 @@ export class BackfillJob {
     this.timer = null
     this.working = false
     this.failsInARow = 0 // ticks that threw since the last one that did not (#tickFailed waits longer for each)
+    this.lastFailure = null // { at, message, inARow } of the last tick that threw: status() shows it
     this.busyNvrs = new Set()
     this.nvrBackoff = new Map() // NVR id -> when it may be asked again (a refusal covers every camera on it)
     this.nextTry = new Map() // ledger row id -> the time it may be tried again (memory only)
@@ -737,19 +738,31 @@ export class BackfillJob {
   }
 
   /**
-   * A tick that threw (the scan, the pick or a pull): say so where an admin looks, and try again.
-   * tick() arms the next one only on the paths it returns from, and this used to log and no more: one
-   * failure left a job that read as running and never ran again until it was stopped and started, while
-   * the holes it could have filled aged out on the NVR. Each failure in a row waits twice as long, up to
-   * ten ticks, so a fault that stays is tried about every five minutes and does not fill the journal.
+   * A tick that threw (the scan, the pick or a pull): keep it in the job's state and the journal, and try
+   * again. tick() arms the next one only on the paths it returns from, and this used to log and no more:
+   * one failure left a job that read as running and never ran again until it was stopped and started,
+   * while the holes it could have filled aged out on the NVR (2026-10 code audit, H2). Each failure in a
+   * row waits twice as long, up to ten ticks, so a fault that stays is tried about every five minutes and
+   * does not fill the journal. status() carries the last failure and how many there were in a row; no
+   * page or alert shows it yet.
    */
   #tickFailed(e) {
-    this.failsInARow++
-    const waitMs = Math.min(this.tickMs * 10, this.tickMs * 2 ** (this.failsInARow - 1))
-    const message = `a run failed (${e?.message ?? e}); trying again in ${Math.round(waitMs / 1000)} s`
-    this.last = { ...this.last, at: this.now(), what: message, errors: this.last.errors + 1 }
-    console.warn(`[backfill] ${message}`)
-    if (this.running) this.#arm(waitMs)
+    let waitMs = this.tickMs
+    try {
+      this.failsInARow++
+      waitMs = Math.min(this.tickMs * 10, this.tickMs * 2 ** (this.failsInARow - 1))
+      const why = String(e?.message ?? e)
+      const at = this.now()
+      const message = this.running ? `a run failed (${why}); trying again in ${Math.round(waitMs / 1000)} s` : `a run failed (${why}); the job is stopped`
+      // (kept apart from `what`, which the next run writes over: the last failure stays in status())
+      this.lastFailure = { at, message: why, inARow: this.failsInARow }
+      this.last = { ...this.last, at, what: message, errors: this.last.errors + 1 }
+      console.warn(`[backfill] ${message}`)
+    } catch {
+      // nothing in here may keep the next tick from being armed, or reject: nobody waits for this
+    } finally {
+      if (this.running) this.#arm(waitMs)
+    }
   }
 
   /**
@@ -789,7 +802,20 @@ export class BackfillJob {
         this.#arm(this.tickMs)
         return
       }
-      const rest = await this.fill(pick.row)
+      let rest
+      try {
+        rest = await this.fill(pick.row)
+      } catch (e) {
+        // fill() threw part-way (the index refusing a write after the footage was pulled, say): none of
+        // what it does for a failed try has happened, so this hole, still the oldest, would be picked
+        // again at the next tick and pulled from the same NVR again, for as long as the fault lasted.
+        // Leave the hole and its NVR alone for an error's back-off, in memory only (the index may be
+        // what failed), and let the tick fail as any other (#tickFailed).
+        const until = this.now() + backoffMs((pick.row.attempts ?? 0) + 1, ERROR_BACKOFF_MS)
+        this.nextTry.set(pick.row.id, until)
+        this.nvrBackoff.set(pick.row.nvr, until)
+        throw e
+      }
       this.#arm(Math.max(rest, 0))
     } finally {
       this.working = false
@@ -979,7 +1005,7 @@ export class BackfillJob {
       running: this.running,
       window: { start: cfg.windowStart, end: cfg.windowEnd, open: inWindow(minutesOfDay(now), cfg.windowStart, cfg.windowEnd), opensInMs: msUntilWindow(now, cfg.windowStart, cfg.windowEnd) },
       nvrRetentionDays: Number(cfg.nvrRetentionDays ?? 30),
-      state: { ...this.last, busyNvrs: [...this.busyNvrs], mayRun: mayRun({ now, cfg, running: this.running, exportsBusy: this.exportsBusy(), recordingBusy: this.recordingBusy() }) },
+      state: { ...this.last, failsInARow: this.failsInARow, lastFailure: this.lastFailure, busyNvrs: [...this.busyNvrs], mayRun: mayRun({ now, cfg, running: this.running, exportsBusy: this.exportsBusy(), recordingBusy: this.recordingBusy() }) },
       counts: {
         pending: pending.length,
         filled: rows.filter((r) => r.state === 'filled').length,
