@@ -292,7 +292,10 @@ check('undoText: when and by whom', /^Undo puts back the line settings from befo
   check('... a stored list instead of a map: asked again, then kept properly', (await arr({ nvr: 't', ch: 0 })) === true && got.length === 13 && keptKeys() === 't/0', keptKeys())
 
   const viewer = readFileSync(join(import.meta.dirname, '..', 'public', 'viewer.js'), 'utf8').replaceAll('\r\n', '\n')
-  check('viewer.js: the Lines button asks through linesSupportAsker', /import \{[^}]*\blinesSupportAsker\b[^}]*\} from '\.\/lines-panel\.js'/.test(viewer) && /const linesSupported = linesSupportAsker\(\)/.test(viewer))
+  // the Lines settings moved from the full-size view to the Sites camera editor (camera-editor.js)
+  const editor = readFileSync(join(import.meta.dirname, '..', 'public', 'camera-editor.js'), 'utf8').replaceAll('\r\n', '\n')
+  check('camera-editor.js: the Lines tab asks through linesSupportAsker', /import \{[^}]*\blinesSupportAsker\b[^}]*\} from '\.\/lines-panel\.js'/.test(editor) && /const linesSupported = linesSupportAsker\(\)/.test(editor))
+  check('viewer.js: the full-size view no longer wires the Lines panel', !/\blinesSupportAsker\b/.test(viewer))
   check('viewer.js: no full GET .../lines of its own any more (the panel still reads it when opened)', !/channels\/\$\{cam\.ch\}\/lines/.test(viewer))
 }
 
