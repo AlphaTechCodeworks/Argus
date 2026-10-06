@@ -241,7 +241,7 @@ const CODEC_MOVES = new Set(['h265p>h265', 'h264>h265'])
  * more pixels or frames without a bitrate raised in proportion (each would get fewer bits).
  * undoTo: Undo sets exactly these logged values (it may lower).
  */
-function planChange(item, sys, change, { undoTo = null } = {}) {
+function planChange(item, sys, change, { undoTo = null, allowLowerRes = false } = {}) {
   const cur = current(item)
   let next
   if (undoTo) next = { ...cur, ...Object.fromEntries(KEYS.filter((k) => k in undoTo).map((k) => [k, undoTo[k]])) }
@@ -275,7 +275,7 @@ function planChange(item, sys, change, { undoTo = null } = {}) {
     if (next.fps < cur.fps) bad('this never lowers the frame rate')
     if (LEVELS.indexOf(next.level) < LEVELS.indexOf(cur.level)) bad('this never lowers the quality level')
     if (next.enct !== cur.enct && !CODEC_MOVES.has(`${cur.enct}>${next.enct}`)) bad(`this changes the codec only from H.265+ to H.265 or from H.264 to H.265, not ${cur.enct} to ${next.enct} (a lower quality at the same cap)`)
-    if (next.res !== cur.res && px(next.res) < px(cur.res)) bad('this never lowers the resolution')
+    if (!allowLowerRes && next.res !== cur.res && px(next.res) < px(cur.res)) bad('this never lowers the resolution')
     // more pixels or frames at the same cap means fewer bits for each: only with the cap raised
     // in proportion (rounded up to a list step; the top step when the list ends)
     const ratio = (px(next.res) / px(cur.res)) * (next.fps / cur.fps)
@@ -651,6 +651,114 @@ export async function handleStreamOptimise(method, nvrId, readJson, user) {
   }
 }
 
+// ---- resolution cap: bring oversized cameras down (e.g. 8 MP -> 4 MP) to save disk --------------
+// Unlike every other change here, this LOWERS quality on purpose, so it is the one place planChange is
+// asked to allow a drop (allowLowerRes) -- and only the main resolution, never bitrate, fps or codec.
+// The encoder restarts and the recorded picture carries less detail from here on; the caller confirms it.
+
+const MP = (res) => px(res) / 1e6
+
+/** The best resolution the camera offers below its current and at or under maxPx pixels, or null. */
+function downTarget(item, curRes, maxPx) {
+  const curPx = px(curRes)
+  return (
+    item.resolutions
+      .map((r) => r.res)
+      .filter((r) => px(r) < curPx && px(r) <= maxPx)
+      .sort((a, b) => px(b) - px(a))[0] ?? null
+  )
+}
+
+/** The resolution change for one camera to fit under maxPx (e.g. 4 MP), or why it is skipped. */
+function capPlan(item, sys, online, maxPx) {
+  const why = whyNot(item, sys, online)
+  if (why) return { skip: why }
+  const cur = current(item)
+  if (px(cur.res) <= maxPx) return { skip: `already ${MP(cur.res).toFixed(1)} MP (${cur.res})` }
+  const target = downTarget(item, cur.res, maxPx)
+  if (!target) return { skip: `the camera offers no resolution under ${(maxPx / 1e6).toFixed(1)} MP` }
+  try {
+    const { next } = planChange(item, sys, { res: target }, { allowLowerRes: true })
+    const moves = KEYS.filter((k) => String(cur[k]) !== String(next[k])).map((k) => `${k} ${cur[k]}→${next[k]}`)
+    return { change: { res: target }, from: pick(cur), to: pick(next), moves, mp: `${MP(cur.res).toFixed(1)}→${MP(target).toFixed(1)} MP` }
+  } catch (e) {
+    return { skip: e.message.replace(/^Refused: /, '') }
+  }
+}
+
+/** Dry run: which cameras on this NVR are over the cap and what they'd become. No writes. */
+async function capList(nvr, gen, maxPx) {
+  const sys = await readSystem(nvr, gen)
+  const all = await readAll(nvr, gen, true)
+  return all.items.map((item) => {
+    const ch = chOfGuid(item.id)
+    const online = ch === null ? true : nvr.channels.find((c) => c.ch === ch)?.online !== false
+    const p = capPlan(item, sys, online, maxPx)
+    return { ch: ch === null ? null : ch + 1, name: item.name, mp: p.mp ?? null, moves: p.moves ?? null, from: p.from ?? null, to: p.to ?? null, skip: p.skip ?? null }
+  })
+}
+
+/** Caps the main resolution of every over-cap camera on this NVR, one at a time (under the NVR lock). */
+async function capApply(ctx, maxPx) {
+  const { nvr, gen } = ctx
+  const sys = await readSystem(nvr, gen)
+  const all = await readAll(nvr, gen, true)
+  const results = []
+  for (const listed of all.items) {
+    if (nvr.gen !== gen || nvr.stopped) break
+    const ch = chOfGuid(listed.id)
+    const online = ch === null ? true : nvr.channels.find((c) => c.ch === ch)?.online !== false
+    const plan0 = capPlan(listed, sys, online, maxPx)
+    const row = { ch: ch === null ? null : ch + 1, name: listed.name }
+    if (!plan0.change) {
+      results.push({ ...row, status: 'skipped', message: plan0.skip })
+      continue
+    }
+    let item, cur, next
+    try {
+      item = await readChannel(nvr, listed.id, gen)
+      ;({ cur, next } = planChange(item, sys, plan0.change, { allowLowerRes: true }))
+    } catch (e) {
+      results.push({ ...row, status: 'skipped', message: String(e?.message ?? e).replace(/^Refused: /, '') })
+      continue
+    }
+    if (sameKeys(cur, next)) {
+      results.push({ ...row, status: 'skipped', message: 'already set' })
+      continue
+    }
+    const res = await writeChange({ ...ctx, ch, chlId: listed.id, name: item.name }, item, cur, next, impactsOf(cur, next))
+    results.push({ ...row, status: res.status, message: res.message, mp: plan0.mp })
+  }
+  return results
+}
+
+/**
+ * POST /api/admin/nvrs/:id/streams/cap-resolution  { maxMp?: number, confirm?: true }
+ * Lowers the MAIN resolution of cameras above the cap (default 4 MP) to the camera's best option at or
+ * under it -- e.g. 8 MP -> 4 MP. This REDUCES recorded quality from here on, so it needs confirm:true and
+ * the UI makes that plain. Without confirm: a dry-run plan. One camera at a time under the NVR lock.
+ * @returns {Promise<[number, any]>}
+ */
+export async function handleStreamCapResolution(method, nvrId, readJson, user) {
+  try {
+    if (method !== 'POST') return [405, { error: 'Method not allowed' }]
+    const nvr = nvrs.get(nvrId)
+    if (!nvr) return [404, { error: 'Unknown NVR' }]
+    requireOnline(nvr)
+    const body = await readJson()
+    if (!isPlainObject(body)) throw new HttpError(400, 'The request must be a JSON object')
+    const maxMp = Number.isFinite(Number(body.maxMp)) && Number(body.maxMp) >= 1 && Number(body.maxMp) <= 12 ? Number(body.maxMp) : 4
+    const maxPx = Math.round(maxMp * 1e6)
+    const gen = nvr.gen
+    if (body.confirm !== true) return [200, { nvr: nvr.id, name: nvr.name, maxMp, dryRun: true, cameras: await capList(nvr, gen, maxPx) }]
+    const ctx = { nvr, gen, user, device: deviceOf(nvr) }
+    const results = await withNvrLock(nvr, `cap resolution at ${maxMp} MP`, () => capApply(ctx, maxPx))
+    return [200, { nvr: nvr.id, name: nvr.name, maxMp, applied: true, results }]
+  } catch (e) {
+    return errorAnswer(e)
+  }
+}
+
 /**
  * /channels/:ch/stream and /channels/:ch/stream/estimate.
  * @returns {Promise<[number, any]>}
@@ -701,4 +809,4 @@ export async function handleStreams(what, method, nvrId, ch, params, readJson, u
 }
 
 // for the offline tests (cctv/test/streams.test.mjs)
-export const _test = { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, impactsOf, undoable, recommendedRange, retentionRefusal, optimisePlan, LOG_FILE, TIMING }
+export const _test = { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, impactsOf, undoable, recommendedRange, retentionRefusal, optimisePlan, capPlan, downTarget, LOG_FILE, TIMING }
