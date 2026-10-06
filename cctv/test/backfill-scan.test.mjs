@@ -451,7 +451,9 @@ const refs = [] // the old scan's holes at each time the new one ran
   sameHoles('... and the ledger ends up exactly the old scan\'s', ledger(), refs[0])
 }
 
-// ---- 9. the one place the old scan was wrong: a long file begun over an hour before the window -----------
+// ---- 9. a long file begun over an hour before the window: the scan finds the hole after it. Until the
+//         MAX_SEGMENT_MS fix (rec-index.mjs) segments() could not see such a file and only scanSpans() caught
+//         it; segments() now consults segments_long too, so the segments()-based scan agrees. ------------
 {
   const ix = openRecIndex(join(DATA, 'edge.db'))
   const from = NOW - RET_DAYS * DAY - SCAN_MARGIN_MS
@@ -462,7 +464,7 @@ const refs = [] // the old scan's holes at each time the new one ran
   await job.scan()
   const rows = ix.backfillList({})
   const old = findGaps({ nvr: 'e', ch: 0, now: NOW, fromMs: from, toMs: NOW, segments: ix.segments('e', 0, from, NOW), gapRows: [] })
-  check('a file over an hour long that began before the window: the hole after it is found (the old scan did not see the file), older than the NVR keeps, so permanent', old.every((g) => g.fromMs !== from + HOUR) && rows.some((r) => r.fromMs === from + HOUR && r.toMs === from + HOUR + 5 * MIN && r.state === 'permanent'), J(rows.map((r) => [r.fromMs - from, r.toMs - from, r.state])))
+  check('a file over an hour long that began before the window: the hole after it is recorded permanent (older than the NVR keeps), and segments() now sees the long file so the scan over it agrees', rows.some((r) => r.fromMs === from + HOUR && r.toMs === from + HOUR + 5 * MIN && r.state === 'permanent') && old.some((g) => g.fromMs === from + HOUR), J(rows.map((r) => [r.fromMs - from, r.toMs - from, r.state])))
   ix.close()
 }
 
