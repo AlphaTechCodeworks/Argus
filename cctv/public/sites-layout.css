@@ -1,0 +1,57 @@
+.sites-page .st-main { max-width: 1600px; padding: 24px 28px; gap: 24px; box-sizing: border-box; }
+.sites-page header .brand h1 { font-size: 20px; letter-spacing: 0; }
+.st-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--border); padding-bottom: 22px; gap: 24px; }
+.st-overview > div { display: flex; flex-direction: column; gap: 6px; border-right: 1px solid var(--border); }
+.st-overview > div:last-child { border-right: 0; }
+.st-overview span { font-size: 12px; color: var(--muted); }
+.st-overview strong { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sites-page .site-search-bar { position: sticky; top: 0; z-index: 5; background: var(--bg, #0e1012); padding: 12px 0; margin-top: -12px; gap: 10px; }
+.sites-page .site-search-bar input { max-width: 560px; }
+.sites-page .site-search-bar .st-meta { margin-left: auto; font-variant-numeric: tabular-nums; }
+.sites-page #sites { display: flex; flex-direction: column; gap: 30px; }
+.sites-page .st-site + .st-site { margin-top: 0; }
+.sites-page .st-site-head { align-items: center; margin-bottom: 0; padding: 0 0 10px; border-bottom: 2px solid var(--border); }
+.sites-page .st-site-head > div { min-width: 0; }
+.sites-page .st-site-head h2 { font-size: 16px; overflow-wrap: anywhere; }
+.sites-page .st-site-head .st-meta { margin-top: 5px; font-size: 12px; }
+.sites-page .st-site-rename { min-height: 34px; padding: 7px 10px; flex: none; font-size: 12px; }
+.sites-page .st-site-rename .icon { width: 18px; height: 18px; }
+.sites-page .st-nvrs { border: 0; border-radius: 0; background: transparent; }
+.sites-page .st-nvr, .sites-page .st-columns { display: grid; grid-template-columns: 8px minmax(140px, 1.2fr) minmax(150px, 1fr) 150px 170px 110px; gap: 16px; padding: 15px 10px; box-sizing: border-box; }
+.sites-page .st-nvr { min-height: 72px; border-bottom: 1px solid var(--border); }
+.sites-page .st-columns { padding-top: 8px; padding-bottom: 8px; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--border); }
+.sites-page .st-connection, .sites-page .st-state { display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.sites-page .st-direct-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.sites-page .st-direct-actions > button { padding: 6px 10px; font-size: 12px; }
+.sites-page .st-site-toggle { border: 0; background: transparent; color: var(--text); padding: 4px 0; text-align: left; font: inherit; font-weight: 600; white-space: normal; overflow-wrap: anywhere; }
+.sites-page .st-partial { color: #d5a933; }
+.sites-page .st-dot.st-partial { background: #d5a933; }
+.sites-page .st-diagnostics summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.sites-page .st-diagnostics p { white-space: normal; overflow-wrap: anywhere; margin: 8px 0; }
+.sites-page .st-nvr + .st-nvr { border-top: 0; }
+.sites-page .st-nvr-name { font-size: 14px; }
+.sites-page .st-nvr-main { gap: 5px; }
+.sites-page .st-nvr-main .st-meta { font-size: 12px; }
+.sites-page .st-nvr-main p { font-size: 12px; max-width: 780px; }
+.sites-page .st-nvr-cams { font-size: 12px; gap: 6px; }
+.sites-page .st-status-label { font-weight: 600; }
+.sites-page .st-bar { width: 100px; height: 3px; }
+.sites-page .st-dialog { border-radius: 6px; }
+.sites-page .st-nvr-actions { position: relative; display: block; }
+.sites-page .st-nvr-actions > summary { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; list-style: none; cursor: pointer; border: 1px solid var(--border); border-radius: 4px; }
+.sites-page .st-nvr-actions > summary::-webkit-details-marker { display: none; }
+.sites-page .st-nvr-actions .icon { width: 18px; height: 18px; }
+.sites-page .st-action-menu { position: absolute; top: 38px; right: 0; z-index: 10; min-width: 150px; padding: 6px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 4px; box-shadow: 0 4px 16px #0004; }
+.sites-page .st-action-menu button { display: block; width: 100%; text-align: left; margin: 2px 0; }
+.sites-page .st-nvrs { overflow: visible; }
+@media (max-width: 1200px) {
+  .sites-page .st-main { padding: 16px; }
+  .sites-page .st-nvr { grid-template-columns: 8px minmax(0, 1fr) 40px; gap: 10px; }
+  .sites-page .st-columns { display: none; }
+  .sites-page .st-nvr-main { grid-column: 2; }
+  .sites-page .st-nvr-cams { grid-column: 2; align-items: flex-start; flex-direction: row; flex-wrap: wrap; }
+  .sites-page .st-direct-actions { grid-column: 2; justify-content: flex-start; }
+  .sites-page .st-connection, .sites-page .st-state { grid-column: 2; }
+  .st-overview { gap: 12px; }
+  .st-overview strong { font-size: 22px; }
+}

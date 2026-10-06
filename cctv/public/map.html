@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="css/components.css" />
   <link rel="stylesheet" href="css/shell.css" />
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="map-layout.css" />
 </head>
 <body class="map-page">
   <header>
@@ -26,6 +27,7 @@
       <h1>CCTV</h1>
     </div>
     <div class="controls">
+      <button id="toggleMapSidebar" type="button" aria-label="Collapse map sidebar" title="Collapse map sidebar" aria-expanded="true" aria-controls="mapBrowser">Cameras</button>
       <label title="Satellite pictures instead of the street map"><input id="sat" type="checkbox" /> Satellite</label>
       <label title="Show camera names on the map"><input id="names" type="checkbox" checked /> Names</label>
       <button id="edit" type="button" hidden>Edit map</button>
@@ -38,11 +40,21 @@
     </div>
   </header>
 
-  <!-- every site on the one map: a button each, filled in by map.js; scrolls sideways on a phone -->
-  <nav id="sites" class="map-sites" aria-label="Sites on the map"></nav>
-
   <main class="map-main">
-    <div id="map" class="map-view" tabindex="0" aria-label="Map of every site's cameras. The site buttons above and the camera list beside it reach the same sites and cameras.">
+    <aside id="mapBrowser" class="map-browser" aria-label="Map browser">
+      <details class="map-site-browser" open>
+        <summary>Sites</summary>
+        <div class="map-site-search"><input id="siteSearch" type="search" aria-label="Search sites" placeholder="Search sites" autocomplete="off" /></div>
+        <nav id="sites" class="map-sites" aria-label="Sites on the map"></nav>
+      </details>
+      <div class="map-search">
+        <input id="cameraSearch" type="search" aria-label="Search cameras" placeholder="Search cameras" autocomplete="off" />
+        <label class="map-issues"><input id="issuesOnly" type="checkbox" /> Issues only</label>
+      </div>
+      <aside id="side" class="map-side" aria-label="Cameras"></aside>
+      <div id="live" class="map-live" aria-label="Camera preview" hidden></div>
+    </aside>
+    <div id="map" class="map-view" tabindex="0" aria-label="Camera map">
       <div class="map-tiles"></div>
       <img class="map-plan" alt="" hidden />
       <svg class="map-overlay" aria-hidden="true"></svg>
@@ -52,10 +64,9 @@
         <button type="button" id="fit" aria-label="Show every camera" title="Show every camera">⤢</button>
       </div>
       <div class="map-credit" hidden></div>
+      <div id="tileStatus" class="map-tile-status" role="status" hidden>Map imagery unavailable <button id="retryMap" type="button">Retry</button></div>
       <div id="empty" class="map-empty" hidden></div>
-      <div id="live" class="map-live" hidden></div>
     </div>
-    <aside id="side" class="map-side" aria-label="Cameras"></aside>
   </main>
 
   <script type="module" src="shell.js"></script>

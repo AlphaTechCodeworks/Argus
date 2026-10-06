@@ -13,6 +13,7 @@
 import { CAP_BYTES, gateSend } from './backpressure.mjs'
 import { replayGop } from './gop-replay.mjs'
 import { idleStopQueue } from './idle-stops.mjs'
+import { liveStartTimeoutMs } from './live-start-policy.mjs'
 import { PRIORITY, RANK, connectLane } from './lanes.mjs'
 import { PACE, livePacer } from './live-pacer.mjs'
 import { CODEC_H264, FRAME_TYPE_VIDEO, FRAME_TYPE_VIDEO_FORMAT, NET_SDK, codecOf, encodeFrame, errorText, lastErrorCode, lastLateReturnAt, lateCalls, liveCallsInFlight, liveFrames, nvrCooling, onCallSettled, sdkCallT } from './sdk.mjs'
@@ -215,6 +216,7 @@ export class LiveStream {
           nvr: nvr.id,
           tag: this.label,
           exclusive: this.exclusive,
+          timeoutMs: liveStartTimeoutMs(this.streamType, nvr.cfg?.sn),
           // LivePlay returned after we gave up on it: stop that orphan stream, and count the
           // start as finished only once that stop has returned (a restart waits for it)
           onLate: (h) => {

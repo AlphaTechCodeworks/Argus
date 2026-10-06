@@ -8,7 +8,10 @@
 // (the whole world is 256 wide, like one zoom-0 tile) for street/satellite maps.
 // screen = (world - centre) * 2^zoom + half the viewport.
 import { LiveTile, SUB_STREAM, TILE_HTML } from './live-tile.js'
+import { cameraConnectionState } from './sites-model.js'
 import { showStill } from './stills.js'
+import { icon } from './icons.js'
+import { matchesMapSearch, mapIssue } from './map-browser.js'
 import {
   MAX_LAT,
   STATES,
@@ -55,14 +58,11 @@ import {
 const $ = (id) => document.getElementById(id)
 const LAYERS = {
   street: {
-    // served by this server (map-tiles.mjs), which fetches from OpenStreetMap and caches, so a
-    // viewing PC with no internet still gets maps. The proxy maps street to tile.openstreetmap.org.
     url: (z, x, y) => `/api/tiles/street/${z}/${x}/${y}`,
     maxZoom: 19,
     credit: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors'
   },
   satellite: {
-    // served by this server; the proxy maps satellite to ArcGIS World_Imagery (its z/y/x order)
     url: (z, x, y) => `/api/tiles/satellite/${z}/${x}/${y}`,
     maxZoom: 19,
     credit: 'Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community'
@@ -138,9 +138,16 @@ class MapView {
     this.#clearTiles()
     this.svg.replaceChildren()
     this.credit.hidden = true
+    $('tileStatus').hidden = true
+  }
+
+  retryTiles() {
+    this.#clearTiles()
+    this.requestRender()
   }
 
   setPlan(url, w, h, keepView = false) {
+    $('tileStatus').hidden = true
     const same = this.mode === 'plan' && this.planW === w && this.planH === h
     this.mode = 'plan'
     this.#clearTiles()
@@ -386,8 +393,15 @@ class MapView {
           // tile servers ask for a referrer; the app's pages otherwise send none
           img.referrerPolicy = 'strict-origin-when-cross-origin'
           t = { img, layer: this.layer, z, tx, ty, loaded: false }
-          img.onload = img.onerror = () => {
+          img.onload = () => {
             t.loaded = true
+            t.failed = false
+            this.requestRender()
+          }
+          img.onerror = () => {
+            t.loaded = true
+            t.failed = true
+            img.style.visibility = 'hidden'
             this.requestRender()
           }
           img.src = layer.url(z, ((tx % n) + n) % n, ty)
@@ -397,6 +411,7 @@ class MapView {
         if (!t.loaded) allLoaded = false
       }
     }
+    $('tileStatus').hidden = ![...wanted].some((key) => this.tiles.get(key)?.failed)
     const s = this.scale
     for (const [key, t] of this.tiles) {
       const u = TILE / 2 ** t.z
@@ -764,10 +779,12 @@ function clusterNode(cluster) {
  * the offline count in the alert colour. SVG has no box that grows with its text, so the pill's
  * width is reckoned from the length of the words; a few pixels out either way does not show.
  */
-function badgeNode(b) {
-  const text = badgeLabel(b)
+function badgeNode(b, maxWidth = 180) {
+  const fullText = badgeLabel(b)
   const off = b.offline ? ` · ${b.offline} offline` : ''
-  const w = Math.round((text.length + off.length) * 6.6) + 34
+  const budget = Math.max(4, Math.floor((maxWidth - 34) / 6.6) - off.length)
+  const text = fullText.length > budget ? `${fullText.slice(0, budget - 1)}…` : fullText
+  const w = Math.min(maxWidth, Math.round((text.length + off.length) * 6.6) + 34)
   const g = svgEl('g', { class: `site-badge st-${b.state}`, 'data-site': b.name, transform: `translate(${b.sx.toFixed(1)} ${b.sy.toFixed(1)})` })
   const title = svgEl('title')
   title.textContent = badgeTitle(b)
@@ -797,7 +814,8 @@ function sitePinNode(name, pos) {
  * each site that is not. A plan shows every camera on it, as it always has.
  */
 function scene() {
-  const all = currentMarkers()
+  const issues = $('issuesOnly').checked && !editing && !linkMode
+  const all = currentMarkers().filter((marker) => !issues || mapIssue(marker.state))
   if (planSite || !view.mode) return { markers: all, badges: [] }
   const { siteOf, badges } = oneMap()
   // the site of the camera being watched or worked on stays open under the person's hands
@@ -805,7 +823,7 @@ function scene() {
   const shut = collapsedSites(badges, view.zoom, { open, editing: editing || linkMode })
   return {
     markers: visibleMarkers(all, siteOf, shut),
-    badges: badges.filter((b) => shut.has(b.name)).map((b) => {
+    badges: badges.filter((b) => shut.has(b.name) && (!issues || all.some((marker) => siteOf[marker.key] === b.name))).map((b) => {
       const [sx, sy] = view.toScreen(b.x, b.y)
       return { ...b, sx, sy }
     })
@@ -855,7 +873,11 @@ view.onDraw = () => {
       }
     }
     for (const cluster of clusters) if (cluster.count > 1) marks.append(clusterNode(cluster))
-    for (const b of badges) marks.append(badgeNode(b))
+    for (const b of badges) {
+      const neighbours = badges.filter((other) => other !== b && Math.abs(other.sy - b.sy) < 28)
+      const gap = Math.min(180, ...neighbours.map((other) => Math.abs(other.sx - b.sx) - 8))
+      marks.append(badgeNode(b, Math.max(110, gap)))
+    }
     if (editing && !planSite) {
       for (const s of oneMap().sites) if (s.placed) marks.append(sitePinNode(s.name, s.position))
     }
@@ -1091,6 +1113,8 @@ function openLive(key) {
   )
   liveEl.hidden = false
   popup = { key, tile: null }
+  setSidebar(true)
+  renderSide()
   // Either source saying it is down is enough not to ask the NVR for a stream it cannot give.
   if (state === 'offline' || !cam.online) {
     tile.classList.add('offline')
@@ -1108,6 +1132,7 @@ function closeLive() {
   liveEl.replaceChildren()
   hideHover() // any change of mode or camera also drops the hover bubble
   view.requestRender()
+  renderSide()
 }
 
 // no video while the tab is hidden
@@ -1389,6 +1414,7 @@ function renderSites({ reveal = true } = {}) {
     parts.push(group)
   }
   sitesRow.replaceChildren(...parts)
+  filterSites()
   if (focused) {
     // back on the button it was on; if that button has gone (a site just placed has no "Place
     // this site" any more), on the site's own button rather than nowhere
@@ -1397,7 +1423,15 @@ function renderSites({ reveal = true } = {}) {
     ;(at(focused) ?? at(own) ?? at('all'))?.focus()
   }
   // the chosen site may be off the end of the row, on a phone usually is: bring it into view
-  if (reveal) sitesRow.querySelector('.map-site.sel')?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  if (reveal) {
+    const active = sitesRow.querySelector('.map-site.sel')
+    if (active) {
+      const rowBounds = sitesRow.getBoundingClientRect()
+      const activeBounds = active.getBoundingClientRect()
+      if (activeBounds.top < rowBounds.top) sitesRow.scrollTop -= rowBounds.top - activeBounds.top
+      else if (activeBounds.bottom > rowBounds.bottom) sitesRow.scrollTop += activeBounds.bottom - rowBounds.bottom
+    }
+  }
 }
 
 /** Zooms to the chosen site's cameras, or every site's; in a plan, to the whole plan. */
@@ -1449,6 +1483,45 @@ function showCamera(key) {
 function renderSide() {
   statusEl = null
   side.replaceChildren(...(linkMode ? linkPanel() : editing ? editPanel() : viewPanel()))
+  $('cameraSearch').disabled = editing || linkMode
+  $('issuesOnly').disabled = editing || linkMode
+  filterCameraRows()
+}
+
+function filterSites() {
+  const query = $('siteSearch').value
+  for (const group of sitesRow.querySelectorAll('.map-site')) {
+    group.hidden = !matchesMapSearch(query, group.textContent)
+  }
+}
+
+function setSidebar(open) {
+  if (!open && popup) closeLive()
+  $('mapBrowser').hidden = !open
+  const button = $('toggleMapSidebar')
+  button.setAttribute('aria-expanded', String(open))
+  button.setAttribute('aria-label', open ? 'Collapse map sidebar' : 'Expand map sidebar')
+  button.title = button.getAttribute('aria-label')
+}
+
+function filterCameraRows() {
+  const query = $('cameraSearch').value
+  const list = side.querySelector('.map-cams')
+  if (!list || editing || linkMode) return
+  for (const row of list.children) {
+    if (!row.classList.contains('map-cams-site')) row.hidden = !matchesMapSearch(query, row.dataset.search) || ($('issuesOnly').checked && !mapIssue(row.dataset.state))
+  }
+  for (const row of list.querySelectorAll('.map-cams-site')) {
+    let next = row.nextElementSibling
+    let visible = false
+    while (next && !next.classList.contains('map-cams-site')) {
+      visible ||= !next.hidden
+      next = next.nextElementSibling
+    }
+    row.hidden = !visible
+  }
+  const empty = side.querySelector('.map-search-empty')
+  if (empty) empty.hidden = [...list.children].some((row) => !row.hidden && !row.classList.contains('map-cams-site'))
 }
 
 function camRow(cam, key, extra, opts = {}) {
@@ -1457,6 +1530,11 @@ function camRow(cam, key, extra, opts = {}) {
   const dot = el('span', { className: `map-dot st-${state}`, title: STATES[state].title })
   const li = el('li', { className: `${opts.placed ? 'placed' : 'unplaced'}${key === selected || key === popup?.key ? ' sel' : ''}` },
     dot, el('span', { className: 'map-cam-name', textContent: camLabel(cam, key) }), extra)
+  li.dataset.search = `${camLabel(cam, key)} ${cam?.site ?? ''} ${cam?.nvrName ?? ''}`
+  li.dataset.state = state
+  const connection = cameraConnectionState(cam)
+  if (connection) li.querySelector('.map-cam-name').append(el('small', { className: `connection-label connection-${connection.key}`, title: connection.detail, textContent: connection.text }))
+  if (key === selected || key === popup?.key) li.setAttribute('aria-current', 'true')
   return li
 }
 
@@ -1476,7 +1554,8 @@ function viewPanel() {
       total++
       if (where[key]) {
         on++
-        const btn = el('button', { type: 'button', className: 'st-link', textContent: 'Show' })
+        const btn = el('button', { type: 'button', className: 'st-link map-camera-open', title: `Open ${camLabel(cam, key)}`, 'aria-label': `Open ${camLabel(cam, key)}` })
+        btn.innerHTML = icon('live')
         const li = camRow(cam, key, btn, { placed: true })
         const show = () => {
           showCamera(key)
@@ -1490,22 +1569,26 @@ function viewPanel() {
         li.addEventListener('click', show)
         list.append(li)
       } else {
-        list.append(camRow(cam, key, el('span', { className: 'map-note', textContent: planSite ? 'not on plan' : 'not on map' })))
+        const btn = el('button', { type: 'button', className: 'st-link map-camera-open', title: `Open ${camLabel(cam, key)}`, 'aria-label': `Open ${camLabel(cam, key)}`, onclick: () => openLive(key) })
+        btn.innerHTML = icon('live')
+        const row = camRow(cam, key, btn)
+        row.title = planSite ? 'Not placed on plan' : 'Not placed on map'
+        list.append(row)
       }
     }
   }
   const parts = [el('h2', { textContent: planSite ? `${planSite}: plan` : name || 'All sites' })]
   if (info && !info.placed && !planSite) {
     // a site nobody has put on the map: say so, and say what can be done about it
-    parts.push(el('p', { className: 'map-help', textContent: `${name} is not placed on the map yet.${info.hasPlan ? ' Its plan is still here: press Plan.' : ''}` }))
+    parts.push(el('p', { className: 'map-help', textContent: 'Location not set' }))
     const acts = el('div', { className: 'map-actions' })
     if (info.hasPlan) acts.append(el('button', { type: 'button', textContent: 'Plan', onclick: () => openPlan(name) }))
     if (isAdmin) acts.append(el('button', { type: 'button', className: 'st-primary', textContent: 'Place this site', onclick: () => startPlaceSite(name) }))
     if (acts.childElementCount) parts.push(acts)
   } else {
-    parts.push(el('p', { className: 'map-help', textContent: `${on} of ${total} on the ${planSite ? 'plan' : 'map'}. Click a camera for live video.` }))
+    parts.push(el('p', { className: 'map-help', textContent: `${total} cameras · ${on} placed` }))
   }
-  parts.push(legend(), coneLegend(), list)
+  parts.push(legend(), coneLegend(), list, el('p', { className: 'map-search-empty map-help', textContent: 'No matching cameras', hidden: true }))
   return parts
 }
 
@@ -1796,9 +1879,6 @@ function removePlacement(key, name = siteOfKey(key)) {
   view.requestRender()
 }
 
-// Typical horizontal field of view for common fixed CCTV lenses (≈ a 1/2.8" sensor): a sensible
-// starting cone angle when you know the lens, which the Field-of-view slider still fine-tunes. A 2.5 mm
-// lens sees far wider than a 4 mm, so a single default angle for every camera was wrong.
 const LENS_FOV = { '2.5': 106, '2.8': 98, '3.6': 82, '4': 75, '6': 52, '8': 40, '12': 27 }
 
 function selectedPanel(m, c) {
@@ -1825,16 +1905,14 @@ function selectedPanel(m, c) {
   })
   const fovField = slider('Field of view', 'fov', 5, 360, '°')
   const fovInput = fovField.querySelector('[data-field="fov"]')
-  // Lens buttons: set the cone angle to match the camera's lens (2.5 mm is wide, 12 mm is narrow), then
-  // the slider fine-tunes. Reuses the fov slider's own input handler by dispatching an input event.
   const lensRow = el('div', { className: 'map-lens' }, el('span', { className: 'map-lens-lbl', textContent: 'Lens (mm)' }))
   for (const [mm, deg] of Object.entries(LENS_FOV)) {
-    const b = el('button', { type: 'button', className: 'map-lens-btn', textContent: mm, title: `${mm} mm ≈ ${deg}° (a starting point — fine-tune with the slider)` })
-    b.addEventListener('click', () => {
+    const button = el('button', { type: 'button', className: 'map-lens-btn', textContent: mm, title: `${mm} mm: approximately ${deg} degrees` })
+    button.addEventListener('click', () => {
       fovInput.value = String(deg)
       fovInput.dispatchEvent(new Event('input', { bubbles: true }))
     })
-    lensRow.append(b)
+    lensRow.append(button)
   }
   return el('section', { className: 'map-selected' },
     el('h2', { textContent: camLabel(cam, selected) }),
@@ -1843,7 +1921,7 @@ function selectedPanel(m, c) {
     lensRow,
     el('label', {}, m.mode === 'geo' ? 'Range (metres)' : 'Range (plan pixels)', range),
     coneColorControl(c),
-    el('p', { className: 'map-help', textContent: 'On the map: drag the camera to move it, the white handle to aim it and set its range, the small handle to widen or narrow its view. The Lens buttons set the view angle for a 2.5–12 mm lens.' }))
+    el('p', { className: 'map-help', textContent: 'On the map: drag the camera to move it, the white handle to aim it and set its range, the small handle to widen or narrow its view.' }))
 }
 
 /** Keeps the selected camera's inputs in step while its handles are dragged. */
@@ -2148,6 +2226,15 @@ document.addEventListener('keydown', (e) => {
 $('zoomIn').addEventListener('click', () => view.zoomBy(1))
 $('zoomOut').addEventListener('click', () => view.zoomBy(-1))
 $('fit').addEventListener('click', fitAll)
+$('cameraSearch').addEventListener('input', filterCameraRows)
+$('siteSearch').addEventListener('input', filterSites)
+$('issuesOnly').addEventListener('change', () => {
+  filterCameraRows()
+  view.requestRender()
+})
+$('toggleMapSidebar').innerHTML = icon('list')
+$('toggleMapSidebar').addEventListener('click', () => setSidebar($('mapBrowser').hidden))
+$('retryMap').addEventListener('click', () => view.retryTiles())
 editBtn.addEventListener('click', startEdit)
 linksBtn.addEventListener('click', startLinks)
 

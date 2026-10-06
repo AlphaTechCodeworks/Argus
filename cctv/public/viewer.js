@@ -11,6 +11,7 @@ import { LinesPanel, linesSupportAsker } from './lines-panel.js'
 import { OsdPanel } from './osd-panel.js'
 import { freshenForPageChange, muxState, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
+import { gridStreamType } from './live-stream-policy.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
@@ -329,7 +330,14 @@ function fillSlot(slot, gridArea, startDelayMs = 0) {
   tile.addEventListener('click', () => openSingle(slot.cam, { fromTap: true }))
   // the phone list: a camera streams only while it is on screen (48 at once would swamp a phone)
   if (LAYOUTS[layoutSelect.value]?.list) return watchInView(slot, tile)
-  slot.live = new LiveTile(tile, cam, SUB_STREAM, startDelayMs, tileOptions(cam))
+  const stream = gridStreamType({
+    cells: layoutCells(layoutSelect.value).cells.length,
+    hd: cam.hd,
+    remote: cam.remote,
+    remotePage: REMOTE_PAGE,
+    unsupportedMain: noMain.has(camKey(cam))
+  })
+  slot.live = new LiveTile(tile, cam, stream, startDelayMs, tileOptions(cam))
   gridTiles.push(slot.live)
 }
 

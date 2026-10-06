@@ -3,6 +3,7 @@
 // the DOM code at the bottom only paints. alert-banner.js reuses bannerText on every other page,
 // which is why the banner wording lives here rather than in the page.
 import { smartRows, smartSummary } from './smart-view.js'
+import { enhanceHealth } from './health-layout.js'
 
 // Absolute times are shown on the site's wall clock, not the viewing PC's zone (a screen set to UTC
 // otherwise showed UTC): add the site offset, then read it back as UTC. siteTzMs is set from
@@ -693,6 +694,7 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
       return panel
     }))
 
+    enhanceHealth(r.nvrPanels, d.nvrs, isAdmin)
     document.getElementById('historyCount').textContent = `(${r.historyRows.length})`
     document.getElementById('history').replaceChildren(...r.historyRows.map((h) => {
       const tr = el('tr')

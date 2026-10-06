@@ -345,7 +345,7 @@ const SIZE = { w: 1000, h: 600 }
   check('Save cannot be pressed twice, and reports every site', /if \(saving\) return/.test(js) && /saveSummary\(stored, failed\)/.test(js))
   check('a role is set as an attribute, so it reaches a screen reader', /k === 'role'/.test(js))
   check('the site buttons are a full touch target on a phone', /@media \(max-width: 800px\) \{[^@]*\.map-sites button \{ height: 44px/.test(css))
-  check('the chosen site is brought into view in the row', /scrollIntoView\(\{ inline: 'nearest', block: 'nearest' \}\)/.test(js))
+  check('the chosen site is brought into view within the sidebar', /sitesRow\.scrollTop -= rowBounds\.top - activeBounds\.top/.test(js) && /sitesRow\.scrollTop \+= activeBounds\.bottom - rowBounds\.bottom/.test(js))
   check('the page reads only what /api/maps gave this user', (js.match(/api\('GET', '\/api\/maps'\)/g) ?? []).length === 1)
 }
 

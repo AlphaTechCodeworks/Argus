@@ -4,7 +4,7 @@
 // It works on the page as it stands: the page's own content is moved into <div class="app-main">
 // and the shell goes beside it, so no page's markup had to be restructured to adopt it. It replaces
 // the ten hand-copied header links and admin-tabs.js.
-import { PHONE_BAR, currentId, navFor } from './nav-model.js'
+import { PHONE_BAR, NAV_GROUPS, currentId, navFor } from './nav-model.js'
 import { icon } from './icons.js'
 import { nextTheme, readTheme, saveTheme } from './theme.js'
 
@@ -62,6 +62,17 @@ function render(parts, me) {
 export function mountShell() {
   if (document.body.classList.contains('has-shell')) return
   applyTheme(readTheme(store))
+  const polish = document.createElement('link')
+  polish.rel = 'stylesheet'
+  polish.href = '/css/polish.css'
+  document.head.append(polish)
+  const pageId = location.hash === '#storage' ? 'storage' : currentId(location.pathname)
+  const page = NAV_GROUPS.flatMap((group) => group.items).find((item) => item.id === pageId)
+  if (page) {
+    document.title = `Argus \u00b7 ${page.label}`
+    const heading = document.querySelector('header .brand h1')
+    if (heading) heading.textContent = page.label
+  }
 
   // the page's own content, moved as it is into the main column. This runs before the page's own
   // scripts (shell.js is the first module on every page), so no video has started yet: a playing
@@ -72,7 +83,7 @@ export function mountShell() {
 
   const side = document.createElement('aside')
   side.className = 'app-shell'
-  side.setAttribute('aria-label', 'Primary navigation') // not "Main": this is the nav, not the main content
+  side.setAttribute('aria-label', 'Primary navigation')
   const bar = document.createElement('nav')
   bar.className = 'shell-bar'
   bar.setAttribute('aria-label', 'Primary navigation')
