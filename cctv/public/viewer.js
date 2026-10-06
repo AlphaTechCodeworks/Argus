@@ -6,9 +6,6 @@ import { enableGridDrag } from './grid-drag.js'
 import { activeTrace, downloadTrace, startTrace, stopTrace } from './frame-trace.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
 import { MAX_VIEW_CAMERAS, applyViews, checkView, normaliseViews } from './grid-view.js'
-import { ImagePanel } from './image-panel.js'
-import { LinesPanel, linesSupportAsker } from './lines-panel.js'
-import { OsdPanel } from './osd-panel.js'
 import { freshenForPageChange, muxState, useMux } from './live-mux.js'
 import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
@@ -91,51 +88,9 @@ let tiles = []
 let showStats = new URLSearchParams(location.search).get('stats') === '1'
 let isAdmin = false
 
-// picture settings of the camera shown full-size (admins); measures the stream on screen
-let singleCam = null // the camera shown full-size
-/** The player on screen in the full-size view: { player, stream: 'main' | 'sub', remote }, or null. */
-const shownPlayer = () => {
-  const t = [...singleTiles].reverse().find((x) => !x.closed && x.player.videoWidth && !x.tile.classList.contains('pending'))
-  // "remote" here means effectively sub-only: a P2P/VPN camera stays on its sub stream only for a
-  // viewer over the internet; on the local network it gets (and the Picture panel measures) the main.
-  return t ? { player: t.player, stream: t.streamType === MAIN_STREAM ? 'main' : 'sub', remote: Boolean(singleCam?.remote) && REMOTE_PAGE } : null
-}
-/** Waits (up to ms) for the main stream to replace the sub stream on screen; the player shown then. */
-const waitForMain = async (ms) => {
-  const until = Date.now() + ms
-  while (Date.now() < until) {
-    const v = shownPlayer()
-    // a P2P/VPN camera over the internet, and browsers without H.265, stay on the sub stream: no point waiting
-    if (v?.stream === 'main' || !singleCam || (singleCam.remote && REMOTE_PAGE) || noMain.has(camKey(singleCam))) return v
-    await new Promise((r) => setTimeout(r, 200))
-  }
-  return shownPlayer()
-}
-const imagePanel = new ImagePanel({
-  getPlayer: shownPlayer,
-  waitForMain,
-  onClose: () => {
-    for (const b of grid.querySelectorAll('button.pic-toggle')) b.setAttribute('aria-expanded', 'false')
-  }
-})
-
-// line crossing (admins): lines drawn on the camera shown full-size, for the camera's own detection
-// (lines-panel.js). One panel at a time with Picture: both sit over the right of the picture.
-let linesPanel = null // the open Lines panel, or null
-/**
- * Whether the camera has line-crossing detection of its own (the NVR's own answer, kept by the server
- * and for this tab: lines-panel.js). null when it could not be asked (NVR busy or offline): asked
- * again the next time the view opens.
- */
-const linesSupported = linesSupportAsker()
-/** The Lines panel may go (it asks first when lines are drawn but not saved). */
-const linesDiscard = () => !linesPanel || linesPanel.confirmDiscard()
-
-// the camera's burnt-in OSD (admins): the name and clock the camera burns into its picture, placed
-// on the full-size live view (osd-panel.js). One panel at a time with Picture and Lines.
-let osdPanel = null // the open OSD panel, or null
-/** The OSD panel may go (it asks first when changes are unsaved). */
-const osdDiscard = () => !osdPanel || osdPanel.confirmDiscard()
+// the camera shown full-size. Its settings (Picture / OSD / Lines) now live on the Sites page
+// (camera-editor.js); the full-size view is view-only.
+let singleCam = null
 
 if (!('VideoDecoder' in window)) {
   notice.hidden = false
@@ -232,8 +187,8 @@ function render({ keepSingle = false } = {}) {
     stopAhead()
   }
   grid.classList.toggle('show-stats', showStats)
-  // the kept view and its panel stay in place (moving them would close an open dialog)
-  const kept = keep ? [overlay, imagePanel.el, linesPanel?.el, osdPanel?.el].filter((n) => n?.parentNode === grid) : []
+  // the kept view stays in place (moving it would close an open dialog)
+  const kept = keep ? [overlay].filter((n) => n?.parentNode === grid) : []
   for (const n of [...grid.children]) if (!kept.includes(n)) { inView?.unobserve(n); n.remove() } // unobserve: phone-list tiles must not leak into the observer
   const before = kept[0] ?? null
 
@@ -401,14 +356,11 @@ function syncSingle(keep) {
   // the full-size view survives a rebuild (camera list refresh, Smooth, etc.)
   if (single !== null) {
     const cam = cameras.find((c) => camKey(c) === single)
-    const panelOpen = imagePanel.key === single
-    if (!cam || (!cam.online && !panelOpen)) {
-      // the camera went away (removed; or offline with no picture panel open): the view goes
+    if (!cam || !cam.online) {
+      // the camera went away (removed or offline): the view goes
       closeSingle()
       return
     }
-    // offline with the panel open: most likely a camera restart the panel asked for; the view
-    // and panel stay (its tiles reconnect by themselves), so the change's result is shown
     // Live HD given or taken away: the view is built again, upgraded to the main stream or back on the
     // sub-stream with its SD badge (the server's sweep ends a main stream no longer allowed anyway)
     if (keep && Boolean(singleCam?.hd) === Boolean(cam.hd)) {
@@ -701,106 +653,18 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
     link.addEventListener('click', (e) => e.stopPropagation())
     links.append(link)
   }
-  if (isAdmin) {
-    const pic = document.createElement('button')
-    pic.type = 'button'
-    pic.className = 'pb-link pic-toggle'
-    pic.textContent = 'Picture'
-    pic.title = 'Camera picture settings and Auto adjust'
-    pic.setAttribute('aria-expanded', String(imagePanel.key === single))
-    pic.addEventListener('click', (e) => {
-      e.stopPropagation()
-      if (imagePanel.key === single) {
-        imagePanel.requestClose()
-        return
-      }
-      // one panel at a time: the Lines and OSD panels go first (asking when changes are unsaved)
-      if (linesPanel && !linesPanel.requestClose()) return
-      if (osdPanel && !osdPanel.requestClose()) return
-      imagePanel.open(cam, { opener: pic })
-      pic.setAttribute('aria-expanded', 'true')
-      grid.append(imagePanel.el)
-    })
-    links.append(pic)
-    // Lines: only for a camera whose NVR says it has line crossing of its own (hidden until then)
-    const lines = document.createElement('button')
-    lines.type = 'button'
-    lines.className = 'pb-link lines-toggle'
-    lines.textContent = 'Lines'
-    lines.title = 'Line crossing: draw lines for the camera\'s own detection'
-    lines.hidden = true
-    lines.setAttribute('aria-expanded', String(linesPanel?.key === single))
-    lines.addEventListener('click', (e) => {
-      e.stopPropagation()
-      if (linesPanel?.key === single) {
-        linesPanel.requestClose()
-        return
-      }
-      // one panel at a time: the Picture and OSD panels go first (asking when changes are unsent)
-      if (!imagePanel.confirmDiscard()) return
-      if (osdPanel && !osdPanel.requestClose()) return
-      imagePanel.close()
-      overlayZoom?.reset() // the lines are drawn on the whole picture
-      linesPanel = new LinesPanel(grid, cam, {
-        liveEl: () => shownPlayer()?.player?.canvas ?? null,
-        opener: lines,
-        onClose: () => {
-          linesPanel = null
-          for (const b of grid.querySelectorAll('button.lines-toggle')) b.setAttribute('aria-expanded', 'false')
-        }
-      })
-      linesPanel.open()
-      lines.setAttribute('aria-expanded', 'true')
-    })
-    links.append(lines)
-    linesSupported(cam).then((ok) => {
-      if (ok) lines.hidden = false
-    })
-    // OSD: the name and clock the camera burns into its picture (every camera has one, so always shown)
-    const osd = document.createElement('button')
-    osd.type = 'button'
-    osd.className = 'pb-link osd-toggle'
-    osd.textContent = 'OSD'
-    osd.title = 'On-screen display: the name and clock the camera burns into its picture'
-    osd.setAttribute('aria-expanded', String(osdPanel?.key === single))
-    osd.addEventListener('click', (e) => {
-      e.stopPropagation()
-      if (osdPanel?.key === single) {
-        osdPanel.requestClose()
-        return
-      }
-      // one panel at a time: Picture and Lines go first (asking when changes are unsaved)
-      if (!imagePanel.confirmDiscard()) return
-      if (linesPanel && !linesPanel.requestClose()) return
-      imagePanel.close()
-      overlayZoom?.reset() // the overlay is placed on the whole picture
-      osdPanel = new OsdPanel(grid, cam, {
-        liveEl: () => shownPlayer()?.player?.canvas ?? null,
-        opener: osd,
-        onClose: () => {
-          osdPanel = null
-          for (const b of grid.querySelectorAll('button.osd-toggle')) b.setAttribute('aria-expanded', 'false')
-        }
-      })
-      osdPanel.open()
-      osd.setAttribute('aria-expanded', 'true')
-    })
-    links.append(osd)
-  }
   overlay.querySelector('.name').after(links)
   if (isPhone()) overlay.append(nativeFullButton(overlay))
   overlay.append(...stepArrows()) // ‹ › on every screen (keys: ← →)
   // closing the view discards the panel's unsent changes: ask first
-  overlay.addEventListener('click', () => {
-    if (imagePanel.confirmDiscard() && linesDiscard() && osdDiscard()) closeSingle()
-  })
+  overlay.addEventListener('click', () => closeSingle())
   // zoom: the wheel, a pinch, drag to pan, double-click / double-tap back (pinch-zoom.js). Only the
   // pictures move (style.css .single-overlay canvas); the name, the badge and the buttons stay put.
   // While zoomed a tap does not close the view and a flick does not change camera.
   const view = overlay
   overlayZoom = attachZoom(view, {
     // paused while the Lines or OSD panel is open: a drag there draws/places on the whole picture
-    busy: () => Boolean(linesPanel || osdPanel),
+    busy: () => false,
     apply: (z, x, y) => {
       view.style.setProperty('--zs', String(z))
       view.style.setProperty('--zx', `${x}px`)
@@ -820,15 +684,6 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   grid.append(overlay)
   // inside the tap itself: a browser allows full screen only in answer to one
   if (fromTap) enterPhoneFull()
-  // open for this camera: keep it (and its unsent changes) across a rebuild of the view
-  if (imagePanel.key === single) grid.append(imagePanel.el)
-  else imagePanel.close()
-  // the Lines panel likewise; its drawing follows the camera's picture into the rebuilt view
-  if (linesPanel?.key === single) grid.append(linesPanel.el)
-  else linesPanel?.close()
-  // the OSD panel the same way
-  if (osdPanel?.key === single) grid.append(osdPanel.el)
-  else osdPanel?.close()
   const opts = tileOptions(cam)
   const sub = new LiveTile(overlay, cam, SUB_STREAM, 0, { ...opts, borrowFrom: lenderFor(cam) })
   singleTiles.push(sub)
@@ -861,9 +716,6 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   if (!resumeGrid) return
   stopAhead()
   leavePhoneFull()
-  imagePanel.close()
-  linesPanel?.close()
-  osdPanel?.close()
   single = null
   singleCam = null
   // A phone rebuilds its grid instead: under the full-size view the list's tiles were scrolled out,
@@ -1004,7 +856,7 @@ function relayout() {
   const perPage = cells.length
   const v = visibleCameras(gridCameras(), gridView(perPage))
   if (gridSlots.length !== perPage || v.page !== page) return render({ keepSingle: true })
-  const before = [overlay, imagePanel.el, linesPanel?.el, osdPanel?.el].find((n) => n?.parentNode === grid) ?? null
+  const before = [overlay].find((n) => n?.parentNode === grid) ?? null
   const keys = cells.map((_, i) => (v.visible[i] ? camKey(v.visible[i]) : null))
   const { from, unused } = reuseSlots(gridSlots.map((s) => (s.cam ? camKey(s.cam) : null)), keys)
   const leaving = unused.map((i) => gridSlots[i])
@@ -1264,16 +1116,7 @@ deleteViewBtn.addEventListener('click', async () => {
 prevBtn.addEventListener('click', () => { page--; freshenForPageChange(); render() })
 nextBtn.addEventListener('click', () => { page++; freshenForPageChange(); render() })
 document.addEventListener('keydown', (e) => {
-  // Escape closes the Lines or OSD panel first (they lie over the picture), then the full-size view
-  if (e.key === 'Escape' && linesPanel) {
-    linesPanel.requestClose()
-    return
-  }
-  if (e.key === 'Escape' && osdPanel) {
-    osdPanel.requestClose()
-    return
-  }
-  if (e.key === 'Escape' && single !== null && !document.fullscreenElement && imagePanel.confirmDiscard()) closeSingle()
+  if (e.key === 'Escape' && single !== null && !document.fullscreenElement) closeSingle()
   // the full-size view: ← → go through the cameras, the same as ‹ › and a flick
   if (single !== null && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && !e.target.closest?.('input, select, textarea')) {
     e.preventDefault()
@@ -1495,7 +1338,7 @@ function stepCamera(dir) {
   if (list.length < 2 || single === null) return
   const i = list.findIndex((c) => camKey(c) === single)
   const next = list[(i + dir + list.length) % list.length]
-  if (imagePanel.confirmDiscard() && linesDiscard() && osdDiscard()) openSingle(next, { stepping: true })
+  openSingle(next, { stepping: true })
 }
 
 /** The ‹ › on a phone's full-size camera: they say a flick works, and a tap on one works too. */
@@ -1525,7 +1368,6 @@ function stepArrows() {
   const rotated = () => false // the picture is no longer turned sideways on an upright phone
   document.addEventListener('touchstart', (e) => {
     if (!document.body.classList.contains('phone-full') || e.touches.length !== 1) return (t0 = null)
-    if (linesPanel || osdPanel) return (t0 = null) // drawing/placing: a flick draws, it does not change camera
     if (overlayZoom && overlayZoom.zoom > 1) return (t0 = null) // zoomed: one finger moves the picture
     t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }
   }, { passive: true })

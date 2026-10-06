@@ -6,6 +6,11 @@
 /** "3 · North Gate" (a camera the NVR has not named: "3 · Camera 3"). */
 export const cameraLabel = (c) => `${c.ch + 1} · ${c.name || `Camera ${c.ch + 1}`}`
 
+/** The cameras of one NVR, ascending by channel. `cameras` is the /api/cameras list. Pure. */
+export function camerasForNvr(cameras, nvrId) {
+  return (cameras ?? []).filter((c) => c.nvr === nvrId).sort((a, b) => a.ch - b.ch)
+}
+
 /**
  * The cameras as groups, in the order the server lists them (site, NVR, channel). A site with more
  * than one NVR gets a group per NVR, or channel numbers would repeat inside one group. Pure.

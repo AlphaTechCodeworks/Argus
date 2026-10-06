@@ -1,4 +1,7 @@
 // Sites page: add, edit and remove NVRs (admins only).
+import { openCameraEditor } from './camera-editor.js'
+import { camerasForNvr, cameraLabel } from './camera-choice.js'
+
 const $ = (id) => document.getElementById(id)
 const sitesEl = $('sites')
 const notice = $('notice')
@@ -46,11 +49,61 @@ function subStreamNote(seen) {
   })
 }
 
+let cameraList = null // /api/cameras, fetched once when a dropdown first opens
+async function allCameras() {
+  if (!cameraList) cameraList = await api('GET', '/api/cameras').catch(() => [])
+  return cameraList
+}
+
+let openEditor = null // { chip, mount, handle } — one camera editor on the page at a time
+/** Close the open editor, asking first when it has unsent changes. Returns false if it was kept open. */
+function closeEditor() {
+  if (!openEditor) return true
+  if (!openEditor.handle.confirmDiscard()) return false
+  openEditor.chip.setAttribute('aria-pressed', 'false')
+  openEditor.handle.close()
+  openEditor = null
+  return true
+}
+
+/** A per-NVR dropdown of its cameras; a chip opens the inline settings editor with a live preview. */
+function camerasPanel(n) {
+  const body = el('div', { className: 'st-cameras-body' })
+  const mount = el('div', { className: 'st-cameras-editor' })
+  const d = el('details', { className: 'st-cameras' }, el('summary', { className: 'st-cameras-sum' }, `Cameras (${n.cameras ?? 0})`), body, mount)
+  let built = false
+  d.addEventListener('toggle', async () => {
+    if (!d.open || built) return
+    built = true
+    const cams = camerasForNvr(await allCameras(), n.id)
+    if (!cams.length) { body.append(el('p', { className: 'st-meta', textContent: 'No cameras reported for this NVR.' })); return }
+    for (const cam of cams) {
+      const chip = el('button', { type: 'button', className: `st-cam-chip${cam.online === false ? ' st-cam-off' : ''}`, textContent: cameraLabel(cam) })
+      chip.setAttribute('aria-pressed', 'false')
+      chip.addEventListener('click', () => {
+        if (openEditor?.chip === chip) { closeEditor(); return } // click the open chip to close
+        if (!closeEditor()) return // another editor had unsent changes and was kept
+        chip.setAttribute('aria-pressed', 'true')
+        openEditor = { chip, mount, handle: openCameraEditor(mount, cam, { onClose: () => { openEditor = null } }) }
+      })
+      body.append(chip)
+    }
+  })
+  // collapsing the dropdown closes its editor; unsent changes are asked about first
+  d.querySelector('summary').addEventListener('click', (e) => {
+    if (d.open && openEditor && openEditor.mount === mount && !closeEditor()) e.preventDefault()
+  })
+  return d
+}
+
 function render() {
   if (nvrList.length === 0) {
     sitesEl.replaceChildren(el('p', { className: 'st-empty', textContent: 'No NVRs yet. Click “+ Add NVR” to add the first one.' }))
     return
   }
+  // a camera dropdown open means its editor is mounted inside it; a full re-render (the 5 s poll)
+  // would tear it out, so hold off until every dropdown is closed again
+  if (sitesEl.querySelector('details[open]')) return
   // one block per site: a heading that sums the site up, then one row per NVR
   const bySite = Map.groupBy(nvrList, (n) => n.site || 'Unassigned')
   const groups = [...bySite].sort(([a], [b]) => a.localeCompare(b)).map(([site, list]) => {
@@ -60,7 +113,7 @@ function render() {
     const camsUp = list.reduce((t, n) => t + (n.status === 'online' ? n.camerasOnline ?? 0 : 0), 0)
     const down = list.filter((n) => n.status !== 'online').length
     const summary = `${list.length} NVR${list.length === 1 ? '' : 's'} · ${camsUp} of ${cams} cameras online${down ? ` · ${down} NVR${down === 1 ? '' : 's'} not connected` : ''}`
-    const rows = list.map((n) => {
+    const rows = list.flatMap((n) => {
       const edit = el('button', { type: 'button', textContent: 'Edit' })
       edit.addEventListener('click', () => openForm(n))
       const remove = el('button', { type: 'button', className: 'btn-ghost st-row-remove', textContent: 'Remove', title: `Remove ${n.name}` })
@@ -76,7 +129,7 @@ function render() {
         ? `VPN tunnel to ${n.vpnSite.name}: ${tunnelText(n.vpnSite)}`
         : !online && n.error ? n.error : ''
       const note = subStreamNote(n.subStreamsSeen)
-      return el(
+      const row = el(
         'div',
         { className: `st-nvr st-nvr-${n.status}` },
         el('span', { className: `st-dot st-${n.status}`, title: STATUS_TEXT[n.status] ?? n.status }),
@@ -90,6 +143,7 @@ function render() {
           online ? el('span', { className: 'st-bar' }, el('span', { style: `width:${pct}%` })) : null),
         el('div', { className: 'st-nvr-actions' }, subs, edit, remove)
       )
+      return [row, camerasPanel(n)]
     })
     return el(
       'section',
