@@ -5,6 +5,10 @@
 // to the parent, which fans them out to the viewers (stream-hub.mjs).
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+// First of the app's modules, before any other is loaded: from here on a promise rejection nobody
+// catches is logged and counted, and no longer ends this worker and with it this NVR's video and
+// recording until the supervisor has a new one logged in (process-guard.mjs)
+import './process-guard-worker.mjs'
 import { DATA_DIR } from './auth.mjs'
 import { loopWorstMs } from './loop-lag.mjs'
 import { recentRefusals } from './nvr-health.mjs'
@@ -310,21 +314,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 async function shutdown() {
   if (stopping) return
   stopping = true
-  clearInterval(loop) // no re-attached taps, no re-created cameras
-  clearInterval(stallTimer) // no stall restarts
-  refuseNewCalls('the worker is stopping') // nothing new enters the SDK (timers of streams included)
-  nvr.lane.clear('the worker is stopping')
-  // tests only (with the fake SDK): a worker that overstays its stop
-  const slow = process.env.CCTV_WORKER_FAKE_SDK === '1' ? Number(process.env.CCTV_WORKER_TEST_SLOW_STOP_MS || 0) : 0
-  if (slow) await sleep(slow)
-  // closes (fsyncs) the open segments; their messages go out before the exit. A disk that does
-  // not finish within 4 s: those files are picked up by the recovery scan at the next start
-  allowAllCloses()
-  await Promise.race([recorder.stop(), sleep(4000)])
-  // messages go to the parent in order: once a last one has been handed over, so have the
-  // segments' (a kill straight after recorder.stop() could lose them)
-  await Promise.race([new Promise((r) => sendStats(r) || r()), sleep(1000)])
-  process.kill(process.pid, 'SIGKILL')
+  try {
+    clearInterval(loop) // no re-attached taps, no re-created cameras
+    clearInterval(stallTimer) // no stall restarts
+    refuseNewCalls('the worker is stopping') // nothing new enters the SDK (timers of streams included)
+    nvr.lane.clear('the worker is stopping')
+    // tests only (with the fake SDK): a worker that overstays its stop
+    const slow = process.env.CCTV_WORKER_FAKE_SDK === '1' ? Number(process.env.CCTV_WORKER_TEST_SLOW_STOP_MS || 0) : 0
+    if (slow) await sleep(slow)
+    // closes (fsyncs) the open segments; their messages go out before the exit. A disk that does
+    // not finish within 4 s: those files are picked up by the recovery scan at the next start
+    allowAllCloses()
+    await Promise.race([recorder.stop(), sleep(4000)])
+    // messages go to the parent in order: once a last one has been handed over, so have the
+    // segments' (a kill straight after recorder.stop() could lose them)
+    await Promise.race([new Promise((r) => sendStats(r) || r()), sleep(1000)])
+  } catch (e) {
+    console.error(`[${id}] stopping failed part-way: ${e?.stack ?? e}`)
+  } finally {
+    // whatever became of the lines above. Nobody waits for this function: a rejection in it used to
+    // end the process by itself, and under process-guard.mjs would be logged and the worker left
+    // running, 'stopping' for good: its loop gone, deaf to every message and signal, its STATS
+    // still going out, so after a SIGTERM of its own the supervisor saw a ready worker
+    process.kill(process.pid, 'SIGKILL')
+  }
 }
 
 process.send?.({ t: MSG.READY })

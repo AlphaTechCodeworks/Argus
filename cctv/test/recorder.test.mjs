@@ -22,6 +22,10 @@ const data = mkdtempSync(join(tmpdir(), 'cctv-rec-'))
 process.env.DATA_DIR = data
 writeFileSync(join(data, 'nvrs.json'), JSON.stringify({ nvrs: [{ id: 'w1', site: 'T', name: 'W1', host: 'w1.invalid', port: 6036, user: 'u', password: 'p' }] }))
 process.env.CCTV_WORKER_FAKE_SDK = '1'
+// The worker is guarded (process-guard.mjs): a promise rejection nobody catches in it is one line on
+// its stderr, and every check here would still pass. With Node's own flag it ends there instead, as
+// it did before the guard, and the test that started it fails.
+process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ''} --unhandled-rejections=strict`.trim()
 
 const { Recorder } = await import('../recorder.mjs')
 const { openRecIndex } = await import('../rec-index.mjs')

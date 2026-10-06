@@ -60,6 +60,12 @@
 //   bytes 6-7   reserved
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
+
+// First, before any other module is loaded: from here on a promise rejection nobody catches is
+// logged and counted, and no longer ends this process and with it every viewer's socket, a running
+// export and every NVR worker (2026-10: a playback command of 'null' threw inside an async handler
+// nobody awaited; process-guard.mjs)
+import './process-guard-server.mjs'
 import { clientIpOf, localProbe, securityHeaders } from './security.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleNetStatus } from './nvr-netstatus.mjs'
@@ -1308,10 +1314,18 @@ if (Object.keys(auth.loadUsers()).length === 0) {
 }
 
 const shutdown = async () => {
-  // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
-  // (9 s: the NVR workers get 8 s to close their segments and log out; the unit allows 15)
-  await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 9000))])
-  process.kill(process.pid, 'SIGKILL')
+  try {
+    // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
+    // (9 s: the NVR workers get 8 s to close their segments and log out; the unit allows 15)
+    await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 9000))])
+  } catch (e) {
+    console.error(`[server] stopping failed part-way: ${e?.stack ?? e}`)
+  } finally {
+    // whatever became of the logout. Nobody waits for this function: a rejection in it used to end
+    // the process by itself, and under process-guard.mjs would be logged and the process left
+    // running until systemd's 15 s were up
+    process.kill(process.pid, 'SIGKILL')
+  }
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
