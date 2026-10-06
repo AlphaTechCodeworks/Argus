@@ -1067,6 +1067,27 @@ body.phone-full #grid > .lines-panel, body.phone-full #grid > .osd-panel { z-ind
 .st-vpn-site button { grid-row: 1 / span 2; grid-column: 3; }
 @media (max-width: 600px) { .st-vpn-site { grid-template-columns: 1fr; } .st-vpn-site button { grid-row: auto; grid-column: auto; justify-self: start; } .st-vpn-site .st-meta:last-of-type { grid-column: auto; } }
 
+/* ---- Sites: per-NVR camera dropdown and the inline settings editor (camera-editor.js) ---- */
+/* a live preview beside the Picture / OSD / Lines panels, re-hosted from the full-size view */
+.st-cameras { margin: 2px 0 6px; }
+.st-cameras-sum { cursor: pointer; font-size: 13px; color: var(--muted); padding: 4px 0; }
+.st-cameras-body { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0; }
+.st-cam-chip { font-size: 13px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer; }
+.st-cam-chip[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.st-cam-off { color: var(--muted); }
+.st-cameras-editor:empty { display: none; }
+.ce-editor { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; padding: 8px 0 4px; }
+.ce-preview { flex: 1 1 280px; min-width: 240px; }
+.ce-tile { position: relative; aspect-ratio: 16 / 9; width: 100%; background: var(--video-bg); border-radius: 8px; overflow: hidden; }
+.ce-panels { flex: 1 1 320px; min-width: 280px; }
+.ce-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.ce-tab { font-size: 14px; padding: 7px 12px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); cursor: pointer; }
+.ce-tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.ce-body[hidden] { display: none; }
+/* the re-hosted panels overlaid the full-size picture (position:absolute); here they sit in normal flow */
+.ce-body .img-panel { position: static; inset: auto; width: auto; height: auto; max-height: 70vh; z-index: auto; background: var(--surface-2); }
+@media (max-width: 640px) { .ce-editor { flex-direction: column; } }
+
 /* Settings page (settings.html) */
 .se-section { background: var(--panel); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 .se-section[hidden] { display: none; }
