@@ -6,7 +6,9 @@
 //               naming the file, {type:'playing'} before the next frame, and the close line's figures
 //   ahead       the next file is opened when the one playing opens, not 3 s before its end; the whole-file
 //               read-ahead stays one file ahead
-//   next        footage with pictures seconds apart (time-lapse) says when the next one is due
+//   turn        that file's .idx is read while the one before it plays, and never alongside one of its reads
+//               (one read in flight per session); the one playing does not wait for the next one to open
+//   next       footage with pictures seconds apart (time-lapse) says when the next one is due
 //   stale       an error from a read nobody needs any more is logged, not dropped
 // Temp dirs, a temp index and a fake WebSocket only: nothing reaches an NVR or a share.
 // Run:  node cctv/test/rec-playback-wait.test.mjs
@@ -126,7 +128,8 @@ const camE = await record(4, [frames(T0, 400), frames(T0 + 20_000, 800)])
 const T5 = Date.UTC(2026, 8, 20, 10, 0, 5)
 const camF = await record(5, [Array.from({ length: 6 }, (_, i) => ({ ts: T5 + i * 3000, isKey: true, buf: key(i) }))])
 const camG = await record(6, [frames(T0, 400), frames(T0 + 20_000, 400)])
-check('footage: two files joined at 19:55:00 (three on camera 2)', camA.length === 2 && camB.length === 3 && camC.length === 2 && camE.length === 2 && camF.length === 1 && camG.length === 2 && camA[1].startMs === T0 + 20_000, `${camA.length} ${camB.length} ${camC.length} ${camF.length}`)
+const camH = await record(7, [frames(T0, 400), frames(T0 + 20_000, 400)])
+check('footage: two files joined at 19:55:00 (three on camera 2)', camA.length === 2 && camB.length === 3 && camC.length === 2 && camE.length === 2 && camF.length === 1 && camG.length === 2 && camH.length === 2 && camA[1].startMs === T0 + 20_000, `${camA.length} ${camB.length} ${camC.length} ${camF.length}`)
 const JOIN = T0 + 20_000
 
 // The cases run side by side (each on a camera of its own): 13 s of waiting once, not once each.
@@ -266,6 +269,45 @@ await Promise.all([
     const line = p.logs.find((x) => /no longer needed/.test(x.l))
     check('a read that failed after a seek made it stale: logged with what the system said', Boolean(line) && /EIO/.test(line.l) && /^\[n1\] server playback ch7: /.test(line.l), p.logs.map((x) => x.l).join(' | '))
     check('  the session is not failed by it: the seek plays', p.ws.readyState === 1 && !p.text('error') && p.texts.some((m) => m.type === 'started' && m.gen === 1) && p.sent.length > 5, J(p.texts.map((t) => t.type)))
+    p.session.close()
+  })(),
+
+  // ---- the next file's .idx is read while the first plays, never alongside one of its reads ---------
+  (async () => {
+    // One read in flight per session (rec-playback.mjs, the top). The next file opens at once here and
+    // its .idx takes 2 s to read: the first file's reads are a second or two apart by then (3 s are
+    // queued, a GOP is 2 s), so one of them falls inside those 2 s and has to wait for its turn.
+    const idx = `${camH[1].path}.idx`
+    const reads = { now: 0, most: 0, idxAt: null, idxDone: null }
+    const t0 = performance.now()
+    const fs = {
+      async open(path, flags) {
+        const fh = await fsp.open(path, flags)
+        return {
+          async read(...a) {
+            reads.most = Math.max(reads.most, ++reads.now)
+            try {
+              if (String(path) === idx) {
+                reads.idxAt ??= performance.now() - t0
+                await sleep(2000)
+              }
+              return await fh.read(...a)
+            } finally {
+              reads.now--
+              if (String(path) === idx) reads.idxDone = performance.now() - t0
+            }
+          },
+          stat: () => fh.stat(),
+          close: () => fh.close()
+        }
+      }
+    }
+    const start = T0 + 2000
+    const p = play(7, start, { fs })
+    await sleep(4500)
+    check('next file\'s .idx, 2 s to read: read as soon as the first file plays, not at the join', reads.idxAt !== null && reads.idxAt < 500 && reads.idxDone !== null && p.sent.at(-1)?.ts < JOIN, `begun at ${s1(reads.idxAt ?? -1)} s, done at ${s1(reads.idxDone ?? -1)} s`)
+    check('  never alongside a read of the file playing: one read in flight', reads.most === 1, `${reads.most} at once`)
+    check('  and the first file plays on meanwhile, every frame in order', p.sent.length > 40 && p.sent.filter((f) => f.ts >= start).every((f, i, a) => i === 0 || (f.ts > a[i - 1].ts && f.ts - a[i - 1].ts < 60)) && p.all('waiting').length === 0, `${p.sent.length} frames, ${J(p.texts.map((t) => t.type))}`)
     p.session.close()
   })()
 ])
