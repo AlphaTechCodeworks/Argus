@@ -4,6 +4,7 @@
 // and no answer from the server ever contains it.
 import { DEFAULT_OSD, OSD_CORNERS, cleanOsdSettings, cornerOf, drawOsd, osdFont, osdLayout } from './osd-overlay.js'
 import { locationEdit } from './storage.js'
+import { notify } from './feedback.js'
 
 const $ = (id) => document.getElementById(id)
 const notice = $('notice')
@@ -30,6 +31,9 @@ const option = (value, text, selected) => el('option', { value, textContent: tex
 const say = (id, text, bad = false) => {
   $(id).textContent = text
   $(id).className = bad ? 'st-error' : 'st-meta'
+  $(id).setAttribute('role', bad ? 'alert' : 'status')
+  if (bad && text) notify(text, { error: true })
+  else if (/^Saved\b/.test(text)) notify(text)
 }
 
 const MODE_TEXT = { off: 'Off', continuous: '24/7', motion: 'Motion only', ai: 'AI events only', 'ai-or-motion': 'AI where supported, else motion' }
@@ -78,6 +82,20 @@ Type REMOVE to go ahead.`, '')
   return typed?.trim().toUpperCase() === 'REMOVE'
 }
 const camEdits = new Map() // "<nvr>/<ch>" -> patch
+let defaultsDirty = false
+const dirtyNote = document.createElement('span')
+dirtyNote.className = 'settings-dirty'
+dirtyNote.setAttribute('role', 'status')
+$('saveCams').after(dirtyNote)
+function updateDirtyNote() {
+  const count = camEdits.size
+  dirtyNote.textContent = defaultsDirty || count ? `Unsaved changes${count ? ` · ${count} camera${count === 1 ? '' : 's'}` : ''}` : ''
+}
+$('defaults').addEventListener('input', () => { defaultsDirty = true; updateDirtyNote() })
+$('defaults').addEventListener('change', () => { defaultsDirty = true; updateDirtyNote() })
+addEventListener('beforeunload', (e) => {
+  if (defaultsDirty || camEdits.size) { e.preventDefault(); e.returnValue = '' }
+})
 
 const gb = (b) => (b >= 1e12 ? `${(b / 1e12).toFixed(1)} TB` : `${(b / 1e9).toFixed(1)} GB`)
 
@@ -97,6 +115,8 @@ $('defaults').addEventListener('submit', async (e) => {
   try {
     settings = (await api('POST', '/api/admin/settings', { recording: { defaults } })).settings
     say('d-msg', 'Saved')
+    defaultsDirty = false
+    updateDirtyNote()
     render()
     refreshRam() // which cameras record may have changed
   } catch (err) {
@@ -166,6 +186,7 @@ function camRows(list, d) {
         const p = camEdits.get(key) ?? {}
         p[field] = v
         camEdits.set(key, p)
+        updateDirtyNote()
         $('saveCams').disabled = false
       }
       const locSel = el(
@@ -193,6 +214,7 @@ $('saveCams').addEventListener('click', async () => {
   try {
     settings = (await api('POST', '/api/admin/settings', { recording: { cameras: Object.fromEntries(camEdits) } })).settings
     camEdits.clear()
+    updateDirtyNote()
     $('saveCams').disabled = true
     say('c-msg', 'Saved')
     render()

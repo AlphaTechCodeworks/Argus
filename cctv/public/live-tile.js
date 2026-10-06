@@ -4,6 +4,10 @@ import { clearStill, maybeKeepStill, showStill } from './stills.js'
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
 import { liveSocket } from './live-mux.js'
 import { activeTrace } from './frame-trace.js'
+import { streamState, lastSeenText, cameraSeen, rememberCameraSeen } from './view-preferences.js'
+import { streamHealth, healthyRetryReset } from './stream-health.js'
+import { liveMetricsText } from './live-metrics.js'
+import { cameraConnectionState } from './sites-model.js'
 
 // Whether this device can play H.265, told to the server with each live stream: a remote viewer
 // who can is sent an H.265 camera as it is (about half the data of H.264 for the same picture)
@@ -96,7 +100,7 @@ function updateEaseChip() {
 // the camera. It is a second canvas rather than drawing onto the player's own, because the player
 // redraws that one on every frame and would wipe the text, and because the overlay must be able to
 // come and go without the streaming path knowing anything about it.
-export const TILE_HTML = '<canvas></canvas><canvas class="osd"></canvas><pre class="stats"></pre><span class="status"></span><div class="label"><span class="dot dot-off" title="No video: nothing is arriving from this camera"></span><span class="name"></span></div>'
+export const TILE_HTML = '<canvas></canvas><canvas class="osd"></canvas><pre class="stats"></pre><span class="status"></span><span class="last-seen"></span><div class="label"><span class="dot dot-off" title="No video: nothing is arriving from this camera"></span><span class="name"></span><span class="stream-metrics" title="Received video: decoded resolution, codec, received FPS and average video payload bitrate"></span></div>'
 
 /**
  * The state dot on a tile, the way Milestone shows it: green when video is arriving, red when
@@ -137,12 +141,20 @@ export class LiveTile {
    */
   constructor(tile, cam, streamType, startDelayMs = 0, opts = {}) {
     this.tile = tile
+    this.cam = cam
     this.nvr = cam.nvr
     this.ch = cam.ch
     this.streamType = streamType
     this.opts = opts
     this.status = tile.querySelector('.status')
     this.statsEl = tile.querySelector('.stats')
+    this.metricsEl = tile.querySelector('.stream-metrics')
+    this.connectionEl = null
+    if (typeof document !== 'undefined' && document.createElement && tile.querySelector('.label')) {
+      this.connectionEl = tile.querySelector('.connection-label') || document.createElement('span')
+      this.connectionEl.className = 'connection-label'
+      tile.querySelector('.label').append(this.connectionEl)
+    }
     this.dotEl = tile.querySelector('.dot') // absent in older markup: the dot is then simply not drawn
     this.osdEl = tile.querySelector('canvas.osd') // absent in older markup: no overlay is drawn
     this.osdSig = '' // what is on the overlay canvas now, so it is only repainted when it changes
@@ -153,6 +165,8 @@ export class LiveTile {
     this.attempts = 0 // reconnects since video last arrived
     this.now = opts.now ?? (() => Date.now()) // (tests)
     this.lastDataAt = 0 // the last frame on this socket, or when it opened
+    this.lastFrameAt = 0
+    this.healthySince = 0
     this.maxFps = opts.maxFps ?? null // a phone asks the server for its 15 fps stream (phone-live.mjs)
     this.taps = new Set() // tiles borrowing this one's stream (#borrow)
     this.gop = null // the stream since its last keyframe (#keep)
@@ -172,6 +186,10 @@ export class LiveTile {
       maxFps: opts.maxFps,
       onUnsupported: (codecId) => (opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)),
       onFrame: () => {
+        this.lastFrameAt = this.now()
+        if (!this.healthySince) this.healthySince = this.lastFrameAt
+        if (healthyRetryReset(this.healthySince, this.lastFrameAt)) this.attempts = 0
+        rememberCameraSeen(`${this.nvr}/${this.ch}`, Date.now())
         if (!shown) clearStill(tile)
         // keep the last picture of this camera on this device, for the next time its tile appears
         if (typeof document !== 'undefined') maybeKeepStill(this.player.canvas, this.nvr, this.ch)
@@ -198,9 +216,16 @@ export class LiveTile {
   }
 
   setStatus(text, live = false) {
+    this.tile.dataset.streamState = streamState(text, live)
     // (only when it changes: a big grid would otherwise write every badge every second)
     if (this.status.textContent !== text) this.status.textContent = text
     this.status.classList.toggle('live', live)
+    const lastSeen = this.tile.querySelector('.last-seen')
+    if (lastSeen) {
+      lastSeen.hidden = live
+      const label = lastSeenText(cameraSeen(`${this.nvr}/${this.ch}`))
+      if (lastSeen.textContent !== label) lastSeen.textContent = label
+    }
   }
 
   /** Paints the state dot (only when it changes: a big grid would otherwise rewrite every tile every second). */
@@ -269,10 +294,23 @@ export class LiveTile {
       this.connect()
     }
     const s = this.player.stats
+    const connection = cameraConnectionState(this.cam)
+    if (this.connectionEl) {
+      this.connectionEl.textContent = connection?.text || ''
+      this.connectionEl.title = connection?.detail || ''
+      this.connectionEl.className = `connection-label connection-${connection?.key || 'unknown'}`
+    }
     activeTrace()?.stats(this, s) // the D overlay's frame trace (frame-trace.js), when one runs
     const ws = this.ws
     const open = (this.source ? true : ws && ws.readyState === 1) && !this.suspended && !this.closed
     const since = open ? this.now() - (this.lastDataAt || this.now()) : 0
+    const metrics = liveMetricsText(s, this.streamType === MAIN_STREAM, Boolean(open && this.lastFrameAt && since < 3000))
+    if (this.metricsEl && this.metricsEl.textContent !== metrics) this.metricsEl.textContent = metrics
+    const health = streamHealth({ now: this.now(), openedAt: this.connectAt || this.lastDataAt || this.now(),
+      dataAt: this.lastDataAt, frameAt: this.lastFrameAt, waiting: this.waiting,
+      hidden: Boolean(this.suspended || (typeof document !== 'undefined' && document.hidden)) })
+    if (health.stale) this.healthySince = 0
+    const canRecover = typeof document === 'undefined' || !document.hidden
     if (!this.source && !this.closed && ws?.readyState === 0 && this.#stuckConnecting()) {
       // a connection that never opens (its handshake stuck in Cloudflare or behind a frozen NVR)
       // waited for ever, and held up every other one behind it: the full-size view sat on the
@@ -284,11 +322,11 @@ export class LiveTile {
       ws.onopen = null
       ws.close()
       onclose?.()
-    } else if (open && since >= STALL_RECONNECT_MS && this.source) {
+    } else if (open && canRecover && (health.recover || (!this.waiting && since >= STALL_RECONNECT_MS)) && this.source) {
       // the borrowed stream stopped: a connection of our own
       this.#unborrow()
       this.connect()
-    } else if (open && since >= STALL_RECONNECT_MS) {
+    } else if (open && canRecover && (health.recover || (!this.waiting && since >= STALL_RECONNECT_MS))) {
       // frames stopped on a socket that stays open: drop it (without waiting for its close
       // handshake, which may be stuck behind the backlog) and connect again with the back-off
       this.lastDataAt = 0
@@ -297,7 +335,7 @@ export class LiveTile {
       ws.onmessage = null
       ws.close()
       onclose?.()
-    } else if (open && since >= NO_VIDEO_MS) this.setStatus('no video')
+    } else if (open && health.stale && !this.waiting) this.setStatus(health.text)
     else if (s.fps > 0 && open) {
       this.setStatus('LIVE', true)
       const fps = `${s.fps} fps`
@@ -305,7 +343,7 @@ export class LiveTile {
     }
     this.setDot({
       hasVideo: Boolean(open && this.lastDataAt && s.fps > 0),
-      stale: Boolean(open && since >= NO_VIDEO_MS),
+      stale: Boolean(open && health.stale),
       // the live grid has no per-camera recording flag yet; a caller that knows can supply one
       recording: this.opts.recording?.(this)
     })
@@ -340,12 +378,15 @@ export class LiveTile {
   }
 
   connect() {
+    if (this.closed || this.suspended) return
     this.setStatus('connecting…')
     // On the Live page a channel on the page's one shared connection (live-mux.js), which behaves
     // like a socket here; elsewhere a socket of its own to /live, as always
     this.ws = liveSocket({ nvr: this.nvr, ch: this.ch, stream: this.streamType, fps: this.maxFps, h265: deviceH265 })
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
+    this.lastFrameAt = 0
+    this.healthySince = 0
     this.connectAt = this.now()
     // The frame trace (frame-trace.js), when the viewer runs one from the D overlay: each frame as it
     // arrives here, on this tile's socket or channel, and what happens to the connection. Otherwise
@@ -361,7 +402,6 @@ export class LiveTile {
       // a text is a note from the server, never a frame (live-wait.mjs: the sub-stream has no picture
       // yet); it is activity all the same, so the stall watchdog leaves the tile alone
       if (typeof e.data === 'string') return this.#note(e.data)
-      this.attempts = 0
       const buf = new Uint8Array(e.data)
       activeTrace()?.frame(this, buf)
       this.onMessage(buf)

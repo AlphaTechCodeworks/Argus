@@ -17,6 +17,10 @@
 //         N from 1 to 2^31-1. Attaches channel N as /live?nvr=&ch=&stream=&fps=&h265= would be
 //         attached. A channel N still open is ended first, silently.
 //     {"op":"unsub","id":N}   ends channel N; nothing is sent back
+//     {"op":"gridfps","fps":4|8|10|15|null}   this viewer's uniform grid frame rate (adaptive-live.mjs:
+//         every sub tile of this browser is converted to it; null/0/anything else is Auto). No id: it is
+//         per viewer, not per channel. Nothing is sent back; a remote viewer only (the server ignores a
+//         local one's). Not counted against the sub bucket.
 //     Binary frames, unknown ops and bad fields are ignored and counted: the 21st closes the socket
 //     1008. A "sub" with a good id but bad fields is also answered with "end" (1008 "bad channel or
 //     stream"), so its tile tries again at once instead of waiting for its stall watchdog. A message
@@ -98,7 +102,10 @@ function parse(data, isBinary) {
   } catch {
     return null
   }
-  if (!m || typeof m !== 'object' || Array.isArray(m) || !goodId(m.id)) return null
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return null
+  // the chosen grid fps is per viewer, not per channel: it carries no id (handled before the id check)
+  if (m.op === 'gridfps') return m
+  if (!goodId(m.id)) return null
   return m.op === 'sub' || m.op === 'unsub' ? m : null
 }
 
@@ -367,12 +374,13 @@ class MuxChannel {
  * @param {{ attach: (channel: MuxChannel, sub: { nvr: string, ch: number, stream: 0|1, fps: number|null, h265: boolean }, user: string) => void,
  *   session: () => string|null, now?: () => number, log?: (line: string) => void, who?: string }} o
  *   attach: what the /live path does with a socket (live-attach.mjs), refusing with channel.close(code, reason);
- *   session: the signed-in user of the upgrade request now, or null; who: "remote" or "local", for the log
+ *   session: the signed-in user of the upgrade request now, or null; who: "remote" or "local", for the log;
+ *   gridFps: told the viewer's chosen grid fps when a "gridfps" control message arrives (adaptive-live.mjs)
  * @returns {{ channels: Map<number, MuxChannel>, queued: () => number, quiet: () => boolean }} the open
  *   channels and the bytes queued on the socket, for tests and diagnostics; quiet: whether it has written
  *   nothing for STUCK_MS (nothing to write, or a peer that stopped reading), for its keep-alive
  */
-export function serveMux(ws, { attach, session, now = Date.now, log = (line) => console.log(line), who = '' }) {
+export function serveMux(ws, { attach, session, now = Date.now, log = (line) => console.log(line), who = '', gridFps = null }) {
   const channels = new Map() // id -> MuxChannel
   const subs = bucket(SUB_BURST, SUBS_PER_S, now)
   const messages = bucket(MESSAGE_BURST, MESSAGES_PER_S, now)
@@ -427,6 +435,12 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
     if (!messages.take()) return shut(1008, 'too many requests')
     const m = parse(data, isBinary)
     if (!m) return bad()
+    if (m.op === 'gridfps') {
+      // the viewer's uniform grid fps (adaptive-live.mjs applies it): advisory, no access decision, so
+      // no session re-check; a bad value reads as Auto there. Not counted a channel, nor as malformed.
+      try { gridFps?.(m.fps) } catch (e) { log(`[live-mux] grid fps failed: ${e.message}`) }
+      return
+    }
     if (m.op === 'unsub') {
       channels.get(m.id)?.end() // (an id the server already ended: nothing to do)
       return

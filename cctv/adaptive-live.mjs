@@ -214,6 +214,20 @@ export function isRemoteAddress(addr) {
 export const startLevel = () => 0
 
 /**
+ * The frame rates a remote viewer may pin the live grid to (the client's <select>): a uniform ceiling
+ * for every sub tile, the fast cameras capped down to it and a slower one left on its own rate. Not a
+ * level's rate: 10 is one of its own; the others happen to match levels. "Auto" (0) is today's
+ * behaviour and is not in the list.
+ */
+export const GRID_FPS_OPTIONS = Object.freeze([4, 8, 10, 15])
+
+/** A chosen grid fps as the server keeps it: one of GRID_FPS_OPTIONS, or 0 for Auto (absent, null, or anything else). */
+export function gridFpsOf(fps) {
+  const n = Number(fps)
+  return GRID_FPS_OPTIONS.includes(n) ? n : 0
+}
+
+/**
  * The next level for one viewer, from what its sockets showed this tick. Pure: the tests drive it.
  * @param {{ level: number, changedAt: number, cleanSince: number, climbAfterMs?: number, climbedAt?: number|null,
  *   pressedAt?: number|null }} v
@@ -252,6 +266,7 @@ class Viewer {
   constructor(key, now, level = startLevel()) {
     this.key = key
     this.level = level
+    this.gridFps = 0 // the uniform grid fps this browser chose (0: Auto), applied to every sub tile (#targetFps)
     this.changedAt = now
     this.cleanSince = now
     this.climbAfterMs = CLIMB_AFTER_MS // (nextLevel)
@@ -285,6 +300,7 @@ export class AdaptiveLive {
   constructor({ pool = new TranscodePool(maxPhoneStreams()), makeTranscoder, log = (l) => console.log(l), budgetBps = wanBudgetBps(), now = () => Date.now() } = {}) {
     Object.assign(this, { pool, makeTranscoder, log, budgetBps, now })
     this.viewers = new Map() // key -> Viewer
+    this.gridFpsBy = new Map() // key -> chosen grid fps (setGridFps): kept per browser so a later tile or a reconnect takes it up
     this.gone = new Map() // key -> { level, at }: viewers whose last socket closed, for REMEMBER_MS
     this.streams = new Map() // `${nvr}/${ch}/${type}@${level}` -> PhoneStream
     this.rates = new Map() // `${nvr}/${ch}/${type}` -> the frame rate last read or learnt of that camera stream (#rateOf)
@@ -306,12 +322,31 @@ export class AdaptiveLive {
     return key ? key[1] === 1 : entry.codec === 'h265'
   }
 
+  /**
+   * The frame rate a socket's stream is thinned to at this level: the level's own rate, lowered to the
+   * viewer's chosen grid fps for a sub (grid) tile -- a ceiling, never a raise. 0 means unlimited (the
+   * "full" level with no grid fps: every frame). A main keeps the level's rate always (grid only).
+   */
+  #targetFps(entry, level) {
+    const levelFps = LEVELS[level].fps
+    const g = entry.gridFps ?? 0
+    if (entry.type === 0 || !(g > 0)) return levelFps
+    // the full level caps nothing (fps 0): the chosen fps replaces "every frame"; otherwise the lower of the two
+    return levelFps > 0 ? Math.min(levelFps, g) : g
+  }
+
   /** Whether a socket's frames go through a conversion on this level. */
   #converts(entry, level) {
     // the camera's own stream where this device can play it: H.264 always; H.265 only for a device
     // that said it can (&h265=1) -- half the data of H.264 for the same picture. Otherwise an H.265
     // camera is converted at full too (every frame kept), never sent raw to a laptop that would show black.
-    if (level === 0) return this.#h265(entry) && !entry.clientH265
+    if (level === 0) {
+      // H.265 a browser cannot play is converted at full (every frame), as before. A grid fps chosen
+      // converts a sub tile faster than it down to that fps too (never a main: its own path is untouched).
+      if (this.#h265(entry) && !entry.clientH265) return true
+      if (entry.type !== 0 && entry.gridFps > 0) return !this.#passes(entry, level)
+      return false
+    }
     return !this.#passes(entry, level)
   }
 
@@ -326,10 +361,13 @@ export class AdaptiveLive {
    */
   #passes(entry, level) {
     if (entry.type === 0) return false // a main: a level always scales it down
-    if (entry.passAt?.level === level) return entry.passAt.passes
+    const target = this.#targetFps(entry, level)
+    if (!(target > 0)) return true // unlimited (full, Auto): nothing to thin, sent as it is
+    // decided once per level AND target (a grid fps changes the target without the level moving)
+    if (entry.passAt?.level === level && entry.passAt.target === target) return entry.passAt.passes
     const fps = this.#rateOf(entry)
     if (!(fps > 0)) return false
-    entry.passAt = { level, passes: keepEveryFor(fps, LEVELS[level].fps) === 1 }
+    entry.passAt = { level, target, passes: keepEveryFor(fps, target) === 1 }
     return entry.passAt.passes
   }
 
@@ -356,7 +394,11 @@ export class AdaptiveLive {
 
   /** A level's shared stream of a socket's camera stream, as this.streams holds it. */
   #keyFor(entry, level) {
-    return `${entry.nvrId}/${entry.ch}/${entry.type}@${LEVELS[level].id}`
+    const base = `${entry.nvrId}/${entry.ch}/${entry.type}@${LEVELS[level].id}`
+    // Auto (and every main) keeps today's key and its sharing. A grid fps makes its own shared stream
+    // per target fps, so a viewer who chose one never shares with (and so never changes) an Auto viewer's.
+    if (entry.type === 0 || !(entry.gridFps > 0)) return base
+    return `${base}#${this.#targetFps(entry, level)}`
   }
 
   /**
@@ -390,7 +432,8 @@ export class AdaptiveLive {
       // bigger than it went in (nvr-2/6 0.37 -> 0.47 Mbit/s; the stutter report: do not convert grid
       // sub-streams at level 15), and at full nothing is thinned.
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, now: this.now, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      // the rate to thin to: the level's, lowered to the viewer's grid fps for a sub tile (#targetFps)
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: this.#targetFps(entry, level), crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, now: this.now, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
       this.#made = s
     }
@@ -738,7 +781,8 @@ export class AdaptiveLive {
     // refused: a main whose viewer may no longer see it, found at a move (#mayMove), sent nothing more;
     // slotless: kept on the conversion it had, for want of a slot for its level's (#retarget);
     // parked: its page has stopped reading, and it is not moved to another stream (#lookAtStopped)
-    const entry = { ws, nvrId, ch, type, source, clientH265, codec, mayMain, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null, refused: false, slotless: false, parked: false }
+    // gridFps: the viewer's chosen uniform grid fps now (0: Auto), read by #targetFps for a sub tile
+    const entry = { ws, nvrId, ch, type, source, clientH265, codec, mayMain, gridFps: v.gridFps, stream: null, sent: 0, lastTs: null, after: null, afterAt: 0, switch: null, passAt: null, refused: false, slotless: false, parked: false }
     // Every frame to this socket, the replay as it joins too: a move waiting to switch goes over at the
     // new stream's start, and nothing older than it had goes after one (#pass). Then the bytes, for the
     // uplink budget and the Health page, and for what a plain /live socket has written (#written).
@@ -784,12 +828,68 @@ export class AdaptiveLive {
     this.#start()
   }
 
+  /**
+   * A remote viewer's chosen grid frame rate (live-mux.mjs control message): one uniform ceiling for
+   * every grid (sub) tile of this browser, or 0 for Auto (today's behaviour). Remembered per browser so
+   * a tile that attaches later or a socket that reconnects takes it up (#arrive, attach). Advisory, never
+   * an access decision, and only ever a ceiling: the controller still owns every step down (#targetFps).
+   */
+  setGridFps(viewerKey, fps) {
+    const g = gridFpsOf(fps)
+    if (g > 0) this.gridFpsBy.set(viewerKey, g)
+    else this.gridFpsBy.delete(viewerKey)
+    const v = this.viewers.get(viewerKey)
+    if (!v || v.gridFps === g) return
+    v.gridFps = g
+    for (const e of v.sockets) {
+      e.gridFps = g
+      e.passAt = null // the pass/convert decision now follows a different target
+    }
+    this.#applyGridFps(v)
+    this.log(`[adaptive] ${viewerKey.slice(0, 8)}: grid fps ${g > 0 ? `${g} fps` : 'Auto'} (every sub tile); ${this.#state(v, this.#link(v))}`)
+  }
+
+  /**
+   * A viewer's grid fps changed: every grid (sub) tile re-targets to the new uniform rate, the main
+   * stream left untouched (grid only). Two passes as a level change does (#move): the old target's
+   * streams given up first, each one left with nobody on it closed there and then (its slot), and only
+   * then every tile onto the new target -- so a tile that needs a slot of its own finds one freed, and a
+   * tile holding its picture switches at the camera's next keyframe (#retarget). A tile whose camera is
+   * slower than the pick goes back onto the camera's own stream; the level does not move.
+   */
+  #applyGridFps(v) {
+    const level = v.level
+    const subs = [...v.sockets].filter((e) => e.type !== 0 && !e.parked)
+    const left = new Set()
+    for (const e of subs) {
+      this.#cancelSwitch(e)
+      // kept: already where it belongs, or holding a picture for a smooth switch (#retarget handles it)
+      if (!e.stream || e.stream === e.source || e.stream === this.streams.get(this.#keyFor(e, level)) || e.lastTs !== null) continue
+      e.stream.remove(e.ws)
+      left.add(e.stream)
+      e.stream = null
+    }
+    for (const s of left) if (s.clients.size === 0 && !this.#awaited(s)) s.close()
+    const down = v.gridFps > 0 // a cap sends no more than before; Auto may send more (a climb's wait)
+    const holding = new Set(subs.filter((e) => e.stream && e.stream !== e.source && !e.stream.passthrough))
+    for (const e of subs) if (!holding.has(e)) this.#retarget(e, level, { down })
+    for (const e of holding) this.#retarget(e, level, { down })
+    v.grace = { from: this.now(), marks: this.#marks(v), opening: false }
+  }
+
   /** A viewer's first socket: a new viewer, at full; or one back within REMEMBER_MS, one level above where it left. */
   #arrive(key, now) {
     const was = this.gone.get(key)
     this.gone.delete(key)
-    if (!was || now - was.at > REMEMBER_MS) return new Viewer(key, now)
+    // its chosen grid fps, remembered per browser, carries across a reconnect (the client re-sends it too)
+    const gridFps = this.gridFpsBy.get(key) ?? 0
+    if (!was || now - was.at > REMEMBER_MS) {
+      const v = new Viewer(key, now)
+      v.gridFps = gridFps
+      return v
+    }
     const v = new Viewer(key, now, Math.max(0, was.level - 1))
+    v.gridFps = gridFps
     this.log(`[adaptive] ${key.slice(0, 8)}: back after ${((now - was.at) / 1000).toFixed(1)} s, at ${LEVELS[v.level].id} (it left at ${LEVELS[was.level].id})`)
     return v
   }

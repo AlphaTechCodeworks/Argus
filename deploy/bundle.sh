@@ -7,6 +7,7 @@
 # downloaded (the image already has every package).
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
+bash "$root/deploy/check-gui.sh"
 # the release's scripts run on Linux: CRLF line endings (core.autocrlf=true on this PC) would break
 # them. .gitattributes keeps deploy/ at LF; refuse to build if a CR slipped in anyway. (tr, not
 # grep: Git for Windows' grep does not match a lone CR reliably.)

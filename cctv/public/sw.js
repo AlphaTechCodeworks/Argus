@@ -15,18 +15,19 @@
 const CACHE = 'argus-app-v3'
 const WAIT_MS = 2500
 const APP_FILE = /\.(css|js|svg|png|webmanifest)$/
-// map tiles (map.js LAYERS): the street and satellite tile servers. Kept on the device so the map
-// opens at once and a flight between sites does not show blank squares the second time around. A
-// tile for a z/x/y never changes, so it is served from here whenever kept (cache-first).
-const TILE_CACHE = 'argus-tiles-v1'
-const TILE_HOSTS = new Set(['tile.openstreetmap.org', 'server.arcgisonline.com'])
-const TILE_MAX = 1500 // tiles kept; the oldest are dropped past this (keeps the store bounded)
+// Map tiles are NOT handled here. The street and satellite tile servers (map.js LAYERS) only serve
+// a tile when the browser sends a Referer: OpenStreetMap answers a request with none with a grey
+// "No referer sent. Access denied" placeholder (operations.osmfoundation.org/policies/tiles). A map
+// <img> sends the referer itself, but a fetch re-issued from the service worker drops it, so OSM
+// denied every tile and the map came up grey behind the worker (v1 then cached that placeholder and
+// served it for ever). Tiles load straight from the page now; the browser's own HTTP cache keeps
+// them. The old tile store is deleted on activate so no poisoned placeholder survives the update.
 
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', (e) =>
   e.waitUntil((async () => {
-    // earlier versions' kept files go
-    for (const k of await caches.keys()) if (k.startsWith('argus-app-') && k !== CACHE) await caches.delete(k)
+    // earlier versions' kept files go, and the poisoned map-tile store from v1
+    for (const k of await caches.keys()) if ((k.startsWith('argus-app-') && k !== CACHE) || k.startsWith('argus-tiles-')) await caches.delete(k)
     await self.clients.claim()
   })())
 )
@@ -35,34 +36,10 @@ self.addEventListener('fetch', (e) => {
   const req = e.request
   if (req.method !== 'GET') return
   const url = new URL(req.url)
-  // map tiles (cross-origin image servers): cache-first, so a tile seen once is instant after
-  if (TILE_HOSTS.has(url.hostname)) return e.respondWith(mapTile(req))
   if (req.mode === 'navigate') return
   if (url.origin !== location.origin || url.pathname.startsWith('/api/') || url.pathname === '/sw.js' || !APP_FILE.test(url.pathname)) return
   e.respondWith(url.searchParams.has('v') ? released(req, url) : fromNetworkElseKept(req))
 })
-
-/** A map tile: the kept copy if there is one, else the server's (kept for next time). Fail-safe:
- *  any trouble with the cache just goes to the network, so a tile never breaks on the cache layer. */
-async function mapTile(req) {
-  try {
-    const cache = await caches.open(TILE_CACHE)
-    const kept = await cache.match(req)
-    if (kept) return kept
-    const res = await fetch(req) // a cross-origin image: an opaque response (status unreadable)
-    cache.put(req, res.clone()).then(() => trimTiles(cache)).catch(() => {})
-    return res
-  } catch {
-    return fetch(req)
-  }
-}
-
-/** Keeps the tile store bounded: past TILE_MAX, drop the oldest (cache.keys is insertion order). */
-async function trimTiles(cache) {
-  const keys = await cache.keys()
-  if (keys.length <= TILE_MAX) return
-  for (const k of keys.slice(0, keys.length - TILE_MAX)) await cache.delete(k).catch(() => {})
-}
 
 /** A file of one release: the kept copy if there is one, else the server's (kept for next time). */
 async function released(req, url) {

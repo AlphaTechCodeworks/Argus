@@ -14,7 +14,7 @@ const { _test: notesTest } = await import('../camera-notes.mjs')
 const aa = await import('../public/auto-adjust.js')
 const {
   Convergence, SITE, afterCheck, cameraPosition, classifyStream, comparable, contradiction, displayCheck, exposureSeconds, figuresForLog, isSettled,
-  lightPeriod, mergePending, predictImpacts, settleMs, solarElevation, sortSuggestions, streamChangeOf, streamLine, suggest, tier, verdict
+  lightPeriod, mergePending, predictImpacts, resolutionChange, resolutionOptions, settleMs, solarElevation, sortSuggestions, streamChangeOf, streamLine, suggest, tier, verdict
 } = aa
 
 let failures = 0
@@ -321,6 +321,26 @@ const colourM = (extra = {}) => ({
   check('  never lowers anything', box(si({}), { usage: 0.99, bindShare: 1, enough: true }).every((x) => x.note || Object.entries(x.change).every(([k, v]) => k === 'enct' || k === 'res' || k === 'level' || v > siGate.current[k])))
   check('not a candidate / ignores its cap / still measuring: a note, no change', box(si({ candidate: false, why: 'the NVR records in manual mode' }))[0].note.includes('manual mode') && box(si({}), { usage: 1.9, bindShare: 1, enough: true })[0].note.includes('does not keep') && box(si({}), { usage: 0.95, bindShare: 1, enough: false, windowS: 8 }).some((x) => x.note && /8 of 20 s/.test(x.note)))
   check('streamChangeOf: one change, the larger cap wins', JSON.stringify(streamChangeOf([{ change: { QoI: 6144 } }, { change: { res: '3840x2160', QoI: 10240 } }, { change: { level: 'highest' } }])) === JSON.stringify({ QoI: 10240, res: '3840x2160', level: 'highest' }))
+}
+{
+  // the manual resolution dropdown (image-panel.js): pick any size the camera offers
+  const curSmall = { enct: 'h265', res: '1920x1080', fps: 20, QoI: 4096, level: 'higher', bitType: 'VBR' }
+  const qoiByRes = { '3840x2160': [2048, 4096, 8192, 16384], '2560x1440': [2048, 4096, 8192], '1920x1080': [1024, 2048, 4096, 6144], '1280x720': [512, 1024, 2048] }
+  const caps = { supEnct: ['h264', 'h265', 'h265p'], levels: siGate.caps.levels, resolutions: [{ res: '3840x2160', fps: 20 }, { res: '2560x1440', fps: 15 }, { res: '1920x1080', fps: 30 }, { res: '1280x720', fps: 30 }] }
+  const siPick = { candidate: true, why: null, current: curSmall, qoiList: qoiByRes['1920x1080'], qoiByRes, caps }
+  const opts = resolutionOptions(siPick)
+  const at = (r) => opts.find((o) => o.res === r)
+  check('resolutionOptions: widest first, current size marked selected', opts.map((o) => o.res).join(',') === '3840x2160,2560x1440,1920x1080,1280x720' && at('1920x1080').selected)
+  check('  a smaller size is disabled (the app does not lower resolution)', at('1280x720').disabled && /does not lower/.test(at('1280x720').reason))
+  check('  a bigger size whose top frame rate is below the current fps is disabled', at('2560x1440').disabled && /15 fps/.test(at('2560x1440').reason))
+  check('  the current size and a bigger one at the frame rate are both choosable', !at('3840x2160').disabled && !at('1920x1080').disabled)
+  check('  not a candidate: every size disabled with the reason', resolutionOptions({ ...siPick, candidate: false, why: 'the NVR records in manual mode' }).every((o) => o.disabled && /manual mode/.test(o.reason)))
+  const up = resolutionChange(siPick, '3840x2160')
+  check('resolutionChange up: res + cap scaled by the pixel ratio (4096 ×4 -> 16384), ticked, encoder restart, manual', up.change.res === '3840x2160' && up.change.QoI === 16384 && up.ticked === true && up.encoderRestart === true && up.rule === 'manual', JSON.stringify(up?.change))
+  check('  to the current size, a smaller size or an fps-blocked size: null', resolutionChange(siPick, '1920x1080') === null && resolutionChange(siPick, '1280x720') === null && resolutionChange(siPick, '2560x1440') === null)
+  const upTop = resolutionChange({ ...siPick, current: { ...curSmall, QoI: 16384 } }, '3840x2160')
+  check('  cap already at the top step: resolution only, no cap change', JSON.stringify(upTop.change) === JSON.stringify({ res: '3840x2160' }))
+  check('  the manual item merges into one POST change (res + raised cap)', JSON.stringify(streamChangeOf([up])) === JSON.stringify({ res: '3840x2160', QoI: 16384 }))
 }
 {
   const withFix = { ...colourM(), displayRange: 'full', selfCheck: { range: 'limited' }, coded: { le4: 0.001, le16: 0.05, ge235: 0.02, ge251: 0.01 } }

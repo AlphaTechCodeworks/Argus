@@ -102,9 +102,10 @@ export function follow(view, atMs, { edge = 0.9 } = {}) {
  * A window holding n whole steps shows n + 1 marks once both ends land on one, so the test is against
  * MAX_TICKS - 1 steps; counting steps instead is how a ladder ends up one label too crowded.
  */
-export function tickStep(spanMs) {
+export function tickStep(spanMs, maxTicks = MAX_TICKS) {
   const span = Math.max(num(spanMs, DAY_MS), 1)
-  return TICK_LADDER.find((step) => span / step <= MAX_TICKS - 1) ?? TICK_LADDER.at(-1)
+  const limit = clamp(Math.floor(num(maxTicks, MAX_TICKS)), 2, MAX_TICKS)
+  return TICK_LADDER.find((step) => span / step <= limit - 1) ?? TICK_LADDER.at(-1)
 }
 
 /**
@@ -114,10 +115,10 @@ export function tickStep(spanMs) {
  * The label carries seconds only when the step is under a minute; above that, consecutive labels would
  * otherwise read the same minute twice.
  */
-export function ticks(view, tzOffsetMs = 0) {
+export function ticks(view, tzOffsetMs = 0, maxTicks = MAX_TICKS) {
   const v = makeView(view)
   const tz = num(tzOffsetMs, 0)
-  const step = tickStep(v.spanMs)
+  const step = tickStep(v.spanMs, maxTicks)
   const out = []
   const first = Math.ceil((v.startMs + tz) / step) * step - tz
   for (let t = first; t <= v.endMs; t += step) {

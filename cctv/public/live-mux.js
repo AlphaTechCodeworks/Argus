@@ -10,6 +10,8 @@
 // Protocol v1 (server.mjs /live-mux is the other half):
 //   page -> server, text:   {"op":"sub","id":N,"nvr":"..","ch":0..255,"stream":0|1[,"fps":15][,"h265":0|1]}
 //                           {"op":"unsub","id":N}
+//                           {"op":"gridfps","fps":4|8|10|15|null}  this viewer's uniform grid fps (no id:
+//                              per viewer, not per channel); null is Auto. Re-sent on each fresh connection.
 //   server -> page, binary: the channel id (4 bytes, little-endian), then the frame exactly as /live sends it
 //   server -> page, text:   {"op":"end","id":N,"code":..,"reason":".."} (the server ended that channel)
 //   server -> page, text:   {"op":"wait","id":N,"why":".."} (that channel's sub-stream has no picture yet,
@@ -103,6 +105,22 @@ const optedOut = () => {
 /** The tiles this page opens from now on share one connection (on), or each open their own (off). */
 export function useMux(on) {
   enabled = Boolean(on)
+}
+
+// The live grid's one uniform frame rate for this browser (viewer.js), carried to the server as a
+// per-connection control message (live-mux.mjs): 0 is Auto. Re-sent whenever a fresh connection opens,
+// so a reconnect (or a server that forgot the viewer) keeps the choice without a page reload.
+const GRID_FPS_OPTIONS = [4, 8, 10, 15]
+let gridFps = 0
+function sendGridFps() {
+  if (sockOpen) send(JSON.stringify({ op: 'gridfps', fps: gridFps || null }))
+}
+/** This browser's grid frame rate: one of 4/8/10/15, or 0 (anything else) for Auto. Applies to remote viewers. */
+export function setGridFps(fps) {
+  const g = GRID_FPS_OPTIONS.includes(Number(fps)) ? Number(fps) : 0
+  if (g === gridFps) return
+  gridFps = g
+  sendGridFps() // tell the open connection now; a change to Auto (0) is sent too
 }
 
 /**
@@ -237,6 +255,7 @@ function connect() {
     tokensAt = lastRxAt
     messages = 0
     flush()
+    if (gridFps > 0) sendGridFps() // a non-Auto choice carries to this fresh connection (the server starts Auto)
     idle()
   }
   s.onmessage = (e) => {
@@ -438,6 +457,7 @@ export const _test = {
     subTokens = SUB_BURST
     tokensAt = 0
     messages = 0
+    gridFps = 0
     outbox.length = 0
     counts.frames = counts.dropped = 0
   }

@@ -23,7 +23,7 @@
 <body class="sites-page">
   <header>
     <div class="brand">
-      <h1>CCTV</h1>
+      <h1>Users &amp; access</h1>
     </div>
     <div class="account">
       <span id="build" class="build" title="Running build"></span>
@@ -86,10 +86,20 @@
   <dialog id="accessDlg" class="st-dialog ac-dialog" aria-labelledby="ac-title">
     <form id="acForm" method="dialog" autocomplete="off">
       <h2 id="ac-title">Access for <span id="ac-user"></span></h2>
-      <label class="st-check ac-admin"><input type="checkbox" id="ac-admin" /> <span><b>Admin</b> <small>everything, everywhere, and every setting</small></span></label>
+      <!-- role presets: one click fills the Admin switch, the areas and the camera tree (audit.js) -->
+      <div id="ac-presets" class="ac-presets" hidden><span class="ac-presets-label">Start from a role:</span></div>
+      <label class="st-check ac-admin"><input type="checkbox" id="ac-admin" /> <span><b>Full admin</b> <small>everything, everywhere, and every setting</small></span></label>
       <p id="ac-adminNote" class="st-notice" hidden></p>
+      <!-- which admin areas a partial admin may use; only a full admin may see or change this -->
+      <fieldset id="ac-caps" class="ac-caps" hidden>
+        <legend>Can administer</legend>
+        <p class="st-help">The admin areas this person may use. The server checks every one; a full admin has them all.</p>
+        <div id="ac-capList" class="ac-cap-list"></div>
+      </fieldset>
       <p id="ac-loading" class="st-meta" role="status" hidden>Reading the sites and cameras…</p>
       <div id="ac-body" class="ac-body" hidden>
+        <label class="st-check ac-map"><input type="checkbox" id="ac-map" /> <span><b>Map</b> <small>see the Map page (every site on one map); untick to hide it from this person</small></span></label>
+        <label class="st-check ac-share"><input type="checkbox" id="ac-share" /> <span><b>Share clips</b> <small>make public, time-limited links to exported clips (off by default)</small></span></label>
         <div class="ac-tools">
           <button type="button" id="ac-everything">Everything</button>
           <button type="button" id="ac-nothing" title="Takes every right away, the old ones listed below included">Nothing</button>

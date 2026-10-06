@@ -433,6 +433,9 @@ function streamView(ctx, item, sys, usage) {
     event: sys.recMode === 'manually' ? item.me : item.ae,
     current: cur,
     qoiList: choices,
+    // the bitrate choices for each offered size (current codec), so the panel's resolution picker
+    // can raise the cap in step with a bigger picture without a round trip per size
+    qoiByRes: Object.fromEntries(item.resolutions.map((r) => [r.res, qoiList(item, sys, cur.enct, r.res)])),
     digitalDefault: cur.res ? digitalDefault(item, cur.enct, cur.res) : null,
     // the page's "recommended range" for VBR
     bitrateRange: cur.bitType === 'VBR' && cur.res ? recommendedRange({ res: cur.res, level: cur.level, fps: cur.fps, enct: cur.enct }, choices.at(-1)) : null,
