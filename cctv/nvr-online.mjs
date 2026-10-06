@@ -91,3 +91,29 @@ export function parseRecStatus(xml) {
   }
   return byCh
 }
+
+/**
+ * queryNetworkNodeEncodeInfo -> Map<ch, { enct, supEnct, h265pCapable }> for each camera's MAIN stream,
+ * or null on no readable <response>. `enct` is the current main encoder ('h264' | 'h265' | 'h265p' |
+ * 'h265s' | ...), `supEnct` the encoders the camera offers on main, and `h265pCapable` whether it offers
+ * 'h265p' (H.265+). H.265+ is an encoder mode, not a distinct bitstream, so it is readable only here --
+ * never from the recorded video, which shows plain "H.265" either way. Pure; tested with real captures.
+ */
+export function parseMainEncoders(xml) {
+  const response = kid(parseXml(xml), 'response')
+  if (!response) return null
+  const byCh = new Map()
+  for (const item of itemsUnder(response, 'content')) {
+    const ch = chOfGuid(item.attrs?.id)
+    if (ch === null) continue
+    const enct = (kid(item, 'main')?.attrs?.enct ?? '').trim().toLowerCase()
+    const supEnct = (kid(item, 'mainCaps')?.attrs?.supEnct ?? '')
+      .toLowerCase()
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (!enct && supEnct.length === 0) continue // not a camera row with encode info
+    byCh.set(ch, { enct, supEnct, h265pCapable: supEnct.includes('h265p') })
+  }
+  return byCh
+}
