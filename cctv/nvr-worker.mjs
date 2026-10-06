@@ -18,6 +18,7 @@ const { Nvr, readConfig } = await import('./nvrs.mjs')
 const { refuseNewCalls, sdkStats } = await import('./sdk.mjs')
 const { spareWhile, startWatchdog } = await import('./watchdog.mjs')
 const { Recorder } = await import('./recorder.mjs')
+const { power, transparent } = await import('./nvr-xml.mjs')
 const { linkReset } = await import('./live.mjs')
 
 const id = process.env.CCTV_WORKER_NVR
@@ -293,11 +294,35 @@ process.on('message', (m) => {
     // the SDK printed that the NVR dropped this worker's links (worker-supervisor.mjs): viewers' new
     // streams wait while it reconnects them (live-pacer.mjs); the recorder's do not
     linkReset(id)
+  } else if (m?.t === MSG.REQ) {
+    answer(m)
   } else if (m?.t === MSG.STOP) shutdown()
 })
 process.on('disconnect', shutdown)
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
+/**
+ * One command from the main process, sent on this worker's own NVR login because the NVR refuses
+ * the main process a second one (nvr-xml.mjs viaWorker). It goes through the same transparent() /
+ * power() as any other call here, so it takes this NVR's lane and can never overlap another SDK
+ * call to it. `gen`: the session the main process believes it is talking to; null means any.
+ */
+async function answer(m) {
+  const reply = (r) => {
+    try {
+      if (process.connected) process.send({ t: MSG.RES, id: m.id, ...r })
+    } catch {} // (the parent is going: nobody is waiting)
+  }
+  try {
+    if (m.gen != null && m.gen !== nvr.gen) throw new Error(`${nvr.name} reconnected; nothing was sent`)
+    if (m.op === 'xml') reply({ ok: true, text: await transparent(nvr, m.url, m.xml, m.tag, { outBytes: m.outBytes }) })
+    else if (m.op === 'power') reply({ ok: true, accepted: await power(nvr, m.action === 'shutdown' ? 'shutdown' : 'reboot') })
+    else if (m.op === 'detail') reply({ ok: true, list: await nvr.cameraDetail() })
+    else throw new Error(`unknown request ${m.op}`)
+  } catch (e) {
+    reply({ ok: false, error: { message: e?.message ?? String(e), name: e?.name ?? 'Error', status: e?.status ?? null, extra: e?.extra ?? null } })
+  }
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /**
@@ -341,7 +366,7 @@ const sendStats = (sent) => {
     // loop: the longest pause of this worker's event loop in the last minute (loop-lag.mjs, /healthz);
     // mem: this process's memory, logged by the parent once an hour (proc-memory.mjs; perf report Task 0)
     const mainPlaying = [...nvr.streams.values()].filter((s) => s.streamType === 0 && s.state === 'playing' && s.gotVideo).map((s) => s.ch)
-    process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, streams: nvr.streams.size, refusals: recentRefusals(nvr.streams.values(), Date.now()), channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), subCap: { limit: cap.known(), held: heldNow(), parked: parkedNow(), full: fullNow() }, mainPlaying, sdk: sdkStats(), rec: recorder.status(), loop: { worstMs: loopWorstMs() }, mem: memoryNow() }, typeof sent === 'function' ? () => sent() : undefined)
+    process.send({ t: MSG.STATS, status: nvr.status, error: nvr.error, gen: nvr.gen, streams: nvr.streams.size, refusals: recentRefusals(nvr.streams.values(), Date.now()), channels: nvr.channels, codecSeen: Object.fromEntries(nvr.codecSeen), subCap: { limit: cap.known(), held: heldNow(), parked: parkedNow(), full: fullNow() }, mainPlaying, sdk: sdkStats(), rec: recorder.status(), loop: { worstMs: loopWorstMs() }, mem: memoryNow() }, typeof sent === 'function' ? () => sent() : undefined)
     return true
   } catch {
     return false
