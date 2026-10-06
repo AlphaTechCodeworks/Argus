@@ -379,7 +379,8 @@ function clockText(ms, tzOffsetMs) {
 
 /**
  * One server playback on one socket (see the top). Everything is injectable for tests.
- * The reader works as a chain of steps, one at a time (so one read in flight). A step belongs to an
+ * The reader works as a chain of steps, one at a time; the one read that is no step's (the next file's
+ * .idx, read ahead) takes turns with theirs (#turnFs): so one read in flight. A step belongs to an
  * epoch; a seek, scrub or restart starts a new epoch, and a step of an older one throws its result
  * away when it returns.
  */
@@ -485,7 +486,8 @@ export class ServerPlayback {
     this.endSent = false
     this.readers = new Map() // path -> SegmentReader, least recently used first
     this.opening = new Map() // path -> Promise<SegmentReader>: an open in flight (dedup: the next file read ahead and then at need share one)
-    this.aheadRead = null // the next file's index, read ahead (#readAheadNext): drained before the next step so a read never overlaps one (one read in flight)
+    this.reads = Promise.resolve() // the end of the session's last read: each one waits for it, whichever file it is of (#turnFs; one read in flight)
+    this.readerFs = this.#turnFs() // what the readers open their files with
     this.skipLogged = false
     this.lastIdleCheck = 0
     this.t0 = now()
@@ -1159,22 +1161,6 @@ export class ServerPlayback {
   #fill() {
     if (this.closed || this.busy || !this.#wantRead()) return
     this.busy = true
-    // A file read ahead (#readAheadNext) is a real read: let it drain before this step's read starts, so
-    // a scrub or seek arriving mid-prefetch never has two reads in flight at once (the task's bound).
-    const ahead = this.aheadRead
-    if (ahead) {
-      this.aheadRead = null
-      ahead.then(() => this.#runStep(), () => this.#runStep())
-    } else {
-      this.#runStep()
-    }
-  }
-
-  #runStep() {
-    if (this.closed) {
-      this.busy = false
-      return this.#closeReaders()
-    }
     const epoch = this.epoch
     const stale = () => this.closed || epoch !== this.epoch
     let run
@@ -1783,7 +1769,7 @@ export class ServerPlayback {
     const after = seg.open ? null : this.index.next(this.nvr.id, this.ch, seg.startMs)
     const nextStartMs = Number.isFinite(after?.startMs) ? after.startMs : null
     const prevEndMs = this.index.prev(this.nvr.id, this.ch, seg.startMs)?.endMs ?? null
-    const r = new SegmentReader({ path: seg.path, endMs: seg.endMs ?? null, growing: Boolean(seg.open), fs: this.fs, nextStartMs, prevEndMs })
+    const r = new SegmentReader({ path: seg.path, endMs: seg.endMs ?? null, growing: Boolean(seg.open), fs: this.readerFs, nextStartMs, prevEndMs })
     await r.open()
     if (this.closed) {
       // closed while this opened (a read-ahead in flight, or a jump that moved on): do not leak its fds
@@ -1806,15 +1792,41 @@ export class ServerPlayback {
     // silently at the join (F9). Faster speeds already read readAheadMs x speed ahead and consume the
     // next file's start with more lead; reverse and keyframe speeds jump file to file. Keeping it to
     // 1x also leaves those paths' index lookups exactly as they were.
-    if (this.closed || this.speed !== 1 || !this.cur.reader || this.aheadRead) return
+    if (this.closed || this.speed !== 1 || !this.cur.reader) return
     const next = this.index.next(this.nvr.id, this.ch, this.cur.seg?.startMs)
     if (!next || next.open || this.readers.has(next.path) || this.opening.has(next.path)) return
     this.readAhead(next.path) // the whole file into the OS cache (its own fs, uncounted): warms it, does not read for a frame
-    // its .idx, read ahead: held so #fill drains it before the next step's read -- the index read is a
-    // real read and must not overlap one (one read in flight, the task's bound). A failure surfaces at
-    // need (#openSeg logs the skip).
-    const p = this.#reader(next).catch(() => {}).finally(() => { if (this.aheadRead === p) this.aheadRead = null })
-    this.aheadRead = p
+    // Its reader, alongside the file playing: that file's steps do not wait for this one to open (a
+    // slow open would hold back every one of its frames, #turnFs), and its .idx, a real read, takes
+    // its turn among their reads (one read in flight, the task's bound). A failure surfaces at need
+    // (#openSeg logs the skip).
+    this.#reader(next).catch(() => {})
+  }
+
+  /**
+   * What the session's readers open their files with: this.fs, with every read taking its turn, so
+   * that one read is in flight whichever file it is of (the bound at the top). The steps are one at a
+   * time by themselves; the read that is no step's is the next file's .idx, read ahead while the file
+   * before it plays (#readAheadNext), and it goes between two of that file's reads, never alongside
+   * one (a scrub or seek arriving meanwhile reads after it).
+   * Only reads take turns. An open waits for nothing and nothing waits for an open: for a while the
+   * steps waited for the whole of the next file's opening instead (2-6 Oct 2026), and a file slow to
+   * open ahead then held back every frame of the one playing, from `started` on, and without a word
+   * (nothing is said before the first frame): the stall that opening ahead is there to prevent (F9),
+   * moved from the join to the start.
+   */
+  #turnFs() {
+    const turn = (read) => {
+      const r = this.reads.then(read)
+      this.reads = r.catch(() => {})
+      return r
+    }
+    return {
+      open: async (path, flags) => {
+        const fh = await this.fs.open(path, flags)
+        return { read: (...a) => turn(() => fh.read(...a)), stat: () => fh.stat(), close: () => fh.close() }
+      }
+    }
   }
 
   /** The start of the file after seg (its first keyframe), or null. */

@@ -55,9 +55,8 @@ jobs:
           #   sps, substreams                     read lab captures from /work that are not in the repo
           skip=" live-replay.test.mjs player.test.mjs playout-speed.test.mjs sps.test.mjs substreams.test.mjs "
           # Run and reported, but not gating until they are fixed on Linux:
-          #   rec-playback-wait  the slow-next-file and stale-read cases send no frames on the runner
           #   live-mux-socket    every check passes, then process.exit() does not return (capped at 60 s)
-          known=" rec-playback-wait.test.mjs live-mux-socket.test.mjs "
+          known=" live-mux-socket.test.mjs "
           pass=0
           fail=0
           skipped=0

@@ -398,9 +398,10 @@ const alerts = startAlerts({
       refusalsLast10Min: refusalsOf(n)
     })),
   // Only slots that actually hold a camera: an NVR reports all 32 of its channels whether or not
-  // anything is plugged into them, and empty slots are permanently "offline".
+  // anything is plugged into them, and empty slots are permanently "offline". By either login, as
+  // listNvrs above: an NVR counted online on its video login must not have every camera read offline.
   listCameras: () =>
-    allCameras()
+    allCameras({ anyLogin: true })
       .filter((c) => c.configured !== false)
       .map((c) => ({
         nvrId: c.nvr,
