@@ -12,7 +12,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'poll-'))
 process.env.CCTV_WORKER_FAKE_SDK = '1'
 process.env.CCTV_TEST_REFRESH_MS = '200'
 await import('./fake-sdk.mjs')
-const { Nvr, jittered } = await import('../nvrs.mjs')
+const { Nvr, allCameras, jittered, nvrs } = await import('../nvrs.mjs')
 
 const print = console.log.bind(console)
 console.log = () => {}
@@ -54,6 +54,22 @@ const base = polls()
 await sleep(1200)
 check('worker ready with a fresh list: main does not poll', polls() === base, `${polls() - base} polls`)
 check('liveOnline follows the worker', nvr.liveOnline === true)
+// The control login is refused while the worker's video login is up (shad, 2026-10-06: a P2P NVR at
+// its session limit). Health counts that NVR as online, so its cameras must be judged the same way,
+// or every one of them reads offline under an NVR the same page calls online. No await in between:
+// the status is put back before anything else can look at it.
+{
+  nvrs.set(nvr.id, nvr)
+  const was = nvr.status
+  nvr.status = 'offline'
+  const cam = (list, ch) => list.find((c) => c.nvr === nvr.id && c.ch === ch)?.online
+  check('control login down, video up: events still follow the control login', cam(allCameras(), 0) === false)
+  check('control login down, video up: health sees the camera online', cam(allCameras({ anyLogin: true }), 0) === true)
+  check('control login down, video up: a camera the NVR calls offline stays offline', cam(allCameras({ anyLogin: true }), 3) === false)
+  nvr.status = was
+  check('both logins up: health sees the camera online', cam(allCameras({ anyLogin: true }), 0) === true)
+  nvrs.delete(nvr.id)
+}
 stats = { ...stats, status: 'offline' }
 nvr.workerStats(stats)
 check('liveOnline: worker says offline', nvr.liveOnline === false)
@@ -70,6 +86,7 @@ await nvr.stop()
 
 // wiring
 const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')
+check('alerts and Health read cameras by either login', /listCameras: \(\) =>\s+allCameras\(\{ anyLogin: true \}\)/.test(src('server.mjs')))
 // (the definition, not the first call of it, which comes earlier in the file)
 check('worker STATS carry the camera list', /channels: nvr\.channels/.test(src('nvr-worker.mjs').split('const sendStats')[1] ?? ''))
 // (the /live attach steps are in live-attach.mjs since /live-mux shares them)
