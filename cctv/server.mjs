@@ -882,13 +882,19 @@ const handleRequest = async (req, res) => {
       if (!nvr.online || nvr.userId < 0) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
       let ok = false
       let err = null
+      let busy = null // power() turned it away with nothing sent (HttpError 503): its extra fields (retryAfterS)
       try {
         ok = await nvrPower(nvr, action)
       } catch (e) {
         err = e.message
+        if (e?.status === 503) busy = e.extra ?? {}
       }
       audit(auth.DATA_DIR, { user: who.user, action: `nvr-${action}`, target: id, ok, detail: err ?? undefined })
       console.log(`[admin] NVR ${action} ${id} (${nvr.name}) by ${who.user}: ${err ? `failed: ${err}` : ok ? 'accepted' : 'refused'}`)
+      // Nothing was sent: an earlier call to this NVR is still inside the SDK (nvr-xml.mjs xmlInside).
+      // Answered as the other busy refusals are (503 with retryAfterS, see playback.mjs), not as a
+      // failed reboot: the admin can simply try again.
+      if (busy) return sendJson(res, 503, { error: err, ...busy }, busy.retryAfterS > 0 ? { 'retry-after': String(busy.retryAfterS) } : {})
       if (err) return sendJson(res, 502, { error: `Could not ${action} ${nvr.name}: ${err}` })
       if (!ok) return sendJson(res, 502, { error: `${nvr.name} did not accept the ${action}` })
       return sendJson(res, 200, { id, action, message: `${nvr.name} is ${action === 'reboot' ? 'rebooting' : 'shutting down'} — it will drop off for a minute or two` })

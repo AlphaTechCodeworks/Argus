@@ -153,7 +153,17 @@ const release = () => {
   running--
   const next = waiting.shift()
   if (next) next.start()
-  for (const fn of settleListeners) fn()
+  // A listener that throws must not stop what follows release() in the native callback: the late
+  // handler (onLate) and the exclusive key's release. A skipped onLate leaves nvr-xml.mjs's record of
+  // the call inside the SDK set, and that NVR's XML calls and reboot refused until a restart; a
+  // skipped key release leaves every later call with that key waiting for ever.
+  for (const fn of settleListeners) {
+    try {
+      fn()
+    } catch (e) {
+      console.warn(`[sdk] a settle listener failed: ${e?.message ?? e}`)
+    }
+  }
 }
 
 // Diagnostics: SDK_TRACE=1, or a file "sdk-trace" in the data folder at start, logs every native
