@@ -46,9 +46,11 @@
         <input id="cmFilter" type="search" placeholder="Filter by NVR, camera, IP, model…" autocomplete="off" />
         <button id="cmRefresh" type="button">Refresh</button>
         <button id="cmXlsx" type="button">Download Excel</button>
+        <button id="cmOptimise" type="button" title="Move cameras to H.265 + VBR to save disk space">Optimise codecs…</button>
       </div>
     </div>
     <p id="cmStatus" class="hp-note" role="status">Loading the cameras…</p>
+    <div id="cmOptPanel" hidden></div>
     <div id="cmTable"></div>
     <p class="hp-note">Shows the latest camera inventory. It refreshes automatically each night (2 AM, site time); press Refresh to read every NVR right now. The NVRs do not report camera serial numbers, so those are not shown here.</p>
   </main>

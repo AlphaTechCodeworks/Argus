@@ -56,7 +56,7 @@ import {
   withNvrLock
 } from './nvr-xml.mjs'
 import { nvrs } from './nvrs.mjs'
-import { parseRecStatus } from './nvr-online.mjs'
+import { chOfGuid, parseRecStatus } from './nvr-online.mjs'
 import { normEnct, qualityList, recommendedRange } from './substreams.mjs'
 
 const QUERY_URL = 'queryNodeEncodeInfo'
@@ -509,6 +509,16 @@ async function apply(ctx, body) {
   const ack = Array.isArray(body.ack) ? body.ack : []
   if (body.ackToken !== token || !list.every((i) => ack.includes(i.key))) throw new HttpError(409, 'This change needs your confirmation', { needsAck: list, ackToken: token })
   if (nvr.degraded || nvr.gen !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
+  return writeChange(ctx, item, cur, next, list, { action, undoes })
+}
+
+/**
+ * Writes one planned change, waits, reads the channel back to verify, and logs the before and the
+ * result (so Undo can put it back). Returns { seq, status, message }. Shared by the single-camera
+ * apply above and the bulk optimiser below; the caller does the gating (seen/ack, retention) first.
+ */
+async function writeChange(ctx, item, cur, next, list, { action = 'change', undoes } = {}) {
+  const { nvr, chlId, gen, device, user } = ctx
   const seq = newSeq()
   // write-ahead: if the "before" can't be recorded, nothing is sent
   writeLog({ kind: 'change', seq, at: new Date().toISOString(), user, nvr: nvr.id, device, nvrName: nvr.name, chl: chlId, ch: ctx.ch + 1, name: ctx.name, action, undoes, from: pick(cur), to: pick(next), ack: list.map((i) => i.key), before: { main: item.main, an: item.an, ae: item.ae } })
@@ -543,6 +553,102 @@ async function apply(ctx, body) {
           : a.status === 'success' ? 'The NVR accepted it, but the camera kept its stream settings'
             : `Not changed: the NVR refused (${a.errorCode || a.status})`
   return { seq, status: result, message }
+}
+
+// ---- bulk optimiser: bring every camera to H.265 + VBR -------------------------------------------
+// The two storage wins that cost no picture quality: H.264 -> H.265 (about half the bitrate for the
+// same quality) and CBR -> VBR (a still scene stops paying its full rate). Both keep the bitrate cap,
+// so neither raises bandwidth nor shortens recordings, and both go through planChange like any other
+// change. Cameras already there are left alone; so are H.265+/smart ones -- those are already the most
+// compressed, and this never moves off a smart codec (which would make recordings bigger).
+
+/** The H.265 + VBR change for one camera, or why it is skipped. `online` from nvr.channels. */
+function optimisePlan(item, sys, online) {
+  const why = whyNot(item, sys, online)
+  if (why) return { skip: why }
+  const cur = current(item)
+  const change = {}
+  if (cur.enct === 'h264' && item.supEnct.some((e) => normEnct(e) === 'h265')) change.enct = 'h265'
+  if (cur.bitType === 'CBR' && (item.bitTypes.length === 0 || item.bitTypes.includes('VBR'))) change.bitType = 'VBR'
+  if (Object.keys(change).length === 0) return { skip: `already ${(cur.enct || '?').toUpperCase()} + ${cur.bitType || '?'}` }
+  try {
+    const { next } = planChange(item, sys, change)
+    const moves = KEYS.filter((k) => String(cur[k]) !== String(next[k])).map((k) => `${k} ${cur[k]}→${next[k]}`)
+    return { change, from: pick(cur), to: pick(next), moves }
+  } catch (e) {
+    return { skip: e.message.replace(/^Refused: /, '') }
+  }
+}
+
+/** Dry run: what the optimiser would change on this NVR, per camera. No writes. */
+async function optimiseList(nvr, gen) {
+  const sys = await readSystem(nvr, gen)
+  const all = await readAll(nvr, gen, true)
+  return all.items.map((item) => {
+    const ch = chOfGuid(item.id)
+    const online = ch === null ? true : nvr.channels.find((c) => c.ch === ch)?.online !== false
+    const p = optimisePlan(item, sys, online)
+    return { ch: ch === null ? null : ch + 1, name: item.name, moves: p.moves ?? null, from: p.from ?? null, to: p.to ?? null, skip: p.skip ?? null }
+  })
+}
+
+/** Applies the H.265 + VBR change to every eligible camera on this NVR, one at a time (under the NVR lock). */
+async function optimiseApply(ctx) {
+  const { nvr, gen } = ctx
+  const sys = await readSystem(nvr, gen)
+  const all = await readAll(nvr, gen, true)
+  const results = []
+  for (const listed of all.items) {
+    if (nvr.gen !== gen || nvr.stopped) break
+    const ch = chOfGuid(listed.id)
+    const online = ch === null ? true : nvr.channels.find((c) => c.ch === ch)?.online !== false
+    const plan0 = optimisePlan(listed, sys, online)
+    const row = { ch: ch === null ? null : ch + 1, name: listed.name }
+    if (!plan0.change) {
+      results.push({ ...row, status: 'skipped', message: plan0.skip })
+      continue
+    }
+    // a fresh read right before writing, in case the camera changed since the list read
+    let item, cur, next
+    try {
+      item = await readChannel(nvr, listed.id, gen)
+      ;({ cur, next } = planChange(item, sys, plan0.change))
+    } catch (e) {
+      results.push({ ...row, status: 'skipped', message: String(e?.message ?? e).replace(/^Refused: /, '') })
+      continue
+    }
+    if (sameKeys(cur, next)) {
+      results.push({ ...row, status: 'skipped', message: 'already set' })
+      continue
+    }
+    const res = await writeChange({ ...ctx, ch, chlId: listed.id, name: item.name }, item, cur, next, impactsOf(cur, next))
+    results.push({ ...row, status: res.status, message: res.message, moves: KEYS.filter((k) => String(cur[k]) !== String(next[k])).map((k) => `${k} ${cur[k]}→${next[k]}`) })
+  }
+  return results
+}
+
+/**
+ * POST /api/admin/nvrs/:id/streams/optimise  { confirm?: true }
+ * Without confirm: a dry-run plan (what would change, per camera). With confirm: applies it, one
+ * camera at a time under the NVR lock. Only ever H.264->H.265 and CBR->VBR (quality kept, cap kept).
+ * @returns {Promise<[number, any]>}
+ */
+export async function handleStreamOptimise(method, nvrId, readJson, user) {
+  try {
+    if (method !== 'POST') return [405, { error: 'Method not allowed' }]
+    const nvr = nvrs.get(nvrId)
+    if (!nvr) return [404, { error: 'Unknown NVR' }]
+    requireOnline(nvr)
+    const body = await readJson()
+    if (!isPlainObject(body)) throw new HttpError(400, 'The request must be a JSON object')
+    const gen = nvr.gen
+    if (body.confirm !== true) return [200, { nvr: nvr.id, name: nvr.name, dryRun: true, cameras: await optimiseList(nvr, gen) }]
+    const ctx = { nvr, gen, user, device: deviceOf(nvr) }
+    const results = await withNvrLock(nvr, 'H.265 + VBR optimise', () => optimiseApply(ctx))
+    return [200, { nvr: nvr.id, name: nvr.name, applied: true, results }]
+  } catch (e) {
+    return errorAnswer(e)
+  }
 }
 
 /**
@@ -595,4 +701,4 @@ export async function handleStreams(what, method, nvrId, ch, params, readJson, u
 }
 
 // for the offline tests (cctv/test/streams.test.mjs)
-export const _test = { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, impactsOf, undoable, recommendedRange, retentionRefusal, LOG_FILE, TIMING }
+export const _test = { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, impactsOf, undoable, recommendedRange, retentionRefusal, optimisePlan, LOG_FILE, TIMING }
