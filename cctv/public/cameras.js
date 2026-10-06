@@ -66,6 +66,7 @@ function render(rows, filter) {
 
 let rows = []
 let lastTotal = 0
+let lastBody = null // the last report, for the optimiser's NVR list
 
 async function load({ fresh = false } = {}) {
   $('cmStatus').hidden = false
@@ -82,6 +83,7 @@ async function load({ fresh = false } = {}) {
     $('cmStatus').textContent = body?.error ?? 'The report could not be loaded.'
     return
   }
+  lastBody = body
   rows = flatten(body)
   const cams = rows.filter((r) => !r.offline).length
   const online = (body.nvrs ?? []).filter((n) => n.nvrOnline).length
@@ -106,5 +108,102 @@ $('cmRefresh').addEventListener('click', () => load({ fresh: true }))
 $('cmXlsx').addEventListener('click', () => {
   window.location = '/api/admin/cameras.xlsx'
 })
+
+// ---- optimise codecs: bulk H.265 + VBR (POST /api/admin/nvrs/:id/streams/optimise) ----
+const btn = (text, onClick) => {
+  const b = el('button', '', text)
+  b.type = 'button'
+  b.style.marginRight = '8px'
+  b.style.marginTop = '10px'
+  b.addEventListener('click', onClick)
+  return b
+}
+const optClear = () => {
+  $('cmOptPanel').hidden = true
+  $('cmOptPanel').replaceChildren()
+}
+async function optPost(nvrId, confirm) {
+  const res = await fetch(`/api/admin/nvrs/${encodeURIComponent(nvrId)}/streams/optimise`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(confirm ? { confirm: true } : {})
+  }).catch(() => null)
+  const body = await res?.json().catch(() => null)
+  return { ok: Boolean(res?.ok), body }
+}
+function optTable(head, rows) {
+  const t = el('table', 'al-table rp-table')
+  const thead = el('thead')
+  const htr = el('tr')
+  for (const h of head) htr.append(el('th', '', h))
+  thead.append(htr)
+  const tb = el('tbody')
+  for (const r of rows) {
+    const tr = el('tr')
+    for (const c of r) tr.append(el('td', '', c == null ? '' : String(c)))
+    tb.append(tr)
+  }
+  t.append(thead, tb)
+  return t
+}
+async function startOptimise() {
+  const panel = $('cmOptPanel')
+  const online = (lastBody?.nvrs ?? []).filter((n) => n.nvrOnline)
+  panel.hidden = false
+  if (!online.length) {
+    panel.replaceChildren(el('p', 'hp-note', 'No NVRs are online to optimise.'))
+    return
+  }
+  $('cmOptimise').disabled = true
+  panel.replaceChildren(el('p', 'hp-note', `Planning H.265 + VBR changes across ${online.length} NVR${online.length === 1 ? '' : 's'}… (reading each camera's encoder settings)`))
+  const plans = []
+  for (const n of online) {
+    const { ok, body } = await optPost(n.nvr, false)
+    if (ok && Array.isArray(body?.cameras)) {
+      const cams = body.cameras.filter((c) => Array.isArray(c.moves) && c.moves.length)
+      if (cams.length) plans.push({ nvr: n.nvr, name: n.nvrName || n.nvr, cams })
+    }
+  }
+  $('cmOptimise').disabled = false
+  renderPlan(plans)
+}
+function renderPlan(plans) {
+  const panel = $('cmOptPanel')
+  const total = plans.reduce((t, p) => t + p.cams.length, 0)
+  const box = el('section', 'se-section')
+  box.append(el('h2', '', 'Optimise codecs to H.265 + VBR'))
+  if (total === 0) {
+    box.append(el('p', 'hp-note', "Nothing to change — every online camera is already on H.265/H.265+ (and VBR), or can't be upgraded."))
+    box.append(btn('Close', optClear))
+    panel.replaceChildren(box)
+    return
+  }
+  const count = (pred) => plans.reduce((t, p) => t + p.cams.filter((c) => c.moves.some(pred)).length, 0)
+  const h264 = count((m) => m.startsWith('enct h264'))
+  const cbr = count((m) => m.startsWith('bitType CBR'))
+  box.append(el('p', 'st-help', `${total} camera${total === 1 ? '' : 's'} across ${plans.length} NVR${plans.length === 1 ? '' : 's'} would change (H.264→H.265: ${h264}, CBR→VBR: ${cbr}). The bitrate cap and picture quality are kept — these only save space. Each camera's encoder restarts briefly (a few seconds without video/recording). Already-optimal and H.265+ cameras are left alone.`))
+  box.append(optTable(['NVR', 'Ch', 'Camera', 'Change'], plans.flatMap((p) => p.cams.map((c) => [p.name, c.ch, c.name, c.moves.join(', ')]))))
+  box.append(btn(`Apply to ${total} camera${total === 1 ? '' : 's'}`, () => applyPlan(plans)), btn('Cancel', optClear))
+  panel.replaceChildren(box)
+}
+async function applyPlan(plans) {
+  const panel = $('cmOptPanel')
+  panel.replaceChildren(el('p', 'hp-note', 'Applying, one camera at a time… (this can take a while)'))
+  const results = []
+  for (const p of plans) {
+    const { ok, body } = await optPost(p.nvr, true)
+    if (ok && Array.isArray(body?.results)) for (const r of body.results) results.push({ nvr: p.name, ...r })
+    else results.push({ nvr: p.name, status: 'failed', message: body?.error || 'request failed' })
+  }
+  const done = results.filter((r) => r.status === 'done').length
+  const notDone = results.filter((r) => r.status !== 'done' && r.status !== 'skipped')
+  const box = el('section', 'se-section')
+  box.append(el('h2', '', 'Optimise results'))
+  box.append(el('p', 'st-help', `${done} applied${notDone.length ? `, ${notDone.length} did not take` : ''}. Press Refresh to see the new settings. Any change can be undone from the camera's stream settings.`))
+  if (notDone.length) box.append(optTable(['NVR', 'Ch', 'Camera', 'Result'], notDone.map((r) => [r.nvr, r.ch, r.name, r.message || r.status])))
+  box.append(btn('Close & refresh', () => { optClear(); load({ fresh: false }) }))
+  panel.replaceChildren(box)
+}
+$('cmOptimise').addEventListener('click', startOptimise)
 
 load()
