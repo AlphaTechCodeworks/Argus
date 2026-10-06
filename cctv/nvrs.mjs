@@ -1495,9 +1495,13 @@ export const startNvrs = () => {
 /**
  * Every camera. live: `online` follows the NVR's video login (the worker's, up in ~4.5 s after a
  * start) for the Live grid and the warm-up; otherwise the control login, as before, for events
- * (camera-offline), alarms and health: a worker restarting must not read as every camera going offline.
+ * (camera-offline) and alarms: a worker restarting must not read as every camera going offline.
+ * anyLogin: either login will do, the rule Health and the nvr-offline alert use for the NVR itself
+ * (info() above). A P2P NVR at its session limit keeps refusing the control login while the worker
+ * streams; judged by the control login alone, every camera of an NVR the page calls online read
+ * offline (shad, 2026-10-06: "12 cameras offline", all of them showing video).
  */
-export const allCameras = ({ live = false } = {}) =>
+export const allCameras = ({ live = false, anyLogin = false } = {}) =>
   [...nvrs.values()]
     .sort((a, b) => a.site.localeCompare(b.site) || a.name.localeCompare(b.name))
     .flatMap((nvr) =>
@@ -1508,7 +1512,7 @@ export const allCameras = ({ live = false } = {}) =>
         ch: c.ch,
         name: c.name,
         // live: the video login (Live waited for the control login, one NVR at a time, up to ~31 s)
-        online: c.online && (live ? nvr.liveOnline : nvr.online),
+        online: c.online && (anyLogin ? nvr.online || nvr.liveOnline : live ? nvr.liveOnline : nvr.online),
         // false for an empty channel slot on the NVR: there is no camera there to be offline
         configured: c.configured !== false,
         model: c.model || null,
