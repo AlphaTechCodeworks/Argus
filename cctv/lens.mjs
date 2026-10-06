@@ -46,6 +46,7 @@ import {
   withNvrLock
 } from './nvr-xml.mjs'
 import { nvrs } from './nvrs.mjs'
+import { xmlDegraded, xmlGen } from './xml-session.mjs'
 
 const QUERY_URL = 'queryCameraLensCtrlParam'
 const EDIT_URL = 'editCameraLensCtrlParam'
@@ -146,7 +147,7 @@ async function save(ctx, lens, IrchangeFocus, { action, undoes, body }) {
   if (list.length && !(body.ackToken === token && list.every((i) => Array.isArray(body.ack) && body.ack.includes(i.key)))) {
     throw new HttpError(409, 'This change needs your confirmation', { needsAck: list, ackToken: token })
   }
-  if (nvr.degraded || nvr.gen !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
+  if (xmlDegraded(nvr) || xmlGen(nvr) !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
   const seq = newSeq()
   const from = { IrchangeFocus: lens.IrchangeFocus, timeInterval: lens.timeInterval }
   const to = { IrchangeFocus, timeInterval: lens.focusType === 'auto' ? lens.timeInterval : 0 }
@@ -176,7 +177,7 @@ async function save(ctx, lens, IrchangeFocus, { action, undoes, body }) {
 /** OneKeyFocus, then always Stop (the page's button: mouse down, mouse up). */
 async function focus(ctx) {
   const { nvr, chlId, gen, device, user } = ctx
-  if (nvr.degraded || nvr.gen !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
+  if (xmlDegraded(nvr) || xmlGen(nvr) !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
   const seq = newSeq()
   writeLog({ kind: 'action', seq, at: new Date().toISOString(), user, nvr: nvr.id, device, chl: chlId, ch: ctx.ch + 1, name: ctx.name, action: 'focus' })
   console.log(`[lens] ${nvr.id} ch${ctx.ch + 1} "${ctx.name}": focus now (by ${user})`)
@@ -215,7 +216,7 @@ export async function handleLens(method, nvrId, ch, readJson, user) {
   try {
     const { nvr, chlId, name } = cameraOf(nvrs, nvrId, ch)
     requireOnline(nvr)
-    const ctx = { nvr, ch, chlId, name, gen: nvr.gen, user, device: deviceOf(nvr) }
+    const ctx = { nvr, ch, chlId, name, gen: xmlGen(nvr), user, device: deviceOf(nvr) }
     if (method === 'GET') return [200, { lens: lensView(ctx, await readLens(nvr, chlId, ctx.gen)) }]
     if (method !== 'POST') return [405, { error: 'Method not allowed' }]
     const body = await readJson()

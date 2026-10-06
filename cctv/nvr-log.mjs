@@ -7,6 +7,7 @@
 //   GET /api/admin/nvrs/:id/log?types=LOG_ALARM_INTELLIGENT,LOG_ALARM_MOTION&from=<ms>&to=<ms>&page=1
 //     -> { total, items: [{ type, atMs, ch, camera, user, content }] }   (admins)
 import { XML_HEADER, kid, kids, parseXml } from './xml.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 export const QUERY_LOG = 'queryLog'
 export const LOG_TYPES = Object.freeze(['LOG_ALARM_MOTION', 'LOG_ALARM_SENSOR', 'LOG_ALARM_INTELLIGENT', 'LOG_ALARM_FACE_MATCH', 'LOG_ALARM_VEHICLE_PLATE_MATCH', 'LOG_ALARM_ALARMOUTPUT', 'LOG_ALARM_OCCLUSION', 'LOG_ALARM_ALL', 'LOG_EXCEPTION_ALL', 'LOG_EXCEPTION_IPC_DISCONNECT', 'LOG_OPERATE_ALL'])
@@ -67,7 +68,7 @@ export async function handleNvrLog(method, pathname, search, { nvrs, admin, quer
   if (method !== 'GET') return [405, { error: 'Method not allowed' }]
   const nvr = nvrs.get(decodeURIComponent(m[1]))
   if (!nvr) return [404, { error: 'Unknown NVR' }]
-  if (!nvr.online) return [409, { error: `${nvr.name} is offline` }]
+  if (!xmlOnline(nvr)) return [409, { error: `${nvr.name} is offline` }]
   const p = new URLSearchParams(search)
   const toMs = Number(p.get('to')) || now
   const fromMs = Number(p.get('from')) || toMs - 86_400_000

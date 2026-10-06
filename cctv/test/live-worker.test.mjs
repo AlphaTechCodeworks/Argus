@@ -290,9 +290,27 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   check('supervisor: after the restart the viewer restarts on a keyframe', ws.got[before]?.[0] === 1)
   clearInterval(poll)
   check('supervisor: stats arrive', await until(() => sup.stats() !== null, 7000))
+  // requests: a command the main process sends on the worker's own NVR login (worker-requests.mjs)
+  check('request: STATS carry the session generation', Number.isInteger(sup.stats().gen), JSON.stringify(sup.stats().gen))
+  check('request: the supervisor knows when this worker started', sup.spawnedAt() > 0 && sup.spawnedAt() <= Date.now())
+  const xmlReq = { op: 'xml', url: 'queryTimeCfg', xml: '<request/>', tag: 'test', outBytes: 1024 }
+  const good = await sup.request({ ...xmlReq, gen: sup.stats().gen }).catch((e) => e)
+  check('request: an XML command is answered by the worker', good?.ok === true && typeof good.text === 'string', good?.message ?? JSON.stringify(good))
+  const stale = await sup.request({ ...xmlReq, gen: sup.stats().gen + 100 }).catch((e) => e)
+  check('request: a command from an older session is refused', stale instanceof Error && /reconnected; nothing was sent/.test(stale.message), stale?.message)
+  const anyGen = await sup.request({ ...xmlReq, gen: null }).catch((e) => e)
+  check('request: no generation named means any session', anyGen?.ok === true)
+  const pw = await sup.request({ op: 'power', action: 'reboot', gen: sup.stats().gen }).catch((e) => e)
+  check('request: reboot is answered', pw?.ok === true && pw.accepted === true, pw?.message ?? JSON.stringify(pw))
+  const det = await sup.request({ op: 'detail' }).catch((e) => e)
+  check('request: camera detail is not something the worker does', det instanceof Error && /unknown request detail/.test(det.message), det?.message)
+  const odd = await sup.request({ op: 'nonsense' }).catch((e) => e)
+  check('request: an unknown request is refused', odd instanceof Error && /unknown request nonsense/.test(odd.message), odd?.message)
   const last = sup._child()
   await sup.stop()
   check('supervisor: stop ends the worker', last.exitCode !== null || last.signalCode !== null)
+  const gone = await sup.request(xmlReq).catch((e) => e)
+  check('request: refused once the worker has stopped', gone?.name === 'WorkerNotReady', gone?.name)
   await new Promise((r) => setTimeout(r, 2500))
   check('supervisor: no restart after stop', sup._child() === last && (last.exitCode !== null || last.signalCode !== null))
 }
@@ -359,6 +377,13 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   await stopNvrs()
   check('app: stopNvrs ends the worker', newChild.exitCode !== null || newChild.signalCode !== null)
   process.stdout.write = realWrite
+}
+
+{
+  const { readFileSync } = await import('node:fs')
+  const sup = readFileSync(new URL('../worker-supervisor.mjs', import.meta.url), 'utf8')
+  const exit = sup.split("c.on('exit'")[1] ?? ''
+  check('request: a worker that exits fails the requests still waiting, before anything else', /^[^\n]*\s+if \(c === child\) requests\.failAll\(/.test(exit), exit.slice(0, 120))
 }
 
 print(failures ? `\n${failures} failed` : '\nall passed')

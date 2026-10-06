@@ -147,6 +147,7 @@ import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
 import { loopWorstMs } from './loop-lag.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 const {
   HTTP_PORT = '8080',
@@ -395,7 +396,8 @@ const alerts = startAlerts({
       cooling: nvrCooling(n.id),
       lastContactMs: lastContactOf(n.id),
       clockSkewMs: freshSkewMs(n),
-      refusalsLast10Min: refusalsOf(n)
+      refusalsLast10Min: refusalsOf(n),
+      borrowing: n.borrowing
     })),
   // Only slots that actually hold a camera: an NVR reports all 32 of its channels whether or not
   // anything is plugged into them, and empty slots are permanently "offline". By either login, as
@@ -843,7 +845,7 @@ const handleRequest = async (req, res) => {
       }
       const nvr = nvrs.get(id)
       if (!nvr) return sendJson(res, 404, { error: 'No such NVR' })
-      if (!nvr.online) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
+      if (!xmlOnline(nvr)) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
       try {
         if (url.searchParams.get('discover')) {
           // ?cmds=a,b,c asks this NVR about command names we are still hunting for -- the disk
@@ -880,7 +882,7 @@ const handleRequest = async (req, res) => {
       const action = body.action === 'shutdown' ? 'shutdown' : body.action === 'reboot' ? 'reboot' : null
       if (!action) return sendJson(res, 400, { error: 'action must be "reboot" or "shutdown"' })
       if (body.confirm !== true) return sendJson(res, 400, { error: `${action} needs confirm: true` })
-      if (!nvr.online || nvr.userId < 0) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
+      if (!xmlOnline(nvr)) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
       let ok = false
       let err = null
       let busy = null // power() turned it away with nothing sent (HttpError 503): its extra fields (retryAfterS)

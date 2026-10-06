@@ -74,6 +74,8 @@ export function buildSnapshot(deps, nowMs) {
       via: n.via ?? null,
       streams: Number.isFinite(n.streams) ? n.streams : null,
       cooling: Boolean(n.cooling),
+      // settings go out on the worker's login: the NVR refuses the main process a second one
+      borrowing: Boolean(n.borrowing),
       lastContactMs: Number.isFinite(n.lastContactMs) ? n.lastContactMs : null,
       // Read in the background, at most every 10 minutes (nvr-disks.mjs); null until the first
       // read has happened. The alert rules read `storage` and nothing else here.
