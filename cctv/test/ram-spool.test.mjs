@@ -102,6 +102,50 @@ check('and memory is freed', !existsSync(join(dir, 'n1', '0', '2026-09-26', '13'
   check('a name already on the drive: the copy is kept beside it, both indexed', !r3.error && readFileSync(kept, 'utf8') === 'from-memory' && readFileSync(onDrive, 'utf8') === 'from-drive' && rows.has(kept) && rows.has(onDrive), JSON.stringify(r3))
 }
 
+// ---- edge branches and the "never touch a file outside the spool folder" guards
+{
+  // a fresh fake index for these, isolated from the rows above
+  const mkIndex = () => {
+    const r = new Map()
+    return {
+      rows: r,
+      locationUse: (loc) => { const xs = [...r.values()].filter((x) => x.loc === loc); return { bytes: xs.reduce((a, x) => a + x.bytes, 0), segments: xs.length } },
+      oldest: (limit, { loc }) => [...r.values()].filter((x) => x.loc === loc).sort((a, b) => a.startMs - b.startMs).slice(0, limit),
+      remove(p) { r.delete(p) },
+      has: (p) => r.has(p),
+      moveSegment(o, n, loc) { const row = r.get(o); r.delete(o); r.set(n, { ...row, path: n, loc }) }
+    }
+  }
+
+  check('a negative CCTV_RAM_SPOOL_GB falls back to the default quarter of RAM', spoolCapBytes({ CCTV_RAM_SPOOL_GB: '-5' }, 16 * 1024 ** 3) === 4 * 1024 ** 3)
+  check('no /dev/shm (its parent is missing): no memory location', spoolLocation({ index, platform: 'linux', cap: 1000, dir: join(base, 'no-such', 'spool') }) === null)
+
+  // trimSpool must drop in-dir footage to make room but never unlink a row whose path escapes the spool
+  {
+    const ix = mkIndex()
+    const outside = join(base, 'outside-trim.h265')
+    writeFileSync(outside, 'keep me')
+    ix.rows.set(outside, { path: outside, loc: SPOOL_ID, startMs: -100, bytes: 100 }) // oldest, but not under dir
+    const inside = join(dir, 'n1', '0', 'trimmable.h265')
+    mkdirSync(join(dir, 'n1', '0'), { recursive: true })
+    writeFileSync(inside, 'drop me')
+    ix.rows.set(inside, { path: inside, loc: SPOOL_ID, startMs: 0, bytes: 900 })
+    const r = await trimSpool({ index: ix, cap: 1000, dir, freeOf: () => MIN_FREE_BYTES * 4 }) // 1000 held = full
+    check('trimSpool drops the in-dir file but never the one outside the spool', r.removed === 1 && !existsSync(inside) && existsSync(outside) && ix.has(outside) && readFileSync(outside, 'utf8') === 'keep me', JSON.stringify(r))
+  }
+
+  // drainSpool must never copy or unlink a row whose path escapes the spool
+  {
+    const ix = mkIndex()
+    const outside = join(base, 'outside-drain.h265')
+    writeFileSync(outside, 'stay')
+    ix.rows.set(outside, { path: outside, loc: SPOOL_ID, startMs: 1, bytes: 5 })
+    const r = await drainSpool({ index: ix, target: drive, dir })
+    const wouldBe = join(drive.path, 'outside-drain.h265') // if the guard let it through, roughly where it would land
+    check('drainSpool leaves a file outside the spool untouched (not copied, not removed, row kept)', r.moved === 0 && existsSync(outside) && ix.has(outside) && !existsSync(wouldBe), JSON.stringify(r))
+  }
+}
+
 rmSync(base, { recursive: true, force: true })
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

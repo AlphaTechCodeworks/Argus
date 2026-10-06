@@ -326,9 +326,10 @@ const refs = [] // the old scan's holes at each time the new one ran
 // ---- 3. a whole tick: scan, pick, pull ------------------------------------------------------------------
 {
   const rounds = []
+  const tickTimes = [] // the times the ticks ran at; their refs are taken below, after the rewind
   for (let round = 0; round < 3; round++) {
     nowBox.t = NOW + 2 * HOUR + (round + 2) * 34_000
-    refs.push(oldScan(nowBox.t)) // what the old tick's scan would have noted at this time
+    tickTimes.push(nowBox.t)
     const job = makeJob({ cfg: { maxGapMinutes: 1 } }) // (a minute a pull: a longer hole is left in part)
     job.running = true
     legs.length = 0
@@ -354,6 +355,15 @@ const refs = [] // the old scan's holes at each time the new one ran
   check('... the old scan would now note the pulled rows\' leftovers again as holes of their own; the new one leaves them to their rows', pulledRows.length > 0 && onlyOld.every(inAPulledRow), `${pulledRows.length} rows pulled; ${onlyOld.length} leftovers the old scan would note: ${onlyOld.slice(0, 3).join(' ')}`)
   // the rest of this file compares with the old scan on the index as it was built
   raw.exec('DELETE FROM segments WHERE source IS NOT NULL')
+  // Only now take each tick's ref, on the rewound index. Taking them inside the loop (before the
+  // rewind) folded the pulls' leftover split-holes into `refs`, which the incremental scan never
+  // records (behind the marks; checked just above) -- and how many ticks ran here is timing-driven
+  // (the best-of-3 perf retry breaks as soon as a round is quiet). That made the later equality
+  // assertions (sections 4-5) fail about one run in three on whichever leftover a second or third
+  // round had snapshotted. Taken here, every tick-time ref is the old scan on the index as built,
+  // exactly as every other section's ref is, so the union the later sections compare against holds
+  // regardless of how many rounds ran.
+  for (const tt of tickTimes) refs.push(oldScan(tt))
 }
 
 // ---- 4. a restart goes on from the marks ------------------------------------------------------------------
@@ -451,7 +461,9 @@ const refs = [] // the old scan's holes at each time the new one ran
   sameHoles('... and the ledger ends up exactly the old scan\'s', ledger(), refs[0])
 }
 
-// ---- 9. the one place the old scan was wrong: a long file begun over an hour before the window -----------
+// ---- 9. a long file begun over an hour before the window: the scan finds the hole after it. Until the
+//         MAX_SEGMENT_MS fix (rec-index.mjs) segments() could not see such a file and only scanSpans() caught
+//         it; segments() now consults segments_long too, so the segments()-based scan agrees. ------------
 {
   const ix = openRecIndex(join(DATA, 'edge.db'))
   const from = NOW - RET_DAYS * DAY - SCAN_MARGIN_MS
@@ -462,7 +474,7 @@ const refs = [] // the old scan's holes at each time the new one ran
   await job.scan()
   const rows = ix.backfillList({})
   const old = findGaps({ nvr: 'e', ch: 0, now: NOW, fromMs: from, toMs: NOW, segments: ix.segments('e', 0, from, NOW), gapRows: [] })
-  check('a file over an hour long that began before the window: the hole after it is found (the old scan did not see the file), older than the NVR keeps, so permanent', old.every((g) => g.fromMs !== from + HOUR) && rows.some((r) => r.fromMs === from + HOUR && r.toMs === from + HOUR + 5 * MIN && r.state === 'permanent'), J(rows.map((r) => [r.fromMs - from, r.toMs - from, r.state])))
+  check('a file over an hour long that began before the window: the hole after it is recorded permanent (older than the NVR keeps), and segments() now sees the long file so the scan over it agrees', rows.some((r) => r.fromMs === from + HOUR && r.toMs === from + HOUR + 5 * MIN && r.state === 'permanent') && old.some((g) => g.fromMs === from + HOUR), J(rows.map((r) => [r.fromMs - from, r.toMs - from, r.state])))
   ix.close()
 }
 

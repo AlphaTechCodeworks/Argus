@@ -50,7 +50,8 @@
 // the pace has a ceiling learned from the rounds and kept in DATA_DIR (the section below says how: review
 // of p3-thin, 2026-09-29 and round 2, 2026-09-30): a fresh start at half the pace; half what a round ran at
 // after a gap that began in it; a step up only after a whole night of rounds with none.
-import { readFile, rename, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
+import { writeFileAtomic } from './atomic-write.mjs'
 import { siteMinutesOfDay } from './site-time.mjs'
 
 /**
@@ -535,8 +536,7 @@ function save() {
   const body = `${JSON.stringify({ v: 1, savedAt: Date.now(), ...state })}\n`
   store.saving = store.saving
     .then(async () => {
-      await writeFile(`${file}.tmp`, body)
-      await rename(`${file}.tmp`, file)
+      await writeFileAtomic(file, body)
     })
     .catch((e) => console.warn(`[thinning] ${file} not written (${e.message}): the time-lapse pace is kept in memory until the next save`))
 }

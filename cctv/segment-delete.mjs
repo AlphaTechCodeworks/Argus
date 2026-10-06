@@ -21,8 +21,9 @@
 // The safeguards stay where they were and are not loosened here: the callers check the marker and
 // that a file is inside its location's folder, and skip bookmarked stretches; the helper checks the
 // marker again (read at that moment) and the folder on its own, and refuses anything else.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { writeFileAtomicSync } from './atomic-write.mjs'
 import { DATA_DIR } from './auth.mjs'
 
 /** Files per call to the helper (each file and its .idx is two file calls; each one that comes back restarts its clock). */
@@ -407,9 +408,7 @@ function load() {
 function save() {
   try {
     mkdirSync(DATA_DIR, { recursive: true })
-    const f = join(DATA_DIR, STALLS_FILE)
-    writeFileSync(`${f}.tmp`, `${JSON.stringify(Object.fromEntries(stalls), null, 1)}\n`)
-    renameSync(`${f}.tmp`, f)
+    writeFileAtomicSync(join(DATA_DIR, STALLS_FILE), `${JSON.stringify(Object.fromEntries(stalls), null, 1)}\n`)
   } catch (e) {
     console.warn(`[housekeeping] ${STALLS_FILE} could not be written (${e.message}): a restart forgets where deleting did not free space`)
   }
