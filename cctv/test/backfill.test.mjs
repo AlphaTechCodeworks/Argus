@@ -605,6 +605,202 @@ const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO
     check(`an NVR whose ${what}: the row it failed on counts the attempt and waits its back-off`, idx.backfillRow(rows[0].id).attempts === 1 && job.nextTry.get(rows[0].id) === NOW + bf.ERROR_BACKOFF_MS[0], J(idx.backfillRow(rows[0].id)))
     idx.close()
   }
+
+  // ---- a pull that THROWS part-way (2026-10 code audit, H2, and its reviews) ----------------------
+  //
+  // fill() returns from every failure it knows of. When it throws instead (here: the index refusing a
+  // write after the footage was pulled) none of what it does for a failed try has happened: the hole,
+  // still the oldest, was first in the pick again. These run the job as its timer does -- the armed
+  // callback itself: tick(), and what the timer does when it throws -- on the simulated clock, which
+  // moves by the wait armed each time. `each(i)` is called after callback i, before the clock moves.
+  const runArmed = async (job, forMs, each = () => {}) => {
+    const until = nowBox.t + forMs
+    job.resume()
+    for (let i = 0; job.timer && nowBox.t < until && i < 5000; i++) {
+      const armed = job.timer
+      const fire = armed._onTimeout // (clearTimeout takes it off the timer)
+      clearTimeout(armed)
+      await fire()
+      each(i, armed)
+      if (!job.timer || job.timer === armed) break // nothing was armed: the job has ended
+      nowBox.t += job.timer._idleTimeout
+    }
+    job.stop('test')
+  }
+  /** Makes `idx[method]` throw when `when(...args)` says so, as an index that refuses a write does. */
+  const refusing = (idx, method, when, message = 'the index refused the write') => {
+    const real = idx[method].bind(idx)
+    idx[method] = (...a) => {
+      if (when(...a)) throw new Error(message)
+      return real(...a)
+    }
+  }
+  /** Runs `fn` with console.warn collected into the list it returns (the timer's failures are warned). */
+  const warnings = async (fn, warn = null) => {
+    const said = []
+    const realWarn = console.warn
+    console.warn = warn ?? ((...a) => said.push(a.join(' ')))
+    try {
+      await fn()
+    } finally {
+      console.warn = realWarn
+    }
+    return said
+  }
+  const ERR = bf.ERROR_BACKOFF_MS
+
+  {
+    // The oldest hole's pull always throws; a fillable hole on the same NVR, one on another. The first
+    // repair gave the NVR the hole's wait: both came due together, the hole, the oldest, was picked
+    // first and threw again, and the NVR's other hole was never pulled.
+    nowBox.t = NOW
+    const { idx, rows, job, pulls } = setup([['nvr-1', 1, 20], ['nvr-1', 2, 19], ['nvr-2', 3, 18]])
+    refusing(idx, 'addSegment', (s) => s.ch === 1)
+    let first = null
+    const said = await warnings(() =>
+      runArmed(job, 3 * HOUR, (i) => {
+        if (i === 0) first = { what: job.last.what, failure: job.status().state.lastFailure, holeUntil: job.nextTry.get(rows[0].id), nvrUntil: job.nvrBackoff.get('nvr-1'), armedMs: job.timer?._idleTimeout }
+      })
+    )
+    const on = (ch) => pulls.filter((p) => p.ch === ch)
+    check('a pull that throws: the oldest hole is pulled first, and the job goes on a tick later', pulls[0]?.ch === 1 && pulls[0].atMs === 0 && first?.armedMs === job.tickMs, `${J(pulls.slice(0, 2))} armed ${first?.armedMs}`)
+    check('a pull that throws: its NVR rests for the first step of the NVR\'s own ladder, the hole for twice that', first?.nvrUntil === NOW + ERR[0] && first?.holeUntil === NOW + 2 * ERR[0], `NVR ${(first?.nvrUntil - NOW) / MIN} min, hole ${(first?.holeUntil - NOW) / MIN} min`)
+    check('a pull that throws: what the job is doing names the hole, the fault and both waits', first?.what === 'nvr-1/2: the fill failed part-way (the index refused the write); that hole is left alone for 10 min and nvr-1 for 5 min; the next run is in 30 s', first?.what)
+    check('a pull that throws: so does the journal, with where it was thrown from', said[0]?.startsWith(`[backfill] ${first?.what}\n`) && /\n\s+at /.test(said[0]), said[0]?.split('\n').slice(0, 3).join(' / '))
+    check('a pull that throws: the last failure in the status says which hole and how many times', J(first?.failure) === J({ at: NOW, message: 'the index refused the write', inARow: 1, hole: 'nvr-1/2', holeThrows: 1 }), J(first?.failure))
+    check('a pull that throws: the next pull is on the other NVR, a tick later', pulls[1]?.nvr === 'nvr-2' && pulls[1].atMs < 2 * MIN && idx.backfillRow(rows[2].id).state === 'filled', J(pulls.slice(0, 3)))
+    check('a pull that throws: nothing is pulled from its NVR while that rests', pulls.filter((p) => p.nvr === 'nvr-1' && p.atMs > 0 && p.atMs < ERR[0]).length === 0, J(pulls.slice(0, 4)))
+    check('a pull that throws: when its NVR is asked again the OTHER hole on it goes first, and is filled', on(2).length === 1 && on(2)[0].atMs >= ERR[0] && on(2)[0].atMs < 2 * ERR[0] && pulls[2]?.ch === 2 && idx.backfillRow(rows[1].id).state === 'filled', J(pulls.slice(0, 4)))
+    // the hole itself: 10, 10, 20, 40, 80 min apart (twice its NVR's rest, or its own ladder, whichever
+    // is longer; the NVR's count started again when its other hole was filled)
+    const gaps = on(1).slice(1).map((p, i) => p.atMs - on(1)[i].atMs)
+    const least = [10, 10, 20, 40, 80].map((m) => m * MIN)
+    check('a pull that throws: the hole is still tried, each time after a longer wait', on(1).length === 6 && gaps.every((g, i) => g >= least[i] && g < least[i] + 2 * MIN), J(on(1).map((p) => p.atMs / MIN)))
+    check('a pull that throws: every throw is counted, in memory and in the status (the ledger was not written)', job.pullThrows.get(rows[0].id) === on(1).length && job.status().state.errors === on(1).length && job.status().state.lastFailure?.holeThrows === on(1).length && idx.backfillRow(rows[0].id).state === 'pending' && idx.backfillRow(rows[0].id).attempts === 0, `${job.pullThrows.get(rows[0].id)} throws, ${J(job.status().state.lastFailure)}, ${J(idx.backfillRow(rows[0].id))}`)
+    idx.close()
+  }
+  {
+    // The server's case: an NVR with many holes that fill, and one whose pull always throws. Every
+    // fill that returns starts the NVR's count again, so what makes the bad hole wait longer each time
+    // is its own count. Without it the hole was pulled every time its first wait ran out, for as long
+    // as the fault lasted, each pull resting the NVR and leaving files the index does not know.
+    // (a rest of 9.5 min after a pull that fills, so that ten holes last the 100 minutes)
+    nowBox.t = NOW
+    const { idx, rows, job, pulls } = setup([['nvr-1', 1, 20], ...Array.from({ length: 10 }, (_, i) => ['nvr-1', i + 2, 19 - i / 10])])
+    job.settings = () => ({ backfill: { ...cfg, restSeconds: 570 } })
+    refusing(idx, 'addSegment', (s) => s.ch === 1)
+    let nvrThrowsMost = 0
+    await warnings(() => runArmed(job, 100 * MIN, () => (nvrThrowsMost = Math.max(nvrThrowsMost, job.nvrThrows.get('nvr-1') ?? 0))))
+    const bad = pulls.filter((p) => p.ch === 1).map((p) => p.atMs)
+    const gaps = bad.slice(1).map((t, i) => t - bad[i])
+    const filled = rows.slice(1).filter((r) => idx.backfillRow(r.id).state === 'filled').length
+    check('one hole that always throws among many that fill: a hole is filled between any two of its pulls', nvrThrowsMost === 1 && filled >= 8 && pulls.every((p, i) => i === 0 || p.ch !== 1 || pulls[i - 1].ch !== 1), `${filled} filled, the NVR's count reached ${nvrThrowsMost}, ${J(pulls.map((p) => p.ch))}`)
+    check('one hole that always throws among many that fill: it still waits longer each time (10, 10, 20, 40 min at least)', bad.length === 5 && gaps.every((g, i) => g >= bf.backoffMs(Math.max(2, i + 1), ERR)), J(bad.map((t) => t / MIN)))
+    idx.close()
+  }
+  {
+    // The fault is at this end: every pull throws, on every NVR. The first repair waited a flat five
+    // minutes each time (the count it read is one fill() writes, and fill() had thrown): 24 pulls per
+    // NVR in two hours, each leaving files the index does not know. Each NVR on its own ladder: 5.
+    nowBox.t = NOW
+    const { idx, job, pulls } = setup([['nvr-1', 1, 20], ['nvr-1', 2, 19], ['nvr-2', 3, 18], ['nvr-2', 4, 17]])
+    refusing(idx, 'addSegment', (s) => String(s.source ?? '').startsWith('backfill:'))
+    await warnings(() => runArmed(job, 2 * HOUR))
+    for (const nvr of ['nvr-1', 'nvr-2']) {
+      const at = pulls.filter((p) => p.nvr === nvr).map((p) => p.atMs)
+      const gaps = at.slice(1).map((t, i) => t - at[i])
+      check(`every pull throws: ${nvr} is asked again only after 5, 10, 20, 40 min`, at.length === 5 && gaps.every((g, i) => g >= bf.backoffMs(i + 1, ERR) && g < bf.backoffMs(i + 1, ERR) + 2 * MIN), J(at.map((t) => t / MIN)))
+      const chs = pulls.filter((p) => p.nvr === nvr).map((p) => p.ch)
+      check(`every pull throws: ${nvr}'s two holes take turns`, chs.every((c, i) => i === 0 || c !== chs[i - 1]), J(chs))
+    }
+    check('every pull throws: the job is still armed to the end, and counts each one', job.status().state.errors === pulls.length && job.status().state.lastFailure?.message === 'the index refused the write', J(job.status().state))
+    idx.close()
+  }
+  {
+    // a hole that had failed before: the throws count on top of the tries in the ledger
+    nowBox.t = NOW
+    const { idx, rows, job } = setup([['nvr-1', 1, 20]])
+    idx.backfillSet(rows[0].id, { attempts: 2 })
+    refusing(idx, 'addSegment', (s) => s.ch === 1)
+    await warnings(() => runArmed(job, 1))
+    check('a pull that throws on a hole with 2 failed tries: the hole waits as for its third, its NVR as for its first', job.nextTry.get(rows[0].id) === NOW + bf.backoffMs(3, ERR) && job.nvrBackoff.get('nvr-1') === NOW + ERR[0], `hole ${(job.nextTry.get(rows[0].id) - NOW) / MIN} min, NVR ${(job.nvrBackoff.get('nvr-1') - NOW) / MIN} min`)
+    idx.close()
+  }
+  {
+    // a pull that threw once and then goes through: the counts start again, for the hole and its NVR
+    nowBox.t = NOW
+    const { idx, rows, job, pulls } = setup([['nvr-1', 1, 20]])
+    let refusals = 0
+    refusing(idx, 'addSegment', () => refusals++ === 0)
+    let afterFirst = null
+    await warnings(() =>
+      runArmed(job, HOUR, (i) => {
+        if (i === 0) afterFirst = [job.pullThrows.get(rows[0].id), job.nvrThrows.get('nvr-1')]
+      })
+    )
+    check('a pull that threw once and then goes through: the hole is filled at its second pull', pulls.length === 2 && pulls[1].atMs >= 2 * ERR[0] && idx.backfillRow(rows[0].id).state === 'filled', `${J(pulls)} ${J(idx.backfillRow(rows[0].id))}`)
+    check('  and the throws counted for it and for its NVR start again', J(afterFirst) === J([1, 1]) && !job.pullThrows.has(rows[0].id) && !job.nvrThrows.has('nvr-1'), `${J(afterFirst)} then ${job.pullThrows.get(rows[0].id)}, ${job.nvrThrows.get('nvr-1')}`)
+    idx.close()
+  }
+  {
+    // the ledger refuses the write of a failed try (the NVR's search failed, the hole's fourth): the
+    // wait fill() had worked out stands, for the hole and for the NVR, and is not cut to a first step
+    nowBox.t = NOW
+    const { idx, rows, job } = setup([['nvr-1', 1, 20]], {
+      coverage: async () => {
+        throw new Error('no answer')
+      }
+    })
+    idx.backfillSet(rows[0].id, { attempts: 3 })
+    refusing(idx, 'backfillSet', (id, fields) => id === rows[0].id && fields.lastError != null, 'the ledger refused the write')
+    let armed = null
+    let what = null
+    await warnings(() =>
+      runArmed(job, 1, () => {
+        armed = job.timer?._idleTimeout
+        what = job.last.what
+      })
+    )
+    check('the ledger refuses a failed try: the back-off that try earned still stands, for the hole and its NVR', job.nextTry.get(rows[0].id) === NOW + bf.backoffMs(4, ERR) && job.nvrBackoff.get('nvr-1') === NOW + bf.backoffMs(4, ERR), `hole ${(job.nextTry.get(rows[0].id) - NOW) / MIN} min, NVR ${(job.nvrBackoff.get('nvr-1') - NOW) / MIN} min`)
+    check('  the waits it reports are the ones that stand', what === 'nvr-1/2: the fill failed part-way (the ledger refused the write); that hole is left alone for 40 min and nvr-1 for 40 min; the next run is in 30 s', what)
+    check('  and the job goes on', armed === job.tickMs && job.status().state.lastFailure?.message === 'the ledger refused the write', `armed ${armed}, ${J(job.status().state.lastFailure)}`)
+    idx.close()
+  }
+  {
+    // the same after a refusal by the NVR: its long wait is the one that must not be lost
+    nowBox.t = NOW
+    const { idx, rows, job } = setup([['nvr-1', 1, 20], ['nvr-1', 2, 19]], { legOf: () => fakeLeg({ refuse: true }) })
+    refusing(idx, 'backfillSet', (id, fields) => fields.lastError != null, 'the ledger refused the write')
+    await warnings(() => runArmed(job, 1))
+    const long = NOW + bf.REFUSED_BACKOFF_MS[0]
+    check('the ledger refuses the note of a refusal: the hole and the whole NVR still stand down for the refusal\'s wait', job.nextTry.get(rows[0].id) === long && job.nvrBackoff.get('nvr-1') === long, `hole ${(job.nextTry.get(rows[0].id) - NOW) / MIN} min, NVR ${(job.nvrBackoff.get('nvr-1') - NOW) / MIN} min`)
+    idx.close()
+  }
+  {
+    // nothing that goes wrong while a failed run is noted may end the job: here the journal itself throws
+    nowBox.t = NOW
+    const { idx, job } = setup([['nvr-1', 1, 20]])
+    job.scan = async () => {
+      throw new Error('the index is busy')
+    }
+    job.resume()
+    const armed = job.timer
+    const fire = armed._onTimeout
+    clearTimeout(armed)
+    let rejected = null
+    await warnings(
+      () => fire().catch((e) => (rejected = e)),
+      () => {
+        throw new Error('the journal is closed')
+      }
+    )
+    const st = job.status().state
+    check('a failed run that cannot be logged: the timer\'s callback does not reject', rejected === null, String(rejected?.message ?? rejected))
+    check('  the next tick is armed all the same', job.timer != null && job.timer !== armed && job.timer._idleTimeout === job.tickMs, `armed ${job.timer?._idleTimeout}`)
+    check('  and the failure is in the status', st.errors === 1 && st.lastFailure?.message === 'the index is busy' && st.lastFailure.hole === null, J(st))
+    job.stop('test')
+    idx.close()
+  }
   nowBox.t = NOW
 }
 {
@@ -718,9 +914,9 @@ check('a job given no settings at all still has sane values', new BackfillJob({ 
     while (!pred() && Date.now() - t0 < ms) await pause(5)
     return pred()
   }
-  const warned = []
+  const warned = [] // (the first line of each: the first failure in a row is logged with its stack)
   const realWarn = console.warn
-  console.warn = (...a) => warned.push(a.join(' '))
+  console.warn = (...a) => warned.push(a.join(' ').split('\n')[0])
   try {
     // the first scan throws, the ones after it find nothing to do
     let scans = 0
@@ -783,27 +979,7 @@ check('a job given no settings at all still has sane values', new BackfillJob({ 
     check('a job stopped during the tick that failed is not started again by the failure', late === 1 && stopping.running === false && stopping.timer === null, `${late} scans, running ${stopping.running}, timer ${stopping.timer === null ? 'none' : 'armed'}`)
     check('  and it says the job is stopped, not that it will try again', /failed while stopping/.test(said) && /the job is stopped/.test(said) && !/trying again/.test(said), said)
 
-    // a pull that throws part-way (the index refusing the write after the footage was pulled): none of what
-    // fill() does for a failed try has happened, so without more the same hole was picked at the next tick
-    // and pulled from the same NVR again, a tick later, for as long as the fault lasted
-    index.backfillNote({ nvr: 'nvr-2', ch: 9, fromMs: NOW - 3 * DAY, toMs: NOW - 3 * DAY + 3 * MIN, reason: 'no video from the NVR', kind: 'gap' }, NOW)
-    const pulled = []
-    const thrower = makeJob({ stateFile: 'rearm-fill.json', extra: { tickMs: 20 } })
-    thrower.scan = async () => {}
-    thrower.fill = async (row) => {
-      pulled.push(row)
-      throw new Error('the index refused the write')
-    }
-    thrower.start('test')
-    await until(() => pulled.length >= 1)
-    await pause(400) // 1, 20, 40, 80 and 160 ms waits: five more ticks, each free to pick again
-    thrower.stop('test')
-    const first = pulled[0]
-    const keys = pulled.map((r) => `${r.nvr}/${r.ch}/${r.fromMs}`)
-    check('a pull that throws is not tried again at the next tick: each hole is pulled once', pulled.length >= 1 && new Set(keys).size === keys.length, keys.join(' '))
-    check('  nor is another hole of the same NVR', new Set(pulled.map((r) => r.nvr)).size === pulled.length, keys.join(' '))
-    check('  the hole and its NVR are left alone for an error\'s back-off (in memory: the index may be what failed)', first != null && thrower.nextTry.get(first.id) === NOW + bf.backoffMs((first.attempts ?? 0) + 1, bf.ERROR_BACKOFF_MS) && thrower.nvrBackoff.get(first.nvr) === thrower.nextTry.get(first.id), first ? `${thrower.nextTry.get(first.id) - NOW} ms, NVR ${thrower.nvrBackoff.get(first.nvr) - NOW} ms` : 'nothing was pulled')
-    check('  and the run still counts as failed', thrower.status().state.errors === pulled.length && thrower.status().state.lastFailure?.message === 'the index refused the write', J(thrower.status().state.lastFailure))
+    // (a pull that throws part-way is with the other "one stuck row" cases above, on a clock that moves)
   } finally {
     console.warn = realWarn
   }
