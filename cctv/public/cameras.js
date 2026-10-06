@@ -206,4 +206,84 @@ async function applyPlan(plans) {
 }
 $('cmOptimise').addEventListener('click', startOptimise)
 
+// ---- cap resolution: lower oversized cameras (e.g. 8MP -> 4MP). REDUCES quality -> strong confirm ----
+async function capPost(nvrId, confirm) {
+  const res = await fetch(`/api/admin/nvrs/${encodeURIComponent(nvrId)}/streams/cap-resolution`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(confirm ? { confirm: true, maxMp: 4 } : { maxMp: 4 })
+  }).catch(() => null)
+  return { ok: Boolean(res?.ok), body: await res?.json().catch(() => null) }
+}
+async function startCap() {
+  const panel = $('cmOptPanel')
+  const online = (lastBody?.nvrs ?? []).filter((n) => n.nvrOnline)
+  panel.hidden = false
+  if (!online.length) {
+    panel.replaceChildren(el('p', 'hp-note', 'No NVRs are online.'))
+    return
+  }
+  $('cmCapRes').disabled = true
+  panel.replaceChildren(el('p', 'hp-note', `Finding cameras over 4 MP across ${online.length} NVR${online.length === 1 ? '' : 's'}…`))
+  const plans = []
+  for (const n of online) {
+    const { ok, body } = await capPost(n.nvr, false)
+    if (ok && Array.isArray(body?.cameras)) {
+      const cams = body.cameras.filter((c) => Array.isArray(c.moves) && c.moves.length)
+      if (cams.length) plans.push({ nvr: n.nvr, name: n.nvrName || n.nvr, cams })
+    }
+  }
+  $('cmCapRes').disabled = false
+  renderCapPlan(plans)
+}
+function renderCapPlan(plans) {
+  const panel = $('cmOptPanel')
+  const total = plans.reduce((t, p) => t + p.cams.length, 0)
+  const box = el('section', 'se-section')
+  box.append(el('h2', '', 'Cap resolution at 4 MP'))
+  if (total === 0) {
+    box.append(el('p', 'hp-note', 'No cameras are above 4 MP (or none can be lowered).'))
+    box.append(btn('Close', optClear))
+    panel.replaceChildren(box)
+    return
+  }
+  const warn = el('p', 'st-help')
+  warn.style.color = '#c0392b'
+  warn.textContent = `This LOWERS recorded detail on ${total} camera${total === 1 ? '' : 's'} across ${plans.length} NVR${plans.length === 1 ? '' : 's'} (plates/faces harder to read at distance). Each encoder restarts briefly. You can restore a camera's resolution later (per-camera Undo), but footage recorded while it is lowered stays low. Nothing is recording now, so there is no disk saving until storage is set up.`
+  box.append(warn)
+  box.append(optTable(['NVR', 'Ch', 'Camera', 'Resolution'], plans.flatMap((p) => p.cams.map((c) => [p.name, c.ch, c.name, c.mp || c.moves.join(', ')]))))
+  const label = el('label', '')
+  label.style.display = 'block'
+  label.style.margin = '10px 0'
+  const cb = el('input')
+  cb.type = 'checkbox'
+  cb.style.marginRight = '8px'
+  label.append(cb, document.createTextNode('I understand this permanently lowers the recorded detail on these cameras.'))
+  box.append(label)
+  const apply = btn(`Apply to ${total} camera${total === 1 ? '' : 's'}`, () => applyCap(plans))
+  apply.disabled = true
+  cb.addEventListener('change', () => { apply.disabled = !cb.checked })
+  box.append(apply, btn('Cancel', optClear))
+  panel.replaceChildren(box)
+}
+async function applyCap(plans) {
+  const panel = $('cmOptPanel')
+  panel.replaceChildren(el('p', 'hp-note', 'Lowering resolution, one camera at a time…'))
+  const results = []
+  for (const p of plans) {
+    const { ok, body } = await capPost(p.nvr, true)
+    if (ok && Array.isArray(body?.results)) for (const r of body.results) results.push({ nvr: p.name, ...r })
+    else results.push({ nvr: p.name, status: 'failed', message: body?.error || 'request failed' })
+  }
+  const done = results.filter((r) => r.status === 'done').length
+  const notDone = results.filter((r) => r.status !== 'done' && r.status !== 'skipped')
+  const box = el('section', 'se-section')
+  box.append(el('h2', '', 'Cap resolution — results'))
+  box.append(el('p', 'st-help', `${done} lowered${notDone.length ? `, ${notDone.length} did not take` : ''}. Press Refresh to see the new settings.`))
+  if (notDone.length) box.append(optTable(['NVR', 'Ch', 'Camera', 'Result'], notDone.map((r) => [r.nvr, r.ch, r.name, r.message || r.status])))
+  box.append(btn('Close & refresh', () => { optClear(); load({ fresh: false }) }))
+  panel.replaceChildren(box)
+}
+$('cmCapRes').addEventListener('click', startCap)
+
 load()

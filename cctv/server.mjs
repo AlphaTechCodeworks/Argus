@@ -80,7 +80,7 @@ import { handleAdmin } from './admin.mjs'
 import { handleDiscovery } from './discovery.mjs'
 import { handleImaging } from './imaging.mjs'
 import { handleLens } from './lens.mjs'
-import { handleStreamOptimise, handleStreams } from './streams.mjs'
+import { handleStreamCapResolution, handleStreamOptimise, handleStreams } from './streams.mjs'
 import { handleLines } from './tripwire.mjs'
 import { ADMIN_OSD_PATH, OSD_PATH, handleCameraNotes, handleOsd as handleCameraOsd, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
@@ -916,6 +916,19 @@ const handleRequest = async (req, res) => {
         return sendJson(res, 400, { error: 'Bad NVR id' })
       }
       const [status, body] = await handleStreamOptimise(req.method, optId, () => readJsonObject(req, 8192), user)
+      return sendJson(res, status, body)
+    }
+    // Cap main resolution (e.g. 8 MP -> 4 MP) on an NVR to save disk -- LOWERS quality, so confirm-gated.
+    const streamCap = /^\/api\/admin\/nvrs\/([^/]+)\/streams\/cap-resolution$/.exec(pathname)
+    if (streamCap) {
+      if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+      let capId
+      try {
+        capId = decodeURIComponent(streamCap[1])
+      } catch {
+        return sendJson(res, 400, { error: 'Bad NVR id' })
+      }
+      const [status, body] = await handleStreamCapResolution(req.method, capId, () => readJsonObject(req, 8192), user)
       return sendJson(res, status, body)
     }
     const cam = CAMERA_ROUTE.exec(pathname)

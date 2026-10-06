@@ -12,7 +12,7 @@ const xmlMod = await import('../nvr-xml.mjs')
 const { nvrs } = await import('../nvrs.mjs')
 const { Lane } = await import('../lanes.mjs')
 
-const { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, recommendedRange, optimisePlan, TIMING } = _test
+const { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, recommendedRange, optimisePlan, capPlan, downTarget, TIMING } = _test
 const dir = process.argv[2] ?? join(import.meta.dirname, 'fixtures', 'streams')
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -243,6 +243,25 @@ check('never written: record mode, dual-stream switch', !calls.some((c) => /edit
   check('optimise: never moves off a smart codec (H.265+ left alone)', [...n1, ...n2].every((p) => !p.moves?.some((m) => /h26\dp→|h26\ds→/.test(m))))
   check('optimise: only ever H.264→H.265 and/or CBR→VBR', changed([...n1, ...n2]).every((p) => p.moves.every((m) => m.startsWith('enct h264→h265') || m.startsWith('bitType CBR→VBR'))))
   check('optimise: never lowers cap, fps, resolution or quality level', changed([...n1, ...n2]).every((p) => p.to.QoI === p.from.QoI && p.to.fps === p.from.fps && p.to.res === p.from.res && p.to.level === p.from.level))
+}
+
+// ---- resolution cap (downTarget + capPlan): the ONE place a resolution drop is allowed ----
+{
+  const item = { resolutions: [{ res: '3840x2160' }, { res: '2560x1440' }, { res: '1920x1080' }] }
+  check('downTarget: 8MP capped at 4MP -> 2560x1440', downTarget(item, '3840x2160', 4e6) === '2560x1440')
+  check('downTarget: picks the largest under the cap', downTarget(item, '3840x2160', 2.5e6) === '1920x1080')
+  check('downTarget: nothing below the cap -> null', downTarget({ resolutions: [{ res: '1920x1080' }] }, '1920x1080', 4e6) === null)
+
+  const sys = { recMode: 'auto', loopRecSwitch: false, totalBandwidth: null, usedTotalBandwidth: null, mainStreamLimitFps: null, poeMode: null }
+  const items = parseEncode(readFileSync(join(dir, 'nvr1-queryNodeEncodeInfo.xml'), 'utf8')).items.filter((i) => i.an && i.resolutions.length)
+  // cap at 2 MP so every captured camera (>= ~2.6 MP here) is over the cap and gets a lower resolution
+  const capped = items.map((i) => ({ cur: current(i).res, ...capPlan(i, sys, true, 2e6) }))
+  const changed = capped.filter((p) => p.change)
+  check('cap: proposes a lower resolution for over-cap cameras (allowLowerRes lets planChange through)', changed.length > 0, `${changed.length} of ${capped.length}`)
+  const px = (r) => r.split('x').map(Number).reduce((a, b) => a * b, 1)
+  check('cap: every proposed target is below current and <= the 2 MP cap', changed.every((p) => px(p.to.res) < px(p.cur) && px(p.to.res) <= 2e6))
+  check('cap: only the resolution changes (QoI, fps, codec, level kept)', changed.every((p) => p.to.QoI === p.from.QoI && p.to.fps === p.from.fps && p.to.enct === p.from.enct && p.to.level === p.from.level))
+  check('cap: a camera already under the cap is skipped, not changed', capPlan(items[0], sys, true, 999e6).change === undefined)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
