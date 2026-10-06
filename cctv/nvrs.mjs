@@ -484,6 +484,7 @@ export class Nvr {
     this.probeFailedAt = 0
     this.relogins = [] // times of recent relogins, for back-off
     this.gen = 0 // session generation: results from an older session are ignored
+    this.controlFailed = false // this login has failed since it was last up (or since the start): see borrowing
     this.lane = new Lane(cfg.id, LANE_CONCURRENCY, { holdAt: LANE_HOLD_AT })
     this.sessions = new SessionPool(this)
     this.playback = createPlayback(this)
@@ -552,6 +553,44 @@ export class Nvr {
     return !this.online || this.relogging || this.probing || lateCalls(this.id) > 0 || sdkStuck()
   }
 
+  /** The worker's STATS while it is ready, logged in and reports its session; else null. */
+  get #workerSession() {
+    const s = this.worker?.state() === 'ready' ? this.worker.stats() : null
+    return s?.status === 'online' && Number.isInteger(s.gen) ? s : null
+  }
+
+  /**
+   * XML commands go out on the worker's login: this process's own (control) login is down and has
+   * failed at least once since it was last up, while the worker is logged in. An NVR at its session
+   * limit lets one of the two in (shad, 2026-10-06, for most of a day). "Failed once" keeps a normal
+   * start out of it: a slow P2P login is still in progress then, not refused. This login keeps
+   * retrying and takes over again when it gets in. CCTV_XML_VIA_WORKER=off turns it off (read here,
+   * not at import, so the service's env file can change it at a restart and the tests can too).
+   */
+  get borrowing() {
+    return process.env.CCTV_XML_VIA_WORKER !== 'off' && !this.online && this.controlFailed && this.#workerSession !== null
+  }
+
+  /** An XML command can be sent: on this login, or on the worker's (xml-session.mjs). */
+  get xmlOnline() {
+    return this.online || this.borrowing
+  }
+
+  /**
+   * The session an XML command would use. A page that read its settings on one session is refused
+   * a write on another (nvr-xml.mjs transparent), and a change of path counts as a change of session.
+   */
+  get xmlGen() {
+    const s = this.borrowing ? this.#workerSession : null
+    return s ? `worker:${this.worker.spawnedAt?.() ?? 0}:${s.gen}` : `own:${this.gen}`
+  }
+
+  /** As degraded, for the session an XML command would use. */
+  get xmlDegraded() {
+    if (!this.borrowing) return this.degraded
+    return (this.#workerSession?.sdk?.late ?? 0) > 0 || sdkStuck()
+  }
+
   info() {
     const subs = [...this.codecSeen.entries()].filter(([k]) => k.endsWith(':1')).map(([, v]) => v.codec)
     return {
@@ -614,11 +653,13 @@ export class Nvr {
           if (!(await this.#queryChannels(PRIORITY.HIGH))) await this.#queryChannels(PRIORITY.HIGH)
           this.status = 'online'
           this.error = ''
+          this.controlFailed = false
           console.log(`[${this.id}] logged in to ${where} (${this.model || 'NVR'}) in ${Date.now() - t0} ms, ${this.channels.length} cameras`)
           return
         }
         this.error = why
         this.status = 'offline'
+        this.controlFailed = true
         console.log(`[${this.id}] login to ${where} failed: ${this.error}; retrying in ${delay / 1000}s`)
         await sleep(delay)
       }
@@ -710,7 +751,7 @@ export class Nvr {
    * identity and the extra IPC_INFO fields the routine poll drops, queryRecStatus for main/sub
    * resolution, frame rate and recording status, the sub-stream codec as last seen in live video, and
    * the main-stream encoder (incl. whether H.265+ is on and offered). Read-only -- never mutates
-   * this.channels. Runs on this process's own login (the control login when a worker holds the video).
+   * this.channels. Runs on this process's own login (the control login when a worker holds the video) and is never borrowed from the worker: it is a heavy, unattended read (the nightly export), and a slow one would hold up the process that records.
    * Returns [] if the NVR did not answer; a failed queryRecStatus / encode read just leaves those fields null.
    */
   async cameraDetail() {
@@ -857,7 +898,10 @@ export class Nvr {
       if (gen !== this.gen) return // the session changed meanwhile
       if (ok) {
         this.health.channelFailures = 0
-        if (!this.online && !this.relogging) this.status = 'online'
+        if (!this.online && !this.relogging) {
+          this.status = 'online'
+          this.controlFailed = false // up again: see borrowing
+        }
       } else if (++this.health.channelFailures >= MAX_CHANNEL_FAILURES) {
         this.#relogin('NVR not answering').catch((e) => this.#log('relogin', e))
       }

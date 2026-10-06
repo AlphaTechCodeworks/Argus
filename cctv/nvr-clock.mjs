@@ -29,6 +29,7 @@ import { DATA_DIR } from './auth.mjs'
 import { HttpError, transparent, withNvrLock } from './nvr-xml.mjs'
 // the clock arithmetic and document building live apart so they can be tested without the SDK
 import { QUERY_TIME, buildTimeCfg, checkWanted, parseNvrTime, readClock, readWithRetry, zoneOffsetMs } from './clock-time.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 const LOG_FILE = join(DATA_DIR, 'clock-changes.log')
 const READ_BACK_MS = 2000 // the NVR takes a moment to apply before it will report the new values
@@ -90,7 +91,7 @@ export async function handleClockWrite(method, pathname, readJson, nvrs, user) {
   if (method !== 'POST') return [405, { error: 'Method not allowed' }]
   const nvr = nvrs.get(decodeURIComponent(m[1]))
   if (!nvr) return [404, { error: 'Unknown NVR' }]
-  if (!nvr.online) return [409, { error: `${nvr.name} is offline` }]
+  if (!xmlOnline(nvr)) return [409, { error: `${nvr.name} is offline` }]
   const body = await readJson()
   // A clock change alters how every recording from here on is stamped, so it is never a stray
   // request: the caller has to mean it.
@@ -194,7 +195,7 @@ export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 3 * 60
     // one at a time: a clock write takes the NVR's change lock, and nothing here is urgent
     for (const nvr of nvrs.values()) {
       if (only && !only.includes(nvr.id)) continue
-      if (!nvr.online) continue
+      if (!xmlOnline(nvr)) continue
       const r = await syncOne(nvr)
       out.push(r)
       // after a write, the NVR's clock is the server's: what it was before is no longer true

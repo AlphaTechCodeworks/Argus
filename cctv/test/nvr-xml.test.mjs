@@ -20,7 +20,7 @@ process.env.UV_THREADPOOL_SIZE = '64'
 process.env.SDK_COOL_MS = '100' // a late read cools its NVR (not used by XML calls); keep it short
 const { lateCalls, sdkCallT, sdkStuck } = await import('../sdk.mjs')
 const { Lane } = await import('../lanes.mjs')
-const { HttpError, _test, isReadCommand, transparent, xmlSettled } = await import('../nvr-xml.mjs')
+const { HttpError, _test, isReadCommand, power, transparent, xmlSettled } = await import('../nvr-xml.mjs')
 
 const print = console.log.bind(console)
 const out = []
@@ -182,6 +182,115 @@ check('reads are told from changes by the command name', isReadCommand('queryChl
   check('once xh\'s late calls return, its read goes out', typeof x === 'string' && log.at(-1)?.nvr === 'xh', `${x?.message ?? 'ok'}; sent: ${log.map((e) => e.nvr).join(',')}`)
   check('... still one XML call in flight at a time, each 250 ms after the one before', peak === 1 && log.slice(1).every((e, i) => e.start - log[i].start >= 245 && e.start >= log[i].end), `peak ${peak}; ${log.slice(1).map((e, i) => e.start - log[i].start).join(',')}`)
   check('... and nothing is left queued', (await xmlSettled(h, 1000)) && (await xmlSettled(b, 1000)))
+}
+
+// ---- borrowing: the control login is refused, the command goes out on the worker's login.
+// Same queue, same refusals; the native call in this process is never made.
+{
+  let native = 0
+  _test.setCall(async () => {
+    native++
+    throw new Error('the SDK must not be called while borrowing')
+  })
+  _test.setNow(null)
+  const sent = []
+  let reply = (m) => ({ ok: true, text: `<answer for="${m.url}"/>` })
+  const w = fakeNvr('xw')
+  Object.assign(w, {
+    online: false, userId: -1, borrowing: true, xmlOnline: true, xmlDegraded: false, xmlGen: 'worker:111:5',
+    worker: {
+      stats: () => ({ gen: 5 }),
+      request: async (m) => {
+        sent.push(m)
+        const r = reply(m)
+        if (r instanceof Error) throw r
+        return r
+      }
+    }
+  })
+  const text = await transparent(w, 'queryTimeCfg', '<request/>', 'clock', { outBytes: 2048 })
+  check('borrowing: the answer is the worker\'s', text === '<answer for="queryTimeCfg"/>', text)
+  check('borrowing: the worker got the whole command and its own session generation', sent.length === 1 && sent[0].op === 'xml' && sent[0].url === 'queryTimeCfg' && sent[0].xml === '<request/>' && sent[0].tag === 'clock' && sent[0].outBytes === 2048 && sent[0].gen === 5, JSON.stringify(sent[0]))
+  check('borrowing: nothing went to the SDK here', native === 0)
+
+  const stale = await transparent(w, 'queryTimeCfg', '<request/>', 'clock', { gen: 'own:1' }).catch((e) => e)
+  check('borrowing: a caller holding the control login\'s session is refused, nothing sent', stale instanceof Error && /reconnected; nothing was sent/.test(stale.message) && sent.length === 1, stale?.message)
+
+  reply = () => Object.assign(new Error('Too many NVR settings requests at once'), { status: 503, extra: { retryAfterS: 5 } })
+  const busy = await transparent(w, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  check("borrowing: the worker's own refusal comes through as the same HTTP error", busy instanceof HttpError && busy.status === 503 && busy.extra?.retryAfterS === 5, `${busy?.status} ${JSON.stringify(busy?.extra)}`)
+
+  reply = () => Object.assign(new Error('the video connection restarted'), { name: 'WorkerLost' })
+  const lostWrite = await transparent(w, 'editTimeCfg', '<request/>', 'clock write').catch((e) => e)
+  check('borrowing: a change lost with the worker says it may have been made', /NVR xw: the connection was lost; the change may or may not have been made/.test(lostWrite?.message), lostWrite?.message)
+  const lostRead = await transparent(w, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  check('borrowing: a read lost with the worker says try again', /NVR xw: the connection was lost; try again/.test(lostRead?.message), lostRead?.message)
+
+  reply = () => Object.assign(new Error('the video connection did not answer in time'), { name: 'SdkTimeout' })
+  const late = await transparent(w, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  check('borrowing: a timeout is a timeout', late?.name === 'SdkTimeout')
+  reply = () => ({ ok: true, text: 'after' })
+  const after = await Promise.race([transparent(w, 'queryTimeCfg', '<request/>', 'clock'), sleep(3000).then(() => 'stuck')])
+  check('borrowing: a timeout does not hold the queue (no native call is left running here)', after === 'after', after)
+
+  // the process-wide turn is not held for the worker round trip: another NVR's command goes out meanwhile
+  {
+    const o = fakeNvr('xo')
+    let letGo
+    w.worker.request = async (m) => {
+      sent.push(m)
+      return new Promise((r) => (letGo = () => r({ ok: true, text: 'slow' })))
+    }
+    _test.setCall(async (_opts, _userId, _xml, _url, outBuf, _size, len) => answer(outBuf, len))
+    const slow = transparent(w, 'queryTimeCfg', '<request/>', 'clock')
+    await sleep(50)
+    const other = await Promise.race([transparent(o, 'queryTimeCfg', '<request/>', 'clock').then(() => 'went'), sleep(2000).then(() => 'held')])
+    check('borrowing: another NVR is not held up while the worker answers', other === 'went', other)
+    letGo()
+    check('borrowing: and the slow answer still arrives', (await slow) === 'slow')
+    _test.setCall(async () => {
+      native++
+      throw new Error('the SDK must not be called while borrowing')
+    })
+  }
+
+  // reboot / shutdown on the worker's login
+  {
+    const before = sent.length
+    w.worker.request = async (m) => {
+      sent.push(m)
+      return { ok: true, accepted: true }
+    }
+    const rebooted = await power(w, 'reboot')
+    check('borrowing: reboot goes to the worker', rebooted === true && sent.length === before + 1 && sent.at(-1).op === 'power' && sent.at(-1).action === 'reboot' && sent.at(-1).gen === 5, JSON.stringify(sent.at(-1)))
+    w.worker.request = async () => {
+      throw Object.assign(new Error('the video connection restarted'), { name: 'WorkerLost' })
+    }
+    const lostPower = await power(w, 'shutdown').catch((e) => e)
+    check('borrowing: a power command lost with the worker says it may have been made', /may or may not have been made/.test(lostPower?.message), lostPower?.message)
+    w.worker.request = async () => {
+      throw Object.assign(new Error('the video connection is not ready; nothing was sent'), { name: 'WorkerNotReady' })
+    }
+    const notReady = await transparent(w, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+    check('borrowing: a worker that is not ready is an error', notReady?.name === 'WorkerNotReady', notReady?.name)
+    w.worker.request = async (m) => {
+      sent.push(m)
+      return { ok: true, text: 'next' }
+    }
+    const next = await Promise.race([transparent(w, 'queryTimeCfg', '<request/>', 'clock'), sleep(3000).then(() => 'stuck')])
+    check('borrowing: and the queue moves on after it', next === 'next', next)
+  }
+
+  // the control login comes back: the next command uses it
+  Object.assign(w, { online: true, userId: 9, borrowing: false, xmlGen: 'own:2' })
+  const before = sent.length
+  _test.setCall(async (_opts, userId, _xml, _url, outBuf, _size, len) => {
+    native = userId
+    return answer(outBuf, len)
+  })
+  await transparent(w, 'queryTimeCfg', '<request/>', 'clock')
+  check('borrowing ended: the command goes out on the control login', native === 9 && sent.length === before)
+  _test.setCall(null)
 }
 
 _test.setCall(null)

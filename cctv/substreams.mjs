@@ -26,6 +26,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { DATA_DIR } from './auth.mjs'
 import { nvrs } from './nvrs.mjs'
 import { HttpError, XML_HEADER, deviceOf, esc, kid, kids, parseXml, settled, transparent, withNvrLock } from './nvr-xml.mjs'
+import { xmlDegraded, xmlGen, xmlOnline } from './xml-session.mjs'
 
 const QUERY_URL = 'queryNetworkNodeEncodeInfo'
 const EDIT_URL = 'editNetworkNodeEncodeInfo' // writes: only ever sent from a confirmed job
@@ -182,7 +183,7 @@ async function readChannels(nvr, { fresh = false, gen } = {}) {
     if (reading.has(nvr.id)) return readChannels(nvr, { fresh, gen })
   }
   const xml = `${XML_HEADER}<requireField><name/><chlType/><subCaps/><sub/><subStreamQualityCaps/><levelNote/></requireField></request>`
-  const p = transparent(nvr, QUERY_URL, xml, 'sub-stream settings', { gen: gen ?? nvr.gen, outBytes: OUT_BYTES })
+  const p = transparent(nvr, QUERY_URL, xml, 'sub-stream settings', { gen: gen ?? xmlGen(nvr), outBytes: OUT_BYTES })
     .then((answer) => {
       const info = parseEncodeInfo(answer)
       if (info.status !== 'success') throw new Error(`the NVR refused to list sub-streams (${info.errorCode || info.status || 'no status'})`)
@@ -259,14 +260,14 @@ function validate(ch, s) {
 const jobs = new Map() // nvr id -> job
 
 async function runJob(nvr, job) {
-  const gen = nvr.gen
+  const gen = xmlGen(nvr)
   const stopAll = (from, reason) => {
     for (const s of job.steps.slice(from)) if (s.status === 'waiting') Object.assign(s, { status: 'skipped', reason })
   }
   for (const [i, step] of job.steps.entries()) {
     // never carry on after doubt: offline, a new session, or calls stuck in the SDK
-    if (!nvr.online || nvr.stopped || nvr.gen !== gen || nvr.degraded) {
-      stopAll(i, `stopped: ${nvr.name} is ${nvr.online ? 'busy or reconnected' : 'offline'}`)
+    if (!xmlOnline(nvr) || nvr.stopped || xmlGen(nvr) !== gen || xmlDegraded(nvr)) {
+      stopAll(i, `stopped: ${nvr.name} is ${xmlOnline(nvr) ? 'busy or reconnected' : 'offline'}`)
       break
     }
     step.status = 'working'
@@ -296,7 +297,7 @@ async function runJob(nvr, job) {
       }
       validate(ch, target)
       // the read took a while: check again that nothing is stuck and the session is the same
-      if (nvr.degraded || nvr.gen !== gen) {
+      if (xmlDegraded(nvr) || xmlGen(nvr) !== gen) {
         Object.assign(step, { status: 'skipped', reason: `${nvr.name} is busy or reconnected; nothing was sent` })
         stopAll(i + 1, 'stopped: the NVR is busy or reconnected')
         break
@@ -401,8 +402,8 @@ export async function handleSubstreams(method, nvrId, jobOnly, readJson, user) {
     if (!nvr) throw new HttpError(404, 'No such NVR')
     if (jobOnly) return [200, { job: jobs.get(nvr.id) ?? null }]
     if (method === 'GET') {
-      if (!nvr.online) throw new HttpError(409, `${nvr.name} is ${nvr.status}; try again when it is online`)
-      if (nvr.degraded) throw new HttpError(409, `${nvr.name} is busy or recovering; try again in a minute`)
+      if (!xmlOnline(nvr)) throw new HttpError(409, `${nvr.name} is ${nvr.status}; try again when it is online`)
+      if (xmlDegraded(nvr)) throw new HttpError(409, `${nvr.name} is busy or recovering; try again in a minute`)
       const info = await readChannels(nvr)
       const log = readLog()
       const channels = info.channels.map((c) => channelView(nvr, c, log, 'match')).sort((a, b) => (a.ch ?? 0) - (b.ch ?? 0))
@@ -418,7 +419,7 @@ export async function handleSubstreams(method, nvrId, jobOnly, readJson, user) {
     if (ids.length === 0 || ids.length > 64 || !ids.every((id) => chNumber(id))) throw new HttpError(400, 'Choose the channels to change')
     const current = jobs.get(nvr.id)
     if (current?.running) throw new HttpError(409, 'Changes are already running on this NVR')
-    if (nvr.degraded) throw new HttpError(409, `${nvr.name} is busy or recovering; try again in a minute`)
+    if (xmlDegraded(nvr)) throw new HttpError(409, `${nvr.name} is busy or recovering; try again in a minute`)
     const steps = ids.map((id) => ({ id, ch: chNumber(id), name: '', status: 'waiting', reason: null, now: null }))
     const job = {
       action,

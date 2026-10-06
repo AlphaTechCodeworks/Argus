@@ -3,6 +3,7 @@
 import { fork } from 'node:child_process'
 import { StreamHub } from './stream-hub.mjs'
 import { MSG, want } from './worker-ipc.mjs'
+import { makeRequests } from './worker-requests.mjs'
 
 const BACKOFF_MS = [2000, 5000, 15_000, 60_000]
 const HEALTHY_MS = 5 * 60_000 // ready this long: the back-off starts again from the first step
@@ -88,6 +89,14 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
   const hub = new StreamHub(nvrId, (m) => {
     if (child?.connected) child.send(m)
   })
+  // commands the main process sends on this worker's NVR login and waits on (worker-requests.mjs)
+  const requests = makeRequests({
+    send: (m) => {
+      if (state !== 'ready' || !child?.connected) return false
+      child.send(m)
+      return true
+    }
+  })
 
   const spawn = () => {
     const childEnv = { ...process.env, ...env, CCTV_WORKER_NVR: nvrId }
@@ -110,6 +119,7 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
     c.on('message', (m) => {
       if (c !== child) return
       if (m?.t === MSG.FRAME) return hub.onMessage(m)
+      if (m?.t === MSG.RES) return void requests.onReply(m)
       if (m?.t === MSG.SEGOPEN || m?.t === MSG.SEGMENT || m?.t === MSG.RECGAP) {
         try {
           onRecording?.(m)
@@ -138,6 +148,7 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
       }
     })
     c.on('exit', (code, signal) => {
+      if (c === child) requests.failAll('the video connection restarted')
       if (stopping || c !== child) return
       if (readyAt && Date.now() - readyAt > HEALTHY_MS) tries = 0
       readyAt = 0
@@ -156,6 +167,10 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
     state: () => state,
     stats: () => stats,
     _child: () => child, // tests
+    /** When the current worker process was started (0: none). Part of a borrowed session's identity (nvrs.mjs xmlGen). */
+    spawnedAt: () => child?.spawnedAt ?? 0,
+    /** One command for the worker to send on its own NVR login; resolves to its reply (worker-requests.mjs). */
+    request: (msg, opts) => requests.request(msg, opts),
     /** Recording settings for the worker (recorder.mjs); kept and sent again after a restart. */
     setRecording(msg) {
       recSettings = { ...msg, t: MSG.SETTINGS }

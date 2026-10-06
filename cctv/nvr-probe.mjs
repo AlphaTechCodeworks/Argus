@@ -12,6 +12,7 @@
 //   GET /api/admin/nvrs/:id/capabilities -> { nvr, model, results: [...] }
 
 import { transparent } from './nvr-xml.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 const XML_HEAD = '<?xml version="1.0" encoding="utf-8"?>'
 const body = () => `${XML_HEAD}<request version="1.0" systemType="NVMS-9000" clientType="WEB"></request>`
@@ -77,7 +78,7 @@ export async function handleProbe(method, pathname, nvrs) {
   if (method !== 'GET') return [405, { error: 'Method not allowed' }]
   const nvr = nvrs.get(decodeURIComponent(m[1]))
   if (!nvr) return [404, { error: 'Unknown NVR' }]
-  if (!nvr.online) return [409, { error: `${nvr.name} is offline` }]
+  if (!xmlOnline(nvr)) return [409, { error: `${nvr.name} is offline` }]
   return [200, { nvr: nvr.id, name: nvr.name, model: nvr.model ?? null, serial: nvr.serial ?? null, results: await probeNvr(nvr) }]
 }
 
@@ -95,7 +96,7 @@ export async function handleClocks(method, pathname, nvrs) {
   if (method !== 'GET') return [405, { error: 'Method not allowed' }]
   const out = []
   for (const nvr of nvrs.values()) {
-    if (!nvr.online) {
+    if (!xmlOnline(nvr)) {
       out.push({ nvr: nvr.id, name: nvr.name, online: false })
       continue
     }
