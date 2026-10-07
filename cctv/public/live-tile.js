@@ -216,7 +216,7 @@ export class LiveTile {
   }
 
   setStatus(text, live = false) {
-    this.tile.dataset.streamState = streamState(text, live)
+    if (this.tile.dataset) this.tile.dataset.streamState = streamState(text, live)
     // (only when it changes: a big grid would otherwise write every badge every second)
     if (this.status.textContent !== text) this.status.textContent = text
     this.status.classList.toggle('live', live)

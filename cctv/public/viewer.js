@@ -103,11 +103,10 @@ let isAdmin = false
 // the camera shown full-size. Its settings (Picture / OSD / Lines) now live on the Sites page
 // (camera-editor.js); the full-size view is view-only.
 let singleCam = null
-/** The player on screen in the full-size view: { player, stream: 'main' | 'sub', remote }, or null. */
-const shownPlayer = () => {
-  const t = [...singleTiles].reverse().find((x) => !x.closed && x.player.videoWidth && !x.tile.classList.contains('pending'))
-  return t ? { player: t.player, stream: t.streamType === MAIN_STREAM ? 'main' : 'sub', remote: Boolean(singleCam?.remote) } : null
-}
+/** The picture on screen in the full-size view (its canvas), or null: kept as a poster while the
+ *  next camera's first frame is on its way (openSingle). */
+const singlePicture = () =>
+  [...singleTiles].reverse().find((x) => !x.closed && x.player.videoWidth && !x.tile.classList.contains('pending'))?.player.canvas ?? null
 
 if (!('VideoDecoder' in window)) {
   notice.hidden = false
@@ -662,7 +661,7 @@ function stopAhead() {
 }
 
 function openSingle(cam, { fromTap = false, stepping = false } = {}) {
-  const displayedPicture = shownPlayer()?.player?.canvas
+  const displayedPicture = singlePicture()
   const oldPicture = displayedPicture ?? overlay?.querySelector('.switch-poster')
   const previousName = !displayedPicture && oldPicture ? overlay?.querySelector('.switch-note')?.dataset.previousName :
     singleCam ? `${singleCam.site ?? ''} / ${singleCam.name}` : ''
