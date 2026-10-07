@@ -369,6 +369,10 @@ const AUD_H264 = Buffer.from([0, 0, 0, 1, 0x09, 0xf0])
  * times are handed back smallest first rather than in the order they went in; with these recordings
  * (no B-frames) the two are the same, and if a camera ever does use them the picture still gets the
  * time it belongs to instead of a shuffled one.
+ * Reverse playback is the exception: keyframes only, each earlier than the one before, and ffmpeg
+ * gives them back in the order they went in. Smallest first, each picture got the time of the one
+ * after it (at -16x, 2 to 4 s of footage out), so from a keyframe earlier than the keyframe before
+ * it the times are handed back in the order they went in, until the keyframes go forward again.
  *
  * Everything is injectable so the lifetime -- and above all the killing -- is tested without ffmpeg.
  */
@@ -408,7 +412,9 @@ export class Transcoder {
     Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, bufSeconds, lowDelay, picturesPerS, gop, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
     this.proc = null
     this.closed = false
-    this.times = [] // the times of the frames pushed in and not yet handed back, smallest first
+    this.times = [] // the times of the frames pushed in and not yet handed back, smallest first (in reverse: as pushed)
+    this.lastKey = null // the time of the last keyframe pushed to this ffmpeg
+    this.backwards = false // the keyframes come in going back in time (reverse playback)
     this.buf = Buffer.alloc(0)
     this.out = 0 // frames handed back (a hardware encoder that produced none is a broken one)
     this.idle = null
@@ -442,6 +448,8 @@ export class Transcoder {
     this.out = 0
     this.buf = Buffer.alloc(0)
     this.times = []
+    this.lastKey = null
+    this.backwards = false
     this.inCount = 0 // frames fed to this ffmpeg: with keepEvery, only every keepEvery-th comes back
     this.stderr = ''
     // Where nice is not available (or the wrapper was skipped), ask the kernel directly. It is the
@@ -476,8 +484,13 @@ export class Transcoder {
     } catch {}
     if (this.keepEvery > 1 && n % this.keepEvery !== 0) return // dropped by ffmpeg's select filter
     const t = this.times
+    // (keyframes are in time order whatever the frames between them do: one before the last is reverse)
+    if (isKey) {
+      if (this.lastKey !== null && tsMs !== this.lastKey) this.backwards = tsMs < this.lastKey
+      this.lastKey = tsMs
+    }
     let i = t.length
-    while (i > 0 && t[i - 1] > tsMs) i--
+    while (!this.backwards && i > 0 && t[i - 1] > tsMs) i--
     t.splice(i, 0, tsMs)
   }
 

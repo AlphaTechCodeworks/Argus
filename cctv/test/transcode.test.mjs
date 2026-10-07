@@ -274,6 +274,26 @@ function harness(opts = {}) {
   h2.fireIdle()
   check('  times are handed back in time order, so reordering cannot shuffle the picture', h2.frames.map((f) => f.ts).join() === '5000,5040,5080', h2.frames.map((f) => f.ts).join())
 
+  // Reverse playback: keyframes only, each earlier than the last, a picture held until the next one's
+  // bytes come. Smallest first, the pictures of 100000, 98000 and 96000 were stamped 98000, 96000 and
+  // 94000 (2026-10-07 audit).
+  const hr = harness()
+  for (const ts of [100000, 98000, 96000, 94000]) {
+    hr.t.push(ts, true, IDR)
+    hr.procs[0].stdout.emit('data', Buffer.concat([SPS, PPS, IDR]))
+  }
+  check('  reverse (each keyframe earlier than the last): every picture keeps its own time', hr.frames.map((f) => f.ts).join() === '100000,98000,96000' && hr.t.pending === 1, `${hr.frames.map((f) => f.ts).join()} pending ${hr.t.pending}`)
+  hr.fireIdle()
+  check('  ... the last one too, when nothing follows it', hr.frames.map((f) => f.ts).join() === '100000,98000,96000,94000', hr.frames.map((f) => f.ts).join())
+  // forward again without a reset (keyframes going on in time): smallest first as before
+  hr.t.push(95000, true, IDR)
+  hr.t.push(95080, false, P)
+  hr.t.push(95040, false, P)
+  hr.procs[0].stdout.emit('data', Buffer.concat([SPS, PPS, IDR, P, P]))
+  hr.fireIdle()
+  check('  ... and forward again, the times are in time order again', hr.frames.slice(4).map((f) => f.ts).join() === '95000,95040,95080', hr.frames.slice(4).map((f) => f.ts).join())
+  hr.t.close()
+
   const h3 = harness({ ...PLAYBACK_LIMITS })
   h3.t.push(1000, true, IDR)
   const a = h3.procs[0]?.args.join(' ') ?? ''
