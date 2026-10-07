@@ -533,6 +533,77 @@ const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO
   for (const id of filler) index.backfillRemove(id)
 }
 
+// ---- a hole longer than one NVR search covers (2026-10-07 audit, M13) ----------------------------
+//
+// nvrCoverage searches the first 8 NVR-local days of a window and no more. fill() asked about the
+// whole row at once: a hole of 11 days whose first 8 had nothing left to pull was made permanent with
+// three days of it still on the NVR. The real nvrCoverage here, on an NVR that answers day searches.
+{
+  const { nvrCoverage } = await import('../rec-fallback.mjs')
+  const longRoot = mkdtempSync(join(tmpdir(), 'backfill-long-'))
+  const FROM = NOW - 12 * DAY
+  const TO = NOW - DAY
+  let n = 0
+  /** An NVR that keeps footage from keepsFrom on, a fresh index with the hole FROM..TO in it, and the job. */
+  const setup = (keepsFrom, { coverage = nvrCoverage } = {}) => {
+    const idx = openRecIndex(join(longRoot, `long-${++n}.db`))
+    const searched = []
+    const nvr = {
+      id: 'nvr-1',
+      online: true,
+      searched,
+      playback: {
+        lastClock: () => ({ tzOffsetMs: 0, skewMs: 0 }),
+        recordings: async (_ch, date) => {
+          searched.push(date)
+          const s = Date.parse(`${date}T00:00:00Z`)
+          const a = Math.max(s, keepsFrom)
+          const b = Math.min(s + DAY - 1000, NOW)
+          return { ranges: b > a ? [[a, b]] : [] }
+        }
+      }
+    }
+    const seg = (name, startMs, endMs, more = {}) => idx.addSegment({ nvr: 'nvr-1', ch: 0, path: join(longRoot, `${n}-${name}.h264`), startMs, endMs, bytes: 1000, keyframes: 10, loc: 'L1', ...more })
+    seg('pre', FROM - 10 * MIN, FROM)
+    seg('post', TO, TO + 10 * MIN)
+    const row = idx.backfillNote({ nvr: 'nvr-1', ch: 0, fromMs: FROM, toMs: TO, reason: null, kind: 'unknown' }, NOW)
+    const leg = fakeLeg()
+    const job = makeJob({ leg, coverage, extra: { index: idx, nvrs: new Map([['nvr-1', nvr]]), locations: () => [{ id: 'L1', path: longRoot, role: 'main' }] } })
+    return { idx, nvr, seg, row, leg, job }
+  }
+  nowBox.t = NOW
+  {
+    // the NVR keeps 7 days (the setting says 30); earlier nights have filled its first three of them
+    const { idx, nvr, seg, row, leg, job } = setup(NOW - 7 * DAY)
+    for (let t = NOW - 7 * DAY; t < NOW - 4 * DAY; t += HOUR) seg(`f${t}`, t, t + HOUR, { source: 'backfill:nvr-1', filledMs: NOW - DAY })
+    await job.fill(row)
+    const after = idx.backfillRow(row.id)
+    check('long hole: nothing to pull in the first 8 days does not make the row permanent', after.state === 'pending', J(after))
+    check('long hole: ... the days after them are asked about too', nvr.searched.includes(new Date(TO).toISOString().slice(0, 10)), J(nvr.searched))
+    check('long hole: ... and the next piece the NVR still has is pulled', leg.calls.length === 1 && leg.calls[0].fromMs === NOW - 4 * DAY, J(leg.calls.map((c) => (c.fromMs - NOW) / DAY)))
+    idx.close()
+  }
+  {
+    // an NVR with none of the hole at all: permanent, but only once every day of it has been asked about
+    const { idx, nvr, row, leg, job } = setup(NOW - HOUR)
+    await job.fill(row)
+    const after = idx.backfillRow(row.id)
+    const days = new Set(nvr.searched)
+    check('long hole: the NVR having none of it is permanent', after.state === 'permanent' && after.note === PERMANENT.nothing && leg.calls.length === 0, J(after))
+    check('long hole: ... after every day of the hole was searched', days.size === 12 && days.has(new Date(FROM).toISOString().slice(0, 10)) && days.has(new Date(TO).toISOString().slice(0, 10)), J([...days]))
+    idx.close()
+  }
+  {
+    // "nothing" for the first span and "could not ask" for the next is not an answer about the hole
+    let asks = 0
+    const { idx, row, leg, job } = setup(NOW - HOUR, { coverage: async (...a) => (++asks === 1 ? nvrCoverage(...a) : { ranges: [], reason: 'the NVR search failed (timed out)' }) })
+    await job.fill(row)
+    const after = idx.backfillRow(row.id)
+    check('long hole: a later span that could not be asked leaves the row pending', asks === 2 && after.state === 'pending' && after.attempts === 1 && /search failed/.test(after.lastError ?? '') && leg.calls.length === 0, J({ asks, after }))
+    idx.close()
+  }
+}
+
 // ---- one stuck row must not hold the whole job (playback report 9, review) -----------------------
 //
 // fill() handed a failed row's back-off to tick() as the job's rest, and set the row's nextTry to that

@@ -36,6 +36,12 @@
 const DAY_MS = 86_400_000
 const JOIN_MS = 2000 // NVR ranges closer than this are one stretch (a day's search ends 1 s before midnight)
 const MAX_DAYS = 8 // days searched for one window at most
+/**
+ * The longest window nvrCoverage answers for in full: one this long touches at most MAX_DAYS NVR-local
+ * days. Of a longer one only the first MAX_DAYS days are searched, and nothing in the answer says so:
+ * whoever asks about more (backfill.mjs fill()) asks a span of this at a time.
+ */
+export const COVERAGE_SPAN_MS = (MAX_DAYS - 1) * DAY_MS
 const NVR_SPEEDS = [1, 2, 4, 8] // what the NVR session accepts (playback.mjs)
 const HEADER_SIZE = 16
 

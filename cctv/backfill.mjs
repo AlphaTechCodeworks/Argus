@@ -50,7 +50,7 @@ import { DATA_DIR, isAdmin } from './auth.mjs'
 // stranger. CCTV_AUTH=off has no real users at all, and is honoured here as everywhere else.
 const AUTH_OFF = process.env.CCTV_AUTH === 'off'
 const admin = (who) => (AUTH_OFF ? true : who && typeof who === 'object' ? who.admin === true : isAdmin(who))
-import { nvrCoverage, startLeg } from './rec-fallback.mjs'
+import { COVERAGE_SPAN_MS, nvrCoverage, startLeg } from './rec-fallback.mjs'
 import { SegmentWriter } from './segment-writer.mjs'
 
 const MINUTE = 60_000
@@ -975,13 +975,32 @@ export class BackfillJob {
     const missingMs = totalMs(holes.map((h) => [h.fromMs, h.toMs]))
 
     // 2. What does the NVR say it has? A failure to ask is not an answer (rule 2 at the top).
+    //    Asked a span at a time (COVERAGE_SPAN_MS), from the start of what is missing, until a span
+    //    holds something to pull or the last of what is missing has been asked about. The whole row
+    //    was asked in one go, and the search looks at the first 8 days of a window only: a hole
+    //    longer than that with nothing to pull in its first 8 days (the NVR keeps less than the
+    //    setting says, or those days were filled on earlier nights) was made permanent with the
+    //    rest of it still on the NVR (2026-10-07 audit, M13).
+    const missing = mergeRanges(holes.map((h) => [h.fromMs, h.toMs]))
+    const lastMs = missing.at(-1)[1]
     let cov
-    try {
-      cov = await this.coverage(nvr, row.ch, row.fromMs, row.toMs, { now: () => this.now() })
-    } catch (e) {
-      return fail(`the NVR search failed (${e?.message ?? e})`, { stop: 'nvr' })
+    let plan
+    let found = []
+    for (let at = missing[0][0]; ; ) {
+      const end = Math.min(at + COVERAGE_SPAN_MS, lastMs)
+      try {
+        cov = await this.coverage(nvr, row.ch, at, end, { now: () => this.now() })
+      } catch (e) {
+        return fail(`the NVR search failed (${e?.message ?? e})`, { stop: 'nvr' })
+      }
+      plan = gapPlan({ fromMs: row.fromMs, toMs: row.toMs }, { now, nvrRetentionMs: this.retentionMs(), coverage: cov })
+      // (aged out, or "we could not ask": the answer for the whole row, whichever span it came with)
+      if (!plan.decided || plan.permanentReason === PERMANENT.aged) break
+      found = intersect(missing, mergeRanges(plan.work))
+      if (found.length || end >= lastMs) break
+      // the next span starts at what is missing after this one (a stretch already here is not asked about)
+      at = Math.max(end, missing.find((m) => m[1] > end)[0])
     }
-    const plan = gapPlan({ fromMs: row.fromMs, toMs: row.toMs }, { now, nvrRetentionMs: this.retentionMs(), coverage: cov })
     if (plan.permanent) {
       this.index.backfillSet(row.id, { state: 'permanent', note: plan.permanentReason, lastTryMs: now })
       this.log(`${row.nvr}/${row.ch + 1} ${new Date(row.fromMs).toISOString()}: permanent (${plan.permanentReason})`)
@@ -996,13 +1015,7 @@ export class BackfillJob {
 
     // 3. Only the parts that are BOTH missing here and present there, in bounded pieces.
     const maxMs = Math.max(MINUTE, Number(cfg.maxGapMinutes ?? 60) * MINUTE)
-    const work = chunkRanges(
-      intersect(
-        mergeRanges(holes.map((h) => [h.fromMs, h.toMs])),
-        mergeRanges(plan.work)
-      ),
-      maxMs
-    )
+    const work = chunkRanges(found, maxMs)
     if (!work.length) {
       this.index.backfillSet(row.id, { state: 'permanent', note: PERMANENT.nothing, lastTryMs: now })
       return 0
