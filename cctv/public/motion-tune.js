@@ -45,13 +45,19 @@ export class MotionTuner {
     this.sampler.height = H
     this.ctx = this.sampler.getContext('2d', { willReadFrequently: true })
     this.timer = null
+    // counts the cameras chosen, so an answer can tell whether it is still for the one on show
+    this.seq = 0
     els.form?.addEventListener('submit', (e) => this.#onSubmit(e))
   }
 
   /** Switches to a camera: opens its stream, reads what the NVR says, starts measuring. */
   async show(camera) {
     this.stop()
+    const seq = ++this.seq
     this.camera = camera
+    // the last camera's answer is not this one's: no write control until this camera's own is in
+    this.motion = null
+    this.els.form.hidden = true
     this.history = []
     this.prev = null
     // the first pictures are the stored still, then the live one arriving: not movement
@@ -63,9 +69,14 @@ export class MotionTuner {
 
     // What the NVR itself is set to. Everything here degrades: a camera whose NVR does not answer
     // shows the meter and says the setting is not available, rather than showing a made-up slider.
-    this.motion = await fetch(`/api/admin/nvrs/${encodeURIComponent(camera.nvr)}/channels/${camera.ch}/motion-tune`, { headers: { accept: 'application/json' } })
+    const motion = await fetch(`/api/admin/nvrs/${encodeURIComponent(camera.nvr)}/channels/${camera.ch}/motion-tune`, { headers: { accept: 'application/json' } })
       .then((r) => r.json())
       .catch((e) => ({ available: false, why: `the server could not be asked: ${e.message}` }))
+    // Another camera was chosen, or the panel closed, while the NVR was being asked (it can take many
+    // seconds). This answer is the earlier camera's: shown now it would put that camera's sensitivity
+    // and zones on this one, and its timer would be one nothing ever stops.
+    if (seq !== this.seq) return
+    this.motion = motion
     this.els.note.textContent = sentence(thresholdNote(this.motion))
     const masked = maskFromArea(this.motion?.area, W, H)
     this.mask = masked.mask
@@ -77,10 +88,12 @@ export class MotionTuner {
     // nothing safe to send.
     this.els.form.hidden = !this.motion?.available
     if (this.motion?.available) this.els.form.elements.threshold.value = this.motion.sensitivity
+    clearInterval(this.timer)
     this.timer = setInterval(() => this.#sample(), SAMPLE_MS)
   }
 
   stop() {
+    this.seq++ // an answer still on its way is for a camera no longer shown
     clearInterval(this.timer)
     this.timer = null
     this.tile?.close?.()
