@@ -229,6 +229,8 @@ const fakeWs = (buffered = 0) => ({
   const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')
   const live = src('live.mjs')
   check('live.mjs uses gateSend', /gateSend\(/.test(live) && !/ws\.waitForKey = false\n\s*\}\n\s*ws\.send/.test(live))
+  // (71ab680 made it 250 ms; an unrelated commit, ef842a7, put the 1500 back without a word)
+  check('live.mjs: a sub-stream asks for a keyframe 250 ms in, the main at once', /^const KEYFRAME_WAIT_MS = \{ 0: 0, 1: 250 \}$/m.test(live))
   const hubSrc = src('stream-hub.mjs')
   check('stream-hub.mjs uses gateSend', /gateSend\(/.test(hubSrc))
   const worker = src('nvr-worker.mjs')
