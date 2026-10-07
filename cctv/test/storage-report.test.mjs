@@ -93,6 +93,28 @@ const series = (hours, { startUsed = 0, perDay = 0, total = TB, noise = 0, step 
   check('a corrupt history file is not a crash', Object.keys(readHistory(data)).length === 0)
   rmSync(join(data, 'storage-history.json'))
 }
+{
+  // The samples are taken by the alert checks (server.mjs extraCandidates, every check; one an hour is kept),
+  // not only when an admin opens the Storage page: an unattended server never had enough of them to forecast
+  // from, and production's file was a week old (audit of 2026-10-07, M11). What the checks do, here: the report
+  // as they build it, its locations handed to recordSample.
+  const settings = { recording: { defaults: {}, cameras: {} }, storage: { locations: [{ id: 'L1', path: '/srv/rec/usb1', type: 'usb', role: 'main' }, { id: 'L2', path: '/srv/rec/nas', type: 'network', role: 'main' }], lowFreePct: 15, floorFreePct: 5 } }
+  const checkAt = (now, free) => {
+    const report = buildStorageReport({ settings, index: null, history: readHistory(data), now, present: (l) => l.id === 'L1', freeOf: () => ({ freeBytes: free, totalBytes: 1000 }), retention: null })
+    recordSample(data, report.locations, now)
+    return report
+  }
+  for (let i = 0; i < 60; i++) checkAt(NOW + i * 60_000, 900 - i)
+  const h = readHistory(data)
+  check('the alert checks take the samples: 60 checks in an hour keep one, of the mounted location only', h.L1?.length === 1 && h.L1[0].usedBytes === 100 && h.L1[0].totalBytes === 1000 && h.L2 === undefined, JSON.stringify(h))
+  for (let i = 1; i <= MIN_SAMPLES; i++) checkAt(NOW + i * HOUR + 1, 900 - 10 * i)
+  const later = checkAt(NOW + (MIN_SAMPLES + 1) * HOUR, 900 - 10 * (MIN_SAMPLES + 1))
+  check('... and with nobody opening the page, the history grows by one an hour and the report reads it', readHistory(data).L1.length === MIN_SAMPLES + 1 && later.locations[0].forecast.samples === MIN_SAMPLES + 1, JSON.stringify(later.locations[0].forecast))
+  rmSync(join(data, 'storage-history.json'))
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  const body = server.match(/extraCandidates: \(\) => \{[\s\S]*?\n  \},/)?.[0] ?? ''
+  check('server.mjs: the alert checks hand the report\'s locations to recordSample', /const report = buildStorageReport\(/.test(body) && /recordSample\(DATA_DIR, report\.locations\)/.test(body) && /import \{[^}]*\brecordSample\b[^}]*\} from '\.\/storage-report\.mjs'/.test(server), body.slice(0, 200))
+}
 
 // ---- the report ---------------------------------------------------------------------------------
 const DEFAULTS = { mode: 'continuous', fullDays: 30, after: 'timelapse', timelapseS: 10, retentionDays: 180, preS: 10, postS: 20 }
