@@ -28,25 +28,35 @@ import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 import { HttpError, transparent, withNvrLock } from './nvr-xml.mjs'
 // the clock arithmetic and document building live apart so they can be tested without the SDK
-import { QUERY_TIME, buildTimeCfg, checkWanted, parseNvrTime, readClock, readWithRetry, zoneOffsetMs } from './clock-time.mjs'
+import { QUERY_TIME, buildTimeCfg, checkWanted, driftOf, readClock, readWithRetry, readingOf, syncOutcome, zoneOffsetMs } from './clock-time.mjs'
 import { xmlOnline } from './xml-session.mjs'
 
 const LOG_FILE = join(DATA_DIR, 'clock-changes.log')
 const READ_BACK_MS = 2000 // the NVR takes a moment to apply before it will report the new values
+// A time the server pushes is sent within this of being taken, or not at all (transparent()'s
+// notAfter): half the drift the sync tolerates, so a write held up in a queue cannot itself leave a
+// clock far enough out to need another.
+const SEND_WITHIN_MS = 2000
 
 /**
  * Reads, writes and reads back one NVR's clock.
+ * `now`: for the clock sync, which wants the clock set to the time at the moment of writing. With it
+ * the time to set is taken right before the write is sent, not by the caller: the wait for the lock
+ * and the read before the write take 6 to 37 s on a busy NVR, and a time taken ahead of them set
+ * the clock that far slow on every pass.
  * @returns {Promise<{before:object, sent:object, after:object, applied:boolean, warning?:string}>}
  */
-export async function setClock(nvr, want, user) {
+export async function setClock(nvr, want, user, { now = null } = {}) {
   const wanted = checkWanted(want)
   return withNvrLock(nvr, 'clock', async () => {
     const beforeXml = String((await transparent(nvr, 'queryTimeCfg', QUERY_TIME, 'clock before', { outBytes: 16 * 1024 })) ?? '')
     const before = readClock(beforeXml)
     if (!before.timeZone) throw new HttpError(502, 'the NVR did not report its clock settings; nothing was changed')
 
+    const live = now !== null && wanted.timeMs !== undefined
+    if (live) wanted.timeMs = now()
     const doc = buildTimeCfg(before, wanted)
-    const reply = String((await transparent(nvr, 'editTimeCfg', doc, 'clock write', { outBytes: 16 * 1024 })) ?? '')
+    const reply = String((await transparent(nvr, 'editTimeCfg', doc, 'clock write', { outBytes: 16 * 1024, ...(live ? { notAfter: Date.now() + SEND_WITHIN_MS } : {}) })) ?? '')
     if (!/<status>\s*success/i.test(reply)) {
       const code = /<errorCode>\s*(\d+)/.exec(reply)?.[1]
       throw new HttpError(502, `the NVR refused the change${code ? ` (code ${code})` : ''}; nothing was changed`)
@@ -137,7 +147,9 @@ const SYNC_EVERY_MS = 15 * 60_000 // check every 15 minutes
 const RETRY_MS = 5 * 60_000
 /**
  * Puts one NVR's clock to the server's, if it has drifted far enough to be worth writing.
- * @returns {Promise<{nvr:string, drift:number|null, changed:boolean, why:string}>} never throws
+ * `drift` is what was read before anything was written; `after`, only when the clock was written,
+ * is what it read back as (null: it could not be read back).
+ * @returns {Promise<{nvr:string, drift:number|null, after?:number|null, changed:boolean, why:string}>} never throws
  */
 export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 'clock sync', tries = 3, waitMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   try {
@@ -168,15 +180,18 @@ export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 
       }
     }
 
-    // what the NVR says its clock reads, read back as a moment
-    const said = parseNvrTime(cur.currentTime, cur)
-    const drift = said === null ? null : said - (now() + offsetMs)
+    // what the NVR says its clock reads, against the server's
+    const drift = driftOf(cur, now(), offsetMs)
     if (drift !== null && Math.abs(drift) < driftMs) {
       return { nvr: nvr.id, drift, changed: false, why: 'close enough to leave alone' }
     }
 
-    const r = await setClock(nvr, { timeMs: now(), offsetMs, confirm: true }, user)
-    return { nvr: nvr.id, drift, changed: true, why: r.applied ? 'put right' : 'the NVR accepted it but still reports the old time' }
+    // (the time given here only has to pass the check: setClock takes it again right before it writes)
+    const r = await setClock(nvr, { timeMs: now(), offsetMs, confirm: true }, user, { now })
+    if (!r.applied) return { nvr: nvr.id, drift, after: null, changed: true, why: 'the NVR accepted it but still reports the old time' }
+    // judged by what the clock reads now, not by the NVR having answered "success"
+    const after = driftOf(r.after, now(), offsetMs)
+    return { nvr: nvr.id, drift, after, changed: true, why: syncOutcome(after, driftMs) }
   } catch (e) {
     return { nvr: nvr.id, drift: null, changed: false, why: `could not be checked: ${e.message.slice(0, 80)}` }
   }
@@ -209,15 +224,18 @@ export function startClockSync(nvrs, { everyMs = SYNC_EVERY_MS, startMs = 3 * 60
       if (!xmlOnline(nvr)) continue
       const r = await syncOne(nvr)
       out.push(r)
-      // after a write, the NVR's clock is the server's: what it was before is no longer true
-      if (r.drift !== null) measured.set(nvr.id, { driftMs: r.changed && /put right/.test(r.why) ? 0 : r.drift, at: Date.now() })
+      // after a write, what the clock read before is no longer true: Health gets the read-back, and
+      // no reading at all when there is none, never a 0 nobody measured
+      const reading = readingOf(r)
+      if (reading !== null) measured.set(nvr.id, { driftMs: reading, at: Date.now() })
+      else if (r.changed) measured.delete(nvr.id)
       if (/could not be checked|still reports the old time/.test(r.why)) failed.add(nvr.id)
       else failed.delete(nvr.id)
       // Every outcome, not only the changes. A background job that speaks only when it acts cannot
       // be told apart from one that is not running at all: when nvr-2 was seen four minutes out on
       // 2026-09-25 there was no way to find out whether the sync had skipped it, failed on it, or
       // never run, because doing nothing looked exactly like being switched off.
-      log(`[clock] ${r.nvr}: ${r.why}${r.drift === null ? '' : ` (${Math.round(r.drift / 1000)} s out)`}`)
+      log(`[clock] ${r.nvr}: ${r.why}${r.drift === null ? '' : ` (${r.changed ? 'was ' : ''}${Math.round(r.drift / 1000)} s out)`}`)
     }
     scheduleRetry()
     return out

@@ -1,7 +1,7 @@
 // Tests for nvr-clock.mjs: reading an NVR's clock settings, writing them back safely, working out
 // a timezone offset, and the server acting as the master clock.
 // Run: node cctv/test/nvr-clock.test.mjs
-import { QUERY_TIME, buildTimeCfg, checkWanted, formatForNvr, parseNvrTime, readClock, readWithRetry, zoneOffsetMs } from '../clock-time.mjs'
+import { QUERY_TIME, buildTimeCfg, checkWanted, driftOf, formatForNvr, parseNvrTime, readClock, readWithRetry, readingOf, syncOutcome, zoneOffsetMs } from '../clock-time.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -126,6 +126,28 @@ const SOLUS = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryTime
   // setting a time while the NVR takes its own from NTP would be pointless and confusing
   const doc = buildTimeCfg(readClock(NVR1), { timeMs: Date.now() })
   check('no time is pushed to an NVR that uses NTP', !doc.includes('currentTime'))
+}
+
+// ---- what a sync pass may claim ----------------------------------------------------------------------
+//
+// The sync used to record a drift of 0 and log "put right" the moment the NVR answered "success",
+// while writing a time taken before a 6 to 37 s wait: the clock was that far slow, Health said it
+// was exact, and the next pass wrote it again. What it says now comes from a reading.
+{
+  const off = -4 * 3600_000
+  const t = Date.UTC(2026, 8, 25, 19, 19, 49) // 15:19:49 on site, which is what NVR2 shows
+  check('a clock reading the server time has no drift', driftOf(readClock(NVR2), t, off) === 0, String(driftOf(readClock(NVR2), t, off)))
+  check('a clock behind the server is slow by that much', driftOf(readClock(NVR2), t + 20_000, off) === -20_000)
+  check('a reading with no time in it is no drift figure, not 0', driftOf({ currentTime: null }, t, off) === null && driftOf(null, t, off) === null)
+
+  check('a write that reads back within the limit was put right', syncOutcome(-1000, 4000) === 'put right')
+  check('one that reads back outside it is not called put right', /still reads -20 s out/.test(syncOutcome(-20_000, 4000)), syncOutcome(-20_000, 4000))
+  check('nor is one that could not be read back', /could not be read back/.test(syncOutcome(null, 4000)), syncOutcome(null, 4000))
+
+  check('Health gets the reading when nothing was written', readingOf({ drift: 1500, changed: false }) === 1500)
+  check('and the read-back after a write, not the reading from before it', readingOf({ drift: -47_000, after: -1000, changed: true }) === -1000)
+  check('a write with no read-back gives Health no reading, not a 0', readingOf({ drift: -47_000, after: null, changed: true }) === null && readingOf({ drift: -47_000, changed: true }) === null)
+  check('an NVR that could not be checked gives none either', readingOf({ drift: null, changed: false }) === null)
 }
 
 // ---- the documents we send are well formed -----------------------------------------------------

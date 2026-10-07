@@ -238,3 +238,29 @@ export function parseNvrTime(text, { dateFormat = 'day-month-year' } = {}) {
   return Number.isFinite(t) ? t : null
 }
 
+/**
+ * How far an NVR's clock is from the server's (ms, positive is fast), from a reading of it taken at
+ * `nowMs`. null when the reading has no time in it that can be read.
+ */
+export function driftOf(clock, nowMs, offsetMs) {
+  const said = parseNvrTime(clock?.currentTime, clock ?? {})
+  return said === null ? null : said - (nowMs + offsetMs)
+}
+
+/**
+ * How a clock write by the sync (nvr-clock.mjs syncOne) went, in words for the log, from what the
+ * clock read back as (`after`, ms out; null: no reading). The read-back is the only evidence there
+ * is: the NVR answering "success" says nothing about what its clock now reads.
+ */
+export function syncOutcome(after, driftMs) {
+  if (after === null) return 'set, but its clock could not be read back'
+  return Math.abs(after) < driftMs ? 'put right' : `set, but it still reads ${Math.round(after / 1000)} s out`
+}
+
+/**
+ * The clock error Health is given after a pass ({ drift, after, changed }): the read-back once the
+ * clock has been written, the reading that was taken otherwise, and null (no reading: the one from
+ * before a write is no longer true) when a written clock could not be read back. Never an assumed 0.
+ */
+export const readingOf = (r) => (r.changed ? (r.after ?? null) : r.drift)
+
