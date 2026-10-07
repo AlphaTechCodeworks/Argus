@@ -171,16 +171,56 @@ export function checkWanted(want) {
 
 const OFFSET_RE = /^[+-]?\d{1,2}(?:\.\d+)?$/
 
-/** Hours to add to UTC for a POSIX zone like AST4 or EST5EDT: the digits are hours WEST of UTC. */
-export function zoneOffsetMs(timeZone, daylight) {
+/**
+ * The UTC moment a POSIX "Mm.w.d[/h]" rule falls on in `year`: weekday d (0 is Sunday) of week w
+ * (5 means the last) of month m, at h o'clock (2 when not given) on a clock `offsetMs` from UTC.
+ * null for anything else, including the Julian-day forms, which these NVRs do not offer.
+ */
+function ruleMoment(rule, year, offsetMs) {
+  const m = /^M(\d{1,2})\.(\d)\.(\d)(?:\/(\d{1,2}))?$/.exec(rule)
+  if (!m) return null
+  const [month, week, day] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  const hour = m[4] === undefined ? 2 : Number(m[4])
+  if (month < 1 || month > 12 || week < 1 || week > 5 || day > 6 || hour > 24) return null
+  const firstWeekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay()
+  let date = 1 + ((day - firstWeekday + 7) % 7) + (week - 1) * 7
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  while (date > daysInMonth) date -= 7
+  return Date.UTC(year, month - 1, date, hour) - offsetMs
+}
+
+/**
+ * Milliseconds to add to UTC, at the moment `atMs`, for a POSIX zone like AST4 or
+ * EST5EDT,M3.2.0,M11.1.0: the digits are hours WEST of UTC.
+ *
+ * `daylight` is the NVR's daylight saving switch. It says the NVR observes daylight saving, not
+ * that it is in force today: whether it is in force comes from the zone's own two dates. (Until
+ * 2026-10 the switch alone added the hour, all year, which would have set every such NVR an hour
+ * fast from the first Sunday of November.)
+ *
+ * null when the offset cannot be worked out: a zone this cannot read, or one with daylight saving
+ * switched on that does not say when it starts and ends (CST4CDT). The dates such a zone falls back
+ * on are the firmware's own choice, and a wrong guess sets a recorder's clock an hour out.
+ */
+export function zoneOffsetMs(timeZone, daylight, atMs = Date.now()) {
   const m = /^[A-Za-z]{2,6}([+-]?\d{1,2}(?:\.\d+)?)/.exec(String(timeZone ?? ''))
   if (!m || !OFFSET_RE.test(m[1])) return null
   const west = Number(m[1])
   if (!Number.isFinite(west)) return null
+  const standard = -west * 3600_000
   // a second zone name (EST5EDT) means daylight saving shifts it an hour east while in force
   const hasDst = /^[A-Za-z]{2,6}[+-]?\d{1,2}(?:\.\d+)?[A-Za-z]{2,6}/.test(String(timeZone))
-  const dst = daylight && hasDst ? 1 : 0
-  return (-west + dst) * 3600_000
+  if (!daylight || !hasDst) return standard
+  const rules = String(timeZone).split(',').slice(1)
+  if (rules.length !== 2) return null
+  // the start is given on the standard clock and the end on the summer one
+  const year = new Date(atMs + standard).getUTCFullYear()
+  const start = ruleMoment(rules[0], year, standard)
+  const end = ruleMoment(rules[1], year, standard + 3600_000)
+  if (start === null || end === null) return null
+  // south of the equator the summer runs over the new year, so the start comes after the end
+  const inForce = start < end ? atMs >= start && atMs < end : atMs >= start || atMs < end
+  return standard + (inForce ? 3600_000 : 0)
 }
 
 

@@ -151,11 +151,22 @@ export async function syncOne(nvr, { now = Date.now, driftMs = DRIFT_MS, user = 
       { tries, waitMs, sleep }
     )
     // the site's time zone, as the NVRs have it (site-time.mjs), whatever their clock says
-    const offsetMs = zoneOffsetMs(cur.timeZone, cur.daylight)
+    const offsetMs = zoneOffsetMs(cur.timeZone, cur.daylight, now())
     if (offsetMs !== null) zones.set(nvr.id, offsetMs / 60_000)
     if (cur.sync === 'NTP') return { nvr: nvr.id, drift: null, changed: false, why: 'it takes its time from NTP itself' }
 
-    if (offsetMs === null) return { nvr: nvr.id, drift: null, changed: false, why: `its timezone (${cur.timeZone ?? 'unknown'}) is not one this can work out` }
+    if (offsetMs === null) {
+      // the zone itself reads, so what is missing is the dates its daylight saving starts and ends on
+      const noDates = cur.daylight && zoneOffsetMs(cur.timeZone, false) !== null
+      return {
+        nvr: nvr.id,
+        drift: null,
+        changed: false,
+        why: noDates
+          ? `its timezone (${cur.timeZone}) has daylight saving on but does not say when it starts and ends, so its clock is left alone rather than set an hour out`
+          : `its timezone (${cur.timeZone ?? 'unknown'}) is not one this can work out`
+      }
+    }
 
     // what the NVR says its clock reads, read back as a moment
     const said = parseNvrTime(cur.currentTime, cur)
