@@ -301,6 +301,14 @@ const json = (o) => async () => o
   check('and it states what cannot be reported', listed[1].sources.notAvailable.length >= 3)
   const filtered = await handleAlarms('GET', '/api/alarms?from=0&types=pos', json({}), who)
   check('the filters are applied server-side too', filtered[1].alarms.every((a) => a.type === 'pos'))
+  // The limit counts the alarms shown, not the rows read: a kind that is not among the newest rows
+  // is still found (it used to be cut off before the filter ran).
+  const everything = listEvents({ limit: 1000 })
+  const older = everything.find((e) => e.type !== everything[0].type)
+  check('(there is an older alarm of another kind to look for)', Boolean(older))
+  const one = await handleAlarms('GET', `/api/alarms?from=0&types=${older.type}&limit=1`, json({}), who)
+  check('a filter with a limit of 1 finds the newest match, not nothing', one[1].alarms.length === 1 && one[1].alarms[0].id === older.id, JSON.stringify(one[1].alarms.map((x) => x.id)))
+  check('listEvents with keep: the limit counts kept rows', listEvents({ limit: 1, keep: (e) => e.id === older.id }).length === 1)
 
   // rights: a viewer who may see no camera sees no alarm, and cannot act on one by its id
   const blind = { user: 'carol', admin: false, cameras: who.cameras, now: who.now, canSee: () => false }

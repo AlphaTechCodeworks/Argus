@@ -320,7 +320,7 @@ async function deleteRule(id, name) {
 async function addRule(e) {
   e.preventDefault()
   const f = e.target.elements
-  const days = f.days.value.split(',').map((d) => Number(d.trim())).filter((d) => Number.isInteger(d))
+  const days = f.days.value.split(',').map((d) => d.trim()).filter(Boolean).map(Number).filter((d) => Number.isInteger(d))
   const schedule = f.from.value || f.to.value || days.length ? [{ days, from: f.from.value || '00:00', to: f.to.value || '00:00' }] : []
   const body = {
     name: f.name.value.trim(),

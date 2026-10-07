@@ -460,7 +460,7 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
         return { nvr: nvr.id, ch, stored: r.stored }
       } catch (e) {
         s.fails++
-        s.lastWhy = `could not be asked: ${String(e?.message ?? e).slice(0, 80)}`
+        s.lastWhy = `could not be asked: ${String(e?.message ?? e).slice(0, 200)}`
         s.lastError = s.lastWhy
         s.nextAt = nowMs + backoffFor(s.fails)
         // The rest of the list goes on after the back-off, and this camera is asked again on the next
@@ -590,7 +590,7 @@ export async function handleEvents(method, pathname, readJson, deps = {}) {
     const { listEvents } = await import('./events-db.mjs')
     return [200, {
       // only cameras this user may see (rights.mjs, via server.mjs)
-      events: listEvents({ fromMs: num(p.get('from')), toMs: num(p.get('to')), limit: num(p.get('limit')) ?? 500 }).filter((e) => canSee(e.nvr, e.ch)),
+      events: listEvents({ fromMs: num(p.get('from')), toMs: num(p.get('to')), limit: num(p.get('limit')) ?? 500, keep: (e) => canSee(e.nvr, e.ch) }),
       sources: sourceReport()
     }, NO_STORE]
   }
