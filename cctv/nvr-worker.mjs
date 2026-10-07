@@ -316,8 +316,10 @@ async function answer(m) {
   }
   try {
     if (m.gen != null && m.gen !== nvr.gen) throw new Error(`${nvr.name} reconnected; nothing was sent`)
-    if (m.op === 'xml') reply({ ok: true, text: await transparent(nvr, m.url, m.xml, m.tag, { outBytes: m.outBytes }) })
-    else if (m.op === 'power') reply({ ok: true, accepted: await power(nvr, m.action === 'shutdown' ? 'shutdown' : 'reboot') })
+    // notAfter: by when the main process wants it sent, or not at all (nvr-xml.mjs refuseIfTooLate):
+    // it may wait here, in this NVR's lane, long after the main process stopped waiting for it
+    if (m.op === 'xml') reply({ ok: true, text: await transparent(nvr, m.url, m.xml, m.tag, { outBytes: m.outBytes, notAfter: m.notAfter ?? undefined }) })
+    else if (m.op === 'power') reply({ ok: true, accepted: await power(nvr, m.action === 'shutdown' ? 'shutdown' : 'reboot', { notAfter: m.notAfter ?? undefined }) })
     else throw new Error(`unknown request ${m.op}`)
   } catch (e) {
     reply({ ok: false, error: { message: e?.message ?? String(e), name: e?.name ?? 'Error', status: e?.status ?? null, extra: e?.extra ?? null } })

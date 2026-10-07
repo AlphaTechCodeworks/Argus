@@ -46,6 +46,20 @@ check('playback.mjs: its route still needs the control login', /if \(!nvr\.onlin
 // the camera-detail read stays on the control login: heavy and unattended (the nightly export)
 check('nvrs.mjs: camera detail is never asked of the worker', !/op: 'detail'/.test(src('nvrs.mjs')) && !/op === 'detail'/.test(src('nvr-worker.mjs')))
 check('camera-export.mjs: still needs the control login', /if \(!nvr\.online\) \{/.test(src('camera-export.mjs')))
+// ... and its two XML reads name the control login's session, so they are refused rather than sent
+// through the worker if that login drops between the gate in camera-export.mjs and the read
+{
+  const body = (src('nvrs.mjs').split('async cameraDetail() {')[1] ?? '').split('async #queryChannelsFull()')[0]
+  check('nvrs.mjs: the camera-detail reads are pinned to the control login', /const own = `own:\$\{this\.gen\}`/.test(body) && (body.match(/gen: own[,\s}]/g) ?? []).length === 2, `${(body.match(/gen: own[,\s}]/g) ?? []).length} of 2`)
+}
+
+// a command handed to the worker says by when it must have been sent, and the worker passes that on
+{
+  const worker = src('nvr-worker.mjs').split('async function answer(m)')[1] ?? ''
+  check('nvr-worker.mjs: the send-by time reaches transparent() and power()', (worker.match(/notAfter: m\.notAfter/g) ?? []).length === 2, `${(worker.match(/notAfter: m\.notAfter/g) ?? []).length} of 2`)
+  const xml = src('nvr-xml.mjs')
+  check('nvr-xml.mjs: both borrowed commands carry a send-by time', (xml.match(/notAfter: Date\.now\(\) \+ capMs/g) ?? []).length === 2, `${(xml.match(/notAfter: Date\.now\(\) \+ capMs/g) ?? []).length} of 2`)
+}
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
