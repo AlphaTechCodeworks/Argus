@@ -366,6 +366,11 @@ export function nvrReady(n, now = Date.now()) {
  * first, because that is the one that becomes impossible soonest. Length breaks ties, shortest
  * first, so a night spent on one huge hole never starves ten small ones.
  *
+ * Both are of the part of the hole the NVR still keeps. A hole is given up only when its END has
+ * passed the NVR's retention (gapPlan, the scan's age-out); one whose start has is losing footage
+ * now, and goes first. Skipped by its start, such a hole was never pulled while most of it was
+ * still on the NVR, and stayed pending until all of it was gone (2026-10-07 audit).
+ *
  * Before the deadline come two counts the job keeps in memory of fills that threw (tick()):
  * `throws`, how often this hole's fill() has thrown since one last returned, and `camThrows`, how
  * often its camera's have since footage of that camera last got into the index. A hole that has
@@ -404,19 +409,20 @@ export function chooseGap(rows, { now = Date.now(), nvrs, retentionMsOf, busyNvr
       continue
     }
     const retention = retentionMsOf(r.nvr)
-    const leftMs = r.fromMs + retention - now // time before the NVR loses the START of this hole
-    if (leftMs <= 0) {
+    if (r.toMs + retention - now <= 0) {
       note('older than the NVR still keeps')
       continue
     }
-    candidates.push({ row: r, leftMs })
+    const keptFrom = Math.max(r.fromMs, now - retention) // where what the NVR still keeps of this hole starts
+    // leftMs: the time before the NVR loses the start of that part (none: it is losing it now)
+    candidates.push({ row: r, leftMs: keptFrom + retention - now, keptMs: r.toMs - keptFrom })
   }
   if (!candidates.length) {
     const worst = [...skipped.entries()].sort((a, b) => b[1] - a[1])[0]
     return { row: null, why: worst ? worst[0] : 'nothing to fill' }
   }
   // (holes whose fill() threw, then holes of a camera whose fills did, go last: see above)
-  candidates.sort((a, b) => (a.row.throws ?? 0) - (b.row.throws ?? 0) || (a.row.camThrows ?? 0) - (b.row.camThrows ?? 0) || a.leftMs - b.leftMs || a.row.toMs - a.row.fromMs - (b.row.toMs - b.row.fromMs))
+  candidates.sort((a, b) => (a.row.throws ?? 0) - (b.row.throws ?? 0) || (a.row.camThrows ?? 0) - (b.row.camThrows ?? 0) || a.leftMs - b.leftMs || a.keptMs - b.keptMs)
   return { row: candidates[0].row, why: null }
 }
 

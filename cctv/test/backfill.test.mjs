@@ -182,6 +182,11 @@ check('nvrReady: a healthy NVR is asked', nvrReady({ online: true }, NOW).ok ===
   check('chooseGap: a gap already past the NVR retention is skipped', chooseGap([{ ...rows[0], fromMs: NOW - 40 * DAY, toMs: NOW - 39 * DAY }], { now: NOW, nvrs, retentionMsOf }).why === 'older than the NVR still keeps')
   const short = chooseGap([{ ...rows[1], id: 4, toMs: NOW - 29 * DAY + 2 * MIN }, rows[1]], { now: NOW, nvrs, retentionMsOf })
   check('chooseGap: with the same deadline the shorter gap goes first', short.row?.id === 4)
+  // a hole whose start the NVR has rolled past, but not its end: what is left of it is being lost now
+  const straddle = { id: 5, nvr: 'nvr-1', ch: 2, fromMs: NOW - 40 * DAY, toMs: NOW - 20 * DAY, state: 'pending' }
+  check('chooseGap: a hole whose start has aged out but whose end has not is still picked', chooseGap([straddle], { now: NOW, nvrs, retentionMsOf }).row?.id === 5)
+  check('chooseGap: ... and before a hole the NVR still keeps whole', chooseGap([rows[1], straddle], { now: NOW, nvrs, retentionMsOf }).row?.id === 5)
+  check('chooseGap: ... of two such holes, the one with less left on the NVR goes first', chooseGap([straddle, { ...straddle, id: 6, fromMs: NOW - 31 * DAY, toMs: NOW - 29 * DAY }], { now: NOW, nvrs, retentionMsOf }).row?.id === 6)
   // a hole whose fill() threw (`throws`, counted by the job) goes after every hole that has not, whatever
   // their deadlines; among those that have, the one that threw least, then the deadline again
   const thrown = (list) => chooseGap(list, { now: NOW, nvrs, retentionMsOf }).row?.id
