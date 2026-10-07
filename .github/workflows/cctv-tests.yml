@@ -1,0 +1,94 @@
+name: CCTV tests (Linux)
+
+# The cctv app's own tests are standalone node scripts (cctv/test/*.test.mjs, a custom check()
+# harness), not the library's vitest suite. They load the native TVT SDK through koffi
+# (cctv/sdk.mjs -> bin/linux/*.so) and import the compiled library structs from build/ (produced by
+# `npm run build`), so they need Linux, a build, and bin/linux on the library path. A few need a
+# browser runtime (WebCodecs VideoDecoder) that node has no equivalent for and are skipped here.
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+
+jobs:
+  cctv-tests:
+    name: cctv app tests (node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 24
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install ffmpeg (several tests shell out to ffmpeg/ffprobe)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - run: npm ci
+
+      # cctv/sdk.mjs imports the compiled library structs from build/lib (gitignored); build them first
+      - run: npm run build
+
+      - name: Run cctv app test suite
+        env:
+          # the TVT SDK .so and its siblings (libShareLib, libNatClientSDK, ...) live here
+          LD_LIBRARY_PATH: ${{ github.workspace }}/bin/linux
+          DATA_DIR: ${{ runner.temp }}/cctv-data
+        run: |
+          mkdir -p "$DATA_DIR"
+          shopt -s nullglob
+          # Never run here:
+          #   live-replay, player, playout-speed  need a browser runtime (WebCodecs VideoDecoder)
+          #   sps, substreams                     read lab captures from /work that are not in the repo
+          skip=" live-replay.test.mjs player.test.mjs playout-speed.test.mjs sps.test.mjs substreams.test.mjs "
+          # Run and reported, but not gating until they are fixed on Linux (none now):
+          known=" "
+          pass=0
+          fail=0
+          skipped=0
+          failed=()
+          knownfailed=()
+          for f in cctv/test/*.test.mjs; do
+            b=$(basename "$f")
+            case "$skip" in
+              *" $b "*) echo "skip $f"; skipped=$((skipped + 1)); continue ;;
+            esac
+            echo "::group::$f"
+            if timeout 300 node "$f"; then
+              pass=$((pass + 1))
+            else
+              code=$?
+              case "$known" in
+                *" $b "*)
+                  echo "::warning file=$f::$f failed (exit $code): known failing on Linux CI, not gating"
+                  knownfailed+=("$f")
+                  ;;
+                *)
+                  echo "::error file=$f::$f failed (exit $code)"
+                  fail=$((fail + 1))
+                  failed+=("$f")
+                  ;;
+              esac
+            fi
+            echo "::endgroup::"
+          done
+          {
+            echo "## cctv tests: $pass passed, $fail failed, ${#knownfailed[@]} known failing (not gating), $skipped skipped"
+            for f in "${failed[@]}"; do echo "- FAILED $f"; done
+            for f in "${knownfailed[@]}"; do echo "- known failing: $f"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "passed: $pass  failed: $fail  known failing: ${#knownfailed[@]}  skipped: $skipped"
+          test "$fail" -eq 0

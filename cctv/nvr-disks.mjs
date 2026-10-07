@@ -31,6 +31,7 @@
 // synchronous and only ever reads the last snapshot.
 
 import { XML_HEADER, esc, kid, kids, parseXml } from './xml.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 /** How long a good answer is kept before the NVR is asked again. */
 export const FRESH_MS = 10 * 60_000
@@ -516,7 +517,7 @@ const unavailable = (why, at, extra = {}) => ({ at, available: false, why, disks
  */
 export async function readStorage(nvr, query, now, reach) {
   const at = now()
-  if (!nvr?.online) {
+  if (!xmlOnline(nvr)) {
     let probed = null
     try {
       probed = reach ? await reach(nvr) : null

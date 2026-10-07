@@ -12,7 +12,7 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'poll-'))
 process.env.CCTV_WORKER_FAKE_SDK = '1'
 process.env.CCTV_TEST_REFRESH_MS = '200'
 await import('./fake-sdk.mjs')
-const { Nvr, jittered } = await import('../nvrs.mjs')
+const { Nvr, allCameras, jittered, nvrs } = await import('../nvrs.mjs')
 
 const print = console.log.bind(console)
 console.log = () => {}
@@ -54,6 +54,54 @@ const base = polls()
 await sleep(1200)
 check('worker ready with a fresh list: main does not poll', polls() === base, `${polls() - base} polls`)
 check('liveOnline follows the worker', nvr.liveOnline === true)
+// The control login is refused while the worker's video login is up (shad, 2026-10-06: a P2P NVR at
+// its session limit). Health counts that NVR as online, so its cameras must be judged the same way,
+// or every one of them reads offline under an NVR the same page calls online. No await in between:
+// the status is put back before anything else can look at it.
+{
+  nvrs.set(nvr.id, nvr)
+  const was = nvr.status
+  nvr.status = 'offline'
+  const cam = (list, ch) => list.find((c) => c.nvr === nvr.id && c.ch === ch)?.online
+  check('control login down, video up: events still follow the control login', cam(allCameras(), 0) === false)
+  check('control login down, video up: health sees the camera online', cam(allCameras({ anyLogin: true }), 0) === true)
+  check('control login down, video up: a camera the NVR calls offline stays offline', cam(allCameras({ anyLogin: true }), 3) === false)
+  nvr.status = was
+  check('both logins up: health sees the camera online', cam(allCameras({ anyLogin: true }), 0) === true)
+  nvrs.delete(nvr.id)
+}
+
+// Borrowing: the NVR refuses the control login while the worker is logged in, so XML commands go
+// out on the worker's login (nvr-xml.mjs). No await in this block: the STATS timer above rewrites
+// `stats` every 100 ms, and everything is put back before anything else can look.
+{
+  const was = { status: nvr.status, failed: nvr.controlFailed, stats, spawnedAt: nvr.worker.spawnedAt }
+  nvr.worker.spawnedAt = () => 111
+  stats = { ...stats, status: 'online', gen: 4, sdk: { late: 0 } }
+  check('borrowing: not while the control login is up', nvr.borrowing === false && nvr.xmlOnline === true && nvr.xmlGen === `own:${nvr.gen}`, nvr.xmlGen)
+  nvr.status = 'offline'
+  nvr.controlFailed = false
+  check('borrowing: not before the control login has failed once (a normal start)', nvr.borrowing === false && nvr.xmlOnline === false)
+  nvr.controlFailed = true
+  check('borrowing: control login refused, worker logged in', nvr.borrowing === true && nvr.xmlOnline === true)
+  check("borrowing: the session is the worker's", nvr.xmlGen === 'worker:111:4', nvr.xmlGen)
+  check('borrowing: not degraded just because the control login is down', nvr.degraded === true && nvr.xmlDegraded === false)
+  stats = { ...stats, sdk: { late: 1 } }
+  check("borrowing: degraded while the worker's SDK calls are late", nvr.xmlDegraded === true)
+  stats = { ...stats, sdk: { late: 0 }, gen: 5 }
+  check('borrowing: a worker relogin is a new session', nvr.xmlGen === 'worker:111:5', nvr.xmlGen)
+  process.env.CCTV_XML_VIA_WORKER = 'off'
+  check('borrowing: switched off', nvr.borrowing === false && nvr.xmlOnline === false && nvr.xmlGen === `own:${nvr.gen}`)
+  delete process.env.CCTV_XML_VIA_WORKER
+  stats = { ...stats, status: 'offline' }
+  check('borrowing: not while the worker is logged out', nvr.borrowing === false)
+  stats = { ...stats, status: 'online', gen: undefined }
+  check('borrowing: not from a worker too old to report its session', nvr.borrowing === false)
+  nvr.status = was.status
+  nvr.controlFailed = was.failed
+  stats = was.stats
+  nvr.worker.spawnedAt = was.spawnedAt
+}
 stats = { ...stats, status: 'offline' }
 nvr.workerStats(stats)
 check('liveOnline: worker says offline', nvr.liveOnline === false)
@@ -67,9 +115,17 @@ check('worker restarting: liveOnline falls back to the main login', nvr.liveOnli
 clearInterval(t)
 nvr.worker = null
 await nvr.stop()
+// a control login that fails is remembered (127.0.0.1:1 refuses the connection: nothing reaches an NVR)
+{
+  const down = new Nvr({ id: 'p2', site: 'T', name: 'P2', host: '127.0.0.1', port: 1, user: 'u', password: 'p' })
+  check('a new NVR has not failed yet', down.controlFailed === false)
+  check('a failed control login is remembered', await until(() => down.controlFailed === true, 10_000))
+  await down.stop()
+}
 
 // wiring
 const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')
+check('alerts and Health read cameras by either login', /listCameras: \(\) =>\s+allCameras\(\{ anyLogin: true \}\)/.test(src('server.mjs')))
 // (the definition, not the first call of it, which comes earlier in the file)
 check('worker STATS carry the camera list', /channels: nvr\.channels/.test(src('nvr-worker.mjs').split('const sendStats')[1] ?? ''))
 // (the /live attach steps are in live-attach.mjs since /live-mux shares them)

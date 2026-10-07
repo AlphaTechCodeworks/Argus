@@ -496,7 +496,9 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
       this.onFrame = this.#onFrame.bind(this)
       sessions.add(this)
       ws.on('message', (data, isBinary) => {
-        if (!isBinary) this.#onCommand(String(data))
+        // (#onCommand is async and nobody waits for it: whatever it throws must end here. Nothing in
+        // this process listens for unhandled rejections, so one that escaped ended the server.)
+        if (!isBinary) this.#onCommand(String(data)).catch((e) => console.warn(`[${nvr.id}] playback ch${this.ch + 1}: a command failed: ${e?.message ?? e}`))
       })
       ws.on('close', () => this.close())
       this.timer = setInterval(() => this.#watch(), 500)
@@ -865,6 +867,9 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
       } catch {
         return
       }
+      // JSON, but not a command: null, a number, a string or true parse without error, and `in` throws
+      // on every one of them (as rec-playback.mjs and live-mux.mjs check before they look inside)
+      if (!cmd || typeof cmd !== 'object') return
       if ('speed' in cmd) {
         const speed = [1, 2, 4, 8].includes(cmd.speed) ? cmd.speed : 1 // 16x/32x are for scanning
         // keep the play position, continue at the new rate

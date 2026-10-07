@@ -775,13 +775,30 @@ const firstB2 = exp2.find((f) => f.seg === cam2.segs[1].path)
   ws.command({ speed: 4 })
   await until(() => ws.bins.filter(isNvr).length >= 20, 5000)
   ws.command({ speed: 16 })
-  await until(() => ws.texts.some((m) => m.type === 'source' && m.src === 'server'), 5000)
-  await until(() => ws.log.slice(ws.log.findIndex((e) => e.text?.src === 'server')).some((e) => e.bin), 3000)
+  const srvAt = () => ws.log.findIndex((e) => e.text?.type === 'source' && e.text.src === 'server')
+  const t16 = performance.now()
+  await until(() => srvAt() > 0, 5000)
+  // The next file's first keyframe follows source server, it does not come with it: the end of the leg
+  // sends the message and restarts the reader in keyframe mode, and that reads the keyframe from disk
+  // (0.3 to 1.3 ms later on the GitHub runner). So the wait is for a frame after that message. It was
+  // for a frame after the first text with src 'server', and the opening {type:'started'} is one: it
+  // was over at once, and the check failed (detail "NaN") whenever this test's 5 ms look came round
+  // between the message and the keyframe, about one run in twenty.
+  const tSrv = performance.now()
+  await until(() => srvAt() > 0 && ws.log.slice(srvAt() + 1).some((e) => e.bin), 3000)
+  const waited = performance.now() - tSrv
   const c = nvr.connects[0]
-  const iSrv = ws.log.findIndex((e) => e.text?.type === 'source' && e.text.src === 'server')
-  const first = ws.log.slice(iSrv + 1).find((e) => e.bin)?.bin
+  const iSrv = srvAt()
+  const src = ws.log[iSrv]
+  const after = iSrv > 0 ? ws.log.slice(iSrv + 1) : []
+  const first = after.find((e) => e.bin)
+  // for the next failure: how long the wait lasted, when the message came, and what the log held after it
+  const brief = (e, t0) => `${e.text ? [e.text.type, e.text.src].filter(Boolean).join(' ') : `${e.bin.key ? 'key' : 'delta'} ${isNvr(e.bin) ? 'nvr' : 'disk'}`} +${(e.at - t0).toFixed(1)}`
+  const saw = src
+    ? `source server ${(src.at - t16).toFixed(0)} ms after the 16x command; ${first ? `first frame ${(first.at - src.at).toFixed(1)} ms after it, ${first.bin.tsMs - firstB2.ts} ms from the next file's first keyframe` : 'no frame after it'}; waited ${waited.toFixed(0)} ms for one; after it (ms): ${J(after.slice(0, 6).map((e) => brief(e, src.at)))}`
+    : `no source server in ${(tSrv - t16).toFixed(0)} ms after the 16x command; the log ends (ms after it): ${J(ws.log.slice(-6).map((e) => brief(e, t16)))}`
   check('16x during a leg: the NVR session gets 8x; the leg plays to the next file', J(c?.commands) === J([{ speed: 4 }, { speed: 8 }]) && iSrv > 0 && c.closed, J(c?.commands))
-  check('... then keyframes from the next file (keyframe mode), nothing from the NVR after source server', first?.key && !isNvr(first) && first.us === firstB2.us && ws.log.slice(iSrv).every((e) => !e.bin || !isNvr(e.bin)) && increasing(ws.bins), `${first?.tsMs - firstB2.ts}`)
+  check('... then keyframes from the next file (keyframe mode), nothing from the NVR after source server', first?.bin.key && !isNvr(first.bin) && first.bin.us === firstB2.us && after.every((e) => !e.bin || !isNvr(e.bin)) && increasing(ws.bins), saw)
   ws.close(1000)
 }
 {

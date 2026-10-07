@@ -40,7 +40,7 @@ process.env.DATA_DIR = data
 writeFileSync(join(data, 'nvrs.json'), J({ nvrs: [{ id: 'w1', site: 'T', name: 'W1', host: 'w1.invalid', port: 6036, user: 'u', password: 'p' }] }))
 process.env.CCTV_WORKER_FAKE_SDK = '1'
 
-const { openRecIndex, OPEN_MAX_MS } = await load('../rec-index.mjs')
+const { openRecIndex, OPEN_MAX_MS, MAX_SEGMENT_MS } = await load('../rec-index.mjs')
 const { SegmentWriter, segmentPath } = await load('../segment-writer.mjs')
 const { Recorder } = await load('../recorder.mjs')
 const { canPlayServer } = await load('../rec-access.mjs')
@@ -96,6 +96,24 @@ idx.addSegment(seg('n2', 3, '10-00', T0 - M, T0 + 20 * M))
   const paths = (rs) => rs.map((r) => r.path).join()
   check('segments: the rows overlapping [from, to], oldest first; ends and starts inclusive', paths(idx.segments('n1', 3, T0 + 30_000, T0 + 2 * M)) === [a, b, c].map((s) => s.path).join() && paths(idx.segments('n1', 3, T0 + M - 40, T0 + M - 40)) === a.path, paths(idx.segments('n1', 3, T0 + 30_000, T0 + 2 * M)))
   check('segments: the 40 ms seam and a gap: none; the whole camera: all four', idx.segments('n1', 3, T0 + M - 20, T0 + M - 20).length === 0 && idx.segments('n1', 3, T0 + 5 * M, T0 + 6 * M).length === 0 && idx.segments('n1', 3, 0, T0 + H).length === 4)
+}
+
+// ---- a segment longer than MAX_SEGMENT_MS (a camera that sent no keyframe for over an hour: the
+// writer rolls over only on a keyframe, so the file grew past MAX_SEGMENT_MS). The playback lookups
+// bound their scan at start_ms >= t - MAX_SEGMENT_MS, so such a file — covering t but starting longer
+// ago than that — was missed on the read path. segments_long holds exactly these rows; lastSegmentEnd()
+// and the backfill scan already consult it, the playback lookups did not. (rec-index.mjs MAX_SEGMENT_MS)
+{
+  const long = seg('n1', 7, '10-00', T0, T0 + 2 * MAX_SEGMENT_MS + 10 * M) // longer than MAX_SEGMENT_MS
+  idx.addSegment(long)
+  const deep = T0 + MAX_SEGMENT_MS + 30 * M // past start + MAX_SEGMENT_MS, still well inside the file
+  check('at: over-long segment, queried past its start + MAX_SEGMENT_MS', pathOf(idx.at('n1', 7, deep)) === long.path, pathOf(idx.at('n1', 7, deep)))
+  check('at: over-long segment, within MAX_SEGMENT_MS of its start (unchanged)', pathOf(idx.at('n1', 7, T0 + 30_000)) === long.path)
+  check('at: past the over-long segment end: no match', idx.at('n1', 7, long.endMs + 1) === null, J(idx.at('n1', 7, long.endMs + 1)))
+  check('segments: over-long segment overlapping a window past its start + MAX_SEGMENT_MS', idx.segments('n1', 7, deep, deep + 5 * M).map((r) => r.path).join() === long.path, J(idx.segments('n1', 7, deep, deep + 5 * M)))
+  check('timeline: over-long segment covers a window past its start + MAX_SEGMENT_MS', J(idx.timeline('n1', 7, deep, deep + 5 * M, long.endMs).ranges) === J([[deep, deep + 5 * M]]), J(idx.timeline('n1', 7, deep, deep + 5 * M, long.endMs).ranges))
+  // next/prev carry no window bound and already find it — characterisation, must stay true after the fix
+  check('next/prev: already find the over-long segment', pathOf(idx.next('n1', 7, T0 - 1)) === long.path && pathOf(idx.prev('n1', 7, long.endMs + M)) === long.path)
 }
 
 // ---- timeline
