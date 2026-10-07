@@ -6,6 +6,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
+import { recordCrashes } from './crash-record.mjs'
 import { loopWorstMs } from './loop-lag.mjs'
 import { recentRefusals } from './nvr-health.mjs'
 import { memoryNow } from './proc-memory.mjs'
@@ -29,6 +30,7 @@ if (!cfg) {
 }
 
 startWatchdog() // kills this worker only; the supervisor starts a new one
+recordCrashes({ dataDir: DATA_DIR }) // last-crash-<nvr>.json: an error that ends this worker (crash-record.mjs)
 const nvr = new Nvr(cfg) // logs in by itself (the constructor connects)
 const taps = new Map() // key -> { tap, stream, ch, type }
 let stopping = false // shutdown() has begun
