@@ -46,7 +46,7 @@
 //    back), at once or at the next run, before anything else touches that file.
 import { readdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
-import { freeMarks } from './location-health.mjs'
+import { floorTargetPct, freeMarks } from './location-health.mjs'
 import { THIN } from './rec-index.mjs'
 import { afterStretch, checkFreeRose, firstUnprotected, freeingStalled, makeDeleter, makePacer } from './segment-delete.mjs'
 import { shareCall } from './share-calls.mjs'
@@ -644,8 +644,13 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   backoffSaid = lowered
   const defaults = settings.recording?.defaults ?? {}
   if (Number.isFinite(defaults.fullDays)) {
-    const ref = now - defaults.fullDays * DAY
-    out.backlog.perHourBytes = index.startedBetween(ref - 3 * 3_600_000, ref).bytes / 3
+    // What arrives at the cutoff an hour: the full video of the 3 hours that pass it next. The 3 hours before
+    // it were measured, and a job that keeps up has just rewritten those to about a tenth: the rate read low,
+    // so the day rule waited for a night that could not clear what was coming, fell behind, and read the true
+    // rate again from the hours it had not converted (audit of 2026-10-07). (Under 3 full-video hours: the
+    // last 3 hours recorded.)
+    const to = Math.min(now, now - defaults.fullDays * DAY + 3 * 3_600_000)
+    out.backlog.perHourBytes = index.startedBetween(to - 3 * 3_600_000, to).bytes / 3
   }
   if (backlog.files > 0 && backlog.lagMs > BEHIND_MS) {
     const w = `FALLING BEHIND: ${backlog.files.toLocaleString('en-GB')} files (${gbs(backlog.bytes)}) of full video wait to be converted, the oldest ${hoursText(backlog.lagMs)} past its full-video days (at ${out.pace.text})`
@@ -1255,6 +1260,11 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
 
   // 1. per-camera retention days, oldest first (olderThan is ordered by start_ms)
   let n = 0
+  // Rows past their days on a location that is not mounted, or not in the list: they cannot go this run, and
+  // the walk goes on after them. A camera's walk stopped at its first 500 of them, and its rows past their
+  // days on the mounted locations, behind those, were never reached (audit of 2026-10-07). Counted by
+  // reason, not listed row by row (as runThinning's backlog says them: a drive away for a week is 900,000 rows).
+  const off = new Map() // why -> files
   for (const { nvr, ch } of startAt === null ? [] : cams) {
     if (switched) break
     const rec = camRec(settings, nvr, ch)
@@ -1270,9 +1280,17 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
       if (!batch.length) break
       let any = false
       let jumped = false
+      let away = false
       for (const s of batch) {
         if (n >= maxDeletes || switched) break
         await pace()
+        if (!here.has(s.loc)) {
+          const loc = locs.get(s.loc)
+          const why = loc ? `${loc.path} is not mounted` : `unknown location ${s.loc}`
+          off.set(why, (off.get(why) ?? 0) + 1)
+          away = true
+          continue
+        }
         // a row starting inside a bookmarked stretch: so does the camera's every row to its end
         const st = guard.stretchOf(s)
         if (st && s.startMs >= st[0]) {
@@ -1287,18 +1305,24 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
         }
       }
       // (rows queued and not sent yet are still in the index, and refused: the next look passes them)
-      if (!any && !jumped) break
+      if (!any && !jumped && !away) break
       // an answer that was not full had every such row: no need to ask again
       if (!jumped && raw.length < BATCH) break
+      // rows that cannot go this run were among them: the next look starts after this one's last row (the
+      // rest of it is taken, or refused)
+      if (away && !jumped) fromMs = raw.at(-1).startMs + 1
     }
   }
+  for (const [why, files] of off) out.skipped.push({ path: `${files.toLocaleString('en-GB')} files`, why, files })
   await flushAll()
 
   // 2. the free-space floor, per location, oldest first: free space from the location's helper, then
   // counted on with the bytes deleted
   for (const loc of locs.values()) {
     if (!here.has(loc.id) || switched) continue
-    const { floorFreePct } = freeMarks(settings, loc)
+    const { floorFreePct, lowFreePct } = freeMarks(settings, loc)
+    // (from the floor's margin above it, and to there: location-health.mjs FLOOR_MARGIN_PCT says why)
+    const floorToPct = floorTargetPct({ floorFreePct, lowFreePct })
     let free
     try {
       free = await freeOf(loc)
@@ -1306,14 +1330,15 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
       continue // storage.mjs reports an unreadable location
     }
     if (!(free?.totalBytes > 0) || !Number.isFinite(free?.freeBytes)) continue
-    if (pct(free) >= floorFreePct) continue
+    if (pct(free) >= floorToPct) continue
+    const under = pct(free) < floorFreePct ? 'below' : 'close to'
     const stall = dryRun ? null : freeingStalled(loc.id)
     if (stall && now < stall.retryAt) {
-      warn(`${loc.path}: below the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%), but deleting files did not free space on it (a recycle bin or snapshots on the NAS, or another program writing to the share?): nothing deleted on it for free space here (housekeeping makes one small try each run while it is below its floor)`)
+      warn(`${loc.path}: ${under} the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%), but deleting files did not free space on it (a recycle bin or snapshots on the NAS, or another program writing to the share?): nothing deleted on it for free space here (housekeeping makes one small try each run while it is below its floor)`)
       continue
     }
-    warn(`${loc.path}: below the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%): ${dryRun ? 'would delete' : 'deleting'} the oldest footage, even inside its retention`)
-    const floorB = (free.totalBytes * floorFreePct) / 100
+    warn(`${loc.path}: ${under} the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%): ${dryRun ? 'would delete' : 'deleting'} the oldest footage, even inside its retention`)
+    const floorB = (free.totalBytes * floorToPct) / 100
     const d = dryRun ? null : deleterFor(loc)
     const base = d ? d.doneBytes : 0
     let dryFreed = 0

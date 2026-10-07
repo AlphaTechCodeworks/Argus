@@ -133,7 +133,7 @@ import { recentRefusals } from './nvr-health.mjs'
 import { probeTarget, tcpReachable } from './probe.mjs'
 import { handleBookmarks, protectedRanges } from './bookmarks.mjs'
 import { handleBackfill, initBackfill } from './backfill.mjs'
-import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, setStorageContext } from './storage-report.mjs'
+import { buildStorageReport, driveFullCandidates, handleStorage, readHistory, recordSample, setStorageContext } from './storage-report.mjs'
 import { retentionCandidates, startRetentionWatch } from './retention-target.mjs'
 import { can, canPlayAnyOn, handleRights, liveCameras, mayHd, onRightsSaved, playbackCameras, sitesFor } from './rights.mjs'
 import { streamParam } from './stream-param.mjs'
@@ -400,6 +400,11 @@ const alerts = startAlerts({
   // recycling at 8 days against 30 is quiet for the forecast above and exactly what this one is for.
   extraCandidates: () => {
     const report = buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf })
+    // The samples that forecast is drawn from are taken here, at most one an hour (recordSample's own rule).
+    // They were taken only when an admin opened the Storage page, so a server nobody looked at never had
+    // enough of them to forecast from (audit of 2026-10-07, M11). This check's forecast was drawn before
+    // the sample; the next check has it.
+    recordSample(DATA_DIR, report.locations)
     return [...driveFullCandidates(report, { days: 7 }), ...retentionCandidates(report), ...housekeepingCandidates()]
   },
   listNvrs: () =>

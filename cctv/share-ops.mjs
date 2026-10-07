@@ -268,6 +268,9 @@ export function makeShareOps({ id, root: rootIn }) {
      * 2026-09-30): [{ path, size, mtimeMs, isFile, keyframes, firstKeyMs, lastKeyMs } | { path, error }].
      * The keyframes are its .idx rows within its size (a torn last row, or one past the end, not counted);
      * no .idx (the worker died between the two opens) is none, firstKeyMs and lastKeyMs null.
+     * A row AT the file's end is past it too: the writer writes a keyframe's row before its data
+     * (segment-writer.mjs #data), so that row is a keyframe none of whose bytes reached the disk (as
+     * rec-reader.mjs reads it; audit of 2026-10-07).
      */
     async segInfo({ paths } = {}, tick) {
       const out = []
@@ -288,7 +291,7 @@ export function makeShareOps({ id, root: rootIn }) {
         }
         let rows = []
         try {
-          rows = parseIdx(await fsp.readFile(`${r}.idx`)).filter((x) => x.offset <= s.size)
+          rows = parseIdx(await fsp.readFile(`${r}.idx`)).filter((x) => x.offset < s.size)
         } catch {} // no .idx: none
         tick()
         out.push({ path: p, size: s.size, mtimeMs: s.mtimeMs, isFile: s.isFile(), keyframes: rows.length, firstKeyMs: rows[0]?.tsMs ?? null, lastKeyMs: rows.at(-1)?.tsMs ?? null })

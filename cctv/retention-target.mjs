@@ -99,6 +99,8 @@ async function useBetween(index, fromMs, toMs, stepMs, pause) {
         a.files += r.files
         a.bytes += r.bytes
         a.ms += r.ms
+        a.fullBytes += r.fullBytes
+        a.fullMs += r.fullMs
         a.weighted += r.weighted
       }
     }
@@ -126,7 +128,7 @@ async function fullFrom(index, loc, fromMs, pause) {
  * the event loop (`pause`); no file on any location is touched. `cache` keeps each whole day's sums between
  * runs (the watch keeps one).
  * @returns {Promise<object|null>} { at, stepMs, keyframeShare, protection, warnings, days: [{ date, fromMs, toMs,
- *   rows: [{ loc, nvr, ch, files, bytes, ms, weighted }] }], locations: { [id]: { id, anyOldestMs, oldestMs,
+ *   rows: [{ loc, nvr, ch, files, bytes, ms, fullBytes, fullMs, weighted }] }], locations: { [id]: { id, anyOldestMs, oldestMs,
  *   timelapse: { oldestMs, newestMs } | null, fullFromMs, sample: [{ nvr, ch, files, bytes, ms }] } } }
  */
 export async function measureRetention({ index, settings, now = Date.now(), protectedRanges, cache = new Map(), pause = turn } = {}) {
@@ -338,14 +340,23 @@ function locationView(row, f, facts, settings, mode, now, memory) {
     for (const r of day.rows) {
       if (r.loc !== row.id) continue
       const k = `${r.nvr}/${r.ch}`
-      const a = cams.get(k) ?? { nvr: r.nvr, ch: r.ch, files: 0, bytes: 0, ms: 0, weighted: 0 }
+      const a = cams.get(k) ?? { nvr: r.nvr, ch: r.ch, files: 0, bytes: 0, ms: 0, fullBytes: 0, fullMs: 0, weighted: 0 }
       a.files += r.files
       a.bytes += r.bytes
       a.ms += r.ms
+      // (rows with no full-video sums of their own are all full video)
+      a.fullBytes += r.fullBytes ?? r.bytes
+      a.fullMs += r.fullMs ?? r.ms
       a.weighted += r.weighted
       cams.set(k, a)
     }
   }
+  // What a camera records in those days, as full video: the bytes of its files still full video, scaled from
+  // their footage time to all of its footage time there. With 3 full-video days or fewer, some of the whole
+  // days are time-lapse already, at about a tenth of the size; counted as they are, the daily volume read low
+  // and the days forecast high (29.4 days where 20.5 fit at 1 full-video day: audit of 2026-10-07, M12). A
+  // camera with no full video left in those days has nothing to scale from, and is counted as it is.
+  for (const c of cams.values()) c.asFull = c.fullMs > 0 ? c.fullBytes * (c.ms / c.fullMs) : c.bytes
   // the cameras recording here, by what their settings keep: full-video days, target, time-lapse or not
   const groupsBy = new Map()
   const planOf = (c) => {
@@ -360,7 +371,7 @@ function locationView(row, f, facts, settings, mode, now, memory) {
     if (p.R === null) continue
     const key = `${p.F}|${p.R}|${p.timelapse}`
     const g = groupsBy.get(key) ?? { ...p, rate: 0, cameras: 0 }
-    g.rate += c.bytes / n
+    g.rate += c.asFull / n
     g.cameras++
     groupsBy.set(key, g)
   }
@@ -376,7 +387,7 @@ function locationView(row, f, facts, settings, mode, now, memory) {
     let asFull = 0
     for (const s of f.sample ?? []) {
       const c = cams.get(`${s.nvr}/${s.ch}`)
-      const bps = c && c.ms > 0 ? c.bytes / c.ms : 0
+      const bps = c && c.ms > 0 ? c.asFull / c.ms : 0
       if (!(bps > 0) || !(s.ms > 0)) continue
       files += s.files
       tlBytes += s.bytes
@@ -387,8 +398,9 @@ function locationView(row, f, facts, settings, mode, now, memory) {
       let bytes = 0
       let weighted = 0
       for (const c of cams.values()) {
-        if (!planOf(c).timelapse) continue
-        bytes += c.bytes
+        // (the keyframes kept are counted on full-video files: rec-index.mjs TARGET_SQL.dayUse)
+        if (!planOf(c).timelapse || !(c.fullMs > 0)) continue
+        bytes += c.fullBytes
         weighted += c.weighted
       }
       const kept = bytes > 0 ? weighted / bytes : null

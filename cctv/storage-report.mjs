@@ -204,12 +204,7 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
   if (index) {
     for (const { nvr, ch } of index.cameras()) {
       const rec = camRec(settings, nvr, ch)
-      const first = index.first(nvr, ch)
-      const oldestMs = first?.startMs ?? null
       const newestMs = index.lastSegmentEnd(nvr, ch) ?? null
-      // Days kept is measured from the oldest footage to now, not to the newest: a camera that
-      // stopped recording a week ago still only holds what it holds.
-      const daysKept = Number.isFinite(oldestMs) ? roundDays(now - oldestMs) : null
       cams.push({
         nvr,
         ch,
@@ -219,11 +214,11 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
         fullDays: rec.fullDays ?? null,
         after: rec.after ?? null,
         timelapseS: rec.timelapseS ?? null,
-        oldestMs,
+        // the oldest footage and the days kept: filled in below, from the locations that are mounted
+        oldestMs: null,
         newestMs,
-        daysKept,
-        // null when we cannot say, never false: "not available" is not "failing".
-        meetsTarget: daysKept === null || !Number.isFinite(rec.retentionDays) ? null : daysKept >= rec.retentionDays * 0.95
+        daysKept: null,
+        meetsTarget: null
       })
     }
   } else {
@@ -293,6 +288,7 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
       for (const c of cams) {
         const oldest = index.oldestOf(c.nvr, c.ch, loc.id, 1)[0] ?? null
         if (!oldest) continue
+        if (c.oldestMs === null || oldest.startMs < c.oldestMs) c.oldestMs = oldest.startMs
         const daysHere = roundDays(now - oldest.startMs)
         row.cameras.push({
           camera: c.camera,
@@ -313,6 +309,17 @@ export function buildStorageReport({ settings, index = null, history = {}, now =
 
     row.forecast = forecast(history?.[loc.id] ?? [], { now, freeBytes: row.freeBytes, totalBytes: row.totalBytes, floorFreePct: marks.floorFreePct })
     locations.push(row)
+  }
+
+  // A camera's days kept, from its oldest footage on the locations above that are mounted. The index's oldest
+  // row of all was used: rows on a location that was removed, or is not mounted, stay in the index, so the
+  // figure grew a day per day on footage nobody can play (audit of 2026-10-07; production since its NAS was
+  // removed on 1 October). Measured from the oldest footage to now, not to the newest: a camera that stopped
+  // recording a week ago still only holds what it holds.
+  for (const c of cams) {
+    c.daysKept = Number.isFinite(c.oldestMs) ? roundDays(now - c.oldestMs) : null
+    // null when we cannot say, never false: "not available" is not "failing".
+    c.meetsTarget = c.daysKept === null || !Number.isFinite(c.targetDays) ? null : c.daysKept >= c.targetDays * 0.95
   }
 
   const days = retentionView({ facts: retention, settings, locations, now })

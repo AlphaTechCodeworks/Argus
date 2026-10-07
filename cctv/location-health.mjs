@@ -31,6 +31,18 @@ export function freeMarks(settings, loc) {
 }
 
 /**
+ * Deleting for the hard floor starts this much of the drive above it and frees to there (housekeeping.mjs,
+ * thinning.mjs runRetention). The floor is also where a location stops being usable (healthOf below,
+ * share-ops.mjs probe): deleting to exactly the floor left the next minute's writing to take it under again, so
+ * a full drive went from recording to the outage buffer (ram-spool.mjs) and back every run (audit of
+ * 2026-10-07, M10). 1 % of the drive is more than the 5 minutes between two runs write on a drive of a size to
+ * record on (the site's 87 cameras: about 5 GB; 1 % of a 1 TB drive is 10 GB).
+ */
+export const FLOOR_MARGIN_PCT = 1
+/** The free space (% of the drive) the floor's deleting keeps: the floor and its margin, never past the low mark. */
+export const floorTargetPct = (marks) => Math.min(marks.floorFreePct + FLOOR_MARGIN_PCT, marks.lowFreePct)
+
+/**
  * A location's space limit for Argus's recordings (limitGB, 1 GB = 1,000,000,000 bytes) and whether it
  * is enforced. Enforced (housekeeping.mjs deletes down to it) only once saved through storage.mjs since
  * 2026-09-29, which checks it against the drive's or share's size, asks first on the page, and stamps

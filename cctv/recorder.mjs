@@ -600,8 +600,10 @@ export class Recorder {
     const gate = this.#gate(cam, ts, now)
     if (!gate.write) {
       // the video is back and this camera is doing what it should (not writing between events):
-      // the restart's ramp-up ends here, not at the next event, and so does a switch of stream
-      if (cam.gap?.startup || cam.gap?.switching) this.#endGap(cam, ts)
+      // the restart's ramp-up ends here, not at the next event, and so does a switch of stream. So does
+      // any other gap ("camera offline", a refusal, no storage, a disk too slow): left open, its row ran
+      // to the next event's first frame, hours past the moment the video came back (audit of 2026-10-07)
+      if (cam.gap) this.#endGap(cam, ts)
       cam.lastTs = ts
       cam.lastAt = now
       cam.waitKey = true // the next written frame must be a keyframe: deltas need their reference

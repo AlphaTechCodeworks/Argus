@@ -93,6 +93,28 @@ const series = (hours, { startUsed = 0, perDay = 0, total = TB, noise = 0, step 
   check('a corrupt history file is not a crash', Object.keys(readHistory(data)).length === 0)
   rmSync(join(data, 'storage-history.json'))
 }
+{
+  // The samples are taken by the alert checks (server.mjs extraCandidates, every check; one an hour is kept),
+  // not only when an admin opens the Storage page: an unattended server never had enough of them to forecast
+  // from, and production's file was a week old (audit of 2026-10-07, M11). What the checks do, here: the report
+  // as they build it, its locations handed to recordSample.
+  const settings = { recording: { defaults: {}, cameras: {} }, storage: { locations: [{ id: 'L1', path: '/srv/rec/usb1', type: 'usb', role: 'main' }, { id: 'L2', path: '/srv/rec/nas', type: 'network', role: 'main' }], lowFreePct: 15, floorFreePct: 5 } }
+  const checkAt = (now, free) => {
+    const report = buildStorageReport({ settings, index: null, history: readHistory(data), now, present: (l) => l.id === 'L1', freeOf: () => ({ freeBytes: free, totalBytes: 1000 }), retention: null })
+    recordSample(data, report.locations, now)
+    return report
+  }
+  for (let i = 0; i < 60; i++) checkAt(NOW + i * 60_000, 900 - i)
+  const h = readHistory(data)
+  check('the alert checks take the samples: 60 checks in an hour keep one, of the mounted location only', h.L1?.length === 1 && h.L1[0].usedBytes === 100 && h.L1[0].totalBytes === 1000 && h.L2 === undefined, JSON.stringify(h))
+  for (let i = 1; i <= MIN_SAMPLES; i++) checkAt(NOW + i * HOUR + 1, 900 - 10 * i)
+  const later = checkAt(NOW + (MIN_SAMPLES + 1) * HOUR, 900 - 10 * (MIN_SAMPLES + 1))
+  check('... and with nobody opening the page, the history grows by one an hour and the report reads it', readHistory(data).L1.length === MIN_SAMPLES + 1 && later.locations[0].forecast.samples === MIN_SAMPLES + 1, JSON.stringify(later.locations[0].forecast))
+  rmSync(join(data, 'storage-history.json'))
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  const body = server.match(/extraCandidates: \(\) => \{[\s\S]*?\n  \},/)?.[0] ?? ''
+  check('server.mjs: the alert checks hand the report\'s locations to recordSample', /const report = buildStorageReport\(/.test(body) && /recordSample\(DATA_DIR, report\.locations\)/.test(body) && /import \{[^}]*\brecordSample\b[^}]*\} from '\.\/storage-report\.mjs'/.test(server), body.slice(0, 200))
+}
 
 // ---- the report ---------------------------------------------------------------------------------
 const DEFAULTS = { mode: 'continuous', fullDays: 30, after: 'timelapse', timelapseS: 10, retentionDays: 180, preS: 10, postS: 20 }
@@ -133,6 +155,20 @@ const seg = (nvr, ch, ageDays, loc = 'L1') => ({ nvr, ch, loc, path: `/srv/rec/$
   check('growth per day is reported', Math.abs(loc.forecast.bytesPerDay - 50e9) < 1e9, String(loc.forecast.bytesPerDay))
   check('full in N days is reported', loc.forecast.confident && loc.forecast.daysToFull > 0)
   check('a location with footage past a target counts as recycling', loc.cycling === true)
+  check('each camera\'s days kept overall: from its oldest footage on a mounted location', Math.abs(r.cameras.find((c) => c.camera === 'n1/0').daysKept - 200) < 0.1 && r.cameras.find((c) => c.camera === 'n1/0').meetsTarget === true && r.cameras.find((c) => c.camera === 'n1/1').meetsTarget === false && r.cameras.find((c) => c.camera === 'n1/1').oldestMs === NOW - 10 * DAY, JSON.stringify(r.cameras))
+}
+{
+  // Rows on a location that is not mounted, or was removed from the list, stay in the index. A camera's days
+  // kept counted from the oldest of all of them: with production's NAS removed on 1 October the figure grew a
+  // day per day on footage nobody can play (audit of 2026-10-07). It is the oldest on the mounted locations.
+  const index = fakeIndex([seg('n1', 0, 60, 'GONE'), seg('n1', 0, 40, 'L2'), seg('n1', 0, 5, 'L1'), seg('n1', 1, 50, 'GONE'), seg('n1', 1, 30, 'L2')])
+  const r = buildStorageReport({ settings: settings([L1, L2]), index, history: {}, now: NOW, freeOf: () => ({ freeBytes: 450e9, totalBytes: TB }), present: (l) => l.id === 'L1', retention: null })
+  const c0 = r.cameras.find((c) => c.camera === 'n1/0')
+  const c1 = r.cameras.find((c) => c.camera === 'n1/1')
+  check('DAYS KEPT PER CAMERA: the oldest on the mounted locations (5 days), not a removed location\'s (60) or an unmounted one\'s (40)', Math.abs(c0.daysKept - 5) < 0.1 && c0.oldestMs === NOW - 5 * DAY && c0.meetsTarget === false, JSON.stringify(c0))
+  check('... a camera with footage only where it cannot be played: not available, never a number', c1.daysKept === null && c1.oldestMs === null && c1.meetsTarget === null && Number.isFinite(c1.newestMs), JSON.stringify(c1))
+  const both = buildStorageReport({ settings: settings([L1, L2]), index, history: {}, now: NOW, freeOf: () => ({ freeBytes: 450e9, totalBytes: TB }), present: () => true, retention: null })
+  check('... with the second location mounted again, its footage counts (40 and 30 days)', Math.abs(both.cameras.find((c) => c.camera === 'n1/0').daysKept - 40) < 0.1 && Math.abs(both.cameras.find((c) => c.camera === 'n1/1').daysKept - 30) < 0.1, JSON.stringify(both.cameras.map((c) => c.daysKept)))
 }
 {
   const r = buildStorageReport({ settings: settings([L1]), index: fakeIndex([]), history: {}, now: NOW, freeOf: () => ({ freeBytes: 1, totalBytes: 2 }), present: () => false })

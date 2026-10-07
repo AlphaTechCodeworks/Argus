@@ -9,8 +9,9 @@
 //  3. on a location with less than its low mark free (its own lowFreePct, else storage.lowFreePct):
 //     the oldest segments first, taking first the camera furthest past its full-video days
 //     (fullDays); footage inside a camera's full-video days is kept unless free space is below the
-//     hard floor (its own floorFreePct, else storage.floorFreePct: then the oldest of it goes too,
-//     with a warning).
+//     hard floor (its own floorFreePct, else storage.floorFreePct) and its margin (location-health.mjs
+//     FLOOR_MARGIN_PCT: 1 % of the drive, so the location is not at the floor again, and unusable, a
+//     minute later): then the oldest of it goes too, with a warning.
 // Bookmarked and exported stretches (bookmarks.mjs protectedRanges) are never deleted by any of them
 // since 2026-09-29; bookmarks that cannot be read stop the run before any file (an alarm, which pages,
 // for a location below its low mark). A bookmark keeps the cameras it names, not every camera (since
@@ -30,7 +31,7 @@
 // on with the bytes of the files deleted; afterwards it must be seen to have risen (segment-delete.mjs
 // checkFreeRose: a NAS keeping deleted files would otherwise be deleted from every run for nothing).
 import { resolve, sep } from 'node:path'
-import { freeMarks, spaceLimit } from './location-health.mjs'
+import { floorTargetPct, freeMarks, spaceLimit } from './location-health.mjs'
 import { shareCall } from './share-calls.mjs'
 import { CameraCursors, Heap, PROBE_BYTES, afterStretch, checkFreeRose, dirOf, firstUnprotected, freeingStalled, makeDeleter, makePacer, stallEnded, _test as deleting } from './segment-delete.mjs'
 import { protectionFor } from './thinning.mjs'
@@ -209,6 +210,8 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
     const overLimit = limitBytes !== null && use > limitBytes
     const lowB = free ? (free.totalBytes * marks.lowFreePct) / 100 : null
     const floorB = free ? (free.totalBytes * marks.floorFreePct) / 100 : null
+    // what the floor's deleting starts under and frees to: the floor and its margin (FLOOR_MARGIN_PCT says why)
+    const floorToB = free ? (free.totalBytes * floorTargetPct(marks)) / 100 : null
     // a location where deleting did not free space: the space may have come back since (the NAS freed it late)
     if (free && stallEnded(loc.id, free.freeBytes)) log(`[housekeeping] ${loc.path}: the free space of the files deleted earlier has come back: deleting for free space goes on as before`)
     const stall = freeingStalled(loc.id)
@@ -353,17 +356,17 @@ export async function runHousekeeping({ index, settings = null, freeOf = null, n
           again(h, c)
         }
         // only full-video footage left here
-        if (freeNow() < lowB && freeNow() >= floorB && going() && room()) warn(`${loc.path}: ${pctNow()}% free (low mark ${marks.lowFreePct}%), but everything left is within its cameras' full-video days: kept`)
+        if (freeNow() < lowB && freeNow() >= floorToB && going() && room()) warn(`${loc.path}: ${pctNow()}% free (low mark ${marks.lowFreePct}%), but everything left is within its cameras' full-video days: kept`)
       }
-      if (freeNow() < floorB && going() && room()) {
-        warn(`${loc.path}: below the hard floor (${pctNow()}% free, floor ${marks.floorFreePct}%): deleting footage within full-video days, oldest first`)
+      if (freeNow() < floorToB && going() && room()) {
+        warn(`${loc.path}: ${freeNow() < floorB ? 'below' : 'close to'} the hard floor (${pctNow()}% free, floor ${marks.floorFreePct}%): deleting footage within full-video days, oldest first`)
         const h = heapOf(byStart)
-        while (h.size && going() && room() && freeNow() < floorB) {
+        while (h.size && going() && room() && freeNow() < floorToB) {
           const { c, s } = h.pop()
           await take(c, s, 'below floor')
           again(h, c)
         }
-        if (freeNow() >= floorB && freeNow() < lowB) warn(`${loc.path}: back above the floor (${pctNow()}%); the rest is within full-video days: kept`)
+        if (freeNow() >= floorToB && freeNow() < lowB) warn(`${loc.path}: back above the floor (${pctNow()}%); the rest is within full-video days: kept`)
       }
     }
     await del.flush()

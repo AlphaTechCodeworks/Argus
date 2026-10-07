@@ -643,6 +643,27 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   w.index.close()
 }
 
+// ---- the rate footage arrives at the cutoff (the day rule's figure): measured on full video ----------------
+// One camera, a file a minute of 12 MB: 720 MB an hour. The job has kept up, so everything past the 30
+// full-video days is time-lapse at a tenth. Measured on the 3 hours just before the cutoff it read 72 MB an
+// hour (audit of 2026-10-07); it is the full video of the 3 hours that pass the cutoff next.
+{
+  const w = world()
+  const cutoff = NOW - 30 * DAY
+  for (let k = -180; k < 240; k++) {
+    const startMs = cutoff + k * 60_000
+    const tl = k < 0
+    w.index.addSegment({ nvr: 'n1', ch: 0, path: join(w.root, 'n1', '0', `${startMs}.h264`), startMs, endMs: startMs + 59_000, bytes: tl ? 1_200_000 : 12_000_000, keyframes: tl ? 6 : 30, loc: 'L1', thinned: tl ? THIN.timelapse : null })
+  }
+  const r = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT })
+  check('THE ARRIVAL RATE IS THE FULL VIDEO\'S (720 MB an hour), not what the hours already converted weigh (72 MB)', r.backlog.files === 0 && r.backlog.perHourBytes === 60 * 12_000_000, JSON.stringify(r.backlog))
+  // a job that is behind: the hour before the cutoff still full video. The figure is the same (it was 288 MB)
+  for (let k = -60; k < 0; k++) w.index.setThin(join(w.root, 'n1', '0', `${cutoff + k * 60_000}.h264`), null, { bytes: 12_000_000, keyframes: 30 })
+  const behind = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, siteMin: () => 12 * 60 })
+  check('... the same with an hour waiting to be converted: the rate does not move with how far the job has got', behind.backlog.files === 60 && behind.backlog.perHourBytes === 60 * 12_000_000, JSON.stringify(behind.backlog))
+  w.index.close()
+}
+
 // ---- when it works: nights first, not while the recorder says the disk is too slow, not past its round --------
 {
   const w = world()
@@ -1071,6 +1092,34 @@ const convertWorld = (walAutocheckpoint) => {
   w.index.close()
 }
 
+// ---- retention: a camera's rows on a location that is not mounted do not end its walk ----------------------
+// A second drive, unplugged, holds a camera's 600 oldest files past their days; the 3 it recorded on the first
+// drive after that are past their days too. The walk took the camera's oldest 500 rows, could delete none of
+// them, and stopped: the 3 were never reached, run after run (audit of 2026-10-07). (Another camera's older
+// footage on the mounted drive is where the walks start: without it they start after the unplugged rows.)
+{
+  const w = world()
+  const away = { id: 'L2', path: join(tmpdir(), 'thin-not-mounted'), type: 'usb', role: 'overflow', limitGB: null }
+  const settings = { recording: { defaults: DEFAULTS, cameras: { 'n1/0': { retentionDays: 30 } } }, storage: { locations: [w.loc, away], lowFreePct: 15, floorFreePct: 5 } }
+  w.add('n1', 1, 150) // kept (180 days), and older than everything below
+  for (let k = 0; k < 600; k++) {
+    const startMs = NOW - 40 * DAY + k * 60_000
+    w.index.addSegment({ nvr: 'n1', ch: 0, path: join(away.path, 'n1', '0', `${startMs}.h264`), startMs, endMs: startMs + 59_000, bytes: 1000, keyframes: 1, loc: 'L2' })
+  }
+  const here = [w.add('n1', 0, 35), w.add('n1', 0, 34), w.add('n1', 0, 33)]
+  const recent = w.add('n1', 0, 10)
+  let looks = 0
+  const counted = new Proxy(w.index, { get: (t, k) => (k === 'olderThan' ? (...a) => (looks++, t.olderThan(...a)) : typeof t[k] === 'function' ? t[k].bind(t) : t[k]) })
+  const room = () => ({ freeBytes: 90, totalBytes: 100 })
+  const dry = await runRetention({ index: counted, settings, now: NOW, present: w.present, freeOf: room })
+  check('ROWS ON A DRIVE THAT IS NOT MOUNTED DO NOT END THE CAMERA\'S WALK: the 3 files past their days behind 600 of them are found (dry run)', dry.deleted.length === 3 && here.every((s) => dry.deleted.some((d) => d.path === s.path)), JSON.stringify(dry.deleted.map((d) => d.path.split(/[\\/]/).slice(-2).join('/'))))
+  const off = dry.skipped.filter((s) => /not mounted/.test(s.why))
+  check('... the 600 are said once, with their number, not row by row; a few looks, not one a row', off.length === 1 && off[0].files === 600 && off[0].why === `${away.path} is not mounted` && looks <= 4, `${JSON.stringify(off)}, ${looks} looks`)
+  const r = await runRetention({ index: w.index, settings, now: NOW, present: w.present, dryRun: false, freeOf: room })
+  check('... and for real: those 3 go, with their rows; the unplugged drive\'s 600 rows and the newer file stay', r.deleted.length === 3 && here.every((s) => !existsSync(s.path) && w.index.thinRow(s.path) === null) && w.index.locationUse('L2').segments === 600 && existsSync(recent.path), `${r.deleted.length} deleted, ${w.index.locationUse('L2').segments} rows on L2: ${JSON.stringify(r.warnings)}`)
+  w.index.close()
+}
+
 // ---- retention: the free-space floor --------------------------------------------------------------------
 {
   const w = world()
@@ -1160,11 +1209,12 @@ const convertWorld = (walAutocheckpoint) => {
   const r = await runRetention({ index: x.index, settings: w.settings(), now: NOW, present: w.present, freeOf: () => ({ freeBytes: 90, totalBytes: 100 }), protectedRanges: ranges })
   check('a bookmarked stretch past the days kept: the rows after it go, none of it', r.deleted.length === 3 * CAMS && !r.deleted.some(inStretch), `${r.deleted.length} would go, ${r.deleted.filter(inStretch).length} of them bookmarked`)
   check('... retention steps over it: at most one look per camera, not a row at a time (10,440 rows)', (x.calls.olderThan ?? 0) <= CAMS && r.skipped.length <= CAMS + 1, `${x.calls.olderThan} olderThan, ${r.skipped.length} skipped entries`)
-  // dry run below the floor (1 % free), nothing past its days (a year kept): the floor's walk
+  // dry run below the floor (1 % free), nothing past its days (a year kept): the floor's walk, to the floor
+  // and its margin (6 % free: 5 files of 1 % each)
   const y = counting()
   const f = await runRetention({ index: y.index, settings: { ...w.settings(), recording: { defaults: { ...DEFAULTS, retentionDays: 365 }, cameras: {} } }, now: NOW, present: w.present, freeOf: () => ({ freeBytes: 1, totalBytes: 100 }), protectedRanges: ranges, maxDeletes: 400 })
   const floor = f.deleted.filter((d) => /floor/.test(d.why))
-  check('... and so does the floor\'s walk: the oldest after it, with a few looks, not 53 looks of 200 bookmarked rows', floor.length === 4 && !floor.some(inStretch) && (y.calls.oldest ?? 0) <= 6 && f.skipped.length <= 2, `${floor.length} below the floor, ${floor.filter(inStretch).length} bookmarked; ${y.calls.oldest} oldest, ${f.skipped.length} skipped entries`)
+  check('... and so does the floor\'s walk: the oldest after it, with a few looks, not 53 looks of 200 bookmarked rows', floor.length === 5 && !floor.some(inStretch) && (y.calls.oldest ?? 0) <= 6 && f.skipped.length <= 2, `${floor.length} below the floor, ${floor.filter(inStretch).length} bookmarked; ${y.calls.oldest} oldest, ${f.skipped.length} skipped entries`)
   w.index.close()
 }
 {
@@ -1250,13 +1300,21 @@ const helperOps = (loc, log) => {
   const calls = []
   const ops = helperOps(w.loc, calls)
   let statfs = 0
-  // 100,000 bytes, the 5 % floor at 5,000: free space one byte more than the two oldest files short of it
-  const share = async (l, op, x) => (op === 'statfs' ? (statfs++, { freeBytes: 5000 - a.bytes - b.bytes + 1, totalBytes: 100_000 }) : ops(l, op, x))
+  // 100,000 bytes, the 5 % floor at 5,000 and its margin (location-health.mjs FLOOR_MARGIN_PCT, 1 %) at 6,000:
+  // free space one byte more than the two oldest files short of that
+  const share = async (l, op, x) => (op === 'statfs' ? (statfs++, { freeBytes: 6000 - a.bytes - b.bytes + 1, totalBytes: 100_000 }) : ops(l, op, x))
   const r = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share })
   check('below the floor: free space asked of the helper once, then counted with the bytes deleted: the two oldest go', statfs === 1 && r.deleted.length === 2 && !existsSync(a.path) && !existsSync(b.path) && existsSync(c.path), `${statfs} statfs, ${r.deleted.length} deleted`)
   const dry = []
   const r2 = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, share: async (l, op, x) => (dry.push(op), op === 'statfs' ? { freeBytes: 1, totalBytes: 100 } : ops(l, op, x)) })
   check('dry run: nothing but free space is asked of the helper', dry.every((op) => op === 'statfs') && r2.deleted.length >= 1 && existsSync(c.path), dry.join())
+  // inside the margin (5.5 % free: above the floor, under the floor and its 1 %): the oldest goes before the
+  // floor is reached, where the location would stop being usable (audit of 2026-10-07, M10); at 6 % nothing
+  const r3 = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share: async (l, op, x) => (op === 'statfs' ? { freeBytes: 5500, totalBytes: 100_000 } : ops(l, op, x)), sleep: async () => {} })
+  check('inside the floor\'s margin (5.5 % free, floor 5 %): deleted for the floor, and it says "close to", not "below"', r3.deleted.length >= 1 && r3.deleted.every((d) => /floor/.test(d.why)) && r3.warnings.some((x) => /close to the hard floor/.test(x)), JSON.stringify(r3.warnings))
+  const left = w.index.locationUse('L1').segments
+  const r4 = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share: async (l, op, x) => (op === 'statfs' ? { freeBytes: 6000, totalBytes: 100_000 } : ops(l, op, x)) })
+  check('... at the floor and its margin (6 % free) nothing is deleted for free space', r4.deleted.length === 0 && w.index.locationUse('L1').segments === left, JSON.stringify(r4.deleted))
   w.index.close()
 }
 {
