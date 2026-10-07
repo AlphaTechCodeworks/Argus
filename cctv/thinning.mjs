@@ -1260,6 +1260,11 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
 
   // 1. per-camera retention days, oldest first (olderThan is ordered by start_ms)
   let n = 0
+  // Rows past their days on a location that is not mounted, or not in the list: they cannot go this run, and
+  // the walk goes on after them. A camera's walk stopped at its first 500 of them, and its rows past their
+  // days on the mounted locations, behind those, were never reached (audit of 2026-10-07). Counted by
+  // reason, not listed row by row (as runThinning's backlog says them: a drive away for a week is 900,000 rows).
+  const off = new Map() // why -> files
   for (const { nvr, ch } of startAt === null ? [] : cams) {
     if (switched) break
     const rec = camRec(settings, nvr, ch)
@@ -1275,9 +1280,17 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
       if (!batch.length) break
       let any = false
       let jumped = false
+      let away = false
       for (const s of batch) {
         if (n >= maxDeletes || switched) break
         await pace()
+        if (!here.has(s.loc)) {
+          const loc = locs.get(s.loc)
+          const why = loc ? `${loc.path} is not mounted` : `unknown location ${s.loc}`
+          off.set(why, (off.get(why) ?? 0) + 1)
+          away = true
+          continue
+        }
         // a row starting inside a bookmarked stretch: so does the camera's every row to its end
         const st = guard.stretchOf(s)
         if (st && s.startMs >= st[0]) {
@@ -1292,11 +1305,15 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
         }
       }
       // (rows queued and not sent yet are still in the index, and refused: the next look passes them)
-      if (!any && !jumped) break
+      if (!any && !jumped && !away) break
       // an answer that was not full had every such row: no need to ask again
       if (!jumped && raw.length < BATCH) break
+      // rows that cannot go this run were among them: the next look starts after this one's last row (the
+      // rest of it is taken, or refused)
+      if (away && !jumped) fromMs = raw.at(-1).startMs + 1
     }
   }
+  for (const [why, files] of off) out.skipped.push({ path: `${files.toLocaleString('en-GB')} files`, why, files })
   await flushAll()
 
   // 2. the free-space floor, per location, oldest first: free space from the location's helper, then

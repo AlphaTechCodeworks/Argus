@@ -1092,6 +1092,34 @@ const convertWorld = (walAutocheckpoint) => {
   w.index.close()
 }
 
+// ---- retention: a camera's rows on a location that is not mounted do not end its walk ----------------------
+// A second drive, unplugged, holds a camera's 600 oldest files past their days; the 3 it recorded on the first
+// drive after that are past their days too. The walk took the camera's oldest 500 rows, could delete none of
+// them, and stopped: the 3 were never reached, run after run (audit of 2026-10-07). (Another camera's older
+// footage on the mounted drive is where the walks start: without it they start after the unplugged rows.)
+{
+  const w = world()
+  const away = { id: 'L2', path: join(tmpdir(), 'thin-not-mounted'), type: 'usb', role: 'overflow', limitGB: null }
+  const settings = { recording: { defaults: DEFAULTS, cameras: { 'n1/0': { retentionDays: 30 } } }, storage: { locations: [w.loc, away], lowFreePct: 15, floorFreePct: 5 } }
+  w.add('n1', 1, 150) // kept (180 days), and older than everything below
+  for (let k = 0; k < 600; k++) {
+    const startMs = NOW - 40 * DAY + k * 60_000
+    w.index.addSegment({ nvr: 'n1', ch: 0, path: join(away.path, 'n1', '0', `${startMs}.h264`), startMs, endMs: startMs + 59_000, bytes: 1000, keyframes: 1, loc: 'L2' })
+  }
+  const here = [w.add('n1', 0, 35), w.add('n1', 0, 34), w.add('n1', 0, 33)]
+  const recent = w.add('n1', 0, 10)
+  let looks = 0
+  const counted = new Proxy(w.index, { get: (t, k) => (k === 'olderThan' ? (...a) => (looks++, t.olderThan(...a)) : typeof t[k] === 'function' ? t[k].bind(t) : t[k]) })
+  const room = () => ({ freeBytes: 90, totalBytes: 100 })
+  const dry = await runRetention({ index: counted, settings, now: NOW, present: w.present, freeOf: room })
+  check('ROWS ON A DRIVE THAT IS NOT MOUNTED DO NOT END THE CAMERA\'S WALK: the 3 files past their days behind 600 of them are found (dry run)', dry.deleted.length === 3 && here.every((s) => dry.deleted.some((d) => d.path === s.path)), JSON.stringify(dry.deleted.map((d) => d.path.split(/[\\/]/).slice(-2).join('/'))))
+  const off = dry.skipped.filter((s) => /not mounted/.test(s.why))
+  check('... the 600 are said once, with their number, not row by row; a few looks, not one a row', off.length === 1 && off[0].files === 600 && off[0].why === `${away.path} is not mounted` && looks <= 4, `${JSON.stringify(off)}, ${looks} looks`)
+  const r = await runRetention({ index: w.index, settings, now: NOW, present: w.present, dryRun: false, freeOf: room })
+  check('... and for real: those 3 go, with their rows; the unplugged drive\'s 600 rows and the newer file stay', r.deleted.length === 3 && here.every((s) => !existsSync(s.path) && w.index.thinRow(s.path) === null) && w.index.locationUse('L2').segments === 600 && existsSync(recent.path), `${r.deleted.length} deleted, ${w.index.locationUse('L2').segments} rows on L2: ${JSON.stringify(r.warnings)}`)
+  w.index.close()
+}
+
 // ---- retention: the free-space floor --------------------------------------------------------------------
 {
   const w = world()
