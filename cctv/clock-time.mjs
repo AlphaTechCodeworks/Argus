@@ -89,6 +89,23 @@ export function readClock(xml) {
   }
 }
 
+/**
+ * The same answer as the clock overview lists it (nvr-probe.mjs handleClocks), each setting as the
+ * NVR wrote it. Here so that it is read by the reader the sync uses and can be tested: the overview
+ * had a pattern of its own, written in a template literal with single backslashes, which matched
+ * nothing, and every field of every NVR came back null.
+ */
+export function clockOverview(xml) {
+  const c = readClock(xml)
+  return {
+    timeZone: c.timeZone,
+    daylightSwitch: pick(xml, 'daylightSwitch'),
+    synchronizeType: c.sync,
+    ntpServer: c.ntpServer ?? pick(xml, 'serverAddr'),
+    ntpInterval: pick(xml, 'updateInterval') ?? pick(xml, 'interval')
+  }
+}
+
 const pad = (n) => String(Math.floor(n)).padStart(2, '0')
 
 /**

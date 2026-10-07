@@ -1,7 +1,7 @@
 // Tests for nvr-clock.mjs: reading an NVR's clock settings, writing them back safely, working out
 // a timezone offset, and the server acting as the master clock.
 // Run: node cctv/test/nvr-clock.test.mjs
-import { QUERY_TIME, buildTimeCfg, checkWanted, driftOf, formatForNvr, parseNvrTime, readClock, readWithRetry, readingOf, syncOutcome, zoneOffsetMs } from '../clock-time.mjs'
+import { QUERY_TIME, buildTimeCfg, checkWanted, clockOverview, driftOf, formatForNvr, parseNvrTime, readClock, readWithRetry, readingOf, syncOutcome, zoneOffsetMs } from '../clock-time.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -32,6 +32,18 @@ const SOLUS = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryTime
   check('nvr-2 has daylight saving on, unlike its neighbours', readClock(NVR2).daylight === true)
   check('rigginglot is on a different timezone', readClock(RIG).timeZone === 'EST5EDT,M3.2.0,M11.1.0')
   check('three of them are set to manual', [NVR2, RIG, SOLUS].every((x) => readClock(x).sync === 'manually'))
+}
+
+// ---- the clock overview (GET /api/admin/nvr-clocks) ---------------------------------------------------
+//
+// It had a reader of its own whose pattern matched nothing, so every setting of every NVR was null.
+{
+  const rig = clockOverview(RIG)
+  check('the overview reads the timezone', rig.timeZone === 'EST5EDT,M3.2.0,M11.1.0', String(rig.timeZone))
+  check('the overview reads the daylight saving switch as the NVR wrote it', rig.daylightSwitch === 'true' && clockOverview(NVR1).daylightSwitch === 'false', String(rig.daylightSwitch))
+  check('the overview reads how the clock is set', rig.synchronizeType === 'manually' && clockOverview(NVR1).synchronizeType === 'NTP', String(rig.synchronizeType))
+  check('the overview reads the NTP server, CDATA or not', clockOverview(NVR1).ntpServer === 'time-b.nist.gov' && clockOverview(SOLUS).ntpServer === 'time.windows.com' && clockOverview(SOLUS).timeZone === 'AST4')
+  check('what the NVR does not state stays null', rig.ntpInterval === null && Object.values(clockOverview('<response><status>fail</status></response>')).every((v) => v === null))
 }
 
 // ---- timezone offsets ------------------------------------------------------------------------------
