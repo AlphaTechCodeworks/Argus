@@ -604,6 +604,68 @@ const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO
   }
 }
 
+// ---- a leg's time runs from its first written frame (2026-10-07 audit, M14) -----------------------
+//
+// The NVR plays from the start of its file, at 1x, and the leg drops those frames only as they come:
+// with the budget counted from the start of the leg, a short hole some minutes into the file ran out
+// of time on every pull. Real timers here, with both limits made short.
+{
+  /** A leg that writes its first frame after leadMs, then (unless it stalls) the rest, and ends. */
+  const slowLeg = ({ leadMs, stall = false }) => {
+    const fn = ({ fromMs, toMs, real }) => {
+      let close
+      const closed = new Promise((r) => (close = () => r({ reason: 'closed' })))
+      const played = new Promise((resolve) => {
+        if (leadMs === null) return // it never reaches the hole
+        setTimeout(() => {
+          real.send(frame(fromMs, true))
+          if (stall) return
+          for (let t = fromMs + 1000; t < toMs; t += 1000) real.send(frame(t, true))
+          resolve({ reason: 'reached' })
+        }, leadMs)
+      })
+      fn.closes = 0
+      return { done: Promise.race([played, closed]), close: () => (fn.closes++, close()), command() {}, fromMs, toMs }
+    }
+    return fn
+  }
+  const limits = { tickMs: 1, legLeadInMs: 400, legBudgetMs: () => 120 }
+  // (the job's timers do not keep a process alive, and a leg that sends nothing has none of its own)
+  const alive = setInterval(() => {}, 1000)
+  {
+    // the first frame comes later than the whole budget, but inside the lead-in
+    const job = makeJob({ leg: slowLeg({ leadMs: 250 }), extra: limits })
+    const row = holeOn(15)
+    await job.fill(row)
+    check('leg time: a lead-in longer than the budget does not end the leg', index.backfillRow(row.id).state === 'filled', J(index.backfillRow(row.id)))
+  }
+  {
+    const leg = slowLeg({ leadMs: null })
+    const job = makeJob({ leg, extra: limits })
+    const row = holeOn(16)
+    const t0 = Date.now()
+    await job.fill(row)
+    const took = Date.now() - t0
+    const after = index.backfillRow(row.id)
+    check('leg time: a leg that never reaches the hole ends at the lead-in limit', took >= 350 && took < 10_000 && leg.closes === 1, `${took} ms, ${leg.closes} close(s)`)
+    check('leg time: ... as a failed try that stands the NVR down', after.state === 'pending' && after.attempts === 1 && /did not reach the hole/.test(after.lastError ?? '') && job.nvrBackoff.get('nvr-1') > NOW, J(after))
+    index.backfillSet(row.id, { state: 'permanent', note: 'test tidy-up' })
+  }
+  {
+    // (a lead-in limit far off, so that it is the budget that ends this one)
+    const leg = slowLeg({ leadMs: 50, stall: true })
+    const job = makeJob({ leg, extra: { ...limits, legLeadInMs: 60_000 } })
+    const row = holeOn(17)
+    const t0 = Date.now()
+    await job.fill(row)
+    const took = Date.now() - t0
+    check('leg time: a leg that stops sending ends when the budget from its first frame is up', took >= 150 && took < 10_000 && leg.closes === 1, `${took} ms, ${leg.closes} close(s)`)
+    index.backfillSet(row.id, { state: 'permanent', note: 'test tidy-up' })
+  }
+  clearInterval(alive)
+  check('leg time: the budget is twice the stretch and a minute, at most 30 minutes', bf.legBudgetMs(3 * MIN) === 7 * MIN && bf.legBudgetMs(HOUR) === 30 * MIN && bf.LEG_LEAD_IN_MS === 30 * MIN)
+}
+
 // ---- one stuck row must not hold the whole job (playback report 9, review) -----------------------
 //
 // fill() handed a failed row's back-off to tick() as the job's rest, and set the row's nextTry to that

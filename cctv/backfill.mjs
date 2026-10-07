@@ -122,6 +122,15 @@ export const THROWN_LAST_MS = [20 * 3_600_000, 8 * DAY]
  * outside the hole, and the same row was pulled again on the next tick (playback report 9).
  */
 export const MIN_PROGRESS_MS = 1000
+/**
+ * How long a leg may play before the first frame inside the hole is written. The NVR starts a playback
+ * at the file holding the asked-for time, often minutes before the hole, and the session paces those
+ * frames at 1x before the leg drops them (pull()). Generous, as the NVR's files can be long; a leg that
+ * never reaches the hole still ends.
+ */
+export const LEG_LEAD_IN_MS = 30 * MINUTE
+/** How long a leg may go on from its first written frame: the stretch itself plus generous slack. */
+export const legBudgetMs = (lengthMs) => Math.min(30 * MINUTE, lengthMs * 2 + 60_000)
 
 /**
  * The backfill settings, repeated here so that this module never has to import settings.mjs.
@@ -459,8 +468,10 @@ function writeRunFlag(running, who, file = STATE_FILE()) {
  * bufferedAmount is the writer's queue: startLeg's session uses it for flow control, so a slow disk
  * slows the pull down instead of filling memory. That is also why the job cannot outrun the drive
  * the recorders are writing to.
+ *
+ * onFirst: called once, when the first frame has been written (pull() starts the leg's time budget there).
  */
-export function writerSink(writer) {
+export function writerSink(writer, { onFirst = () => {} } = {}) {
   const stats = { frames: 0, bytes: 0, firstTs: null, lastTs: null, dropped: 0 }
   return {
     OPEN: 1,
@@ -484,11 +495,10 @@ export function writerSink(writer) {
       stats.bytes += buf.length - HEADER_SIZE
       if (stats.firstTs === null) stats.firstTs = ts
       stats.lastTs = ts
+      if (stats.frames === 1) onFirst()
     }
   }
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref?.())
 
 /** The backfill job. One per process; server.mjs makes it and hands it to handleBackfill. */
 export class BackfillJob {
@@ -497,7 +507,8 @@ export class BackfillJob {
    *   settings?: () => object, coverage?: Function, leg?: Function, makeWriter?: Function,
    *   now?: () => number, exportsBusy?: () => boolean, recordingBusy?: () => boolean,
    *   refusingOf?: (nvrId:string) => boolean, coolingOf?: (nvrId:string) => boolean,
-   *   tickMs?: number, stateFile?: string, log?: Function }} deps
+   *   tickMs?: number, stateFile?: string, log?: Function, legLeadInMs?: number,
+   *   legBudgetMs?: (lengthMs:number) => number }} deps legLeadInMs, legBudgetMs: a leg's two time limits (pull())
    */
   constructor(deps = {}) {
     // deps.index may be the recordings index itself or, from server.mjs at start-up (before it is
@@ -522,6 +533,8 @@ export class BackfillJob {
     this.refusingOf = deps.refusingOf ?? (() => false)
     this.coolingOf = deps.coolingOf ?? (() => false)
     this.tickMs = deps.tickMs ?? 30_000
+    this.legLeadInMs = deps.legLeadInMs ?? LEG_LEAD_IN_MS
+    this.legBudgetMs = deps.legBudgetMs ?? legBudgetMs
     this.stateFile = deps.stateFile ?? STATE_FILE()
     this.log = deps.log ?? ((m) => console.log(`[backfill] ${m}`))
     this.running = readRunFlag(this.stateFile)
@@ -1106,7 +1119,16 @@ export class BackfillJob {
     const segments = []
     writer.on('segment', (s) => segments.push(s))
     writer.on('error', (e) => this.log(`write failed: ${e.message}`))
-    const sink = writerSink(writer)
+    // The leg's clock: legLeadInMs to write its first frame, then the budget from that frame on.
+    let timer = null
+    let outOfTime
+    const timeout = new Promise((resolve) => (outOfTime = resolve))
+    const within = (ms, message) => {
+      clearTimeout(timer)
+      timer = setTimeout(() => outOfTime({ reason: 'timeout', message }), ms)
+      timer.unref?.()
+    }
+    const sink = writerSink(writer, { onFirst: () => within(this.legBudgetMs(toMs - fromMs), 'the NVR leg ran out of time') })
     let leg = null
     let done
     try {
@@ -1117,15 +1139,20 @@ export class BackfillJob {
       this.current = { row: row.id, abort: () => leg.close() }
       // A leg is bounded: the stretch itself plus generous slack. A session that stops sending is
       // closed rather than left holding an NVR login all night.
-      const budgetMs = Math.min(30 * MINUTE, (toMs - fromMs) * 2 + 60_000)
-      done = await Promise.race([leg.done, sleep(budgetMs).then(() => ({ reason: 'timeout' }))])
+      // The budget runs from the first frame written, not from the start of the leg: the frames
+      // before the hole are paced at 1x like any others before the floor drops them, so a short hole
+      // some minutes into the NVR's file ran out of time on every pull and was never filled
+      // (2026-10-07 audit, M14). The lead-in has a limit of its own.
+      if (!sink.stats.frames) within(this.legLeadInMs, 'the NVR leg did not reach the hole in time')
+      done = await Promise.race([leg.done, timeout])
       if (done.reason === 'timeout') leg.close()
     } finally {
+      clearTimeout(timer)
       this.current = null
       await writer.close()
       await writer.drained()
     }
-    const message = done.message ?? (done.reason === 'timeout' ? 'the NVR leg ran out of time' : null)
+    const message = done.message ?? null
     // A leg that failed before a single frame, with a refusal-shaped message, is the NVR saying no.
     const refused = done.reason === 'error' && sink.stats.frames === 0 && /refus|busy|limit|resource|no capacity|failed to start/i.test(String(message ?? ''))
     // brokeOff: the leg errored or ran out of time, as against playing to its end
