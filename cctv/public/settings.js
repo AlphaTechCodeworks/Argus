@@ -921,8 +921,9 @@ function renderOsd() {
   $('o-name').checked = osdDraft.showName
   $('o-time').checked = osdDraft.showTime
   $('o-text').value = osdDraft.text ?? ''
-  $('o-x').value = osdDraft.x
-  $('o-y').value = osdDraft.y
+  // Not the box being typed in: writing the number back on every keystroke turned "0." into "0",
+  // so a decimal could not be typed. It is put in order when the box is left (bindOsd).
+  for (const k of ['x', 'y']) if (document.activeElement !== $(`o-${k}`)) $(`o-${k}`).value = osdDraft[k]
   $('o-size').value = osdDraft.size
   const here = cornerOf(osdDraft)
   $('o-corners').replaceChildren(
@@ -962,6 +963,8 @@ function bindOsd() {
   edit('o-x', (i) => ({ x: Number(i.value) }))
   edit('o-y', (i) => ({ y: Number(i.value) }))
   edit('o-size', (i) => ({ size: Number(i.value) }))
+  // Typing is finished (Enter, or the box is left): the box shows the number the draft holds.
+  for (const k of ['x', 'y']) $(`o-${k}`).addEventListener('change', () => ($(`o-${k}`).value = osdDraft[k]))
 
   $('o-cam').addEventListener('change', () => {
     osdCam = $('o-cam').value
