@@ -46,7 +46,7 @@
 //    back), at once or at the next run, before anything else touches that file.
 import { readdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
-import { freeMarks } from './location-health.mjs'
+import { floorTargetPct, freeMarks } from './location-health.mjs'
 import { THIN } from './rec-index.mjs'
 import { afterStretch, checkFreeRose, firstUnprotected, freeingStalled, makeDeleter, makePacer } from './segment-delete.mjs'
 import { shareCall } from './share-calls.mjs'
@@ -1298,7 +1298,9 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
   // counted on with the bytes deleted
   for (const loc of locs.values()) {
     if (!here.has(loc.id) || switched) continue
-    const { floorFreePct } = freeMarks(settings, loc)
+    const { floorFreePct, lowFreePct } = freeMarks(settings, loc)
+    // (from the floor's margin above it, and to there: location-health.mjs FLOOR_MARGIN_PCT says why)
+    const floorToPct = floorTargetPct({ floorFreePct, lowFreePct })
     let free
     try {
       free = await freeOf(loc)
@@ -1306,14 +1308,15 @@ export async function runRetention({ index, settings = null, now = Date.now(), d
       continue // storage.mjs reports an unreadable location
     }
     if (!(free?.totalBytes > 0) || !Number.isFinite(free?.freeBytes)) continue
-    if (pct(free) >= floorFreePct) continue
+    if (pct(free) >= floorToPct) continue
+    const under = pct(free) < floorFreePct ? 'below' : 'close to'
     const stall = dryRun ? null : freeingStalled(loc.id)
     if (stall && now < stall.retryAt) {
-      warn(`${loc.path}: below the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%), but deleting files did not free space on it (a recycle bin or snapshots on the NAS, or another program writing to the share?): nothing deleted on it for free space here (housekeeping makes one small try each run while it is below its floor)`)
+      warn(`${loc.path}: ${under} the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%), but deleting files did not free space on it (a recycle bin or snapshots on the NAS, or another program writing to the share?): nothing deleted on it for free space here (housekeeping makes one small try each run while it is below its floor)`)
       continue
     }
-    warn(`${loc.path}: below the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%): ${dryRun ? 'would delete' : 'deleting'} the oldest footage, even inside its retention`)
-    const floorB = (free.totalBytes * floorFreePct) / 100
+    warn(`${loc.path}: ${under} the hard floor (${pct(free).toFixed(1)}% free, floor ${floorFreePct}%): ${dryRun ? 'would delete' : 'deleting'} the oldest footage, even inside its retention`)
+    const floorB = (free.totalBytes * floorToPct) / 100
     const d = dryRun ? null : deleterFor(loc)
     const base = d ? d.doneBytes : 0
     let dryFreed = 0

@@ -1160,11 +1160,12 @@ const convertWorld = (walAutocheckpoint) => {
   const r = await runRetention({ index: x.index, settings: w.settings(), now: NOW, present: w.present, freeOf: () => ({ freeBytes: 90, totalBytes: 100 }), protectedRanges: ranges })
   check('a bookmarked stretch past the days kept: the rows after it go, none of it', r.deleted.length === 3 * CAMS && !r.deleted.some(inStretch), `${r.deleted.length} would go, ${r.deleted.filter(inStretch).length} of them bookmarked`)
   check('... retention steps over it: at most one look per camera, not a row at a time (10,440 rows)', (x.calls.olderThan ?? 0) <= CAMS && r.skipped.length <= CAMS + 1, `${x.calls.olderThan} olderThan, ${r.skipped.length} skipped entries`)
-  // dry run below the floor (1 % free), nothing past its days (a year kept): the floor's walk
+  // dry run below the floor (1 % free), nothing past its days (a year kept): the floor's walk, to the floor
+  // and its margin (6 % free: 5 files of 1 % each)
   const y = counting()
   const f = await runRetention({ index: y.index, settings: { ...w.settings(), recording: { defaults: { ...DEFAULTS, retentionDays: 365 }, cameras: {} } }, now: NOW, present: w.present, freeOf: () => ({ freeBytes: 1, totalBytes: 100 }), protectedRanges: ranges, maxDeletes: 400 })
   const floor = f.deleted.filter((d) => /floor/.test(d.why))
-  check('... and so does the floor\'s walk: the oldest after it, with a few looks, not 53 looks of 200 bookmarked rows', floor.length === 4 && !floor.some(inStretch) && (y.calls.oldest ?? 0) <= 6 && f.skipped.length <= 2, `${floor.length} below the floor, ${floor.filter(inStretch).length} bookmarked; ${y.calls.oldest} oldest, ${f.skipped.length} skipped entries`)
+  check('... and so does the floor\'s walk: the oldest after it, with a few looks, not 53 looks of 200 bookmarked rows', floor.length === 5 && !floor.some(inStretch) && (y.calls.oldest ?? 0) <= 6 && f.skipped.length <= 2, `${floor.length} below the floor, ${floor.filter(inStretch).length} bookmarked; ${y.calls.oldest} oldest, ${f.skipped.length} skipped entries`)
   w.index.close()
 }
 {
@@ -1250,13 +1251,21 @@ const helperOps = (loc, log) => {
   const calls = []
   const ops = helperOps(w.loc, calls)
   let statfs = 0
-  // 100,000 bytes, the 5 % floor at 5,000: free space one byte more than the two oldest files short of it
-  const share = async (l, op, x) => (op === 'statfs' ? (statfs++, { freeBytes: 5000 - a.bytes - b.bytes + 1, totalBytes: 100_000 }) : ops(l, op, x))
+  // 100,000 bytes, the 5 % floor at 5,000 and its margin (location-health.mjs FLOOR_MARGIN_PCT, 1 %) at 6,000:
+  // free space one byte more than the two oldest files short of that
+  const share = async (l, op, x) => (op === 'statfs' ? (statfs++, { freeBytes: 6000 - a.bytes - b.bytes + 1, totalBytes: 100_000 }) : ops(l, op, x))
   const r = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share })
   check('below the floor: free space asked of the helper once, then counted with the bytes deleted: the two oldest go', statfs === 1 && r.deleted.length === 2 && !existsSync(a.path) && !existsSync(b.path) && existsSync(c.path), `${statfs} statfs, ${r.deleted.length} deleted`)
   const dry = []
   const r2 = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, share: async (l, op, x) => (dry.push(op), op === 'statfs' ? { freeBytes: 1, totalBytes: 100 } : ops(l, op, x)) })
   check('dry run: nothing but free space is asked of the helper', dry.every((op) => op === 'statfs') && r2.deleted.length >= 1 && existsSync(c.path), dry.join())
+  // inside the margin (5.5 % free: above the floor, under the floor and its 1 %): the oldest goes before the
+  // floor is reached, where the location would stop being usable (audit of 2026-10-07, M10); at 6 % nothing
+  const r3 = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share: async (l, op, x) => (op === 'statfs' ? { freeBytes: 5500, totalBytes: 100_000 } : ops(l, op, x)), sleep: async () => {} })
+  check('inside the floor\'s margin (5.5 % free, floor 5 %): deleted for the floor, and it says "close to", not "below"', r3.deleted.length >= 1 && r3.deleted.every((d) => /floor/.test(d.why)) && r3.warnings.some((x) => /close to the hard floor/.test(x)), JSON.stringify(r3.warnings))
+  const left = w.index.locationUse('L1').segments
+  const r4 = await runRetention({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, share: async (l, op, x) => (op === 'statfs' ? { freeBytes: 6000, totalBytes: 100_000 } : ops(l, op, x)) })
+  check('... at the floor and its margin (6 % free) nothing is deleted for free space', r4.deleted.length === 0 && w.index.locationUse('L1').segments === left, JSON.stringify(r4.deleted))
   w.index.close()
 }
 {

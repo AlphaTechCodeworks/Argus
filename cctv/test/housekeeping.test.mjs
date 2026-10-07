@@ -143,14 +143,32 @@ const tail = (p) => p.split(/[\\/]/).slice(-5).join('/')
 }
 
 // ---- below the floor: full-days footage goes too (oldest first), with a warning
+// Down to the floor and its margin (location-health.mjs FLOOR_MARGIN_PCT, 1 % of the drive), not to the floor
+// itself: the floor is also where the location stops being usable, and at exactly the floor the next minute's
+// writing took it under again, so a full drive went to the outage buffer and back every run (audit of
+// 2026-10-07, M10).
 {
   const { loc, index, add } = setup()
   const d1 = add('n1', 0, 10)
   const d2 = add('n1', 0, 3)
-  const free = fakeFree(4000) // 4% < 5% floor: 1000 bytes to reach the floor; the low mark would need 11000
+  const d3 = add('n1', 0, 2)
+  const free = fakeFree(4000) // 4% < 5% floor: 2000 bytes to reach the floor and its 1 %; the low mark would need 11000
   const r = await run({ index, settings: settingsWith([loc]), freeOf: free.fn, onDelete: (s) => (free.freed += s.bytes) })
-  check('floor: below the floor, the oldest full-days footage is deleted', !existsSync(d1) && existsSync(d2))
-  check('floor: warning logged', r.warnings.some((w) => /below the hard floor/.test(w)), JSON.stringify(r.warnings))
+  check('floor: below the floor, the oldest full-days footage is deleted, to the floor and its margin (6 %), no further', !existsSync(d1) && !existsSync(d2) && existsSync(d3) && free.freed === 2000, `${free.freed} freed`)
+  check('floor: warning logged', r.warnings.some((w) => /below the hard floor/.test(w)) && r.warnings.some((w) => /back above the floor \(6\.0%\)/.test(w)), JSON.stringify(r.warnings))
+  // the next run, a minute's writing later (5.9 %): inside the margin, so it deletes before the floor is reached
+  const d4 = add('n1', 0, 1)
+  const near = fakeFree(5900)
+  const r2 = await run({ index, settings: settingsWith([loc]), freeOf: near.fn, onDelete: (s) => (near.freed += s.bytes) })
+  check('floor: inside the margin (5.9 %) the oldest goes before the floor is reached; it says "close to", not "below"', !existsSync(d3) && existsSync(d4) && r2.deleted.length === 1 && r2.deleted[0].why === 'below floor' && r2.warnings.some((w) => /close to the hard floor/.test(w)), JSON.stringify(r2.warnings))
+  // at the margin or above it: nothing inside its full-video days goes
+  const r3 = await run({ index, settings: settingsWith([loc]), freeOf: fakeFree(6000).fn })
+  check('floor: at the floor and its margin (6 %), footage inside its full-video days is kept', existsSync(d4) && r3.deleted.length === 0 && r3.warnings.some((w) => /full-video days/.test(w)), JSON.stringify(r3.warnings))
+  // the newest footage is not spared below the floor (it never was): what the margin adds is bounded by 1 % of the drive
+  const { loc: l2, index: i2, add: add2 } = setup({ marks: { lowFreePct: 6, floorFreePct: 5 } })
+  const k = add2('n1', 0, 3)
+  await run({ index: i2, settings: settingsWith([l2]), freeOf: fakeFree(6000).fn })
+  check('floor: the margin never reaches past the low mark (low 6 %, floor 5 %: at 6 % nothing goes)', existsSync(k))
 }
 
 // ---- each location's own marks (the owner's NAS: a low mark near 7 % so 12 TB is usable, 2026-09-29)
