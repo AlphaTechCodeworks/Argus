@@ -33,17 +33,23 @@
 // it is. And a job whose last line is what ends the process (shutdown() in server.mjs) has that
 // line in a finally: stopped part-way, it would otherwise leave the process running, half shut down.
 //
-// Imports nothing, so it is the same on any machine and its test runs it for real (no SDK).
+// Imports nothing but node:util, so it is the same on any machine and its test runs it for real (no SDK).
+import { inspect } from 'node:util'
 
 // A fault that loops (a timer whose job rejects every second) would be 86,400 stacks a day in a
-// journal capped at 1 GB: a line is logged only while fewer than MAX_LINES were in the minute before
-// it, and the ones over that are one line saying how many, when that minute is over (like loop-lag.mjs).
+// journal capped at 1 GB: a reason is logged only while fewer than MAX_LINES were in the minute
+// before it, and those over that are a line saying how many, when the oldest of them is a minute old
+// or before the next one that is logged (like loop-lag.mjs). So at most MAX_LINES reasons in any
+// minute, and at most as many of those lines.
 const MAX_LINES = 20
 const MINUTE_MS = 60_000
 const LAST_CHARS = 300 // lastMessage is for a page: the first line of the reason, no longer than this
-// The limit above is on lines, not on their size: one reason (a message that carries a whole reply,
-// a stack of a deep recursion) is logged up to this many characters, and the line says it was cut.
-const LOG_CHARS = 8000
+// The limit above is on lines, not on their size. One reason (a message that carries a whole reply, an
+// object with a table in it; not a deep stack, V8 keeps ten frames) is logged up to LOG_HEAD +
+// LOG_TAIL characters: both ends, since an Error's frames, its cause and its properties come after
+// its message, with a line between them that says so.
+const LOG_HEAD = 6000
+const LOG_TAIL = 2000
 
 let guard = null // { name, log, now } once guardProcess() has run
 let count = 0
@@ -63,6 +69,21 @@ function textOf(reason) {
   }
 }
 
+/**
+ * A reason as the log has it: as Node prints an error the process dies of (the stack, and what a
+ * stack leaves out: the cause, an AggregateError's errors, properties such as code), so that the log
+ * says no less than it did when the process ended there; a string as it is. Only for a line that is
+ * logged: inspect() of a large object takes time, and a looping fault rejects thousands of times.
+ * @param {unknown} reason
+ * @param {string} text textOf(reason), the fallback
+ */
+function logTextOf(reason, text) {
+  try {
+    if (reason !== null && (typeof reason === 'object' || typeof reason === 'function')) return inspect(reason)
+  } catch {} // (a reason inspect() cannot take: a proxy whose traps throw)
+  return text
+}
+
 /** The one line for the rejections not logged one by one. Also a timer's callback, so it must not throw. */
 function tellRest() {
   try {
@@ -71,7 +92,7 @@ function tellRest() {
     if (!untold) return
     const n = untold
     untold = 0
-    guard.log(`[${guard.name}] ${n} more unhandled rejection${n === 1 ? '' : 's'} in the minute before were not logged (${count} since this process started)`)
+    guard.log(`[${guard.name}] ${n} more unhandled rejection${n === 1 ? ' was' : 's were'} not logged (${count} since this process started)`)
   } catch {} // (as in onRejection)
 }
 
@@ -84,7 +105,9 @@ function onRejection(reason) {
     const at = now()
     const text = textOf(reason)
     lastAt = at
-    lastMessage = text.split('\n', 1)[0].slice(0, LAST_CHARS)
+    // (a copy: a slice keeps the whole string it was cut from alive, megabytes of it for as long as
+    // no other rejection follows)
+    lastMessage = Buffer.from(text.split('\n', 1)[0].slice(0, LAST_CHARS)).toString()
     // (a clock set back must not hold the log back for as long as it went back: start again)
     if (logged.length && at < logged.at(-1)) logged = []
     while (logged.length && logged[0] <= at - MINUTE_MS) logged.shift()
@@ -100,7 +123,8 @@ function onRejection(reason) {
     }
     tellRest() // (the timer may be late, or the clock not the timer's: say it before the next line)
     logged.push(at)
-    const shown = text.length > LOG_CHARS ? `${text.slice(0, LOG_CHARS)}\n[${name}] (that reason was ${text.length} characters: the first ${LOG_CHARS} are logged)` : text
+    const full = logTextOf(reason, text)
+    const shown = full.length > LOG_HEAD + LOG_TAIL ? `${full.slice(0, LOG_HEAD)}\n[${name}] (that reason is ${full.length} characters: the first ${LOG_HEAD} and the last ${LOG_TAIL} are logged, this line between them)\n${full.slice(-LOG_TAIL)}` : full
     log(`[${name}] unhandled rejection (kept running): ${shown}`)
   } catch {}
 }

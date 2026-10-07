@@ -27,7 +27,6 @@ const importing = (f) => `import ${JSON.stringify(new URL(`../${f}`, import.meta
 function run(code, more = {}) {
   const env = { ...process.env }
   delete env.NODE_OPTIONS // (a developer's --unhandled-rejections would change what is being pinned here)
-  delete env.CCTV_WORKER_NVR
   Object.assign(env, more)
   const t0 = Date.now()
   // 30 s: under the minute a line still owed is held back for, so a timer that kept the process open shows as no status
@@ -110,18 +109,59 @@ setTimeout(() => console.log(JSON.stringify(processErrors())), 50)`)
 }
 {
   // the limit of 20 lines a minute is no limit on their size: a reason that carries a whole reply, or
-  // megabytes of it, is logged up to 8,000 characters, and the log says how long it was
+  // megabytes of it, is logged up to 8,000 characters, both ends, and the log says how long it was
   const r = run(`${IMPORT}
 guardProcess({ name: 'huge' })
-Promise.reject('y'.repeat(3_000_000))
+Promise.reject('y'.repeat(2_999_000) + 'e'.repeat(1000))
 Promise.reject('z'.repeat(8000))
 setTimeout(() => console.log(JSON.stringify(processErrors())), 50)`)
   const START = '[huge] unhandled rejection (kept running): '
   const k = kept(r, 'huge')
-  ran('a reason of 3,000,000 characters: its first 8,000 are logged', k.length === 2 && k[0] === `${START}${'y'.repeat(8000)}`, r, `${k[0]?.length} characters`)
-  ran('...and the next line says it was cut, and from what', said(r, 'huge')[1] === '[huge] (that reason was 3000000 characters: the first 8000 are logged)', r, said(r, 'huge')[1]?.slice(0, 120))
-  ran('...one of exactly 8,000 is logged whole, with no such line', k[1] === `${START}${'z'.repeat(8000)}` && said(r, 'huge').length === 3 && r.err.length < 17_000, r, `${r.err.length} characters on stderr`)
+  const all = lines(r.err)
+  ran('a reason of 3,000,000 characters: its first 6,000 are logged', k.length === 2 && all[0] === `${START}${'y'.repeat(6000)}`, r, `${all[0]?.length} characters`)
+  ran('...the next line says it was cut, and from what', all[1] === '[huge] (that reason is 3000000 characters: the first 6000 and the last 2000 are logged, this line between them)', r, all[1]?.slice(0, 140))
+  ran('...and then its last 2,000', all[2] === `${'y'.repeat(1000)}${'e'.repeat(1000)}`, r, `${all[2]?.length} characters`)
+  ran('...one of exactly 8,000 is logged whole, with no such line', all[3] === `${START}${'z'.repeat(8000)}` && all.length === 4 && r.err.length < 17_000, r, `${r.err.length} characters on stderr`)
   ran('...both counted, and the process goes on', json(r).unhandledRejections === 2 && json(r).lastMessage === 'z'.repeat(300) && r.status === 0, r)
+}
+{
+  // The log is now the only trace of the fault, so it must say no less than Node did when the process
+  // died of it: an Error's cause, the errors of an AggregateError and properties such as code are not
+  // in its stack. (A refused fetch is "TypeError: fetch failed" and nothing more without its cause.)
+  const r = run(`${IMPORT}
+${TURN}
+guardProcess({ name: 'rich' })
+const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:59999'), { code: 'ECONNREFUSED', syscall: 'connect' })
+Promise.reject(new TypeError('fetch failed', { cause: refused }))
+await turn()
+console.error('[rich] SECOND')
+Promise.reject(Object.assign(new Error('the share is not answering'), { code: 'ESHARESTUCK', extra: { retryAfterS: 5 } }))
+await turn()
+console.error('[rich] THIRD')
+Promise.reject(new AggregateError([new Error('first of two'), new RangeError('second of two')], 'both failed'))
+await turn()
+console.error('[rich] FOURTH')
+Promise.reject({ status: 503, why: 'a plain object' })
+await turn()
+console.log(JSON.stringify(processErrors()))`)
+  const part = (from, to) => r.err.slice(r.err.indexOf(from), to ? r.err.indexOf(to) : undefined)
+  const one = part('[rich] unhandled', '[rich] SECOND')
+  ran('an Error with a cause: the line begins as before, with the error and its stack', kept(r, 'rich')[0] === '[rich] unhandled rejection (kept running): TypeError: fetch failed' && /\n +at /.test(one), r)
+  ran('...and the cause is there too, with its own message and its code', one.includes('[cause]') && one.includes('connect ECONNREFUSED 127.0.0.1:59999') && one.includes("code: 'ECONNREFUSED'"), r, flat(one, 300))
+  ran('an Error with properties of its own (a code, the retry hint): they are logged', /code: 'ESHARESTUCK'/.test(part('[rich] SECOND', '[rich] THIRD')) && /retryAfterS: 5/.test(part('[rich] SECOND', '[rich] THIRD')), r)
+  ran('an AggregateError: the errors inside it are logged', part('[rich] THIRD', '[rich] FOURTH').includes('first of two') && part('[rich] THIRD', '[rich] FOURTH').includes('RangeError: second of two'), r)
+  ran('a reason that is a plain object: what is in it, not "[object Object]"', kept(r, 'rich')[3] === "[rich] unhandled rejection (kept running): { status: 503, why: 'a plain object' }", r, kept(r, 'rich')[3])
+  ran('...and lastMessage (for a page) stays the short text of the reason', json(r).lastMessage === '[object Object]' && json(r).unhandledRejections === 4 && r.status === 0, r)
+}
+{
+  // an Error whose message is longer than the cut still has its frames in the log: they come after
+  // the message, which is why both ends are kept
+  const r = run(`${IMPORT}
+guardProcess({ name: 'longmsg' })
+function whereItWasThrown() { return Promise.reject(Object.assign(new Error('m'.repeat(20000)), { code: 'ELONG' })) }
+whereItWasThrown()
+setTimeout(() => console.log('still running'), 50)`)
+  ran('an Error with a 20,000-character message: where it was thrown and its code are still in the log', /\n +at whereItWasThrown /.test(r.err) && r.err.includes("code: 'ELONG'") && said(r, 'longmsg').some((l) => /^\[longmsg\] \(that reason is \d+ characters: the first 6000 and the last 2000 are logged/.test(l)) && r.err.length < 9000 && r.out.includes('still running'), r, `${r.err.length} characters on stderr`)
 }
 
 // ---- a looping fault must not fill the journal: 20 lines in any minute, then one for the rest ---------------
@@ -333,7 +373,10 @@ setTimeout(() => console.log('still running ' + JSON.stringify(processErrors()))
   // pattern sees only the ways the pattern knows.
   check("server.mjs: its first line of code is the import of process-guard-server.mjs", firstCode(server) === "import './process-guard-server.mjs'", firstCode(server).slice(0, 80))
   check('...and it makes no late call of its own', server.length > 0 && !/guardProcess/.test(server))
-  check('server.mjs: /healthz carries the count (errors: processErrors())', /pathname === '\/healthz'[\s\S]{0,2500}?\n\s+errors: processErrors\(\),?\n/.test(server))
+  // (read, not run: that the line is in the /healthz body and that the name it uses is imported from
+  // the guard. A typing mistake in either would be an error at start-up or at the first /healthz,
+  // which no test here would see: no test starts server.mjs)
+  check('server.mjs: /healthz carries the count (errors: processErrors())', /pathname === '\/healthz'[\s\S]{0,2500}?\n\s+errors: processErrors\(\),?\n/.test(server) && /^import \{ processErrors \} from '\.\/process-guard\.mjs'$/m.test(server) && /^export const processErrors = /m.test(guard))
 
   // Not a worker: one that ends is replaced by its supervisor within seconds, and kept running after
   // a job of its own stopped part-way it would go on reporting ready with nothing to act on that
@@ -353,8 +396,9 @@ setTimeout(() => console.log('still running ' + JSON.stringify(processErrors()))
     const end = at < 0 ? -1 : text.indexOf('\n}\n', at)
     return end < 0 ? '// (not found)' : text.slice(at, end + 2)
   }
-  const STAYED = "setTimeout(() => { console.log('still here'); process.exit(0) }, 500)"
-  const serverStop = (stopNvrs) => `${importing('process-guard-server.mjs')}
+  const STAYED = "setTimeout(() => { console.log('still here'); process.exit(0) }, 2000)"
+  const serverStop = (stopNvrs, before = '') => `${importing('process-guard-server.mjs')}
+${before}
 const stopNvrs = ${stopNvrs}
 ${fn(server, 'const shutdown = async () => {')}
 shutdown()
@@ -367,7 +411,21 @@ ${STAYED}`
   }
   {
     const r = run(serverStop('async () => {}'))
-    ran('server.mjs shutdown(): nothing fails: killed once the NVRs are stopped, with nothing said, as before', killed(r) && !r.out.includes('still here') && r.err === '' && r.ms < 5000, r, `${r.ms} ms`)
+    ran('server.mjs shutdown(): nothing to wait for and nothing fails: killed, with nothing said', killed(r) && r.out === '' && r.err === '', r, `${r.ms} ms`)
+  }
+  {
+    // The wait is the time the NVR workers have to close their segments and log out: the kill must
+    // come after stopNvrs() is done, not beside it. A stop that takes a while and says when it is done.
+    const r = run(serverStop("async () => { await new Promise((r) => setTimeout(r, 400)); console.log('the NVRs are stopped') }"))
+    ran('server.mjs shutdown(): it waits for the NVRs to be stopped, and is killed only then', killed(r) && r.out === 'the NVRs are stopped\n' && r.err === '', r, `${r.ms} ms`)
+  }
+  {
+    // ... but not for ever: a stop that never ends is given 9 s (the workers get 8, the unit allows
+    // 15). The function is run with a setTimeout of its own that says how long it was asked to wait
+    // and waits a tenth of a second instead.
+    const SHORT = "const realSetTimeout = globalThis.setTimeout\nconst setTimeout = (f, ms) => realSetTimeout(f, ms >= 1000 && ms !== 2000 ? (console.log('limit ' + ms), 100) : ms)"
+    const r = run(serverStop('() => new Promise(() => {})', SHORT))
+    ran('server.mjs shutdown(): a stop that never ends is given 9 s, and the process is killed then', killed(r) && r.out === 'limit 9000\n' && r.err === '', r, `${r.ms} ms`)
   }
 
   // --unhandled-rejections=strict would end the process in spite of the guard (Node raises the
