@@ -577,11 +577,17 @@ async function runJob(job, plan, { dataDir, work }) {
   // ever saw one of them could not tell whether a clip labelled 14:00 was 14:00 by the NVR's clock
   // or by ours, and on nvr1 those are nearly four minutes apart.
   // Matched on the camera label buildManifest was given, not on position: it sorts its clips.
-  const byKey = new Map(job.clips.map((c) => [`${c.nvr} channel ${c.ch}`, c]))
+  // And on the start it was given: on the camera alone, two clips of one camera both got the times
+  // of the second (2026-10-07 audit). Two that start at the same keyframe are taken in turn.
+  const iso = (ms) => new Date(ms).toISOString()
+  const byKey = new Map()
+  for (const c of job.clips) {
+    const key = `${c.nvr} channel ${c.ch} ${iso(c.actualStartMs ?? c.fromMs)}`
+    byKey.set(key, [...(byKey.get(key) ?? []), c])
+  }
   manifest.clips = manifest.clips.map((m) => {
-    const c = byKey.get(m.camera) ?? null
+    const c = byKey.get(`${m.camera} ${m.startServer}`)?.shift() ?? null
     if (!c) return m
-    const iso = (ms) => new Date(ms).toISOString()
     return {
       ...m,
       offsetMs: c.offsetMs,
@@ -690,7 +696,10 @@ async function mp4Clip(planned, clip, { packDir, add, onBytes, job }) {
   }
   clip.actualStartMs = Math.round(frames[0].ptsMs)
   clip.actualEndMs = Math.round(frames.at(-1).ptsMs)
-  const name = `clips/${camKey(clip.nvr, clip.ch)}.mp4`
+  // One file per clip: a camera's second clip in the same export was written over its first, under
+  // the same name. The first keeps the name it always had, the next ones are numbered from 2.
+  const nth = job.clips.slice(0, job.clips.indexOf(clip)).filter((c) => c.nvr === clip.nvr && c.ch === clip.ch).length
+  const name = `clips/${camKey(clip.nvr, clip.ch)}${nth ? `-${nth + 1}` : ''}.mp4`
   // ptsMs is rebased to zero: mp4.mjs writes no edit list, so the wall-clock time of the clip
   // belongs in the manifest, which is where it is.
   const base = frames[0].ptsMs
