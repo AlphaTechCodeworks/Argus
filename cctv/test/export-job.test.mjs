@@ -261,6 +261,24 @@ const runToEnd = async () => {
   job.removeExport(dataDir, started.id)
 }
 
+// Two clips of the same camera in one export: the second was written over the first (one file name
+// per camera), and both manifest clips carried the second's times (2026-10-07 audit).
+{
+  job._test.reset()
+  const clips = [clip({ fromMs: T0 + 1000, toMs: T0 + 5000 }), clip({ fromMs: T0 + 11_000, toMs: T0 + 17_000 })]
+  const started = job.startExport(request({ format: 'mp4', clips }), { dataDir, index: fakeIndex([segA]), who: ADMIN, user: 'boss', clockOf })
+  await runToEnd()
+  const done = job.getExport(dataDir, started.id)
+  const dir = job.packDirOf(dataDir, started.id)
+  const paths = done.state === 'done' ? JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')).files.map((f) => f.path) : []
+  check('two clips of one camera: a file each, the first under the usual name', done.state === 'done' && existsSync(join(dir, 'clips', 'nvr1-ch1.mp4')) && existsSync(join(dir, 'clips', 'nvr1-ch1-2.mp4')) && paths.filter((p) => p.endsWith('.mp4')).join() === 'clips/nvr1-ch1-2.mp4,clips/nvr1-ch1.mp4', `${done.state} ${done.error ?? ''} ${paths.join()}`)
+  check('  the pack verifies', done.state === 'done' && verifyPack(dir).ok, done.state === 'done' ? verifyPack(dir).problems.join('; ') : '')
+  const ms = done.state === 'done' ? JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')).clips : []
+  const asked = ms.map((m) => [Date.parse(m.requestedStart) - T0, Date.parse(m.requestedEnd) - T0, Date.parse(m.startNvr) - Date.parse(m.startServer)])
+  check('  each manifest clip states what was asked for that clip, and its own NVR time', ms.length === 2 && JSON.stringify(asked.map((a) => a.slice(0, 2))) === JSON.stringify([[1000, 5000], [11_000, 17_000]]) && asked[0][2] === asked[1][2] && ms.every((m) => Date.parse(m.startServer) <= Date.parse(m.requestedStart) && Date.parse(m.endServer) <= Date.parse(m.requestedEnd)), JSON.stringify(ms))
+  job.removeExport(dataDir, started.id)
+}
+
 // ---- cancellation ------------------------------------------------------------------------------
 
 {

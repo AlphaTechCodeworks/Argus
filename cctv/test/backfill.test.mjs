@@ -182,6 +182,11 @@ check('nvrReady: a healthy NVR is asked', nvrReady({ online: true }, NOW).ok ===
   check('chooseGap: a gap already past the NVR retention is skipped', chooseGap([{ ...rows[0], fromMs: NOW - 40 * DAY, toMs: NOW - 39 * DAY }], { now: NOW, nvrs, retentionMsOf }).why === 'older than the NVR still keeps')
   const short = chooseGap([{ ...rows[1], id: 4, toMs: NOW - 29 * DAY + 2 * MIN }, rows[1]], { now: NOW, nvrs, retentionMsOf })
   check('chooseGap: with the same deadline the shorter gap goes first', short.row?.id === 4)
+  // a hole whose start the NVR has rolled past, but not its end: what is left of it is being lost now
+  const straddle = { id: 5, nvr: 'nvr-1', ch: 2, fromMs: NOW - 40 * DAY, toMs: NOW - 20 * DAY, state: 'pending' }
+  check('chooseGap: a hole whose start has aged out but whose end has not is still picked', chooseGap([straddle], { now: NOW, nvrs, retentionMsOf }).row?.id === 5)
+  check('chooseGap: ... and before a hole the NVR still keeps whole', chooseGap([rows[1], straddle], { now: NOW, nvrs, retentionMsOf }).row?.id === 5)
+  check('chooseGap: ... of two such holes, the one with less left on the NVR goes first', chooseGap([straddle, { ...straddle, id: 6, fromMs: NOW - 31 * DAY, toMs: NOW - 29 * DAY }], { now: NOW, nvrs, retentionMsOf }).row?.id === 6)
   // a hole whose fill() threw (`throws`, counted by the job) goes after every hole that has not, whatever
   // their deadlines; among those that have, the one that threw least, then the deadline again
   const thrown = (list) => chooseGap(list, { now: NOW, nvrs, retentionMsOf }).row?.id
@@ -531,6 +536,139 @@ const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO
   check('oldest first: with 5,100 newer rows in the ledger the oldest pending hole is the one pulled', leg.calls.length === 1 && leg.calls[0].fromMs === OLD_FROM, J({ calls: leg.calls.map((c) => (c.fromMs - NOW) / DAY), what: job.last.what }))
   check('oldest first: ... and it is filled', index.backfillRow(oldest.id).state === 'filled', J(index.backfillRow(oldest.id)))
   for (const id of filler) index.backfillRemove(id)
+}
+
+// ---- a hole longer than one NVR search covers (2026-10-07 audit, M13) ----------------------------
+//
+// nvrCoverage searches the first 8 NVR-local days of a window and no more. fill() asked about the
+// whole row at once: a hole of 11 days whose first 8 had nothing left to pull was made permanent with
+// three days of it still on the NVR. The real nvrCoverage here, on an NVR that answers day searches.
+{
+  const { nvrCoverage } = await import('../rec-fallback.mjs')
+  const longRoot = mkdtempSync(join(tmpdir(), 'backfill-long-'))
+  const FROM = NOW - 12 * DAY
+  const TO = NOW - DAY
+  let n = 0
+  /** An NVR that keeps footage from keepsFrom on, a fresh index with the hole FROM..TO in it, and the job. */
+  const setup = (keepsFrom, { coverage = nvrCoverage } = {}) => {
+    const idx = openRecIndex(join(longRoot, `long-${++n}.db`))
+    const searched = []
+    const nvr = {
+      id: 'nvr-1',
+      online: true,
+      searched,
+      playback: {
+        lastClock: () => ({ tzOffsetMs: 0, skewMs: 0 }),
+        recordings: async (_ch, date) => {
+          searched.push(date)
+          const s = Date.parse(`${date}T00:00:00Z`)
+          const a = Math.max(s, keepsFrom)
+          const b = Math.min(s + DAY - 1000, NOW)
+          return { ranges: b > a ? [[a, b]] : [] }
+        }
+      }
+    }
+    const seg = (name, startMs, endMs, more = {}) => idx.addSegment({ nvr: 'nvr-1', ch: 0, path: join(longRoot, `${n}-${name}.h264`), startMs, endMs, bytes: 1000, keyframes: 10, loc: 'L1', ...more })
+    seg('pre', FROM - 10 * MIN, FROM)
+    seg('post', TO, TO + 10 * MIN)
+    const row = idx.backfillNote({ nvr: 'nvr-1', ch: 0, fromMs: FROM, toMs: TO, reason: null, kind: 'unknown' }, NOW)
+    const leg = fakeLeg()
+    const job = makeJob({ leg, coverage, extra: { index: idx, nvrs: new Map([['nvr-1', nvr]]), locations: () => [{ id: 'L1', path: longRoot, role: 'main' }] } })
+    return { idx, nvr, seg, row, leg, job }
+  }
+  nowBox.t = NOW
+  {
+    // the NVR keeps 7 days (the setting says 30); earlier nights have filled its first three of them
+    const { idx, nvr, seg, row, leg, job } = setup(NOW - 7 * DAY)
+    for (let t = NOW - 7 * DAY; t < NOW - 4 * DAY; t += HOUR) seg(`f${t}`, t, t + HOUR, { source: 'backfill:nvr-1', filledMs: NOW - DAY })
+    await job.fill(row)
+    const after = idx.backfillRow(row.id)
+    check('long hole: nothing to pull in the first 8 days does not make the row permanent', after.state === 'pending', J(after))
+    check('long hole: ... the days after them are asked about too', nvr.searched.includes(new Date(TO).toISOString().slice(0, 10)), J(nvr.searched))
+    check('long hole: ... and the next piece the NVR still has is pulled', leg.calls.length === 1 && leg.calls[0].fromMs === NOW - 4 * DAY, J(leg.calls.map((c) => (c.fromMs - NOW) / DAY)))
+    idx.close()
+  }
+  {
+    // an NVR with none of the hole at all: permanent, but only once every day of it has been asked about
+    const { idx, nvr, row, leg, job } = setup(NOW - HOUR)
+    await job.fill(row)
+    const after = idx.backfillRow(row.id)
+    const days = new Set(nvr.searched)
+    check('long hole: the NVR having none of it is permanent', after.state === 'permanent' && after.note === PERMANENT.nothing && leg.calls.length === 0, J(after))
+    check('long hole: ... after every day of the hole was searched', days.size === 12 && days.has(new Date(FROM).toISOString().slice(0, 10)) && days.has(new Date(TO).toISOString().slice(0, 10)), J([...days]))
+    idx.close()
+  }
+  {
+    // "nothing" for the first span and "could not ask" for the next is not an answer about the hole
+    let asks = 0
+    const { idx, row, leg, job } = setup(NOW - HOUR, { coverage: async (...a) => (++asks === 1 ? nvrCoverage(...a) : { ranges: [], reason: 'the NVR search failed (timed out)' }) })
+    await job.fill(row)
+    const after = idx.backfillRow(row.id)
+    check('long hole: a later span that could not be asked leaves the row pending', asks === 2 && after.state === 'pending' && after.attempts === 1 && /search failed/.test(after.lastError ?? '') && leg.calls.length === 0, J({ asks, after }))
+    idx.close()
+  }
+}
+
+// ---- a leg's time runs from its first written frame (2026-10-07 audit, M14) -----------------------
+//
+// The NVR plays from the start of its file, at 1x, and the leg drops those frames only as they come:
+// with the budget counted from the start of the leg, a short hole some minutes into the file ran out
+// of time on every pull. Real timers here, with both limits made short.
+{
+  /** A leg that writes its first frame after leadMs, then (unless it stalls) the rest, and ends. */
+  const slowLeg = ({ leadMs, stall = false }) => {
+    const fn = ({ fromMs, toMs, real }) => {
+      let close
+      const closed = new Promise((r) => (close = () => r({ reason: 'closed' })))
+      const played = new Promise((resolve) => {
+        if (leadMs === null) return // it never reaches the hole
+        setTimeout(() => {
+          real.send(frame(fromMs, true))
+          if (stall) return
+          for (let t = fromMs + 1000; t < toMs; t += 1000) real.send(frame(t, true))
+          resolve({ reason: 'reached' })
+        }, leadMs)
+      })
+      fn.closes = 0
+      return { done: Promise.race([played, closed]), close: () => (fn.closes++, close()), command() {}, fromMs, toMs }
+    }
+    return fn
+  }
+  const limits = { tickMs: 1, legLeadInMs: 400, legBudgetMs: () => 120 }
+  // (the job's timers do not keep a process alive, and a leg that sends nothing has none of its own)
+  const alive = setInterval(() => {}, 1000)
+  {
+    // the first frame comes later than the whole budget, but inside the lead-in
+    const job = makeJob({ leg: slowLeg({ leadMs: 250 }), extra: limits })
+    const row = holeOn(15)
+    await job.fill(row)
+    check('leg time: a lead-in longer than the budget does not end the leg', index.backfillRow(row.id).state === 'filled', J(index.backfillRow(row.id)))
+  }
+  {
+    const leg = slowLeg({ leadMs: null })
+    const job = makeJob({ leg, extra: limits })
+    const row = holeOn(16)
+    const t0 = Date.now()
+    await job.fill(row)
+    const took = Date.now() - t0
+    const after = index.backfillRow(row.id)
+    check('leg time: a leg that never reaches the hole ends at the lead-in limit', took >= 350 && took < 10_000 && leg.closes === 1, `${took} ms, ${leg.closes} close(s)`)
+    check('leg time: ... as a failed try that stands the NVR down', after.state === 'pending' && after.attempts === 1 && /did not reach the hole/.test(after.lastError ?? '') && job.nvrBackoff.get('nvr-1') > NOW, J(after))
+    index.backfillSet(row.id, { state: 'permanent', note: 'test tidy-up' })
+  }
+  {
+    // (a lead-in limit far off, so that it is the budget that ends this one)
+    const leg = slowLeg({ leadMs: 50, stall: true })
+    const job = makeJob({ leg, extra: { ...limits, legLeadInMs: 60_000 } })
+    const row = holeOn(17)
+    const t0 = Date.now()
+    await job.fill(row)
+    const took = Date.now() - t0
+    check('leg time: a leg that stops sending ends when the budget from its first frame is up', took >= 150 && took < 10_000 && leg.closes === 1, `${took} ms, ${leg.closes} close(s)`)
+    index.backfillSet(row.id, { state: 'permanent', note: 'test tidy-up' })
+  }
+  clearInterval(alive)
+  check('leg time: the budget is twice the stretch and a minute, at most 30 minutes', bf.legBudgetMs(3 * MIN) === 7 * MIN && bf.legBudgetMs(HOUR) === 30 * MIN && bf.LEG_LEAD_IN_MS === 30 * MIN)
 }
 
 // ---- one stuck row must not hold the whole job (playback report 9, review) -----------------------

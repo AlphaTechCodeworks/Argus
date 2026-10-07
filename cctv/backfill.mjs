@@ -50,7 +50,7 @@ import { DATA_DIR, isAdmin } from './auth.mjs'
 // stranger. CCTV_AUTH=off has no real users at all, and is honoured here as everywhere else.
 const AUTH_OFF = process.env.CCTV_AUTH === 'off'
 const admin = (who) => (AUTH_OFF ? true : who && typeof who === 'object' ? who.admin === true : isAdmin(who))
-import { nvrCoverage, startLeg } from './rec-fallback.mjs'
+import { COVERAGE_SPAN_MS, nvrCoverage, startLeg } from './rec-fallback.mjs'
 import { SegmentWriter } from './segment-writer.mjs'
 
 const MINUTE = 60_000
@@ -122,6 +122,15 @@ export const THROWN_LAST_MS = [20 * 3_600_000, 8 * DAY]
  * outside the hole, and the same row was pulled again on the next tick (playback report 9).
  */
 export const MIN_PROGRESS_MS = 1000
+/**
+ * How long a leg may play before the first frame inside the hole is written. The NVR starts a playback
+ * at the file holding the asked-for time, often minutes before the hole, and the session paces those
+ * frames at 1x before the leg drops them (pull()). Generous, as the NVR's files can be long; a leg that
+ * never reaches the hole still ends.
+ */
+export const LEG_LEAD_IN_MS = 30 * MINUTE
+/** How long a leg may go on from its first written frame: the stretch itself plus generous slack. */
+export const legBudgetMs = (lengthMs) => Math.min(30 * MINUTE, lengthMs * 2 + 60_000)
 
 /**
  * The backfill settings, repeated here so that this module never has to import settings.mjs.
@@ -357,6 +366,11 @@ export function nvrReady(n, now = Date.now()) {
  * first, because that is the one that becomes impossible soonest. Length breaks ties, shortest
  * first, so a night spent on one huge hole never starves ten small ones.
  *
+ * Both are of the part of the hole the NVR still keeps. A hole is given up only when its END has
+ * passed the NVR's retention (gapPlan, the scan's age-out); one whose start has is losing footage
+ * now, and goes first. Skipped by its start, such a hole was never pulled while most of it was
+ * still on the NVR, and stayed pending until all of it was gone (2026-10-07 audit).
+ *
  * Before the deadline come two counts the job keeps in memory of fills that threw (tick()):
  * `throws`, how often this hole's fill() has thrown since one last returned, and `camThrows`, how
  * often its camera's have since footage of that camera last got into the index. A hole that has
@@ -395,19 +409,20 @@ export function chooseGap(rows, { now = Date.now(), nvrs, retentionMsOf, busyNvr
       continue
     }
     const retention = retentionMsOf(r.nvr)
-    const leftMs = r.fromMs + retention - now // time before the NVR loses the START of this hole
-    if (leftMs <= 0) {
+    if (r.toMs + retention - now <= 0) {
       note('older than the NVR still keeps')
       continue
     }
-    candidates.push({ row: r, leftMs })
+    const keptFrom = Math.max(r.fromMs, now - retention) // where what the NVR still keeps of this hole starts
+    // leftMs: the time before the NVR loses the start of that part (none: it is losing it now)
+    candidates.push({ row: r, leftMs: keptFrom + retention - now, keptMs: r.toMs - keptFrom })
   }
   if (!candidates.length) {
     const worst = [...skipped.entries()].sort((a, b) => b[1] - a[1])[0]
     return { row: null, why: worst ? worst[0] : 'nothing to fill' }
   }
   // (holes whose fill() threw, then holes of a camera whose fills did, go last: see above)
-  candidates.sort((a, b) => (a.row.throws ?? 0) - (b.row.throws ?? 0) || (a.row.camThrows ?? 0) - (b.row.camThrows ?? 0) || a.leftMs - b.leftMs || a.row.toMs - a.row.fromMs - (b.row.toMs - b.row.fromMs))
+  candidates.sort((a, b) => (a.row.throws ?? 0) - (b.row.throws ?? 0) || (a.row.camThrows ?? 0) - (b.row.camThrows ?? 0) || a.leftMs - b.leftMs || a.keptMs - b.keptMs)
   return { row: candidates[0].row, why: null }
 }
 
@@ -459,8 +474,10 @@ function writeRunFlag(running, who, file = STATE_FILE()) {
  * bufferedAmount is the writer's queue: startLeg's session uses it for flow control, so a slow disk
  * slows the pull down instead of filling memory. That is also why the job cannot outrun the drive
  * the recorders are writing to.
+ *
+ * onFirst: called once, when the first frame has been written (pull() starts the leg's time budget there).
  */
-export function writerSink(writer) {
+export function writerSink(writer, { onFirst = () => {} } = {}) {
   const stats = { frames: 0, bytes: 0, firstTs: null, lastTs: null, dropped: 0 }
   return {
     OPEN: 1,
@@ -484,11 +501,10 @@ export function writerSink(writer) {
       stats.bytes += buf.length - HEADER_SIZE
       if (stats.firstTs === null) stats.firstTs = ts
       stats.lastTs = ts
+      if (stats.frames === 1) onFirst()
     }
   }
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref?.())
 
 /** The backfill job. One per process; server.mjs makes it and hands it to handleBackfill. */
 export class BackfillJob {
@@ -497,7 +513,8 @@ export class BackfillJob {
    *   settings?: () => object, coverage?: Function, leg?: Function, makeWriter?: Function,
    *   now?: () => number, exportsBusy?: () => boolean, recordingBusy?: () => boolean,
    *   refusingOf?: (nvrId:string) => boolean, coolingOf?: (nvrId:string) => boolean,
-   *   tickMs?: number, stateFile?: string, log?: Function }} deps
+   *   tickMs?: number, stateFile?: string, log?: Function, legLeadInMs?: number,
+   *   legBudgetMs?: (lengthMs:number) => number }} deps legLeadInMs, legBudgetMs: a leg's two time limits (pull())
    */
   constructor(deps = {}) {
     // deps.index may be the recordings index itself or, from server.mjs at start-up (before it is
@@ -522,6 +539,8 @@ export class BackfillJob {
     this.refusingOf = deps.refusingOf ?? (() => false)
     this.coolingOf = deps.coolingOf ?? (() => false)
     this.tickMs = deps.tickMs ?? 30_000
+    this.legLeadInMs = deps.legLeadInMs ?? LEG_LEAD_IN_MS
+    this.legBudgetMs = deps.legBudgetMs ?? legBudgetMs
     this.stateFile = deps.stateFile ?? STATE_FILE()
     this.log = deps.log ?? ((m) => console.log(`[backfill] ${m}`))
     this.running = readRunFlag(this.stateFile)
@@ -975,13 +994,32 @@ export class BackfillJob {
     const missingMs = totalMs(holes.map((h) => [h.fromMs, h.toMs]))
 
     // 2. What does the NVR say it has? A failure to ask is not an answer (rule 2 at the top).
+    //    Asked a span at a time (COVERAGE_SPAN_MS), from the start of what is missing, until a span
+    //    holds something to pull or the last of what is missing has been asked about. The whole row
+    //    was asked in one go, and the search looks at the first 8 days of a window only: a hole
+    //    longer than that with nothing to pull in its first 8 days (the NVR keeps less than the
+    //    setting says, or those days were filled on earlier nights) was made permanent with the
+    //    rest of it still on the NVR (2026-10-07 audit, M13).
+    const missing = mergeRanges(holes.map((h) => [h.fromMs, h.toMs]))
+    const lastMs = missing.at(-1)[1]
     let cov
-    try {
-      cov = await this.coverage(nvr, row.ch, row.fromMs, row.toMs, { now: () => this.now() })
-    } catch (e) {
-      return fail(`the NVR search failed (${e?.message ?? e})`, { stop: 'nvr' })
+    let plan
+    let found = []
+    for (let at = missing[0][0]; ; ) {
+      const end = Math.min(at + COVERAGE_SPAN_MS, lastMs)
+      try {
+        cov = await this.coverage(nvr, row.ch, at, end, { now: () => this.now() })
+      } catch (e) {
+        return fail(`the NVR search failed (${e?.message ?? e})`, { stop: 'nvr' })
+      }
+      plan = gapPlan({ fromMs: row.fromMs, toMs: row.toMs }, { now, nvrRetentionMs: this.retentionMs(), coverage: cov })
+      // (aged out, or "we could not ask": the answer for the whole row, whichever span it came with)
+      if (!plan.decided || plan.permanentReason === PERMANENT.aged) break
+      found = intersect(missing, mergeRanges(plan.work))
+      if (found.length || end >= lastMs) break
+      // the next span starts at what is missing after this one (a stretch already here is not asked about)
+      at = Math.max(end, missing.find((m) => m[1] > end)[0])
     }
-    const plan = gapPlan({ fromMs: row.fromMs, toMs: row.toMs }, { now, nvrRetentionMs: this.retentionMs(), coverage: cov })
     if (plan.permanent) {
       this.index.backfillSet(row.id, { state: 'permanent', note: plan.permanentReason, lastTryMs: now })
       this.log(`${row.nvr}/${row.ch + 1} ${new Date(row.fromMs).toISOString()}: permanent (${plan.permanentReason})`)
@@ -996,13 +1034,7 @@ export class BackfillJob {
 
     // 3. Only the parts that are BOTH missing here and present there, in bounded pieces.
     const maxMs = Math.max(MINUTE, Number(cfg.maxGapMinutes ?? 60) * MINUTE)
-    const work = chunkRanges(
-      intersect(
-        mergeRanges(holes.map((h) => [h.fromMs, h.toMs])),
-        mergeRanges(plan.work)
-      ),
-      maxMs
-    )
+    const work = chunkRanges(found, maxMs)
     if (!work.length) {
       this.index.backfillSet(row.id, { state: 'permanent', note: PERMANENT.nothing, lastTryMs: now })
       return 0
@@ -1093,7 +1125,16 @@ export class BackfillJob {
     const segments = []
     writer.on('segment', (s) => segments.push(s))
     writer.on('error', (e) => this.log(`write failed: ${e.message}`))
-    const sink = writerSink(writer)
+    // The leg's clock: legLeadInMs to write its first frame, then the budget from that frame on.
+    let timer = null
+    let outOfTime
+    const timeout = new Promise((resolve) => (outOfTime = resolve))
+    const within = (ms, message) => {
+      clearTimeout(timer)
+      timer = setTimeout(() => outOfTime({ reason: 'timeout', message }), ms)
+      timer.unref?.()
+    }
+    const sink = writerSink(writer, { onFirst: () => within(this.legBudgetMs(toMs - fromMs), 'the NVR leg ran out of time') })
     let leg = null
     let done
     try {
@@ -1104,15 +1145,20 @@ export class BackfillJob {
       this.current = { row: row.id, abort: () => leg.close() }
       // A leg is bounded: the stretch itself plus generous slack. A session that stops sending is
       // closed rather than left holding an NVR login all night.
-      const budgetMs = Math.min(30 * MINUTE, (toMs - fromMs) * 2 + 60_000)
-      done = await Promise.race([leg.done, sleep(budgetMs).then(() => ({ reason: 'timeout' }))])
+      // The budget runs from the first frame written, not from the start of the leg: the frames
+      // before the hole are paced at 1x like any others before the floor drops them, so a short hole
+      // some minutes into the NVR's file ran out of time on every pull and was never filled
+      // (2026-10-07 audit, M14). The lead-in has a limit of its own.
+      if (!sink.stats.frames) within(this.legLeadInMs, 'the NVR leg did not reach the hole in time')
+      done = await Promise.race([leg.done, timeout])
       if (done.reason === 'timeout') leg.close()
     } finally {
+      clearTimeout(timer)
       this.current = null
       await writer.close()
       await writer.drained()
     }
-    const message = done.message ?? (done.reason === 'timeout' ? 'the NVR leg ran out of time' : null)
+    const message = done.message ?? null
     // A leg that failed before a single frame, with a refusal-shaped message, is the NVR saying no.
     const refused = done.reason === 'error' && sink.stats.frames === 0 && /refus|busy|limit|resource|no capacity|failed to start/i.test(String(message ?? ''))
     // brokeOff: the leg errored or ran out of time, as against playing to its end
