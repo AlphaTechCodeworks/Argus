@@ -4,7 +4,8 @@
 // Run:  node cctv/test/worker-requests.test.mjs
 import { setTimeout as sleep } from 'node:timers/promises'
 import { MSG } from '../worker-ipc.mjs'
-import { REQUEST_TIMEOUT_MS, makeRequests } from '../worker-requests.mjs'
+import { readFileSync } from 'node:fs'
+import { CALL_BUDGET_MS, REQUEST_TIMEOUT_MS, SEND_BY_MS, makeRequests } from '../worker-requests.mjs'
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -18,7 +19,18 @@ const J = (v) => JSON.stringify(v)
 const keepAlive = setInterval(() => {}, 1000)
 
 check('the messages exist', MSG.REQ === 'req' && MSG.RES === 'res')
-check('the default wait is the XML cap plus 5 s', REQUEST_TIMEOUT_MS === 95_000)
+// A command the worker sent just inside its send-by time still has its own time limit to run: the
+// wait covers both. At the send-by time plus 5 s the caller was told "no answer" for a command the
+// NVR then carried out (a reboot).
+check('the default wait covers the send-by time and the longest call sent after it', SEND_BY_MS === 90_000 && REQUEST_TIMEOUT_MS === SEND_BY_MS + CALL_BUDGET_MS + 5000, `${REQUEST_TIMEOUT_MS}`)
+{
+  const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')
+  const budget = (fn) => Number((src('sdk.mjs').match(new RegExp(`^  NET_SDK_${fn}: ([\\d_]+)`, 'm'))?.[1] ?? 'x').replaceAll('_', ''))
+  const calls = ['TransparentConfig', 'RebootDVR', 'ShutDownDVR'].map(budget)
+  check('... which is no shorter than the time limits of the calls the worker makes (sdk.mjs)', calls.every((ms) => ms > 0 && ms <= CALL_BUDGET_MS), calls.join())
+  const xml = src('nvr-xml.mjs')
+  check('nvr-xml.mjs: the send-by time it gives the worker is the one the wait is counted from', /^const XML_CAP_MS = SEND_BY_MS /m.test(xml) && /^let capMs = XML_CAP_MS /m.test(xml) && (xml.match(/notAfter: Date\.now\(\) \+ capMs/g) ?? []).length === 2)
+}
 
 {
   const sent = []

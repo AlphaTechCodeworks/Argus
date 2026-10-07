@@ -6,7 +6,14 @@
 // worker-supervisor.mjs supplies `send` and feeds the replies in.
 import { MSG } from './worker-ipc.mjs'
 
-export const REQUEST_TIMEOUT_MS = 95_000 // nvr-xml.mjs XML_CAP_MS plus 5 s: the caller's own cap has freed its queue by then; this ends the wait itself
+// The wait for the worker's answer covers everything the worker may still do with the command. It
+// is told to send it within SEND_BY_MS of being handed it, or not at all (nvr-xml.mjs notAfter), and
+// one sent at the last moment then has its own time limit to run. At 5 s past the send-by time, a
+// command sent at 88 s was reported as timed out and carried out after that: a reboot said to have
+// failed, and the NVR rebooting.
+export const SEND_BY_MS = 90_000 // nvr-xml.mjs takes its XML_CAP_MS from here
+export const CALL_BUDGET_MS = 20_000 // the longest time limit of a call the worker makes for a request (sdk.mjs BUDGETS: TransparentConfig 20 s, a reboot 10 s)
+export const REQUEST_TIMEOUT_MS = SEND_BY_MS + CALL_BUDGET_MS + 5000 // (5 s for the worker's own queue and the way back)
 
 const named = (name, message, more = {}) => Object.assign(new Error(message), { name, ...more })
 
