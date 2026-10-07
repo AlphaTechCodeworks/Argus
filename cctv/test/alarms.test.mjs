@@ -281,6 +281,48 @@ const json = (o) => async () => o
   await new Promise((r) => setImmediate(r))
   check('a link that cannot be made costs the link, not the alert', got.length === 2 && !got[1].detail.includes('\n'), JSON.stringify(got[1]))
 }
+{
+  // The quiet gap and the name in the message come from the rule that asked to notify, not from the
+  // most urgent matching rule (audit 2026-10-07 M4): a critical rule with no gap and notify off took
+  // away the 30 s gap of the rule that does notify, and the message named the critical rule.
+  const sent = []
+  const sender = { deliver: async (alerts) => sent.push(alerts[0]) }
+  const rules = [
+    { id: 11, name: 'grade only', enabled: true, cameras: [], types: ['tamper'], schedule: [], priority: 'critical', notify: false, minGapS: 0 },
+    { id: 12, name: 'tell me', enabled: true, cameras: [], types: ['tamper'], schedule: [], priority: 'low', notify: true, minGapS: 30 }
+  ]
+  let now = T0 + 300 * MIN
+  const notifier = makeAlarmNotifier({ sender, rules: () => rules, now: () => now, log: () => {} })
+  const tamper = (ch) => addEvent({ nvr: 'nvr1', ch, type: 'tamper', startMs: now, source: 'x' }, now).event
+  const first = await notifier.handle(tamper(5))
+  await new Promise((r) => setImmediate(r))
+  check('graded by the most urgent rule, told by the rule that asked', first.priority === 'critical' && first.ruleName === 'grade only' && sent.length === 1, JSON.stringify(first))
+  check('the message names the rule that asked to notify', /rule: tell me$/.test(sent[0]?.detail ?? ''), JSON.stringify(sent[0]))
+  now += 10 * S
+  await notifier.handle(tamper(5))
+  await new Promise((r) => setImmediate(r))
+  check('the notifying rule\'s quiet gap holds, whatever the gap of the more urgent rule', sent.length === 1, `${sent.length}`)
+  await notifier.handle(tamper(6))
+  await new Promise((r) => setImmediate(r))
+  check('the gap is per camera', sent.length === 2, `${sent.length}`)
+  now += 31 * S
+  await notifier.handle(tamper(5))
+  await new Promise((r) => setImmediate(r))
+  check('once that gap has passed, the next one is sent', sent.length === 3, `${sent.length}`)
+
+  // two rules that both ask: a message goes when either rule's gap has passed, and starts both gaps
+  rules.push({ id: 13, name: 'tell me rarely', enabled: true, cameras: [], types: ['tamper'], schedule: [], priority: 'high', notify: true, minGapS: 300 })
+  now += 10 * MIN
+  await notifier.handle(tamper(5))
+  now += 10 * S
+  await notifier.handle(tamper(5))
+  await new Promise((r) => setImmediate(r))
+  check('two rules asking: one message, not one per rule', sent.length === 4, `${sent.length}`)
+  now += 31 * S
+  await notifier.handle(tamper(5))
+  await new Promise((r) => setImmediate(r))
+  check('... and the shorter gap decides when the next one goes', sent.length === 5 && /rule: tell me$/.test(sent[4]?.detail ?? ''), `${sent.length} ${sent[4]?.detail}`)
+}
 
 // --- the routes --------------------------------------------------------------------------------------
 {
