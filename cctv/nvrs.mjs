@@ -1305,7 +1305,7 @@ const makeNvr = (cfg) => {
   const nvr = new Nvr(cfg)
   if (LIVE_WORKER) {
     // (each worker's recorders' write queues, every 5 s: writes waiting make time-lapse stand back before a gap, thin-pace.mjs)
-    nvr.worker = startWorker(nvr.id, { onStats: (s) => { nvr.workerStats(s); noteRecorderQueues(nvr.id, s?.rec) }, onRecording, onReady: ({ spawnedAt }) => recoverFor(nvr.id, spawnedAt) })
+    nvr.worker = startWorker(nvr.id, { onStats: (s) => { nvr.workerStats(s); noteRecorderQueues(nvr.id, s?.rec) }, onRecording, onReady: ({ spawnedAt }) => recoverFor(nvr.id, spawnedAt), p2p: Boolean(cfg.sn) })
     try {
       nvr.worker.setRecording(recordingMsg())
     } catch (e) {

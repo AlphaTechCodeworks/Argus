@@ -50,6 +50,8 @@ export class HubStream {
     this.stopTimer = null
     this.clients.add(ws)
     const bg = ws.background === true
+    // a viewer's main stream is about to be asked for: on a P2P NVR, room for it first (freeIdleSubs)
+    if (this.type === 0 && !bg && !this.fg) this.hub.freeIdleSubs?.()
     if (!this.wanted) {
       this.wanted = true
       this.fg = !bg
@@ -77,20 +79,24 @@ export class HubStream {
     }
     if (this.clients.size > 0 || this.closed) return
     clearTimeout(this.stopTimer)
-    this.stopTimer = setTimeout(() => {
-      this.stopTimer = null
-      if (this.clients.size > 0) return
-      this.wanted = false
-      this.fg = false
-      this.gop = []
-      // with another stream of this camera in the hub by now it says nothing: its unwant would stop
-      // that one under everyone watching it
-      const live = this.hub.streams.get(this.key)
-      if (live && live !== this) return
-      this.hub.send(unwant(this.ch, this.type))
-      if (live === this) this.hub.streams.delete(this.key)
-      this.left = true
-    }, this.hub.stopDelayMs[this.type] ?? 10_000)
+    this.stopTimer = setTimeout(() => this.lingerOver(), this.hub.stopDelayMs[this.type] ?? 10_000)
+  }
+
+  /** Its linger is over, or cut short (StreamHub.freeIdleSubs): the worker is told to stop it. */
+  lingerOver() {
+    clearTimeout(this.stopTimer)
+    this.stopTimer = null
+    if (this.clients.size > 0) return
+    this.wanted = false
+    this.fg = false
+    this.gop = []
+    // with another stream of this camera in the hub by now it says nothing: its unwant would stop
+    // that one under everyone watching it
+    const live = this.hub.streams.get(this.key)
+    if (live && live !== this) return
+    this.hub.send(unwant(this.ch, this.type))
+    if (live === this) this.hub.streams.delete(this.key)
+    this.left = true
   }
 
   onFrame(buf, isKey) {
@@ -119,10 +125,11 @@ export class HubStream {
 }
 
 export class StreamHub {
-  constructor(nvrId, send, { stopDelayMs = STOP_DELAY_MS } = {}) {
+  constructor(nvrId, send, { stopDelayMs = STOP_DELAY_MS, p2p = false } = {}) {
     this.nvrId = nvrId
     this.send = send
     this.stopDelayMs = stopDelayMs
+    this.p2p = p2p // the NVR is reached by serial number, through the P2P cloud (freeIdleSubs)
     this.streams = new Map()
   }
 
@@ -131,6 +138,21 @@ export class StreamHub {
     let s = this.streams.get(key)
     if (!s) this.streams.set(key, (s = new HubStream(this, ch, type)))
     return s
+  }
+
+  /**
+   * A viewer's main stream is about to be asked for on a P2P NVR, which serves only so many streams
+   * at once and refuses a main outright with a grid's worth of sub-streams open. The sub-streams
+   * nobody watches any more are only lingering for a quick return to the grid, yet they held the
+   * NVR's places for the whole linger: the full-size view took ~3 minutes to appear. Their lingers
+   * end now; they start again when the grid comes back. live.mjs #freeIdleSubs does this where the
+   * streams play, but in an NVR's worker it finds none to free: there each of them still has this
+   * process's tap on it until its unwant. One with a viewer or a warm-up on it here is left alone,
+   * and one the recorder writes plays on in the worker whatever is unwanted here.
+   */
+  freeIdleSubs() {
+    if (!this.p2p) return
+    for (const s of [...this.streams.values()]) if (s.type === 1 && s.clients.size === 0 && s.stopTimer) s.lingerOver()
   }
 
   onMessage(msg) {

@@ -387,6 +387,8 @@ export class LiveStream {
    * are only lingering for a quick return to the grid, SUB_LINGER_MS), so their slots at the NVR free
    * up for the main. The one the full-size view borrows keeps its viewer, so it is left running.
    * Stops go through the idle-stop queue (paced; cancelled if the sub is wanted again before its turn).
+   * In an NVR's worker every lingering sub still has the main process's tap on it, so none is found
+   * here: there the main process ends their lingers itself (stream-hub.mjs freeIdleSubs).
    */
   #freeIdleSubs() {
     for (const s of this.nvr.streams.values()) {

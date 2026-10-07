@@ -195,5 +195,71 @@ check('frames for an unwanted stream are ignored', !hub.streams.has('18:0') && a
   check('a linger ending on a stream no longer the hub\'s: no unwant, the hub\'s stream stays', count(MSG.UNWANT) === n && h.streams.get('7:1') === b7 && a7.wanted === false)
 }
 
+// ---- a P2P NVR (reached by serial number) serves only so many streams: a viewer's main stream
+// asked for ends the lingers of its sub-streams nobody watches, at once, not 180 s later. In worker
+// mode live.mjs #freeIdleSubs frees nothing: each lingering sub still has the parent's tap there.
+{
+  const { readFileSync } = await import('node:fs')
+  const msgs = []
+  const h = new StreamHub('p', (m) => msgs.push(m), { stopDelayMs: { 0: 10_000, 1: 180_000 }, p2p: true })
+  const said = (from) => msgs.slice(from).map((m) => m.t + ' ' + m.ch + ':' + m.type + (m.background ? ' bg' : '')).join(', ')
+  const idleMain = h.getStream(9, 0)
+  const m9 = fakeWs()
+  idleMain.add(m9)
+  idleMain.remove(m9)
+  const idle = [0, 1, 2].map((ch) => {
+    const s = h.getStream(ch, 1)
+    const w = fakeWs()
+    s.add(w)
+    s.remove(w)
+    return s
+  })
+  const watched = h.getStream(3, 1)
+  watched.add(fakeWs())
+  const warm = h.getStream(4, 1)
+  warm.add({ ...fakeWs(), background: true })
+  let at = msgs.length
+  // a stand-in's main (sub-bridge.mjs) is asked for in the background: nothing is freed for it
+  const standIn = h.getStream(6, 0)
+  standIn.add({ ...fakeWs(), background: true })
+  check('P2P: a main asked for in the background frees nothing', said(at) === 'want 6:0 bg' && idle.every((s) => s.wanted), said(at))
+  at = msgs.length
+  h.getStream(5, 0).add(fakeWs())
+  check('P2P: a viewer\'s main ends the lingers of the subs nobody watches, before its own want', said(at) === 'unwant 0:1, unwant 1:1, unwant 2:1, want 5:0', said(at))
+  check('P2P: ... they have left the hub, their timers gone', idle.every((s) => !s.wanted && s.stopTimer === null && s.left) && !h.streams.has('0:1'))
+  check('P2P: ... a sub with a viewer, a warm-up\'s, and a lingering main are left as they were', watched.wanted && warm.wanted && idleMain.wanted && idleMain.stopTimer !== null && h.streams.get('3:1') === watched && h.streams.get('4:1') === warm)
+  at = msgs.length
+  h.getStream(5, 0).add(fakeWs())
+  check('P2P: a second viewer of that main asks nothing more', msgs.length === at)
+  // a main the stand-in started in the background, now wanted by a viewer: freed for it then
+  const s7 = h.getStream(7, 1)
+  const w7 = fakeWs()
+  s7.add(w7)
+  s7.remove(w7)
+  at = msgs.length
+  standIn.add(fakeWs())
+  check('P2P: a background main a viewer now wants frees them too', said(at) === 'unwant 7:1, want 6:0', said(at))
+  // back to the grid: the freed sub starts again
+  at = msgs.length
+  h.getStream(0, 1).add(fakeWs())
+  check('P2P: back on the grid, a freed sub is asked for again', said(at) === 'want 0:1', said(at))
+  clearTimeout(idleMain.stopTimer)
+
+  // an NVR reached by its address has no such limit: its subs linger on
+  const lan = []
+  const g = new StreamHub('lan', (m) => lan.push(m), { stopDelayMs: { 0: 10_000, 1: 180_000 } })
+  const sub = g.getStream(0, 1)
+  const w = fakeWs()
+  sub.add(w)
+  sub.remove(w)
+  g.getStream(5, 0).add(fakeWs())
+  check('by address: a main leaves the lingering subs alone', sub.wanted && sub.stopTimer !== null && !lan.some((m) => m.t === MSG.UNWANT))
+  clearTimeout(sub.stopTimer)
+
+  const src = (name) => readFileSync(new URL('../' + name, import.meta.url), 'utf8')
+  check('wiring: nvrs.mjs tells the worker\'s hub that the NVR is a P2P one', /startWorker\(nvr\.id, \{[^\n]*p2p: Boolean\(cfg\.sn\)/.test(src('nvrs.mjs')))
+  check('wiring: worker-supervisor.mjs passes it to its StreamHub', /new StreamHub\(nvrId, [^]*?\}, \{ p2p \}\)/.test(src('worker-supervisor.mjs')))
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)
