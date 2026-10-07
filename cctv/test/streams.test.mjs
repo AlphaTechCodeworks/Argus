@@ -251,6 +251,13 @@ check('never written: record mode, dual-stream switch', !calls.some((c) => /edit
   check('downTarget: 8MP capped at 4MP -> 2560x1440', downTarget(item, '3840x2160', 4e6) === '2560x1440')
   check('downTarget: picks the largest under the cap', downTarget(item, '3840x2160', 2.5e6) === '1920x1080')
   check('downTarget: nothing below the cap -> null', downTarget({ resolutions: [{ res: '1920x1080' }] }, '1920x1080', 4e6) === null)
+  // "N MP" is the name of a size: the standard ones are a few percent over the round million
+  const sizes = { resolutions: ['3840x2160', '3200x1800', '2880x1620', '2688x1520', '2592x1944', '2560x1440', '1920x1080', '1280x720'].map((res) => ({ res })) }
+  check('downTarget: standard 4 MP (2688x1520 = 4,085,760) is within a 4 MP cap', downTarget(sizes, '3200x1800', 4e6) === '2688x1520', String(downTarget(sizes, '3200x1800', 4e6)))
+  check('downTarget: 4.7 MP (2880x1620) is not', downTarget({ resolutions: [{ res: '2880x1620' }, { res: '1920x1080' }] }, '3200x1800', 4e6) === '1920x1080')
+  check('downTarget: standard 8 MP (3840x2160 = 8,294,400) is within an 8 MP cap', downTarget({ resolutions: [{ res: '4000x3000' }, { res: '3840x2160' }, { res: '2688x1520' }] }, '4000x3000', 8e6) === '3840x2160')
+  check('downTarget: standard 5 MP (2592x1944 = 5,038,848) is within a 5 MP cap', downTarget(sizes, '3840x2160', 5e6) === '2592x1944', String(downTarget(sizes, '3840x2160', 5e6)))
+  check('downTarget: standard 2 MP (1920x1080 = 2,073,600) is within a 2 MP cap', downTarget(sizes, '2688x1520', 2e6) === '1920x1080', String(downTarget(sizes, '2688x1520', 2e6)))
 
   const sys = { recMode: 'auto', loopRecSwitch: false, totalBandwidth: null, usedTotalBandwidth: null, mainStreamLimitFps: null, poeMode: null }
   const items = parseEncode(readFileSync(join(dir, 'nvr1-queryNodeEncodeInfo.xml'), 'utf8')).items.filter((i) => i.an && i.resolutions.length)
@@ -259,9 +266,22 @@ check('never written: record mode, dual-stream switch', !calls.some((c) => /edit
   const changed = capped.filter((p) => p.change)
   check('cap: proposes a lower resolution for over-cap cameras (allowLowerRes lets planChange through)', changed.length > 0, `${changed.length} of ${capped.length}`)
   const px = (r) => r.split('x').map(Number).reduce((a, b) => a * b, 1)
-  check('cap: every proposed target is below current and <= the 2 MP cap', changed.every((p) => px(p.to.res) < px(p.cur) && px(p.to.res) <= 2e6))
+  // (1920x1080 is 2 MP by name and 2,073,600 pixels)
+  check('cap: every proposed target is below current and no more than 2 MP', changed.every((p) => px(p.to.res) < px(p.cur) && px(p.to.res) <= 2_073_600), changed.map((p) => p.to.res).join())
   check('cap: only the resolution changes (QoI, fps, codec, level kept)', changed.every((p) => p.to.QoI === p.from.QoI && p.to.fps === p.from.fps && p.to.enct === p.from.enct && p.to.level === p.from.level))
   check('cap: a camera already under the cap is skipped, not changed', capPlan(items[0], sys, true, 999e6).change === undefined)
+
+  // "Cap at 4 MP" against both NVRs' real answers. Held to exactly 4,000,000 pixels, every camera
+  // already at 4 MP (2688x1520) was lowered to 2560x1440, with an encoder restart, for nothing.
+  const all = [...items, ...parseEncode(readFileSync(join(dir, 'nvr-2-queryNodeEncodeInfo.xml'), 'utf8')).items.filter((i) => i.an && i.resolutions.length)]
+  const at4 = all.map((i) => ({ item: i, cur: current(i).res, ...capPlan(i, sys, true, 4e6) }))
+  const already = at4.filter((p) => p.cur === '2688x1520')
+  check('cap at 4 MP: the fixtures hold cameras already at 4 MP', already.length > 0, String(already.length))
+  check('cap at 4 MP: a camera already at 2688x1520 is left alone', already.every((p) => p.change === undefined && /^already 4\.1 MP/.test(p.skip)), already.map((p) => p.skip).join(' | '))
+  const offered = at4.filter((p) => px(p.cur) > 4_085_760 && p.item.resolutions.some((r) => r.res === '2688x1520'))
+  check('cap at 4 MP: the fixtures hold bigger cameras that offer 2688x1520', offered.length > 0, String(offered.length))
+  check('cap at 4 MP: a bigger camera that offers 2688x1520 goes to it, not past it', offered.every((p) => p.change?.res === '2688x1520' && p.to.res === '2688x1520'), offered.map((p) => `${p.cur}->${p.change?.res ?? p.skip}`).join(' | '))
+  check('cap at 4 MP: nothing is ever proposed above 4 MP by name', at4.filter((p) => p.change).every((p) => px(p.to.res) <= 4_085_760 && px(p.to.res) < px(p.cur)))
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

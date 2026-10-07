@@ -668,13 +668,21 @@ export async function handleStreamOptimise(method, nvrId, readJson, user) {
 
 const MP = (res) => px(res) / 1e6
 
-/** The best resolution the camera offers below its current and at or under maxPx pixels, or null. */
+// "4 MP" is the name of a size, not a pixel count: standard 4 MP is 2688x1520 = 4,085,760 pixels,
+// 8 MP is 3840x2160 = 8,294,400, and the usual sizes run up to 4.9% over their name (3 MP is
+// 2048x1536 = 3,145,728). So a size is within a cap when it is no more than 5% over it. Held to the exact million, a
+// camera already at 4 MP was lowered to 2560x1440 (an encoder restart for nothing), and a 3200x1800
+// camera was sent past the 2688x1520 it offers.
+const CAP_SLACK = 1.05
+const withinCap = (res, maxPx) => px(res) <= maxPx * CAP_SLACK
+
+/** The best resolution the camera offers below its current and within the cap (withinCap), or null. */
 function downTarget(item, curRes, maxPx) {
   const curPx = px(curRes)
   return (
     item.resolutions
       .map((r) => r.res)
-      .filter((r) => px(r) < curPx && px(r) <= maxPx)
+      .filter((r) => px(r) < curPx && withinCap(r, maxPx))
       .sort((a, b) => px(b) - px(a))[0] ?? null
   )
 }
@@ -684,7 +692,7 @@ function capPlan(item, sys, online, maxPx) {
   const why = whyNot(item, sys, online)
   if (why) return { skip: why }
   const cur = current(item)
-  if (px(cur.res) <= maxPx) return { skip: `already ${MP(cur.res).toFixed(1)} MP (${cur.res})` }
+  if (withinCap(cur.res, maxPx)) return { skip: `already ${MP(cur.res).toFixed(1)} MP (${cur.res})` }
   const target = downTarget(item, cur.res, maxPx)
   if (!target) return { skip: `the camera offers no resolution under ${(maxPx / 1e6).toFixed(1)} MP` }
   try {
