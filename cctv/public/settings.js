@@ -79,6 +79,11 @@ Type REMOVE to go ahead.`, '')
 }
 const camEdits = new Map() // "<nvr>/<ch>" -> patch
 
+// The forms with something typed and not saved yet: render() runs after a save elsewhere on the
+// page, and that must not put the stored values back over what an admin is still typing.
+const unsaved = new Set() // 'defaults' | 'misc' | 'alerts'
+for (const id of ['defaults', 'misc', 'alerts']) $(id).addEventListener('input', () => unsaved.add(id))
+
 const gb = (b) => (b >= 1e12 ? `${(b / 1e12).toFixed(1)} TB` : `${(b / 1e9).toFixed(1)} GB`)
 
 // ---- recording ----------------------------------------------------------------------------------
@@ -96,6 +101,7 @@ $('defaults').addEventListener('submit', async (e) => {
   for (const k of REC_FIELDS) defaults[k] = Number($(`d-${k}`).value)
   try {
     settings = (await api('POST', '/api/admin/settings', { recording: { defaults } })).settings
+    unsaved.delete('defaults')
     say('d-msg', 'Saved')
     render()
     refreshRam() // which cameras record may have changed
@@ -161,7 +167,10 @@ $('camChanged').addEventListener('change', () => renderCameras())
 function camRows(list, d) {
   return list.map((c) => {
       const key = `${c.nvr}/${c.ch}`
-      const o = settings.recording.cameras?.[key] ?? {}
+      // What is stored with the unsaved edits on top (null: back to the default), so a row always
+      // shows what "Save camera changes" will send, however often the table is redrawn.
+      const o = { ...settings.recording.cameras?.[key] }
+      for (const [field, v] of Object.entries(camEdits.get(key) ?? {})) o[field] = v ?? undefined
       const edit = (field) => (v) => {
         const p = camEdits.get(key) ?? {}
         p[field] = v
@@ -237,6 +246,7 @@ $('misc').addEventListener('submit', async (e) => {
         storage: { lowFreePct: Number($('m-low').value), floorFreePct: Number($('m-floor').value) }
       })
     ).settings
+    unsaved.delete('misc')
     say('m-msg', 'Saved')
   } catch (err) {
     say('m-msg', err.message, true)
@@ -746,7 +756,10 @@ function hookRow(h = { url: '', secret: '' }) {
   const url = el('input', { type: 'url', className: 'a-hook-url', placeholder: 'https://example.com/argus-hook', value: h.url ?? '' })
   const secret = el('input', { type: 'password', className: 'a-hook-secret', placeholder: 'secret (optional)', autocomplete: 'new-password', value: h.secret === 'set' ? 'set' : '' })
   const remove = el('button', { type: 'button', textContent: 'Remove' })
-  remove.addEventListener('click', () => row.remove())
+  remove.addEventListener('click', () => {
+    row.remove()
+    unsaved.add('alerts')
+  })
   row.append(url, secret, remove)
   return row
 }
@@ -761,6 +774,7 @@ function collectHooks() {
 $('a-hook-add').addEventListener('click', () => {
   if (document.querySelectorAll('.a-hook').length >= 5) return say('a-hook-msg', 'At most five.', true)
   $('a-hooks').append(hookRow())
+  unsaved.add('alerts')
 })
 $('a-hook-test').addEventListener('click', async () => {
   say('a-hook-msg', 'Sending…')
@@ -779,6 +793,7 @@ $('a-new').addEventListener('click', () => {
   const letters = 'abcdefghijklmnopqrstuvwxyz0123456789'
   const rnd = crypto.getRandomValues(new Uint8Array(16))
   $('a-topic').value = `cctv-${Array.from(rnd, (b) => letters[b % letters.length]).join('')}`
+  unsaved.add('alerts')
 })
 
 $('a-test').addEventListener('click', async () => {
@@ -822,6 +837,7 @@ $('alerts').addEventListener('submit', async (e) => {
         }
       })
     ).settings
+    unsaved.delete('alerts')
     renderAlerts()
     say('a-msg', 'Saved')
   } catch (err) {
@@ -995,10 +1011,10 @@ async function loadOsd() {
 }
 
 function render() {
-  renderDefaults()
+  if (!unsaved.has('defaults')) renderDefaults()
   renderCameras()
-  renderMisc()
-  renderAlerts()
+  if (!unsaved.has('misc')) renderMisc()
+  if (!unsaved.has('alerts')) renderAlerts()
 }
 
 $('logout').addEventListener('click', async () => {
