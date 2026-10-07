@@ -20,7 +20,7 @@ const {
   filterAlarms, labelOf, prioritise, priorityRank, ruleMatches, summarise, withinQuietGap
 } = await import('../event-rules.mjs')
 const {
-  MERGE_MS, acknowledge, addEvent, classify, closeEvents, createRule, deleteRule, eventsOfCamera,
+  EVENT_KEEP_DAYS, MERGE_MS, acknowledge, addEvent, classify, closeEvents, createRule, deleteRule, eventKeepDays, eventsOfCamera,
   forgetEventsBefore, getEvent, lastEventMs, listEvents, listRules, unackedEvents,
   unacknowledge, updateRule
 } = await import('../events-db.mjs')
@@ -204,6 +204,24 @@ const json = (o) => async () => o
   forgetEventsBefore(T0 + 60 * MIN)
   check('housekeeping drops old events', listEvents({ limit: 10 }).length === 1)
   check('but never one somebody wrote a note on', getEvent(id)?.ackNote === 'kept')
+}
+{
+  // ... and something calls it (audit 2026-10-07 M5: forgetEventsBefore had no caller, so the table only grew)
+  const DAY = 86_400_000
+  const now = T0 - 400 * DAY // long before the rows the tests below count
+  const old = addEvent({ nvr: 'keep1', ch: 0, type: 'motion', startMs: now - 91 * DAY, source: 'x' }, now).event
+  const oldNoted = addEvent({ nvr: 'keep1', ch: 1, type: 'motion', startMs: now - 200 * DAY, source: 'x' }, now).event
+  const recent = addEvent({ nvr: 'keep1', ch: 2, type: 'motion', startMs: now - 89 * DAY, source: 'x' }, now).event
+  acknowledge(oldNoted.id, 'bob', 'the break-in', now)
+  check('an event nobody acknowledged is kept 90 days at least', EVENT_KEEP_DAYS === 90 && eventKeepDays({}) === 90 && eventKeepDays({ recording: { defaults: { retentionDays: 30 } } }) === 90)
+  check('... and as long as the longest days kept of any camera', eventKeepDays({ recording: { defaults: { retentionDays: 183 }, cameras: { 'nvr1/0': { retentionDays: 366 }, 'nvr1/1': { mode: 'off' } } } }) === 366)
+  const gone = forgetEventsBefore(now - eventKeepDays({}) * DAY)
+  check('past that it goes, and the count comes back', getEvent(old.id) === null && gone >= 1, `${gone}`)
+  check('a newer one stays, and so does an old one with a note', getEvent(recent.id) !== null && getEvent(oldNoted.id)?.ackNote === 'the break-in')
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  const round = server.slice(server.indexOf('if (LIVE_WORKER) {'), server.indexOf('.then(() => sweepSnapshots())'))
+  check('server.mjs: the 5-minute round forgets old events, before the sweep of their pictures',
+    round.includes('forgetEventsBefore(Date.now() - eventKeepDays(getSettings()) * 86_400_000)') && /import \{[^}]*\bforgetEventsBefore\b[^}]*\} from '\.\/events-db\.mjs'/.test(server), round.slice(-300))
 }
 
 // --- rules in the store -----------------------------------------------------------------------------
