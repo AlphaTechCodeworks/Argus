@@ -64,6 +64,14 @@ check('three seconds behind is put back too', needsResync(T - 3000, T) === true)
 check('a tile with no picture yet is left alone', needsResync(null, T) === false)
 check('the tolerance can be widened', needsResync(T + 3000, T, { tolMs: 5000 }) === false)
 check('the default tolerance is under two seconds', RESYNC_MS <= 2000)
+// the tolerance is footage: at 4x and 8x the same real-time lag is 4 and 8 times as much of it
+check('at 1x the tolerance is the plain one', needsResync(T + RESYNC_MS + 1, T, { speed: 1 }) === true && needsResync(T + RESYNC_MS, T, { speed: 1 }) === false)
+check('three seconds of footage out at 4x is left alone', needsResync(T - 3000, T, { speed: 4 }) === false)
+check('... and past four times the tolerance it is put back', needsResync(T - (4 * RESYNC_MS + 1), T, { speed: 4 }) === true)
+check('eight seconds out at 8x is left alone, thirteen is not', needsResync(T + 8000, T, { speed: 8 }) === false && needsResync(T + 13_000, T, { speed: 8 }) === true)
+check('reverse counts by its size', needsResync(T + 3000, T, { speed: -4 }) === false && needsResync(T + 7000, T, { speed: -4 }) === true)
+check('slower than 1x is never tighter than 1x', needsResync(T + 1000, T, { speed: 0.5 }) === false)
+check('a speed that is no number is 1x', needsResync(T + 3000, T, { speed: NaN }) === true)
 // The mistake this guards against: comparing an NVR position with the clock without taking the skew
 // off would make a perfectly synchronised tile look 220 s adrift and be re-seeked for ever.
 check('a raw NVR position looks adrift, a converted one does not', needsResync(cameraTime(T, SKEW), T) === true && needsResync(serverTime(cameraTime(T, SKEW), SKEW), T) === false)

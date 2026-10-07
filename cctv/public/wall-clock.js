@@ -48,10 +48,16 @@ export function serverTime(cameraMs, skewMs = 0) {
  * Whether a tile has drifted far enough from the shared clock to be seeked back. `tileServerMs` is
  * the tile's position already converted to server time (serverTime above) — a tile with no picture
  * yet (null) is left alone, because seeking it again would only restart the wait.
+ *
+ * The tolerance is footage, and footage goes by `speed` times as fast as the wall's timer: at 8x a
+ * tile 1.5 s of footage out is under 200 ms of real time out, which is no more than the buffer every
+ * tile plays through. So the tolerance grows with the speed (never below the 1x figure); a fixed one
+ * had every tile seeked back about every 3 s at 4x and above.
  */
-export function needsResync(tileServerMs, clockMs, { tolMs = RESYNC_MS } = {}) {
+export function needsResync(tileServerMs, clockMs, { tolMs = RESYNC_MS, speed = 1 } = {}) {
   if (!Number.isFinite(tileServerMs) || !Number.isFinite(clockMs)) return false
-  return Math.abs(tileServerMs - clockMs) > Math.max(0, tolMs)
+  const rate = Number.isFinite(speed) ? Math.max(1, Math.abs(speed)) : 1
+  return Math.abs(tileServerMs - clockMs) > Math.max(0, tolMs) * rate
 }
 
 /**

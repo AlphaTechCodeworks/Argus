@@ -202,6 +202,7 @@ const rightsNow = () => pbRights(playbackCams.find((c) => c.nvr === state.nvr &&
 let ws = null
 let showStats = false
 let scrub = null // { t } while the playhead is dragged (server mode)
+let stepHold = false // a frame step's seek is playing: its first picture pauses it (stepFrame)
 let seekAt = null // performance.now() of the last seek, until its first picture (D overlay)
 let startMs = null // seek to first picture, ms
 let lastEndSkip = -Infinity // the last stretch jumped to at an end (never the same one twice)
@@ -216,6 +217,11 @@ const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   clock: PLAYBACK_CLOCK,
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
+    if (stepHold && !scrub) {
+      // the picture a frame step asked for: hold it
+      stepHold = false
+      if (ws && !state.paused) togglePause()
+    }
     noteStart()
     notePlaybackFrame() // a frame arrived: not waiting; re-arm the "nothing is arriving" watch
     hideMessage()
@@ -290,6 +296,7 @@ function notePlaybackFrame(ms = PLAYBACK_STALL_MS) {
 /** Shows the spinner and a message while playback waits (the server's reason, or a plain fallback). */
 function showWaiting(why) {
   clearTimeout(stallTimer)
+  if (state.paused) return // nothing is meant to arrive while paused: that is not waiting
   waiting = true
   showSpinner()
   showMessage(waitingText(why), { sticky: true })
@@ -676,6 +683,7 @@ function setSource(src) {
 const rateOf = (speed) => (speed > 0 ? speed : 1) // reverse is shown as stills, not by the clock
 
 function seek(t) {
+  stepHold = false // (stepFrame sets it again after its own seek)
   if (state.mode === 'server') return serverSeek(t)
   const target = recordedFrom(t)
   if (target === null) {
@@ -703,6 +711,7 @@ function open(start) {
   state.nvrMain = false
   if (qualitySel.dataset.kind === 'nvr') qualitySel.value = String(rightsNow().nvrHd ? state.stream : 1)
   else updateModeUi()
+  stopStallWatch() // (the old socket's frames have stopped; the new one's first frame arms it again)
   if (ws) {
     ws.onclose = null
     ws.close()
@@ -713,6 +722,9 @@ function open(start) {
   sock.kind = 'nvr'
   sock.onopen = () => {
     if (state.speed !== 1) sock.send(JSON.stringify({ speed: state.speed }))
+    // paused while it was still connecting: send() drops what an unopened socket cannot take, and
+    // the NVR went on playing behind a page that said it was paused
+    if (state.paused) sock.send(JSON.stringify({ pause: true }))
   }
   sock.onmessage = (e) => {
     if (typeof e.data === 'string') return onStatus(JSON.parse(e.data))
@@ -780,6 +792,7 @@ function onStatus(msg) {
     else showNotice(msg.message)
   }
   if (msg.type === 'end') {
+    stopStallWatch() // (no more frames are due: "Waiting for the server…" 2 s later was wrong)
     // skip gaps between recordings automatically
     const next = state.ranges.find(([s]) => s > (state.position ?? 0) + 1000)
     if (next) seek(next[0])
@@ -1059,11 +1072,16 @@ const throttle = new ScrubThrottle(
 )
 
 function togglePause() {
+  stepHold = false // Play or Pause pressed while a frame step was on its way: the viewer's choice stands
   if (!ws && state.position !== null) return seek(state.position)
   state.paused = !state.paused
   send({ pause: state.paused })
-  if (state.paused) player.pause()
-  else player.resume()
+  if (state.paused) {
+    player.pause()
+    // the frames stop because the viewer said so: without this the watch armed by the last frame
+    // put up the spinner and "Waiting for the server…" 2 s into every pause
+    stopStallWatch()
+  } else player.resume()
   updatePlayButton()
 }
 
@@ -1095,13 +1113,19 @@ function setSpeed(speed) {
   return allowed
 }
 
-/** One frame back or on (pb-transport frameStep), paused where it lands. */
+/**
+ * One frame back or on (pb-transport frameStep), paused where it lands. The seek plays, and the first
+ * picture it shows pauses it (the player's onFrame above): the frame at or after the target, since
+ * the frames before it are the preroll the player skips. Paused straight after the seek, as this
+ * used to do, the clock moved and the picture did not: the server sends a paused playback no frames
+ * (rec-playback.mjs), and a paused player draws none.
+ */
 function stepFrame(direction) {
   if (state.position === null) return
   const fps = Number(player.stats?.fps) > 0 ? Number(player.stats.fps) : 25
   const target = frameStep(state.position / 1000, direction, fps) * 1000
   seek(target)
-  if (!state.paused) togglePause()
+  stepHold = true
 }
 
 function jumpEvent(direction) {
@@ -1614,6 +1638,16 @@ function clipOn(on) {
   scheduleDraw()
 }
 
+/**
+ * Another day is shown: the clip marked on the old one is dropped. Left in place it stayed
+ * exportable, out of sight, and the export dialog named it by the day on screen.
+ */
+function clearClip() {
+  clip.from = null
+  clip.to = null
+  clipOn(false)
+}
+
 const selectClipStart = () => { if (!clip.on) clipOn(true); setClip(state.position ?? clip.from, clip.to ?? (state.position ?? 0) + 60_000) }
 const selectClipEnd = () => { if (!clip.on) clipOn(true); setClip(clip.from ?? (state.position ?? 0) - 60_000, state.position ?? clip.to) }
 
@@ -1828,6 +1862,7 @@ async function openBookmark(b) {
   const known = Boolean(key) && [...cameraSel.options].some((o) => o.value === key)
   const day = fmtDate(b.startMs)
   if (day !== state.date) {
+    clearClip()
     state.date = day
     dateInput.value = day
     viewWholeDay()
@@ -2021,6 +2056,7 @@ dateInput.addEventListener('change', async () => {
     if (dateInput.value > day) showMessage('That day has not happened yet: showing today.')
     dateInput.value = day
   }
+  if (dateInput.value !== state.date) clearClip()
   state.date = dateInput.value
   updateDayArrows()
   viewWholeDay()
@@ -2105,12 +2141,17 @@ setInterval(async () => {
   if (state.mode === 'server') return refreshServer().catch(() => {})
   // without Playback SD the NVR is not asked (its clock and recordings: a day with nothing to play)
   if (!rightsNow().sd) return
+  // another camera or day chosen while an answer was on its way (a busy NVR takes seconds): that
+  // answer is the old one's, and used to replace the new one's ranges
+  const token = dayToken
   try {
     const clock = await api(`/api/playback/now?${nvrQ()}`)
+    if (token !== dayToken) return
     state.nvrNow = clock.now
     state.tz = clock.tzOffsetMs ?? state.tz
     if (state.date === fmtDate(state.nvrNow)) {
       const { ranges, events } = await api(`/api/playback/recordings?${nvrQ()}&ch=${state.ch}&date=${state.date}`)
+      if (token !== dayToken) return
       state.ranges = ranges
       state.events = events
       scheduleDraw()
@@ -2500,9 +2541,13 @@ const zoomState = { z: 1, x: 0, y: 0 } // x and y are pixel offsets of the scale
 
 const zoomBusy = () => !boxLayer.hidden
 
-/** Keeps the picture covering the tile: you can never pan to an empty edge. */
+/**
+ * Keeps the picture covering the tile: you can never pan to an empty edge. Measured on the tile, which
+ * the canvas fills: the canvas's own box is the zoomed and moved one (its transform is in it), and
+ * limits taken from that let the picture be panned off the screen.
+ */
 function clampZoom() {
-  const { width: w, height: h } = zoomCanvas.getBoundingClientRect()
+  const { width: w, height: h } = videoEl.getBoundingClientRect()
   const maxX = (zoomState.z - 1) * w
   const maxY = (zoomState.z - 1) * h
   zoomState.x = Math.min(0, Math.max(-maxX, zoomState.x))
@@ -2531,7 +2576,9 @@ const zoomer = attachZoom(videoEl, {
     zoomState.y = y
     applyZoom()
   },
-  rect: () => zoomCanvas.getBoundingClientRect(),
+  // the tile, not the canvas: the canvas's box moves and grows with the zoom, and each step taken
+  // from it drifted further off the pointer
+  rect: () => videoEl.getBoundingClientRect(),
   max: MAX_ZOOM,
   busy: zoomBusy
 })
@@ -2613,7 +2660,9 @@ const exSay = (text, bad = false) => {
 async function openExport() {
   if (clip.from === null || clip.to === null) return
   const secs = Math.round((clip.to - clip.from) / 1000)
-  exPeriod.textContent = `${state.date} · ${fmtTime(clip.from)} – ${fmtTime(clip.to)} (${Math.floor(secs / 60)} min ${secs % 60} s)`
+  // the clip's own day, not the day on screen (they differed after a change of day)
+  const clipDay = fmtDate(clip.from)
+  exPeriod.textContent = `${clipDay} · ${fmtTime(clip.from)} – ${fmtTime(clip.to)} (${Math.floor(secs / 60)} min ${secs % 60} s)`
 
   // A wrong NVR clock is the sort of thing that gets evidence thrown out, so say it here rather
   // than only burying it in the manifest.
@@ -2635,7 +2684,7 @@ async function openExport() {
     })
   )
 
-  exName.value = `${state.date} ${fmtTime(clip.from).slice(0, 5)} ${cameraSel.selectedOptions[0]?.textContent ?? 'export'}`
+  exName.value = `${clipDay} ${fmtTime(clip.from).slice(0, 5)} ${cameraSel.selectedOptions[0]?.textContent ?? 'export'}`
   exNotes.value = ''
   exProgress.hidden = true
   exStart.disabled = false
@@ -2643,6 +2692,20 @@ async function openExport() {
   exportDlg.showModal()
 }
 exportBtn.addEventListener('click', openExport)
+
+// ?markIn=ms&markOut=ms: a stretch to mark as the clip, and &export=1 to open the export dialog on it
+// (the Alarms page's Export button). Down here, not with ?t above, because the dialog's elements
+// must exist; the day has loaded by now (start, and ?t when the link has one). Only a stretch that
+// begins on the day shown: setClip keeps a clip inside that day, and would move any other into it.
+{
+  const markIn = Number(params.get('markIn'))
+  const markOut = Number(params.get('markOut'))
+  if (params.has('markIn') && params.has('markOut') && Number.isFinite(markIn) && Number.isFinite(markOut) && markIn > 0 && markOut > markIn && fmtDate(markIn) === state.date) {
+    setClip(markIn, markOut)
+    clipOn(true)
+    if (params.get('export') === '1') openExport()
+  }
+}
 
 exStart.addEventListener('click', async () => {
   const cameras = [...exCameras.selectedOptions].map((o) => {

@@ -240,6 +240,11 @@ class Tile {
         // The NVR found room after all, so the refusal count and its backoff are cleared: they only
         // ever mean anything in a row.
         if (this.stream.refusals) this.stream = afterVideo(this.stream)
+        // Opened while the wall is paused: this is the picture of the moment asked for, and the tile
+        // stops on it. (Paused before any picture, it never drew one: the server sends a paused
+        // playback nothing, so a seek on a paused wall stayed black, and with one tile opening at a
+        // time the first tile kept all the others from opening at all.)
+        if (!clock.playing) this.setPaused(true)
       },
       onUnsupported: (codecId) => {
         this.undecodable = true
@@ -268,14 +273,21 @@ class Tile {
   /** The day's recorded stretches for this camera, from the server's index (one request, no NVR). */
   async loadDay(from, token) {
     this.error = null
-    this.stretches = []
+    // Only another day empties the lane before the answer comes. The minute refresh of today's wall
+    // asks for the same day again, and a tile with no stretches has "nothing recorded at this
+    // moment": every tile was stopped, blanked and opened again once a minute.
+    if (this.dayFrom !== from) this.stretches = []
+    this.dayFrom = from
     try {
       const tl = await api(`/api/playback/timeline?nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&from=${from}&to=${from + DAY}`)
       if (token !== dayToken) return
       this.available = tl.available === true
       // Playback HD only: the server's recordings or nothing (the NVR's copy is not this viewer's)
       if (!this.available && !this.rights.sd) this.error = 'No recordings of this camera on this server that you may play back.'
-      if (!this.available) return
+      if (!this.available) {
+        this.stretches = []
+        return
+      }
       this.skew = tl.skewMs ?? 0
       this.tzOffsetMs = tl.tzOffsetMs
       this.codec = tl.codec ?? 'h264'
@@ -290,6 +302,7 @@ class Tile {
     } catch (e) {
       if (token !== dayToken) return
       this.available = false
+      this.stretches = []
       this.error = `Could not load this camera's timeline: ${e.message}`
     }
   }
@@ -326,7 +339,10 @@ class Tile {
   /** Whether the picture has drifted far enough from the shared clock to be worth re-seeking. */
   drifted(atMs) {
     if (!this.ws || this.position === null) return false
-    return needsResync(this.position, atMs) && performance.now() - this.lastSeekAt > RESYNC_EVERY_MS
+    // a paused tile holds the first picture it was sent: asked again, it would be sent the same one
+    if (!clock.playing) return false
+    // (measured against the speed the wall's clock runs at: wall-clock.js needsResync)
+    return needsResync(this.position, atMs, { speed: clock.speed }) && performance.now() - this.lastSeekAt > RESYNC_EVERY_MS
   }
 
   /**
@@ -360,7 +376,8 @@ class Tile {
     if (this.position === null && this.ws && (this.blankOpens >= 2 || since > NO_PICTURE_MS)) {
       this.show({ kind: 'waiting', text: 'No picture from this camera. Trying again.' })
     }
-    if (this.ws) this.setPaused(!playing)
+    // (a tile with no picture yet runs on until its first one, which pauses it: see onFrame)
+    if (this.ws) this.setPaused(!playing && this.position !== null)
   }
 
   show(st) {
@@ -401,7 +418,7 @@ class Tile {
     sock.onopen = () => {
       const speed = clampSpeed(state.speed, server ? 'server' : 'nvr').speed
       if (speed !== 1) sock.send(JSON.stringify({ speed }))
-      if (!clock.playing) sock.send(JSON.stringify({ pause: true }))
+      // (no pause here on a paused wall: the first picture pauses the tile, onFrame)
     }
     sock.onmessage = (e) => {
       if (this.ws !== sock) return
@@ -876,7 +893,8 @@ function setPlaying(on) {
   else clock.pause()
   playBtn.textContent = on ? '❚❚' : '▶'
   playBtn.setAttribute('aria-label', on ? 'Pause' : 'Play')
-  for (const t of state.tiles) t.setPaused(!on)
+  // (a tile still waiting for its first picture is paused by that picture: Tile onFrame)
+  for (const t of state.tiles) t.setPaused(!on && t.position !== null)
 }
 
 /** Every tile to one moment. The clock is the only thing that decides where that is. */

@@ -1054,8 +1054,12 @@ async function putViews(next) {
   return { ok: true, error: null }
 }
 
-/** The cameras a view saved now would hold: those on the grid (a view's, or every shown camera), capped. */
-const currentViewCameras = () => shownCameras(gridCameras(), gridView()).slice(0, MAX_VIEW_CAMERAS).map(camKey)
+/**
+ * The cameras a view saved now would hold: those on the grid (a view's, or every camera of the site
+ * chosen), capped. Offline ones too, whatever "Hide offline" says: a camera that happened to be off
+ * at the moment of saving was dropped from the view for good.
+ */
+const currentViewCameras = () => shownCameras(gridCameras(), { ...gridView(), hideOffline: false }).slice(0, MAX_VIEW_CAMERAS).map(camKey)
 
 function selectView(id) {
   activeView = views.find((v) => v.id === id) ?? null
@@ -1083,11 +1087,12 @@ saveViewBtn.addEventListener('click', () => {
 })
 
 document.getElementById('viewSave').addEventListener('click', async () => {
-  // a view saved under a name already in use replaces it, rather than leaving two the menu cannot tell apart
+  // a view saved under a name already in use replaces it, rather than leaving two the menu cannot tell apart;
+  // any other name is a new view (it used to take the selected view's id, and so overwrote that view)
   const name = viewNameEl.value
   const existing = views.find((v) => v.name.trim().toLowerCase() === name.trim().toLowerCase())
   const candidate = {
-    id: existing?.id ?? activeView?.id ?? `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
+    id: existing?.id ?? `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
     name,
     cameras: currentViewCameras(),
     layout: layoutSelect.value
