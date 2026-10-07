@@ -146,5 +146,54 @@ check('frames for an unwanted stream are ignored', !hub.streams.has('18:0') && a
   check('... a main stream\'s linger is left as it was (foreground)', msgs.length === before && m7.fg === true)
 }
 
+// ---- a stream kept past its linger (adaptive-live.mjs keeps a socket's source and adds to it again
+// when a stopped page writes again). It had left the hub: it got no frames, and its next linger's
+// unwant stopped the newer stream of the same camera under its viewers.
+{
+  const msgs = []
+  const h = new StreamHub('n4', (m) => msgs.push(m), { stopDelayMs: { 0: 30, 1: 30 } })
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+  const count = (t) => msgs.filter((m) => m.t === t).length
+  const frame = (key) => h.onMessage({ t: MSG.FRAME, key, buf: Buffer.from([1, 9]), isKey: true })
+  const old = h.getStream(5, 0)
+  const v = fakeWs()
+  old.add(v)
+  old.remove(v)
+  await wait(60)
+  check('kept stream: its linger over, it has left the hub', !h.streams.has('5:0') && msgs.at(-1).t === MSG.UNWANT)
+  old.add(v)
+  frame('5:0')
+  check('kept stream: added to again with its key free, it is the hub\'s stream again', h.streams.get('5:0') === old && h.getStream(5, 0) === old && msgs.at(-1).t === MSG.WANT)
+  check('kept stream: ... and its viewer gets the frames', v.got.length === 1, String(v.got.length))
+  old.remove(v)
+  await wait(60)
+  // a newer stream of the camera has taken its place by the time it is added to again
+  const newer = h.getStream(5, 0)
+  const other = fakeWs()
+  newer.add(other)
+  const wants = count(MSG.WANT)
+  const back = fakeWs()
+  old.add(back)
+  frame('5:0')
+  check('kept stream: with a newer one in the hub, its socket goes onto that one', newer !== old && newer.clients.has(back) && old.clients.size === 0 && back.got.length === 1 && other.got.length === 1)
+  check('kept stream: ... and asks the worker for nothing more', count(MSG.WANT) === wants)
+  const unwants = count(MSG.UNWANT)
+  old.remove(back)
+  await wait(60)
+  check('kept stream: taken off it, the socket leaves the newer one', !newer.clients.has(back) && newer.clients.has(other))
+  check('kept stream: ... and no unwant stops the newer one under its viewer', count(MSG.UNWANT) === unwants && h.streams.get('5:0') === newer)
+  // a linger that runs out on a stream that is not the hub's any more says nothing to the worker
+  const a7 = h.getStream(7, 1)
+  const w7 = fakeWs()
+  a7.add(w7)
+  a7.remove(w7)
+  h.streams.delete('7:1')
+  const b7 = h.getStream(7, 1)
+  b7.add(fakeWs())
+  const n = count(MSG.UNWANT)
+  await wait(60)
+  check('a linger ending on a stream no longer the hub\'s: no unwant, the hub\'s stream stays', count(MSG.UNWANT) === n && h.streams.get('7:1') === b7 && a7.wanted === false)
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

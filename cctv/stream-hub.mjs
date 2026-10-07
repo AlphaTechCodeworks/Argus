@@ -27,6 +27,7 @@ export class HubStream {
     this.stopTimer = null
     this.wanted = false
     this.fg = false // a real viewer (not only a warm-up) has asked for it: told to the worker
+    this.left = false // its linger ended and it took itself out of the hub (remove)
   }
 
   /**
@@ -35,6 +36,16 @@ export class HubStream {
    *   its fan-out: it takes that keyframe as it goes out, once)
    */
   add(ws, { replay = true } = {}) {
+    // Its linger ended and it left the hub (remove), yet whoever kept hold of it adds to it again
+    // (adaptive-live.mjs keeps a socket's source for as long as the socket lives). Frames only reach
+    // the hub's stream of this camera, so it goes back in; or, where a newer one has taken its place
+    // meanwhile, the socket goes onto that one (remove finds it there).
+    if (this.left) {
+      const live = this.hub.streams.get(this.key)
+      if (live && live !== this) return live.add(ws, { replay })
+      this.hub.streams.set(this.key, this)
+      this.left = false
+    }
     clearTimeout(this.stopTimer)
     this.stopTimer = null
     this.clients.add(ws)
@@ -54,6 +65,8 @@ export class HubStream {
   }
 
   remove(ws) {
+    // (a socket that add handed on to the hub's newer stream of this camera)
+    if (this.left && !this.clients.has(ws)) return this.hub.streams.get(this.key)?.remove(ws)
     this.clients.delete(ws)
     // only warm-ups left: the worker may start it behind real viewers again. A sub-stream nobody
     // watches any more (its linger) is background too: at an NVR's sub-stream limit a viewer's
@@ -70,8 +83,13 @@ export class HubStream {
       this.wanted = false
       this.fg = false
       this.gop = []
+      // with another stream of this camera in the hub by now it says nothing: its unwant would stop
+      // that one under everyone watching it
+      const live = this.hub.streams.get(this.key)
+      if (live && live !== this) return
       this.hub.send(unwant(this.ch, this.type))
-      if (this.hub.streams.get(this.key) === this) this.hub.streams.delete(this.key)
+      if (live === this) this.hub.streams.delete(this.key)
+      this.left = true
     }, this.hub.stopDelayMs[this.type] ?? 10_000)
   }
 
