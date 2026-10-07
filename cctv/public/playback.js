@@ -2682,6 +2682,20 @@ async function openExport() {
 }
 exportBtn.addEventListener('click', openExport)
 
+// ?markIn=ms&markOut=ms: a stretch to mark as the clip, and &export=1 to open the export dialog on it
+// (the Alarms page's Export button). Down here, not with ?t above, because the dialog's elements
+// must exist; the day has loaded by now (start, and ?t when the link has one). Only a stretch that
+// begins on the day shown: setClip keeps a clip inside that day, and would move any other into it.
+{
+  const markIn = Number(params.get('markIn'))
+  const markOut = Number(params.get('markOut'))
+  if (params.has('markIn') && params.has('markOut') && Number.isFinite(markIn) && Number.isFinite(markOut) && markIn > 0 && markOut > markIn && fmtDate(markIn) === state.date) {
+    setClip(markIn, markOut)
+    clipOn(true)
+    if (params.get('export') === '1') openExport()
+  }
+}
+
 exStart.addEventListener('click', async () => {
   const cameras = [...exCameras.selectedOptions].map((o) => {
     const [nvr, ch] = o.value.split('/')
