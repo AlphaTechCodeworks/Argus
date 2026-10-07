@@ -570,7 +570,8 @@ _test.setAnswerMs(1000)
     const took = Date.now() - t0
     const worst = stop()
     const r = ` (round ${round + 1})`
-    check(`a call on a hung share fails as "not answering" within the answer time${r}`, r1.e?.code === 'ESHARESTUCK' && /not answering/.test(r1.e.message) && took >= 1000 && took < 2000, `${r1.e?.code} ${r1.e?.message} after ${took} ms`)
+    // (990, not 1000: Node rounds a timer's start down to a whole ms, so it can fire 1 ms early; CI read 999)
+    check(`a call on a hung share fails as "not answering" within the answer time${r}`, r1.e?.code === 'ESHARESTUCK' && /not answering/.test(r1.e.message) && took >= 990 && took < 2000, `${r1.e?.code} ${r1.e?.message} after ${took} ms`)
     check(`...and so does every other call in flight on it${r}`, r2.e?.code === 'ESHARESTUCK')
     check(`the server went on answering while the share hung (a web request)${r}`, webMs < 250 && webAt - t0 < 1000, `${webMs.toFixed(1)} ms, ${webAt - t0} ms into the hang`)
     check(`another share went on answering meanwhile${r}`, otherAnswer.v?.totalBytes > 0)
