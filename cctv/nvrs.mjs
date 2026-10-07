@@ -29,7 +29,7 @@ import { downtimeGaps, recoverLocation } from './rec-recover.mjs'
 import { cameraRecording, getSettings, onSettingsChange } from './settings.mjs'
 import { spareWhile } from './watchdog.mjs'
 import { checkHealth, listLocations, onChange as onStorageChange, startHealthChecks } from './storage.mjs'
-import { SPOOL_ID, drainSpool, spoolLocation, trimSpool } from './ram-spool.mjs'
+import { SPOOL_ID, drainSpool, spoolLocation, trimSpool, writableLocations } from './ram-spool.mjs'
 import { noteRecorderGap, noteRecorderQueues } from './thin-pace.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
@@ -1138,7 +1138,8 @@ const healthyLocations = () => listLocations().filter((l) => l.health.ok).map(({
 const recordingMsg = () => {
   const locations = healthyLocations()
   // every drive down: record into memory meanwhile (ram-spool.mjs), until a drive is back or it fills
-  if (!locations.length) {
+  // (a healthy archive location is not a drive to record on: writableLocations)
+  if (!writableLocations(locations).length) {
     const spool = spoolLocation({ index })
     if (spool) locations.push(spool)
   }
@@ -1150,7 +1151,7 @@ let draining = false
 function watchSpool() {
   const t = setInterval(async () => {
     if (!index) return
-    const real = healthyLocations()
+    const real = writableLocations(healthyLocations())
     const on = !real.length && Boolean(spoolLocation({ index }))
     if (on !== spoolWasOn) {
       console.warn(on ? '[spool] every storage location is down: recording into the outage buffer until one is back (the oldest dropped as it fills)' : '[spool] a storage location is back: recording goes to it')

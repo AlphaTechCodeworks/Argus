@@ -46,6 +46,14 @@ export function spoolLocation({ index, cap = spoolCapBytes(), platform = process
   return { id: SPOOL_ID, path: dir, role: 'overflow' }
 }
 
+/**
+ * Of the healthy locations, those the recorder can write to: not the archive ones (recorder.mjs #pickLocation
+ * takes none of them). Whether memory records, and where it is copied to afterwards, are asked of these: with
+ * a healthy archive counted, the outage buffer stayed off while the recorder had nowhere to write, and memory
+ * could be copied onto the archive (audit of 2026-10-07).
+ */
+export const writableLocations = (locations) => (locations ?? []).filter((l) => l.role !== 'archive')
+
 /** Deletion starts at this share of the cap and frees down to TRIM_TO, so it runs now and then, not every segment. */
 export const TRIM_AT = 0.95
 export const TRIM_TO = 0.85

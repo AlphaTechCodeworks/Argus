@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MIN_FREE_BYTES, SPOOL_ID, drainSpool, spoolCapBytes, spoolLocation, trimSpool } from '../ram-spool.mjs'
+import { MIN_FREE_BYTES, SPOOL_ID, drainSpool, spoolCapBytes, spoolLocation, trimSpool, writableLocations } from '../ram-spool.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -115,6 +115,18 @@ check('and memory is freed', !existsSync(join(dir, 'n1', '0', '2026-09-26', '13'
       has: (p) => r.has(p),
       moveSegment(o, n, loc) { const row = r.get(o); r.delete(o); r.set(n, { ...row, path: n, loc }) }
     }
+  }
+
+  // an archive location is not one the recorder writes to (recorder.mjs #pickLocation): healthy, it neither
+  // keeps the outage buffer off nor takes what is copied out of memory (audit of 2026-10-07)
+  {
+    const main = { id: 'M', path: '/srv/m', role: 'main' }
+    const over = { id: 'O', path: '/srv/o', role: 'overflow' }
+    const arch = { id: 'A', path: '/srv/a', role: 'archive' }
+    check('writableLocations: main and overflow locations, never an archive one', JSON.stringify(writableLocations([arch, over, main]).map((l) => l.id)) === '["O","M"]' && writableLocations([arch]).length === 0 && writableLocations([]).length === 0 && writableLocations(null).length === 0)
+    const nvrs = readFileSync(new URL('../nvrs.mjs', import.meta.url), 'utf8')
+    check('nvrs.mjs: the workers get the memory location when no writable location is healthy (a healthy archive does not count)', /if \(!writableLocations\(locations\)\.length\) \{\s+const spool = spoolLocation\(/.test(nvrs))
+    check('nvrs.mjs: the spool watch (on or off, making room, copying out) asks the writable locations only', /const real = writableLocations\(healthyLocations\(\)\)/.test(nvrs) && !/const real = healthyLocations\(\)/.test(nvrs))
   }
 
   check('a negative CCTV_RAM_SPOOL_GB falls back to the default quarter of RAM', spoolCapBytes({ CCTV_RAM_SPOOL_GB: '-5' }, 16 * 1024 ** 3) === 4 * 1024 ** 3)
