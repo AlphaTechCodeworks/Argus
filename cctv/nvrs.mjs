@@ -755,11 +755,15 @@ export class Nvr {
    * Returns [] if the NVR did not answer; a failed queryRecStatus / encode read just leaves those fields null.
    */
   async cameraDetail() {
+    // The two XML reads below name this login's session. Should it drop while they wait (the gate
+    // in camera-export.mjs was passed a moment ago) they are refused, where without a session named
+    // they would go out on the worker's login (borrowing): the heavy read this must keep off it.
+    const own = `own:${this.gen}`
     const cams = await this.#queryChannelsFull()
     if (cams.length === 0) return cams
     let rec = null
     try {
-      rec = parseRecStatus(String((await transparent(this, 'queryRecStatus', `${XML_HEADER}</request>`, 'rec status', { outBytes: 256 * 1024 })) ?? ''))
+      rec = parseRecStatus(String((await transparent(this, 'queryRecStatus', `${XML_HEADER}</request>`, 'rec status', { gen: own, outBytes: 256 * 1024 })) ?? ''))
     } catch {
       rec = null
     }
@@ -769,7 +773,7 @@ export class Nvr {
     // full form is what the NAT 1.0 relay NVRs refuse. A failed read just leaves the encoder fields null.
     let enc = null
     try {
-      enc = parseMainEncoders(String((await transparent(this, 'queryNetworkNodeEncodeInfo', `${XML_HEADER}<requireField><name/><mainCaps/><main/><an/></requireField></request>`, 'encode info', { outBytes: 2 * 1024 * 1024 })) ?? ''))
+      enc = parseMainEncoders(String((await transparent(this, 'queryNetworkNodeEncodeInfo', `${XML_HEADER}<requireField><name/><mainCaps/><main/><an/></requireField></request>`, 'encode info', { gen: own, outBytes: 2 * 1024 * 1024 })) ?? ''))
     } catch {
       enc = null
     }

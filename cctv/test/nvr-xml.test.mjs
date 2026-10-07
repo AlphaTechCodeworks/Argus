@@ -1116,6 +1116,60 @@ onCallSettled(() => laterListenerRan++)
   restore()
 }
 
+// ---- notAfter: a command that waited past its time to be sent is not sent.
+// A request handed to a worker can sit in the worker's lane (held behind a late call) long after the
+// main process stopped waiting for it. Sent then, a clock write would set a stale time and a reboot
+// would arrive minutes after the admin was told it had failed.
+{
+  _test.setNow(null)
+  _test.resetBreakers()
+  _test.setCap(null)
+  let native = 0
+  _test.setCall(async (_opts, _userId, _xml, _url, outBuf, _size, len) => {
+    native++
+    return answer(outBuf, len)
+  })
+  const n = fakeNvr('xd')
+  const late = await transparent(n, 'editTimeCfg', '<request/>', 'clock write', { notAfter: Date.now() - 1 }).catch((e) => e)
+  check('notAfter: a command past its time is refused, nothing sent', late instanceof Error && /waited too long to be sent; nothing was sent/.test(late.message) && native === 0, late?.message)
+  check('notAfter: and it leaves no record of being inside the SDK', _test.inside(n) === null)
+  const inTime = await transparent(n, 'queryTimeCfg', '<request/>', 'clock', { notAfter: Date.now() + 60_000 }).catch((e) => e)
+  check('notAfter: a command in time is sent', native === 1 && typeof inTime === 'string', inTime?.message)
+  const none = await transparent(n, 'queryTimeCfg', '<request/>', 'clock').catch((e) => e)
+  check('notAfter: one with no time named is sent as always', native === 2 && typeof none === 'string', none?.message)
+
+  let powered = 0
+  _test.setPower(async () => {
+    powered++
+    return true
+  })
+  const latePower = await power(n, 'reboot', { notAfter: Date.now() - 1 }).catch((e) => e)
+  check('notAfter: a reboot past its time is refused, nothing sent', /waited too long to be sent; nothing was sent/.test(latePower?.message ?? '') && powered === 0 && _test.inside(n) === null, latePower?.message ?? String(latePower))
+  const powerInTime = await power(n, 'reboot', { notAfter: Date.now() + 60_000 }).catch((e) => e)
+  check('notAfter: a reboot in time is sent', powerInTime === true && powered === 1, powerInTime?.message)
+
+  // through the worker: the request says by when it must have been sent (the cap: after that the
+  // main process's queue has moved on)
+  const sent = []
+  const w = fakeNvr('xe')
+  Object.assign(w, {
+    online: false, userId: -1, borrowing: true, xmlOnline: true, xmlDegraded: false, xmlGen: 'worker:1:5',
+    worker: {
+      stats: () => ({ gen: 5 }),
+      request: async (m) => {
+        sent.push(m)
+        return m.op === 'power' ? { ok: true, accepted: true } : { ok: true, text: '' }
+      }
+    }
+  })
+  const t0 = Date.now()
+  await transparent(w, 'editTimeCfg', '<request/>', 'clock write')
+  check('notAfter: a borrowed command tells the worker by when to send it', sent[0]?.notAfter >= t0 + 90_000 && sent[0]?.notAfter <= Date.now() + 90_000, String(sent[0]?.notAfter - t0))
+  await power(w, 'reboot')
+  check('notAfter: and so does a borrowed reboot', sent[1]?.op === 'power' && sent[1]?.notAfter >= t0 + 90_000 && sent[1]?.notAfter <= Date.now() + 90_000, String(sent[1]?.notAfter - t0))
+  _test.setPower(null)
+}
+
 check('at the end of the file nothing is left admitted', _test.pending() === 0, `pending ${_test.pending()}`)
 ranToEnd = true
 _test.setCall(null)

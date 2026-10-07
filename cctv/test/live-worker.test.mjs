@@ -304,6 +304,14 @@ process.env.CCTV_WORKER_FAKE_SDK = '1'
   check('request: reboot is answered', pw?.ok === true && pw.accepted === true, pw?.message ?? JSON.stringify(pw))
   const det = await sup.request({ op: 'detail' }).catch((e) => e)
   check('request: camera detail is not something the worker does', det instanceof Error && /unknown request detail/.test(det.message), det?.message)
+  // a request that sat too long before the worker could send it (its lane held behind a late call) is
+  // not sent after all: the main process stopped waiting, and a clock write would carry a stale time
+  const tooLate = await sup.request({ ...xmlReq, gen: sup.stats().gen, notAfter: Date.now() - 1 }).catch((e) => e)
+  check('request: a command past its send-by time is not sent', tooLate instanceof Error && /waited too long to be sent; nothing was sent/.test(tooLate.message), tooLate?.message ?? JSON.stringify(tooLate))
+  const tooLatePower = await sup.request({ op: 'power', action: 'reboot', gen: sup.stats().gen, notAfter: Date.now() - 1 }).catch((e) => e)
+  check('request: nor a reboot', tooLatePower instanceof Error && /waited too long to be sent; nothing was sent/.test(tooLatePower.message), tooLatePower?.message ?? JSON.stringify(tooLatePower))
+  const inTime = await sup.request({ ...xmlReq, gen: sup.stats().gen, notAfter: Date.now() + 60_000 }).catch((e) => e)
+  check('request: one still in time is', inTime?.ok === true, inTime?.message ?? JSON.stringify(inTime))
   const odd = await sup.request({ op: 'nonsense' }).catch((e) => e)
   check('request: an unknown request is refused', odd instanceof Error && /unknown request nonsense/.test(odd.message), odd?.message)
   const last = sup._child()
