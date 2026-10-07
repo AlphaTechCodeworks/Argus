@@ -16,6 +16,8 @@
 //   /api/camera-links, /api/admin/camera-links -> which camera adjoins which, see camera-links.mjs
 //   /api/admin/discovery       -> find TVT NVRs on the network (admins), see discovery.mjs
 //   GET  /api/admin/vpn        -> VPN hub status and the remote sites (admins), see vpn.mjs
+//   GET  /api/admin/connector[/installer] -> the NVR site-server installer: its status, and the
+//                                 download (admins), see connector-download.mjs
 //   /api/admin/nvrs/:id/substreams -> sub-stream codec per channel, switch to H.264 (admins), see substreams.mjs
 //   GET  /api/admin/nvrs/:id/disks[?discover=1] -> what the NVR says about its own disks and how
 //                                 many days it holds; discover=1 sends every candidate query and
@@ -124,6 +126,7 @@ import { listExports } from './export-job.mjs'
 import { NVR_MAIN_ACTIONS, connectPlayback } from './rec-playback.mjs'
 import { accessWatch } from './access-watch.mjs'
 import { vpnView } from './vpn.mjs'
+import { sendInstaller, statusOf } from './connector-download.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
 import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
 import { recentRefusals } from './nvr-health.mjs'
@@ -1001,6 +1004,17 @@ const handleRequest = async (req, res) => {
     if (pathname === '/api/admin/vpn') {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
       return sendJson(res, 200, vpnView(readConfig().nvrs))
+    }
+    // The site-server installer (Settings > Remote sites): its availability, and the file itself.
+    if (pathname === '/api/admin/connector') {
+      if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+      return sendJson(res, 200, statusOf())
+    }
+    if (pathname === '/api/admin/connector/installer') {
+      if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+      return sendInstaller(res)
     }
     if (pathname === '/api/admin/discovery') {
       const [status, body] = await handleDiscovery(req.method, async () => JSON.parse((await readBody(req, 4096)) || '{}'))

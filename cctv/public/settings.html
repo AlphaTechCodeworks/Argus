@@ -248,6 +248,18 @@
       </form>
       </details>
     </section>
+    <section class="se-section" data-tab="connector" aria-labelledby="conn-title">
+      <h2 id="conn-title">Remote site connector</h2>
+      <p class="st-help">Connects a server at an NVR site to this app over Tailscale, so the app reaches that site's NVRs by their LAN IP — no port forwarding, no fixed IP. Install it once on a Windows server that sits on the NVRs' network; it finds the LAN and joins your tailnet by itself.</p>
+      <p id="conn-status" class="st-help" role="status">Checking for an installer…</p>
+      <p><a id="conn-download" class="st-primary" href="/api/admin/connector/installer" download hidden>Download the installer</a></p>
+      <ol class="st-help">
+        <li>Copy the installer to a Windows server on the NVR site's network and run it (it needs admin).</li>
+        <li>It installs Tailscale, works out the LAN and joins your tailnet — nothing to type.</li>
+        <li>Approve the new machine's subnet route in your Tailscale admin console if it is not auto-approved.</li>
+      </ol>
+      <p class="hp-note">For the app to use these links, this server must itself be on the tailnet with subnet routes accepted. The installer is built with your tailnet key and placed on this server by an admin; it is not part of the app.</p>
+    </section>
     <section class="se-section" data-tab="server" aria-labelledby="srv-title">
       <h2 id="srv-title">Restart the server</h2>
       <p class="st-help">Stops and starts the Argus server. Live video and server recording pause for about 10 seconds, then every camera reconnects by itself. The NVRs keep recording to their own disks throughout. Only an admin can do this.</p>
@@ -301,6 +313,7 @@
   <script type="module" src="shell.js"></script>
   <script type="module" src="settings.js"></script>
   <script type="module" src="settings-tabs.js"></script>
+  <script type="module" src="connector.js"></script>
   <script type="module" src="storage.js"></script>
   <script type="module" src="alert-banner.js"></script>
   <script type="module" src="build-badge.js"></script>
