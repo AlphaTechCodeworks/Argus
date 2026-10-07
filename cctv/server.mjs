@@ -818,8 +818,16 @@ const handleRequest = async (req, res) => {
     // Who may do what, and the record of who did.
     const rightsRoute = await handleRights(req.method, pathname, () => readJsonObject(req, 8192), who)
     if (rightsRoute) return sendJson(res, ...rightsRoute)
-    // accounts: add a viewer or an admin from the app (users-api.mjs)
-    const usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who)
+    // accounts: add a viewer or an admin from the app (users-api.mjs). It refuses by throwing an
+    // HttpError (status and message): answered as that, or a short password and every other refusal
+    // reached the page as a bare 500 with nothing to show.
+    let usersRoute
+    try {
+      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who)
+    } catch (e) {
+      if (!Number.isInteger(e?.status)) throw e
+      usersRoute = [e.status, { error: e.message }]
+    }
     if (usersRoute) return sendJson(res, ...usersRoute)
     // Settings > Server: restart. The answer goes out first; systemd (Restart=always) starts it again.
     if (req.method === 'POST' && pathname === '/api/admin/restart') {

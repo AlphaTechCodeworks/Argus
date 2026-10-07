@@ -1,6 +1,6 @@
 // Tests adding and removing accounts from the app (users-api.mjs), on a temporary data folder.
 //   node cctv/test/users-api.test.mjs
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -64,6 +64,17 @@ check('a stale admin row does not survive', !rights.can({ user: 'exadm', admin: 
 rmSync(rights.RIGHTS_FILE, { force: true })
 ;[st] = await call('POST', '/api/admin/users', { name: 'fresh', password: 'fresh-viewer-1', role: 'viewer' })
 check('a new viewer starts with no access even before rights.json exists', st === 200 && !rights.can({ user: 'fresh', admin: false }, 'live', { nvr: 'nvr1', ch: 0 }))
+
+// A refusal is thrown (HttpError), and server.mjs has to answer it with its status and message: it
+// went out as a bare 500, so the page could not say "A password is at least 8 characters".
+{
+  const refused = await handleUsers('POST', '/api/admin/users', async () => ({ name: 'short', password: 'abc', role: 'viewer' }), boss).catch((e) => e)
+  check('a refusal carries its status and its message', refused?.status === 400 && /at least 8 characters/.test(refused.message ?? ''), String(refused))
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  const route = server.slice(server.indexOf('usersRoute = await handleUsers('), server.indexOf('if (usersRoute) return sendJson(res, ...usersRoute)'))
+  check('server.mjs answers a refusal with its status and message as JSON; anything else is still thrown',
+    /catch \(e\) \{\s*if \(!Number\.isInteger\(e\?\.status\)\) throw e\s*usersRoute = \[e\.status, \{ error: e\.message \}\]\s*\}/.test(route), route)
+}
 
 rmSync(dir, { recursive: true, force: true })
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
