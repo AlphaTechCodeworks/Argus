@@ -450,6 +450,7 @@ check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any
       pushFrame: () => {},
       refusedMessage: () => null,
       showMessage: () => {},
+      stopStallWatch: () => {},
       seek: () => {}
     }
     Object.assign(r, new Function(...Object.keys(deps), `${fn('open')}\n${fn('onStatus')}\nreturn { open, onStatus }`)(...Object.values(deps)))
