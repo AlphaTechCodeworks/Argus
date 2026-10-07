@@ -102,7 +102,8 @@ const edit = (list, i, fields) => list.map((c, j) => (j === i ? { ...c, ...field
   check('viewer.js: without it, the SD badge', /else if \(cam\.hd === false\) overlay\.querySelector\('\.name'\)\.after\(sdBadge\(\)\)/.test(src))
   check('viewer.js: the full-size view is rebuilt when Live HD flips', /if \(keep && Boolean\(singleCam\?\.hd\) === Boolean\(cam\.hd\)\)/.test(src))
   check('viewer.js: "Recordings" only with a playback right', /if \(cam\.playback !== false\) \{/.test(src))
-  check('viewer.js: a main layer refused before it showed goes, the sub-stream stays', /onHdRefused: \(\) => \{\n\s*if \(!layer\.classList\.contains\('pending'\)\) return false/.test(src))
+  check('viewer.js: a refused main layer retains SD', /onHdRefused: \(\) => \{\n\s*clearTimeout\(main\.upgradeTimeout\)\n\s*if \(!layer\.classList\.contains\('pending'\)\) return false/.test(src))
+  check('viewer.js: main upgrade has bounded timeout and retains SD', /main\.upgradeTimeout = setTimeout\([\s\S]*?Keeping the SD picture[\s\S]*?30000\)/.test(src))
 }
 
 console.log(failures ?`\n${failures} FAILED` : '\nall passed')

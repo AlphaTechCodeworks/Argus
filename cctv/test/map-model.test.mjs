@@ -345,7 +345,10 @@ const SIZE = { w: 1000, h: 600 }
   check('Save cannot be pressed twice, and reports every site', /if \(saving\) return/.test(js) && /saveSummary\(stored, failed\)/.test(js))
   check('a role is set as an attribute, so it reaches a screen reader', /k === 'role'/.test(js))
   check('the site buttons are a full touch target on a phone', /@media \(max-width: 800px\) \{[^@]*\.map-sites button \{ height: 44px/.test(css))
-  check('the chosen site is brought into view in the row', /scrollIntoView\(\{ inline: 'nearest', block: 'nearest' \}\)/.test(js))
+  check('the chosen site scrolls only its list, not the map page', /sitesRow\.scrollTop/.test(js) && !/scrollIntoView/.test(js))
+  check('camera search survives sidebar refreshes', /function filterCameraRows\(/.test(js) && /addEventListener\('input', filterCameraRows\)/.test(js))
+  check('unplaced cameras can open live video', /onclick: \(\) => openLive\(key\)/.test(js))
+  check('failed tiles hide broken images', /img\.style\.visibility = 'hidden'/.test(js) && /tileStatus/.test(js))
   check('the page reads only what /api/maps gave this user', (js.match(/api\('GET', '\/api\/maps'\)/g) ?? []).length === 1)
 }
 

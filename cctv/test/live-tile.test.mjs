@@ -36,7 +36,7 @@ const el = () => ({ textContent: '', classList: { set: new Set(), toggle(c, on) 
 const canvas = { width: 0, height: 0, getContext: () => ({}) }
 const dotEl = { className: '', title: '' }
 const parts = { '.status': el(), '.stats': el(), '.name': el(), '.dot': dotEl, canvas }
-const tileEl = { querySelector: (s) => parts[s], append() {} }
+const tileEl = { dataset: {}, classList: el().classList, style: {}, querySelector: (s) => parts[s], append() {} }
 
 const { LiveTile, MAIN_STREAM, NO_VIDEO_MS, STALL_RECONNECT_MS, SUB_STREAM, TILE_HTML, tileDot, waitText } = await import('../public/live-tile.js')
 
@@ -101,7 +101,7 @@ t.updateStatus()
 check('3 s without frames: still the fps badge', status.textContent === 'LIVE')
 now += 3000
 t.updateStatus()
-check('6 s without frames: "no video", live dot off', status.textContent === 'no video' && !status.classList.contains('live'), status.textContent)
+check('6 s without decoded frames: explicit no-video state, live dot off', status.textContent === 'No video received' && !status.classList.contains('live'), status.textContent)
 check('... and the tile dot has gone grey', /\bdot-off\b/.test(dotEl.className), dotEl.className)
 check('... and the socket is still the same one', sockets.length === 1 && !ws.closed)
 now += 12_000 // 18 s without frames
@@ -261,7 +261,7 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   grid.suspend() // hidden under the full-size view
   const before = sockets.length
   const got = []
-  const overlayEl = { querySelector: (s) => ({ ...parts, '.status': el() })[s], append() {} }
+  const overlayEl = { dataset: {}, querySelector: (s) => ({ ...parts, '.status': el() })[s], append() {} }
   const full = new LiveTile(overlayEl, { nvr: 'n1', ch: 7 }, 1, 0, { now: () => now, borrowFrom: grid })
   full.player.push = (f) => got.push(f.isKey ? 'K' : 'd')
   check('borrow: no new socket for the full-size view', sockets.length === before && full.source === grid)
@@ -281,7 +281,7 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
 {
   const nameEl = { textContent: 'Gate', append(s) { this.textContent += s } }
   const st = el()
-  const tileHd = { querySelector: (s) => (s === '.name' ? nameEl : s === '.status' ? st : parts[s]), append() {} }
+  const tileHd = { dataset: {}, querySelector: (s) => (s === '.name' ? nameEl : s === '.status' ? st : parts[s]), append() {} }
   const tw = new LiveTile(tileHd, { nvr: 'n1', ch: 7 }, SUB_STREAM, 0, { now: () => now })
   clearTimeout(tw.retry)
   tw.player.push = () => {}
@@ -367,7 +367,7 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   t6.player.stats = { ...t6.player.stats, fps: 20, dropped: 3, late: 2, resyncs: 1, delayMs: 350 }
   clock = 1000
   t6.updateStatus()
-  const full = new LiveTile({ querySelector: (s) => ({ ...parts, '.status': el() })[s], append() {} }, { nvr: 'n1', ch: 9 }, 1, 0, { now: () => now, borrowFrom: t6 })
+  const full = new LiveTile({ dataset: {}, querySelector: (s) => ({ ...parts, '.status': el() })[s], append() {} }, { nvr: 'n1', ch: 9 }, 1, 0, { now: () => now, borrowFrom: t6 })
   full.player.push = () => {}
   clock = 1100
   t6.suspend()
@@ -391,7 +391,7 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
 {
   const { startTrace, stopTrace } = await import('../public/frame-trace.js')
   const mk = (ch, o = {}) => {
-    const x = new LiveTile({ querySelector: (s) => ({ ...parts, '.status': el() })[s], append() {} }, { nvr: 'n1', ch }, 1, 0, { now: () => now, ...o })
+    const x = new LiveTile({ dataset: {}, querySelector: (s) => ({ ...parts, '.status': el() })[s], append() {} }, { nvr: 'n1', ch }, 1, 0, { now: () => now, ...o })
     clearTimeout(x.retry)
     x.player.push = () => {}
     return x
@@ -436,6 +436,33 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   check('trace started over a hidden tile: "suspend" comes first, then its frames', events(grid) === '[["suspend"],["resume","kept"]]' && tr.records.get(grid).frames.length === 1 && tr.records.get(grid).events[0][0] === 20, events(grid))
   check('... over a full-size view borrowing: "borrow" first, naming its lender, itself hidden', events(view) === '[["borrow",3]]' && tr.records.get(lender)?.id === 3 && events(lender) === '[["suspend"]]', `${events(view)} ${events(lender)}`)
   check('... a resume with nothing fresh kept says it connected again, before its new connect', events(quiet) === '[["suspend"],["resume","reconnect"],["connect","sub"]]', events(quiet))
+}
+{
+  const frozen = new LiveTile(tileEl, { nvr: 'n1', ch: 20 }, SUB_STREAM, 0, { now: () => now })
+  const healthy = new LiveTile(tileEl, { nvr: 'n1', ch: 21 }, SUB_STREAM, 0, { now: () => now })
+  for (const x of [frozen, healthy]) {
+    clearTimeout(x.retry)
+    x.player.push = () => {}
+    x.connect()
+    x.ws.readyState = 1
+    x.ws.onopen()
+    x.player.onFrame()
+  }
+  const deadSocket = frozen.ws
+  const goodSocket = healthy.ws
+  frozen.attempts = 3
+  now += 13000
+  deadSocket.onmessage({ data: new Uint8Array(40).buffer })
+  check('undecoded packets do not reset retry backoff', frozen.attempts === 3)
+  // a healthy camera is one whose packets still arrive and decode: without the packet its socket has
+  // been silent for 13 s, which is the stall the tile is right to reconnect (STALL_RECONNECT_MS)
+  goodSocket.onmessage({ data: new Uint8Array(40).buffer })
+  healthy.player.onFrame()
+  frozen.updateStatus()
+  healthy.updateStatus()
+  check('frozen decoder recovers even while packets arrive', deadSocket.closed)
+  check('recovery leaves the healthy camera connected', !goodSocket.closed)
+  for (const x of [frozen, healthy]) x.close()
 }
 t.close()
 console.log(failures ? `\n${failures} failed` : '\nall passed')

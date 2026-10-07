@@ -12,7 +12,7 @@
 // tick means lives in access-model.js, tested without a browser; this file only paints its view
 // and posts its row. The server decides again on save (rights.mjs), so nothing here is trusted.
 
-import { COLUMNS, COLUMN_LABELS, COLUMN_TITLES, FORMATS, FORMAT_LABELS, HEAD_ROWS, buildTree, click, copyFrom, copySources, dropKept, fromRow, sameRow, setAdmin, setAll, setFormat, toRow, view } from './access-model.js'
+import { CAP_LABELS, CAPS, COLUMNS, COLUMN_LABELS, COLUMN_TITLES, FORMATS, FORMAT_LABELS, HEAD_ROWS, PRESETS, buildTree, click, copyFrom, copySources, dropKept, fromRow, preset, sameRow, setAdmin, setAll, setCap, setFormat, setMap, setShare, toRow, view } from './access-model.js'
 
 const PAD = (n) => String(n).padStart(2, '0')
 
@@ -295,9 +295,17 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     if (!ac) return
     const v = view(ac.state, ac.tree)
     id('ac-admin').checked = v.admin
+    id('ac-admin').disabled = !ac.mayEditAdmin
     id('ac-adminNote').textContent = v.adminNote
     id('ac-adminNote').hidden = !v.admin
     id('ac-body').hidden = v.admin
+    // the admin areas: only a full admin may see or change them, and a full admin implies all, so
+    // the section shows only for a non-admin and the preset bar only when this editor may set admin
+    id('ac-presets').hidden = !ac.mayEditAdmin
+    id('ac-caps').hidden = v.admin || !ac.mayEditAdmin
+    for (const c of v.caps) { const cb = ac.capBoxes?.get(c.id); if (cb) cb.checked = c.on }
+    id('ac-map').checked = v.map
+    id('ac-share').checked = v.share
     // parent: the site's cell, whose note a camera does not repeat (every camera of a site stored
     // as NVR playback only would otherwise say so twenty times over)
     const rowNotes = new Map() // target -> ['Live HD: no effect without Live', …] (the row header, on phones)
@@ -420,6 +428,25 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     const copy = id('ac-copy')
     copy.replaceChildren(el('option', { value: '', textContent: 'choose someone' }), ...copySources(ac.users, ac.user).map((u) => el('option', { value: u, textContent: u })))
     copy.disabled = copy.options.length === 1
+
+    // role presets: one click fills the Full-admin switch, the admin areas and the camera tree
+    const presetBar = el('span', { className: 'ac-presets-label', textContent: 'Start from a role:' })
+    id('ac-presets').replaceChildren(presetBar, ...PRESETS.map((p) => {
+      const b = el('button', { type: 'button', className: 'btn-ghost' })
+      b.textContent = p.label
+      b.addEventListener('click', () => { ac.state = preset(p.id); paintAccess() })
+      return b
+    }))
+    // the admin-area ticks
+    ac.capBoxes = new Map()
+    id('ac-capList').replaceChildren(...CAPS.map((cap) => {
+      const cb = el('input', { type: 'checkbox' })
+      cb.addEventListener('change', () => { ac.state = setCap(ac.state, cap, cb.checked); paintAccess() })
+      ac.capBoxes.set(cap, cb)
+      const label = el('label', { className: 'st-check' })
+      label.append(cb, ` ${CAP_LABELS[cap]}`)
+      return label
+    }))
   }
 
   /** Opens the editor for one account, with the rights and the camera list as they are right now. */
@@ -430,6 +457,8 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     id('ac-user').textContent = user
     id('ac-body').hidden = true
     id('ac-adminNote').hidden = true
+    id('ac-caps').hidden = true
+    id('ac-presets').hidden = true
     id('ac-dirty').textContent = ''
     id('ac-save').disabled = true
     id('ac-rows').replaceChildren()
@@ -448,7 +477,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       // `seen`: the row's compare-and-swap token, sent back unchanged with Save (rights.mjs). Kept on
       // the session, not re-read at save time, because the whole point is to catch a change that
       // happened while this editor sat open.
-      ac = { user, tree, state, saved: toRow(state), users, seen: mine.seen }
+      ac = { user, tree, state, saved: toRow(state), users, seen: mine.seen, mayEditAdmin: rights.mayEditAdmin === true }
       drawTree()
       paintAccess()
       id('ac-save').disabled = false
@@ -463,6 +492,8 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
   const acDirty = () => ac !== null && !sameRow(toRow(ac.state), ac.saved)
   const acLeave = () => !acDirty() || confirm(`Close without saving the changes to ${ac.user}'s access?`)
   id('ac-admin').addEventListener('change', (e) => { if (!ac) return; ac.state = setAdmin(ac.state, e.target.checked); paintAccess() })
+  id('ac-map').addEventListener('change', (e) => { if (!ac) return; ac.state = setMap(ac.state, e.target.checked); paintAccess() })
+  id('ac-share').addEventListener('change', (e) => { if (!ac) return; ac.state = setShare(ac.state, e.target.checked); paintAccess() })
   id('ac-everything').addEventListener('click', () => { if (!ac) return; ac.state = setAll(ac.state, true); paintAccess() })
   id('ac-nothing').addEventListener('click', () => { if (!ac) return; ac.state = setAll(ac.state, false); paintAccess() })
   id('ac-copy').addEventListener('change', (e) => {

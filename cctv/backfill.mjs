@@ -42,14 +42,13 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { writeFileAtomicSync } from './atomic-write.mjs'
 import { siteMinutesOfDay } from './site-time.mjs'
 import { join } from 'node:path'
-import { DATA_DIR, isAdmin } from './auth.mjs'
+import { DATA_DIR } from './auth.mjs'
+import { canAdmin } from './rights.mjs'
 
-// The caller may hand us a plain user name or the { user, admin } the newer routes pass around.
-// Taking only one of the two is how a route ends up refusing everybody: isAdmin() given an object
-// looks it up as if it were a name, finds nothing, and denies an admin as confidently as a
-// stranger. CCTV_AUTH=off has no real users at all, and is honoured here as everywhere else.
+// Who may see or run backfill: a full admin, or a partial admin with the `storage` area (rights.mjs
+// canAdmin takes either the { user, admin } the routes pass or a bare name). CCTV_AUTH=off has no
+// real users at all, and is honoured here as everywhere else.
 const AUTH_OFF = process.env.CCTV_AUTH === 'off'
-const admin = (who) => (AUTH_OFF ? true : who && typeof who === 'object' ? who.admin === true : isAdmin(who))
 import { nvrCoverage, startLeg } from './rec-fallback.mjs'
 import { SegmentWriter } from './segment-writer.mjs'
 
@@ -1180,7 +1179,7 @@ export const backfillJob = () => job
  */
 export async function handleBackfill(method, pathname, readJson, user) {
   if (pathname !== '/api/admin/backfill' && pathname !== '/api/admin/backfill/run' && pathname !== '/api/admin/backfill/stop') return null
-  if (!admin(user)) return [403, { error: 'Only admins can see or change backfill' }]
+  if (!(AUTH_OFF || canAdmin(user, 'storage'))) return [403, { error: 'Only admins can see or change backfill' }]
   const want = pathname === '/api/admin/backfill' ? 'GET' : 'POST'
   if (method !== want) return [405, { error: 'Method not allowed' }]
   if (!job) return [503, { error: 'Backfill is not available (no recordings index)' }]

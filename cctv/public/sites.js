@@ -2,6 +2,9 @@
 import { openCameraEditor } from './camera-editor.js'
 import { camerasForNvr, cameraLabel } from './camera-choice.js'
 
+import { icon } from './icons.js'
+import { notify } from './feedback.js'
+import { connectionState, matchesNvr } from './sites-model.js'
 const $ = (id) => document.getElementById(id)
 const sitesEl = $('sites')
 const notice = $('notice')
@@ -13,6 +16,40 @@ const saveBtn = $('save')
 let nvrList = []
 let vpn = { available: false, sites: [] } // the WireGuard hub's status (deploy/vpn)
 let editing = null // id of the NVR being edited, or null when adding
+const searchBar = document.createElement('div')
+searchBar.className = 'site-search-bar'
+const siteSearch = document.createElement('input')
+siteSearch.type = 'search'
+siteSearch.placeholder = 'Search sites or NVRs'
+siteSearch.setAttribute('aria-label', 'Search sites or NVRs')
+const statusFilter = document.createElement('select')
+statusFilter.setAttribute('aria-label', 'Filter NVR status')
+statusFilter.append(new Option('All statuses', ''), new Option('Connected', 'online'), new Option('Video only', 'partial'), new Option('Connecting', 'connecting'), new Option('Disconnected', 'offline'))
+const resultsNote = document.createElement('span')
+resultsNote.className = 'st-meta'
+resultsNote.setAttribute('role', 'status')
+resultsNote.textContent = 'Loading NVRs...'
+searchBar.append(siteSearch, statusFilter, resultsNote)
+sitesEl.before(searchBar)
+const preferenceKey = 'argus-sites-layout-v1'
+let preferences = {}
+try { preferences = JSON.parse(localStorage.getItem(preferenceKey) || '{}') || {} } catch {}
+if (typeof preferences !== 'object' || Array.isArray(preferences)) preferences = {}
+const collapsed = new Set(Array.isArray(preferences.collapsed) ? preferences.collapsed.filter((s) => typeof s === 'string') : [])
+siteSearch.value = typeof preferences.search === 'string' ? preferences.search : ''
+statusFilter.value = ['online', 'partial', 'connecting', 'offline'].includes(preferences.status) ? preferences.status : ''
+const main = document.querySelector('.st-main')
+let restoreScroll = true
+let renderedSignature = ''
+function savePreferences() {
+  try { localStorage.setItem(preferenceKey, JSON.stringify({ search: siteSearch.value, status: statusFilter.value, collapsed: [...collapsed], scroll: main.scrollTop })) } catch {}
+}
+siteSearch.addEventListener('input', () => { render(); savePreferences() })
+statusFilter.addEventListener('change', () => { render(); savePreferences() })
+main.addEventListener('scroll', savePreferences, { passive: true })
+document.addEventListener('click', (e) => {
+  for (const menu of sitesEl.querySelectorAll('details[open]')) if (!menu.contains(e.target)) menu.open = false
+})
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -24,6 +61,7 @@ async function api(method, path, body) {
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     const err = new Error(data.error ?? `HTTP ${res.status}`)
+    err.status = res.status
     err.testFailed = data.testFailed
     throw err
   }
@@ -97,7 +135,17 @@ function camerasPanel(n) {
 }
 
 function render() {
+  $('st-site-count').textContent = new Set(nvrList.map((n) => n.site || 'Unassigned')).size
+  $('st-nvr-count').textContent = nvrList.length
+  $('st-online-count').textContent = nvrList.filter((n) => connectionState(n).key === 'online').length
+  $('st-camera-count').textContent = nvrList.reduce((sum, n) => sum + (Number(n.cameras) || 0), 0)
+  if (sitesEl.contains(document.activeElement) || sitesEl.querySelector('details[open]')) return
+  const signature = JSON.stringify([nvrList, siteSearch.value, statusFilter.value])
+  if (signature === renderedSignature) return
+  renderedSignature = signature
+  const scroll = main.scrollTop
   if (nvrList.length === 0) {
+    resultsNote.textContent = '0 NVRs'
     sitesEl.replaceChildren(el('p', { className: 'st-empty', textContent: 'No NVRs yet. Click “+ Add NVR” to add the first one.' }))
     return
   }
@@ -105,17 +153,26 @@ function render() {
   // would tear it out, so hold off until every dropdown is closed again
   if (sitesEl.querySelector('details[open]')) return
   // one block per site: a heading that sums the site up, then one row per NVR
-  const bySite = Map.groupBy(nvrList, (n) => n.site || 'Unassigned')
+  const query = siteSearch.value.trim().toLocaleLowerCase()
+  const matches = nvrList.filter((n) => matchesNvr(n, query, statusFilter.value))
+  resultsNote.textContent = `${matches.length} of ${nvrList.length} NVRs`
+  if (!matches.length) { sitesEl.replaceChildren(el('p', { className: 'st-empty', textContent: 'No matching sites or NVRs' })); return }
+  const bySite = Map.groupBy(matches, (n) => n.site || 'Unassigned')
   const groups = [...bySite].sort(([a], [b]) => a.localeCompare(b)).map(([site, list]) => {
-    const rename = el('button', { type: 'button', className: 'btn-ghost st-site-rename', textContent: 'Rename' })
-    rename.addEventListener('click', () => renameSite(site, list))
+    const rename = el('button', { type: 'button', className: 'btn-ghost st-site-rename', title: `Rename ${site}` })
+    rename.textContent = 'Rename'
+    rename.setAttribute('aria-label', `Rename ${site}`)
+    rename.addEventListener('click', () => renameSite(site, nvrList.filter((n) => (n.site || 'Unassigned') === site)))
     const cams = list.reduce((t, n) => t + (n.cameras ?? 0), 0)
-    const camsUp = list.reduce((t, n) => t + (n.status === 'online' ? n.camerasOnline ?? 0 : 0), 0)
-    const down = list.filter((n) => n.status !== 'online').length
-    const summary = `${list.length} NVR${list.length === 1 ? '' : 's'} · ${camsUp} of ${cams} cameras online${down ? ` · ${down} NVR${down === 1 ? '' : 's'} not connected` : ''}`
+    const camsUp = list.reduce((t, n) => t + (['online', 'partial'].includes(connectionState(n).key) ? n.camerasOnline ?? 0 : 0), 0)
+    const down = list.filter((n) => !['online', 'partial'].includes(connectionState(n).key)).length
+    const summary = `${list.length} NVR${list.length === 1 ? '' : 's'} · ${camsUp} of ${cams} cameras reported online${down ? ` · ${down} NVR${down === 1 ? '' : 's'} not connected` : ''}`
     const rows = list.flatMap((n) => {
+      const previous = [...sitesEl.querySelectorAll('.st-nvr')].find((row) => row.dataset.nvrId === n.id)
+      const rowSignature = JSON.stringify(n)
+      if (previous?.dataset.signature === rowSignature) return [previous, camerasPanel(n)]
       const edit = el('button', { type: 'button', textContent: 'Edit' })
-      edit.addEventListener('click', () => openForm(n))
+      edit.addEventListener('click', () => openForm(nvrList.find((item) => item.id === n.id) || n))
       const remove = el('button', { type: 'button', className: 'btn-ghost st-row-remove', textContent: 'Remove', title: `Remove ${n.name}` })
       remove.addEventListener('click', () => removeNvr(n))
       let subs = null
@@ -123,36 +180,61 @@ function render() {
         subs = el('button', { type: 'button', textContent: 'Sub-streams' })
         subs.addEventListener('click', () => openSubstreams(n))
       }
-      const online = n.status === 'online'
+      const state = connectionState(n)
+      const online = state.key === 'online' || state.key === 'partial'
+      const actions = el('details', { className: 'st-nvr-actions' })
+      const summaryAction = el('summary', { title: `Actions for ${n.name}` })
+      summaryAction.innerHTML = icon('more')
+      summaryAction.setAttribute('aria-label', `Actions for ${n.name}`)
+      const menu = el('div', { className: 'st-action-menu' }, subs, remove)
+      actions.append(summaryAction, menu)
+      actions.addEventListener('keydown', (e) => { if (e.key === 'Escape') { actions.open = false; summaryAction.focus() } })
+      menu.addEventListener('click', () => { actions.open = false })
       const pct = online && n.cameras ? Math.round((100 * (n.camerasOnline ?? 0)) / n.cameras) : 0
       const problem = n.vpnSite && !n.vpnSite.connected
         ? `VPN tunnel to ${n.vpnSite.name}: ${tunnelText(n.vpnSite)}`
         : !online && n.error ? n.error : ''
       const note = subStreamNote(n.subStreamsSeen)
+      const diagnostics = problem || note ? el('details', { className: 'st-diagnostics' }, el('summary', { textContent: 'Details' }), problem ? el('p', { className: 'st-error-text', textContent: problem }) : null, note) : null
       const row = el(
         'div',
-        { className: `st-nvr st-nvr-${n.status}` },
-        el('span', { className: `st-dot st-${n.status}`, title: STATUS_TEXT[n.status] ?? n.status }),
+        { className: `st-nvr st-nvr-${state.key}` },
+        el('span', { className: `st-dot st-${state.key}`, title: state.text, ariaHidden: 'true' }),
         el('div', { className: 'st-nvr-main' },
           el('div', { className: 'st-nvr-name', textContent: n.name }),
-          el('div', { className: 'st-meta', textContent: [whereText(n), n.model, `user ${n.user}`].filter(Boolean).join(' · ') }),
-          problem ? el('div', { className: 'st-error-text', textContent: problem }) : null,
-          note),
+          el('div', { className: 'st-meta', textContent: n.model || 'NVR' }), diagnostics),
+        el('div', { className: 'st-connection' }, el('span', { textContent: n.via === 'p2p' ? 'P2P cloud' : n.vpnSite ? 'VPN' : 'IP / LAN' }), el('span', { className: 'st-meta', textContent: whereText(n) })),
         el('div', { className: 'st-nvr-cams' },
-          el('span', { textContent: online ? `${n.camerasOnline} / ${n.cameras}` : STATUS_TEXT[n.status] ?? n.status }),
+          el('span', { textContent: online ? `${n.camerasOnline ?? 0} / ${n.cameras ?? 0} cameras` : `${n.cameras ?? 0} cameras` }),
+          online && n.cameras > (n.camerasOnline ?? 0) ? el('span', { className: 'st-warn-text', textContent: `${n.cameras - (n.camerasOnline ?? 0)} not reported online` }) : null,
           online ? el('span', { className: 'st-bar' }, el('span', { style: `width:${pct}%` })) : null),
-        el('div', { className: 'st-nvr-actions' }, subs, edit, remove)
+        el('div', { className: 'st-state' }, el('span', { className: `st-status-label st-${state.key}`, textContent: state.text }), el('span', { className: 'st-meta', textContent: state.detail })),
+        el('div', { className: 'st-direct-actions' }, edit, actions)
       )
+      row.dataset.nvrId = n.id
+      row.dataset.signature = rowSignature
       return [row, camerasPanel(n)]
+    })
+    const body = el('div', { className: 'st-nvrs' }, el('div', { className: 'st-columns', ariaHidden: 'true' }, el('span'), el('span', { textContent: 'NVR' }), el('span', { textContent: 'Connection' }), el('span', { textContent: 'Cameras' }), el('span', { textContent: 'Status' }), el('span', { textContent: 'Actions' })), ...rows)
+    body.hidden = collapsed.has(site)
+    const toggle = el('button', { type: 'button', className: 'st-site-toggle', textContent: `${body.hidden ? '+' : '-'} ${site}` })
+    toggle.setAttribute('aria-expanded', String(!body.hidden))
+    toggle.addEventListener('click', () => {
+      body.hidden = !body.hidden
+      body.hidden ? collapsed.add(site) : collapsed.delete(site)
+      toggle.textContent = `${body.hidden ? '+' : '-'} ${site}`
+      toggle.setAttribute('aria-expanded', String(!body.hidden))
+      savePreferences()
     })
     return el(
       'section',
       { className: 'st-site' },
-      el('div', { className: 'st-site-head' }, el('div', {}, el('h2', { textContent: site }), el('p', { className: 'st-meta', textContent: summary })), rename),
-      el('div', { className: 'st-nvrs' }, ...rows)
+      el('div', { className: 'st-site-head' }, el('div', {}, el('h2', {}, toggle), el('p', { className: 'st-meta', textContent: summary })), rename), body
     )
   })
   sitesEl.replaceChildren(...groups)
+  main.scrollTop = restoreScroll && Number.isFinite(preferences.scroll) ? preferences.scroll : scroll
+  restoreScroll = false
 }
 
 /** The VPN sites: whether each tunnel is up, and the NVRs reached through it. */
@@ -186,6 +268,7 @@ function renderVpn() {
 }
 
 async function load() {
+  sitesEl.setAttribute('aria-busy', 'true')
   try {
     ;[nvrList, vpn] = await Promise.all([api('GET', '/api/admin/nvrs'), api('GET', '/api/admin/vpn').catch(() => ({ available: false, sites: [] }))])
     notice.hidden = true
@@ -193,8 +276,17 @@ async function load() {
     render()
     $('siteNames').replaceChildren(...[...new Set(nvrList.map((n) => n.site))].map((s) => el('option', { value: s })))
   } catch (e) {
-    notice.textContent = e.message
+    const denied = e.status === 403
+    notice.replaceChildren(document.createTextNode(denied ? 'You do not have permission to manage sites.' : `Could not refresh sites: ${e.message}`))
+    if (!denied) {
+      const retry = el('button', { type: 'button', textContent: 'Retry' })
+      retry.addEventListener('click', () => { retry.disabled = true; void load() })
+      notice.append(retry)
+    }
+    if (!nvrList.length) resultsNote.textContent = denied ? 'Access denied' : 'Sites unavailable'
     notice.hidden = false
+  } finally {
+    sitesEl.setAttribute('aria-busy', 'false')
   }
 }
 
@@ -277,6 +369,7 @@ form.addEventListener('submit', async (e) => {
     else await api('POST', '/api/admin/nvrs', body)
     dialog.close()
     await load()
+    notify('NVR saved')
   } catch (err) {
     formError.textContent = err.testFailed
       ? `${err.message}. Check ${p2p ? 'the serial number and login, and that P2P is on in the NVR’s network settings' : 'the address, port and login'}, or tick “Save even if…” to save anyway.`
@@ -403,8 +496,9 @@ async function removeNvr(n) {
   try {
     await api('DELETE', `/api/admin/nvrs/${encodeURIComponent(n.id)}`)
     await load()
+    notify('NVR removed')
   } catch (e) {
-    alert(e.message)
+    notify(`Could not remove the NVR: ${e.message}`, { error: true })
   }
 }
 
@@ -414,8 +508,9 @@ async function renameSite(site, list) {
   try {
     for (const n of list) await api('PUT', `/api/admin/nvrs/${encodeURIComponent(n.id)}`, { site: name })
     await load()
+    notify('Site renamed')
   } catch (e) {
-    alert(e.message)
+    notify(`Could not finish renaming the site: ${e.message}`, { error: true })
   }
 }
 

@@ -28,6 +28,21 @@
 
 /** The per-camera rights rights.mjs knows ('admin' is the account's role, not a grant). */
 export const GRANTABLE = Object.freeze(['live', 'live-hd', 'playback-server', 'playback-nvr', 'export'])
+
+/** The admin areas a partial admin can hold, in rights.mjs CAPS order (mirrored; the page cannot
+ *  import rights.mjs, which reads files). The test checks this matches rights.mjs exactly. */
+export const CAPS = Object.freeze(['users', 'cameras', 'settings', 'storage', 'reports', 'audit', 'reboot', 'diagnostics'])
+/** Each admin area's label for the "Can administer" section. */
+export const CAP_LABELS = Object.freeze({
+  users: 'Users & access',
+  cameras: 'Cameras & sites',
+  settings: 'System settings',
+  storage: 'Recording storage',
+  reports: 'Reports',
+  audit: 'Audit log',
+  reboot: 'Restart & reboot',
+  diagnostics: 'Diagnostics'
+})
 /** Export formats, in rights.mjs's order (it saves them in this order whatever order they are ticked). */
 export const FORMATS = Object.freeze(['pack', 'mp4', 'stills'])
 export const FORMAT_LABELS = Object.freeze({ pack: 'Evidence pack', mp4: 'MP4', stills: 'Stills' })
@@ -93,10 +108,17 @@ export function cleanTarget(t) {
 export function cleanRow(raw) {
   const ok = raw && typeof raw === 'object' && !Array.isArray(raw)
   const grants = ok && raw.grants && typeof raw.grants === 'object' && !Array.isArray(raw.grants) ? raw.grants : {}
-  const out = { admin: ok && raw.admin === true, grants: {}, formats: [] }
+  const out = { admin: ok && raw.admin === true, adminCaps: [], grants: {}, formats: [], map: true, share: false }
+  // the admin areas, only the known ones, de-duped and in CAPS order (fail-closed, like rights.mjs)
+  const caps = ok && Array.isArray(raw.adminCaps) ? new Set(raw.adminCaps) : new Set()
+  out.adminCaps = CAPS.filter((c) => caps.has(c))
   for (const a of GRANTABLE) out.grants[a] = [...new Set(arr(grants[a]).map(cleanTarget).filter(Boolean))].sort(byText)
   const formats = ok ? arr(raw.formats) : []
   out.formats = FORMATS.filter((f) => formats.includes(f))
+  // the Map page: on unless explicitly turned off (matches rights.mjs cleanRights)
+  if (ok && raw.map === false) out.map = false
+  // making share links: off unless explicitly turned on (only the literal true)
+  if (ok && raw.share === true) out.share = true
   return out
 }
 
@@ -174,7 +196,7 @@ export function fromRow(row, tree) {
   const idx = indexOf(tree)
   const grants = {}
   for (const a of GRANTABLE) grants[a] = split(clean.grants[a], idx)
-  return { admin: clean.admin, grants, formats: clean.formats }
+  return { admin: clean.admin, adminCaps: clean.adminCaps, grants, formats: clean.formats, map: clean.map, share: clean.share }
 }
 
 /** The state as the row to POST. Nothing is merged or tidied that the admin did not change. */
@@ -184,11 +206,11 @@ export function toRow(state) {
     const c = state?.grants?.[a] ?? emptyCov()
     grants[a] = [...new Set([...(c.all ? ['*'] : []), ...c.nvrs, ...c.cams, ...c.kept])].sort(byText)
   }
-  return { admin: state?.admin === true, grants, formats: FORMATS.filter((f) => arr(state?.formats).includes(f)) }
+  return { admin: state?.admin === true, adminCaps: CAPS.filter((c) => arr(state?.adminCaps).includes(c)), grants, formats: FORMATS.filter((f) => arr(state?.formats).includes(f)), map: state?.map !== false, share: state?.share === true }
 }
 
 const copyCov = (c) => ({ all: c.all, nvrs: [...c.nvrs], cams: [...c.cams], kept: [...c.kept] })
-const copyState = (s) => ({ admin: s.admin, formats: [...s.formats], grants: Object.fromEntries(GRANTABLE.map((a) => [a, copyCov(s.grants[a])])) })
+const copyState = (s) => ({ admin: s.admin, adminCaps: [...arr(s.adminCaps)], formats: [...s.formats], map: s.map !== false, share: s.share === true, grants: Object.fromEntries(GRANTABLE.map((a) => [a, copyCov(s.grants[a])])) })
 
 // ----------------------------------------------------------------------------------------- changes
 
@@ -247,6 +269,7 @@ export function setAll(state, on) {
   const next = copyState(state)
   for (const a of GRANTABLE) next.grants[a] = on ? { ...emptyCov(), all: true } : emptyCov()
   next.formats = on ? [...FORMATS] : []
+  // the Map is its own toggle, independent of these camera buttons (so Nothing == the empty row)
   return next
 }
 
@@ -260,8 +283,62 @@ export function setFormat(state, format, on) {
 /** The Admin switch. The ticks stay as they are: they apply again the day Admin is switched off. */
 export const setAdmin = (state, on) => ({ ...copyState(state), admin: on === true })
 
-/** Another user's grants and formats, as they are. Never their admin: that stays this user's own. */
-export const copyFrom = (state, row, tree) => ({ ...fromRow(row, tree), admin: state.admin === true })
+/** One admin area (CAPS) ticked or unticked. Kept in CAPS order. */
+export function setCap(state, cap, on) {
+  if (!CAPS.includes(cap)) return state
+  const next = copyState(state)
+  next.adminCaps = CAPS.filter((c) => (c === cap ? on === true : arr(state.adminCaps).includes(c)))
+  return next
+}
+
+/** The Map page on or off for this person. */
+export function setMap(state, on) {
+  const next = copyState(state)
+  next.map = on === true
+  return next
+}
+
+/** Whether this person may make public share links. */
+export function setShare(state, on) {
+  const next = copyState(state)
+  next.share = on === true
+  return next
+}
+
+const allCov = () => ({ all: true, nvrs: [], cams: [], kept: [] })
+const gstate = (on) => Object.fromEntries(GRANTABLE.map((a) => [a, on[a] ? allCov() : emptyCov()]))
+
+/** The role presets the editor offers (one-click fills, not stored as roles). */
+export const PRESETS = Object.freeze([
+  { id: 'full-admin', label: 'Full admin' },
+  { id: 'deputy-admin', label: 'Deputy admin' },
+  { id: 'camera-manager', label: 'Camera manager' },
+  { id: 'operator', label: 'Operator' },
+  { id: 'guard', label: 'Guard' },
+  { id: 'custom', label: 'Custom' }
+])
+
+/**
+ * A preset's complete editor state (admin, adminCaps, grants, formats). Fills both the capabilities
+ * and the viewing tree in one go; the admin then tweaks. Viewing "all cameras" is '*' in each right,
+ * so a preset needs no tree. null for an unknown name.
+ */
+export function preset(name) {
+  // the Map is on by default in every preset (it is off only when an admin unticks it for someone)
+  switch (name) {
+    case 'full-admin': return { admin: true, adminCaps: [], grants: gstate({}), formats: [], map: true, share: false }
+    case 'deputy-admin': return { admin: false, adminCaps: CAPS.filter((c) => c !== 'users'), grants: gstate({ live: 1, 'live-hd': 1, 'playback-nvr': 1, 'playback-server': 1, export: 1 }), formats: [...FORMATS], map: true, share: false }
+    case 'camera-manager': return { admin: false, adminCaps: ['cameras', 'diagnostics'], grants: gstate({ live: 1, 'live-hd': 1, 'playback-nvr': 1, 'playback-server': 1 }), formats: [], map: true, share: false }
+    case 'operator': return { admin: false, adminCaps: [], grants: gstate({ live: 1, 'playback-nvr': 1, 'playback-server': 1 }), formats: [], map: true, share: false }
+    case 'guard': return { admin: false, adminCaps: [], grants: gstate({ live: 1 }), formats: [], map: true, share: false }
+    case 'custom': return { admin: false, adminCaps: [], grants: gstate({}), formats: [], map: true, share: false }
+    default: return null
+  }
+}
+
+/** Another user's grants, formats and Map, as they are. Never their admin, admin areas or sharing:
+ *  those are privileges that stay this user's own. */
+export const copyFrom = (state, row, tree) => ({ ...fromRow(row, tree), admin: state.admin === true, adminCaps: [...arr(state.adminCaps)], share: state.share === true })
 
 /** Removes one listed old grant (see view().kept) from every right that has it. */
 export function dropKept(state, target) {
@@ -356,8 +433,14 @@ export function view(state, tree) {
   if (!state.admin && hdAlone) warnings.push('Live HD is ticked where Live is not (kept from before): it has no effect there. Tick Live there, or untick Live HD.')
   return {
     admin: state.admin,
-    adminNote: 'An admin may watch (at full quality), play back and export everything, on every site and camera, in any format, and can change all of this. Switch Admin off to choose what they may see.',
-    nothing: !state.admin && !GRANTABLE.some((a) => hasAny(g[a])),
+    adminNote: 'An admin may watch (at full quality), play back and export everything, on every site and camera, in any format, and can change all of this. Switch Admin off to choose what they may see and administer.',
+    // the "Can administer" section: each area and whether it is ticked (a full admin implies all)
+    caps: CAPS.map((id) => ({ id, label: CAP_LABELS[id], on: state.admin || arr(state.adminCaps).includes(id) })),
+    adminCaps: [...arr(state.adminCaps)],
+    // the Map page toggle (a full admin always has it) and the share-links permission
+    map: state.admin || state.map !== false,
+    share: state.admin || state.share === true,
+    nothing: !state.admin && arr(state.adminCaps).length === 0 && !GRANTABLE.some((a) => hasAny(g[a])),
     all: cellsOf((a) => allCell(g[a], idx)),
     sites,
     kept: keptList(state, idx),

@@ -16,18 +16,16 @@
 // is worse than no forecast at all: somebody drives to site for it.
 import { mkdirSync, readFileSync, renameSync, statfsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { isAdmin } from './auth.mjs'
+import { canAdmin } from './rights.mjs'
 import { freeMarks, spaceLimit } from './location-health.mjs'
 import { retentionFacts, retentionView } from './retention-target.mjs'
 import { lastRuns } from './storage-jobs.mjs'
 import { describePaceNow, thinPace } from './thin-pace.mjs'
 
-// The caller may hand us a plain user name or the { user, admin } the newer routes pass around.
-// Taking only one of the two is how a route ends up refusing everybody: isAdmin() given an object
-// looks it up as if it were a name, finds nothing, and denies an admin as confidently as a
-// stranger. CCTV_AUTH=off has no real users at all, and is honoured here as everywhere else.
+// Who may see the storage report: a full admin, or a partial admin with the `storage` area
+// (rights.mjs canAdmin accepts either the { user, admin } object the routes pass or a bare name).
+// CCTV_AUTH=off has no real users at all, and is honoured here as everywhere else.
 const AUTH_OFF = process.env.CCTV_AUTH === 'off'
-const admin = (who) => (AUTH_OFF ? true : who && typeof who === 'object' ? who.admin === true : isAdmin(who))
 
 // storage.mjs and settings.mjs both pull in nvr-xml.mjs -> sdk.mjs -> koffi, which cannot even be
 // loaded on a machine without the Linux SDK. This module has to stay testable on any laptop, so
@@ -424,7 +422,7 @@ export function setStorageContext({ index = null, dataDir = null, settingsOf = n
 export async function handleStorage(method, pathname, _readJson, user) {
   if (pathname !== '/api/storage') return null
   if (method !== 'GET') return [405, { error: 'Method not allowed' }]
-  if (!admin(user)) return [403, { error: 'Only admins can see storage' }]
+  if (!(AUTH_OFF || canAdmin(user, 'storage'))) return [403, { error: 'Only admins can see storage' }]
   const settings = settingsRef ? settingsRef() : (await import('./settings.mjs')).getSettings()
   const asked = { ...(presentRef ? { present: presentRef } : {}), ...(freeOfRef ? { freeOf: freeOfRef } : {}) }
   let history = {}

@@ -17,6 +17,7 @@
 //  - seekReset(): a seek keeps the decoder set up (reset + configure with the same config), so it
 //    needs no isConfigSupported round trip.
 import { PlayoutClock, REMOTE_CLOCK } from './playout.js'
+import { ReceiveMetrics } from './live-metrics.js'
 import { pictureSize, videoInfo } from './sps.js'
 
 const MAX_QUEUED_FRAMES = 45
@@ -215,6 +216,7 @@ export class VideoPlayer {
     // older: frames decoded and not shown for being at or before one already shown (noRewindMs)
     this.stats = { fps: 0, jitterMs: 0, delayMs: 0, dropped: 0, late: 0, resyncs: 0, older: 0, kbps: 0, width: 0, height: 0, codec: '', hw: '', coded: '', visible: '' }
     this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0 }
+    this.receiveMetrics = new ReceiveMetrics()
     this.grabs = [] // callers waiting for the next frame shown, at full size (grab())
     this.onChunk = null // (chunk) => void: sees every encoded frame as it arrives (set while the picture panel is open)
     this.keyTs = [] // timestamps (µs) of the last keyframes received, oldest first
@@ -241,6 +243,7 @@ export class VideoPlayer {
   push(chunk) {
     if (this.closed) return
     this.win.bytes += chunk.data.length
+    this.receiveMetrics.receive(chunk.data.length)
     if (chunk.isKey) this.#noteKey(chunk.timestampUs)
     if (this.onChunk) {
       try {
@@ -822,6 +825,7 @@ export class VideoPlayer {
     const mean = n ? w.intervals.reduce((a, b) => a + b, 0) / n : 0
     const variance = n ? w.intervals.reduce((a, b) => a + (b - mean) ** 2, 0) / n : 0
     Object.assign(this.stats, {
+      ...this.receiveMetrics.sample(performance.now()),
       fps: w.frames,
       jitterMs: Math.round(Math.sqrt(variance) * 10) / 10,
       kbps: Math.round((w.bytes * 8) / 1000),
@@ -838,6 +842,9 @@ export class VideoPlayer {
 
   /** Clears buffered video, e.g. before a seek or after a reconnect. */
   reset() {
+    this.receiveMetrics.reset(performance.now())
+    this.stats.receivedFps = 0
+    this.stats.receivedKbps = 0
     for (const { frame } of this.queue) frame.close()
     this.queue = []
     this.clock.reset()

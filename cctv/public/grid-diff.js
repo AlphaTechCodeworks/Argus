@@ -52,7 +52,8 @@ export function diffCameras(oldList, newList, view) {
   b.visible.forEach((cam, index) => {
     const was = a.visible[index]
     const d = { online: was.online !== cam.online, name: was.name !== cam.name, remote: Boolean(was.remote) !== Boolean(cam.remote), hd: Boolean(was.hd) !== Boolean(cam.hd) }
-    if (d.online || d.name || d.remote || d.hd) changed.push({ index, cam, ...d })
+    d.health = ['nvrOnline', 'nvrVideoOnline', 'cameraOnline'].some((field) => was[field] !== cam[field])
+    if (d.online || d.name || d.remote || d.hd || d.health) changed.push({ index, cam, ...d })
   })
   return { full: false, changed }
 }

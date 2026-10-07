@@ -25,7 +25,7 @@
 <body class="live-page">
   <header>
     <div class="brand">
-      <h1>CCTV</h1>
+      <h1>Live</h1>
     </div>
     <div class="controls">
       <label id="siteLabel" hidden>Site
@@ -61,6 +61,15 @@
       <button id="deleteView" type="button" title="Delete the saved view shown" hidden>Delete view</button>
       <label title="Leave offline cameras out of the layout"><input id="hideOffline" type="checkbox" checked /> Hide offline</label>
       <label title="Steadier motion: holds about 0.4 s more video (a little more delay)"><input id="smooth" type="checkbox" /> Smooth</label>
+      <label id="gridFpsLabel" hidden title="One frame rate for every grid tile, so the picture is even and the connection is shared equally. Faster cameras are capped to it; a slower camera keeps its own rate. Auto leaves each camera at its own rate.">Grid fps
+        <select id="gridFps">
+          <option value="">Auto</option>
+          <option value="4">4</option>
+          <option value="8">8</option>
+          <option value="10">10</option>
+          <option value="15">15</option>
+        </select>
+      </label>
       <button id="resetOrder" type="button" title="Your cameras are in your own order (drag a tile onto another to swap them, or onto ‹ › to move it to another page). This puts them back in the default order." hidden>Reset order</button>
       <button id="prev" type="button" aria-label="Previous page">‹</button>
       <span id="page">1 / 1</span>

@@ -119,7 +119,7 @@ const auditRowsAll = () => readFileSync(join(DATA, 'audit.jsonl'), 'utf8').trim(
   check('cleanRights: admin only from the literal true', tampered.admin === false)
   check('cleanRights: an unknown action is dropped', !('no-such-action' in tampered.grants))
   check('cleanRights: an unknown format is dropped', tampered.formats.join() === 'pack')
-  check('cleanRights: unknown keys do not survive', Object.keys(tampered).sort().join() === 'admin,formats,grants')
+  check('cleanRights: unknown keys do not survive', Object.keys(tampered).sort().join() === 'admin,adminCaps,formats,grants,map,share')
   check('cleanRights of a string is empty rights', R.cleanRights('admin').admin === false)
   check('cleanRights of an array is empty rights', R.cleanRights([{ admin: true }]).admin === false)
   check('cleanRights of null is empty rights', R.cleanRights(null).admin === false)
@@ -861,6 +861,84 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   check('server.mjs: /api/cameras through liveCameras, ?for=playback through playbackCameras', /pathname === '\/api\/cameras'\) return sendJson\(res, 200, url\.searchParams\.get\('for'\) === 'playback' \? playbackCameras\(who, allCameras\(\{ live: true \}\)\) : liveCameras\(who, allCameras\(\{ live: true \}\)\)\)/.test(src))
   const rsrc = readFileSync(new URL('../rights.mjs', import.meta.url), 'utf8')
   check('an admin\'s lists are made without asking can() per camera (as the old route did)', /export function liveCameras\(who, cams\) \{[^}]*?if \(who\?\.admin === true\) return cams\.map/.test(rsrc) && /export function playbackCameras\(who, cams\) \{\s*if \(who\?\.admin === true\) return cams\.map/.test(rsrc))
+}
+
+// ---- granular admin capabilities (adminCaps, canAdmin, the escalation safeguard) -----------
+{
+  // self-contained: earlier blocks promote/alter the shared accounts, so reset them here
+  writeFileSync(USERS, JSON.stringify({ boss: { hash: 'x', role: 'admin' }, legacy: 'scrypt:aa:bb', jo: { hash: 'x', role: 'viewer' }, sam: { hash: 'x', role: 'viewer' } }))
+  writeFileSync(R.RIGHTS_FILE, JSON.stringify({ version: 2, users: {} }))
+  R.loadRights()
+
+  check('CAPS is the eight admin areas', R.CAPS.join() === 'users,cameras,settings,storage,reports,audit,reboot,diagnostics')
+  check('emptyRights starts with no capabilities', J(R.emptyRights().adminCaps) === J([]))
+
+  const cleaned = R.cleanRights({ adminCaps: ['cameras', 'nonsense', 'users', 'cameras', '__proto__'] })
+  check('cleanRights keeps only known caps, de-duped, in CAPS order', J(cleaned.adminCaps) === J(['users', 'cameras']))
+  check('cleanRights: adminCaps that is not an array -> []', J(R.cleanRights({ adminCaps: 'users' }).adminCaps) === J([]))
+
+  // jo becomes a partial admin (cameras + diagnostics); sam stays a plain viewer
+  R.saveRights('jo', { admin: false, adminCaps: ['cameras', 'diagnostics'] })
+
+  check('canAdmin: a full admin holds every capability', R.CAPS.every((c) => R.canAdmin(ADMIN, c)))
+  check('canAdmin: a session admin (admin:true) holds every capability', R.CAPS.every((c) => R.canAdmin({ user: 'x', admin: true }, c)))
+  check('canAdmin: a partial admin holds exactly its granted caps', R.canAdmin(VIEWER, 'cameras') && R.canAdmin(VIEWER, 'diagnostics') && !R.canAdmin(VIEWER, 'users') && !R.canAdmin(VIEWER, 'settings') && !R.canAdmin(VIEWER, 'reboot'))
+  check('canAdmin: a plain viewer holds no capability', R.CAPS.every((c) => !R.canAdmin(SAM, c)))
+  check('canAdmin: an unknown capability is refused even for an admin', R.canAdmin(ADMIN, 'everything') === false)
+  check('canAdmin: a forged adminCaps on who is ignored; the store decides', R.canAdmin({ user: 'sam', admin: false, adminCaps: ['users'] }, 'users') === false)
+  check('isFullAdmin: a partial admin is NOT a full admin', R.isFullAdmin(VIEWER) === false)
+  check('isFullAdmin: the admin role is', R.isFullAdmin(ADMIN) === true && R.isFullAdmin('boss') === true)
+
+  // the escalation safeguard: only a full admin changes the admin switch or the capabilities
+  check('a full admin may grant admin areas', J(R.saveRights('sam', { admin: false, adminCaps: ['settings'] }, { by: ADMIN }).adminCaps) === J(['settings']))
+  check('a partial admin CANNOT change admin areas (403)', threw(() => R.saveRights('sam', { admin: false, adminCaps: ['settings', 'users'] }, { by: VIEWER }))?.status === 403)
+  check('a partial admin CANNOT make someone a full admin (403)', threw(() => R.saveRights('sam', { admin: true }, { by: VIEWER }))?.status === 403)
+  const okEdit = R.saveRights('sam', { admin: false, adminCaps: ['settings'], grants: { live: ['n9'] } }, { by: VIEWER })
+  check('a partial admin MAY edit viewing grants, caps left as they are', okEdit.grants.live.join() === 'n9' && J(okEdit.adminCaps) === J(['settings']))
+
+  const capOf = R.capForAdminPath
+  // the Cameras report and the NVR register (stored NVR passwords) map to no area: a full admin only
+  check('capForAdminPath: cameras report and NVR register -> no capability', ['/api/admin/cameras', '/api/admin/cameras.xlsx', '/api/admin/register', '/api/admin/register.xlsx'].every((x) => capOf(x) === null))
+  // server.mjs: each route a partial admin's `cameras` area can reach but must not use asks for a full admin itself
+  {
+    const srv = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+    const fullOnly = (marker) => { const i = srv.indexOf(marker); return i > 0 && srv.slice(i, i + 700).includes("if (!who.admin) return sendJson(res, 403") }
+    check('server.mjs: NVR power, bulk optimise, cap resolution, cameras report and register each require a full admin', ['if (powerRoute) {', 'if (streamOpt) {', 'if (streamCap) {', "if (pathname === '/api/admin/cameras') {", "if (pathname === '/api/admin/cameras.xlsx') {", "if (pathname === '/api/admin/register') {", "if (pathname === '/api/admin/register.xlsx') {"].every(fullOnly))
+  }
+  check('capForAdminPath: users/rights -> users', capOf('/api/admin/users') === 'users' && capOf('/api/admin/rights') === 'users')
+  check('capForAdminPath: NVR CRUD and camera config -> cameras', capOf('/api/admin/nvrs') === 'cameras' && capOf('/api/admin/nvrs/n1/channels/0/image') === 'cameras' && capOf('/api/admin/nvrs/n1/channels/0/stream') === 'cameras' && capOf('/api/admin/maps/Main') === 'cameras' && capOf('/api/admin/osd') === 'cameras')
+  check('capForAdminPath: NVR monitoring/probes -> diagnostics', capOf('/api/admin/nvrs/n1/log') === 'diagnostics' && capOf('/api/admin/nvrs/n1/netstatus') === 'diagnostics' && capOf('/api/admin/nvrs/n1/alarm-outputs') === 'diagnostics' && capOf('/api/admin/vpn') === 'diagnostics')
+  check('capForAdminPath: settings/storage/reports/audit/reboot', capOf('/api/admin/settings') === 'settings' && capOf('/api/admin/storage') === 'storage' && capOf('/api/admin/disks') === 'storage' && capOf('/api/admin/reports') === 'reports' && capOf('/api/admin/audit') === 'audit' && capOf('/api/admin/restart') === 'reboot' && capOf('/api/admin/reboot') === 'reboot')
+  check('capForAdminPath: an unmapped admin path -> null (so the gate demands a full admin)', capOf('/api/admin/something-brand-new') === null && capOf('/api/cameras') === null)
+
+  R.saveRights('jo', { admin: false, adminCaps: ['cameras'] }, { by: ADMIN })
+  check('adminCaps round-trips through rightsOf', J(R.rightsOf('jo').adminCaps) === J(['cameras']))
+  const listed = R.listRights().find((u) => u.user === 'jo')
+  check('listRights carries adminCaps and a seen token', J(listed.adminCaps) === J(['cameras']) && typeof listed.seen === 'string')
+
+  // the Map page permission (a viewing setting, not an admin power)
+  check('emptyRights: the Map is on by default', R.emptyRights().map === true)
+  check('cleanRights: no map field keeps the Map; only map:false turns it off', R.cleanRights({}).map === true && R.cleanRights({ map: false }).map === false && R.cleanRights({ map: 0 }).map === true)
+  R.saveRights('jo', { admin: false, adminCaps: ['cameras'], map: false }, { by: ADMIN })
+  check('canSeeMap: off where the row turns it off', R.canSeeMap(VIEWER) === false && R.rightsOf('jo').map === false)
+  check('canSeeMap: a full admin always sees the Map, whatever the row says', R.canSeeMap(ADMIN) === true && R.canSeeMap({ user: 'x', admin: true }) === true)
+  check('canSeeMap: no session, no Map', R.canSeeMap(null) === false)
+  check('listRights carries the Map flag', R.listRights().find((u) => u.user === 'jo').map === false)
+  R.saveRights('sam', { admin: false, map: true }, { by: ADMIN })
+  check('a partial admin may change the Map setting (it is viewing, not an admin power)', R.saveRights('sam', { admin: false, map: false }, { by: VIEWER }).map === false)
+  R.saveRights('jo', { admin: false, map: true }, { by: ADMIN })
+  check('canSeeMap: back on when the row allows it', R.canSeeMap(VIEWER) === true)
+
+  // the sharing permission (public clip links) — off by default, the opposite of the Map
+  check('emptyRights: sharing is off by default', R.emptyRights().share === false)
+  check('cleanRights: share only from the literal true', R.cleanRights({}).share === false && R.cleanRights({ share: true }).share === true && R.cleanRights({ share: 'yes' }).share === false && R.cleanRights({ share: 1 }).share === false)
+  check('canShare: a viewer cannot share by default', R.canShare(VIEWER) === false)
+  R.saveRights('jo', { admin: false, share: true }, { by: ADMIN })
+  check('canShare: on when the row grants it', R.canShare(VIEWER) === true && R.rightsOf('jo').share === true)
+  check('canShare: a full admin always may share', R.canShare(ADMIN) === true && R.canShare({ user: 'x', admin: true }) === true)
+  check('canShare: no session, no sharing', R.canShare(null) === false)
+  check('canShare: a forged share on who is ignored; the store decides', R.canShare({ user: 'sam', admin: false, share: true }) === false)
+  check('listRights carries the share flag', R.listRights().find((u) => u.user === 'jo').share === true)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

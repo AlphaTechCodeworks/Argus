@@ -27,6 +27,8 @@ import {
   isSettled,
   lightPeriod,
   mergePending,
+  resolutionChange,
+  resolutionOptions,
   settingsHash,
   settleMs,
   sortSuggestions,
@@ -1416,6 +1418,18 @@ export class ImagePanel {
 
   // ---- Recording quality (main stream) ------------------------------------------------------------
 
+  /** Choose a recording resolution from the dropdown: replaces any resolution item (suggested or
+   *  manual), keeps the other Recording-quality suggestions, and re-renders. Back to the current
+   *  size clears it. The change still goes through Review (storage estimate) → confirm → apply. */
+  pickResolution(target) {
+    const si = this.streamInfo
+    if (!si) return
+    const kept = (this.streamItems ?? []).filter((it) => !it.change?.res)
+    const item = resolutionChange(si, target)
+    this.streamItems = item ? [item, ...kept] : kept
+    this.renderStream()
+  }
+
   renderStream() {
     const box = this.$('.ip-stream')
     const si = this.streamInfo
@@ -1442,6 +1456,25 @@ export class ImagePanel {
     kids.push(el('p', {}, `${String(c.enct ?? '').toUpperCase()} ${c.res} at ${c.fps} fps, bitrate cap ${c.QoI} kbit/s (${c.bitType}), quality ${c.level}.`))
     kids.push(el('p', { className: 'ip-stream-line ip-muted' }, ''))
     if (!si.candidate) kids.push(el('p', { className: 'ip-muted' }, `Changes are not offered here: ${si.why}.`))
+    // resolution picker: pick any size the camera offers (raises or keeps; a bigger picture pulls
+    // the bitrate cap up with it). Chosen here, it becomes one Recording-quality item, applied
+    // through the same storage estimate and confirmation as the suggested changes.
+    if (si.candidate) {
+      const opts = resolutionOptions(si)
+      if (opts.length > 1) {
+        const chosen = (this.streamItems ?? []).find((it) => it.ticked && it.change?.res)?.change.res ?? c.res
+        const sel = el(
+          'select',
+          { 'aria-label': 'Resolution' },
+          opts.map((o) =>
+            el('option', { value: o.res, disabled: o.disabled, title: o.reason ?? undefined }, o.reason ? `${o.res} — ${o.reason}` : o.res)
+          )
+        )
+        sel.value = chosen
+        sel.addEventListener('change', () => this.pickResolution(sel.value))
+        kids.push(el('div', { className: 'ip-res' }, el('label', {}, 'Resolution ', sel)))
+      }
+    }
     for (const n of this.streamNotes ?? []) kids.push(el('p', { className: 'ip-muted' }, n))
     if (this.streamItems?.length) {
       kids.push(el('ul', { className: 'ip-items' }, this.streamItems.map((it) => {

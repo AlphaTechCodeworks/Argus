@@ -148,7 +148,7 @@ check('readNetStatus alone: the unfilled-counter check counts the NVR\'s online 
 // ---- server.mjs wiring (it loads the SDK, so it is read as text here) ----
 {
   const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
-  const at = src.indexOf('await handleNetStatus(req.method, pathname, { nvrs, admin: who.admin, query: transparent })')
+  const at = src.indexOf("await handleNetStatus(req.method, pathname, { nvrs, admin: canAdmin(who, 'diagnostics'), query: transparent })")
   check('server.mjs imports the module', /import \{ handleNetStatus \} from '\.\/nvr-netstatus\.mjs'/.test(src))
   check('server.mjs dispatches it with the real XML query and the caller\'s admin flag', at > 0 && /if \(netStatus\) return sendJson\(res, \.\.\.netStatus\)/.test(src))
   check('... before the general admin block and admin.mjs (which would answer the path first)', at > 0 && at < src.indexOf("if (pathname.startsWith('/api/admin/'))"))

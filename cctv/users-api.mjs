@@ -18,7 +18,7 @@
 import { audit } from './audit.mjs'
 import { DATA_DIR, hashPassword, loadUsers, saveUsers } from './auth.mjs'
 import { HttpError } from './nvr-xml.mjs'
-import { forgetRights } from './rights.mjs'
+import { canAdmin, forgetRights, isFullAdmin } from './rights.mjs'
 
 const NAME_RE = /^[\w.@-]{1,64}$/
 const ROLES = ['viewer', 'admin']
@@ -32,10 +32,15 @@ const admins = (users) => Object.entries(users).filter(([, u]) => u.role === 'ad
  */
 export async function handleUsers(method, pathname, readJson, who) {
   if (pathname !== '/api/admin/users' && !pathname.startsWith('/api/admin/users/')) return null
-  if (!who?.admin) throw new HttpError(403, 'Only an admin can manage accounts')
+  // Listing accounts is part of the Users & access screen (the `users` capability). Creating,
+  // changing or removing an account is full-admin only: the escalation safeguard — a partial admin
+  // with `users` edits viewing grants (rights.mjs), never the roster itself or anyone's role.
+  if (method === 'GET' && pathname === '/api/admin/users') {
+    if (!canAdmin(who, 'users')) throw new HttpError(403, 'Only an admin can manage accounts')
+    return [200, { users: list(loadUsers()) }]
+  }
+  if (!isFullAdmin(who)) throw new HttpError(403, 'Only a full admin can add, change or remove accounts')
   const users = loadUsers()
-
-  if (method === 'GET' && pathname === '/api/admin/users') return [200, { users: list(users) }]
 
   if (method === 'POST' && pathname === '/api/admin/users') {
     const body = await readJson()

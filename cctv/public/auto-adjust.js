@@ -833,6 +833,58 @@ export function streamChangeOf(items) {
   return change
 }
 
+/**
+ * The resolution dropdown for the Recording-quality box: every size the camera offers, widest
+ * first, each marked whether it can be chosen here. The app only keeps or raises the resolution
+ * (planChange refuses to lower it, and it never lowers the frame rate), so a smaller size, or one
+ * whose top frame rate is below the current fps, is offered disabled with the reason — the whole
+ * range stays visible so it is clear what the camera can do and why a size is out.
+ * @returns {{ res: string, px: number, selected: boolean, disabled: boolean, reason: string|null }[]}
+ */
+export function resolutionOptions(si) {
+  const cur = si?.current ?? {}
+  const curPx = pixels(cur.res)
+  const list = [...(si?.caps?.resolutions ?? [])].sort((a, b) => pixels(b.res) - pixels(a.res))
+  return list.map((r) => {
+    const px = pixels(r.res)
+    let reason = null
+    if (!si?.candidate) reason = si?.why ?? 'this stream cannot be changed here'
+    else if (px < curPx) reason = 'smaller than now — the app does not lower resolution (do that on the NVR)'
+    else if (r.fps && cur.fps && r.fps < cur.fps) reason = `this size tops out at ${r.fps} fps, below the current ${cur.fps}`
+    return { res: r.res, px, selected: r.res === cur.res, disabled: Boolean(reason), reason }
+  })
+}
+
+/**
+ * A manual Recording-quality item for choosing `target` from the resolution dropdown: the same
+ * shape streamBox's S5 makes, with the bitrate cap raised in step with the extra pixels so each
+ * pixel keeps its share (planChange refuses a bigger picture at the same cap). null when `target`
+ * is the current size or cannot be offered.
+ */
+export function resolutionChange(si, target) {
+  const cur = si?.current ?? {}
+  if (!target || target === cur.res) return null
+  const opt = resolutionOptions(si).find((o) => o.res === target)
+  if (!opt || opt.disabled) return null
+  const list = [...(si?.qoiByRes?.[target] ?? si?.qoiList ?? [])].sort((a, b) => a - b)
+  const ratio = pixels(target) / (pixels(cur.res) || 1)
+  const need = list.find((v) => v >= cur.QoI * ratio) ?? list.at(-1) ?? cur.QoI
+  const QoI = Math.max(need, cur.QoI)
+  const change = QoI > cur.QoI ? { res: target, QoI } : { res: target }
+  const from = Object.fromEntries(Object.keys(change).map((k) => [k, cur[k]]))
+  const capNote = QoI > cur.QoI ? `; the bitrate cap rises with it (${cur.QoI} → ${QoI} kbit/s), so each pixel keeps its share` : ''
+  return {
+    id: 'Sres',
+    rule: 'manual',
+    change,
+    from,
+    why: `Set by hand: ${target} is ${ratio.toFixed(2)}× the pixels of ${cur.res}${capNote}.`,
+    downside: `The camera restarts its encoder (a few seconds without video), and recordings take about ${ratio.toFixed(1)}× the space at the cap. The NVR keeps fewer days of recordings (see the estimate before applying).`,
+    ticked: true,
+    encoderRestart: true
+  }
+}
+
 /** A short hash of the settings measured with (for the figures log). */
 export function settingsHash(settings) {
   const s = (settings?.fields ?? []).map((f) => `${f.path}=${f.value}`).join(';')
