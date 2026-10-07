@@ -27,6 +27,7 @@
 // window), in its one-at-a-time XML queue next to settings reads and clock checks. So one answer is
 // kept for CACHE_MS and shared by every admin asking meanwhile: this is for looking, not for polling.
 import { XML_HEADER, kid, kids, parseXml } from './xml.mjs'
+import { xmlDegraded, xmlGen, xmlOnline } from './xml-session.mjs'
 
 export const QUERY_NET_STATUS = 'queryNetStatus'
 export const CACHE_MS = 5000
@@ -160,7 +161,7 @@ export function readNetStatus(nvr, query, clock = Date.now) {
   if (p) return p
   p = (async () => {
     const camerasOnline = (nvr.channels ?? []).filter((c) => c.online && c.configured !== false).length
-    const xml = await query(nvr, QUERY_NET_STATUS, netStatusRequest(), 'network status', { gen: nvr.gen })
+    const xml = await query(nvr, QUERY_NET_STATUS, netStatusRequest(), 'network status', { gen: xmlGen(nvr) })
     const at = clock()
     const value = { ...parseNetStatus(xml, { camerasOnline }), at }
     cache.set(nvr, { value, until: at + CACHE_MS })
@@ -187,10 +188,10 @@ export async function handleNetStatus(method, pathname, { nvrs, admin, query, cl
   }
   const nvr = nvrs.get(id)
   if (!nvr) return [404, { error: 'Unknown NVR' }]
-  if (!nvr.online) return [409, { error: `${nvr.name} is offline` }]
+  if (!xmlOnline(nvr)) return [409, { error: `${nvr.name} is offline` }]
   // optional work waits while the NVR recovers or its calls are late (nvrs.mjs degraded): a 1.2 s read
   // would only queue behind them
-  if (nvr.degraded) return [409, { error: `${nvr.name} is busy or recovering; try again in a minute` }]
+  if (xmlDegraded(nvr)) return [409, { error: `${nvr.name} is busy or recovering; try again in a minute` }]
   try {
     return [200, await readNetStatus(nvr, query, clock)]
   } catch (e) {

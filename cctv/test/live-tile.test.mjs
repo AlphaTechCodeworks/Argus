@@ -454,6 +454,9 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   now += 13000
   deadSocket.onmessage({ data: new Uint8Array(40).buffer })
   check('undecoded packets do not reset retry backoff', frozen.attempts === 3)
+  // a healthy camera is one whose packets still arrive and decode: without the packet its socket has
+  // been silent for 13 s, which is the stall the tile is right to reconnect (STALL_RECONNECT_MS)
+  goodSocket.onmessage({ data: new Uint8Array(40).buffer })
   healthy.player.onFrame()
   frozen.updateStatus()
   healthy.updateStatus()

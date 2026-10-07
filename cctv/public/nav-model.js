@@ -24,8 +24,10 @@ export const NAV_GROUPS = Object.freeze([
     { id: 'settings', label: 'Settings', href: '/settings.html', icon: 'cog', cap: 'settings' },
     { id: 'storage', label: 'Storage', href: '/settings.html#storage', icon: 'disk', cap: 'storage' },
     { id: 'reports', label: 'Reports', href: '/reports.html', icon: 'chart', cap: 'reports' },
-    { id: 'cameras', label: 'Cameras', href: '/cameras.html', icon: 'list', cap: 'cameras' },
-    { id: 'register', label: 'NVR register', href: '/register.html', icon: 'list', cap: 'cameras' }
+    // fullAdmin: no capability reaches these two (the server answers a full admin only: the Cameras
+    // report, and the NVR register that shows stored NVR passwords)
+    { id: 'cameras', label: 'Cameras', href: '/cameras.html', icon: 'list', fullAdmin: true },
+    { id: 'register', label: 'NVR register', href: '/register.html', icon: 'list', fullAdmin: true }
   ] }
 ])
 
@@ -44,6 +46,7 @@ export function navFor({ admin = false, adminCaps = [], map = true } = {}) {
   // an item is shown when its capability (if any) is held, and, for the Map, when the Map is not
   // turned off for this person (a full admin always sees it)
   const mayItem = (i) =>
+    (!i.fullAdmin || admin === true) &&
     (!i.cap || (Array.isArray(i.cap) ? i.cap.some(has) : has(i.cap))) &&
     (!i.needsMap || admin === true || map !== false)
   return NAV_GROUPS.map((g) => {

@@ -897,6 +897,14 @@ const whoOf = (user) => ({ user, admin: auth.isAdmin(user) }) // as server.mjs b
   check('a partial admin MAY edit viewing grants, caps left as they are', okEdit.grants.live.join() === 'n9' && J(okEdit.adminCaps) === J(['settings']))
 
   const capOf = R.capForAdminPath
+  // the Cameras report and the NVR register (stored NVR passwords) map to no area: a full admin only
+  check('capForAdminPath: cameras report and NVR register -> no capability', ['/api/admin/cameras', '/api/admin/cameras.xlsx', '/api/admin/register', '/api/admin/register.xlsx'].every((x) => capOf(x) === null))
+  // server.mjs: each route a partial admin's `cameras` area can reach but must not use asks for a full admin itself
+  {
+    const srv = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+    const fullOnly = (marker) => { const i = srv.indexOf(marker); return i > 0 && srv.slice(i, i + 700).includes("if (!who.admin) return sendJson(res, 403") }
+    check('server.mjs: NVR power, bulk optimise, cap resolution, cameras report and register each require a full admin', ['if (powerRoute) {', 'if (streamOpt) {', 'if (streamCap) {', "if (pathname === '/api/admin/cameras') {", "if (pathname === '/api/admin/cameras.xlsx') {", "if (pathname === '/api/admin/register') {", "if (pathname === '/api/admin/register.xlsx') {"].every(fullOnly))
+  }
   check('capForAdminPath: users/rights -> users', capOf('/api/admin/users') === 'users' && capOf('/api/admin/rights') === 'users')
   check('capForAdminPath: NVR CRUD and camera config -> cameras', capOf('/api/admin/nvrs') === 'cameras' && capOf('/api/admin/nvrs/n1/channels/0/image') === 'cameras' && capOf('/api/admin/nvrs/n1/channels/0/stream') === 'cameras' && capOf('/api/admin/maps/Main') === 'cameras' && capOf('/api/admin/osd') === 'cameras')
   check('capForAdminPath: NVR monitoring/probes -> diagnostics', capOf('/api/admin/nvrs/n1/log') === 'diagnostics' && capOf('/api/admin/nvrs/n1/netstatus') === 'diagnostics' && capOf('/api/admin/nvrs/n1/alarm-outputs') === 'diagnostics' && capOf('/api/admin/vpn') === 'diagnostics')

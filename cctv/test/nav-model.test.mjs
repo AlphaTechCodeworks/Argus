@@ -29,6 +29,8 @@ check('a camera manager sees Sites only in Admin', ids(navFor({ admin: false, ad
 // inside that page is gated separately (mayEditAdmin, audit.js), not by hiding the link
 check('a deputy admin (all but users) sees every admin link (users-management is gated in-page)', (() => { const a = ids(navFor({ admin: false, adminCaps: ['cameras', 'settings', 'storage', 'reports', 'audit', 'reboot', 'diagnostics'] })); return ['audit', 'sites', 'settings', 'storage', 'reports'].every((i) => a.includes(i)) })())
 check('a deputy WITHOUT the audit cap does not see the Users & access link', !ids(navFor({ admin: false, adminCaps: ['cameras', 'settings', 'storage', 'reports', 'reboot', 'diagnostics'] })).includes('audit'))
+check('Cameras and NVR register are for a full admin only: no capability shows them', (() => { const a = ids(navFor({ admin: false, adminCaps: ['users', 'cameras', 'settings', 'storage', 'reports', 'audit', 'reboot', 'diagnostics'] })); return !a.includes('cameras') && !a.includes('register') })() && ['cameras', 'register'].every((i) => ids(navFor({ admin: true })).includes(i)))
+check('a viewer sees neither', !ids(navFor({})).includes('cameras') && !ids(navFor({})).includes('register'))
 check('the `users` capability shows Users & access', ids(navFor({ admin: false, adminCaps: ['users'] })).includes('audit'))
 check('the `audit` capability alone also shows Users & access (the log lives there)', ids(navFor({ admin: false, adminCaps: ['audit'] })).includes('audit'))
 check('a partial admin with no mapped area sees no Admin group', navFor({ admin: false, adminCaps: ['reboot'] }).some((g) => g.id === 'admin') === false)

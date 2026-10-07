@@ -324,5 +324,16 @@ const sys = (o = {}) => ({
   check('the shaped output carries no password field', !JSON.stringify(r).toLowerCase().includes('pass'), JSON.stringify(r).slice(0, 200))
 }
 
+// ---- an NVR whose settings go through the worker's login (the control login is refused)
+{
+  const [p] = renderHealth(nvrWith({ borrowing: true, lastContactMs: 800 })).nvrPanels
+  check('borrowing: the panel says online, as a warning', p.status.value === 'Online' && p.status.state === 'warn', JSON.stringify(p.status))
+  check('borrowing: and why', p.status.note === 'Settings are going through the video login; the NVR is refusing a second one.', p.status.note)
+  const [q] = renderHealth(nvrWith({ borrowing: false, lastContactMs: 800 })).nvrPanels
+  check('not borrowing: the panel is as before', q.status.value === 'Online' && q.status.state === 'ok')
+  const [r] = renderHealth(nvrWith({ borrowing: true, online: false, status: 'offline' })).nvrPanels
+  check('offline wins over borrowing', r.status.value === 'Offline' && r.status.state === 'bad')
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

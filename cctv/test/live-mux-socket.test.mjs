@@ -58,14 +58,23 @@ if (partial) check('a reader that stopped, one 48 MB frame queued: none of it ca
 if (partial) check('  what is pending stands still', pending > 0 && pending === channel.socketPending, `${pending} ${channel.socketPending}`)
 if (partial) check('  the system took part of the frame before it stopped (less pending than the frame)', pending < FRAME, `${pending}`)
 
-// it reads again, a little at a time (a slow link): the frame is still going out, and the number moves
+// it reads again, a little at a time (a slow link): the frame is still going out, and the number moves.
+// A little by the byte, not by the clock: SIP more each time, however long the client takes over it. It
+// was 5 ms of reading, and on the GitHub runner (kernel 6.17) 8 runs in 310 failed here (6 Oct): now and
+// then the system gave the client next to nothing in its 5 ms (455 KB, then 0 bytes, with 28 MB still
+// waiting at the sender) for a look or two before it came again by itself, and the number rightly stood
+// still. A look now comes after the reader has really taken something: none in 500 failed, and the slowest
+// look took 44 ms.
+const SIP = 8 * MB
 const seen = [pending]
 for (let i = 0; i < 6 && channel.writtenBytes === 0; i++) {
+  const upTo = client._socket.bytesRead + SIP
   client._socket.resume()
-  await sleep(5)
+  // (got: the whole frame has reached the client, and there is no more to read)
+  for (let j = 0; j < 2000 && client._socket.bytesRead < upTo && got === 0; j++) await sleep(1)
   client._socket.pause()
   await sleep(60)
-  // (only while the frame is still going: how much a reader takes in 5 ms is the machine's doing)
+  // (only while the frame is still going: the last of it may go in one of these)
   if (channel.writtenBytes === 0) seen.push(channel.socketPending)
 }
 const moved = seen.filter((p, i) => i > 0 && p < seen[i - 1]).length
@@ -77,8 +86,17 @@ client._socket.resume()
 for (let i = 0; i < 1000 && channel.writtenBytes === 0; i++) await sleep(20)
 check('read to the end: written, nothing pending', channel.writtenBytes > FRAME && channel.socketPending === 0 && channel.sharedBufferedAmount === 0, `${channel.writtenBytes} ${channel.socketPending}`)
 
+// Both ends closed, nothing left open, and the process ends by itself: no process.exit() here. After a
+// frame this size the heap is over what V8 allows itself before a collection, and a compilation on one of
+// its worker threads that needs memory then waits for the main thread to collect. process.exit() waits for
+// those threads and never collects, so each waits for the other: on the GitHub runner (node 24.21) 12 runs
+// in 40 stayed alive after "all passed" until timeout killed them (6 Oct, gdb: the main thread in
+// node::WorkerThreadsTaskRunner::Shutdown, two workers in Maglev's
+// CollectionBarrier::AwaitCollectionBackground). A program that ends by itself stops those jobs first:
+// none in 770 there.
+for (const ws of wss.clients) ws.terminate()
 client.terminate()
 wss.close()
 http.close()
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
-process.exit(failures ? 1 : 0)
+process.exitCode = failures ? 1 : 0

@@ -71,6 +71,7 @@ import {
   withNvrLock
 } from './nvr-xml.mjs'
 import { nvrs } from './nvrs.mjs'
+import { xmlDegraded, xmlGen, xmlOnline } from './xml-session.mjs'
 
 const QUERY_URL = 'queryChlVideoParam'
 const EDIT_URL = 'editChlVideoParam' // writes: only for an admin's confirmed change
@@ -725,7 +726,7 @@ async function readUntil(nvr, gen, read, shows, { poll = false, lock = null } = 
         last = await read()
         if (shows(last)) break
       } catch {
-        if (nvr.gen !== gen || !nvr.online) break
+        if (xmlGen(nvr) !== gen || !xmlOnline(nvr)) break
       }
     }
     return last
@@ -743,7 +744,7 @@ async function readUntil(nvr, gen, read, shows, { poll = false, lock = null } = 
       last = x
       if (failed && shows(x)) return x
     } catch {
-      if (nvr.gen !== gen || !nvr.online) break
+      if (xmlGen(nvr) !== gen || !xmlOnline(nvr)) break
       failed = true
       last = null // offline since the last good read: that one is out of date
     }
@@ -785,7 +786,7 @@ async function change(ctx, target, opts) {
     const pd = Object.fromEntries(Object.entries(diff).filter(([p]) => partOf(groupOf(p)) === part))
     return Object.keys(pd).length ? { part, pd, xml: buildEdit(chlId, s, pd, part, { rebootPrompt: opts.rebootPrompt !== false }) } : null
   }).filter(Boolean)
-  if (nvr.degraded || nvr.gen !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
+  if (xmlDegraded(nvr) || xmlGen(nvr) !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
   const seq = newSeq()
   const from = Object.fromEntries(Object.keys(diff).map((p) => [p, fieldOf(s, p).value]))
   const ack = list.map((i) => i.key)
@@ -1132,7 +1133,7 @@ async function writeSchedule(ctx, cur, next, { action, undoes, lock, poll = fals
   checkSchedule(sched, next)
   const from = { program: sched.program, dayTime: sched.dayTime, nightTime: sched.nightTime }
   if (['program', 'dayTime', 'nightTime'].every((k) => same(from[k], next[k]))) return { settings: cur, result: { status: 'done', message: 'Nothing to change' } }
-  if (nvr.degraded || nvr.gen !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
+  if (xmlDegraded(nvr) || xmlGen(nvr) !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
   // a fixed program is written with its own profile, as the page does (ds:229-236)
   const cfgFile = cur.profiles.includes(next.program) ? next.program : cur.profile
   const seq = newSeq()
@@ -1328,7 +1329,7 @@ export async function handleImaging(method, nvrId, ch, params, readJson, user, s
   try {
     const { nvr, chlId, name } = cameraOf(nvrs, nvrId, ch)
     requireOnline(nvr)
-    const ctx = { nvr, ch, chlId, name, gen: nvr.gen, user, device: deviceOf(nvr), active: null }
+    const ctx = { nvr, ch, chlId, name, gen: xmlGen(nvr), user, device: deviceOf(nvr), active: null }
     if (sub === 'profiles') return await handleProfiles(method, ctx, readJson)
     if (sub === 'schedule') return await handleSchedule(method, ctx, readJson)
     if (method === 'GET') {

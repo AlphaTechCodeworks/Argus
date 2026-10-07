@@ -9,6 +9,7 @@
 // wired to it -- a siren, a gate, a light -- so that waits until the owner has said which outputs are
 // safe to use from here; the site's floodlight is worked by hand only.
 import { XML_HEADER, kid, kids, parseXml } from './xml.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 export const GET_ALARM_OUTS = 'getAlarmOutStatus'
 const text = (n) => (n?.text ?? '').trim()
@@ -56,7 +57,7 @@ export async function handleRelays(method, pathname, { nvrs, admin, query }) {
   if (!admin) return [403, { error: 'Admins only' }]
   if (method !== 'GET') return [405, { error: 'Reading only: switching outputs is not set up yet' }]
   const ask = async (nvr) => {
-    if (!nvr.online) return { nvr: nvr.id, name: nvr.name, error: `${nvr.name} is offline` }
+    if (!xmlOnline(nvr)) return { nvr: nvr.id, name: nvr.name, error: `${nvr.name} is offline` }
     try {
       return { nvr: nvr.id, name: nvr.name, outputs: await readAlarmOuts(nvr, query) }
     } catch (e) {

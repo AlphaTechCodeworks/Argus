@@ -145,7 +145,10 @@ function nvrPanel(n, mine, nowMs) {
         }
       : n.cooling
         ? { value: 'Online, slow', state: 'warn', note: 'calls to it are overdue; new streams and playbacks are held back' }
-        : { value: 'Online', state: 'ok', note: `last contact ${ago(n.lastContactMs)}` }
+        : n.borrowing
+          ? // video and settings work; playback from the NVR and searches of it do not, until it lets a second login in
+            { value: 'Online', state: 'warn', note: 'Settings are going through the video login; the NVR is refusing a second one.' }
+          : { value: 'Online', state: 'ok', note: `last contact ${ago(n.lastContactMs)}` }
 
   // Disks. An NVR we could not ask says so; an NVR that answered "no disks" is a real fault, and
   // is exactly the silent failure this panel exists to catch.

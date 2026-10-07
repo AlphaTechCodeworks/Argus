@@ -58,6 +58,7 @@ import {
 import { nvrs } from './nvrs.mjs'
 import { chOfGuid, parseRecStatus } from './nvr-online.mjs'
 import { normEnct, qualityList, recommendedRange } from './substreams.mjs'
+import { xmlDegraded, xmlGen } from './xml-session.mjs'
 
 const QUERY_URL = 'queryNodeEncodeInfo'
 const EDIT_URL = 'editNodeEncodeInfo' // writes: only an admin's confirmed change
@@ -154,7 +155,7 @@ async function readChannel(nvr, chlId, gen) {
     const item = info.status === 'success' ? info.items.find((i) => sameId(i.id, chlId)) : null
     if (item) return item
   } catch (e) {
-    if (nvr.gen !== gen) throw e
+    if (xmlGen(nvr) !== gen) throw e
   }
   const item = (await readAll(nvr, gen, true)).items.find((i) => sameId(i.id, chlId))
   if (!item) throw new HttpError(502, 'The NVR lists no main stream for this camera')
@@ -192,7 +193,7 @@ async function readSystem(nvr, gen) {
       const a = parseAnswer(await transparent(nvr, url, `${XML_HEADER}</request>`, url, { gen }))
       return a.status === 'success' ? kid(a.response, 'content') : null
     } catch (e) {
-      if (nvr.gen !== gen) throw e
+      if (xmlGen(nvr) !== gen) throw e
       return null
     }
   }
@@ -345,7 +346,7 @@ async function storageEstimate(nvr, gen, item, sys, next) {
     try {
       return parseRemain(await transparent(nvr, 'queryRemainRecTime', buildRemain(all.items, replace), 'storage estimate', { gen }))
     } catch (e) {
-      if (nvr.gen !== gen) throw e
+      if (xmlGen(nvr) !== gen) throw e
       return { ok: false, errorCode: e.message }
     }
   }
@@ -511,7 +512,7 @@ async function apply(ctx, body) {
   const token = tokenOf([device, chlId, 'stream', action, sortObj(pick(cur)), sortObj(pick(next)), list.map((i) => [i.key, i.text])])
   const ack = Array.isArray(body.ack) ? body.ack : []
   if (body.ackToken !== token || !list.every((i) => ack.includes(i.key))) throw new HttpError(409, 'This change needs your confirmation', { needsAck: list, ackToken: token })
-  if (nvr.degraded || nvr.gen !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
+  if (xmlDegraded(nvr) || xmlGen(nvr) !== gen) throw new HttpError(409, `${nvr.name} is busy or reconnected; nothing was sent`)
   return writeChange(ctx, item, cur, next, list, { action, undoes })
 }
 
@@ -602,7 +603,7 @@ async function optimiseApply(ctx) {
   const all = await readAll(nvr, gen, true)
   const results = []
   for (const listed of all.items) {
-    if (nvr.gen !== gen || nvr.stopped) break
+    if (xmlGen(nvr) !== gen || nvr.stopped) break
     const ch = chOfGuid(listed.id)
     const online = ch === null ? true : nvr.channels.find((c) => c.ch === ch)?.online !== false
     const plan0 = optimisePlan(listed, sys, online)
@@ -644,7 +645,7 @@ export async function handleStreamOptimise(method, nvrId, readJson, user) {
     requireOnline(nvr)
     const body = await readJson()
     if (!isPlainObject(body)) throw new HttpError(400, 'The request must be a JSON object')
-    const gen = nvr.gen
+    const gen = xmlGen(nvr)
     if (body.confirm !== true) return [200, { nvr: nvr.id, name: nvr.name, dryRun: true, cameras: await optimiseList(nvr, gen) }]
     const ctx = { nvr, gen, user, device: deviceOf(nvr) }
     const results = await withNvrLock(nvr, 'H.265 + VBR optimise', () => optimiseApply(ctx))
@@ -708,7 +709,7 @@ async function capApply(ctx, maxPx) {
   const all = await readAll(nvr, gen, true)
   const results = []
   for (const listed of all.items) {
-    if (nvr.gen !== gen || nvr.stopped) break
+    if (xmlGen(nvr) !== gen || nvr.stopped) break
     const ch = chOfGuid(listed.id)
     const online = ch === null ? true : nvr.channels.find((c) => c.ch === ch)?.online !== false
     const plan0 = capPlan(listed, sys, online, maxPx)
@@ -752,7 +753,7 @@ export async function handleStreamCapResolution(method, nvrId, readJson, user) {
     if (!isPlainObject(body)) throw new HttpError(400, 'The request must be a JSON object')
     const maxMp = Number.isFinite(Number(body.maxMp)) && Number(body.maxMp) >= 1 && Number(body.maxMp) <= 12 ? Number(body.maxMp) : 4
     const maxPx = Math.round(maxMp * 1e6)
-    const gen = nvr.gen
+    const gen = xmlGen(nvr)
     if (body.confirm !== true) return [200, { nvr: nvr.id, name: nvr.name, maxMp, dryRun: true, cameras: await capList(nvr, gen, maxPx) }]
     const ctx = { nvr, gen, user, device: deviceOf(nvr) }
     const results = await withNvrLock(nvr, `cap resolution at ${maxMp} MP`, () => capApply(ctx, maxPx))
@@ -771,7 +772,7 @@ export async function handleStreams(what, method, nvrId, ch, params, readJson, u
     const { nvr, chlId, name } = cameraOf(nvrs, nvrId, ch)
     requireOnline(nvr)
     const online = nvr.channels.find((c) => c.ch === ch)?.online !== false
-    const ctx = { nvr, ch, chlId, name, gen: nvr.gen, user, device: deviceOf(nvr), online }
+    const ctx = { nvr, ch, chlId, name, gen: xmlGen(nvr), user, device: deviceOf(nvr), online }
     if (what === 'estimate') {
       if (method !== 'POST') return [405, { error: 'Method not allowed' }]
       const body = await readJson()
@@ -789,7 +790,7 @@ export async function handleStreams(what, method, nvrId, ch, params, readJson, u
         // queryNodeEncodeInfo is heavy (~500 KB/channel) and times out over P2P. Rather than show
         // nothing, fall back to the resolution the recorder reports (queryRecStatus, ~fast), marked
         // as read-only. The full, editable settings still need the NVR on a fatter link.
-        if (nvr.gen !== ctx.gen) throw e
+        if (xmlGen(nvr) !== ctx.gen) throw e
         const partial = await recStatusResolution(nvr, ch, ctx.gen)
         if (partial) return [200, { stream: partial }]
         throw e

@@ -32,6 +32,7 @@ import { DATA_DIR } from './auth.mjs'
 import { HttpError, cameraOf, chlIdOf, transparent, withNvrLock } from './nvr-xml.mjs'
 // the documents and the rules about them live apart so they can be tested without the SDK
 import { allApplied, buildEdit, checkWanted, osdRequest, parseOsd, probeShapes } from './osd-doc.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 const QUERY_URL = 'queryIPChlORChlOSD'
 const EDIT_URL = 'editIPChlORChlOSD'
@@ -122,7 +123,7 @@ export async function handleOsd(method, pathname, search, readJson, nvrs, who, q
   } catch (e) {
     return [e.status ?? 404, { error: e.message }]
   }
-  if (!nvr.online) return [409, { error: `${nvr.name} is offline` }]
+  if (!xmlOnline(nvr)) return [409, { error: `${nvr.name} is offline` }]
 
   try {
     if (method === 'GET') {

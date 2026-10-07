@@ -60,6 +60,12 @@
 //   bytes 6-7   reserved
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
+
+// First, before any other module is loaded: from here on a promise rejection nobody catches is
+// logged and counted (/healthz: errors), and no longer ends this process and with it every viewer's
+// socket, a running export and every NVR worker (2026-10: a playback command of 'null' threw inside
+// an async handler nobody awaited; process-guard.mjs). This process only: a worker still ends on one.
+import './process-guard-server.mjs'
 import { clientIpOf, localProbe, securityHeaders } from './security.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleNetStatus } from './nvr-netstatus.mjs'
@@ -146,8 +152,10 @@ import { detectEncoder } from './transcode.mjs'
 import { httpsOptions } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
 import { loopWorstMs } from './loop-lag.mjs'
+import { processErrors } from './process-guard.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
+import { xmlOnline } from './xml-session.mjs'
 
 const {
   HTTP_PORT = '8080',
@@ -396,12 +404,14 @@ const alerts = startAlerts({
       cooling: nvrCooling(n.id),
       lastContactMs: lastContactOf(n.id),
       clockSkewMs: freshSkewMs(n),
-      refusalsLast10Min: refusalsOf(n)
+      refusalsLast10Min: refusalsOf(n),
+      borrowing: n.borrowing
     })),
   // Only slots that actually hold a camera: an NVR reports all 32 of its channels whether or not
-  // anything is plugged into them, and empty slots are permanently "offline".
+  // anything is plugged into them, and empty slots are permanently "offline". By either login, as
+  // listNvrs above: an NVR counted online on its video login must not have every camera read offline.
   listCameras: () =>
-    allCameras()
+    allCameras({ anyLogin: true })
       .filter((c) => c.configured !== false)
       .map((c) => ({
         nvrId: c.nvr,
@@ -595,6 +605,10 @@ const handleRequest = async (req, res) => {
       // the longest pause of this process's event loop in the last minute, in ms (loop-lag.mjs): the
       // live video, pages and alarms all waited that long; "[loop] blocked" lines have the details
       loop: { worstMs: loopWorstMs() },
+      // promise rejections nobody caught in this process since it started, which no longer end it
+      // (process-guard.mjs): how many, and when and what the last one was. Each is a job that
+      // stopped part-way and a stack in the journal; `ok` stays as it is, nothing restarts for one
+      errors: processErrors(),
       // network shares as last checked (never checked here): the outside watcher remounts one that
       // stopped answering, which the server itself, no longer frozen by it, would otherwise hide
       shares: listLocations().filter((l) => l.type === 'network').map((l) => ({ path: l.path, ok: l.health.ok, reason: l.health.reason }))
@@ -875,7 +889,7 @@ const handleRequest = async (req, res) => {
       }
       const nvr = nvrs.get(id)
       if (!nvr) return sendJson(res, 404, { error: 'No such NVR' })
-      if (!nvr.online) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
+      if (!xmlOnline(nvr)) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
       try {
         if (url.searchParams.get('discover')) {
           // ?cmds=a,b,c asks this NVR about command names we are still hunting for -- the disk
@@ -900,6 +914,9 @@ const handleRequest = async (req, res) => {
     const powerRoute = /^\/api\/admin\/nvrs\/([^/]+)\/power$/.exec(pathname)
     if (powerRoute) {
       if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' }, { allow: 'POST' })
+      // a full admin only: the gate above lets a partial admin with the `cameras` area reach
+      // /api/admin/nvrs/:id/..., and powering an NVR off is not camera configuration
+      if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
       let id
       try {
         id = decodeURIComponent(powerRoute[1])
@@ -912,16 +929,22 @@ const handleRequest = async (req, res) => {
       const action = body.action === 'shutdown' ? 'shutdown' : body.action === 'reboot' ? 'reboot' : null
       if (!action) return sendJson(res, 400, { error: 'action must be "reboot" or "shutdown"' })
       if (body.confirm !== true) return sendJson(res, 400, { error: `${action} needs confirm: true` })
-      if (!nvr.online || nvr.userId < 0) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
+      if (!xmlOnline(nvr)) return sendJson(res, 409, { error: `${nvr.name} is ${nvr.status}; try again when it is online` })
       let ok = false
       let err = null
+      let busy = null // power() turned it away with nothing sent (HttpError 503): its extra fields (retryAfterS)
       try {
         ok = await nvrPower(nvr, action)
       } catch (e) {
         err = e.message
+        if (e?.status === 503) busy = e.extra ?? {}
       }
       audit(auth.DATA_DIR, { user: who.user, action: `nvr-${action}`, target: id, ok, detail: err ?? undefined })
       console.log(`[admin] NVR ${action} ${id} (${nvr.name}) by ${who.user}: ${err ? `failed: ${err}` : ok ? 'accepted' : 'refused'}`)
+      // Nothing was sent: an earlier call to this NVR is still inside the SDK (nvr-xml.mjs xmlInside).
+      // Answered as the other busy refusals are (503 with retryAfterS, see playback.mjs), not as a
+      // failed reboot: the admin can simply try again.
+      if (busy) return sendJson(res, 503, { error: err, ...busy }, busy.retryAfterS > 0 ? { 'retry-after': String(busy.retryAfterS) } : {})
       if (err) return sendJson(res, 502, { error: `Could not ${action} ${nvr.name}: ${err}` })
       if (!ok) return sendJson(res, 502, { error: `${nvr.name} did not accept the ${action}` })
       return sendJson(res, 200, { id, action, message: `${nvr.name} is ${action === 'reboot' ? 'rebooting' : 'shutting down'} — it will drop off for a minute or two` })
@@ -1352,10 +1375,18 @@ if (Object.keys(auth.loadUsers()).length === 0) {
 }
 
 const shutdown = async () => {
-  // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
-  // (9 s: the NVR workers get 8 s to close their segments and log out; the unit allows 15)
-  await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 9000))])
-  process.kill(process.pid, 'SIGKILL')
+  try {
+    // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
+    // (9 s: the NVR workers get 8 s to close their segments and log out; the unit allows 15)
+    await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 9000))])
+  } catch (e) {
+    console.error(`[server] stopping failed part-way: ${e?.stack ?? e}`)
+  } finally {
+    // whatever became of the logout. Nobody waits for this function: a rejection in it used to end
+    // the process by itself, and under process-guard.mjs would be logged and the process left
+    // running until systemd's 15 s were up
+    process.kill(process.pid, 'SIGKILL')
+  }
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
