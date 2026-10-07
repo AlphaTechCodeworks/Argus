@@ -146,6 +146,45 @@ check('and memory is freed', !existsSync(join(dir, 'n1', '0', '2026-09-26', '13'
     check('trimSpool drops the in-dir file but never the one outside the spool', r.removed === 1 && !existsSync(inside) && existsSync(outside) && ix.has(outside) && readFileSync(outside, 'utf8') === 'keep me', JSON.stringify(r))
   }
 
+  // Rows of this location outside the spool folder (CCTV_RAM_SPOOL_DIR changed while rows of the old folder
+  // remained), over the cap: trimSpool asked for the same oldest 50 for ever, on the main thread (audit of
+  // 2026-10-07: hung). An index that throws when asked too often, so a loop that does not end fails here.
+  const bounded = (ix, most = 50) => {
+    let asked = 0
+    return { ix: { ...ix, oldest: (...a) => { if (++asked > most) throw new Error('asked for the oldest rows over and over') ; return ix.oldest(...a) } }, asked: () => asked }
+  }
+  {
+    const ix = mkIndex()
+    const there = Array.from({ length: 60 }, (_, i) => join(base, `stray-${i}.h265`))
+    for (const [i, p] of there.entries()) {
+      writeFileSync(p, 'not ours')
+      ix.rows.set(p, { path: p, loc: SPOOL_ID, startMs: -1000 + i, bytes: 100 })
+    }
+    const b = bounded(ix)
+    const lines = []
+    const r = await trimSpool({ index: b.ix, cap: 1000, dir, freeOf: () => MIN_FREE_BYTES * 4, log: (l) => lines.push(l) }) // 6000 held
+    check('trimSpool: only rows outside the spool folder, over the cap: it ends, nothing removed, no file touched', r.removed === 0 && b.asked() <= 3 && there.every((p) => existsSync(p) && ix.has(p)) && !lines.some((l) => /failed/.test(l)), `${b.asked()} looks, ${JSON.stringify(lines)}`)
+    // 60 such rows older than the footage in memory: the footage behind them is still dropped to make room
+    const inside = join(dir, 'n1', '0', 'behind.h265')
+    mkdirSync(join(dir, 'n1', '0'), { recursive: true })
+    writeFileSync(inside, 'drop me')
+    ix.rows.set(inside, { path: inside, loc: SPOOL_ID, startMs: 0, bytes: 900 })
+    const b2 = bounded(ix)
+    const r2 = await trimSpool({ index: b2.ix, cap: 1000, dir, freeOf: () => MIN_FREE_BYTES * 4 })
+    check('... and the footage in memory behind 60 of them is still dropped (the walk goes past them)', r2.removed === 1 && r2.bytes === 900 && !existsSync(inside) && !ix.has(inside) && there.every((p) => existsSync(p) && ix.has(p)), `${JSON.stringify(r2)}, ${b2.asked()} looks`)
+    // their files gone (the old folder was cleared): the rows point at nothing, and are forgotten, oldest
+    // first, as far as making room goes (6,000 counted, under 850 wanted: 52 rows of 100)
+    for (const p of there.slice(0, 55)) rmSync(p)
+    const b3 = bounded(ix)
+    const lines3 = []
+    const r3 = await trimSpool({ index: b3.ix, cap: 1000, dir, freeOf: () => MIN_FREE_BYTES * 4, log: (l) => lines3.push(l) })
+    check('trimSpool: a row outside the spool folder whose file is gone is forgotten (the row only); one whose file is there stays', r3.removed === 0 && there.slice(0, 52).every((p) => !ix.has(p)) && there.slice(55).every((p) => ix.has(p) && existsSync(p)) && ix.locationUse(SPOOL_ID).bytes === 800 && lines3.some((l) => /forgot 52 index rows/.test(l)), `${JSON.stringify(r3)} ${JSON.stringify(lines3)}`)
+    // and drainSpool does the same with those it comes to (the 3 left of those, and one more)
+    rmSync(there[55])
+    const d = await drainSpool({ index: ix, target: drive, dir })
+    check('drainSpool: a row outside the spool folder whose file is gone is forgotten; the others stay, nothing copied', d.moved === 0 && there.slice(52, 56).every((p) => !ix.has(p)) && there.slice(56).every((p) => ix.has(p) && existsSync(p)) && d.left === 4, JSON.stringify(d))
+  }
+
   // drainSpool must never copy or unlink a row whose path escapes the spool
   {
     const ix = mkIndex()

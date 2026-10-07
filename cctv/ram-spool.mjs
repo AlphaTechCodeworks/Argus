@@ -74,7 +74,9 @@ export function freeBytesOf(dir) {
 
 /**
  * Makes room: deletes the oldest footage in memory until it holds under TRIM_TO of the cap. Never
- * throws. Only ever touches files under the spool folder.
+ * throws. Only ever touches files under the spool folder. A row of this location whose file is somewhere
+ * else (the spool folder setting was changed while rows of the old folder remained) is forgotten when its
+ * file is gone, and passed over when it is there: its file is not ours to delete.
  * @returns {Promise<{ removed: number, bytes: number }>}
  */
 export async function trimSpool({ index, cap = spoolCapBytes(), dir = SPOOL_DIR, log = () => {}, freeOf = freeBytesOf }) {
@@ -87,12 +89,26 @@ export async function trimSpool({ index, cap = spoolCapBytes(), dir = SPOOL_DIR,
     const short = free !== null && free < MIN_FREE_BYTES ? MIN_FREE_BYTES - free : 0
     if (!short && used < cap * TRIM_AT) return { removed, bytes }
     const target = Math.min(cap * TRIM_TO, Math.max(0, used - short))
+    // Rows passed over (outside the spool folder, their file still there) are not asked for again: the same
+    // oldest 50 came back every time, nothing was removed, and the loop never ended, on the main thread
+    // (audit of 2026-10-07). Each pass now removes a row or passes one over for good, or it is the last.
+    const passed = new Set()
+    let forgotten = 0
     while (used > target) {
-      const rows = index.oldest(50, { loc: SPOOL_ID })
+      const rows = index.oldest(50 + passed.size, { loc: SPOOL_ID }).filter((r) => !passed.has(r.path))
       if (!rows.length) break
       for (const row of rows) {
         if (used <= target) break
-        if (relative(dir, row.path).startsWith('..')) continue
+        if (relative(dir, row.path).startsWith('..')) {
+          if (existsSync(row.path)) passed.add(row.path)
+          else {
+            // nothing is there: the row held no memory, and counted against the cap
+            index.remove(row.path)
+            used -= row.bytes
+            forgotten++
+          }
+          continue
+        }
         index.remove(row.path)
         await unlink(row.path).catch(() => {})
         await unlink(`${row.path}.idx`).catch(() => {})
@@ -101,6 +117,7 @@ export async function trimSpool({ index, cap = spoolCapBytes(), dir = SPOOL_DIR,
         removed++
       }
     }
+    if (forgotten) log(`[spool] forgot ${forgotten} index rows of files that are gone (outside the outage buffer's folder ${dir})`)
   } catch (e) {
     log(`[spool] making room failed: ${e.message}`)
   }
@@ -118,7 +135,12 @@ export async function drainSpool({ index, target, dir = SPOOL_DIR, batch = DRAIN
   try {
     for (const row of index.oldest(batch, { loc: SPOOL_ID })) {
       const rel = relative(dir, row.path)
-      if (rel.startsWith('..')) continue // not ours: never touched
+      if (rel.startsWith('..')) {
+        // not ours: never touched. Gone, its row points at nothing and still counts against the cap
+        // (trimSpool): the row goes
+        if (!existsSync(row.path)) index.remove(row.path)
+        continue
+      }
       // gone from memory (a restart: systemd clears /dev/shm for this service): nothing to copy,
       // and a row pointing at nothing would stop every later copy at this one
       if (!existsSync(row.path)) {
