@@ -138,6 +138,9 @@ export function startWarmStreams({ cameras, orders, streamOf, roomy = null, log 
     } catch (e) {
       return log(`[warm] ${e.message}`)
     }
+    // a stream that has ended (its NVR was removed, or edited and made again under the same id) keeps
+    // nothing warm: forgotten, so the camera is warmed again on the stream it has now
+    for (const [k, h] of held) if (h.stream.closed === true || h.stream.stopped === true) held.delete(k)
     const released = new Map() // NVR id -> streams let go in this pass
     for (const [k, h] of held) {
       if (want.has(k)) continue

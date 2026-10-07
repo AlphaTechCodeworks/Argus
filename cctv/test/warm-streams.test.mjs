@@ -153,6 +153,22 @@ const fake = () => ({ clients: new Set(), add(v) { this.clients.add(v) }, remove
     sizes.push(w.held.size)
   }
   check(`dropping 16 keys releases ${RELEASE_PER_RUN} per run`, RELEASE_PER_RUN === 2 && sizes.join() === '14,12,10,8,6,4,2,0,0', sizes.join())
+}{
+  // an NVR edited and made again under the same id: its old streams are closed, and held nothing
+  // warm for ever after (the key stayed "held", so the camera's new stream was never asked for)
+  let made = []
+  const fake = () => { const s = { clients: new Set(), closed: false, add(w) { this.clients.add(w) }, remove(w) { this.clients.delete(w) } }; made.push(s); return s }
+  const cams = Array.from({ length: 4 }, (_, i) => ({ nvr: 'e', ch: i, online: true }))
+  const w = startWarmStreams({ cameras: () => cams, orders: () => ({}), streamOf: fake, roomy: () => true, log: () => {}, everyMs: 1e9, now: () => 0, firstRunMs: 0, outFile: null })
+  w.run()
+  const old = made
+  made = []
+  for (const s of old) { s.closed = true; s.clients.clear() } // stream-hub.mjs closeAll
+  w.run()
+  check('closed streams are forgotten and their cameras warmed again on the new ones', old.length === 4 && made.length === 4 && w.held.size === 4 && [...w.held.values()].every((h) => made.includes(h.stream) && h.stream.clients.has(h.viewer)), made.length + ' made, ' + w.held.size + ' held')
+  w.run()
+  check('... once: streams that run are left alone', made.length === 4, String(made.length))
 }
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

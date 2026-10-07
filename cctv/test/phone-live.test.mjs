@@ -666,5 +666,38 @@ check('  a trickle at 0.8 fps is one (1250 ms steps); two steps, one a hole: the
   check(`  one that hands back nothing: reset ${CATCH_UP_MS / 1000} s after the first live frame and ${LAG_HOLD_MS / 1000} s over, not before`, hung.resets >= 1 && hung.resetAt >= CATCH_UP_MS + LAG_HOLD_MS && hung.resetAt <= CATCH_UP_MS + LAG_HOLD_MS + 100, `resets ${hung.resets} at ${hung.resetAt} ms`)
 }
 
+// ---- an NVR's connection settings are edited: nvrs.mjs retires the Nvr (its hub's closeAll) and
+// makes a new one under the same id. A conversion's tap has no close, so the old conversion stayed
+// in the map under the same key: a phone that reconnected got its old replay and nothing after.
+{
+  const { StreamHub } = await import('../stream-hub.mjs')
+  const sock = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, got: [], closed: null, handlers: {}, send(b) { this.got.push(b) }, on(e, f) { this.handlers[e] = f }, close(c, r) { this.closed = c + ' ' + r } })
+  const make = (o) => ({ push(ts, k) { o.onFrame(ts, k, Buffer.from([1])) }, close() {} })
+  const feed = (hub, n, from = 0) => { for (let i = from; i < from + n; i++) hub.onMessage({ t: 'frame', key: '2:1', buf: encodeFrame(Buffer.from([0, 0, 1, 1]), i % 30 === 0, 0, (i * 1000) / 30), isKey: i % 30 === 0 }) }
+  const pool = new TranscodePool(4)
+  const live = new PhoneLive({ pool, makeTranscoder: make, log: () => {} })
+  const hub1 = new StreamHub('n1', () => {})
+  const phone = sock()
+  live.attach('n1/2/1', hub1.getStream(2, 1), 1, phone, { camera: 'n1/3' })
+  feed(hub1, 60)
+  const first = live.streams.get('n1/2/1')
+  check('edited NVR: a phone plays before the edit', phone.got.length > 0 && !first.closed)
+  hub1.closeAll()
+  const hub2 = new StreamHub('n1', () => {})
+  const phone2 = sock()
+  const ok = live.attach('n1/2/1', hub2.getStream(2, 1), 1, phone2, { camera: 'n1/3' })
+  const second = live.streams.get('n1/2/1')
+  check('edited NVR: the next phone gets a conversion of the new stream, the old one closed', ok === true && first.closed && second !== first && second.source === hub2.getStream(2, 1) && hub2.getStream(2, 1).clients.size === 1)
+  check('edited NVR: ... the viewer of the old one is dropped to reconnect, and its place given back', phone.closed === '1011 stream ended' && pool.active === 1, phone.closed + ', ' + pool.active + ' running')
+  phone.handlers.close?.()
+  const before = phone2.got.length
+  feed(hub2, 120, 60)
+  check('edited NVR: ... and the new one plays', phone2.got.length > before && live.streams.get('n1/2/1') === second, String(phone2.got.length - before))
+  // the same stream handed in again joins the conversion that runs
+  const phone3 = sock()
+  live.attach('n1/2/1', hub2.getStream(2, 1), 1, phone3, { camera: 'n1/3' })
+  check('the same stream again: the running conversion is joined, not made again', live.streams.get('n1/2/1') === second && !second.closed && pool.active === 1)
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

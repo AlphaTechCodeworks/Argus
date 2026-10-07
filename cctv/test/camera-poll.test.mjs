@@ -102,6 +102,26 @@ check('liveOnline follows the worker', nvr.liveOnline === true)
   stats = was.stats
   nvr.worker.spawnedAt = was.spawnedAt
 }
+// The control login has died under a polling worker. Its keepalive read comes once in 5 minutes, and
+// a read not answered used to count as that turn's keepalive: the 4 failures a relogin takes were 15
+// to 20 minutes apart in all. One not answered is asked again at the next turn.
+{
+  const { NET_SDK } = await import('../sdk.mjs')
+  const real = NET_SDK.GetDeviceIPCInfo.async
+  let dead = true
+  NET_SDK.GetDeviceIPCInfo.async = (...args) => real(...args.slice(0, -1), (err, ok) => args.at(-1)(err, dead ? false : ok))
+  const logins = () => globalThis.__fakeSdk.calls('Login').length
+  const from = { polls: polls(), logins: logins() }
+  nvr.lastOwnPoll = 0 // the keepalive is due (5 minutes since the last read)
+  check('keepalive not answered: asked again at the next turns, not 5 minutes later', await until(() => polls() >= from.polls + 3, 3000), `${polls() - from.polls} reads`)
+  check('keepalive not answered 4 times: the control login is made again', await until(() => logins() > from.logins, 5000), `${polls() - from.polls} reads, ${logins() - from.logins} logins`)
+  dead = false
+  check('... and is online again', await until(() => nvr.online && nvr.lastOwnPoll > 0, 8000), nvr.status)
+  const quiet = polls()
+  await sleep(1200)
+  check('answered again: back to the slow keepalive', polls() === quiet, `${polls() - quiet} reads`)
+  NET_SDK.GetDeviceIPCInfo.async = real
+}
 stats = { ...stats, status: 'offline' }
 nvr.workerStats(stats)
 check('liveOnline: worker says offline', nvr.liveOnline === false)

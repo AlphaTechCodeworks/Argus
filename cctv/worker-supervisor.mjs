@@ -79,11 +79,12 @@ export function linkResetWatch(send, now = Date.now) {
 /**
  * @param {string} nvrId
  * @param {{ env?: object, stdio?: any, onStats?: (stats: object) => void, onRecording?: (m: object) => void,
- *           onReady?: (r: { again: boolean, spawnedAt: number }) => void }} [opts]
+ *           onReady?: (r: { again: boolean, spawnedAt: number }) => void, p2p?: boolean }} [opts]
  *   stdio: for tests; onRecording: the worker's segopen / segment / recgap messages (recorder.mjs);
- *   onReady: each worker process that has started (the first and every restart)
+ *   onReady: each worker process that has started (the first and every restart);
+ *   p2p: the NVR is reached by serial number (stream-hub.mjs freeIdleSubs)
  */
-export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onReady } = {}) {
+export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onReady, p2p = false } = {}) {
   let recSettings = null // the last settings message: sent again to every new worker
   let child = null
   let state = 'starting' // starting | ready | restarting
@@ -95,7 +96,7 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
   let stopped = null // the stop() promise
   const hub = new StreamHub(nvrId, (m) => {
     if (child?.connected) child.send(m)
-  })
+  }, { p2p })
   // commands the main process sends on this worker's NVR login and waits on (worker-requests.mjs)
   const requests = makeRequests({
     send: (m) => {

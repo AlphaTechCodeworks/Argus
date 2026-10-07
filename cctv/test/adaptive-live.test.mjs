@@ -1104,6 +1104,36 @@ function onPage(key, n = 2) {
   look(5_900_000)
   check('  ... it writes again: stepped at that look, on the budget', h.level === 1 && logs.some((x) => x.includes('full -> 15 (the uplink budget is used up;')), logs.join(' | '))
 }
+{
+  // ... and the one sent the most may have no step left to take (the lowest level already): only it
+  // was asked, so nobody went down and the uplink stayed over its budget. The next one down is asked.
+  const clock = { now: T }
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 100_000, now: () => clock.now })
+  const heavy = fakePage()
+  const light = fakePage()
+  const hSrc = fakeSource('heavy')
+  const lSrc = fakeSource('light')
+  live.attach('heavy', { ws: heavy.channel(), nvrId: 'n1', ch: 0, type: 1, source: hSrc })
+  live.attach('light', { ws: light.channel(), nvrId: 'n1', ch: 1, type: 1, source: lSrc })
+  clearInterval(live.timer)
+  const [h, l] = [live.viewers.get('heavy'), live.viewers.get('light')]
+  const worst = LEVELS.length - 1
+  h.level = worst // (as after its own steps down)
+  let n = 0
+  const budgetLook = () => {
+    // 200 KB/s to the one, 50 KB/s to the other, against a budget of 100 KB/s
+    for (const x of [...hSrc.viewers]) x.send(encodeFrame(Buffer.alloc(400_000), n === 0, 0, n * 2000))
+    for (const x of [...lSrc.viewers]) x.send(encodeFrame(Buffer.alloc(100_000), n === 0, 0, n * 2000))
+    n++
+    heavy.written += 400_000
+    light.written += 100_000
+    clock.now += TICK_MS
+    live.tick()
+  }
+  for (let i = 0; i < 4; i++) budgetLook()
+  check('over the uplink budget with the viewer sent the most at the lowest level: the next one steps down', l.level >= 1 && h.level === worst && logs.some((x) => x.includes('light: full -> 15 (the uplink budget is used up;')), `${h.level} ${l.level} ${logs.join(' | ')}`)
+}
 
 // ---- replays of a page over a link of a set rate (remote-page.mjs: the real mux, fan-out and stand-ins) ----
 {
@@ -2320,6 +2350,35 @@ function slotlessBelowFull(may) {
   r.down(9000, [b.ws])
   r.to(51_000)
   check('Live HD: a sub-stream\'s level changes ask nothing, and it moves as before', b.asked() === 0 && !b.ws.closedWith && b.v.level === 0 && b.entry().stream === t.stream && b.ws.got.length > 0, `${b.asked()} ${b.v.level}`)
+}
+
+// ---- an NVR edited and made again under the same id (its hub's closeAll, a new hub): a conversion
+// made on the old hub's stream stayed under the same key, and a remote tile that reconnected joined
+// it: its old replay and nothing after.
+{
+  const { StreamHub } = await import('../stream-hub.mjs')
+  const sock = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, got: [], closed: null, handlers: {}, send(b) { this.got.push(b) }, on(e, f) { this.handlers[e] = f }, close(c, r) { this.closed = c + ' ' + r } })
+  const make = (o) => ({ push(ts, k) { o.onFrame(ts, k, Buffer.from([1])) }, close() {} })
+  const feed = (hub, n, from = 0) => { for (let i = from; i < from + n; i++) hub.onMessage({ t: 'frame', key: '5:0', buf: encodeFrame(Buffer.from([0, 0, 1, 1]), i % 12 === 0, 1, (i * 1000) / 30), isKey: i % 12 === 0 }) }
+  const pool = new TranscodePool(8)
+  const live = new AdaptiveLive({ pool, makeTranscoder: make, log: () => {}, budgetBps: 1e9, now: () => T })
+  clearInterval(live.timer)
+  const hub1 = new StreamHub('n1', () => {})
+  const a = sock()
+  live.attach('pc-a', { ws: a, nvrId: 'n1', ch: 5, type: 0, source: hub1.getStream(5, 0), codec: 'h265', mayMain: () => true })
+  feed(hub1, 30)
+  const first = [...live.streams.values()][0]
+  check('edited NVR: a remote main plays through its conversion before the edit', a.got.length > 0 && first && !first.closed && live.streams.size === 1)
+  hub1.closeAll()
+  const hub2 = new StreamHub('n1', () => {})
+  const b = sock()
+  live.attach('pc-b', { ws: b, nvrId: 'n1', ch: 5, type: 0, source: hub2.getStream(5, 0), codec: 'h265', mayMain: () => true })
+  const second = [...live.streams.values()].find((s) => !s.closed)
+  check('edited NVR: the next viewer gets a conversion of the new stream, the old one closed', first.closed && second && second !== first && second.source === hub2.getStream(5, 0) && pool.active === 1, pool.active + ' running')
+  check('edited NVR: ... the viewer of the old one is dropped to reconnect', a.closed === '1011 stream ended', String(a.closed))
+  a.handlers.close?.()
+  feed(hub2, 30, 30)
+  check('edited NVR: ... and the new one plays', b.got.length > 0, String(b.got.length))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

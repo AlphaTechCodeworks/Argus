@@ -41,7 +41,7 @@ const HEALTHY_MS = 60_000 // this long without problems resets the back-off
 // stream asks at once; the sub stream used to wait 1.5 s, which is most of the delay people feel
 // when a grid of tiles opens. 250 ms still lets a keyframe that is already on its way win, so the
 // NVR is not asked needlessly, without the wait being noticeable.
-const KEYFRAME_WAIT_MS = { 0: 0, 1: 1500 }
+const KEYFRAME_WAIT_MS = { 0: 0, 1: 250 }
 const KEYFRAME_EVERY_MS = 5000 // at most one keyframe request per stream per this
 const BUSY_RETRY_MS = 5000 // retry delay while the NVR has calls stuck in the SDK or is cooling down
 // a start refused this fast is the NVR saying no (stream limit, no permission, camera offline),
@@ -387,6 +387,8 @@ export class LiveStream {
    * are only lingering for a quick return to the grid, SUB_LINGER_MS), so their slots at the NVR free
    * up for the main. The one the full-size view borrows keeps its viewer, so it is left running.
    * Stops go through the idle-stop queue (paced; cancelled if the sub is wanted again before its turn).
+   * In an NVR's worker every lingering sub still has the main process's tap on it, so none is found
+   * here: there the main process ends their lingers itself (stream-hub.mjs freeIdleSubs).
    */
   #freeIdleSubs() {
     for (const s of this.nvr.streams.values()) {
@@ -461,7 +463,8 @@ export class LiveStream {
   /** Stops the stream and disconnects its viewers (their browsers reconnect). */
   fail(reason) {
     const done = this.stop()
-    for (const ws of this.clients) ws.close(1011, reason)
+    // (a conversion's or a stand-in's tap, and a warm-up, have no close)
+    for (const ws of this.clients) ws.close?.(1011, reason)
     return done
   }
 

@@ -6,6 +6,7 @@ import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'n
 import { setTimeout as sleep } from 'node:timers/promises'
 import { PRIORITY } from './lanes.mjs'
 import { NET_SDK, lastErrorReason, lateCalls, sdkCallT, sdkStuck } from './sdk.mjs'
+import { SEND_BY_MS } from './worker-requests.mjs'
 import { kid, parseXml } from './xml.mjs'
 import { xmlDegraded, xmlGen, xmlOnline } from './xml-session.mjs'
 // The parser itself lives in xml.mjs, which imports nothing: modules that only read an NVR's
@@ -150,7 +151,8 @@ export function errorAnswer(e) {
 // inside the SDK.
 
 const xmlTails = new WeakMap() // nvr -> promise that settles when nothing need wait for its last queued XML call any more: it returned from the SDK, nothing was sent, or the cap passed
-const XML_CAP_MS = 90_000 // the longest callers wait behind one call: never block the queue and the turn for ever. It lets nothing into the SDK (xmlInside does that), and nothing ends a call stuck longer: while other NVRs answer, the watchdog leaves the process alone (see above)
+// (90 s, from worker-requests.mjs: a borrowed command's send-by time is this cap, and the wait for the worker's answer is counted from it)
+const XML_CAP_MS = SEND_BY_MS // the longest callers wait behind one call: never block the queue and the turn for ever. It lets nothing into the SDK (xmlInside does that), and nothing ends a call stuck longer: while other NVRs answer, the watchdog leaves the process alone (see above)
 let capMs = XML_CAP_MS // (tests shorten it: _test.setCap)
 
 // ---- and one at a time in the whole process, paced, with a short queue -------------------
