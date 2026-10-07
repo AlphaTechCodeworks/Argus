@@ -70,17 +70,28 @@ function textOf(reason) {
 }
 
 /**
- * A reason as the log has it: as Node prints an error the process dies of (the stack, and what a
- * stack leaves out: the cause, an AggregateError's errors, properties such as code), so that the log
- * says no less than it did when the process ended there; a string as it is. Only for a line that is
- * logged: inspect() of a large object takes time, and a looping fault rejects thousands of times.
+ * A reason as the log has it.
+ * An Error: as Node prints the one a process dies of, with the very options of its fatal message
+ * (inspect to depth 5, none of the reason's own inspect functions run). That is the stack and what
+ * a stack leaves out: the cause, an AggregateError's errors, properties such as code, address and
+ * port, also on the errors inside. A refused fetch is "TypeError: fetch failed" with no frame of
+ * ours; which host and port is two levels down. So the log says no less than it did when the
+ * process ended there.
+ * Any other object: what is in it, to inspect()'s usual depth. Node's message only named its class
+ * ("#<Object>"), so for these the log now holds more than the journal ever did.
+ * A string, or anything else: as it is.
+ * Only for a line that is logged. inspect() builds the whole text before any of it is cut, so what
+ * it costs goes by the size of the reason, not by the 8,000 characters kept: a reason holding a
+ * large table can take the event loop for seconds, at most MAX_LINES times a minute, and a looping
+ * fault rejects thousands of times.
  * @param {unknown} reason
  * @param {string} text textOf(reason), the fallback
  */
 function logTextOf(reason, text) {
   try {
-    if (reason !== null && (typeof reason === 'object' || typeof reason === 'function')) return inspect(reason)
-  } catch {} // (a reason inspect() cannot take: a proxy whose traps throw)
+    if (reason instanceof Error) return inspect(reason, { depth: Math.max(inspect.defaultOptions.depth, 5), customInspect: false })
+    if (reason !== null && (typeof reason === 'object' || typeof reason === 'function')) return inspect(reason, { customInspect: false })
+  } catch {} // (inspect() is not known to throw on anything; should it, the text there already is gets logged)
   return text
 }
 

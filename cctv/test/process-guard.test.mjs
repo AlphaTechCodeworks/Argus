@@ -154,6 +154,56 @@ console.log(JSON.stringify(processErrors()))`)
   ran('...and lastMessage (for a page) stays the short text of the reason', json(r).lastMessage === '[object Object]' && json(r).unhandledRejections === 4 && r.status === 0, r)
 }
 {
+  // The shape a refused fetch to a host name really has: a TypeError with no frame of ours, whose
+  // cause is an AggregateError (one error for each address tried), and only those errors say which
+  // host and port. They are three levels down: at inspect()'s usual depth of 2 the log had
+  // "[errors]: [ [Error], [Error] ]", where Node's message at the death of the process names both.
+  // Built by hand, no network. And a chain of causes five long, each with a property of its own.
+  const r = run(`${IMPORT}
+${TURN}
+guardProcess({ name: 'deep' })
+const tried = (address) => Object.assign(new Error('connect ECONNREFUSED ' + address + ':59999'), { errno: -111, code: 'ECONNREFUSED', syscall: 'connect', address, port: 59999 })
+const refused = Object.assign(new AggregateError([tried('::1'), tried('127.0.0.1')], ''), { code: 'ECONNREFUSED' })
+Promise.reject(new TypeError('fetch failed', { cause: refused }))
+await turn()
+console.error('[deep] SECOND')
+let chain = Object.assign(new Error('cause 5'), { step: 'five' })
+for (const n of [4, 3, 2, 1]) chain = Object.assign(new Error('cause ' + n, { cause: chain }), { step: 'step-' + n })
+Promise.reject(new Error('the top', { cause: chain }))
+await turn()
+console.error('[deep] THIRD')
+Promise.reject({ a: { b: { c: { d: 'four down' } } }, note: 'a plain object' })
+await turn()`)
+  const part = (from, to) => r.err.slice(r.err.indexOf(from), to ? r.err.indexOf(to) : undefined)
+  const one = part('[deep] unhandled', '[deep] SECOND')
+  ran('a refused fetch to a host name: each address that was tried is in the log, with its port', one.includes("address: '::1'") && one.includes("address: '127.0.0.1'") && (one.match(/port: 59999/g) ?? []).length === 2 && !one.includes('[Error]'), r, flat(one, 400))
+  const two = part('[deep] SECOND', '[deep] THIRD')
+  ran('a chain of five causes, each with a property of its own: all five are in the log', ['cause 1', 'cause 2', 'cause 3', 'cause 4', "step: 'step-4'"].every((s) => two.includes(s)), r, flat(two.replace(/\n +at [^\n]+/g, ''), 400))
+  // (an object that is no Error: Node's message at death only named its class, and its fields are logged to the usual depth and no deeper)
+  ran('a plain object: its fields to the usual depth, and no deeper', kept(r, 'deep')[2] === "[deep] unhandled rejection (kept running): { a: { b: { c: [Object] } }, note: 'a plain object' }" && r.status === 0, r, kept(r, 'deep')[2])
+}
+{
+  // What is logged is worked out only for a line that is logged: inspect() of a large reason takes
+  // time, and a fault that loops rejects thousands of times. The same Error 50 times, with its stack
+  // behind a getter that counts. The short text (for the count and lastMessage) reads it three times
+  // for every rejection; inspect() once more, and only for the 20 that are logged.
+  const r = run(`${IMPORT}
+${TURN}
+guardProcess({ name: 'cost' })
+const e = new Error('the same one')
+const stack = e.stack
+let reads = 0
+Object.defineProperty(e, 'stack', { get() { reads++; return stack } })
+for (let i = 0; i < 20; i++) Promise.reject(e)
+await turn()
+const logged = reads
+for (let i = 0; i < 30; i++) Promise.reject(e)
+await turn()
+console.log(JSON.stringify({ logged: logged / 20, notLogged: (reads - logged) / 30, n: processErrors().unhandledRejections }))`)
+  const j = json(r)
+  ran('the long text is made only for a line that is logged: a rejection over the limit costs less', kept(r, 'cost').length === 20 && j.n === 50 && j.notLogged === 3 && j.logged === 4, r, `stack read ${j.logged}x for each one logged, ${j.notLogged}x for each one not`)
+}
+{
   // an Error whose message is longer than the cut still has its frames in the log: they come after
   // the message, which is why both ends are kept
   const r = run(`${IMPORT}
