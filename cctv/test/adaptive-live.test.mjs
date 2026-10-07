@@ -1104,6 +1104,36 @@ function onPage(key, n = 2) {
   look(5_900_000)
   check('  ... it writes again: stepped at that look, on the budget', h.level === 1 && logs.some((x) => x.includes('full -> 15 (the uplink budget is used up;')), logs.join(' | '))
 }
+{
+  // ... and the one sent the most may have no step left to take (the lowest level already): only it
+  // was asked, so nobody went down and the uplink stayed over its budget. The next one down is asked.
+  const clock = { now: T }
+  const logs = []
+  const live = new AdaptiveLive({ pool: new TranscodePool(8), makeTranscoder: () => ({ push() {}, close() {} }), log: (l) => logs.push(l), budgetBps: 100_000, now: () => clock.now })
+  const heavy = fakePage()
+  const light = fakePage()
+  const hSrc = fakeSource('heavy')
+  const lSrc = fakeSource('light')
+  live.attach('heavy', { ws: heavy.channel(), nvrId: 'n1', ch: 0, type: 1, source: hSrc })
+  live.attach('light', { ws: light.channel(), nvrId: 'n1', ch: 1, type: 1, source: lSrc })
+  clearInterval(live.timer)
+  const [h, l] = [live.viewers.get('heavy'), live.viewers.get('light')]
+  const worst = LEVELS.length - 1
+  h.level = worst // (as after its own steps down)
+  let n = 0
+  const budgetLook = () => {
+    // 200 KB/s to the one, 50 KB/s to the other, against a budget of 100 KB/s
+    for (const x of [...hSrc.viewers]) x.send(encodeFrame(Buffer.alloc(400_000), n === 0, 0, n * 2000))
+    for (const x of [...lSrc.viewers]) x.send(encodeFrame(Buffer.alloc(100_000), n === 0, 0, n * 2000))
+    n++
+    heavy.written += 400_000
+    light.written += 100_000
+    clock.now += TICK_MS
+    live.tick()
+  }
+  for (let i = 0; i < 4; i++) budgetLook()
+  check('over the uplink budget with the viewer sent the most at the lowest level: the next one steps down', l.level >= 1 && h.level === worst && logs.some((x) => x.includes('light: full -> 15 (the uplink budget is used up;')), `${h.level} ${l.level} ${logs.join(' | ')}`)
+}
 
 // ---- replays of a page over a link of a set rate (remote-page.mjs: the real mux, fan-out and stand-ins) ----
 {

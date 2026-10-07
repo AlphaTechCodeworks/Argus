@@ -1149,8 +1149,14 @@ export class AdaptiveLive {
       v.sentAt = now
       total += v.bps
     }
-    // over the budget: the one taking most goes down first
-    const heaviest = total > this.budgetBps ? [...this.viewers.values()].sort((a, b) => b.bps - a.bps)[0] : null
+    // over the budget: the one taking most goes down first, of those a step down can help. With the
+    // one taking most of all already at the lowest level, or kept where it is for want of conversion
+    // slots (starved, #look), it was the only one asked and nobody went down. It is still told (it
+    // does not climb meanwhile); the next one down the list is asked to step as well.
+    const byBps = total > this.budgetBps ? [...this.viewers.values()].sort((a, b) => b.bps - a.bps) : []
+    const heaviest = new Set(byBps.slice(0, 1))
+    const able = byBps.find((v) => v.level < LEVELS.length - 1 && !(this.#raw(v) * 2 > v.sockets.size))
+    if (able) heaviest.add(able)
     // Each viewer's look on its own: one that throws (a bug) must not stall every viewer after it in the
     // Map -- no steps down or climbs, no switch cut over past its time -- at every look for as long as it
     // throws. A main refused at a move while on no stream did that until its socket closed, up to ws's
@@ -1187,7 +1193,7 @@ export class AdaptiveLive {
     }
     // more than half its tiles already on the camera's own stream for want of a slot: a level lower
     // would find no more slots than this one and thin none of them (verify-1)
-    const n = nextLevel(v, { pressure, now, overBudget: v === heaviest, starved: this.#raw(v) * 2 > v.sockets.size })
+    const n = nextLevel(v, { pressure, now, overBudget: heaviest.has(v), starved: this.#raw(v) * 2 > v.sockets.size })
     if (n.level !== v.level) this.#move(v, n.level, n.why)
     else {
       // The camera's own stream only where it is H.264: an H.265 one would be black on a laptop
