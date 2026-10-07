@@ -77,6 +77,14 @@ const REAL_OSD = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryI
   check('the document opens <request> exactly once', (doc.match(/<request\b/g) ?? []).length === 1 && (doc.match(/<\/request>/g) ?? []).length === 1)
 }
 {
+  // A name is text, whatever is in it. "$1", "$$" and "$'" mean something to String.replace when
+  // the new text is given as a replacement string, and came out as pieces of the document.
+  for (const text of ['Lot $1', 'Bay $2', 'Cost $$5', "Till $' $`"]) {
+    const doc = buildEdit(REAL_OSD, checkWanted({ name: { text } }, parseOsd(REAL_OSD).osd))
+    check(`a name with dollar signs goes out as written: ${text}`, doc.includes(`<name maxLen="63">${text}</name><extraLine>keep me</extraLine>`), doc.slice(doc.indexOf('<chlName>')))
+  }
+}
+{
   // A change to the clock must not touch the name block, and vice versa.
   const doc = buildEdit(REAL_OSD, checkWanted({ time: { show: false, timeFormat: '12' } }, parseOsd(REAL_OSD).osd))
   check('only the clock switch and format change', doc.includes('<switch>false</switch>') && doc.includes('<timeFormat type="timeFormat">12</timeFormat>'), doc)
