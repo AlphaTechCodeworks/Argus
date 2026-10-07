@@ -135,6 +135,13 @@ check('reads are told from changes by the command name', isReadCommand('queryChl
   const one = await transparent(a, 'queryChlVideoParam', '<x/>', 'r6').catch((e) => e)
   check('the count starts over: the first timeout after it closed does not reopen it', sent.length === next + 1 && one?.name === 'SdkTimeout', `${one?.name ?? one}`)
   await sleep(200)
+  // ... but that was the second in a row since it closed, and two in a row open it, as the first time.
+  // (It used to open once and never again: the time it had closed at stayed, and every later
+  // time-out started the count over.)
+  const k = sent.length
+  const seventh = await transparent(a, 'queryChlVideoParam', '<x/>', 'r7').catch((e) => e)
+  const logged = out.filter((l) => l.includes('[xa]') && l.includes('no reads to this NVR for 60 s')).length
+  check('two timeouts in a row after it closed open it again: the next read is refused, nothing sent, and it is logged a second time', seventh instanceof HttpError && seventh.status === 503 && seventh.extra?.retryAfterS === 60 && sent.length === k && logged === 2, `${seventh?.status ?? seventh?.name} ${seventh?.message ?? seventh}; sent ${sent.length - k}; logged ${logged}x`)
   _test.setNow(null)
 }
 
@@ -1009,19 +1016,79 @@ onCallSettled(() => laterListenerRan++)
     () => new Error('NVR xbr reconnected; nothing was sent'),
     () => new Error('not started: the worker is stopping'),
     () => Object.assign(new Error('the video connection was lost; try again'), { name: 'WorkerLost' }),
+    // (an error the worker passed on: the NVR's own refusal of the request. On this process's own
+    // login that one starts the count over, see the next block; through the worker it is not told
+    // apart from the others)
+    () => new Error('the NVR did not accept the request (no permission)'),
     timesOut
   ])
   const got = []
-  for (let i = 0; i < 7; i++) got.push(await read(r.nvr))
+  for (let i = 0; i < 8; i++) got.push(await read(r.nvr))
   const next = await read(r.nvr)
-  check('a borrowed read: each of the worker\'s outcomes reaches the caller as it was given', got[0]?.name === 'SdkTimeout' && got[1]?.status === 503 && got[2]?.name === 'WorkerNotReady' && /reconnected; nothing was sent/.test(got[3]?.message) && /the worker is stopping/.test(got[4]?.message) && got[5]?.name === 'WorkerLost' && got[6]?.name === 'SdkTimeout', got.map((e) => (e?.status ? `${e.status}` : (e?.name ?? 'ok'))).join(' | '))
-  check('a time-out, five outcomes that are not an answer, a time-out: the breaker is open, and the next read is refused here, not sent', refusedByBreaker(next) && r.asked === 7, `${next?.status} ${next?.message ?? next}; asked ${r.asked}`)
+  check('a borrowed read: each of the worker\'s outcomes reaches the caller as it was given', got[0]?.name === 'SdkTimeout' && got[1]?.status === 503 && got[2]?.name === 'WorkerNotReady' && /reconnected; nothing was sent/.test(got[3]?.message) && /the worker is stopping/.test(got[4]?.message) && got[5]?.name === 'WorkerLost' && /did not accept the request/.test(got[6]?.message) && got[7]?.name === 'SdkTimeout', got.map((e) => (e?.status ? `${e.status}` : (e?.name ?? 'ok'))).join(' | '))
+  check('a time-out, six outcomes that are not an answer, a time-out: the breaker is open, and the next read is refused here, not sent', refusedByBreaker(next) && r.asked === 8, `${next?.status} ${next?.message ?? next}; asked ${r.asked}`)
 
   const a = borrowing('xba', [timesOut, () => ({ text: 'an answer' }), timesOut])
   const got2 = [await read(a.nvr), await read(a.nvr), await read(a.nvr)]
   const next2 = await read(a.nvr)
   check('a time-out, an ANSWER, a time-out: the answer started the count over, and the next read is sent', got2[0]?.name === 'SdkTimeout' && got2[1] === 'an answer' && got2[2]?.name === 'SdkTimeout' && next2 === 'ok' && a.asked === 4, `${got2.map((e) => e?.name ?? e).join(' | ')} | ${next2?.message ?? next2}; asked ${a.asked}`)
-  check('... nothing is left admitted or queued', await nothingLeft(r.nvr, a.nvr), `pending ${_test.pending()}`)
+
+  // the breaker opens again after it has closed, on a borrowed login as on the NVR's own
+  let clock = Date.UTC(2026, 9, 6, 12, 0, 0)
+  _test.setNow(() => clock)
+  const c = borrowing('xbc', [timesOut, timesOut, timesOut, timesOut])
+  const open1 = [await read(c.nvr), await read(c.nvr), await read(c.nvr)]
+  clock += 61_000
+  const open2 = [await read(c.nvr), await read(c.nvr), await read(c.nvr)]
+  check('a borrowed login: two time-outs open the breaker, and two more after it has closed open it again', open1[0]?.name === 'SdkTimeout' && open1[1]?.name === 'SdkTimeout' && refusedByBreaker(open1[2]) && open2[0]?.name === 'SdkTimeout' && open2[1]?.name === 'SdkTimeout' && refusedByBreaker(open2[2]) && c.asked === 4, `${[...open1, ...open2].map((e) => e?.status ?? e?.name ?? e).join(' | ')}; asked ${c.asked}`)
+  _test.setNow(null)
+  check('... nothing is left admitted or queued', await nothingLeft(r.nvr, a.nvr, c.nvr), `pending ${_test.pending()}`)
+  restore()
+}
+
+// ---- ... and on this process's own login an error IN TIME does start the count over: there it is
+// known to be the NVR's answer (it did not accept the request), and an NVR that answers is not one
+// to stop asking. This is the one place the two paths differ.
+{
+  _test.setCap(CAP)
+  _test.setGap(10)
+  const n = fakeNvr('xoe')
+  const sent = []
+  const late = (ms) => ({ async: (...args) => setTimeout(() => args.at(-1)(null, true), ms) })
+  _test.setCall((opts, userId, xml, url, outBuf, size, len) => {
+    sent.push(opts.tag)
+    if (opts.tag === 'times out') return sdkCallT({ ...opts, timeoutMs: 50 }, late(150), userId, xml, url, outBuf, size, len)
+    if (opts.tag === 'not accepted') return Promise.resolve(false)
+    if (opts.tag === 'fails') return Promise.reject(new Error('the call failed in the SDK'))
+    return Promise.resolve(answer(outBuf, len))
+  })
+  const read = (tag) => transparent(n, 'queryChlVideoParam', '<x/>', tag).catch((e) => e)
+  // (each read waits for the one before to have come back, late: see the first breaker block)
+  const t1 = await read('times out')
+  await sleep(200)
+  const no = await read('not accepted')
+  const t2 = await read('times out')
+  await sleep(200)
+  const after = await read('next')
+  check('own login: a time-out, a request the NVR did not accept (in time), a time-out: the count started over, and the next read is sent', t1?.name === 'SdkTimeout' && no instanceof Error && no.name !== 'SdkTimeout' && !(no instanceof HttpError && no.status === 503) && t2?.name === 'SdkTimeout' && typeof after === 'string' && sent.join() === 'times out,not accepted,times out,next', `${t1?.name} | ${no?.message ?? no} | ${t2?.name} | ${after?.message ?? 'sent'}; sent ${sent.join()}`)
+  // (the same for a call that came back in time with an error of the SDK's own, thrown and not returned)
+  const g = fakeNvr('xog')
+  const v1 = await transparent(g, 'queryChlVideoParam', '<x/>', 'times out').catch((e) => e)
+  await sleep(200)
+  const failed = await transparent(g, 'queryChlVideoParam', '<x/>', 'fails').catch((e) => e)
+  const v2 = await transparent(g, 'queryChlVideoParam', '<x/>', 'times out').catch((e) => e)
+  await sleep(200)
+  const afterFailed = await transparent(g, 'queryChlVideoParam', '<x/>', 'next').catch((e) => e)
+  check('own login: a time-out, a call that failed in time, a time-out: the count started over, and the next read is sent', v1?.name === 'SdkTimeout' && failed?.message === 'the call failed in the SDK' && v2?.name === 'SdkTimeout' && typeof afterFailed === 'string', `${v1?.name} | ${failed?.message ?? failed} | ${v2?.name} | ${afterFailed?.message ?? 'sent'}`)
+  // (and without the error between them the same two time-outs do open it: the checks above are not passing for want of a breaker)
+  const m = fakeNvr('xof')
+  const u1 = await transparent(m, 'queryChlVideoParam', '<x/>', 'times out').catch((e) => e)
+  await sleep(200)
+  const u2 = await transparent(m, 'queryChlVideoParam', '<x/>', 'times out').catch((e) => e)
+  await sleep(200)
+  const refused = await transparent(m, 'queryChlVideoParam', '<x/>', 'next').catch((e) => e)
+  check('... while two time-outs with nothing between them open it', u1?.name === 'SdkTimeout' && u2?.name === 'SdkTimeout' && refused instanceof HttpError && refused.status === 503 && /did not answer 2 settings reads in time/.test(refused.message), `${u1?.name} | ${u2?.name} | ${refused?.message ?? 'sent'}`)
+  check('... nothing is left admitted or queued', await nothingLeft(n, g, m), `pending ${_test.pending()}`)
   restore()
 }
 

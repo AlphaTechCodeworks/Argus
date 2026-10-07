@@ -287,7 +287,15 @@ function refuseNow(nvr, read) {
 function noteRead(nvr, timedOut) {
   if (!timedOut) return void readFails.delete(nvr.id)
   const b = readFails.get(nvr.id) ?? { fails: 0, openUntil: 0 }
-  if (b.openUntil && b.openUntil <= now()) b.fails = 0 // (a closed breaker starts counting again)
+  // A breaker that has closed starts counting again, and is forgotten as one that was open: left
+  // set in the past, openUntil had every later time-out start the count over, so the count never
+  // reached XML_READ_FAILS a second time and the breaker opened once per NVR and never again (until
+  // a read came back). An NVR that does not answer was asked again by every read after its first
+  // minute, each one waiting out its whole time limit.
+  if (b.openUntil && b.openUntil <= now()) {
+    b.fails = 0
+    b.openUntil = 0
+  }
   b.fails++
   if (b.fails >= XML_READ_FAILS) {
     b.openUntil = now() + XML_READ_BREAKER_MS
