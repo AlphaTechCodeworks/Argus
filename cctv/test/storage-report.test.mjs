@@ -155,6 +155,20 @@ const seg = (nvr, ch, ageDays, loc = 'L1') => ({ nvr, ch, loc, path: `/srv/rec/$
   check('growth per day is reported', Math.abs(loc.forecast.bytesPerDay - 50e9) < 1e9, String(loc.forecast.bytesPerDay))
   check('full in N days is reported', loc.forecast.confident && loc.forecast.daysToFull > 0)
   check('a location with footage past a target counts as recycling', loc.cycling === true)
+  check('each camera\'s days kept overall: from its oldest footage on a mounted location', Math.abs(r.cameras.find((c) => c.camera === 'n1/0').daysKept - 200) < 0.1 && r.cameras.find((c) => c.camera === 'n1/0').meetsTarget === true && r.cameras.find((c) => c.camera === 'n1/1').meetsTarget === false && r.cameras.find((c) => c.camera === 'n1/1').oldestMs === NOW - 10 * DAY, JSON.stringify(r.cameras))
+}
+{
+  // Rows on a location that is not mounted, or was removed from the list, stay in the index. A camera's days
+  // kept counted from the oldest of all of them: with production's NAS removed on 1 October the figure grew a
+  // day per day on footage nobody can play (audit of 2026-10-07). It is the oldest on the mounted locations.
+  const index = fakeIndex([seg('n1', 0, 60, 'GONE'), seg('n1', 0, 40, 'L2'), seg('n1', 0, 5, 'L1'), seg('n1', 1, 50, 'GONE'), seg('n1', 1, 30, 'L2')])
+  const r = buildStorageReport({ settings: settings([L1, L2]), index, history: {}, now: NOW, freeOf: () => ({ freeBytes: 450e9, totalBytes: TB }), present: (l) => l.id === 'L1', retention: null })
+  const c0 = r.cameras.find((c) => c.camera === 'n1/0')
+  const c1 = r.cameras.find((c) => c.camera === 'n1/1')
+  check('DAYS KEPT PER CAMERA: the oldest on the mounted locations (5 days), not a removed location\'s (60) or an unmounted one\'s (40)', Math.abs(c0.daysKept - 5) < 0.1 && c0.oldestMs === NOW - 5 * DAY && c0.meetsTarget === false, JSON.stringify(c0))
+  check('... a camera with footage only where it cannot be played: not available, never a number', c1.daysKept === null && c1.oldestMs === null && c1.meetsTarget === null && Number.isFinite(c1.newestMs), JSON.stringify(c1))
+  const both = buildStorageReport({ settings: settings([L1, L2]), index, history: {}, now: NOW, freeOf: () => ({ freeBytes: 450e9, totalBytes: TB }), present: () => true, retention: null })
+  check('... with the second location mounted again, its footage counts (40 and 30 days)', Math.abs(both.cameras.find((c) => c.camera === 'n1/0').daysKept - 40) < 0.1 && Math.abs(both.cameras.find((c) => c.camera === 'n1/1').daysKept - 30) < 0.1, JSON.stringify(both.cameras.map((c) => c.daysKept)))
 }
 {
   const r = buildStorageReport({ settings: settings([L1]), index: fakeIndex([]), history: {}, now: NOW, freeOf: () => ({ freeBytes: 1, totalBytes: 2 }), present: () => false })
