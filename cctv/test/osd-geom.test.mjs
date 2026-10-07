@@ -7,7 +7,7 @@
 // for ever. changedFields()'s output is the exact POST body osd.mjs takes.
 import {
   CORNERS, OSD_MAX, changeCount, changeSummary, changedFields, clamp, draftOf,
-  nameError, nearestCorner, overlayHasPosition, overlayMoved, saveLabel, toFrac, toUnits
+  fieldsNotHeld, nameError, nearestCorner, overlayHasPosition, overlayMoved, saveLabel, toFrac, toUnits
 } from '../public/osd-geom.js'
 
 let failures = 0
@@ -88,6 +88,17 @@ const CAM = {
   check('a format change is named', changeSummary(CAM, df).some((l) => /Date format:/.test(l)))
   check('overlayMoved is true only when an axis differs', overlayMoved(CAM.name, { ...draftOf(CAM).name, x: 76 }) === true && overlayMoved(CAM.name, draftOf(CAM).name) === false)
   check('saveLabel counts', saveLabel(0) === 'Save' && saveLabel(1) === 'Save 1 change' && saveLabel(3) === 'Save 3 changes')
+}
+
+// ---- what Undo puts back after a save the camera kept only part of --------------------------------
+{
+  const before = { name: { text: 'Gate', x: 75 }, time: { show: true } }
+  const partly = { ...CAM, name: { ...CAM.name, text: 'North Gate' } } // the text took, x and the clock did not
+  check('only the fields that read back as changed are put back', JSON.stringify(fieldsNotHeld(before, partly)) === '{"name":{"text":"Gate"}}')
+  check('a save the camera ignored leaves nothing to put back', JSON.stringify(fieldsNotHeld(before, CAM)) === '{}')
+  check('a camera that could not be read back: every field', JSON.stringify(fieldsNotHeld(before, null)) === JSON.stringify(before))
+  check('no values, nothing to put back', JSON.stringify(fieldsNotHeld(null, CAM)) === '{}' && JSON.stringify(fieldsNotHeld({}, null)) === '{}')
+  check('after an undo: what is back is dropped, what is not stays', JSON.stringify(fieldsNotHeld({ name: { text: 'Gate', x: 500 } }, CAM)) === '{"name":{"x":500}}')
 }
 
 // ---- preset corners ----------------------------------------------------------------------------
