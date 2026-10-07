@@ -421,10 +421,14 @@ export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBy
           try {
             text = String((await viaWorker(nvr, { op: 'xml', url, xml, tag, outBytes }, !read)).text ?? '')
           } catch (e) {
-            // turned away with nothing sent (the worker's own 503s, or it is not ready): not a read
-            // that came back, so it does not start the read breaker's count over, as the refusals
-            // of this process do not either. A read the worker sent and gave up on still counts.
-            if (e?.status === 503 || e?.name === 'WorkerNotReady') sentAt = 0
+            // Only a time-out counts for the read breaker here (a read the worker sent and gave up
+            // on). Whatever else the worker came back with leaves the count as it is: its own
+            // refusals with nothing sent (its 503s, not ready, a session that changed, stopping), a
+            // worker lost with the request out, an error it passed on. None of them is known to be
+            // a read that came back from the NVR, and starting the count over for one let "a
+            // time-out, turned away, a time-out" go on asking. (On this process's own login an
+            // error in time does start it over: there it is known to be the NVR's answer.)
+            if (e?.name !== 'SdkTimeout') sentAt = 0
             throw e
           }
           return true
