@@ -1638,6 +1638,16 @@ function clipOn(on) {
   scheduleDraw()
 }
 
+/**
+ * Another day is shown: the clip marked on the old one is dropped. Left in place it stayed
+ * exportable, out of sight, and the export dialog named it by the day on screen.
+ */
+function clearClip() {
+  clip.from = null
+  clip.to = null
+  clipOn(false)
+}
+
 const selectClipStart = () => { if (!clip.on) clipOn(true); setClip(state.position ?? clip.from, clip.to ?? (state.position ?? 0) + 60_000) }
 const selectClipEnd = () => { if (!clip.on) clipOn(true); setClip(clip.from ?? (state.position ?? 0) - 60_000, state.position ?? clip.to) }
 
@@ -1852,6 +1862,7 @@ async function openBookmark(b) {
   const known = Boolean(key) && [...cameraSel.options].some((o) => o.value === key)
   const day = fmtDate(b.startMs)
   if (day !== state.date) {
+    clearClip()
     state.date = day
     dateInput.value = day
     viewWholeDay()
@@ -2045,6 +2056,7 @@ dateInput.addEventListener('change', async () => {
     if (dateInput.value > day) showMessage('That day has not happened yet: showing today.')
     dateInput.value = day
   }
+  if (dateInput.value !== state.date) clearClip()
   state.date = dateInput.value
   updateDayArrows()
   viewWholeDay()
@@ -2637,7 +2649,9 @@ const exSay = (text, bad = false) => {
 async function openExport() {
   if (clip.from === null || clip.to === null) return
   const secs = Math.round((clip.to - clip.from) / 1000)
-  exPeriod.textContent = `${state.date} · ${fmtTime(clip.from)} – ${fmtTime(clip.to)} (${Math.floor(secs / 60)} min ${secs % 60} s)`
+  // the clip's own day, not the day on screen (they differed after a change of day)
+  const clipDay = fmtDate(clip.from)
+  exPeriod.textContent = `${clipDay} · ${fmtTime(clip.from)} – ${fmtTime(clip.to)} (${Math.floor(secs / 60)} min ${secs % 60} s)`
 
   // A wrong NVR clock is the sort of thing that gets evidence thrown out, so say it here rather
   // than only burying it in the manifest.
@@ -2659,7 +2673,7 @@ async function openExport() {
     })
   )
 
-  exName.value = `${state.date} ${fmtTime(clip.from).slice(0, 5)} ${cameraSel.selectedOptions[0]?.textContent ?? 'export'}`
+  exName.value = `${clipDay} ${fmtTime(clip.from).slice(0, 5)} ${cameraSel.selectedOptions[0]?.textContent ?? 'export'}`
   exNotes.value = ''
   exProgress.hidden = true
   exStart.disabled = false
