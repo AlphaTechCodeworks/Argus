@@ -290,6 +290,7 @@ function notePlaybackFrame(ms = PLAYBACK_STALL_MS) {
 /** Shows the spinner and a message while playback waits (the server's reason, or a plain fallback). */
 function showWaiting(why) {
   clearTimeout(stallTimer)
+  if (state.paused) return // nothing is meant to arrive while paused: that is not waiting
   waiting = true
   showSpinner()
   showMessage(waitingText(why), { sticky: true })
@@ -703,6 +704,7 @@ function open(start) {
   state.nvrMain = false
   if (qualitySel.dataset.kind === 'nvr') qualitySel.value = String(rightsNow().nvrHd ? state.stream : 1)
   else updateModeUi()
+  stopStallWatch() // (the old socket's frames have stopped; the new one's first frame arms it again)
   if (ws) {
     ws.onclose = null
     ws.close()
@@ -780,6 +782,7 @@ function onStatus(msg) {
     else showNotice(msg.message)
   }
   if (msg.type === 'end') {
+    stopStallWatch() // (no more frames are due: "Waiting for the server…" 2 s later was wrong)
     // skip gaps between recordings automatically
     const next = state.ranges.find(([s]) => s > (state.position ?? 0) + 1000)
     if (next) seek(next[0])
@@ -1062,8 +1065,12 @@ function togglePause() {
   if (!ws && state.position !== null) return seek(state.position)
   state.paused = !state.paused
   send({ pause: state.paused })
-  if (state.paused) player.pause()
-  else player.resume()
+  if (state.paused) {
+    player.pause()
+    // the frames stop because the viewer said so: without this the watch armed by the last frame
+    // put up the spinner and "Waiting for the server…" 2 s into every pause
+    stopStallWatch()
+  } else player.resume()
   updatePlayButton()
 }
 
