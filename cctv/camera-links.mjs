@@ -141,7 +141,9 @@ function withEntry(links, from, to, label) {
 /**
  * Adds a link, two-way unless `oneWay`. Two-way is the default because a way out of one camera's
  * view is almost always a way back: if the yard leads to the gate, the gate leads to the yard.
- * Returns a new links object; the one passed in is not changed.
+ * Returns a new links object; the one passed in is not changed. Only the two cameras of the new link
+ * are checked against `known`: the links already there stand as stored, so one of them naming a
+ * camera of an NVR that is removed or not logged in yet does not refuse every new link.
  */
 export function addLink(links, { from, to, label = '', oneWay = false }, known) {
   if (typeof from !== 'string' || !KEY_RE.test(from)) throw new LinkError(400, `"${String(from).slice(0, 40)}" is not a camera key ("<nvr>/<channel>")`)
@@ -150,7 +152,7 @@ export function addLink(links, { from, to, label = '', oneWay = false }, known) 
   let out = withEntry(links, from, b.to, b.label)
   // the same label both ways: "through the front door" describes the doorway, not a direction
   if (!oneWay) out = withEntry(out, b.to, from, b.label)
-  return cleanLinks(out, known)
+  return cleanLinks(out)
 }
 
 /** Removes a link. Both directions unless `oneWay`, which removes only from -> to. */
@@ -282,12 +284,15 @@ export function readLinks(known) {
 /**
  * Saves the links if the change was made on the latest version (read, checked and written in one
  * synchronous step, so no other request can come between them).
+ * @param {{ stored?: boolean }} [opts]  stored: `links` is the file as it stands with one link added or
+ *   removed (and that link already checked). The rest is written back as it was, not checked against
+ *   `known`, and the answer leaves out links to cameras that are not there, as readLinks does.
  * @returns {{ saved: boolean, links: object, version: number }} the new state, or the latest when refused
  */
-export function saveLinks(links, version, known) {
+export function saveLinks(links, version, known, { stored = false } = {}) {
   const now = loadFile()
   if (version !== now.version) return { saved: false, links: cleanLinks(now.links, known, { drop: true }), version: now.version }
-  const clean = cleanLinks(links, known)
+  const clean = cleanLinks(links, stored ? undefined : known)
   const next = now.version + 1
   mkdirSync(dirname(LINKS_FILE), { recursive: true })
   if (now.text) {
@@ -298,7 +303,7 @@ export function saveLinks(links, version, known) {
     }
   }
   writeAtomic(LINKS_FILE, `${JSON.stringify({ version: next, links: clean }, null, 1)}\n`)
-  return { saved: true, links: clean, version: next }
+  return { saved: true, links: stored ? cleanLinks(clean, known, { drop: true }) : clean, version: next }
 }
 
 // ---- the requests ------------------------------------------------------------------------------
@@ -350,7 +355,9 @@ export async function handleCameraLinks(method, pathname, readJson, { admin = fa
       else if (body.action === 'unlink') wanted = removeLink(links, { from: String(body.from ?? ''), to: String(body.to ?? ''), oneWay })
       else throw new LinkError(400, 'action must be link or unlink')
     }
-    const { saved, links, version } = saveLinks(wanted, body.version, set)
+    // (POST: only the link asked for was checked against the cameras; a stored link to a removed or
+    // not-yet-logged-in NVR's camera refused every link and unlink with a 400)
+    const { saved, links, version } = saveLinks(wanted, body.version, set, { stored: method === 'POST' })
     if (!saved) return [409, { error: 'The camera links were changed on another screen', links, version }, NO_STORE]
     return [200, { links, version }, NO_STORE]
   } catch (e) {

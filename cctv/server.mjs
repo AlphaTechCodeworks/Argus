@@ -144,6 +144,7 @@ import { audit, handleAudit, pruneAudit } from './audit.mjs'
 import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
 import { handleSnapshot, sweepSnapshots } from './event-snapshot.mjs'
+import { eventKeepDays, forgetEventsBefore } from './events-db.mjs'
 import { handleAlarms } from './alarms.mjs'
 import { forgetLineBookmarks, handleLineAlert } from './line-actions.mjs'
 import { handleOsd } from './osd.mjs'
@@ -241,6 +242,15 @@ if (LIVE_WORKER) {
       .then(() => runHousekeeping({ index: recIndex(), protectedRanges, present: markerMatches }))
       .then(() => pruneAudit(auth.DATA_DIR)) // a year of audit is kept; older rows go with the rest
       .then(() => thinAndRetain(roundStart))
+      // events nobody acknowledged, older than the longest days kept and at least 90 days
+      // (events-db.mjs eventKeepDays); a failure must not stop the sweep after it
+      .then(() => {
+        try {
+          forgetEventsBefore(Date.now() - eventKeepDays(getSettings()) * 86_400_000)
+        } catch (e) {
+          console.warn(`[events] old events not forgotten this round: ${e.message}`)
+        }
+      })
       // pictures of events that are gone (event-snapshot.mjs; it never throws)
       .then(() => sweepSnapshots())
       .catch((e) => console.warn(`[housekeeping] failed: ${e.message}`))
@@ -808,8 +818,16 @@ const handleRequest = async (req, res) => {
     // Who may do what, and the record of who did.
     const rightsRoute = await handleRights(req.method, pathname, () => readJsonObject(req, 8192), who)
     if (rightsRoute) return sendJson(res, ...rightsRoute)
-    // accounts: add a viewer or an admin from the app (users-api.mjs)
-    const usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who)
+    // accounts: add a viewer or an admin from the app (users-api.mjs). It refuses by throwing an
+    // HttpError (status and message): answered as that, or a short password and every other refusal
+    // reached the page as a bare 500 with nothing to show.
+    let usersRoute
+    try {
+      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who)
+    } catch (e) {
+      if (!Number.isInteger(e?.status)) throw e
+      usersRoute = [e.status, { error: e.message }]
+    }
     if (usersRoute) return sendJson(res, ...usersRoute)
     // Settings > Server: restart. The answer goes out first; systemd (Restart=always) starts it again.
     if (req.method === 'POST' && pathname === '/api/admin/restart') {

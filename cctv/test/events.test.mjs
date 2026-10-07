@@ -402,6 +402,53 @@ const S = 1000
   check('... and the failing camera is asked again on the next round', again?.ch === 1 && asked.join() === '0,1,2,0,1', asked.join())
 }
 {
+  // An offline camera is not asked (the NVR refuses its search, which is no failure of the NVR), and a
+  // camera whose search always fails backs off on its own: before, the NVR's count started again at
+  // the next camera that answered, and the same camera failed and was logged every round for ever
+  // (audit 2026-10-07 M1).
+  const CAMERA_REST = events.CAMERA_REST_MS
+  let now = T0
+  const asked = []
+  const logged = []
+  const cams = [{ ch: 0, online: true }, { ch: 1, online: true }, { ch: 2, online: false }, { ch: 3, online: true }]
+  const intake = makeEventIntake({
+    listNvrs: () => [{ id: 'a', name: 'A', online: true }],
+    camerasOf: () => cams,
+    recordings: async (_nvr, ch) => {
+      asked.push({ ch, at: now })
+      if (ch === 1) throw new Error('the NVR refused the search (FindFile failed)')
+      return { events: [] }
+    },
+    now: () => now,
+    log: (l) => logged.push(l),
+    store: { addEvent: () => ({ event: null, isNew: false }), intakeCursorMs: () => null }
+  })
+  const until = T0 + 6 * 3_600_000
+  let errors = 0
+  while (now < until) {
+    const r = await intake.tick()
+    if (r?.error) errors++
+    now += 5000
+  }
+  const of = (ch) => asked.filter((a) => a.ch === ch)
+  check('an offline camera is never asked', of(2).length === 0, `${of(2).length}`)
+  check('... and leaving it out is not a failure', errors === of(1).length && intake.status()[0].fails <= 1, `${errors} errors, ${of(1).length} tries`)
+  // 1, 2, 5, 15, 30 min, then every hour: 5 tries in the first hour, and one an hour after
+  check('a camera whose search always fails backs off: about ten tries in six hours, not one a round', of(1).length >= 8 && of(1).length <= 12 && logged.length === of(1).length, `${of(1).length} tries, ${logged.length} lines`)
+  const gaps = of(1).slice(1).map((a, i) => a.at - of(1)[i].at)
+  check('... each wait at least as long as the one before, up to the hour', gaps.every((g, i) => i === 0 || g >= gaps[i - 1] - MIN_POLL_MS - 4 * CAMERA_REST) && gaps.at(-1) >= 55 * MIN, gaps.map((g) => Math.round(g / MIN)).join())
+  check('... and its line says its own wait', /next try in 60 min$/.test(logged.at(-1) ?? ''), logged.at(-1))
+  check('the healthy cameras are still asked every round', of(0).length > 100 && of(3).length > 100, `${of(0).length}, ${of(3).length}`)
+  cams[2].online = true
+  cams[1].online = false
+  asked.length = 0
+  for (let i = 0; i < 40; i++) {
+    await intake.tick()
+    now += 5000
+  }
+  check('a camera that comes back online is asked again', of(2).length > 0 && of(1).length === 0, asked.map((a) => a.ch).join())
+}
+{
   // NVRs take turns (playback report 6). Each 5 s tick went to the first NVR in list order that could
   // be asked, and an NVR with cameras still to do may be asked again 3 s later: nvr1 and nvr-2 took
   // nearly every tick, and value4u's and rigginglot's motion reached the Alarms page 20 min to hours

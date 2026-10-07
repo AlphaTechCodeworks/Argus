@@ -324,12 +324,29 @@ export const intakeCursorMs = (nvr, ch) => {
   return Number.isFinite(row?.m) ? row.m : null
 }
 
+/** The fewest days an event nobody acknowledged is kept, whatever the recording settings say. */
+export const EVENT_KEEP_DAYS = 90
+
+/**
+ * How many days an event nobody acknowledged is kept: as long as the longest retention any camera
+ * has (settings.recording, as housekeeping.mjs prunes its gap rows), so an event never goes while
+ * this server may still hold its footage, and never under EVENT_KEEP_DAYS. Without an end the table
+ * only ever grew (audit 2026-10-07 M5).
+ */
+export function eventKeepDays(settings) {
+  const rec = settings?.recording ?? {}
+  const days = [rec.defaults?.retentionDays, ...Object.values(rec.cameras ?? {}).map((c) => c?.retentionDays)].map(Number).filter((d) => Number.isFinite(d) && d > 0)
+  return Math.max(EVENT_KEEP_DAYS, ...days)
+}
+
 /**
  * Drops events older than `beforeMs`. Acknowledged ones are kept: somebody wrote down what
- * happened, and that note is the record of it. Called from the same nightly job that prunes alerts.
+ * happened, and that note is the record of it. Called from server.mjs's 5-minute housekeeping
+ * round with eventKeepDays, just before the sweep of the pictures (event-snapshot.mjs).
+ * @returns {number} how many rows went
  */
 export function forgetEventsBefore(beforeMs) {
-  open().forget.run(Math.round(beforeMs))
+  return Number(open().forget.run(Math.round(beforeMs)).changes)
 }
 
 // ---- rules -------------------------------------------------------------------------------------

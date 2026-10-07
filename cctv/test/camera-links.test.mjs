@@ -195,6 +195,25 @@ check('data/camera-links.json in DATA_DIR', LINKS_FILE === join(DATA, 'camera-li
   check('a second admin saving on the version they read gets 409, not a silent overwrite', stale === 409 && staleBody.version === put.version && to(staleBody.links, 'nvr1/2').join() === 'nvr1/1')
   const [gone, after] = await call('POST', ADMIN_LINKS_PATH, { action: 'unlink', from: 'nvr1/1', to: 'nvr1/2', version: put.version }, true)
   check('POST unlink takes it away again', gone === 200 && !('nvr1/2' in after.links))
+  // One stored link to a camera that is not there (its NVR removed, or not logged in yet after a
+  // restart) must not refuse every link and unlink: only the link being changed is checked.
+  {
+    const some = { admin: true, cameras: () => cameraList().filter((c) => c.nvr === 'nvr1'), maps } // nvr2 is not there
+    const post = (body) => handleCameraLinks('POST', ADMIN_LINKS_PATH, async () => body, some)
+    const fileHas = (key) => readFileSync(LINKS_FILE, 'utf8').includes(key)
+    check('(the file holds a link to a camera of the missing NVR)', fileHas('nvr2/0'))
+    const [st1, b1] = await post({ action: 'link', from: 'nvr1/1', to: 'nvr1/2', label: 'side door', version: after.version })
+    check('with a stored link to a missing NVR, a new link is still saved', st1 === 200 && to(b1.links, 'nvr1/2').join() === 'nvr1/1', JSON.stringify(b1))
+    check('  the answer leaves the missing camera out, as GET does', !JSON.stringify(b1.links).includes('nvr2'))
+    check('  and the stored link is kept in the file as it was', fileHas('nvr2/0') && to(readLinks(CAMS).links, 'nvr1/0').join() === 'nvr1/1,nvr2/0')
+    const [st2] = await post({ action: 'link', from: 'nvr1/1', to: 'nvr2/0', version: b1.version })
+    check('  a new link to the missing camera is still refused', st2 === 400)
+    const [st3, b3] = await post({ action: 'unlink', from: 'nvr1/1', to: 'nvr1/2', version: b1.version })
+    check('  and so is an unlink saved', st3 === 200 && !('nvr1/2' in b3.links) && fileHas('nvr2/0'), JSON.stringify(b3))
+    const [st4, b4] = await post({ action: 'unlink', from: 'nvr1/0', to: 'nvr2/0', version: b3.version })
+    check('  the link to the missing camera itself can be removed', st4 === 200 && !fileHas('nvr2/0'), JSON.stringify(b4))
+    after.version = b4.version
+  }
   const [badAction] = await call('POST', ADMIN_LINKS_PATH, { action: 'nonsense', version: after.version }, true)
   check('an unknown action is refused', badAction === 400)
   const [method] = await call('DELETE', ADMIN_LINKS_PATH, {}, true)

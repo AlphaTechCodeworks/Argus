@@ -112,9 +112,15 @@ export function makeAlarmNotifier({ sender, rules = listRules, tzOffsetMin = () 
       if (!verdict.notify || row.notifiedMs) return row
 
       const nowMs = now()
-      const gateKey = `${verdict.rule?.id ?? '-'}|${cameraKey(row.nvr, row.ch)}`
-      if (withinQuietGap(verdict.rule, lastSent.get(gateKey), nowMs)) return row
-      lastSent.set(gateKey, nowMs)
+      // The gap, its gate and the name in the message belong to a rule that asked to notify.
+      // verdict.rule is the most urgent matching rule, which may not notify at all: a critical
+      // rule with no gap and notify off took away the gap of the rule that does notify.
+      const asking = verdict.matched.filter((r) => r.notify === true)
+      const gateKey = (r) => `${r.id ?? '-'}|${cameraKey(row.nvr, row.ch)}`
+      const teller = asking.find((r) => !withinQuietGap(r, lastSent.get(gateKey(r)), nowMs))
+      if (!teller) return row
+      // one message went out for this camera: it starts the quiet gap of every rule that asked
+      for (const r of asking) lastSent.set(gateKey(r), nowMs)
 
       const named = nameOf ? { ...row, camera: nameOf(cameraKey(row.nvr, row.ch)) } : row
       // A link that cannot be made (settings unreadable) costs the link, never the alert.
@@ -126,7 +132,7 @@ export function makeAlarmNotifier({ sender, rules = listRules, tzOffsetMin = () 
       }
       // Fire and forget, like the health alerts: delivery has its own retries and a slow mail
       // server must never hold up the poll that found the event.
-      void Promise.resolve(sender.deliver([alarmMessage(named, { ruleName: verdict.rule?.name ?? '', link, tzOffsetMin: tzOffsetMin() })], 'opened'))
+      void Promise.resolve(sender.deliver([alarmMessage(named, { ruleName: teller.name ?? '', link, tzOffsetMin: tzOffsetMin() })], 'opened'))
         .catch((e) => log(`[alarms] could not deliver: ${e?.message ?? e}`))
       noteNotified(row.id, nowMs)
       return { ...row, notifiedMs: nowMs }

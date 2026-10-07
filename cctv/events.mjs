@@ -62,6 +62,8 @@
 //     SDK runs one call at a time for every NVR, so a question to another NVR only queues behind
 //     the stuck call (on 09-27 six such questions turned one stuck FindRecDate into a restart)
 //   - backs off exponentially on every failure and does not come back for a while
+//   - leaves out a camera that is offline (the NVR refuses its search), and backs a camera whose
+//     search fails off on its own, so one such camera is not asked again every round for ever
 //   - runs at the lane's LOW priority through the playback search the timeline already uses, so it
 //     queues behind live video rather than in front of it
 //   - asks only for the stretch since the newest event it filed itself, not the whole month
@@ -379,7 +381,7 @@ export function daysToAsk(fromMs, toMs, tzOffsetMs = 0, maxDays = 2) {
  *   (sdk.mjs lateCalls() > 0): then no NVR is asked at all
  */
 export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null, onEvent = () => {}, now = Date.now, log = console.log, store = { addEvent, intakeCursorMs }, sdkBusy = () => false }) {
-  /** nvr id -> { nextAt, fails, queue: [ch], lastWhy } */
+  /** nvr id -> { nextAt, fails, queue: [ch], cams: Map(ch -> { fails, nextAt }), lastWhy } */
   const state = new Map()
   let offline = new Map() // camera key -> online, for the offline/online comparison
   // A pass still waiting (its clock read or search queued behind a slow call) when the next 5 s
@@ -394,7 +396,7 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
 
   const stateOf = (id) => {
     let s = state.get(id)
-    if (!s) state.set(id, (s = { nextAt: 0, fails: 0, queue: [], lastWhy: '' }))
+    if (!s) state.set(id, (s = { nextAt: 0, fails: 0, queue: [], cams: new Map(), lastWhy: '' }))
     return s
   }
 
@@ -441,10 +443,16 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
         s.lastWhy = can.why
         continue
       }
-      if (!s.queue.length) s.queue = camerasOf(nvr).map((c) => (typeof c === 'number' ? c : c.ch)).filter((c) => Number.isInteger(c))
-      const ch = s.queue.shift()
+      // An offline camera is left out: the NVR refuses a recording search for it, and that refusal
+      // is not a failure of the NVR. Nothing is lost, its search starts from its own cursor once it
+      // is back.
+      if (!s.queue.length) s.queue = camerasOf(nvr).filter((c) => c?.online !== false).map((c) => (typeof c === 'number' ? c : c.ch)).filter((c) => Number.isInteger(c))
+      const listed = s.queue.length
+      // A camera still backing off after its own failed search is passed over, and that is no failure either.
+      let ch = s.queue.shift()
+      while (ch !== undefined && nowMs < (s.cams.get(ch)?.nextAt ?? 0)) ch = s.queue.shift()
       if (ch === undefined) {
-        s.lastWhy = 'this NVR reports no cameras'
+        s.lastWhy = listed ? 'the cameras left to ask are backing off after a failed search' : 'this NVR has no camera online to ask'
         s.nextAt = nowMs + MIN_POLL_MS
         continue
       }
@@ -453,6 +461,7 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
       try {
         const r = await pollCamera(nvr, ch)
         s.fails = 0
+        s.cams.delete(ch)
         s.lastWhy = ''
         s.lastError = null
         // The rest is per camera; the whole-NVR minimum only applies once the list is exhausted.
@@ -463,12 +472,19 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
         s.lastWhy = `could not be asked: ${String(e?.message ?? e).slice(0, 200)}`
         s.lastError = s.lastWhy
         s.nextAt = nowMs + backoffFor(s.fails)
-        // The rest of the list goes on after the back-off, and this camera is asked again on the next
-        // round. Starting the list again from the first camera would never reach the cameras after
-        // one whose search keeps failing (a refused or broken search is an error now, not "no
-        // footage", playback.mjs); nothing is lost meanwhile, as each camera's search starts from
-        // its own newest filed event.
-        log(`[events] ${nvr.id}/${ch + 1}: ${s.lastWhy}; next try in ${Math.round(backoffFor(s.fails) / 60_000)} min`)
+        // The camera backs off on its own count as well. The NVR's count above starts again at the
+        // next camera that answers, so with only that count one camera whose search always fails
+        // was asked, and logged, every round for ever (the fleet-wide "FindFile failed" lines).
+        const cam = s.cams.get(ch) ?? { fails: 0, nextAt: 0 }
+        cam.fails++
+        cam.nextAt = nowMs + backoffFor(cam.fails)
+        s.cams.set(ch, cam)
+        // The rest of the list goes on after the back-off, and this camera is asked again on the first
+        // round after its own. Starting the list again from the first camera would never reach the
+        // cameras after one whose search keeps failing (a refused or broken search is an error now,
+        // not "no footage", playback.mjs); nothing is lost meanwhile, as each camera's search starts
+        // from its own newest filed event.
+        log(`[events] ${nvr.id}/${ch + 1}: ${s.lastWhy}; next try in ${Math.round(backoffFor(cam.fails) / 60_000)} min`)
         return { nvr: nvr.id, ch, stored: 0, error: s.lastWhy }
       }
     }
