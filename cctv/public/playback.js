@@ -2141,12 +2141,17 @@ setInterval(async () => {
   if (state.mode === 'server') return refreshServer().catch(() => {})
   // without Playback SD the NVR is not asked (its clock and recordings: a day with nothing to play)
   if (!rightsNow().sd) return
+  // another camera or day chosen while an answer was on its way (a busy NVR takes seconds): that
+  // answer is the old one's, and used to replace the new one's ranges
+  const token = dayToken
   try {
     const clock = await api(`/api/playback/now?${nvrQ()}`)
+    if (token !== dayToken) return
     state.nvrNow = clock.now
     state.tz = clock.tzOffsetMs ?? state.tz
     if (state.date === fmtDate(state.nvrNow)) {
       const { ranges, events } = await api(`/api/playback/recordings?${nvrQ()}&ch=${state.ch}&date=${state.date}`)
+      if (token !== dayToken) return
       state.ranges = ranges
       state.events = events
       scheduleDraw()
