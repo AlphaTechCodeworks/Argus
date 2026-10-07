@@ -403,7 +403,8 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   })(), J(ix.fullSummary([{ nvr: 't1', ch: 2 }], { fromMs: T0, toMs: cutoff, endBefore: cutoff, stepMs: 10_000 })))
   const both = ix.fullSummary([{ nvr: 't1', ch: 1 }, { nvr: 't1', ch: 2 }], { fromMs: T0, toMs: cutoff, endBefore: cutoff, stepMs: 10_000 }).map((r) => [r.nvr, r.ch, r.loc, r.files])
   check('... per camera and location, several cameras at once', J(both.sort()) === J([['t1', 1, 'L1', 5], ['t1', 1, 'L2', 5], ['t1', 2, 'L1', 2]]), J(both))
-  check('startedBetween: what started in a window, every camera', J(ix.startedBetween(T0, T0 + 2 * MIN)) === J({ files: 6, bytes: 12_000_000 * 3 + 1_300_000 + 1000 + 3000 }), J(ix.startedBetween(T0, T0 + 2 * MIN)))
+  // (the file already rewritten, 1.3 MB of its 12, is not what arrived: audit of 2026-10-07)
+  check('startedBetween: the full video that started in a window, every camera; a file already time-lapse is left out', J(ix.startedBetween(T0, T0 + 2 * MIN)) === J({ files: 5, bytes: 12_000_000 * 3 + 1000 + 3000 }), J(ix.startedBetween(T0, T0 + 2 * MIN)))
   // one camera's sums from its own rows (a camera with bookmarks of its own: thinning.mjs backlogOf, 2026-09-30)
   const of1 = ix.fullSummaryOf({ nvr: 't1', ch: 1 }, { fromMs: T0, toMs: cutoff, endBefore: cutoff, stepMs: 10_000 })
   check('fullSummaryOf: one camera\'s figures, the same as fullSummary\'s for it', J(of1.map((r) => [r.nvr, r.ch, r.loc, r.files, r.bytes, Math.round(r.weighted), r.firstMs]).sort()) === J(sum.map((r) => [r.nvr, r.ch, r.loc, r.files, r.bytes, Math.round(r.weighted), r.firstMs]).sort()), J({ of1, sum }))
@@ -420,7 +421,7 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   const so = planOf(THIN_SQL.fullSummaryOf, 10_000, 't1', 1, -1e15, cutoff, cutoff)
   check('fullSummaryOf reads one camera\'s rows only (segments_cam, camera and start bounded)', /SEARCH segments USING INDEX segments_cam \(nvr=\? AND ch=\? AND start_ms>\? AND start_ms<\?\)/.test(so) && !/SCAN segments/.test(so), so)
   const b = planOf(THIN_SQL.startedBetween, T0, cutoff)
-  check('startedBetween searches segments_start', /^SEARCH segments USING INDEX segments_start \(start_ms>\? AND start_ms<\?\)$/.test(b), b)
+  check('startedBetween searches the partial index of full-video rows, bounded on both sides', /^SEARCH segments USING INDEX segments_full \(start_ms>\? AND start_ms<\?\)$/.test(b), b)
   raw.close()
   ix.close()
 }

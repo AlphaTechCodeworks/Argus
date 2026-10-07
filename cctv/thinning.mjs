@@ -644,8 +644,13 @@ export async function runThinning({ index, settings = null, now = Date.now(), dr
   backoffSaid = lowered
   const defaults = settings.recording?.defaults ?? {}
   if (Number.isFinite(defaults.fullDays)) {
-    const ref = now - defaults.fullDays * DAY
-    out.backlog.perHourBytes = index.startedBetween(ref - 3 * 3_600_000, ref).bytes / 3
+    // What arrives at the cutoff an hour: the full video of the 3 hours that pass it next. The 3 hours before
+    // it were measured, and a job that keeps up has just rewritten those to about a tenth: the rate read low,
+    // so the day rule waited for a night that could not clear what was coming, fell behind, and read the true
+    // rate again from the hours it had not converted (audit of 2026-10-07). (Under 3 full-video hours: the
+    // last 3 hours recorded.)
+    const to = Math.min(now, now - defaults.fullDays * DAY + 3 * 3_600_000)
+    out.backlog.perHourBytes = index.startedBetween(to - 3 * 3_600_000, to).bytes / 3
   }
   if (backlog.files > 0 && backlog.lagMs > BEHIND_MS) {
     const w = `FALLING BEHIND: ${backlog.files.toLocaleString('en-GB')} files (${gbs(backlog.bytes)}) of full video wait to be converted, the oldest ${hoursText(backlog.lagMs)} past its full-video days (at ${out.pace.text})`

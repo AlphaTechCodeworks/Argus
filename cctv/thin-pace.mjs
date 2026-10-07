@@ -169,8 +169,8 @@ export function hoursToNightEnd(now, night, siteMin = siteMinutesOfDay) {
 
 /**
  * Whether this round converts. backlogBytes: full video past its full-video days, waiting (the index's
- * figure); arrivalBytesPerHour: the rate footage passes the cutoff (what the cameras recorded in the
- * hours just before it). slow: lastDiskTooSlow(); strain: lastStrain(). factor: the ceiling (paceFactor());
+ * figure); arrivalBytesPerHour: the rate footage passes the cutoff (the full video the cameras recorded
+ * in the hours that pass it next). slow: lastDiskTooSlow(); strain: lastStrain(). factor: the ceiling (paceFactor());
  * achievedMBps: what recent rounds converted (achievedMBps(), null while unknown): the coming night is judged
  * at the lower of the pace so lowered and that.
  * A round held back by the recorders (held) says whether it would otherwise have worked (wouldWork): by day,

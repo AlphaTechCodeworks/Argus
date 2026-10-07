@@ -643,6 +643,27 @@ await import(${JSON.stringify(pathToFileURL(join(import.meta.dirname, '..', 'sha
   w.index.close()
 }
 
+// ---- the rate footage arrives at the cutoff (the day rule's figure): measured on full video ----------------
+// One camera, a file a minute of 12 MB: 720 MB an hour. The job has kept up, so everything past the 30
+// full-video days is time-lapse at a tenth. Measured on the 3 hours just before the cutoff it read 72 MB an
+// hour (audit of 2026-10-07); it is the full video of the 3 hours that pass the cutoff next.
+{
+  const w = world()
+  const cutoff = NOW - 30 * DAY
+  for (let k = -180; k < 240; k++) {
+    const startMs = cutoff + k * 60_000
+    const tl = k < 0
+    w.index.addSegment({ nvr: 'n1', ch: 0, path: join(w.root, 'n1', '0', `${startMs}.h264`), startMs, endMs: startMs + 59_000, bytes: tl ? 1_200_000 : 12_000_000, keyframes: tl ? 6 : 30, loc: 'L1', thinned: tl ? THIN.timelapse : null })
+  }
+  const r = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, ...AT_NIGHT })
+  check('THE ARRIVAL RATE IS THE FULL VIDEO\'S (720 MB an hour), not what the hours already converted weigh (72 MB)', r.backlog.files === 0 && r.backlog.perHourBytes === 60 * 12_000_000, JSON.stringify(r.backlog))
+  // a job that is behind: the hour before the cutoff still full video. The figure is the same (it was 288 MB)
+  for (let k = -60; k < 0; k++) w.index.setThin(join(w.root, 'n1', '0', `${cutoff + k * 60_000}.h264`), null, { bytes: 12_000_000, keyframes: 30 })
+  const behind = await runThinning({ index: w.index, settings: w.settings(), now: NOW, present: w.present, dryRun: false, siteMin: () => 12 * 60 })
+  check('... the same with an hour waiting to be converted: the rate does not move with how far the job has got', behind.backlog.files === 60 && behind.backlog.perHourBytes === 60 * 12_000_000, JSON.stringify(behind.backlog))
+  w.index.close()
+}
+
 // ---- when it works: nights first, not while the recorder says the disk is too slow, not past its round --------
 {
   const w = world()

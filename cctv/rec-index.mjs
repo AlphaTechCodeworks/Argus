@@ -388,8 +388,9 @@ export const THIN_SQL = {
   // each of its windows would pass every other camera's rows again
   fullSummaryOf: `SELECT loc, COUNT(*) AS files, SUM(bytes) AS bytes, SUM(bytes * MIN(1.0, MAX(1.0, (end_ms - start_ms) * 1.0 / ?) / MAX(keyframes, 1))) AS weighted, MIN(start_ms) AS firstMs
     FROM segments INDEXED BY segments_cam WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms < ? AND end_ms < ? AND thinned IS NULL GROUP BY loc`,
-  // what every camera recorded in a window (the rate footage passes the cutoff at: thinning's pace)
-  startedBetween: 'SELECT COUNT(*) AS files, IFNULL(SUM(bytes), 0) AS bytes FROM segments WHERE start_ms >= ? AND start_ms < ?'
+  // the full video every camera recorded in a window (the rate footage passes the cutoff at: thinning's pace).
+  // Full-video rows only: a row already rewritten weighs about a tenth of what arrived (audit of 2026-10-07)
+  startedBetween: 'SELECT COUNT(*) AS files, IFNULL(SUM(bytes), 0) AS bytes FROM segments INDEXED BY segments_full WHERE thinned IS NULL AND start_ms >= ? AND start_ms < ?'
 }
 /** "From the start" for oldestOf / oldest: earlier than any start_ms. */
 const NO_START = Number.MIN_SAFE_INTEGER
@@ -618,7 +619,7 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     /** fullSummary for one camera ({ nvr, ch }), read from its own rows only (THIN_SQL.fullSummaryOf). */
     fullSummaryOf: (cam, { fromMs = NO_START, toMs, endBefore, stepMs }) =>
       q.fullSummaryOf.all(Math.max(1, Number(stepMs)), String(cam.nvr), Number(cam.ch), fromMs, toMs, endBefore).map((r) => ({ nvr: String(cam.nvr), ch: Number(cam.ch), loc: r.loc, files: Number(r.files), bytes: Number(r.bytes), weighted: Number(r.weighted), firstMs: Number(r.firstMs) })),
-    /** { files, bytes } of every camera's rows that started in [fromMs, toMs). */
+    /** { files, bytes } of every camera's full-video rows that started in [fromMs, toMs). */
     startedBetween: (fromMs, toMs) => {
       const r = q.startedBetween.get(fromMs, toMs)
       return { files: Number(r.files), bytes: Number(r.bytes) }
