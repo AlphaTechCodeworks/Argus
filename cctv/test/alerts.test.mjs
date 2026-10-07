@@ -219,5 +219,68 @@ check('KINDS covers every kind used', ['server-restart', 'drive-missing', 'drive
   check('... and can be muted like any other kind', m.step(at(T0 + 7 * MIN, [short]), T0 + 7 * MIN).opened.length === 0)
 }
 
+// --- an open alert keeps its severity and start (audit 2026-10-07 M3) ---------------------------
+{
+  const e = eng()
+  const nvr = (online) => [{ id: 'nvr1', name: 'Main site', online, loginError: null, refusalsLast10Min: 0, clockSkewMs: 0 }]
+  e.step(ok({ nvrs: nvr(false) }), T0 + 4 * MIN)
+  const opened = e.step(ok({ nvrs: nvr(false) }), T0 + 6 * MIN).opened[0]
+  check('nvr-offline opens high, since its first sighting', opened?.severity === 'high' && opened.since === T0 + 4 * MIN, JSON.stringify(opened))
+  const later = e.step(ok({ nvrs: nvr(false) }), T0 + 7 * MIN).open[0]
+  check('on the next pass the open alert still has its severity and start', later?.severity === 'high' && later.since === T0 + 4 * MIN, JSON.stringify(later))
+  e.step(ok(), T0 + 7 * MIN + 30_000)
+  const gone = e.step(ok(), T0 + 9 * MIN).cleared[0]
+  check('... and so does its clear', gone?.severity === 'high' && gone.since === T0 + 4 * MIN && gone.clearedAt === T0 + 9 * MIN, JSON.stringify(gone))
+}
+{
+  // the wording still follows the facts: a second camera going offline changes the open alert's title
+  const e = eng()
+  const cam = (ch, online) => ({ nvrId: 'nvr1', ch, name: `Cam ${ch + 1}`, online, recording: true, lastSegmentMs: T0 })
+  const one = ok({ cameras: [cam(0, false), cam(1, true)] })
+  e.step(one, T0 + 4 * MIN); e.step(one, T0 + 6 * MIN)
+  const r = e.step(ok({ cameras: [cam(0, false), cam(1, false)] }), T0 + 7 * MIN)
+  check('an open alert takes the newer wording and keeps its severity', r.opened.length === 0 && r.open[0]?.title === 'nvr1: 2 cameras offline' && r.open[0].severity === 'medium' && r.open[0].since === T0 + 4 * MIN, JSON.stringify(r.open))
+}
+
+// --- a camera alert is not "OK again" because its NVR went offline (audit 2026-10-07 M3) --------
+{
+  const e = eng()
+  const nvr = (online) => [{ id: 'nvr1', name: 'Main site', online, loginError: null, refusalsLast10Min: 0, clockSkewMs: 0 }]
+  const cam = (online) => [{ nvrId: 'nvr1', ch: 0, name: 'Cashier Front', online, recording: true, lastSegmentMs: T0 }]
+  const camDown = ok({ cameras: cam(false) })
+  const nvrDown = ok({ cameras: cam(false), nvrs: nvr(false) })
+  e.step(camDown, T0 + 4 * MIN)
+  check('the camera alert opens', e.step(camDown, T0 + 6 * MIN).opened[0]?.kind === 'camera-offline')
+  const cleared = []
+  let r
+  for (let t = 7; t <= 20; t++) {
+    r = e.step(nvrDown, T0 + t * MIN)
+    cleared.push(...r.cleared)
+  }
+  check('with its NVR offline the camera alert does not clear', cleared.length === 0, JSON.stringify(cleared))
+  check('... and both stay open', r.open.map((a) => a.kind).sort().join() === 'camera-offline,nvr-offline', r.open.map((a) => a.kind).join())
+  // the NVR is back and the camera is still offline: the same alert goes on, nothing is sent again
+  r = e.step(camDown, T0 + 21 * MIN)
+  check('NVR back, camera still offline: no second camera alert', r.opened.length === 0 && r.open.some((a) => a.kind === 'camera-offline'), JSON.stringify(r.opened))
+  check('... only the NVR alert clears', r.cleared.length === 1 && r.cleared[0].kind === 'nvr-offline', JSON.stringify(r.cleared))
+  // the camera really is back: it clears clearMs after that, as before
+  check('camera back: not cleared at once', e.step(ok(), T0 + 21 * MIN + 30_000).cleared.length === 0)
+  r = e.step(ok(), T0 + 23 * MIN)
+  check('... cleared after clearMs', r.cleared.length === 1 && r.cleared[0].kind === 'camera-offline' && r.cleared[0].severity === 'medium', JSON.stringify(r.cleared))
+}
+{
+  // NVR back with the camera online: the clear time starts when the NVR could be asked again
+  const e = eng()
+  const nvr = (online) => [{ id: 'nvr1', name: 'Main site', online, loginError: null, refusalsLast10Min: 0, clockSkewMs: 0 }]
+  const cam = (online) => [{ nvrId: 'nvr1', ch: 0, name: 'Cashier Front', online, recording: true, lastSegmentMs: T0 + 30 * MIN }]
+  const camDown = ok({ cameras: cam(false) })
+  e.step(camDown, T0 + 4 * MIN); e.step(camDown, T0 + 6 * MIN)
+  for (let t = 7; t <= 12; t++) e.step(ok({ cameras: cam(false), nvrs: nvr(false) }), T0 + t * MIN)
+  const up = ok({ cameras: cam(true) })
+  check('NVR and camera back: the camera alert is not cleared on the first pass', e.step(up, T0 + 12 * MIN + 30_000).cleared.every((a) => a.kind !== 'camera-offline'))
+  const all = [...e.step(up, T0 + 13 * MIN).cleared, ...e.step(up, T0 + 14 * MIN).cleared]
+  check('... and is cleared clearMs later', all.some((a) => a.kind === 'camera-offline'), JSON.stringify(all.map((a) => a.kind)))
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

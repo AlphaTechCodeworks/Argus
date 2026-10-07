@@ -29,6 +29,9 @@ const IMMEDIATE = new Set(['server-restart', 'nvr-login', 'nvr-refusing'])
 /** Kinds reported once with no clear (nothing to recover from). */
 const ONE_SHOT = new Set(['server-restart'])
 
+/** Kinds about an NVR's cameras, keyed "<kind>/<nvr id>": unknown, not cleared, while that NVR is offline. */
+const CAMERA_KINDS = new Set(['camera-offline', 'not-recording'])
+
 const HIGH = new Set(['server-restart', 'drive-missing', 'drive-full', 'nvr-offline', 'nvr-login', 'nvr-disk'])
 
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
@@ -66,7 +69,9 @@ export function alertEngine({ raiseMs, clearMs, graceMs, notRecordingMs, clockSk
 
       for (const [key, c] of found) {
         const st = state.get(key) ?? { firstSeen: nowMs, openedAt: null, doneOneShot: false }
-        st.alert = c
+        // An open alert keeps what it opened with (since, severity) and takes only the candidate's
+        // newer wording: replaced whole, Health showed it as medium and its clear carried no severity.
+        st.alert = st.openedAt !== null ? { ...st.alert, ...c } : c
         st.lastSeen = nowMs
         state.set(key, st)
         if (st.openedAt !== null || st.doneOneShot) continue
@@ -81,9 +86,14 @@ export function alertEngine({ raiseMs, clearMs, graceMs, notRecordingMs, clockSk
         if (ONE_SHOT.has(c.kind)) { st.doneOneShot = true; st.openedAt = null }
       }
 
+      // A camera alert stops being a candidate when its NVR goes offline (the NVR alert covers it),
+      // but nothing says the cameras are back: it is held as it is, with no "OK again", and its
+      // clear time starts once the NVR can be asked again.
+      const offlineNvrs = new Set((snap.nvrs ?? []).filter((n) => !n.online).map((n) => n.id))
       for (const [key, st] of [...state]) {
         if (found.has(key)) continue
         if (st.openedAt === null) { state.delete(key); continue }   // never opened: forget it
+        if (CAMERA_KINDS.has(st.alert.kind) && offlineNvrs.has(key.slice(st.alert.kind.length + 1))) { st.lastSeen = nowMs; continue }
         if (nowMs - st.lastSeen < clearMs) continue
         cleared.push({ ...st.alert, clearedAt: nowMs })
         state.delete(key)
