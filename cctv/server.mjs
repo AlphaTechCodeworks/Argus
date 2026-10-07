@@ -153,6 +153,7 @@ import { RUN_MS as THIN_RUN_MS, usePaceFile } from './thin-pace.mjs'
 import { detectEncoder } from './transcode.mjs'
 import { httpsOptions } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
+import { recordCrashes } from './crash-record.mjs'
 import { loopWorstMs } from './loop-lag.mjs'
 import { processErrors } from './process-guard.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
@@ -168,6 +169,8 @@ const {
 const PUBLIC_DIR = join(import.meta.dirname, 'public')
 
 startWatchdog()
+// an error that ends this process leaves DATA_DIR/last-crash.json behind (the watchdog covers hangs, not these)
+recordCrashes({ dataDir: auth.DATA_DIR })
 // One line per process an hour: this one and each NVR worker (from its 5 s STATS), so a day of the
 // journal says whose memory grows and whether it is JavaScript or native (perf report Task 0, 2026-09-29)
 startMemoryLog({

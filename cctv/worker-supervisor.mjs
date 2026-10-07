@@ -22,10 +22,17 @@ const LINK_RESET_EVERY_MS = 1000 // one reset prints a line per link: at most on
 // person acts on, so it is not written there; onLine still gets it, like every line, because that
 // is where the SDK's output is watched.
 const LOGIN_STATE_NOISE_RE = /ProcChannelState.*m_bLoginSuccess == false/
+// And this one for every address it formats over a NAT 1.0 link ("NatCommon.cpp(241): INFO:
+// NAT_inet_ntoa |IPv6| ip_str_buf=181.41.121.88"). On 2026-10-07 it was 98 % of the journal: about
+// 235,000 lines in ten minutes from two sites' workers, which filled the 500 MB cap in two and a half
+// hours, so the journal no longer held the night's restart by the time anyone looked. It has no
+// blank line of its own. The SDK's other NAT lines (a relay chosen, a search that failed) stay.
+const NAT_NTOA_NOISE_RE = /NatCommon\.cpp\(\d+\): INFO: NAT_inet_ntoa /
 
 /**
  * Copies a child's output to `out`, each line prefixed, except the SDK's login-state noise (above)
- * and the blank line after it; onLine (optional) is shown every line, those included.
+ * and the blank line after it, and its NAT_inet_ntoa line; onLine (optional) is shown every line,
+ * those included.
  */
 export function prefixLines(from, out, prefix, onLine = null) {
   if (!from) return
@@ -33,7 +40,7 @@ export function prefixLines(from, out, prefix, onLine = null) {
   let afterNoise = false // the last line was the SDK's noise: a blank line now is its second half
   const keep = (l) => {
     const noise = LOGIN_STATE_NOISE_RE.test(l)
-    const drop = noise || (afterNoise && l.trim() === '')
+    const drop = noise || (afterNoise && l.trim() === '') || NAT_NTOA_NOISE_RE.test(l)
     afterNoise = noise
     return !drop
   }
