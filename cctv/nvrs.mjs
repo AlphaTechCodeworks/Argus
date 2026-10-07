@@ -113,7 +113,7 @@ export function applyP2pOnline(list, { hasVideo, onlineSet = null }) {
 /** The camera list as far as a change to it matters (the order is the channels'). */
 const listSig = (list) => list.map((c) => `${c.ch}|${c.online}|${c.configured}|${c.name}|${c.ip}|${c.httpPort}|${c.model}|${c.maker}`).join('\n')
 const WORKER_LIST_FRESH_MS = Math.max(15_000, CHANNEL_REFRESH_MS * 3) // STATS come every 5 s
-const CONTROL_KEEPALIVE_MS = 5 * 60_000 // main's own poll while the worker polls
+const CONTROL_KEEPALIVE_MS = 5 * 60_000 // main's own poll while the worker polls (after one not answered: at the next turn)
 /** ms +-20% (rnd: tests). */
 export const jittered = (ms, rnd = Math.random) => Math.round(ms * (0.8 + 0.4 * rnd()))
 const MAX_LIVE_FAILURES = 6 // consecutive LivePlay failures -> log in again
@@ -491,7 +491,7 @@ export class Nvr {
     this.sessions = new SessionPool(this)
     this.playback = createPlayback(this)
     this.loggedInAt = 0 // when the current session logged in (playback.mjs asks for no recording dates just after)
-    this.lastOwnPoll = 0 // when this process last read the camera list itself
+    this.lastOwnPoll = 0 // when this process last read the camera list itself and was answered
     this.listReadAt = 0 // when the camera list was last read (the routine read, the stall probe, a login)
     this.listChangedAt = 0 // when a read last found a camera added, gone, renamed, moved, offline or back
     // the turns of the routine read since the last hourly line: read (failed: no answer), or not read
@@ -885,14 +885,16 @@ export class Nvr {
       return
     }
     // the worker polls and sends the list: only a slow keepalive here (keeps this control login
-    // checked for picture settings, playback and motion search)
+    // checked for picture settings, playback and motion search). Counted from the last read that
+    // was answered: one that was not is asked again at the next turn, so a dead control login is
+    // replaced after MAX_CHANNEL_FAILURES turns (~2 minutes) as without a worker, where it took
+    // that many keepalives (15 to 20 minutes with settings, playback and motion search failing)
     if (this.#workerPolls && Date.now() - this.lastOwnPoll < CONTROL_KEEPALIVE_MS) return
     const held = this.#listHeld()
     if (held) {
       turns[held]++
       return
     }
-    this.lastOwnPoll = Date.now()
     this.refreshing = true
     const gen = this.gen
     try {
@@ -903,6 +905,7 @@ export class Nvr {
       if (!ok) turns.failed++
       if (gen !== this.gen) return // the session changed meanwhile
       if (ok) {
+        this.lastOwnPoll = Date.now()
         this.health.channelFailures = 0
         if (!this.online && !this.relogging) {
           this.status = 'online'
