@@ -71,6 +71,8 @@ function open(file = EVENTS_DB) {
     // The window query is the only filter with an index behind it; the rest are applied in JS by
     // event-rules.filterAlarms, which the page uses on the same data.
     inWindow: db.prepare(`SELECT ${EV_COLS} FROM events WHERE start_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC LIMIT ?`),
+    // the same without a limit, read a row at a time (listEvents with `keep`)
+    inWindowAll: db.prepare(`SELECT ${EV_COLS} FROM events WHERE start_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC`),
     ofCamera: db.prepare(`SELECT ${EV_COLS} FROM events WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? ORDER BY start_ms`),
     unacked: db.prepare(`SELECT ${EV_COLS} FROM events WHERE ack_ms IS NULL ORDER BY start_ms DESC LIMIT ?`),
     ack: db.prepare('UPDATE events SET ack_ms = ?, ack_user = ?, ack_note = ? WHERE id = ?'),
@@ -227,15 +229,27 @@ export function addEvent(e, nowMs = Date.now()) {
 /** One event by id, or null. */
 export const getEvent = (id) => plain(open().byId.get(Number(id)))
 
-/** Events starting inside [fromMs, toMs], newest first. */
-export function listEvents({ fromMs = null, toMs = null, limit = MAX_RESULTS } = {}) {
+/**
+ * Events starting inside [fromMs, toMs], newest first.
+ *
+ * keep: a test each row must pass to be returned. The limit then counts the rows kept, not the rows
+ * read: limiting first and filtering afterwards loses whatever is older than the newest `limit` rows
+ * of every camera and kind, which on a busy fleet is an unacknowledged alarm from an hour ago.
+ */
+export function listEvents({ fromMs = null, toMs = null, limit = MAX_RESULTS, keep = null } = {}) {
   const s = open()
   const cap = Math.min(Math.max(1, Math.floor(Number(limit) || MAX_RESULTS)), MAX_RESULTS)
-  return s.inWindow.all(
-    Number.isFinite(fromMs) ? Math.round(fromMs) : -8.64e15,
-    Number.isFinite(toMs) ? Math.round(toMs) : 8.64e15,
-    cap
-  ).map(plain)
+  const from = Number.isFinite(fromMs) ? Math.round(fromMs) : -8.64e15
+  const to = Number.isFinite(toMs) ? Math.round(toMs) : 8.64e15
+  if (typeof keep !== 'function') return s.inWindow.all(from, to, cap).map(plain)
+  const out = []
+  for (const r of s.inWindowAll.iterate(from, to)) {
+    const row = plain(r)
+    if (!keep(row)) continue
+    out.push(row)
+    if (out.length >= cap) break
+  }
+  return out
 }
 
 /** One camera's events in [fromMs, toMs], oldest first — what the recorder's windows are built from. */

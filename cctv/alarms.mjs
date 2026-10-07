@@ -292,14 +292,23 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
       const p = new URLSearchParams(search)
       const fromMs = num(p.get('from')) ?? now - DEFAULT_WINDOW_MS
       const toMs = num(p.get('to')) ?? now
-      const rows = nameCameras(listEvents({ fromMs, toMs, limit: num(p.get('limit')) ?? 500 }).filter(visible), cameras())
-      const filtered = filterAlarms(rows, {
+      const cams = cameras()
+      const want = {
         types: list(p.get('types')),
         cameras: list(p.get('cameras')),
         priorities: list(p.get('priorities')),
         acked: tri(p.get('acked')),
         text: p.get('text') ?? ''
-      })
+      }
+      // Rights and filters are applied as the rows are read, so the limit counts the alarms shown.
+      // Cutting to the newest 500 of everything first hid an older unacknowledged alarm behind a busy
+      // fleet's motion events, and left a viewer of one quiet camera with an empty list.
+      const filtered = nameCameras(listEvents({
+        fromMs,
+        toMs,
+        limit: num(p.get('limit')) ?? 500,
+        keep: (row) => visible(row) && filterAlarms(nameCameras([row], cams), want).length > 0
+      }), cams)
       const { sourceReport } = await import('./events.mjs')
       return [200, {
         alarms: prioritise(filtered),

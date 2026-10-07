@@ -1406,7 +1406,8 @@ async function followWallExport(id) {
     } catch {
       continue // a blip in polling is not a failed export
     }
-    exProgressEl.value = Math.round((job.progress ?? 0) * 100)
+    // progress is { step, pct, … } (export-job.mjs), as playback.js reads it
+    if (Number.isFinite(job.progress?.pct)) exProgressEl.value = job.progress.pct
     if (job.state === 'done') {
       exSay('Ready.')
       const a = document.createElement('a')
