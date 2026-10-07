@@ -60,6 +60,12 @@
 //   bytes 6-7   reserved
 //   bytes 8-15  timestamp in microseconds (int64)
 //   bytes 16-   Annex B bitstream
+
+// First, before any other module is loaded: from here on a promise rejection nobody catches is
+// logged and counted (/healthz: errors), and no longer ends this process and with it every viewer's
+// socket, a running export and every NVR worker (2026-10: a playback command of 'null' threw inside
+// an async handler nobody awaited; process-guard.mjs). This process only: a worker still ends on one.
+import './process-guard-server.mjs'
 import { clientIpOf, localProbe, securityHeaders } from './security.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleNetStatus } from './nvr-netstatus.mjs'
@@ -145,6 +151,7 @@ import { detectEncoder } from './transcode.mjs'
 import { httpsOptions } from './tls.mjs'
 import { lastHang, startWatchdog, startupDelayMs } from './watchdog.mjs'
 import { loopWorstMs } from './loop-lag.mjs'
+import { processErrors } from './process-guard.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
 import { xmlOnline } from './xml-session.mjs'
@@ -595,6 +602,10 @@ const handleRequest = async (req, res) => {
       // the longest pause of this process's event loop in the last minute, in ms (loop-lag.mjs): the
       // live video, pages and alarms all waited that long; "[loop] blocked" lines have the details
       loop: { worstMs: loopWorstMs() },
+      // promise rejections nobody caught in this process since it started, which no longer end it
+      // (process-guard.mjs): how many, and when and what the last one was. Each is a job that
+      // stopped part-way and a stack in the journal; `ok` stays as it is, nothing restarts for one
+      errors: processErrors(),
       // network shares as last checked (never checked here): the outside watcher remounts one that
       // stopped answering, which the server itself, no longer frozen by it, would otherwise hide
       shares: listLocations().filter((l) => l.type === 'network').map((l) => ({ path: l.path, ok: l.health.ok, reason: l.health.reason }))
@@ -1311,10 +1322,18 @@ if (Object.keys(auth.loadUsers()).length === 0) {
 }
 
 const shutdown = async () => {
-  // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
-  // (9 s: the NVR workers get 8 s to close their segments and log out; the unit allows 15)
-  await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 9000))])
-  process.kill(process.pid, 'SIGKILL')
+  try {
+    // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
+    // (9 s: the NVR workers get 8 s to close their segments and log out; the unit allows 15)
+    await Promise.race([stopNvrs().catch(() => {}), new Promise((r) => setTimeout(r, 9000))])
+  } catch (e) {
+    console.error(`[server] stopping failed part-way: ${e?.stack ?? e}`)
+  } finally {
+    // whatever became of the logout. Nobody waits for this function: a rejection in it used to end
+    // the process by itself, and under process-guard.mjs would be logged and the process left
+    // running until systemd's 15 s were up
+    process.kill(process.pid, 'SIGKILL')
+  }
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
