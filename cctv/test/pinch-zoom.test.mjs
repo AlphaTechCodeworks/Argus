@@ -69,6 +69,26 @@ check('double-tap: back to the whole picture', last.z === 1)
 const plain = el.fire('click', {})
 check('not zoomed: a tap is passed on (the view closes as before)', plain.stopped !== true)
 
+// rect is the box the picture fills unzoomed (Playback gives its tile's; it used to give the canvas's
+// own box, which carries the zoom's transform, and the picture drifted off the pointer step by step)
+{
+  const tile = fakeEl()
+  const box = { left: 100, top: 50, width: 1000, height: 562 }
+  let at = { z: 1, x: 0, y: 0 }
+  attachZoom(tile, { apply: (z, x, y) => (at = { z, x, y }), rect: () => box })
+  const under = () => (800 - box.left - at.x) / at.z // the picture's own x under a pointer at screen x 800
+  let held = true
+  for (let i = 0; i < 4; i++) {
+    tile.fire('wheel', { deltaY: -1, clientX: 800, clientY: 300 })
+    if (Math.abs(under() - 700) > 1e-6) held = false
+  }
+  check('a fixed rect: four wheel steps keep the same point under the pointer', held && Math.abs(at.z - 1.25 ** 4) < 1e-9, JSON.stringify(at))
+  tile.fire('pointerdown', { pointerId: 9, pointerType: 'mouse', clientX: 800, clientY: 300 })
+  tile.fire('pointermove', { pointerId: 9, clientX: -9000, clientY: -9000 })
+  tile.fire('pointerup', { pointerId: 9, pointerType: 'mouse' })
+  check('... and a drag stops with the far edge of the picture on the far edge of the box',Math.abs(at.x + (at.z - 1) * box.width) < 1e-6 && Math.abs(at.y + (at.z - 1) * box.height) < 1e-6, JSON.stringify(at))
+}
+
 isBusy = true
 el.fire('wheel', { deltaY: -1, clientX: 10, clientY: 10 })
 check('busy (a search box over the picture): gestures are ignored', last.z === 1)

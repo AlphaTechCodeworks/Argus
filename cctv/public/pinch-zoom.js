@@ -16,7 +16,8 @@ const MOVE_PX = 6 // a pointer that moved this far was a drag, not a tap
  * @param {HTMLElement} el the element the gestures happen on
  * @param {{ apply: (z: number, x: number, y: number) => void, rect?: () => DOMRect, max?: number,
  *   busy?: () => boolean }} o apply(z, x, y): scale z, and the scaled picture's offset in pixels
- *   (top-left origin); rect: the box the picture fills; busy: gestures are ignored (e.g. a search box
+ *   (top-left origin); rect: the box the picture fills unzoomed (never that of an element apply
+ *   transforms: its box has the zoom in it already); busy: gestures are ignored (e.g. a search box
  *   drawn over the picture needs raw pointer coordinates)
  * @returns {{ reset: () => void, readonly zoom: number, reapply: () => void }}
  */

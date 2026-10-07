@@ -2536,9 +2536,13 @@ const zoomState = { z: 1, x: 0, y: 0 } // x and y are pixel offsets of the scale
 
 const zoomBusy = () => !boxLayer.hidden
 
-/** Keeps the picture covering the tile: you can never pan to an empty edge. */
+/**
+ * Keeps the picture covering the tile: you can never pan to an empty edge. Measured on the tile, which
+ * the canvas fills: the canvas's own box is the zoomed and moved one (its transform is in it), and
+ * limits taken from that let the picture be panned off the screen.
+ */
 function clampZoom() {
-  const { width: w, height: h } = zoomCanvas.getBoundingClientRect()
+  const { width: w, height: h } = videoEl.getBoundingClientRect()
   const maxX = (zoomState.z - 1) * w
   const maxY = (zoomState.z - 1) * h
   zoomState.x = Math.min(0, Math.max(-maxX, zoomState.x))
@@ -2567,7 +2571,9 @@ const zoomer = attachZoom(videoEl, {
     zoomState.y = y
     applyZoom()
   },
-  rect: () => zoomCanvas.getBoundingClientRect(),
+  // the tile, not the canvas: the canvas's box moves and grows with the zoom, and each step taken
+  // from it drifted further off the pointer
+  rect: () => videoEl.getBoundingClientRect(),
   max: MAX_ZOOM,
   busy: zoomBusy
 })
