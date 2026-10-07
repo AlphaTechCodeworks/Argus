@@ -89,12 +89,15 @@ const num = (v) => {
  * A size the NVR states, in bytes. These answers carry megabytes unless they say otherwise
  * (the SDK prints them with "%.2f"), and some firmware adds a unit attribute. This assumption is
  * the main thing a run against a real NVR has to confirm — see the discovery notes below.
+ *
+ * The NVR's units are the binary ones: its "MB" is 1,048,576 bytes. nvr-2's 12 TB drive reports
+ * 11444224 MB, which is 12,000,138,625,024 bytes; at a million bytes each it showed as 11.4 TB.
  */
 export function sizeBytes(value, unit) {
   const n = num(value)
   if (n === null) return null
   const u = String(unit ?? 'MB').trim().toUpperCase()
-  const scale = { B: 1, KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12 }[u]
+  const scale = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 }[u]
   return scale === undefined ? null : Math.round(n * scale)
 }
 
