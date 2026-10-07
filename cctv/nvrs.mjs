@@ -343,12 +343,14 @@ class SessionPool {
           throw new Error(`${this.nvr.name} reconnected. Try again.`)
         }
         console.log(`[${this.nvr.id}] playback login ready in ${Date.now() - t0} ms (${this.inUse + 1} in use)`)
+        this.opening--
         return this.#lease(userId, gen)
       } catch (e) {
+        // its place is free before the waiter is woken: woken first, the waiter found this login
+        // still counted as opening, the pool full, and only queued again until its wait ran out
+        this.opening--
         this.#wakeOne() // let a waiter try its own login instead of timing out
         throw e
-      } finally {
-        this.opening--
       }
     }
     // all playback logins busy: wait for one
