@@ -1,13 +1,14 @@
 // Tests for connector-download.mjs: the Settings > Remote sites installer status and download.
-// SDK-free, runs anywhere.  node cctv/test/connector-download.test.mjs
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+// A .zip is preferred over a bare .exe (Chrome blocks unsigned .exe downloads). SDK-free, runs anywhere.
+//   node cctv/test/connector-download.test.mjs
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
 
 // point DATA_DIR somewhere harmless before the module (via auth.mjs) reads it at import
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'conn-data-'))
-const { statusOf, sendInstaller, INSTALLER_PATH } = await import('../connector-download.mjs')
+const { statusOf, sendInstaller } = await import('../connector-download.mjs')
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -22,7 +23,6 @@ class MockRes extends Writable {
     this.chunks = []
     this.status = 0
     this.headers = {}
-    this.destroyedByUs = false
   }
   writeHead(status, headers) {
     this.status = status
@@ -40,32 +40,43 @@ class MockRes extends Writable {
 const piped = (res) => new Promise((r) => res.on('finish', r).on('close', r))
 
 const dir = mkdtempSync(join(tmpdir(), 'conn-'))
-const exe = join(dir, 'NvrSiteConnector-Setup.exe')
+mkdirSync(join(dir, 'connector'), { recursive: true })
+const connDir = join(dir, 'connector')
+const exe = join(connDir, 'NvrSiteConnector-Setup.exe')
+const zip = join(connDir, 'NvrSiteConnector-Setup.zip')
 
-// ---- status ----
-check('INSTALLER_PATH is under DATA_DIR/connector and keeps the setup name', INSTALLER_PATH.replace(/\\/g, '/').endsWith('/connector/NvrSiteConnector-Setup.exe'), INSTALLER_PATH)
-check('status of a missing installer is "not available"', JSON.stringify(statusOf(exe)) === JSON.stringify({ available: false }))
-
-const bytes = Buffer.alloc(2048, 7)
-writeFileSync(exe, bytes)
-const s = statusOf(exe)
-check('status of a present installer: available, with its size, mtime and name', s.available === true && s.bytes === 2048 && typeof s.mtime === 'number' && s.name === 'NvrSiteConnector-Setup.exe', JSON.stringify(s))
-
-// ---- download, present ----
-{
+const download = async (d) => {
   const res = new MockRes()
-  sendInstaller(res, exe)
+  sendInstaller(res, d)
   await piped(res)
-  check('download of a present installer: 200, octet-stream, attachment, right length', res.status === 200 && res.headers['content-type'] === 'application/octet-stream' && res.headers['content-length'] === 2048 && /attachment; filename="NvrSiteConnector-Setup\.exe"/.test(res.headers['content-disposition'] ?? ''), JSON.stringify(res.headers))
-  check('download of a present installer: the body is the file, byte for byte', res.body().equals(bytes), `${res.body().length} bytes`)
+  return res
 }
 
-// ---- download, missing ----
+// ---- nothing placed ----
+check('status of an empty connector dir is "not available"', JSON.stringify(statusOf(connDir)) === JSON.stringify({ available: false }))
 {
-  const res = new MockRes()
-  sendInstaller(res, join(dir, 'nope.exe'))
-  await piped(res)
-  check('download when none is placed: 404 JSON saying so, no file streamed', res.status === 404 && res.headers['content-type'] === 'application/json' && /No installer has been uploaded/.test(res.body().toString()), `${res.status} ${res.body().toString().slice(0, 80)}`)
+  const res = await download(connDir)
+  check('download when none is placed: 404 JSON saying so', res.status === 404 && res.headers['content-type'] === 'application/json' && /No installer has been uploaded/.test(res.body().toString()), `${res.status}`)
+}
+
+// ---- only a bare .exe (fallback) ----
+const exeBytes = Buffer.alloc(2048, 7)
+writeFileSync(exe, exeBytes)
+{
+  const s = statusOf(connDir)
+  check('exe only: available, reported as the .exe with its size', s.available === true && s.name === 'NvrSiteConnector-Setup.exe' && s.bytes === 2048, JSON.stringify(s))
+  const res = await download(connDir)
+  check('exe only: served as octet-stream attachment, byte-exact', res.status === 200 && res.headers['content-type'] === 'application/octet-stream' && /filename="NvrSiteConnector-Setup\.exe"/.test(res.headers['content-disposition'] ?? '') && res.body().equals(exeBytes), JSON.stringify(res.headers))
+}
+
+// ---- a .zip present: preferred over the .exe, served as application/zip ----
+const zipBytes = Buffer.from('PK\u0003\u0004 pretend-zip')
+writeFileSync(zip, zipBytes)
+{
+  const s = statusOf(connDir)
+  check('zip present: it is preferred over the exe', s.available === true && s.name === 'NvrSiteConnector-Setup.zip' && s.bytes === zipBytes.length, JSON.stringify(s))
+  const res = await download(connDir)
+  check('zip present: served as application/zip attachment, byte-exact', res.status === 200 && res.headers['content-type'] === 'application/zip' && /filename="NvrSiteConnector-Setup\.zip"/.test(res.headers['content-disposition'] ?? '') && res.body().equals(zipBytes), JSON.stringify(res.headers))
 }
 
 rmSync(dir, { recursive: true, force: true })
