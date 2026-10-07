@@ -838,6 +838,35 @@ const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO
     check('the pick: with nothing else to pull, the hole that has thrown is still picked', alone === 'the oldest after 3 page(s)', alone)
     idx.close()
   }
+  {
+    // Two holes of one camera, the older always throwing (fifth review). Once a second hole of the
+    // camera has also thrown, camThrows runs a step ahead of the bad hole's own count, so the hole's
+    // 2x lapse and the camera's 1x lapse end at the same moment; without holding the hole for the
+    // camera's 2x lapse the bad hole (the camera's oldest) is picked first every time, throws, and
+    // its siblings never get a turn. Driven at the pick: counts and their times set by hand.
+    nowBox.t = NOW
+    const { idx, rows, job } = setup([['nvr-1', 1, 20], ['nvr-1', 1, 19], ['nvr-1', 2, 18]])
+    const [bad, sibling] = rows
+    const H = bf.THROWN_LAST_MS[0] // 20 h, the lapse's first step (the pick's order runs on THIS, not the minute ladder)
+    const at = async (hrs) => (await job.pick(NOW + hrs * (H / 20))).row?.id
+    // the bad hole has thrown once; a sibling of its camera has thrown too, so the camera's count is 2
+    job.pullThrows.set(bad.id, 1)
+    job.pullThrowAt.set(bad.id, NOW)
+    job.camThrows.set('nvr-1/1', 2)
+    job.camThrowAt.set('nvr-1/1', NOW)
+    // own 2x lapse = 2*backoffMs(1) = 40 h; the camera's handed (1x) lapse = backoffMs(2) = 40 h, so
+    // both end at 40 h; the camera's 2x lapse = 80 h now holds the bad hole past that.
+    const held = await at(41)
+    const freed = await at(81)
+    check('two holes of one camera, the older throwing: while the camera\'s longer lapse runs the sibling leads, not the bad hole', held === sibling.id, `picked ${held === sibling.id ? 'the sibling' : held === bad.id ? 'the bad hole' : held} at +41 h`)
+    check('  ... and once that lapse is over too the bad hole takes its place by age again', freed === bad.id, `picked ${freed === bad.id ? 'the bad hole' : freed} at +81 h`)
+    // one count deeper (the hole 2, the camera 3): own 2x = 80 h, camera 1x = 80 h, camera 2x = 160 h
+    job.pullThrows.set(bad.id, 2)
+    job.camThrows.set('nvr-1/1', 3)
+    const held2 = await at(81)
+    check('  ... the same one count deeper (hole 2, camera 3): the sibling still leads while the camera\'s 2x lapse runs', held2 === sibling.id, `picked ${held2 === sibling.id ? 'the sibling' : held2} at +81 h`)
+    idx.close()
+  }
   for (const [what, always] of [['one write refused, once', false], ['one hole that always throws', true]]) {
     // The place at the back is for a while, not for good. A standing backlog (a hole of another camera
     // due at every tick, one pulled an hour, for two days) and camera 2 with the two oldest holes in

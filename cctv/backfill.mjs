@@ -721,11 +721,20 @@ export class BackfillJob {
       const got = chooseGap(
         page.map((r) => {
           const cam = `${r.nvr}/${r.ch}`
+          const own = this.pullThrows.get(r.id)
+          // A hole that threw stays at the back while its OWN place is running (2x its ladder) or,
+          // if a sibling of the same camera has also thrown, while the CAMERA's is (also 2x). Once a
+          // second hole of the camera throws, camThrows runs a step ahead of this hole's count, so
+          // the hole's 2x lapse and the camera's 1x lapse end at the same moment; the hole, the
+          // camera's oldest, would then be picked first, throw, and send the camera's other holes
+          // back before they ever got a turn. Only a hole that itself threw is held so -- the
+          // camera's unthrown holes must still get pulled.
+          const back = stillLast(own, this.pullThrowAt.get(r.id), 2) || (own && stillLast(this.camThrows.get(cam), this.camThrowAt.get(cam), 2) ? own : 0)
           return {
             ...r,
             // (its own wait, or its camera's after a throw, whichever is longer)
             nextTryMs: Math.max(this.nextTry.get(r.id) ?? 0, this.camBackoff.get(cam) ?? 0),
-            throws: stillLast(this.pullThrows.get(r.id), this.pullThrowAt.get(r.id), 2),
+            throws: back,
             camThrows: stillLast(this.camThrows.get(cam), this.camThrowAt.get(cam))
           }
         }),
