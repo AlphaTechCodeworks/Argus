@@ -202,6 +202,7 @@ const rightsNow = () => pbRights(playbackCams.find((c) => c.nvr === state.nvr &&
 let ws = null
 let showStats = false
 let scrub = null // { t } while the playhead is dragged (server mode)
+let stepHold = false // a frame step's seek is playing: its first picture pauses it (stepFrame)
 let seekAt = null // performance.now() of the last seek, until its first picture (D overlay)
 let startMs = null // seek to first picture, ms
 let lastEndSkip = -Infinity // the last stretch jumped to at an end (never the same one twice)
@@ -216,6 +217,11 @@ const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   clock: PLAYBACK_CLOCK,
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
+    if (stepHold && !scrub) {
+      // the picture a frame step asked for: hold it
+      stepHold = false
+      if (ws && !state.paused) togglePause()
+    }
     noteStart()
     notePlaybackFrame() // a frame arrived: not waiting; re-arm the "nothing is arriving" watch
     hideMessage()
@@ -677,6 +683,7 @@ function setSource(src) {
 const rateOf = (speed) => (speed > 0 ? speed : 1) // reverse is shown as stills, not by the clock
 
 function seek(t) {
+  stepHold = false // (stepFrame sets it again after its own seek)
   if (state.mode === 'server') return serverSeek(t)
   const target = recordedFrom(t)
   if (target === null) {
@@ -715,6 +722,9 @@ function open(start) {
   sock.kind = 'nvr'
   sock.onopen = () => {
     if (state.speed !== 1) sock.send(JSON.stringify({ speed: state.speed }))
+    // paused while it was still connecting: send() drops what an unopened socket cannot take, and
+    // the NVR went on playing behind a page that said it was paused
+    if (state.paused) sock.send(JSON.stringify({ pause: true }))
   }
   sock.onmessage = (e) => {
     if (typeof e.data === 'string') return onStatus(JSON.parse(e.data))
@@ -1062,6 +1072,7 @@ const throttle = new ScrubThrottle(
 )
 
 function togglePause() {
+  stepHold = false // Play or Pause pressed while a frame step was on its way: the viewer's choice stands
   if (!ws && state.position !== null) return seek(state.position)
   state.paused = !state.paused
   send({ pause: state.paused })
@@ -1102,13 +1113,19 @@ function setSpeed(speed) {
   return allowed
 }
 
-/** One frame back or on (pb-transport frameStep), paused where it lands. */
+/**
+ * One frame back or on (pb-transport frameStep), paused where it lands. The seek plays, and the first
+ * picture it shows pauses it (the player's onFrame above): the frame at or after the target, since
+ * the frames before it are the preroll the player skips. Paused straight after the seek, as this
+ * used to do, the clock moved and the picture did not: the server sends a paused playback no frames
+ * (rec-playback.mjs), and a paused player draws none.
+ */
 function stepFrame(direction) {
   if (state.position === null) return
   const fps = Number(player.stats?.fps) > 0 ? Number(player.stats.fps) : 25
   const target = frameStep(state.position / 1000, direction, fps) * 1000
   seek(target)
-  if (!state.paused) togglePause()
+  stepHold = true
 }
 
 function jumpEvent(direction) {
