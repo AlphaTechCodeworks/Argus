@@ -284,6 +284,53 @@ const protectedRanges = () => [{ fromMs: MARK[0] - MIN, toMs: MARK[1] + MIN, cam
   check('... bookmarks that cannot be read: the oldest file of all, and it says so', unread.protection === 'unread' && unread.locations.NAS.oldestMs === OLDEST && /bookmarks could not be read/.test(unread.warnings[0]), J(unread.warnings))
 }
 
+// ---- the daily volume where the whole days are partly time-lapse already (audit of 2026-10-07, M12) --------
+// One camera recording 12 MB a minute, 17.28 GB a day, for 5 days; 1 full-video day, and the job has kept up:
+// everything over a day old is time-lapse at a tenth of the size. Of the three whole days, two are all
+// time-lapse and the newest is time-lapse for its first 8 hours (to 12:00 UTC on 2 Oct; the site's day starts
+// 04:00 UTC). Counted as they are the three days averaged 5.2 GB a day, and the forecast was 29.4 days where
+// 20.5 fit.
+{
+  const f = join(ROOT, 'partly.db')
+  openRecIndex(f).close()
+  const cut = NOW - DAY
+  const raw = new DatabaseSync(f)
+  raw.exec('BEGIN')
+  raw
+    .prepare(
+      `WITH RECURSIVE m(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM m WHERE k < ?)
+       INSERT INTO segments (path, nvr, ch, start_ms, end_ms, bytes, keyframes, loc, thinned)
+       SELECT '/srv/nas/nvr1/0/' || (? + k * 60000) || '.h265', 'nvr1', 0, ? + k * 60000, ? + k * 60000 + 60000,
+         CASE WHEN ? + k * 60000 < ? THEN 1200000 ELSE 12000000 END, 30, 'NAS', CASE WHEN ? + k * 60000 < ? THEN ${THIN.timelapse} END
+       FROM m`
+    )
+    .run(5 * 1440 - 1, OLDEST, OLDEST, OLDEST, OLDEST, cut, OLDEST, cut)
+  raw.exec('COMMIT')
+  raw.close()
+  const ix = openRecIndex(f)
+  const GBd = 12_000_000 * 1440 // 17.28 GB a day
+  const view = async (fullDays, at = NOW) => {
+    const s = settingsOf({ defaults: { fullDays } })
+    const facts = await measureRetention({ index: ix, settings: s, now: at, protectedRanges: null, cache: new Map() })
+    return { facts, l: retentionView({ facts, settings: s, locations: [rowOf({ held: 0.1 * TB, free: 1 * TB, total: 2 * TB, limit: 500e9 })], now: at }).locations.NAS }
+  }
+  const { facts, l } = await view(1)
+  const days = facts.days.map((d) => d.rows[0])
+  check('PARTLY TIME-LAPSE: measured, two whole days are all time-lapse and the newest is full video for its last 16 hours', days.length === 3 && days[0].fullMs === 0 && days[1].fullMs === 0 && days[2].fullMs === 16 * HOUR && days[2].fullBytes === 16 * 60 * 12_000_000 && days[2].ms === DAY, J(days))
+  check('... THE DAILY VOLUME IS THE FULL VIDEO\'S, 17.28 GB A DAY (counted as they are the days gave 5.2)', near(l.perDay / 1e9, 17.28, 1e-6), String(l.perDay / 1e9))
+  check('... the time-lapse measured against the same full video: a tenth of it', l.share.how === 'measured' && near(l.share.value, 0.1, 1e-9), J(l.share))
+  // 1 full-video day (17.28 GB) and time-lapse at 1.728 GB a day under 500 GB: all 30 days fit (67.4 GB)
+  check('... and the forecast is drawn at that volume: the plan\'s 30 days are 67.4 GB', l.forecast.now.daysFit === 30 && near(l.forecast.now.fullDays, 1), J(l.forecast.now))
+  // what the days would have read counted as they are: (2 x 1.728 + 8/24 x 1.728 + 16/24 x 17.28) / 3
+  const asTheyAre = days.reduce((a, r) => a + r.bytes, 0) / 3 / 1e9
+  check('... (the figures as they were counted before: 5.18 GB a day, under a third of it)', near(asTheyAre, 5.184, 1e-6), String(asTheyAre))
+  // a camera with no full video left in the whole days (measured the moment the day turns, 1 full-video day and
+  // the newest hours not there yet): nothing to scale from, counted as it is rather than as nothing
+  const none = retentionView({ facts: { ...facts, days: facts.days.slice(0, 2) }, settings: settingsOf({ defaults: { fullDays: 1 } }), locations: [rowOf({ held: 0.1 * TB, free: 1 * TB, total: 2 * TB, limit: 500e9 })], now: NOW }).locations.NAS
+  check('... no full video in the days at all: counted as it is (1.728 GB a day), never as nothing', near(none.perDay / 1e9, 1.728, 1e-6), String(none.perDay / 1e9))
+  ix.close()
+}
+
 // ---- what measuring costs the main thread -----------------------------------------------------------------
 /** The main thread's longest busy stretch while fn runs (a 2 ms beat less the loop's idle time), and monitorEventLoopDelay's max. */
 async function mainThread(fn) {

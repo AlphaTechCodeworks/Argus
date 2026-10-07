@@ -225,10 +225,13 @@ export const TARGET_SQL = {
   // where the n-th row from a time starts, whatever its camera or location: a window's end, so each dayUse
   // below reads at most that many rows (counted on segments_start alone, no row read)
   startNth: 'SELECT start_ms AS s FROM segments INDEXED BY segments_start WHERE start_ms >= ? ORDER BY start_ms LIMIT 1 OFFSET ?',
-  // what every camera recorded on each location in a window: files, bytes, footage time, and the bytes
+  // what every camera recorded on each location in a window: files, bytes and footage time; of those, the
+  // full-video rows' bytes and footage time (a row rewritten to time-lapse weighs about a tenth of what the
+  // camera recorded: the daily volume is the full video's, audit of 2026-10-07, M12), and their bytes
   // weighted by the share of keyframes one per interval keeps (thinning's estimate, THIN_SQL.fullSummary)
   dayUse: `SELECT IFNULL(loc, '') AS loc, nvr, ch, COUNT(*) AS files, SUM(bytes) AS bytes, SUM(MAX(0, end_ms - start_ms)) AS ms,
-    SUM(bytes * MIN(1.0, MAX(1.0, (end_ms - start_ms) * 1.0 / ?) / MAX(keyframes, 1))) AS weighted
+    SUM(CASE WHEN thinned IS NULL THEN bytes ELSE 0 END) AS fullBytes, SUM(CASE WHEN thinned IS NULL THEN MAX(0, end_ms - start_ms) ELSE 0 END) AS fullMs,
+    SUM(CASE WHEN thinned IS NULL THEN bytes * MIN(1.0, MAX(1.0, (end_ms - start_ms) * 1.0 / ?) / MAX(keyframes, 1)) ELSE 0 END) AS weighted
     FROM segments INDEXED BY segments_start WHERE start_ms >= ? AND start_ms < ? GROUP BY IFNULL(loc, ''), nvr, ch`,
   // a location's oldest and newest time-lapse, to the hour (TL_SCHEMA above)
   tlOldest: `SELECT start_ms AS s FROM segments INDEXED BY segments_tl WHERE ${TL_ROW} AND loc = ? ORDER BY start_ms LIMIT 1`,
@@ -650,10 +653,11 @@ export function openRecIndex(file, { walAutocheckpoint = null } = {}) {
     startNth: (fromMs, n = 0) => q.startNth.get(fromMs, Math.max(0, Math.floor(Number(n) || 0)))?.s ?? null,
     /**
      * What every camera recorded on each location, of the rows starting in [fromMs, toMs): [{ loc ('' for none), nvr, ch,
-     * files, bytes, ms (footage time), weighted (bytes by the share of keyframes one per stepMs keeps) }].
+     * files, bytes, ms (footage time), fullBytes and fullMs (the full-video rows' of those), weighted (the
+     * full-video rows' bytes by the share of keyframes one per stepMs keeps) }].
      */
     dayUse: (fromMs, toMs, stepMs) =>
-      q.dayUse.all(Math.max(1, Number(stepMs)), fromMs, toMs).map((r) => ({ loc: r.loc, nvr: r.nvr, ch: Number(r.ch), files: Number(r.files), bytes: Number(r.bytes), ms: Number(r.ms), weighted: Number(r.weighted) })),
+      q.dayUse.all(Math.max(1, Number(stepMs)), fromMs, toMs).map((r) => ({ loc: r.loc, nvr: r.nvr, ch: Number(r.ch), files: Number(r.files), bytes: Number(r.bytes), ms: Number(r.ms), fullBytes: Number(r.fullBytes), fullMs: Number(r.fullMs), weighted: Number(r.weighted) })),
     /** A location's oldest and newest time-lapse file, to the hour (TL_ROW), or null when it has none. */
     timelapseEdges(loc) {
       const o = q.tlOldest.get(String(loc))?.s ?? null

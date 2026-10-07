@@ -468,6 +468,7 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   check('dayUse: files, bytes and footage time per location and camera; a row with no location counts under \'\'', J(Object.keys(by).sort()) === J(['L1|0', 'L1|1', 'L2|1', '|2']) && by['L1|0'].files === 180 && by['L1|0'].bytes === 180 * 12_000_000 && by['L1|0'].ms === 180 * 59_000 && by['L2|1'].files === 60 && by['|2'].bytes === 10_000, J(use.map((r) => [r.loc, r.ch, r.files])))
   check('... and the bytes weighted by the share of keyframes one per interval keeps (as thinning\'s fullSummary)', Math.abs(by['L1|0'].weighted - 180 * 12_000_000 * (5.9 / 30)) < 1, String(by['L1|0'].weighted))
   check('... only the rows that start in the window', ix.dayUse(T0 + 60 * MIN, T0 + 61 * MIN, 10_000).reduce((a, r) => a + r.files, 0) === 2)
+  check('... all of them full video: the full-video bytes and footage time are the same', by['L1|0'].fullBytes === by['L1|0'].bytes && by['L1|0'].fullMs === by['L1|0'].ms, J(by['L1|0']))
   check('startNth: where the n-th row from a time starts (any camera, any location); past the last, null', ix.startNth(T0, 0) === T0 && ix.startNth(T0, 3) === T0 + MIN && ix.startNth(T0 + 179 * MIN, 1) === T0 + 179 * MIN && ix.startNth(T0 + 179 * MIN, 2) === null, J([ix.startNth(T0, 3), ix.startNth(T0 + 179 * MIN, 2)]))
 
   // time-lapse: camera 0's first two hours rewritten; the edges and the sample see the file of each hour's first minute
@@ -477,6 +478,10 @@ const startsOf = old.prepare('SELECT start_ms AS s, end_ms AS e FROM segments WH
   check('timelapseEdges: the oldest and newest time-lapse file of the hours\' first minutes (to the hour)', J(edges) === J({ oldestMs: T0, newestMs: T0 + 60 * MIN }) && ix.timelapseEdges('L2') === null, J(edges))
   const sample = ix.timelapseSample('L1', T0, T0 + 3 * 60 * MIN)
   check('timelapseSample: one file an hour per camera, with its bytes and footage time', J(sample) === J([{ nvr: 'd1', ch: 0, files: 2, bytes: 2_000_000, ms: 2 * 59_000 }]), J(sample))
+  // the full-video sums leave the rewritten files out; the files, bytes and footage time count every row
+  // (retention-target.mjs scales the full video's bytes to the whole footage time: audit of 2026-10-07, M12)
+  const mixed = ix.dayUse(T0, T0 + 3 * 60 * MIN, 10_000).find((r) => r.loc === 'L1' && r.ch === 0)
+  check('dayUse: a camera\'s files rewritten to time-lapse are in files, bytes and ms, and not in fullBytes, fullMs or weighted', mixed.files === 180 && mixed.bytes === 120 * 1_000_000 + 60 * 12_000_000 && mixed.ms === 180 * 59_000 && mixed.fullBytes === 60 * 12_000_000 && mixed.fullMs === 60 * 59_000 && Math.abs(mixed.weighted - 60 * 12_000_000 * (5.9 / 30)) < 1, J(mixed))
   ix.setThin('/rec/d1/0/0.h265', THIN.kept)
   check('... a file left as it was (THIN.kept) is not time-lapse', J(ix.timelapseEdges('L1')) === J({ oldestMs: T0 + 60 * MIN, newestMs: T0 + 60 * MIN }))
   const next = ix.fullNext('L1', T0 + 60 * MIN, 1000)
