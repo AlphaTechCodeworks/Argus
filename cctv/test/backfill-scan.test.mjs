@@ -344,7 +344,9 @@ const refs = [] // the old scan's holes at each time the new one ran
   // hole of its own, a second ledger row for footage its row already stands for; the new one does not
   // look behind the marks, and fill() works out what is left of the row from the index every time.
   const t = nowBox.t
-  const pulledRows = raw.prepare("SELECT id, nvr, ch, from_ms AS f, to_ms AS t FROM backfill_gaps WHERE note LIKE 'partly filled%' OR state = 'filled'").all()
+  // (A row with a try on it was pulled too: the pick now takes a hole whose start the NVR has rolled past
+  // while its end has not, the next round's scan may age that row out, and its note then says so.)
+  const pulledRows = raw.prepare("SELECT id, nvr, ch, from_ms AS f, to_ms AS t FROM backfill_gaps WHERE note LIKE 'partly filled%' OR state = 'filled' OR last_try_ms IS NOT NULL").all()
   const inAPulledRow = (k) => {
     const [nvr, ch, f, to] = k.split('/')
     return pulledRows.some((r) => r.nvr === nvr && String(r.ch) === ch && Number(f) >= r.f && Number(to) <= r.t)
