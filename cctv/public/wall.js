@@ -326,7 +326,8 @@ class Tile {
   /** Whether the picture has drifted far enough from the shared clock to be worth re-seeking. */
   drifted(atMs) {
     if (!this.ws || this.position === null) return false
-    return needsResync(this.position, atMs) && performance.now() - this.lastSeekAt > RESYNC_EVERY_MS
+    // (measured against the speed the wall's clock runs at: wall-clock.js needsResync)
+    return needsResync(this.position, atMs, { speed: clock.speed }) && performance.now() - this.lastSeekAt > RESYNC_EVERY_MS
   }
 
   /**
