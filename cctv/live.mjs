@@ -463,7 +463,8 @@ export class LiveStream {
   /** Stops the stream and disconnects its viewers (their browsers reconnect). */
   fail(reason) {
     const done = this.stop()
-    for (const ws of this.clients) ws.close(1011, reason)
+    // (a conversion's or a stand-in's tap, and a warm-up, have no close)
+    for (const ws of this.clients) ws.close?.(1011, reason)
     return done
   }
 
