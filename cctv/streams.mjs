@@ -63,6 +63,15 @@ import { xmlDegraded, xmlGen } from './xml-session.mjs'
 const QUERY_URL = 'queryNodeEncodeInfo'
 const EDIT_URL = 'editNodeEncodeInfo' // writes: only an admin's confirmed change
 const OUT_BYTES = 2 * 1024 * 1024 // the all-channel answer is ~33 KB per channel
+// queryNodeEncodeInfo is heavy and over a slow P2P/relay link takes far longer than the SDK's 20 s
+// default (sdk.mjs budgetOf): the read then times out and the panel falls back to a read-only
+// resolution with no editable controls at all. This read is interactive — the user is waiting on the
+// stream-settings panel — so it is given a long budget (transparent's timeoutMs). That the budget is
+// longer than XML_CAP_MS (nvr-xml.mjs, 90 s) is safe since the overlap fix (audit H1): when the cap
+// passes it frees the per-NVR queue and the process-wide turn so other NVRs' calls go on, and refuses
+// any further call to THIS NVR (503) until this one returns — it no longer lets a second call into the
+// SDK beside it. (A 5 MP main over a NAT relay has been measured at ~3 min; 4 min leaves margin.)
+const STREAM_READ_TIMEOUT_MS = 240_000
 const CACHE_MS = 5000
 const LOG_FILE = join(DATA_DIR, 'stream-changes.log')
 const REQUIRE = '<requireField><name/><chlType/><mainCaps/><main/><an/><ae/><mn/><me/><mainStreamQualityCaps/><levelNote/></requireField>'
@@ -140,7 +149,7 @@ function digitalDefault(item, enct, res) {
 async function readAll(nvr, gen, fresh = false) {
   const hit = allCache.get(nvr.id)
   if (!fresh && hit && Date.now() - hit.at < CACHE_MS) return hit.info
-  const info = parseEncode(await transparent(nvr, QUERY_URL, `${XML_HEADER}${REQUIRE}</request>`, 'main stream settings (all)', { gen, outBytes: OUT_BYTES }))
+  const info = parseEncode(await transparent(nvr, QUERY_URL, `${XML_HEADER}${REQUIRE}</request>`, 'main stream settings (all)', { gen, outBytes: OUT_BYTES, timeoutMs: STREAM_READ_TIMEOUT_MS }))
   if (info.status !== 'success') throw new HttpError(502, `The NVR refused to list its streams (${info.errorCode || info.status || 'no status'})`)
   allCache.set(nvr.id, { at: Date.now(), info })
   return info
@@ -151,7 +160,7 @@ const allCache = new Map() // nvr id -> { at, info }
 async function readChannel(nvr, chlId, gen) {
   try {
     const xml = `${XML_HEADER}<condition><chlId>${esc(chlId)}</chlId></condition>${REQUIRE}</request>`
-    const info = parseEncode(await transparent(nvr, QUERY_URL, xml, 'main stream settings', { gen, outBytes: OUT_BYTES }))
+    const info = parseEncode(await transparent(nvr, QUERY_URL, xml, 'main stream settings', { gen, outBytes: OUT_BYTES, timeoutMs: STREAM_READ_TIMEOUT_MS }))
     const item = info.status === 'success' ? info.items.find((i) => sameId(i.id, chlId)) : null
     if (item) return item
   } catch (e) {
