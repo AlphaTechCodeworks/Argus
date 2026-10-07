@@ -2322,5 +2322,34 @@ function slotlessBelowFull(may) {
   check('Live HD: a sub-stream\'s level changes ask nothing, and it moves as before', b.asked() === 0 && !b.ws.closedWith && b.v.level === 0 && b.entry().stream === t.stream && b.ws.got.length > 0, `${b.asked()} ${b.v.level}`)
 }
 
+// ---- an NVR edited and made again under the same id (its hub's closeAll, a new hub): a conversion
+// made on the old hub's stream stayed under the same key, and a remote tile that reconnected joined
+// it: its old replay and nothing after.
+{
+  const { StreamHub } = await import('../stream-hub.mjs')
+  const sock = () => ({ OPEN: 1, readyState: 1, bufferedAmount: 0, got: [], closed: null, handlers: {}, send(b) { this.got.push(b) }, on(e, f) { this.handlers[e] = f }, close(c, r) { this.closed = c + ' ' + r } })
+  const make = (o) => ({ push(ts, k) { o.onFrame(ts, k, Buffer.from([1])) }, close() {} })
+  const feed = (hub, n, from = 0) => { for (let i = from; i < from + n; i++) hub.onMessage({ t: 'frame', key: '5:0', buf: encodeFrame(Buffer.from([0, 0, 1, 1]), i % 12 === 0, 1, (i * 1000) / 30), isKey: i % 12 === 0 }) }
+  const pool = new TranscodePool(8)
+  const live = new AdaptiveLive({ pool, makeTranscoder: make, log: () => {}, budgetBps: 1e9, now: () => T })
+  clearInterval(live.timer)
+  const hub1 = new StreamHub('n1', () => {})
+  const a = sock()
+  live.attach('pc-a', { ws: a, nvrId: 'n1', ch: 5, type: 0, source: hub1.getStream(5, 0), codec: 'h265', mayMain: () => true })
+  feed(hub1, 30)
+  const first = [...live.streams.values()][0]
+  check('edited NVR: a remote main plays through its conversion before the edit', a.got.length > 0 && first && !first.closed && live.streams.size === 1)
+  hub1.closeAll()
+  const hub2 = new StreamHub('n1', () => {})
+  const b = sock()
+  live.attach('pc-b', { ws: b, nvrId: 'n1', ch: 5, type: 0, source: hub2.getStream(5, 0), codec: 'h265', mayMain: () => true })
+  const second = [...live.streams.values()].find((s) => !s.closed)
+  check('edited NVR: the next viewer gets a conversion of the new stream, the old one closed', first.closed && second && second !== first && second.source === hub2.getStream(5, 0) && pool.active === 1, pool.active + ' running')
+  check('edited NVR: ... the viewer of the old one is dropped to reconnect', a.closed === '1011 stream ended', String(a.closed))
+  a.handlers.close?.()
+  feed(hub2, 30, 30)
+  check('edited NVR: ... and the new one plays', b.got.length > 0, String(b.got.length))
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

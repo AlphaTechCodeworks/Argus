@@ -533,6 +533,13 @@ export class PhoneStream {
   }
 }
 
+/**
+ * A camera stream that has ended under whoever reads it: its NVR was removed, or edited and made
+ * again under the same id (stream-hub.mjs HubStream.close; live.mjs LiveStream.stop). Nothing comes
+ * from it any more, and a conversion's tap has no close to be told by.
+ */
+export const ended = (source) => source?.closed === true || source?.stopped === true
+
 /** Every phone stream on the server, by NVR, channel and stream type. */
 export class PhoneLive {
   constructor({ pool = new TranscodePool(maxPhoneStreams()), makeTranscoder, log } = {}) {
@@ -546,6 +553,10 @@ export class PhoneLive {
    */
   attach(key, source, type, ws, { background = false, camera } = {}) {
     let s = this.streams.get(key)
+    // one made on another stream than the camera's now (its NVR was edited and made again), or on one
+    // that has ended: its viewers would get its old replay and nothing after. Closed (they reconnect)
+    // and made again on this one
+    if (s && !s.closed && (s.source !== source || ended(s.source))) s.close()
     if (!s || s.closed) {
       const slot = this.pool.acquire()
       if (!slot) return false

@@ -44,7 +44,7 @@
 // closed 1008 as the access watch would close it at its next sweep ('hd not allowed' when only Live HD
 // went, #mayMove). A sub-stream's streams never carry the main stream (their keys hold the stream
 // type): not asked.
-import { FIRM_INTERVALS, PhoneStream, RATE_SAMPLES, keepEveryFor, maxPhoneStreams, steadyRate } from './phone-live.mjs'
+import { FIRM_INTERVALS, PhoneStream, RATE_SAMPLES, ended, keepEveryFor, maxPhoneStreams, steadyRate } from './phone-live.mjs'
 import { HD_NOT_ALLOWED } from './stream-param.mjs'
 import { CODEC_H265, PLAYBACK_LIMITS, TranscodePool } from './transcode.mjs'
 
@@ -371,6 +371,10 @@ export class AdaptiveLive {
     const L = LEVELS[level]
     const key = this.#keyFor(entry, level)
     let s = this.streams.get(key)
+    // one whose camera stream has ended under it (its NVR was edited and made again under the same
+    // id) sends nothing more: closed, its sockets with it (they reconnect), and made again on this
+    // socket's stream. Not for a socket still on the ended stream itself: it is on its way out too
+    if (s && !s.closed && ended(s.source) && !ended(entry.source)) s.close()
     if (!s || s.closed) {
       // a main's level-full conversion past FULL_MAX: level 15's stream, until one is free (the tick's
       // #retarget at full asks again)
