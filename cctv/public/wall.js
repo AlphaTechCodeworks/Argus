@@ -273,14 +273,21 @@ class Tile {
   /** The day's recorded stretches for this camera, from the server's index (one request, no NVR). */
   async loadDay(from, token) {
     this.error = null
-    this.stretches = []
+    // Only another day empties the lane before the answer comes. The minute refresh of today's wall
+    // asks for the same day again, and a tile with no stretches has "nothing recorded at this
+    // moment": every tile was stopped, blanked and opened again once a minute.
+    if (this.dayFrom !== from) this.stretches = []
+    this.dayFrom = from
     try {
       const tl = await api(`/api/playback/timeline?nvr=${encodeURIComponent(this.nvr)}&ch=${this.ch}&from=${from}&to=${from + DAY}`)
       if (token !== dayToken) return
       this.available = tl.available === true
       // Playback HD only: the server's recordings or nothing (the NVR's copy is not this viewer's)
       if (!this.available && !this.rights.sd) this.error = 'No recordings of this camera on this server that you may play back.'
-      if (!this.available) return
+      if (!this.available) {
+        this.stretches = []
+        return
+      }
       this.skew = tl.skewMs ?? 0
       this.tzOffsetMs = tl.tzOffsetMs
       this.codec = tl.codec ?? 'h264'
@@ -295,6 +302,7 @@ class Tile {
     } catch (e) {
       if (token !== dayToken) return
       this.available = false
+      this.stretches = []
       this.error = `Could not load this camera's timeline: ${e.message}`
     }
   }
