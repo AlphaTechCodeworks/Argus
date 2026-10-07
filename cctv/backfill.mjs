@@ -103,6 +103,19 @@ function markAfter(spans, h) {
 // much shorter ladder.
 export const REFUSED_BACKOFF_MS = [30 * MINUTE, 6 * 3_600_000]
 export const ERROR_BACKOFF_MS = [5 * MINUTE, 2 * 3_600_000]
+// How long a fill() that threw keeps the other holes of its camera at the back of the pick
+// (chooseGap): 20 hours after the first throw, twice as long for each further one, up to 8 days. The
+// hole that threw stays there twice as long as that.
+// 20 hours is the rest of the night it happened in and no more: by the next night's window the
+// camera's holes have their place by age again. A place at the back that only footage of that
+// camera getting into the index could end lasted until the service was restarted wherever other
+// holes were due at every tick: one refused write, and the five oldest holes of that camera aged out
+// on the NVR behind a standing backlog, four of them never asked for.
+// Twice as long for the hole itself, so that the camera's other holes are tried before it is: back
+// in its place together with them it was the oldest, went first, threw again, and put them all at
+// the back again. The doubling is for what really does throw every time: tried again after 1, 2, 4
+// and 8 days and not every night.
+export const THROWN_LAST_MS = [20 * 3_600_000, 8 * DAY]
 /**
  * A pull counts as progress only when it made the row's missing time at least this much shorter.
  * Counting any written file as progress cleared the retry wait on pulls that only wrote footage from
@@ -344,7 +357,18 @@ export function nvrReady(n, now = Date.now()) {
  * first, because that is the one that becomes impossible soonest. Length breaks ties, shortest
  * first, so a night spent on one huge hole never starves ten small ones.
  *
- * @param {object[]} rows ledger rows: { id, nvr, ch, fromMs, toMs, state, attempts, lastTryMs, nextTryMs? }
+ * Before the deadline come two counts the job keeps in memory of fills that threw (tick()):
+ * `throws`, how often this hole's fill() has thrown since one last returned, and `camThrows`, how
+ * often its camera's have since footage of that camera last got into the index. A hole that has
+ * thrown goes after every hole that has not, and among those that have not, the holes of a camera
+ * that has go after the others: a throw is the only thing known about what else will throw. A
+ * hole's own wait only says when it may be tried again, not that anything else gets a turn first:
+ * with two such holes on one NVR, each was due, and older, whenever the NVR had rested from the
+ * other, and the NVR's other holes were never pulled. The job hands a count over as 0 once the
+ * throw is long enough ago (THROWN_LAST_MS; the hole's own twice as late as its camera's): the
+ * place at the back is for a while, not for good.
+ *
+ * @param {object[]} rows ledger rows: { id, nvr, ch, fromMs, toMs, state, attempts, lastTryMs, nextTryMs?, throws?, camThrows? }
  * @param {{ now?:number, nvrs: Map<string, object>|object, retentionMsOf: (nvrId:string) => number,
  *   busyNvrs?: Set<string>, skipped?: Map<string, number> }} opts busyNvrs: NVRs already pulling (one
  *   camera at a time per NVR); skipped: the rows passed over and why, counted into (the job's pick, a
@@ -382,7 +406,8 @@ export function chooseGap(rows, { now = Date.now(), nvrs, retentionMsOf, busyNvr
     const worst = [...skipped.entries()].sort((a, b) => b[1] - a[1])[0]
     return { row: null, why: worst ? worst[0] : 'nothing to fill' }
   }
-  candidates.sort((a, b) => a.leftMs - b.leftMs || a.row.toMs - a.row.fromMs - (b.row.toMs - b.row.fromMs))
+  // (holes whose fill() threw, then holes of a camera whose fills did, go last: see above)
+  candidates.sort((a, b) => (a.row.throws ?? 0) - (b.row.throws ?? 0) || (a.row.camThrows ?? 0) - (b.row.camThrows ?? 0) || a.leftMs - b.leftMs || a.row.toMs - a.row.fromMs - (b.row.toMs - b.row.fromMs))
   return { row: candidates[0].row, why: null }
 }
 
@@ -502,6 +527,15 @@ export class BackfillJob {
     this.running = readRunFlag(this.stateFile)
     this.timer = null
     this.working = false
+    this.failsInARow = 0 // ticks that threw since the last one that did not (#tickFailed waits longer for each)
+    this.lastFailure = null // { at, message, inARow, hole, holeThrows } of the last tick that threw: status() shows it
+    this.pullThrows = new Map() // ledger row id -> pulls of that hole that threw since one last returned (memory only)
+    this.camThrows = new Map() // "nvr/ch" -> fills of that camera's holes that threw since footage of it last got into the index (memory only)
+    this.nvrThrows = new Map() // NVR id -> fills on it that threw since footage from it last got into the index (memory only)
+    this.pullThrowAt = new Map() // ledger row id -> when its fill() last threw: its place at the back of the pick lapses (THROWN_LAST_MS)
+    this.camThrowAt = new Map() // "nvr/ch" -> the same for a camera's holes
+    this.camBackoff = new Map() // "nvr/ch" -> when holes of that camera may be tried again after a throw (the camera's own ladder)
+    this.thrownPull = null // the pull that threw in the tick now failing, for #tickFailed to word
     this.busyNvrs = new Set()
     this.nvrBackoff = new Map() // NVR id -> when it may be asked again (a refusal covers every camera on it)
     this.nextTry = new Map() // ledger row id -> the time it may be tried again (memory only)
@@ -663,6 +697,8 @@ export class BackfillJob {
    * all 10,000 at once, twice (39 + 42 ms on production at 7,500 rows: verify-5). Every NVR is given the
    * same retention here, so the row picked is the oldest hole that can be pulled (the shortest of those
    * that start together): one on a page beats every row on the pages after it, and reading stops there.
+   * Unless its fill() has thrown: such a hole goes after every hole that has not (chooseGap), so the
+   * reading goes on past it.
    * @returns {Promise<{ row: object|null, why: string|null }>}
    */
   async pick(now = this.now()) {
@@ -672,20 +708,48 @@ export class BackfillJob {
     let best = null
     let why = 'nothing to fill'
     let after = null
+    // A count of throws puts a camera's holes, and the hole that threw for `times` as long, at the
+    // back of the pick for a while and not for good: it is handed over as 0 once the last throw is
+    // THROWN_LAST_MS ago, twice as long for each throw. (A count with no time beside it is one that
+    // has just been made.)
+    const stillLast = (count = 0, at, times = 1) => (count > 0 && (at === undefined || now - at < times * backoffMs(count, THROWN_LAST_MS)) ? count : 0)
     for (let seen = 0; seen < PICK_ROWS; ) {
       const limit = Math.min(PICK_PAGE, PICK_ROWS - seen)
       const page = this.index.backfillPendingPage({ after, limit })
       if (!page.length) break
       seen += page.length
       const got = chooseGap(
-        page.map((r) => ({ ...r, nextTryMs: this.nextTry.get(r.id) ?? 0 })),
+        page.map((r) => {
+          const cam = `${r.nvr}/${r.ch}`
+          const own = this.pullThrows.get(r.id)
+          // A hole that threw stays at the back while its OWN place is running (2x its ladder) or,
+          // if a sibling of the same camera has also thrown, while the CAMERA's is (also 2x). Once a
+          // second hole of the camera throws, camThrows runs a step ahead of this hole's count, so
+          // the hole's 2x lapse and the camera's 1x lapse end at the same moment; the hole, the
+          // camera's oldest, would then be picked first, throw, and send the camera's other holes
+          // back before they ever got a turn. Only a hole that itself threw is held so -- the
+          // camera's unthrown holes must still get pulled.
+          const back = stillLast(own, this.pullThrowAt.get(r.id), 2) || (own && stillLast(this.camThrows.get(cam), this.camThrowAt.get(cam), 2) ? own : 0)
+          return {
+            ...r,
+            // (its own wait, or its camera's after a throw, whichever is longer)
+            nextTryMs: Math.max(this.nextTry.get(r.id) ?? 0, this.camBackoff.get(cam) ?? 0),
+            throws: back,
+            camThrows: stillLast(this.camThrows.get(cam), this.camThrowAt.get(cam))
+          }
+        }),
         { now, nvrs, retentionMsOf: () => retention, busyNvrs: this.busyNvrs, skipped }
       )
       why = got.why
       const r = got.row
-      if (r && (!best || r.fromMs < best.fromMs || (r.fromMs === best.fromMs && r.toMs - r.fromMs < best.toMs - best.fromMs))) best = r
+      // (as chooseGap orders them: fewest throws, of the hole and then of its camera, then the oldest, then the shortest)
+      const before = (a, b) => a.throws - b.throws || a.camThrows - b.camThrows || a.fromMs - b.fromMs || a.toMs - a.fromMs - (b.toMs - b.fromMs)
+      if (r && (!best || before(r, best) < 0)) best = r
       const lastRow = page.at(-1)
-      if ((best && best.fromMs < lastRow.fromMs) || page.length < limit) break
+      // A hole that has thrown, or whose camera has, does not end the reading: one that has not, on
+      // a later page, goes before it. That reads the whole ledger (up to PICK_ROWS) each tick while
+      // such a hole is the best there is, a page at a time as ever.
+      if ((best && best.throws === 0 && best.camThrows === 0 && best.fromMs < lastRow.fromMs) || page.length < limit) break
       after = { fromMs: lastRow.fromMs, id: lastRow.id }
       await turn()
     }
@@ -724,10 +788,62 @@ export class BackfillJob {
 
   #arm(ms) {
     clearTimeout(this.timer)
-    this.timer = setTimeout(() => {
-      this.tick().catch((e) => console.warn(`[backfill] tick failed: ${e.message}`))
-    }, ms)
+    // (the callback returns its promise, which never rejects: a test runs the armed callback itself,
+    // on a clock of its own, and waits for it)
+    this.timer = setTimeout(
+      () =>
+        this.tick().then(
+          () => {
+            this.failsInARow = 0
+          },
+          (e) => this.#tickFailed(e)
+        ),
+      ms
+    )
     this.timer.unref?.()
+  }
+
+  /**
+   * A tick that threw (the scan, the pick or a pull): keep it in the job's state and the journal, and try
+   * again. tick() arms the next one only on the paths it returns from, and this used to log and no more:
+   * one failure left a job that read as running and never ran again until it was stopped and started,
+   * while the holes it could have filled aged out on the NVR (2026-10 code audit, H2). Each failure in a
+   * row waits twice as long, up to ten ticks, so a fault that stays is tried about every five minutes and
+   * does not fill the journal. status() carries the last failure and how many there were in a row; no
+   * page or alert shows it yet.
+   */
+  #tickFailed(e) {
+    let waitMs = this.tickMs
+    try {
+      this.failsInARow++
+      waitMs = Math.min(this.tickMs * 10, this.tickMs * 2 ** (this.failsInARow - 1))
+      const why = String(e?.message ?? e)
+      const at = this.now()
+      const min = (ms) => Math.round(ms / 60_000)
+      // fill() threw (tick() says for which hole, and how long it and its NVR are left alone): the
+      // job goes on with the other holes at its next run; anything else: the whole run is tried again
+      const p = this.thrownPull && this.thrownPull.error === e ? this.thrownPull : null
+      this.thrownPull = null
+      const what = p ? `${p.hole}: the fill failed part-way (${why}); that hole is left alone for ${min(p.holeWaitMs)} min and ${p.nvr} for ${min(p.nvrWaitMs)} min` : `a run failed (${why})`
+      const message = this.running ? `${what}; ${p ? 'the next run is' : 'trying again'} in ${Math.round(waitMs / 1000)} s` : `${what}; the job is stopped`
+      // (kept apart from `what`, which the next run writes over: the last failure stays in status().
+      // failsInARow starts again at any run that completes, also one that picked nothing because
+      // every hole was waiting: for a pull that keeps throwing, holeThrows is the count that climbs)
+      this.lastFailure = { at, message: why, inARow: this.failsInARow, hole: p?.hole ?? null, holeThrows: p?.holeThrows ?? null }
+      this.last = { ...this.last, at, what: message, errors: this.last.errors + 1 }
+      // (the stack once, for the first failure in a row: the journal should say where)
+      console.warn(`[backfill] ${message}${this.failsInARow === 1 && e?.stack ? `\n${e.stack}` : ''}`)
+    } catch (e2) {
+      // nothing in here may keep the next tick from being armed, or reject: nobody waits for this.
+      // One guarded try to say that the failed run could not be recorded.
+      try {
+        console.warn(`[backfill] a failed run could not be recorded: ${e2?.message ?? e2}`)
+      } catch {
+        // (the journal itself: there is nothing left to say it with)
+      }
+    } finally {
+      if (this.running) this.#arm(waitMs)
+    }
   }
 
   /**
@@ -767,7 +883,52 @@ export class BackfillJob {
         this.#arm(this.tickMs)
         return
       }
-      const rest = await this.fill(pick.row)
+      const row = pick.row
+      let rest
+      try {
+        rest = await this.fill(row)
+        // (it returned: what became of the hole is in the ledger, and its place in the pick is its own
+        // again. The camera's count and the NVR's are fill()'s to clear, once footage has got into the index)
+        this.pullThrows.delete(row.id)
+        this.pullThrowAt.delete(row.id)
+      } catch (e) {
+        // fill() threw part-way (the index refusing a write after the footage was pulled, say): none of
+        // what it does for a failed try has happened, so this hole, still the oldest, would be picked
+        // again at the next tick and pulled from the same NVR again, for as long as the fault lasted,
+        // each pull leaving files the index does not know. Counted here, in memory (the index may be
+        // what failed):
+        //   the hole waits on the error ladder, a step further for each throw, and for a while
+        //     (THROWN_LAST_MS) goes after every hole that has not thrown, as the other holes of its
+        //     camera go after those of cameras that have not (chooseGap): one hole, several, or a
+        //     camera's, that always throw cannot hold the others back (report 9's shape);
+        //   the camera waits on a ladder of its own, by its fills that threw since footage of it last
+        //     got into the index: its holes are many, each new to the pick, and one of them was
+        //     pulled, and threw, whenever nothing else was due (every 7.5 min, all night);
+        //   the NVR rests on a ladder of its own, by its pulls that threw in a row (5, 10, 20 min ...
+        //     2 h), so a fault at this end does not walk through every hole of every NVR a tick apart.
+        //     Footage that gets into the index starts the camera's count and the NVR's again (fill()).
+        // All from now, when it threw, not from when the tick began: a pull takes minutes. A back-off
+        // fill() had already set is never shortened. Then the tick fails as any other.
+        const threwAt = this.now()
+        const cam = `${row.nvr}/${row.ch}`
+        const holeThrows = (this.pullThrows.get(row.id) ?? 0) + 1
+        const camThrows = (this.camThrows.get(cam) ?? 0) + 1
+        const nvrThrows = (this.nvrThrows.get(row.nvr) ?? 0) + 1
+        this.pullThrows.set(row.id, holeThrows)
+        this.pullThrowAt.set(row.id, threwAt)
+        this.camThrows.set(cam, camThrows)
+        this.camThrowAt.set(cam, threwAt)
+        this.nvrThrows.set(row.nvr, nvrThrows)
+        const holeUntil = Math.max(this.nextTry.get(row.id) ?? 0, threwAt + backoffMs((row.attempts ?? 0) + holeThrows, ERROR_BACKOFF_MS))
+        const camUntil = threwAt + backoffMs(camThrows, ERROR_BACKOFF_MS)
+        const nvrUntil = Math.max(this.nvrBackoff.get(row.nvr) ?? 0, threwAt + backoffMs(nvrThrows, ERROR_BACKOFF_MS))
+        this.nextTry.set(row.id, holeUntil)
+        this.camBackoff.set(cam, camUntil)
+        this.nvrBackoff.set(row.nvr, nvrUntil)
+        // (for #tickFailed: which hole, and how long it, by its own wait or its camera's, and its NVR are in fact left alone)
+        this.thrownPull = { error: e, hole: `${row.nvr}/${row.ch + 1}`, nvr: row.nvr, holeThrows, holeWaitMs: Math.max(holeUntil, camUntil) - threwAt, nvrWaitMs: nvrUntil - threwAt }
+        throw e
+      }
       this.#arm(Math.max(rest, 0))
     } finally {
       this.working = false
@@ -794,9 +955,10 @@ export class BackfillJob {
     const fail = (message, { ladder = ERROR_BACKOFF_MS, stop = 'row', restMs = this.tickMs } = {}) => {
       const attempts = (row.attempts ?? 0) + 1
       const wait = backoffMs(attempts, ladder)
-      this.index.backfillSet(row.id, { attempts, lastTryMs: now, lastError: message })
+      // (the back-off before the ledger: if that write throws, the wait this try earned still stands)
       this.nextTry.set(row.id, this.now() + wait)
       if (stop === 'nvr') this.nvrBackoff.set(row.nvr, this.now() + wait)
+      this.index.backfillSet(row.id, { attempts, lastTryMs: now, lastError: message })
       this.last = { ...this.last, at: now, what: message, errors: this.last.errors + 1 }
       return stop === 'job' ? wait : restMs
     }
@@ -870,10 +1032,11 @@ export class BackfillJob {
       // and come back much later: asking again now is exactly what would hurt live recording.
       const attempts = (row.attempts ?? 0) + 1
       const wait = backoffMs(attempts, REFUSED_BACKOFF_MS)
-      this.index.backfillSet(row.id, { attempts, lastTryMs: now, lastError: result.message })
       this.nextTry.set(row.id, this.now() + wait)
       // the whole NVR stands down, not only this camera: it is the NVR that has no capacity left
       this.nvrBackoff.set(row.nvr, this.now() + wait)
+      // (the ledger last, as in fail(): a refusal's long wait must stand also when that write throws)
+      this.index.backfillSet(row.id, { attempts, lastTryMs: now, lastError: result.message })
       this.log(`${row.nvr} refused (${result.message}); leaving it alone for ${Math.round(wait / 60_000)} min`)
       return wait
     }
@@ -891,6 +1054,19 @@ export class BackfillJob {
     for (const s of result.segments) {
       this.index.addSegment({ nvr: row.nvr, ch: row.ch, path: s.path, startMs: s.startMs, endMs: s.endMs, bytes: s.bytes, keyframes: s.keyframes, loc: loc.id, source: `backfill:${row.nvr}`, filledMs: filledAt })
     }
+    // Footage of this camera, from this NVR, is in the index: whatever made fills throw (tick()
+    // counts them: it rests the NVR and the camera longer for each in a row, and puts the camera's
+    // holes after the others) is not this end as a whole, nor this camera. Here, once every segment
+    // of the pull is in, and nowhere else: a fill() that returns without having indexed anything
+    // (the NVR played nothing, the search failed) says nothing about that, and cleared the NVR's
+    // count each time, so the NVR was pulled every five minutes for as long as the fault lasted.
+    // (Also when what follows counts the try as failed, the hole less than a second shorter: what is
+    // known by then is that this end can index footage of this camera.)
+    const cam = `${row.nvr}/${row.ch}`
+    this.nvrThrows.delete(row.nvr)
+    this.camThrows.delete(cam)
+    this.camThrowAt.delete(cam)
+    this.camBackoff.delete(cam)
     const left = this.holesOf(row.nvr, row.ch, row.fromMs, row.toMs)
     const ms = result.segments.reduce((n, s) => n + (s.endMs - s.startMs), 0)
     // Progress is a hole that got shorter, not a file written: a pull whose footage all lies outside
@@ -957,7 +1133,7 @@ export class BackfillJob {
       running: this.running,
       window: { start: cfg.windowStart, end: cfg.windowEnd, open: inWindow(minutesOfDay(now), cfg.windowStart, cfg.windowEnd), opensInMs: msUntilWindow(now, cfg.windowStart, cfg.windowEnd) },
       nvrRetentionDays: Number(cfg.nvrRetentionDays ?? 30),
-      state: { ...this.last, busyNvrs: [...this.busyNvrs], mayRun: mayRun({ now, cfg, running: this.running, exportsBusy: this.exportsBusy(), recordingBusy: this.recordingBusy() }) },
+      state: { ...this.last, failsInARow: this.failsInARow, lastFailure: this.lastFailure, busyNvrs: [...this.busyNvrs], mayRun: mayRun({ now, cfg, running: this.running, exportsBusy: this.exportsBusy(), recordingBusy: this.recordingBusy() }) },
       counts: {
         pending: pending.length,
         filled: rows.filter((r) => r.state === 'filled').length,
