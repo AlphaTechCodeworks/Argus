@@ -375,6 +375,9 @@ const SIZE = { w: 1000, h: 600 }
   const withGroups = saveBody({ geo: { lat: 1, lng: 2, cams: { 'yard/0': g(1, 2) }, groups } }, 'street')
   check('a save carries the site\'s groups', J(withGroups.geo.groups) === J(groups), J(withGroups.geo.groups))
   check('a save with no groups sends no groups key', saveBody({ geo: { lat: 1, lng: 2, cams: { 'yard/0': g(1, 2) } } }, 'street').geo.groups === undefined)
+  // groups live in the geo block, which a site only has once it has a position
+  check('groups on a site with no position are not stored', saveBody({ geo: { groups } }, 'street') === null && saveBody({ plan: { file: 'p.jpg', cams: {} }, geo: { groups } }, 'street').geo === undefined)
+  check('  so the editor offers the groups panel only once the site has a position', readFileSync(new URL('../public/map.js', import.meta.url), 'utf8').includes('if (sitePosition(drafts[name])) parts.push(groupsPanel(name))'))
 }
 
 // ---- live lighting: which markers are active ------------------------------------------------------

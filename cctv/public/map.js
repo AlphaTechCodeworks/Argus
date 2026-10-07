@@ -1769,7 +1769,9 @@ function editPanel() {
       el('h2', { textContent: 'Cameras' }),
       el('p', { className: 'map-help', textContent: 'Drag a camera onto the map, or click Place and then click the map.' }),
       list))
-    parts.push(groupsPanel(name))
+    // Cone colours are stored with the site's position (saveBody), so they are offered once it has
+    // one: groups made before that were dropped by Save without a word.
+    if (sitePosition(drafts[name])) parts.push(groupsPanel(name))
   }
 
   const c = selected && where[selected]
