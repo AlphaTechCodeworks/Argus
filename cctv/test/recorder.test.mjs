@@ -615,6 +615,42 @@ const wire = (isKey, codec, payload, ts = 0) => {
   await rec.stop()
 }
 
+// ---- a camera recording on events that goes offline: its "camera offline" row ends with the first frame
+// after it is back, between events too, not with the next event's first frame (audit of 2026-10-07)
+{
+  const streams = new Map()
+  const sent = []
+  let now = Date.UTC(2026, 8, 24, 15, 45, 0)
+  const chans = [{ ch: 0, online: true }]
+  const rec = new Recorder({ nvrId: 'nof', getStream: (ch, type) => { const k = `${ch}:${type}`; return streams.get(k) ?? streams.set(k, fakeStream()).get(k) }, online: () => true, channels: () => chans.map((c) => ({ ...c })), send: (m) => sent.push(m), now: () => now, writerOpts: { rollOffsetMs: 0 } })
+  rec.startedAt = -Infinity
+  const frame = async () => { for (const s of streams.values()) for (const t of s.clients) t.send(wire(true, 1, Buffer.from([0, 0, 0, 1, 0x26, 0]), now)); await rec.idle(); now += 1000 }
+  const rows = () => sent.filter((m) => m.t === 'recgap').map(({ fromMs, toMs, reason }) => ({ fromMs, toMs, reason }))
+  const t0 = now
+  rec.apply({ recording: recording({}, { mode: 'motion' }), locations: [location('LOF')] })
+  rec.applyEvents({ windows: { 0: [[t0, t0 + 10 * 60_000]] }, at: t0 })
+  await frame(); await frame() // written at t0 and t0+1 s, inside the event
+  chans[0].online = false
+  rec.sync() // t0+2 s: the NVR says the camera is offline
+  check('events: offline during an event: an open "camera offline" gap from its last frame', rec.cams.get(0).gap?.reason === 'camera offline' && rec.cams.get(0).gap.fromMs === t0 + 1000 && rows().length === 0, J({ gap: rec.cams.get(0).gap, rows: rows() }))
+  now = t0 + 20 * 60_000 // back 20 minutes on, the event long over
+  chans[0].online = true
+  rec.applyEvents({ windows: { 0: [] }, at: now }) // (the event feed is fresh: nothing going on)
+  rec.sync()
+  const back = now
+  await frame() // its first frame back: outside any event, not written
+  check('events: back between events: the row ends at the first frame back, not at the next event', J(rows()) === J([{ fromMs: t0 + 1000, toMs: back, reason: 'camera offline' }]) && !rec.cams.get(0).gap && rec.cams.get(0).eventIdle, J({ rows: rows(), gap: rec.cams.get(0).gap }))
+  // the next event, an hour later (video coming all the while, not written): recorded, and no second row
+  // over the quiet hour
+  now = back + 3_600_000 - 1000
+  rec.applyEvents({ windows: { 0: [] }, at: now })
+  await frame()
+  rec.applyEvents({ windows: { 0: [[now, now + 5000]] }, at: now })
+  await frame()
+  check('... and the next event an hour later adds no row over the quiet hour', rows().length === 1 && !rec.cams.get(0).gap, J(rows()))
+  await rec.stop()
+}
+
 // ---- what follows a switch keeps its own reason (a switch's row took in a 5-10 min refusal, an hour
 // offline, an NVR outage, a stall already under way), and a camera waiting out a refusal still follows
 // its setting. Long past the start (startedAt -Infinity): a refusal backs off the full 5-10 min.
