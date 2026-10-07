@@ -184,5 +184,34 @@ await sleep(COOL_MS + 100)
   check('the NVR answers again once it has cooled down', status === 200 && a.jobs.length === 1, `${status}`)
 }
 
+{
+  // A command that is valid JSON but not an object (null, a number, a string, true) is ignored like any
+  // other bad command. The session's command handler is async and the socket's message handler does not
+  // wait for it, so the TypeError from `'speed' in null` was an unhandled rejection; nothing in the app
+  // listens for those, so one text frame from a signed-in viewer ended the server process.
+  const g = fakeNvr('pb-g', [true, 78, true]) // clock, PlayBackByTimeEx (handle), SetPlayDataCallBack
+  const ws = fakeWs()
+  const escaped = []
+  const onEscape = (e) => escaped.push(e?.message ?? String(e))
+  process.on('unhandledRejection', onEscape)
+  try {
+    openPlayback(g, ws)
+    await sleep(50)
+    check('a playback opens (for the commands that are not objects)', ws.sent.some((m) => m.type === 'started'), JSON.stringify(ws.sent))
+    const jobs = g.jobs.length
+    for (const bad of [null, 5, 'x', true, []]) ws.command(bad)
+    ws.handlers.message(Buffer.from('not json at all'), false)
+    await sleep(50)
+    check('a command that is JSON but not an object is ignored: nothing escapes as an unhandled rejection', escaped.length === 0, escaped.join(' | '))
+    check('... the playback is left running, and no SDK work is done for them', ws.readyState === 1 && !ws.sent.some((m) => m.type === 'error') && g.jobs.length === jobs, `state ${ws.readyState}, ${g.jobs.length - jobs} jobs, ${JSON.stringify(ws.sent)}`)
+    ws.command({ pause: true })
+    await sleep(50)
+    check('... and a real command after them still goes to the NVR', g.jobs.length === jobs + 1, `${g.jobs.length - jobs} jobs`)
+  } finally {
+    process.off('unhandledRejection', onEscape)
+    ws.close(1000)
+  }
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED')
 process.exit(failures ? 1 : 0)
