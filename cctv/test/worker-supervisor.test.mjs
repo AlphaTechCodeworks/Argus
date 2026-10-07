@@ -81,6 +81,28 @@ const NOISE = ' ../../NetDeviceN9000.cpp, ProcChannelState,1873  m_bLoginSuccess
   p.feed('[nvr1] ProcChannelState is the SDK function that logs logins\nm_bLoginSuccess == true\n')
   check('lines that are not the SDK\'s login-state line are written', p.journal().length === 2, J(p.journal()))
 }
+{
+  // The SDK prints this for every address it formats over a NAT 1.0 link. On 2026-10-07 it was 98 % of
+  // the journal (about 235,000 lines in ten minutes, from two sites), which filled the 500 MB cap in
+  // two and a half hours: nothing was left of the night's restart at 06:10 by the time it was looked for.
+  const NTOA = '2026-10-07 14:31:43  ../../DVR_NET_SDK/source/nat/NatCommon.cpp(241): INFO: NAT_inet_ntoa |IPv6| ip_str_buf=181.41.121.88'
+  const p = pipe()
+  p.feed(`before\n${NTOA}\n${NTOA}\n${NTOA}\nafter\n`)
+  check('the NAT_inet_ntoa line is not written, however many', J(p.journal()) === J(['[worker w1] before', '[worker w1] after']), J(p.journal()))
+  check('... but every one reaches onLine', p.seen.length === 5 && p.seen[1] === NTOA, J(p.seen.length))
+  // unlike the login-state line it has no blank line of its own: one that follows is real output
+  const q = pipe()
+  q.feed(`${NTOA}\n\nnext\n`)
+  check('a blank line after it is kept', J(q.journal()) === J(['[worker w1] ', '[worker w1] next']), J(q.journal()))
+  // the SDK's other NAT lines say something (a relay chosen, a search that failed): they stay
+  const r = pipe()
+  r.feed('2026-10-07 14:31:43  ../../DVR_NET_SDK/source/nat/ClientConnMan.cpp(301): INFO: Search device info failed!\n')
+  check('other SDK NAT lines are still written', p.journal().length === 2 && r.journal().length === 1, J(r.journal()))
+  const s = pipe()
+  s.feed(NTOA)
+  s.end()
+  check('a last NAT_inet_ntoa line without a newline is not written either', s.journal().length === 0 && s.seen.at(-1) === NTOA, J(s.journal()))
+}
 
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED')
 process.exit(failures ? 1 : 0)

@@ -315,6 +315,17 @@ let powerCall = nativePower
 const noOwnSession = (nvr) => nvr.borrowing !== true && nvr.userId < 0
 
 /**
+ * Refuses a command whose time to be sent has passed (notAfter, ms since the epoch; none: never).
+ * A command handed to a worker (viaWorker) can sit in the worker's lane, held behind a late call, long
+ * after the main process stopped waiting for it. Sent then, a clock write would set a time that was
+ * right minutes ago, and a reboot would arrive after the admin was told it had failed. Both processes
+ * are on one machine, so they read one clock.
+ */
+function refuseIfTooLate(nvr, notAfter) {
+  if (notAfter && Date.now() > notAfter) throw new Error(`${nvr.name}: this command waited too long to be sent; nothing was sent`)
+}
+
+/**
  * The same command on the worker's login (nvrs.mjs Nvr borrowing): the NVR refuses this process a
  * second one. The worker runs it through its own transparent() / power(), on its own lane. No
  * native call of this process is left running behind an error from here, so the caller's queue place
@@ -348,8 +359,12 @@ async function viaWorker(nvr, req, write) {
  * On this process's own login only: a command sent through the worker (borrowing) runs on the
  * worker's default limit, and the wait for the worker's answer has a limit of its own
  * (worker-requests.mjs).
+ *
+ * notAfter: the command is refused, nothing sent, if its native call has not started by then (ms
+ * since the epoch; refuseIfTooLate). The worker is given it for a borrowed command: the cap from the
+ * moment the command is handed over, after which this process's queue has moved on.
  */
-export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBytes = 256 * 1024, timeoutMs } = {}) {
+export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBytes = 256 * 1024, timeoutMs, notAfter } = {}) {
   if (!xmlOnline(nvr) || noOwnSession(nvr)) throw new Error(`${nvr.name} is offline`)
   const read = isReadCommand(url)
   refuseNow(nvr, read)
@@ -427,7 +442,7 @@ export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBy
           passTurn?.(0)
           passTurn = null
           try {
-            text = String((await viaWorker(nvr, { op: 'xml', url, xml, tag, outBytes }, !read)).text ?? '')
+            text = String((await viaWorker(nvr, { op: 'xml', url, xml, tag, outBytes, notAfter: Date.now() + capMs }, !read)).text ?? '')
           } catch (e) {
             // Only a time-out counts for the read breaker here (a read the worker sent and gave up
             // on). Whatever else the worker came back with leaves the count as it is: its own
@@ -443,6 +458,8 @@ export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBy
         }
         // From here to the native call nothing is awaited: the session check above, the record and
         // the call are one synchronous step.
+        // (too late to be sent: refused before it takes a record, so there is none to clear)
+        refuseIfTooLate(nvr, notAfter)
         // on record as inside the SDK, or refused (503, nothing sent) because another call to this NVR is
         rec = enterSdk(nvr, tag || url)
         sentAt = Date.now()
@@ -492,9 +509,11 @@ export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBy
  * NVR accepted the command.
  * @param {import('./nvrs.mjs').Nvr} nvr
  * @param {'reboot'|'shutdown'} action
+ * @param {{ notAfter?: number }} [opts] notAfter: refused, nothing sent, if the native call has not
+ *   started by then (as in transparent())
  * @returns {Promise<boolean>}
  */
-export async function power(nvr, action) {
+export async function power(nvr, action, { notAfter } = {}) {
   if (!xmlOnline(nvr) || noOwnSession(nvr)) throw new Error(`${nvr.name} is offline`)
   // at the door, as refuseNow does for XML calls: no lane slot and no turn taken only to be refused
   // (not while the worker's login is borrowed: that call never enters this process's SDK)
@@ -511,9 +530,10 @@ export async function power(nvr, action) {
         if ((!borrowed && userId < 0) || xmlGen(nvr) !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
         if (borrowed) {
           passTurn() // as in transparent(): the turn is this process's SDK's, which this call never enters
-          return Boolean((await viaWorker(nvr, { op: 'power', action }, true)).accepted)
+          return Boolean((await viaWorker(nvr, { op: 'power', action, notAfter: Date.now() + capMs }, true)).accepted)
         }
         // from here to the native call nothing is awaited, as in transparent()
+        refuseIfTooLate(nvr, notAfter) // (before the record: none to clear)
         // on record as inside the SDK, or refused (503, nothing sent) because another call to this NVR is
         rec = enterSdk(nvr, action)
         // (exclusive: the backstop behind the record, see transparent())

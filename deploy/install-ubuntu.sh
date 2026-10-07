@@ -76,10 +76,15 @@ rm -rf "$dest"
 cp -a "$here" "$dest"
 chown -R root:root "$dest"
 chmod -R go-w "$dest"
+# Before switching: remember the live release and how many NVRs are online right now. The deploy is
+# gated on the NVRs coming back (below), so a bad build that answers /healthz but leaves every NVR
+# stuck offline -- e.g. a native SDK lib that spins on P2P -- is caught and rolled back automatically.
+online_now() { curl -fsS http://127.0.0.1:8080/healthz 2>/dev/null | grep -oE '"online":[0-9]+' | grep -oE '[0-9]+' | head -1; }
+prev="$(readlink -f /opt/cctv/current 2>/dev/null || true)"
+baseline="$(online_now || true)"; baseline="${baseline:-0}"
 ln -sfn "$dest" /opt/cctv/current.new && mv -T /opt/cctv/current.new /opt/cctv/current
-# keep the three newest releases (rollback: point /opt/cctv/current at an older one and restart)
-ls -1dt /opt/cctv/releases/*/ | tail -n +4 | xargs -r rm -rf
-echo "active: $dest"
+echo "active: $dest (was ${prev:-none}; $baseline NVRs online before)"
+# (the old releases are pruned only after the gate passes, so a rollback target is never removed)
 
 say "settings (/etc/cctv/cctv.env)"
 mkdir -p /etc/cctv
@@ -157,15 +162,48 @@ systemctl daemon-reload
 systemctl enable cctv >/dev/null 2>&1
 systemctl restart cctv
 
-say "health check"
-for _ in $(seq 1 30); do
-  if out="$(curl -fsS http://127.0.0.1:8080/healthz 2>/dev/null)"; then
-    echo "$out"
-    echo "OK: CCTV $release is running"
-    exit 0
+# Roll the live release back to the one that was running before, and fail the install.
+rollback() {
+  if [ -n "${prev:-}" ] && [ "$prev" != "$dest" ] && [ -d "$prev" ]; then
+    echo "ROLLING BACK to ${prev##*/} after a failed deploy: $1" >&2
+    ln -sfn "$prev" /opt/cctv/current.new && mv -T /opt/cctv/current.new /opt/cctv/current
+    systemctl restart cctv || true
+  else
+    echo "deploy failed ($1) and there is no previous release to roll back to" >&2
   fi
+  journalctl -u cctv -n 40 --no-pager >&2 || true
+  exit 1
+}
+
+say "health check"
+out=""
+answered=""
+for _ in $(seq 1 30); do
+  if out="$(curl -fsS http://127.0.0.1:8080/healthz 2>/dev/null)"; then answered=1; break; fi
   sleep 2
 done
-echo "the app did not answer on port 8080; last log lines:" >&2
-journalctl -u cctv -n 40 --no-pager >&2 || true
-exit 1
+if [ -z "$answered" ]; then rollback "the app did not answer on port 8080"; fi
+echo "$out"
+
+# The NVRs must come back. A deploy that leaves them stuck offline has regressed even when /healthz
+# answers ok. Only gate when there is a baseline to compare against (a fresh box, or NVRs already all
+# offline, has baseline 0 -- nothing to regress from, so it is skipped).
+want=$(( (baseline + 1) / 2 ))   # at least half of what was online before
+if [ "$baseline" -gt 0 ] && [ -n "${prev:-}" ] && [ "$prev" != "$dest" ]; then
+  peak=0
+  for _ in $(seq 1 30); do        # up to ~150 s, since P2P logins are slow
+    n="$(online_now || echo 0)"; n="${n:-0}"
+    if [ "$n" -gt "$peak" ]; then peak="$n"; fi
+    if [ "$peak" -ge "$want" ]; then break; fi
+    sleep 5
+  done
+  if [ "$peak" -lt "$want" ]; then
+    rollback "only $peak of $baseline NVRs came back online"
+  fi
+  echo "online recovered: $peak of $baseline"
+fi
+
+# gate passed: now it is safe to prune older releases (keep the three newest)
+ls -1dt /opt/cctv/releases/*/ | tail -n +4 | xargs -r rm -rf || true
+echo "OK: CCTV $release is running"
+exit 0
