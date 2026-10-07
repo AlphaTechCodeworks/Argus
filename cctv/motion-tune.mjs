@@ -25,7 +25,7 @@
 // writes a value it did not first read back out of the NVR's own document.
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { XML_HEADER, kid, kids, parseXml } from './xml.mjs'
+import { XML_HEADER, esc, kid, kids, parseXml } from './xml.mjs'
 
 const LOG_FILE_NAME = 'motion-changes.log'
 const READ_BACK_MS = 1500 // the NVR takes a moment before it reports the new value
@@ -61,7 +61,13 @@ export function field(node, names) {
   return null
 }
 
-/** The <chl> element for this channel id, or the only one there is. */
+/**
+ * The <chl> element for this channel id. Asked for a camera, it answers with that camera's block or
+ * with nothing: the first block of an answer that does not hold the camera is another camera's, and
+ * was shown as this one's. The one exception is a lone block that names no camera at all, which is
+ * the answer to a question that named one (motionRequest). With no id asked for: the only block there
+ * is, or the first.
+ */
 export function channelNode(xml, chlId = null) {
   const response = kid(parseXml(xml), 'response')
   const content = kid(response, 'content')
@@ -69,8 +75,10 @@ export function channelNode(xml, chlId = null) {
   const all = [...kids(content, 'chl'), ...kids(content, 'item')]
   const list = all.length ? all : content.children
   if (chlId) {
-    const hit = list.find((c) => c.attrs?.id === chlId || text(kid(c, 'id')) === chlId)
+    const idOf = (c) => String(c.attrs?.id ?? text(kid(c, 'id'))).trim().toUpperCase()
+    const hit = list.find((c) => idOf(c) === String(chlId).toUpperCase())
     if (hit) return hit
+    return list.length === 1 && idOf(list[0]) === '' ? list[0] : null
   }
   return list.length === 1 ? list[0] : (list[0] ?? null)
 }
@@ -88,6 +96,7 @@ export function readMotionAnswer(xml, chlId = null) {
     return { available: false, why: `the NVR refused queryMotion (${status}${code ? `, code ${code}` : ''})` }
   }
   const chl = channelNode(xml, chlId)
+  if (!chl && chlId && channelNode(xml)) return { available: false, why: 'the NVR’s answer did not include this camera, so there is nothing to show or change' }
   if (!chl) return { available: false, why: 'the NVR’s answer had no channel in it' }
   const sensitivity = numOf(field(chl, SENSITIVITY_NAMES))
   if (sensitivity === null) {
@@ -134,20 +143,32 @@ export function readArea(chl) {
  * matched — no match means we would be writing something the NVR did not send us, and several
  * matches means we do not know which camera we would be changing.
  *
+ * `chlId`: when the answer holds this camera's own <chl id="..."> block, that block alone is edited
+ * and sent back. An answer that lists several cameras then changes the one asked for, and the others
+ * are not written at all (the block the NVR replaces is the camera's). Without such a block the whole
+ * answer is the camera's, as before.
+ *
  * @returns {{ ok: true, doc: string, was: string } | { ok: false, error: string }}
  */
-export function buildMotionEdit(queryXml, value) {
+export function buildMotionEdit(queryXml, value, chlId = null) {
   const inner = /<content[^>]*>([\s\S]*)<\/content>/i.exec(queryXml)
   if (!inner) return { ok: false, error: 'the NVR’s answer had no <content>, so there is nothing to send back' }
-  const name = SENSITIVITY_NAMES.find((n) => new RegExp(`<${n}(\\s[^>]*)?>`, 'i').test(inner[1]))
+  let scope = inner[1]
+  if (chlId) {
+    const idOf = (block) => /^<chl\b[^>]*?\sid\s*=\s*["']([^"']*)["']/i.exec(block)?.[1] ?? ''
+    const mine = (scope.match(/<chl\b[^>]*>[\s\S]*?<\/chl>/gi) ?? []).filter((b) => idOf(b).toUpperCase() === String(chlId).toUpperCase())
+    if (mine.length > 1) return { ok: false, error: 'the NVR’s answer lists this camera more than once' }
+    if (mine.length === 1) scope = mine[0]
+  }
+  const name = SENSITIVITY_NAMES.find((n) => new RegExp(`<${n}(\\s[^>]*)?>`, 'i').test(scope))
   if (!name) return { ok: false, error: 'the NVR’s answer has no sensitivity element to change' }
   const re = new RegExp(`(<${name}(?:\\s[^>]*)?>)([^<]*)(</${name}>)`, 'gi')
-  const found = inner[1].match(re) ?? []
+  const found = scope.match(re) ?? []
   if (found.length !== 1) {
     return { ok: false, error: `the NVR’s answer has ${found.length} sensitivity elements; only a single, unambiguous one is changed` }
   }
   let was = ''
-  const content = inner[1].replace(re, (_m, open, old, close) => {
+  const content = scope.replace(re, (_m, open, old, close) => {
     was = old.trim()
     return `${open}${value}${close}`
   })
@@ -164,8 +185,12 @@ export function buildMotionEdit(queryXml, value) {
  */
 const nvrXml = () => import('./nvr-xml.mjs')
 
-/** The request queryMotion is sent: this dialect wants the whole document even with nothing to say. */
-export const motionRequest = () => `${XML_HEADER}</request>`
+/**
+ * The request queryMotion is sent. It names the camera the way the picture and OSD reads do
+ * (imaging.mjs readSettings, osd-doc.mjs osdRequest): unnamed, the NVR was left to choose whose
+ * settings to answer with.
+ */
+export const motionRequest = (chlId) => `${XML_HEADER}<condition><chlId>${esc(chlId)}</chlId></condition></request>`
 
 /**
  * Reads one camera's motion settings. Never throws for an NVR that simply will not answer: that
@@ -177,7 +202,7 @@ export async function readMotion(nvr, ch, query, deps = null) {
   const chlId = chlIdOf(Number(ch))
   let xml = ''
   try {
-    xml = String((await query(nvr, QUERY_MOTION, motionRequest(), `motion read ch${Number(ch) + 1}`)) ?? '')
+    xml = String((await query(nvr, QUERY_MOTION, motionRequest(chlId), `motion read ch${Number(ch) + 1}`)) ?? '')
   } catch (e) {
     return { nvr: nvr.id, ch: Number(ch), available: false, why: `the NVR could not be asked: ${String(e?.message ?? e).slice(0, 120)}` }
   }
@@ -207,7 +232,7 @@ export async function writeMotionThreshold(nvr, ch, want, user, query, deps = nu
   const chlId = chlIdOf(Number(ch))
 
   return withNvrLock(nvr, 'A motion sensitivity change', async () => {
-    const beforeXml = String((await query(nvr, QUERY_MOTION, motionRequest(), `motion before ch${Number(ch) + 1}`)) ?? '')
+    const beforeXml = String((await query(nvr, QUERY_MOTION, motionRequest(chlId), `motion before ch${Number(ch) + 1}`)) ?? '')
     const before = readMotionAnswer(beforeXml, chlId)
     // Never write blind. If we could not read the current setting we do not know what we would be
     // replacing, and on a box that swallows whole blocks that is how a camera stops detecting.
@@ -218,7 +243,7 @@ export async function writeMotionThreshold(nvr, ch, want, user, query, deps = nu
     if (before.min !== null && value < before.min) throw new HttpError(400, `this NVR's lowest sensitivity is ${before.min}`)
     if (before.max !== null && value > before.max) throw new HttpError(400, `this NVR's highest sensitivity is ${before.max}`)
 
-    const built = buildMotionEdit(beforeXml, value)
+    const built = buildMotionEdit(beforeXml, value, chlId)
     if (!built.ok) throw new HttpError(502, `${built.error}; nothing was changed`)
 
     const reply = String((await query(nvr, EDIT_MOTION, built.doc, `motion write ch${Number(ch) + 1}`)) ?? '')
@@ -228,7 +253,7 @@ export async function writeMotionThreshold(nvr, ch, want, user, query, deps = nu
     }
 
     await new Promise((r) => setTimeout(r, READ_BACK_MS))
-    const afterXml = String((await query(nvr, QUERY_MOTION, motionRequest(), `motion after ch${Number(ch) + 1}`)) ?? '')
+    const afterXml = String((await query(nvr, QUERY_MOTION, motionRequest(chlId), `motion after ch${Number(ch) + 1}`)) ?? '')
     const after = readMotionAnswer(afterXml, chlId)
     // The NVR can answer "success" and keep its old setting, so the answer is not taken as proof.
     const applied = after.available && after.sensitivity === value

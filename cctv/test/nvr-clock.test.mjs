@@ -1,7 +1,7 @@
 // Tests for nvr-clock.mjs: reading an NVR's clock settings, writing them back safely, working out
 // a timezone offset, and the server acting as the master clock.
 // Run: node cctv/test/nvr-clock.test.mjs
-import { QUERY_TIME, buildTimeCfg, checkWanted, formatForNvr, parseNvrTime, readClock, readWithRetry, zoneOffsetMs } from '../clock-time.mjs'
+import { QUERY_TIME, buildTimeCfg, checkWanted, clockOverview, driftOf, formatForNvr, parseNvrTime, readClock, readWithRetry, readingOf, syncOutcome, zoneOffsetMs } from '../clock-time.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -34,15 +34,55 @@ const SOLUS = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryTime
   check('three of them are set to manual', [NVR2, RIG, SOLUS].every((x) => readClock(x).sync === 'manually'))
 }
 
+// ---- the clock overview (GET /api/admin/nvr-clocks) ---------------------------------------------------
+//
+// It had a reader of its own whose pattern matched nothing, so every setting of every NVR was null.
+{
+  const rig = clockOverview(RIG)
+  check('the overview reads the timezone', rig.timeZone === 'EST5EDT,M3.2.0,M11.1.0', String(rig.timeZone))
+  check('the overview reads the daylight saving switch as the NVR wrote it', rig.daylightSwitch === 'true' && clockOverview(NVR1).daylightSwitch === 'false', String(rig.daylightSwitch))
+  check('the overview reads how the clock is set', rig.synchronizeType === 'manually' && clockOverview(NVR1).synchronizeType === 'NTP', String(rig.synchronizeType))
+  check('the overview reads the NTP server, CDATA or not', clockOverview(NVR1).ntpServer === 'time-b.nist.gov' && clockOverview(SOLUS).ntpServer === 'time.windows.com' && clockOverview(SOLUS).timeZone === 'AST4')
+  check('what the NVR does not state stays null', rig.ntpInterval === null && Object.values(clockOverview('<response><status>fail</status></response>')).every((v) => v === null))
+}
+
 // ---- timezone offsets ------------------------------------------------------------------------------
 {
   check('AST4 is four hours behind UTC', zoneOffsetMs('AST4', false) === -4 * 3600_000, String(zoneOffsetMs('AST4', false)))
   check('daylight saving does not move a zone with no summer name', zoneOffsetMs('AST4', true) === -4 * 3600_000)
-  check('EST5EDT in winter is five hours behind', zoneOffsetMs('EST5EDT,M3.2.0,M11.1.0', false) === -5 * 3600_000)
-  check('EST5EDT in summer is four hours behind', zoneOffsetMs('EST5EDT,M3.2.0,M11.1.0', true) === -4 * 3600_000)
+  // The daylight saving switch says the NVR observes it, not that it is in force: that comes from
+  // the zone's own dates, on the day in question. These used to pass the switch as "it is summer",
+  // which is how the sync came to add the hour all year.
+  const EST = 'EST5EDT,M3.2.0,M11.1.0'
+  const h = 3600_000
+  const at = (...a) => Date.UTC(...a)
+  check('EST5EDT in winter is five hours behind', zoneOffsetMs(EST, true, at(2026, 0, 15, 12)) === -5 * h, String(zoneOffsetMs(EST, true, at(2026, 0, 15, 12))))
+  check('EST5EDT in summer is four hours behind', zoneOffsetMs(EST, true, at(2026, 6, 15, 12)) === -4 * h, String(zoneOffsetMs(EST, true, at(2026, 6, 15, 12))))
+  check('EST5EDT with daylight saving switched off is five hours behind all year',
+    zoneOffsetMs(EST, false, at(2026, 0, 15, 12)) === -5 * h && zoneOffsetMs(EST, false, at(2026, 6, 15, 12)) === -5 * h)
   check('which is why rigginglot matches the others today but not in November',
-    zoneOffsetMs('EST5EDT,M3.2.0,M11.1.0', true) === zoneOffsetMs('AST4', false) &&
-    zoneOffsetMs('EST5EDT,M3.2.0,M11.1.0', false) !== zoneOffsetMs('AST4', false))
+    zoneOffsetMs(EST, true, at(2026, 8, 25, 19)) === zoneOffsetMs('AST4', false, at(2026, 8, 25, 19)) &&
+    zoneOffsetMs(EST, true, at(2026, 10, 15, 12)) !== zoneOffsetMs('AST4', false, at(2026, 10, 15, 12)))
+  // 2026: the second Sunday of March is the 8th and the first Sunday of November is the 1st. The
+  // clocks go forward at 02:00 EST (07:00 UTC) and back at 02:00 EDT (06:00 UTC).
+  check('summer time starts at 02:00 on the second Sunday of March',
+    zoneOffsetMs(EST, true, at(2026, 2, 8, 6, 59, 59)) === -5 * h && zoneOffsetMs(EST, true, at(2026, 2, 8, 7)) === -4 * h)
+  check('and ends at 02:00 summer time on the first Sunday of November',
+    zoneOffsetMs(EST, true, at(2026, 10, 1, 5, 59, 59)) === -4 * h && zoneOffsetMs(EST, true, at(2026, 10, 1, 6)) === -5 * h)
+  check('the dates move with the year', zoneOffsetMs(EST, true, at(2027, 2, 14, 6, 59, 59)) === -5 * h && zoneOffsetMs(EST, true, at(2027, 2, 14, 7)) === -4 * h &&
+    zoneOffsetMs(EST, true, at(2027, 10, 7, 5, 59, 59)) === -4 * h && zoneOffsetMs(EST, true, at(2027, 10, 7, 6)) === -5 * h)
+  check('week 5 is the last one in the month, and a given hour is used',
+    zoneOffsetMs('GMT0BST,M3.5.0/1,M10.5.0', true, at(2026, 2, 29, 0, 59, 59)) === 0 && zoneOffsetMs('GMT0BST,M3.5.0/1,M10.5.0', true, at(2026, 2, 29, 1)) === h &&
+    zoneOffsetMs('GMT0BST,M3.5.0/1,M10.5.0', true, at(2026, 9, 25, 0, 59, 59)) === h && zoneOffsetMs('GMT0BST,M3.5.0/1,M10.5.0', true, at(2026, 9, 25, 1)) === 0)
+  check('a southern summer runs over the new year',
+    zoneOffsetMs('AEST-10AEDT,M10.1.0,M4.1.0/3', true, at(2026, 0, 15)) === 11 * h && zoneOffsetMs('AEST-10AEDT,M10.1.0,M4.1.0/3', true, at(2026, 6, 15)) === 10 * h &&
+    zoneOffsetMs('AEST-10AEDT,M10.1.0,M4.1.0/3', true, at(2026, 11, 15)) === 11 * h)
+  // CST4CDT is on a production NVR. Without dates there is no telling whether the hour applies, and
+  // the wrong answer sets a recorder an hour out, so it is null and the sync leaves that clock alone.
+  check('a summer zone with no dates gives null when daylight saving is on, not a guess',
+    zoneOffsetMs('CST4CDT', true, at(2026, 0, 15)) === null && zoneOffsetMs('CST4CDT', true, at(2026, 6, 15)) === null)
+  check('and its standard offset when daylight saving is off', zoneOffsetMs('CST4CDT', false, at(2026, 6, 15)) === -4 * h)
+  check('dates it cannot read give null too', zoneOffsetMs('EST5EDT,M3.2.0', true, at(2026, 6, 15)) === null && zoneOffsetMs('EST5EDT,M13.2.0,M11.1.0', true, at(2026, 6, 15)) === null && zoneOffsetMs('EST5EDT,J60,J300', true, at(2026, 6, 15)) === null)
   check('a zone it cannot read gives null, not a guess', zoneOffsetMs('Europe/London', false) === null)
   check('an empty zone gives null', zoneOffsetMs('', false) === null && zoneOffsetMs(null, false) === null)
 }
@@ -98,6 +138,28 @@ const SOLUS = `<?xml version="1.0" encoding="UTF-8"?><response cmdUrl="queryTime
   // setting a time while the NVR takes its own from NTP would be pointless and confusing
   const doc = buildTimeCfg(readClock(NVR1), { timeMs: Date.now() })
   check('no time is pushed to an NVR that uses NTP', !doc.includes('currentTime'))
+}
+
+// ---- what a sync pass may claim ----------------------------------------------------------------------
+//
+// The sync used to record a drift of 0 and log "put right" the moment the NVR answered "success",
+// while writing a time taken before a 6 to 37 s wait: the clock was that far slow, Health said it
+// was exact, and the next pass wrote it again. What it says now comes from a reading.
+{
+  const off = -4 * 3600_000
+  const t = Date.UTC(2026, 8, 25, 19, 19, 49) // 15:19:49 on site, which is what NVR2 shows
+  check('a clock reading the server time has no drift', driftOf(readClock(NVR2), t, off) === 0, String(driftOf(readClock(NVR2), t, off)))
+  check('a clock behind the server is slow by that much', driftOf(readClock(NVR2), t + 20_000, off) === -20_000)
+  check('a reading with no time in it is no drift figure, not 0', driftOf({ currentTime: null }, t, off) === null && driftOf(null, t, off) === null)
+
+  check('a write that reads back within the limit was put right', syncOutcome(-1000, 4000) === 'put right')
+  check('one that reads back outside it is not called put right', /still reads -20 s out/.test(syncOutcome(-20_000, 4000)), syncOutcome(-20_000, 4000))
+  check('nor is one that could not be read back', /could not be read back/.test(syncOutcome(null, 4000)), syncOutcome(null, 4000))
+
+  check('Health gets the reading when nothing was written', readingOf({ drift: 1500, changed: false }) === 1500)
+  check('and the read-back after a write, not the reading from before it', readingOf({ drift: -47_000, after: -1000, changed: true }) === -1000)
+  check('a write with no read-back gives Health no reading, not a 0', readingOf({ drift: -47_000, after: null, changed: true }) === null && readingOf({ drift: -47_000, changed: true }) === null)
+  check('an NVR that could not be checked gives none either', readingOf({ drift: null, changed: false }) === null)
 }
 
 // ---- the documents we send are well formed -----------------------------------------------------

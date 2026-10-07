@@ -11,6 +11,7 @@
 //
 //   GET /api/admin/nvrs/:id/capabilities -> { nvr, model, results: [...] }
 
+import { clockOverview } from './clock-time.mjs'
 import { transparent } from './nvr-xml.mjs'
 import { xmlOnline } from './xml-session.mjs'
 
@@ -102,17 +103,12 @@ export async function handleClocks(method, pathname, nvrs) {
     }
     try {
       const xml = String((await transparent(nvr, 'queryTimeCfg', body(), 'clock', { outBytes: 16 * 1024 })) ?? '')
-      const pick = (tag) => new RegExp(`<${tag}>\s*(?:<!\[CDATA\[)?([^<\]]*)`, 'i').exec(xml)?.[1]?.trim() ?? null
       out.push({
         nvr: nvr.id,
         name: nvr.name,
         online: true,
         model: nvr.model ?? null,
-        timeZone: pick('timeZone'),
-        daylightSwitch: pick('daylightSwitch'),
-        synchronizeType: pick('synchronizeType'),
-        ntpServer: pick('ntpServer') ?? pick('serverAddr'),
-        ntpInterval: pick('updateInterval') ?? pick('interval'),
+        ...clockOverview(xml),
         // what the server believes this NVR's clock reads, from the playback clock it already keeps
         skewMs: nvr.playback?.lastClock?.()?.skewMs ?? null,
         raw: xml.replace(/>\s+</g, '><')

@@ -177,7 +177,9 @@ export function checkWanted(want, osd = null) {
 /** Within one block's XML, replace an element's inner text, keeping its tag and attributes. */
 function swapIn(xml, tag, value) {
   const re = new RegExp(`(<${tag}(?:\\s[^>]*)?>)(?:<!\\[CDATA\\[)?[\\s\\S]*?(?:\\]\\]>)?(</${tag}>)`, 'i')
-  return re.test(xml) ? xml.replace(re, `$1${value}$2`) : xml
+  // (a function, not a string: in a replacement string "$1", "$&" and "$$" in a camera's name are
+  // taken as patterns, and "Lot $1" went to the NVR with the element's opening tag where "$1" was)
+  return re.test(xml) ? xml.replace(re, (_m, open, close) => `${open}${value}${close}`) : xml
 }
 
 /** Apply a block's wanted fields to that block's XML substring. */

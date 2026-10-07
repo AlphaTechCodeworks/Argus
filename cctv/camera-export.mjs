@@ -12,6 +12,7 @@
 //   GET /api/admin/cameras.xlsx -> the same, as a spreadsheet download (admins)
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { siteOffsetMin } from './site-time.mjs'
 import { buildXlsx } from './xlsx-writer.mjs'
 
 /**
@@ -80,6 +81,14 @@ export async function camerasReport(nvrs, { fresh = false } = {}) {
   return readNow(nvrs)
 }
 
+/** Milliseconds from `now` to the next time the site's clock (`offsetMin` minutes from UTC) reads `hour`:00. */
+export function msUntilSiteHour(now, hour, offsetMin) {
+  const site = new Date(now + offsetMin * 60_000) // its getUTC* read back as the site's wall clock
+  let target = Date.UTC(site.getUTCFullYear(), site.getUTCMonth(), site.getUTCDate(), hour, 0, 0) - offsetMin * 60_000
+  if (target <= now) target += 24 * 3600_000
+  return target - now
+}
+
 /**
  * Loads the saved snapshot and refreshes it once a day at `hour` (site-local; 2 AM by default, when the
  * sites are quiet). This nightly read is the only automatic one -- opening the page never reads a live NVR.
@@ -90,18 +99,17 @@ export function startCameraReportSchedule(nvrs, { dataDir, hour = 2 } = {}) {
     const saved = JSON.parse(readFileSync(storeFile, 'utf8'))
     if (saved && Array.isArray(saved.nvrs)) cache = { at: Number(saved.at) || 0, nvrs: saved.nvrs, running: null }
   } catch {} // no saved snapshot yet: the first page open builds one
-  const offsetMin = Number(process.env.CCTV_SITE_TZ_OFFSET_MIN) || 0
-  const msUntilNext = () => {
-    const now = Date.now()
-    const site = new Date(now + offsetMin * 60_000) // its getUTC* read back as the site's wall clock
-    let target = Date.UTC(site.getUTCFullYear(), site.getUTCMonth(), site.getUTCDate(), hour, 0, 0) - offsetMin * 60_000
-    if (target <= now) target += 24 * 3600_000
-    return target - now
-  }
   const arm = () => {
-    const ms = msUntilNext()
+    // The site's offset as the rest of the app has it (site-time.mjs): the NVRs' own zone first, then
+    // CCTV_SITE_TZ_OFFSET_MIN. Read at each arming, not once: this used the variable alone, and with
+    // it unset "2 AM" was 2 AM UTC, the middle of the evening on site.
+    const offsetMin = siteOffsetMin()
+    const ms = msUntilSiteHour(Date.now(), hour, offsetMin)
     console.log(`[cameras] next inventory refresh in ${Math.round(ms / 3600_000)} h (${new Date(Date.now() + ms).toISOString()}); page opens serve the saved snapshot${cache.nvrs ? ` (from ${new Date(cache.at).toISOString()})` : ' (none yet)'}`)
     const timer = setTimeout(() => {
+      // The NVRs' zones are first read a few minutes after start, so a timer set before that was aimed
+      // by the fallback. If the offset has changed since, aim again rather than read at the wrong hour.
+      if (siteOffsetMin() !== offsetMin) return arm()
       readNow(nvrs)
         .then((r) => console.log(`[cameras] nightly refresh: ${(r.nvrs ?? []).reduce((n, x) => n + (x.cameras?.length ?? 0), 0)} cameras from ${(r.nvrs ?? []).length} NVRs`))
         .catch((e) => console.warn(`[cameras] nightly refresh failed: ${e.message}`))

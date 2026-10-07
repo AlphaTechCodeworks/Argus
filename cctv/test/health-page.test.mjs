@@ -138,12 +138,12 @@ const storage = {
 {
   const real = {
     name: 'Disk 1', slot: 1, id: '{d1}', model: 'ST12000VE001-3BN101', serial: 'ZRT0CMKL',
-    status: null, state: 'unknown', totalBytes: 11444224e6, freeBytes: 0, recFrom: 0, recTo: 0, days: 18
+    status: null, state: 'unknown', totalBytes: 12_000_138_625_024, freeBytes: 0, recFrom: 0, recTo: 0, days: 18
   }
   const [p] = renderHealth(nvrWith({ storage: { at: T0, available: true, why: '', disks: [real], days: 18, worst: 'unknown', caps: {} } })).nvrPanels
   const r = p.diskRows[0]
   // "0 B free" on a recorder that overwrites its oldest footage by design reads as a fault.
-  check('a full cycling disk says it is overwriting, not that it has no space', r.size === '11.4 TB · overwriting oldest', r.size)
+  check('a full cycling disk says it is overwriting, not that it has no space', r.size === '12.0 TB · overwriting oldest', r.size)
   // Every one of these NVRs would otherwise sit amber for ever, which is the alarm nobody reads.
   check('a disk plainly recording is not marked amber for a condition the NVR withheld', r.state === 'ok' && r.status === 'Recording', JSON.stringify(r))
   check('and the summary agrees with its rows', p.disks.state === 'ok' && p.disks.value === '1 disk', JSON.stringify(p.disks))

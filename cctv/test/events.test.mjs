@@ -25,7 +25,7 @@ const {
 } = await import('../events.mjs')
 const events = await import('../events.mjs')
 const { FEED_FRESH_MS, buildWindowMessage, shouldWrite, windowsFor } = await import('../rec-modes.mjs')
-const { buildMotionEdit, readArea, readMotionAnswer, writeMotionThreshold } = await import('../motion-tune.mjs')
+const { buildMotionEdit, motionRequest, readArea, readMotionAnswer, writeMotionThreshold } = await import('../motion-tune.mjs')
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -707,6 +707,22 @@ const S = 1000
   check('a refusal says so', /refused/.test(readMotionAnswer('<response><status>fail</status><errorCode>17</errorCode></response>').why))
   check('no document at all says so', /did not answer/.test(readMotionAnswer('').why))
   check('an unreadable zone grid is null, not an empty grid', readArea({ children: [{ name: 'area', children: [], text: 'zzz', attrs: {} }], attrs: {} }) === null)
+
+  // Which camera. The question names it, and an answer is only ever read for the camera asked
+  // about: the first camera's figure used to be shown for any camera the answer did not hold.
+  const A = '{00000001-0000-0000-0000-000000000000}'
+  const B = '{00000002-0000-0000-0000-000000000000}'
+  const C = '{00000003-0000-0000-0000-000000000000}'
+  check('the question names the camera', motionRequest(B).includes(`<condition><chlId>${B}</chlId></condition>`) && motionRequest(B).startsWith('<?xml') && motionRequest(B).endsWith('</request>'), motionRequest(B))
+  const two = `<response><status>success</status><content><chl id="${A}"><sensitivity>50</sensitivity></chl><chl id="${B}"><sensitivity>20</sensitivity></chl></content></response>`
+  check('an answer with several cameras gives each its own', readMotionAnswer(two, A).sensitivity === 50 && readMotionAnswer(two, B).sensitivity === 20)
+  const missing = readMotionAnswer(two, C)
+  check('a camera that is not in the answer is not available, not shown another camera’s', missing.available === false && missing.sensitivity === undefined && /did not include this camera/.test(missing.why), JSON.stringify(missing))
+  check('a lone block for a different camera is not this camera’s either', readMotionAnswer(good, B).available === false, JSON.stringify(readMotionAnswer(good, B)))
+  check('the id is matched whatever its letter case', readMotionAnswer(good.replace('{00000001', '{0000000a'), '{0000000A-0000-0000-0000-000000000000}').sensitivity === 50)
+  check('an id given as an element is matched too', readMotionAnswer(`<response><status>success</status><content><item><id>${A}</id><sensitivity>1</sensitivity></item><item><id>${B}</id><sensitivity>2</sensitivity></item></content></response>`, B).sensitivity === 2)
+  // a single-camera answer need not repeat the id: the question named the camera
+  check('a lone block that names no camera is the answer for the camera asked about', readMotionAnswer('<response><status>success</status><content><chl><sensitivity>30</sensitivity></chl></content></response>', B).sensitivity === 30)
 }
 
 // --- motion tuning: building the write --------------------------------------------------------------------
@@ -723,6 +739,14 @@ const S = 1000
   check('it is a request document, not a response', /^<\?xml/.test(built.doc) && /<\/request>$/.test(built.doc))
   const many = buildMotionEdit('<response><content><chl id="A"><sensitivity>1</sensitivity></chl><chl id="B"><sensitivity>2</sensitivity></chl></content></response>', 9)
   check('two cameras in one answer is refused, not guessed at', !many.ok && /2 sensitivity elements/.test(many.error), many.error)
+  // ... unless the camera is known: then its own block is the one edited, and the only one sent
+  const twoCams = '<response><content><chl id="A"><sensitivity>1</sensitivity><holdTime>5</holdTime></chl><chl id="B"><sensitivity>2</sensitivity><holdTime>7</holdTime></chl></content></response>'
+  const forB = buildMotionEdit(twoCams, 9, 'b')
+  check('with the camera named, its block is the one changed', forB.ok && forB.was === '2' && forB.doc.includes('<chl id="B"><sensitivity>9</sensitivity><holdTime>7</holdTime></chl>'), JSON.stringify(forB))
+  check('and no other camera is written at all', forB.ok && !forB.doc.includes('id="A"') && (forB.doc.match(/<chl\b/g) ?? []).length === 1, forB.doc)
+  check('a camera listed twice is refused', !buildMotionEdit('<response><content><chl id="A"><sensitivity>1</sensitivity></chl><chl id="A"><sensitivity>2</sensitivity></chl></content></response>', 9, 'A').ok)
+  check('a lone block with no id is still edited whole', buildMotionEdit('<response><content><chl><sensitivity>50</sensitivity><holdTime>10</holdTime></chl></content></response>', 70, 'B').doc?.includes('<chl><sensitivity>70</sensitivity><holdTime>10</holdTime></chl>'))
+  check('several unnamed blocks are still refused', !buildMotionEdit('<response><content><item><sensitivity>1</sensitivity></item><item><sensitivity>2</sensitivity></item></content></response>', 9, 'B').ok)
   check('no sensitivity element is refused', !buildMotionEdit('<response><content><chl/></content></response>', 9).ok)
   check('no content at all is refused', !buildMotionEdit('<response></response>', 9).ok)
 }
@@ -785,6 +809,18 @@ const S = 1000
   check('a good write reads back and confirms', ok.out?.applied === true, JSON.stringify(ok.out))
   check('it read, wrote and read again', ok.sent.map((s) => s.url).join() === 'queryMotion,editMotion,queryMotion', ok.sent.map((s) => s.url).join())
   check('and it logged what it did', ok.out?.logged?.was === 50 && ok.out.logged.wanted === 70 && ok.out.logged.by === 'alice', JSON.stringify(ok.out?.logged))
+
+  check('every read names the camera', ok.sent.filter((s) => s.url === 'queryMotion').every((s) => s.doc.includes('<chlId>{00000001-0000-0000-0000-000000000000}</chlId>')), ok.sent[0]?.doc)
+
+  // An NVR that answers with every camera: the write used to be refused outright ("2 sensitivity
+  // elements"). The camera asked for is changed, and the other one is not in what is sent.
+  const other = '<chl id="{00000002-0000-0000-0000-000000000000}"><sensitivity>20</sensitivity></chl>'
+  const both = goodAnswer.replace('</content>', `${other}</content>`)
+  const multi = await tried({ threshold: 70 }, [both, '<response><status>success</status></response>', both.replace('>50<', '>70<')])
+  check('a several-camera answer: the camera asked for is changed', multi.out?.applied === true && multi.out.logged.was === 50, JSON.stringify(multi.out ?? multi.error?.message))
+  check('and the write holds that camera only', multi.sent[1]?.doc.includes('<sensitivity>70</sensitivity>') && !multi.sent[1].doc.includes('00000002'), multi.sent[1]?.doc)
+  const absent = await tried({ threshold: 70 }, [`<response><status>success</status><content>${other}</content></response>`])
+  check('an answer without the camera writes nothing', absent.error && /did not include this camera.*nothing was changed/.test(absent.error.message) && absent.sent.length === 1, absent.error?.message)
 
   const lied = await tried({ threshold: 70 }, [goodAnswer, '<response><status>success</status></response>', goodAnswer])
   check('an NVR that says success and keeps its old value is caught', lied.out?.applied === false, JSON.stringify(lied.out))

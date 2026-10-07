@@ -89,6 +89,23 @@ export function readClock(xml) {
   }
 }
 
+/**
+ * The same answer as the clock overview lists it (nvr-probe.mjs handleClocks), each setting as the
+ * NVR wrote it. Here so that it is read by the reader the sync uses and can be tested: the overview
+ * had a pattern of its own, written in a template literal with single backslashes, which matched
+ * nothing, and every field of every NVR came back null.
+ */
+export function clockOverview(xml) {
+  const c = readClock(xml)
+  return {
+    timeZone: c.timeZone,
+    daylightSwitch: pick(xml, 'daylightSwitch'),
+    synchronizeType: c.sync,
+    ntpServer: c.ntpServer ?? pick(xml, 'serverAddr'),
+    ntpInterval: pick(xml, 'updateInterval') ?? pick(xml, 'interval')
+  }
+}
+
 const pad = (n) => String(Math.floor(n)).padStart(2, '0')
 
 /**
@@ -171,16 +188,56 @@ export function checkWanted(want) {
 
 const OFFSET_RE = /^[+-]?\d{1,2}(?:\.\d+)?$/
 
-/** Hours to add to UTC for a POSIX zone like AST4 or EST5EDT: the digits are hours WEST of UTC. */
-export function zoneOffsetMs(timeZone, daylight) {
+/**
+ * The UTC moment a POSIX "Mm.w.d[/h]" rule falls on in `year`: weekday d (0 is Sunday) of week w
+ * (5 means the last) of month m, at h o'clock (2 when not given) on a clock `offsetMs` from UTC.
+ * null for anything else, including the Julian-day forms, which these NVRs do not offer.
+ */
+function ruleMoment(rule, year, offsetMs) {
+  const m = /^M(\d{1,2})\.(\d)\.(\d)(?:\/(\d{1,2}))?$/.exec(rule)
+  if (!m) return null
+  const [month, week, day] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  const hour = m[4] === undefined ? 2 : Number(m[4])
+  if (month < 1 || month > 12 || week < 1 || week > 5 || day > 6 || hour > 24) return null
+  const firstWeekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay()
+  let date = 1 + ((day - firstWeekday + 7) % 7) + (week - 1) * 7
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  while (date > daysInMonth) date -= 7
+  return Date.UTC(year, month - 1, date, hour) - offsetMs
+}
+
+/**
+ * Milliseconds to add to UTC, at the moment `atMs`, for a POSIX zone like AST4 or
+ * EST5EDT,M3.2.0,M11.1.0: the digits are hours WEST of UTC.
+ *
+ * `daylight` is the NVR's daylight saving switch. It says the NVR observes daylight saving, not
+ * that it is in force today: whether it is in force comes from the zone's own two dates. (Until
+ * 2026-10 the switch alone added the hour, all year, which would have set every such NVR an hour
+ * fast from the first Sunday of November.)
+ *
+ * null when the offset cannot be worked out: a zone this cannot read, or one with daylight saving
+ * switched on that does not say when it starts and ends (CST4CDT). The dates such a zone falls back
+ * on are the firmware's own choice, and a wrong guess sets a recorder's clock an hour out.
+ */
+export function zoneOffsetMs(timeZone, daylight, atMs = Date.now()) {
   const m = /^[A-Za-z]{2,6}([+-]?\d{1,2}(?:\.\d+)?)/.exec(String(timeZone ?? ''))
   if (!m || !OFFSET_RE.test(m[1])) return null
   const west = Number(m[1])
   if (!Number.isFinite(west)) return null
+  const standard = -west * 3600_000
   // a second zone name (EST5EDT) means daylight saving shifts it an hour east while in force
   const hasDst = /^[A-Za-z]{2,6}[+-]?\d{1,2}(?:\.\d+)?[A-Za-z]{2,6}/.test(String(timeZone))
-  const dst = daylight && hasDst ? 1 : 0
-  return (-west + dst) * 3600_000
+  if (!daylight || !hasDst) return standard
+  const rules = String(timeZone).split(',').slice(1)
+  if (rules.length !== 2) return null
+  // the start is given on the standard clock and the end on the summer one
+  const year = new Date(atMs + standard).getUTCFullYear()
+  const start = ruleMoment(rules[0], year, standard)
+  const end = ruleMoment(rules[1], year, standard + 3600_000)
+  if (start === null || end === null) return null
+  // south of the equator the summer runs over the new year, so the start comes after the end
+  const inForce = start < end ? atMs >= start && atMs < end : atMs >= start || atMs < end
+  return standard + (inForce ? 3600_000 : 0)
 }
 
 
@@ -197,4 +254,30 @@ export function parseNvrTime(text, { dateFormat = 'day-month-year' } = {}) {
   const t = Date.UTC(Number(Y), Number(M) - 1, Number(D), h, Number(mm), Number(ss))
   return Number.isFinite(t) ? t : null
 }
+
+/**
+ * How far an NVR's clock is from the server's (ms, positive is fast), from a reading of it taken at
+ * `nowMs`. null when the reading has no time in it that can be read.
+ */
+export function driftOf(clock, nowMs, offsetMs) {
+  const said = parseNvrTime(clock?.currentTime, clock ?? {})
+  return said === null ? null : said - (nowMs + offsetMs)
+}
+
+/**
+ * How a clock write by the sync (nvr-clock.mjs syncOne) went, in words for the log, from what the
+ * clock read back as (`after`, ms out; null: no reading). The read-back is the only evidence there
+ * is: the NVR answering "success" says nothing about what its clock now reads.
+ */
+export function syncOutcome(after, driftMs) {
+  if (after === null) return 'set, but its clock could not be read back'
+  return Math.abs(after) < driftMs ? 'put right' : `set, but it still reads ${Math.round(after / 1000)} s out`
+}
+
+/**
+ * The clock error Health is given after a pass ({ drift, after, changed }): the read-back once the
+ * clock has been written, the reading that was taken otherwise, and null (no reading: the one from
+ * before a write is no longer true) when a written clock could not be read back. Never an assumed 0.
+ */
+export const readingOf = (r) => (r.changed ? (r.after ?? null) : r.drift)
 

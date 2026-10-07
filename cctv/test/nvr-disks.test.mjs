@@ -27,7 +27,8 @@ const REFUSED = fixture('notSupported')
   check('the disk list parses', r.ok && r.disks.length === 2, JSON.stringify(r).slice(0, 120))
   check('a working disk is ok', r.disks[0].state === 'ok' && r.disks[0].status === 'read/write', JSON.stringify(r.disks[0]))
   check('a disk the NVR calls "exception" is bad', r.disks[1].state === 'bad', r.disks[1].state)
-  check('sizes come back in bytes (MB in the answer)', r.disks[0].totalBytes === 3_815_447_000_000 && r.disks[0].freeBytes === 41_120_000_000, `${r.disks[0].totalBytes}/${r.disks[0].freeBytes}`)
+  // the NVR's MB is 1,048,576 bytes: 3815447 of them is a 4 TB drive (4,000,786,153,472 bytes)
+  check('sizes come back in bytes (MB in the answer)', r.disks[0].totalBytes === 3_815_447 * 1_048_576 && r.disks[0].freeBytes === 41_120 * 1_048_576, `${r.disks[0].totalBytes}/${r.disks[0].freeBytes}`)
   check('the model and serial are carried through', r.disks[0].model === 'ST4000VX016-3CV104' && r.disks[0].serial === 'ZGY1A2B3')
 }
 {
@@ -49,6 +50,8 @@ check('read only is a warning', diskState('read only') === 'warn')
 // A word we have never seen must not be reported as healthy, and must not page the owner either.
 check('an unknown word is unknown, not ok and not bad', diskState('quantum flux') === 'unknown' && diskState('') === 'unknown')
 check('sizes: a missing figure stays null, never 0', sizeBytes(null) === null && sizeBytes('') === null && sizeBytes(undefined) === null)
+check('sizes: the units are the NVR\'s, powers of 1024', sizeBytes('1', 'B') === 1 && sizeBytes('1', 'KB') === 1024 && sizeBytes('1', 'MB') === 1_048_576 && sizeBytes('1', 'GB') === 1_073_741_824 && sizeBytes('1', 'TB') === 1_099_511_627_776 && sizeBytes('2') === 2_097_152)
+check('sizes: a unit it does not know is null, not a guess', sizeBytes('5', 'blocks') === null)
 check('dates: the shapes these answers use', parseDate('2026-09-25') === Date.UTC(2026, 8, 25) && parseDate('2026/9/5') === Date.UTC(2026, 8, 5) && parseDate('20260925') === Date.UTC(2026, 8, 25))
 check('dates: nonsense is null', parseDate('') === null && parseDate('not a date') === null && parseDate('2026-13-01') === null)
 
@@ -198,8 +201,9 @@ const at = (t) => () => t
   check('items straight under <content> are found', d.status === 'read/write' && d.state === 'ok', `${d.status} ${d.state}`)
   check('the two answers pair up by GUID when there is no slot to pair on', d.slot === 1 && d.serial === 'ZV70E99C', JSON.stringify(d))
   check('the model comes through', d.model === 'ST12000VE001-3BN101', String(d.model))
-  // 11444224 MB is a 12 TB drive. A thousandfold slip here reads as 11 GB and looks like a fault.
-  check('the size is read in the megabytes the list declares', d.totalBytes === 11444224e6, String(d.totalBytes))
+  // 11444224 MB is a 12 TB drive: 12,000,138,625,024 bytes, at the 1,048,576 bytes these NVRs mean
+  // by MB. (A thousandfold slip here reads as 11 GB and looks like a fault.)
+  check('the size is read in the megabytes the list declares', d.totalBytes === 12_000_138_625_024, String(d.totalBytes))
   check('a full cycling disk is zero free, not unknown', d.freeBytes === 0, String(d.freeBytes))
   check('the recording days come through', d.days === 16, String(d.days))
   // the raid type lists in this same answer also hold <item> elements, and are not disks
