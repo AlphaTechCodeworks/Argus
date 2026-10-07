@@ -87,15 +87,71 @@ export function errorAnswer(e) {
 
 // ---- one XML call at a time per NVR ------------------------------------------------------
 //
-// XML calls to one NVR go out one at a time, in order, and the next starts only once the
-// previous one has really returned from the SDK (even long after its time limit). The queue
-// sits OUTSIDE the lane on purpose: the session check inside lane.run stays the last thing
-// before the native call, so a call queued behind a slow one can never go out on a login
-// that was logged out meanwhile (the SDK reuses login ids). It also keeps a queued call from
-// holding one of the NVR's two lane slots while it waits, which would block live video.
+// Two things do this, and they are kept apart on purpose: a queue that callers wait in, and a
+// record of the call that is inside the SDK.
+//
+// The queue (xmlTails). XML calls to one NVR go out one at a time, in order: a call waits for
+// the one before it to return from the SDK, also after that one's time limit (onLate), but for
+// at most XML_CAP_MS. The cap bounds how long callers wait and nothing else: when it passes it
+// frees this queue and the process-wide turn (below), so the calls behind stop waiting and
+// other NVRs' calls go on. It does not say that the call has left the SDK. The queue sits
+// OUTSIDE the lane on purpose: the session check inside lane.run stays the last thing before
+// the native call, so a call queued behind a slow one can never go out on a login that was
+// logged out meanwhile (the SDK reuses login ids). It also keeps a queued call from holding one
+// of the NVR's two lane slots while it waits, which would block live video.
+//
+// The record (xmlInside). This is what protects the SDK. Per NVR id it names the one native XML
+// or power call (TransparentConfig, reboot, shutdown) that is inside the SDK. A call is entered
+// in the same synchronous step that hands its native call to sdkCallT, right after the session
+// check, and is refused (503, nothing sent) if another one is there. The record is cleared only
+// when that native call has really returned or was never started: an answer in time, a native
+// error in time, koffi refusing the arguments, and after a time-out only when the call comes
+// back (onLate). No timer clears it, the cap least of all, and no relogin: it goes by the NVR's
+// id, not by the Nvr object or the login, so it outlives both.
+// The queue alone used to stand for both, and the cap broke it: once a call had been inside the
+// SDK for 90 s, the next XML call for the same NVR was let go and started on the same login
+// beside it, and overlapping SDK calls have corrupted the heap (sdk.mjs `exclusive`). A reboot
+// was worse off: it passed the turn at its own 10 s time limit with nothing to hold the next
+// XML call back. Now, when the cap passes with the call still inside (for a reboot: when its
+// time limit does), the record is marked held: the calls queued behind it are refused as they
+// come out of the queue, and every later XML call (reads and changes alike), reboot and
+// shutdown of that NVR at the door, until it returns. That is for as long as it takes, also
+// for a healthy call whose own time limit is longer than the cap (transparent's timeoutMs): it
+// still gets its answer. If it never returns, that NVR's settings and reboot stay refused until
+// the service is restarted, which is right: the call is still inside. Nothing restarts it by
+// itself while the other NVRs keep answering: the watchdog then leaves the process alone on
+// purpose (watchdog.mjs: one NVR's stuck call is no evidence while calls to others come back),
+// and nvrs.mjs declines a relogin while the call is late. The "still inside the SDK" line in
+// the log and the 503 texts say what is going on; someone then has to restart the service.
+//
+// Backstop: the native calls also carry sdk.mjs's exclusive key `${id}/xml`. With a correct
+// record it is never contended. sdk.mjs frees the key in the native call's own callback: on a
+// return in time before the record is cleared (that follows a few promise ticks later, when the
+// caller's wait ends), on a late return right after it, in the same synchronous callback (onLate
+// clears the record, then the key goes). Either way the key is free before another call to this
+// NVR can get as far as its native call, so nothing ever waits on it. If the record logic were
+// ever wrong, the key turns an overlap into a wait. That is better than two calls on one login,
+// but it is not harmless:
+//  - the waiting call is already past its session check, so it starts later on the login id it
+//    read before the wait, even if that login was logged out meanwhile (a logout waits for the
+//    key for 30 s at most);
+//  - no time limit runs while it waits (sdk.mjs starts it with the native call), so its caller
+//    and its lane slot wait for as long as the other call stays inside. An XML call's cap still
+//    passes the queue and the turn on; a reboot or shutdown has no cap, and keeps the
+//    process-wide turn, i.e. every NVR's XML calls, for that long;
+//  - nothing logs that a call waited on the key (sdk.mjs would have to; it does not yet).
+// So the key is the last line only, not a second queue: the record has to stay right.
+// The key also lets a logout see these calls (nvrs.mjs waits for the keys under `${id}/`, for as
+// long as it already waited for this queue).
+//
+// What this does NOT cover: other kinds of SDK call on the same login (the camera list, clock
+// reads, playback searches and starts) still run beside an XML call, since the NVR's lane lets
+// two run at once; and a logout, after its own bounded wait, can still run under a call that is
+// inside the SDK.
 
-const xmlTails = new WeakMap() // nvr -> promise that settles when its last queued XML call has returned from the SDK
-const XML_CAP_MS = 90_000 // never block the queue for ever: the watchdog handles calls stuck longer
+const xmlTails = new WeakMap() // nvr -> promise that settles when nothing need wait for its last queued XML call any more: it returned from the SDK, nothing was sent, or the cap passed
+const XML_CAP_MS = 90_000 // the longest callers wait behind one call: never block the queue and the turn for ever. It lets nothing into the SDK (xmlInside does that), and nothing ends a call stuck longer: while other NVRs answer, the watchdog leaves the process alone (see above)
+let capMs = XML_CAP_MS // (tests shorten it: _test.setCap)
 
 // ---- and one at a time in the whole process, paced, with a short queue -------------------
 //
@@ -110,7 +166,10 @@ const XML_CAP_MS = 90_000 // never block the queue for ever: the watchdog handle
 // refused for XML_READ_BREAKER_MS (other failures are answers, e.g. a probe of a command the
 // firmware lacks, and do not count). Changes (edit...) are never turned away by the queue length
 // or the breaker: an admin is waiting on each one, and the change lock allows one per NVR.
-// Nothing is queued at all while the SDK is stuck (sdk.mjs sdkStuck).
+// Nothing is queued at all while the SDK is stuck (sdk.mjs sdkStuck), nor for an NVR whose earlier
+// call is held inside the SDK (xmlInside above): those two turn changes away as well, because they
+// are about what the SDK can take, not about load. None of these refusals sends anything, so none
+// counts towards the breaker.
 // A call takes its process-wide turn only once its NVR's lane runs it, right before the native call
 // (takeTurn). Taken earlier, a call waiting for its lane would keep every NVR's XML calls waiting:
 // an NVR with two late calls holds its lane, e.g. for a disk read from nvr-disks (which checks only
@@ -125,6 +184,7 @@ const XML_READ_FAILS = 2 // timeouts in a row ...
 const XML_READ_BREAKER_MS = 60_000 // ... and that NVR's reads are refused this long
 const BUSY_RETRY_S = 5 // "try again" hint for a full queue
 const STUCK_RETRY_S = 30 // ... and while the SDK is stuck
+const INSIDE_RETRY_S = 30 // ... and while an earlier call to the same NVR is still inside the SDK
 
 let gapMs = XML_GAP_MS // (tests that shorten every other timing shorten this too: _test.setGap)
 let xmlGate = Promise.resolve() // settles once the last call to take its turn has returned and XML_GAP_MS has passed since it started
@@ -148,9 +208,74 @@ let now = Date.now // (the tests' clock)
 /** Whether a command only reads (NVMS-9000 web command names). */
 export const isReadCommand = (url) => /^(query|get|search)/i.test(String(url))
 
-/** Refuses (503, nothing sent) while the SDK is stuck, or reads while this NVR's read breaker is open. */
+// The record of the one native XML or power call per NVR that is inside the SDK (see "one XML call
+// at a time per NVR" above for why, and for what clears it). There is no way to clear it from
+// outside, on purpose, the tests included: they let their stand-in calls return.
+const xmlInside = new Map() // nvr id -> { what, since, held }: by id, so it survives a relogin and a re-created Nvr object
+/** sdk.mjs `exclusive` key of an NVR's XML and power calls: the backstop behind xmlInside. */
+const xmlKey = (nvr) => `${nvr.id}/xml`
+/** How long a call on record has been inside the SDK, in whole seconds. */
+const insideS = (rec) => Math.round((Date.now() - rec.since) / 1000)
+
+/** The refusal (503, nothing sent) while an earlier call to this NVR is still inside the SDK. */
+const insideError = (nvr, rec) =>
+  new HttpError(503, `${nvr.name} is still answering an earlier request (${rec.what}, ${insideS(rec)} s so far); nothing was sent. Try again shortly`, { retryAfterS: INSIDE_RETRY_S })
+
+/**
+ * Check and set in one synchronous step: throws the refusal if a call to this NVR is inside the
+ * SDK, else records this one as inside and returns its record. It must be the last thing before
+ * the native call, with nothing awaited in between (the session check comes right before it).
+ * @param {{ id: string, name: string }} nvr
+ * @param {string} what  the call's tag, for the refusal and the log
+ */
+function enterSdk(nvr, what) {
+  const there = xmlInside.get(nvr.id)
+  if (there) throw insideError(nvr, there)
+  const rec = { what: what || 'a request', since: Date.now(), held: false }
+  xmlInside.set(nvr.id, rec)
+  return rec
+}
+
+/**
+ * The native call has really returned, or was never started: its record goes. Only the call that
+ * set a record clears it, and calling this twice is harmless. Nothing else may delete from xmlInside.
+ */
+function leaveSdk(nvr, rec) {
+  if (xmlInside.get(nvr.id) !== rec) return
+  xmlInside.delete(nvr.id)
+  if (rec.held) console.warn(`[${nvr.id}] ${rec.what} returned from the SDK after ${insideS(rec)} s: XML calls to this NVR go out again`)
+}
+
+/**
+ * Callers have stopped waiting for a call that is still inside the SDK (the cap passed, or a
+ * reboot's time limit): from now on this NVR's calls are refused at the door (refuseHeld). Logged once.
+ */
+function holdSdk(nvr, rec) {
+  if (rec.held || xmlInside.get(nvr.id) !== rec) return
+  rec.held = true
+  console.warn(`[${nvr.id}] ${rec.what} is still inside the SDK after ${insideS(rec)} s: XML calls to this NVR are refused until it returns`)
+}
+
+/** Refuses (503, nothing sent) while a call to this NVR that callers stopped waiting for is still inside the SDK. */
+function refuseHeld(nvr) {
+  const rec = xmlInside.get(nvr.id)
+  if (rec?.held) throw insideError(nvr, rec)
+}
+
+/**
+ * Refuses (503, nothing sent) while the SDK is stuck, while an earlier call to this NVR is held
+ * inside the SDK (reads and changes alike), or reads while this NVR's read breaker is open.
+ */
 function refuseNow(nvr, read) {
   if (sdkStuck()) throw new HttpError(503, `The connection to the NVRs is stuck on an earlier call; nothing was sent. Try again in a minute`, { retryAfterS: STUCK_RETRY_S })
+  // at the door, so a caller is not queued only to be refused at the last moment (enterSdk). Not while
+  // the worker's login is borrowed: such a call enters no SDK of this process, so a call of this
+  // NVR still inside it is nothing it can run beside; the worker's own transparent() keeps the
+  // record for the worker's SDK. (Hardly reachable today: a held call is a late call unless it was
+  // given a long timeoutMs, and a late call keeps nvrs.mjs from the relogin that would start
+  // borrowing; it takes an Nvr object made again under the same id. It is not a way round a call
+  // wedged on the control login: that NVR stays on its own login, and refused.)
+  if (nvr.borrowing !== true) refuseHeld(nvr)
   const b = readFails.get(nvr.id)
   if (read && b?.openUntil > now()) {
     const s = Math.ceil((b.openUntil - now()) / 1000)
@@ -162,7 +287,15 @@ function refuseNow(nvr, read) {
 function noteRead(nvr, timedOut) {
   if (!timedOut) return void readFails.delete(nvr.id)
   const b = readFails.get(nvr.id) ?? { fails: 0, openUntil: 0 }
-  if (b.openUntil && b.openUntil <= now()) b.fails = 0 // (a closed breaker starts counting again)
+  // A breaker that has closed starts counting again, and is forgotten as one that was open: left
+  // set in the past, openUntil had every later time-out start the count over, so the count never
+  // reached XML_READ_FAILS a second time and the breaker opened once per NVR and never again (until
+  // a read came back). An NVR that does not answer was asked again by every read after its first
+  // minute, each one waiting out its whole time limit.
+  if (b.openUntil && b.openUntil <= now()) {
+    b.fails = 0
+    b.openUntil = 0
+  }
   b.fails++
   if (b.fails >= XML_READ_FAILS) {
     b.openUntil = now() + XML_READ_BREAKER_MS
@@ -174,16 +307,21 @@ function noteRead(nvr, timedOut) {
 
 // replaced by the offline tests: (opts, userId, xml, url, out, outSize, len) => Promise<bool>
 let call = (opts, ...args) => sdkCallT(opts, NET_SDK.TransparentConfig, ...args)
+// ... and the reboot/shutdown call: (opts, action, userId) => Promise<bool>
+const nativePower = (opts, action, userId) => sdkCallT(opts, action === 'shutdown' ? NET_SDK.ShutDownDVR : NET_SDK.RebootDVR, userId)
+let powerCall = nativePower
 
 /** No session of this process's own to send on (the worker's is borrowed, or there is none). */
 const noOwnSession = (nvr) => nvr.borrowing !== true && nvr.userId < 0
 
 /**
  * The same command on the worker's login (nvrs.mjs Nvr borrowing): the NVR refuses this process a
- * second one. The worker runs it through its own transparent() / power(), on its own lane. Errors
- * are marked viaWorker: no native call of this process is left running behind them, so the queue is
- * released at once even after a timeout. `write`: a change or a power command, whose loss with the
- * worker leaves it unknown whether the NVR acted.
+ * second one. The worker runs it through its own transparent() / power(), on its own lane. No
+ * native call of this process is left running behind an error from here, so the caller's queue place
+ * is given back at once even after a timeout: such a call has no record of being inside this
+ * process's SDK (transparent()'s catch). Errors are marked viaWorker; nothing reads the mark now.
+ * `write`: a change or a power command, whose loss with the worker leaves it unknown whether the NVR
+ * acted.
  */
 async function viaWorker(nvr, req, write) {
   try {
@@ -199,10 +337,19 @@ async function viaWorker(nvr, req, write) {
 /**
  * Sends one command and returns the answer. Refuses (nothing sent) if the session changed
  * while the call waited its turn: `gen` is the session the caller's data came from. Refuses with
- * 503 while the SDK is stuck, while the process-wide queue is full (reads) and while this NVR's
- * read breaker is open (reads): see above.
+ * 503 while the SDK is stuck, while an earlier XML or power call to this NVR is still inside the
+ * SDK after callers stopped waiting for it, while the process-wide queue is full (reads) and while
+ * this NVR's read breaker is open (reads): see above.
+ *
+ * timeoutMs: the SDK time limit for this one call (sdk.mjs sdkCallT); left out, the command's own
+ * default (budgetOf) applies. It may be longer than XML_CAP_MS, for a heavy read that rightly takes
+ * minutes: the call still gets its answer, the cap still frees the queue and the process-wide turn
+ * for other NVRs after 90 s, and this NVR's other XML calls are refused until it has returned.
+ * On this process's own login only: a command sent through the worker (borrowing) runs on the
+ * worker's default limit, and the wait for the worker's answer has a limit of its own
+ * (worker-requests.mjs).
  */
-export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBytes = 256 * 1024 } = {}) {
+export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBytes = 256 * 1024, timeoutMs } = {}) {
   if (!xmlOnline(nvr) || noOwnSession(nvr)) throw new Error(`${nvr.name} is offline`)
   const read = isReadCommand(url)
   refuseNow(nvr, read)
@@ -213,7 +360,7 @@ export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBy
   const len = Buffer.alloc(4)
   const prev = xmlTails.get(nvr) ?? Promise.resolve()
   let returned
-  const mine = new Promise((r) => (returned = r)) // resolves once the native call has returned, nothing was sent, or the cap
+  const mine = new Promise((r) => (returned = r)) // resolves once nothing need wait for this call any more: the native call has returned, nothing was sent, or the cap
   const tail = prev.then(() => mine)
   xmlTails.set(nvr, tail)
   tail.then(() => {
@@ -225,56 +372,102 @@ export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBy
   let sentAt = 0
   let passTurn = null // set while this call holds the process-wide turn (takeTurn)
   let cap = null
+  let rec = null // this call's record of being inside the SDK (enterSdk): from right before the native call until done()
+  // Callers stop waiting for this call: the per-NVR queue and the process-wide turn pass on. This
+  // does NOT say that the call has left the SDK: only done() does, which clears the record first.
   const release = () => {
     clearTimeout(cap)
     returned()
     passTurn?.(sentAt)
     passTurn = null
   }
-  // never block the queues for ever (the watchdog handles calls stuck longer): from here while it
-  // waits for its lane, and again from its process-wide turn
-  cap = setTimeout(release, XML_CAP_MS)
+  // The native call has really returned, or nothing was sent. The record goes before the queues
+  // are released, so whichever call is let through next finds it clear.
+  const done = () => {
+    if (rec) leaveSdk(nvr, rec)
+    rec = null
+    release()
+  }
+  // The cap: never block the queues for ever, from here while it waits for its lane, and again from
+  // its process-wide turn. It frees the waiting only: a call still inside the SDK keeps its record,
+  // marked held before the queues are released, so whichever call is let through next is refused
+  // instead of started beside it. (Nothing ends such a call from here: see "If it never returns".)
+  const capped = () => {
+    if (rec) holdSdk(nvr, rec)
+    release()
+  }
+  cap = setTimeout(capped, capMs)
   let text = null // the answer when it came from the worker (nothing is written to `out` then)
   let ok
   try {
-    // things may have changed while it waited: the SDK stuck, the breaker opened
+    // things may have changed while it waited: the SDK stuck, the call before this one still inside it at its cap, the breaker opened
     refuseNow(nvr, read)
     ok = await nvr.lane.run(
       async () => {
         // the process-wide turn, only now that the lane runs this call (see takeTurn)
         passTurn = await takeTurn()
         clearTimeout(cap)
-        cap = setTimeout(release, XML_CAP_MS)
-        // and once more after that wait: the SDK stuck, the breaker opened
+        cap = setTimeout(capped, capMs)
+        // and once more after that wait
         refuseNow(nvr, read)
         // the session as it is when the call really starts: a relogin may have happened while it was
         // queued, or the path may have changed between this login and the worker's
         const borrowed = nvr.borrowing === true
         const userId = nvr.userId
         if ((!borrowed && userId < 0) || xmlGen(nvr) !== gen || nvr.stopped) throw new Error(`${nvr.name} reconnected; nothing was sent`)
-        sentAt = Date.now()
         if (borrowed) {
-          // nothing of this call enters this process's SDK, so the process-wide turn is passed on
-          // at once (0: no native call started here, so no gap is kept): other NVRs' XML calls must
-          // not wait out a round trip to this NVR's worker. This NVR's own queue still holds until
-          // the answer is back, so the worker gets one request at a time.
+          // nothing of this call enters this process's SDK, so it takes no record here (the worker
+          // runs it through its own transparent(), which keeps the record for the worker's SDK), and
+          // the process-wide turn is passed on at once (0: no native call started here, so no gap is
+          // kept): other NVRs' XML calls must not wait out a round trip to this NVR's worker. This
+          // NVR's own queue still holds until the answer is back or the cap passes, so its XML
+          // commands reach the worker one after another (a reboot does not use this queue; in the
+          // worker, its own turn and record are what keep two of them apart).
+          sentAt = Date.now()
           passTurn?.(0)
           passTurn = null
-          text = String((await viaWorker(nvr, { op: 'xml', url, xml, tag, outBytes }, !read)).text ?? '')
+          try {
+            text = String((await viaWorker(nvr, { op: 'xml', url, xml, tag, outBytes }, !read)).text ?? '')
+          } catch (e) {
+            // Only a time-out counts for the read breaker here (a read the worker sent and gave up
+            // on). Whatever else the worker came back with leaves the count as it is: its own
+            // refusals with nothing sent (its 503s, not ready, a session that changed, stopping), a
+            // worker lost with the request out, an error it passed on. None of them is known to be
+            // a read that came back from the NVR, and starting the count over for one let "a
+            // time-out, turned away, a time-out" go on asking. (On this process's own login an
+            // error in time does start it over: there it is known to be the NVR's answer.)
+            if (e?.name !== 'SdkTimeout') sentAt = 0
+            throw e
+          }
           return true
         }
-        return call({ nvr: nvr.id, tag, onLate: release }, userId, xml, url, out, out.length, len)
+        // From here to the native call nothing is awaited: the session check above, the record and
+        // the call are one synchronous step.
+        // on record as inside the SDK, or refused (503, nothing sent) because another call to this NVR is
+        rec = enterSdk(nvr, tag || url)
+        sentAt = Date.now()
+        // exclusive: the backstop behind the record. The key is free whenever the record is, so sdkCallT
+        // hands the call to the SDK a few promise ticks from here, before any timer or native return
+        // can run; unless every native slot is taken (sdk.mjs MAX_NATIVE): then it waits in sdk.mjs's
+        // own queue, as it always did, with its record and key set and its session check behind it.
+        // It only ever waits on the key if the record logic is wrong. That is a wait instead of two
+        // calls on one login, with no time limit running and the session check already done: see
+        // "Backstop" above for what it costs.
+        return call({ nvr: nvr.id, tag, exclusive: xmlKey(nvr), onLate: done, ...(timeoutMs === undefined ? {} : { timeoutMs }) }, userId, xml, url, out, out.length, len)
       },
       { priority: PRIORITY.NORMAL }
     )
   } catch (e) {
     if (read && sentAt) noteRead(nvr, e?.name === 'SdkTimeout')
-    // after a timeout the native call is still running: onLate releases the queues when it returns
-    // (a call that went to the worker leaves no native call running here, timed out or not)
-    if (e?.name !== 'SdkTimeout' || e.viaWorker) release()
+    // after a timeout the native call is still inside the SDK: its record stays, and the queues stay
+    // held up to the cap, until onLate (done) says it has returned. Any other error: it has returned
+    // or was never started (done clears its record), or nothing was sent (there is no record). A call
+    // that went to the worker has no record here, so it releases at once, timed out or not: no native
+    // call of this process is left running behind it.
+    if (!(rec && e?.name === 'SdkTimeout')) done()
     throw e
   }
-  release()
+  done()
   if (read) noteRead(nvr, false)
   if (!ok) throw new Error(`the NVR did not accept the request (${await lastErrorReason('no reason given')})`)
   if (text !== null) return text
@@ -283,21 +476,35 @@ export async function transparent(nvr, url, xml, tag, { gen = xmlGen(nvr), outBy
 }
 
 /**
- * Reboot or power the NVR off (NET_SDK_RebootDVR / NET_SDK_ShutDownDVR), on its control login, or the worker's while that is borrowed. One
- * SDK call, taken on this NVR's lane and the process-wide turn like every other, so it never overlaps
- * another call (overlapping SDK calls have corrupted the heap). The device drops right after, so there
- * is nothing to read back: the boolean is only whether the NVR accepted the command.
+ * Reboot or power the NVR off (NET_SDK_RebootDVR / NET_SDK_ShutDownDVR), on its control login, or the
+ * worker's while that is borrowed. One SDK call, taken on this NVR's lane and the process-wide turn
+ * like the XML calls, and kept apart from them by the same record (xmlInside) and exclusive key, both
+ * ways (overlapping SDK calls have corrupted the heap): it is refused (503, nothing sent) while an XML
+ * or power call to this NVR is inside this process's SDK, and XML calls are refused while it is. The
+ * turn passes when the caller's wait ends: at the latest when the 10 s time limit does, which sdk.mjs
+ * counts from the start of the native call. There is no cap on that wait here as there is in
+ * transparent(): were this call ever to wait on the exclusive key (only if the record logic is wrong,
+ * see "Backstop" above), it would keep the process-wide turn, and with it every NVR's XML calls, until
+ * the other call returns. The record stays until the native call has really returned (onLate), where
+ * the turn alone used to let the next XML call onto the login beside it. A reboot sent through the
+ * worker enters no SDK of this process and takes no record here: the worker's own power() keeps it.
+ * The device drops right after, so there is nothing to read back: the boolean is only whether the
+ * NVR accepted the command.
  * @param {import('./nvrs.mjs').Nvr} nvr
  * @param {'reboot'|'shutdown'} action
  * @returns {Promise<boolean>}
  */
 export async function power(nvr, action) {
   if (!xmlOnline(nvr) || noOwnSession(nvr)) throw new Error(`${nvr.name} is offline`)
-  const fn = action === 'shutdown' ? NET_SDK.ShutDownDVR : NET_SDK.RebootDVR
+  // at the door, as refuseNow does for XML calls: no lane slot and no turn taken only to be refused
+  // (not while the worker's login is borrowed: that call never enters this process's SDK)
+  if (nvr.borrowing !== true) refuseHeld(nvr)
   const gen = xmlGen(nvr)
   return nvr.lane.run(
     async () => {
       const passTurn = await takeTurn()
+      let rec = null // this call's record of being inside the SDK (enterSdk)
+      let inside = false // it ran past its time limit and is still inside the SDK: only onLate clears the record
       try {
         const borrowed = nvr.borrowing === true
         const userId = nvr.userId
@@ -306,8 +513,19 @@ export async function power(nvr, action) {
           passTurn() // as in transparent(): the turn is this process's SDK's, which this call never enters
           return Boolean((await viaWorker(nvr, { op: 'power', action }, true)).accepted)
         }
-        return Boolean(await sdkCallT({ nvr: nvr.id, tag: action }, fn, userId))
+        // from here to the native call nothing is awaited, as in transparent()
+        // on record as inside the SDK, or refused (503, nothing sent) because another call to this NVR is
+        rec = enterSdk(nvr, action)
+        // (exclusive: the backstop behind the record, see transparent())
+        return Boolean(await powerCall({ nvr: nvr.id, tag: action, exclusive: xmlKey(nvr), onLate: () => leaveSdk(nvr, rec) }, action, userId))
+      } catch (e) {
+        inside = rec !== null && e?.name === 'SdkTimeout'
+        throw e
       } finally {
+        // before the turn passes: the record goes (the call has returned or was never started), or it is
+        // marked held, so the XML call that takes the turn next is refused instead of started beside it
+        if (rec && inside) holdSdk(nvr, rec)
+        else if (rec) leaveSdk(nvr, rec)
         passTurn()
       }
     },
@@ -315,7 +533,12 @@ export async function power(nvr, action) {
   )
 }
 
-/** Waits (up to maxMs) until no XML call to this NVR is queued or inside the SDK. Resolves true if none is. */
+/**
+ * Waits (up to maxMs) until this NVR's XML queue is empty: no XML call to it is waiting its turn, and
+ * none is inside the SDK within the cap. Resolves true if so. A call still inside the SDK after the
+ * cap, and a reboot or shutdown, are not in the queue: a logout sees those through their exclusive
+ * key (sdk.mjs exclusiveSettled), which it waits for as well.
+ */
 export async function xmlSettled(nvr, maxMs) {
   const until = Date.now() + maxMs
   for (;;) {
@@ -492,10 +715,27 @@ export const newSeq = () => `${Date.now().toString(36)}-${Math.random().toString
 export const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype
 
 // for the offline tests: replace the native call (null puts the real one back)
+// A stand-in has to keep sdkCallT's word, because the record of the call inside the SDK (xmlInside)
+// goes by it: it settles with anything but an SdkTimeout only once its "native call" has returned
+// or was never started, and one that rejects with an error named SdkTimeout must later call
+// opts.onLate, or that NVR stays refused for the rest of the process (there is no hook that clears a
+// record). A stand-in built on sdkCallT with a fake function does both by itself.
 export const _test = {
   setCall(fn) {
     call = fn ?? ((opts, ...args) => sdkCallT(opts, NET_SDK.TransparentConfig, ...args))
   },
+  /** The same for the reboot/shutdown call, under the same rule: (opts, action, userId) => Promise<bool> (null: the real one). */
+  setPower(fn) {
+    powerCall = fn ?? nativePower
+  },
+  /** How long callers wait behind one call before the queue and the turn pass on (null: 90 s). */
+  setCap(ms) {
+    capMs = ms ?? XML_CAP_MS
+  },
+  /** The record of this NVR's XML or power call inside the SDK ({ what, since, held }), or null. */
+  inside: (nvr) => xmlInside.get(nvr.id) ?? null,
+  /** XML calls admitted and not yet returned or given up waiting for (xmlPending). */
+  pending: () => xmlPending,
   /** The read breaker's clock (null: the real one). */
   setNow(fn) {
     now = fn ?? Date.now
