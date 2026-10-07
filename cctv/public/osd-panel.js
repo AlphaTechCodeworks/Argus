@@ -15,7 +15,7 @@
 // thing entirely, left alone. The canvas lies exactly over the picture (colour-check-ui.js's tested
 // maths); the placement maths and rules are osd-geom.js (node-tested). The DOM is only touched here.
 import { clientToPicture, objectPosition, overlayBox, pictureRect, pictureToOverlay } from './colour-check-ui.js'
-import { CORNERS, OSD_MAX, changeCount, changeSummary, changedFields, draftOf, nameError, nearestCorner, overlayHasPosition, overlayMoved, saveLabel, toFrac, toUnits } from './osd-geom.js'
+import { CORNERS, OSD_MAX, changeCount, changeSummary, changedFields, draftOf, fieldsNotHeld, nameError, nearestCorner, overlayHasPosition, overlayMoved, saveLabel, toFrac, toUnits } from './osd-geom.js'
 
 const MOVE_PX = 4 // a press that moved less than this is a tap (place the overlay there)
 const REACH_PX = 10 // extra slack around a box when deciding which one a press grabs
@@ -621,8 +621,15 @@ export class OsdPanel {
       return
     }
     const result = r.data ?? {}
-    if (undoWant && Object.keys(undoWant).length && result.applied) this.undo = { want: undoWant, at: Date.now(), by: 'you' }
-    else if (verb === 'Undoing') this.undo = null
+    // A save can be kept in part: Undo puts back the fields the camera reports as changed, and an
+    // older save's values stay on offer only when this one changed nothing.
+    const back = fieldsNotHeld(undoWant, result.after)
+    if (Object.keys(back).length) this.undo = { want: back, at: Date.now(), by: 'you' }
+    else if (verb === 'Undoing') {
+      // gone once it is all back; an undo the camera kept only part of leaves the rest to try again
+      const left = fieldsNotHeld(this.undo?.want, result.after)
+      this.undo = result.applied || !Object.keys(left).length ? null : { ...this.undo, want: left }
+    }
     if (result.after) this.show(result.after)
     this.showResult(result)
     this.status('')

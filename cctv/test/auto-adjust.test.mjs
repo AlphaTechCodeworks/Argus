@@ -159,6 +159,8 @@ const lclS = camera('auto-adjust', 'nvr1', 'image-00000007')
   const r = mergePending(new Map([['bright', 60], ['sharpen.value', 100]]), new Map([['bright', 'manual'], ['sharpen.value', 'auto']]), items)
   check('mergePending: ticked ones prefilled, optional ones not', r.pending.get('hue') === 50 && !r.pending.has('contrast'))
   check('  a value changed by hand is kept (and listed), the old prefilled one goes', r.pending.get('bright') === 60 && r.kept.join() === 'bright' && !r.pending.has('sharpen.value') && r.conflicts.length === 1 && r.origins.get('hue') === 'auto')
+  const col = mergePending(new Map([['hue', 44], ['saturation', 52], ['sharpen.value', 100]]), new Map([['hue', 'colour'], ['saturation', 'colour'], ['sharpen.value', 'auto']]), items)
+  check('  the colour check: its unsent values are kept (and listed), and win over a suggestion', col.pending.get('hue') === 44 && col.pending.get('saturation') === 52 && col.kept.join() === 'hue,saturation' && col.origins.get('hue') === 'colour' && col.conflicts.length === 1 && col.conflicts[0].path === 'hue' && !col.pending.has('sharpen.value') && col.origins.get('bright') === 'auto')
 }
 
 // ---- suggestions: real figures, real settings ------------------------------------------------------------

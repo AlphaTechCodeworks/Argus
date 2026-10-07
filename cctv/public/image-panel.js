@@ -113,14 +113,21 @@ export function seenOf(settings, paths) {
 }
 
 /**
+ * Whether any unsent change came from a measurement of the picture: Auto adjust ('auto') or the
+ * colour check ('colour'). The two are told apart only so that a new Auto adjust clears its own
+ * prefilled values and keeps the colour check's (mergePending); to the server both are 'auto'.
+ */
+export const measuredOrigin = (origins) => [...(origins?.values() ?? [])].some((o) => o === 'auto' || o === 'colour')
+
+/**
  * The Apply request: exactly the unsent changes, the values they were seen with, and
- * origin 'auto' when any came from Auto adjust (the server then refuses if the camera switched
- * profile since the measurement).
+ * origin 'auto' when any came from Auto adjust or the colour check (the server then refuses if
+ * the camera switched profile since the measurement).
  */
 export function applyBody(settings, pending, origins, extra = {}) {
   const changes = Object.fromEntries(pending)
   const body = { device: settings.nvr.device, profile: settings.profile ?? null, changes, seen: seenOf(settings, Object.keys(changes)), confirm: true, ...extra }
-  if ([...(origins?.values() ?? [])].includes('auto') && !('origin' in extra)) body.origin = 'auto'
+  if (measuredOrigin(origins) && !('origin' in extra)) body.origin = 'auto'
   return body
 }
 
@@ -320,7 +327,7 @@ export class ImagePanel {
     this.cam = null
     this.settings = null
     this.pending = new Map() // path -> value not sent yet
-    this.origins = new Map() // path -> 'manual' | 'defaults' | 'auto'
+    this.origins = new Map() // path -> 'manual' | 'defaults' | 'auto' | 'colour'
     this.rows = new Map() // path -> { row, input, field }
     this.busy = false
     this.sending = 0 // camera writes on their way (this opening of the panel)
@@ -810,7 +817,7 @@ export class ImagePanel {
       row.title = ok ? '' : `Only matters while ${this.byPath.get(field.needs.path)?.label ?? field.needs.path} is ${'eq' in field.needs ? valueText(this.byPath.get(field.needs.path), field.needs.eq) : `not ${field.needs.ne}`}`
     }
     const n = this.pending.size
-    const auto = [...this.origins.values()].includes('auto')
+    const auto = measuredOrigin(this.origins)
     const apply = this.$('.ip-apply')
     apply.disabled = this.busy || n === 0 || !s
     apply.textContent = applyLabel(n, auto ? this.measured?.at : null)
@@ -930,7 +937,7 @@ export class ImagePanel {
   async apply() {
     const s = this.settings
     if (!s || this.busy || this.pending.size === 0) return
-    const fromAuto = [...this.origins.values()].includes('auto')
+    const fromAuto = measuredOrigin(this.origins)
     const body = applyBody(s, this.pending, this.origins)
     const items = fromAuto ? (this.items ?? []).filter((it) => it.changes.every((c) => this.pending.has(c.path) && same(this.pending.get(c.path), c.to))) : []
     const lines = Object.entries(body.changes).map(([p, v]) => changeLine(this.byPath.get(p), this.byPath.get(p)?.value, v))
@@ -1112,8 +1119,10 @@ export class ImagePanel {
       fields: () => this.settings?.fields ?? [],
       camera: `${this.cam.ch + 1} ${this.cam.name}`,
       onSuggest: (list) => {
-        // [{ path, label, from, to, why }]: the ticked ones. Origin 'auto': the server refuses them
-        // if the camera has switched profile since, as for Auto adjust's
+        // [{ path, label, from, to, why }]: the ticked ones. Their own origin, so the next Auto
+        // adjust keeps them as unsent changes rather than clearing them with its own old values;
+        // sent as 'auto' all the same (applyBody), so the server refuses them if the camera has
+        // switched profile since, as for Auto adjust's
         const cur = this.settings
         if (!cur || this.busy) return this.status('The colour changes were not added: the panel is busy; run the check again.', { error: true })
         if (cur.profile && cur.active && cur.profile !== cur.active) return this.status(`The colour changes were not added: the panel shows ${profileName(cur.profile)}, not the profile in use.`, { error: true })
@@ -1121,7 +1130,7 @@ export class ImagePanel {
         for (const x of list) {
           const f = this.byPath?.get(x.path)
           if (!f) continue
-          this.setPending(f, x.to, 'auto')
+          this.setPending(f, x.to, 'colour')
           n++
         }
         this.update()

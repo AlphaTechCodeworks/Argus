@@ -336,9 +336,10 @@ export class Convergence {
 
 /**
  * New suggestions into the unsent changes. Ticked ones (tier 'tick') are prefilled; unsent
- * changes an admin made by hand (origin 'manual' or 'defaults') are kept and win over a
- * suggestion for the same setting; the previous measurement's own prefilled values go.
- * pending: Map path -> value; origins: Map path -> 'manual' | 'defaults' | 'auto'.
+ * changes an admin made by hand (origin 'manual' or 'defaults') or took from the colour check
+ * ('colour') are kept and win over a suggestion for the same setting; the previous measurement's
+ * own prefilled values go.
+ * pending: Map path -> value; origins: Map path -> 'manual' | 'defaults' | 'auto' | 'colour'.
  * @returns {{ pending: Map, origins: Map, kept: string[], conflicts: { path, manual, suggested }[] }}
  */
 export function mergePending(pending, origins, items) {

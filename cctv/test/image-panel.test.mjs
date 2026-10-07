@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   applyBody,
+  measuredOrigin,
   applyLabel,
   changeLine,
   defaultsList,
@@ -102,6 +103,8 @@ const settings = {
   check('  device, profile and confirm; no origin for hand-made changes', manual.device === '192.168.0.228:6036' && manual.profile === 'day' && manual.confirm === true && !('origin' in manual) && !('ack' in manual))
   const auto = applyBody(settings, pending, new Map([['sharpen.switch', 'auto'], ['sharpen.value', 'auto']]))
   check('  origin "auto" when any came from Auto adjust (the server then checks the profile in use)', auto.origin === 'auto')
+  const colour = applyBody(settings, pending, new Map([['sharpen.switch', 'colour'], ['sharpen.value', 'manual']]))
+  check('  and when any came from the colour check: its own origin in the panel, "auto" to the server', colour.origin === 'auto' && measuredOrigin(new Map([['hue', 'colour']])) && !measuredOrigin(new Map([['hue', 'manual'], ['bright', 'defaults']])) && !measuredOrigin(undefined))
   check('seenOf: missing setting -> null (the server refuses it)', seenOf(settings, ['nope']).nope === null)
   check('Apply label: count, and the measurement\'s age after 5 minutes', applyLabel(0) === 'Apply' && applyLabel(3, Date.now() - 60_000) === 'Apply 3 changes' && applyLabel(1, Date.now() - 7 * 60_000) === 'Apply 1 change (measured 7 min ago)')
   check('dirty: unsent values plus ticked Recording-quality suggestions', dirtyCount(pending, 1) === 4 && dirtyCount(new Map(), 0) === 0)

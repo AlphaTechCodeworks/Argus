@@ -96,6 +96,22 @@ export function changedFields(osd, draft) {
   return out
 }
 
+/**
+ * The fields of `want` ({ name?: {...}, time?: {...} }) that the camera, as read back, does not
+ * have. Asked of the values from before a Save it gives the fields that really changed (what an
+ * Undo has to put back); asked of an Undo's own values, the ones still to put back. A camera that
+ * could not be read back holds nothing as far as anyone knows, so every field is returned.
+ */
+export function fieldsNotHeld(want, after) {
+  const out = {}
+  for (const [block, fields] of Object.entries(want ?? {})) {
+    const o = {}
+    for (const [k, v] of Object.entries(fields)) if (after?.[block]?.[k] !== v) o[k] = v
+    if (Object.keys(o).length) out[block] = o
+  }
+  return out
+}
+
 /** How many fields a Save would change, across both overlays. */
 export function changeCount(osd, draft) {
   const ch = changedFields(osd, draft)
