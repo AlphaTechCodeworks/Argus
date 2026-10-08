@@ -493,7 +493,7 @@ const MIME = {
   '.webmanifest': 'application/manifest+json'
 }
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/show-password.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
 const SECURITY_HEADERS = securityHeaders()
 
 // CCTV_AUTH=off is for local development only: never publish such an instance beyond 127.0.0.1
@@ -603,7 +603,7 @@ const handleLogin = async (req, res) => {
   console.log(`login ok for "${user}" from ${ip}`)
   audit(auth.DATA_DIR, { user, action: 'login', ip })
   const cookie = auth.sessionCookie(auth.createSession(user), Boolean(req.socket.encrypted))
-  sendJson(res, 200, { user }, { 'set-cookie': cookie })
+  sendJson(res, 200, { user, mustChangePassword: auth.mustChangePassword(user) }, { 'set-cookie': cookie })
 }
 
 const handleRequest = async (req, res) => {
@@ -675,11 +675,30 @@ const handleRequest = async (req, res) => {
   }
   if (PUBLIC_PATHS.has(pathname)) return serveFile(res, pathname, req)
 
-  const user = currentUser(req)
+  // Pending-reset sessions may reach only the password-change flow. Video sockets
+  // continue using verifySession's default, which refuses these sessions entirely.
+  const user = AUTH_OFF ? 'dev' : auth.verifySession(auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME], { allowPasswordChange: true })
   if (!user) {
     if (pathname.startsWith('/api/')) return sendJson(res, 401, { error: 'Not logged in' })
     res.writeHead(302, { location: '/login.html', ...SECURITY_HEADERS }).end()
     return
+  }
+
+  if (pathname === '/change-password.html' || pathname === '/change-password.js') return serveFile(res, pathname, req)
+  if (pathname === '/api/me/password' && req.method === 'POST') {
+    if (req.headers.origin !== `https://${req.headers.host}` && req.headers.origin !== `http://${req.headers.host}`) return sendJson(res, 403, { error: 'Forbidden' })
+    if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) return sendJson(res, 403, { error: 'Forbidden' })
+    if (auth.loginBlocked(clientIp(req))) return sendJson(res, 429, { error: 'Too many attempts. Try again later.' })
+    const body = await readJsonObject(req, 8192)
+    const result = await auth.changePassword(user, body.currentPassword, body.newPassword)
+    if (!result.ok) { auth.recordFailure(clientIp(req)); return sendJson(res, 400, result) }
+    auth.clearFailures(clientIp(req))
+    audit(auth.DATA_DIR, { user, action: 'password-change', ip: clientIp(req), ok: true })
+    return sendJson(res, 200, { ok: true }, { 'set-cookie': auth.sessionCookie(auth.createSession(user), Boolean(req.socket.encrypted)) })
+  }
+  if (!AUTH_OFF && auth.mustChangePassword(user)) {
+    if (pathname.startsWith('/api/')) return sendJson(res, 403, { error: 'Choose a new password before continuing.', mustChangePassword: true })
+    return res.writeHead(302, { location: '/change-password.html', ...SECURITY_HEADERS }).end()
   }
 
   // Map tiles: signed in is enough. The browser asks this server for them, not OpenStreetMap/ArcGIS

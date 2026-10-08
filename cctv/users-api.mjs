@@ -50,7 +50,8 @@ export async function handleUsers(method, pathname, readJson, who) {
     if (existed && users[name].role === 'admin' && role !== 'admin' && admins(users).length <= 1) {
       throw new HttpError(409, `${name} is the only admin: add another admin first`)
     }
-    users[name] = { ...(users[name] ?? {}), role, ...(password !== null ? { hash: await hashPassword(password) } : {}), ...(existed ? {} : { since: Date.now() }) }
+    const hash = password !== null ? await hashPassword(password) : null
+    users[name] = { ...(users[name] ?? {}), role, ...(hash !== null ? { hash, ...(existed ? { mustChangePassword: true, since: Date.now() } : {}) } : {}), ...(existed ? {} : { since: Date.now() }) }
     saveUsers(users)
     if (!existed) forgetRights(name) // a row left behind by an earlier account of this name
     audit(DATA_DIR, { user: who.user, action: existed ? 'user-change' : 'user-add', target: name, detail: `${role}${password !== null ? ', password set' : ''}`, ok: true })

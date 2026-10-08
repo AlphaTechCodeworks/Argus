@@ -108,7 +108,7 @@ export const createSession = (user) => {
 }
 
 /** Returns the user name for a valid session token, otherwise null. */
-export const verifySession = (token) => {
+export const verifySession = (token, { allowPasswordChange = false } = {}) => {
   if (!token) return null
   const parts = token.split('.')
   if (parts.length !== 3) return null
@@ -129,7 +129,24 @@ export const verifySession = (token) => {
   // made before `since` existed has none and keeps its sessions as before.
   const since = users[user]?.since
   if (Number.isFinite(since) && Number(parts[1]) - SESSION_TTL_MS < since) return null
+  if (users[user]?.mustChangePassword && !allowPasswordChange) return null
   return user
+}
+
+export const mustChangePassword = (user) => loadUsers()[user]?.mustChangePassword === true
+
+/** Change only the signed-in account, preserving role, rights and personal settings. */
+export async function changePassword(user, currentPassword, newPassword) {
+  if (typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 1024) return { error: 'Use a password between 8 and 1024 characters.' }
+  const before = loadUsers()[user]
+  if (!before || !(await checkLogin(user, currentPassword))) return { error: 'The current password is incorrect.' }
+  if (await checkLogin(user, newPassword)) return { error: 'Choose a different password from the temporary password.' }
+  const hash = await hashPassword(newPassword)
+  const users = loadUsers()
+  if (!users[user] || users[user].hash !== before.hash) return { error: 'Your password was reset again. Sign in with the latest temporary password.' }
+  users[user] = { ...users[user], hash, mustChangePassword: false, since: Date.now() }
+  saveUsers(users)
+  return { ok: true }
 }
 
 // Signed-out sessions. A session is a signed cookie the server keeps no record of, so signing out
@@ -158,7 +175,7 @@ const revokedSessions = () => {
  * @returns {boolean} whether there was a session to sign out (junk never reaches the file)
  */
 export const revokeSession = (token) => {
-  if (verifySession(token) === null) return false
+  if (verifySession(token, { allowPasswordChange: true }) === null) return false
   const [, expiry, sig] = token.split('.')
   const list = revokedSessions()
   const now = Date.now()

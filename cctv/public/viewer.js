@@ -343,7 +343,10 @@ function fillSlot(slot, gridArea, startDelayMs = 0) {
   tile.addEventListener('click', () => openSingle(slot.cam, { fromTap: true }))
   // the phone list: a camera streams only while it is on screen (48 at once would swamp a phone)
   if (LAYOUTS[layoutSelect.value]?.list) return watchInView(slot, tile)
-  slot.live = new LiveTile(tile, cam, SUB_STREAM, startDelayMs, tileOptions(cam))
+  // Auto prioritises camera quality; LiveTile falls back to SD if HD is refused
+  // or the browser/server cannot play the main stream. Only visible tiles connect.
+  const stream = layoutSelect.value === 'auto' ? MAIN_STREAM : SUB_STREAM
+  slot.live = new LiveTile(tile, cam, stream, startDelayMs, tileOptions(cam))
   gridTiles.push(slot.live)
 }
 
