@@ -352,6 +352,17 @@ const sys = (o = {}) => ({
   check('... their budget full: amber (the next such PC is refused)', full.state === 'warn', JSON.stringify(full))
   const off = renderHealth(data({ viewing: viewing({ running: 0, cap: 0, step: 'veryfast', units: 0, budgetUnits: 0 }) })).viewingCards.encoding
   check('... turned off: not mentioned', off.note === before.note && off.state === 'ok', JSON.stringify(off))
+  // the main streams of such PCs' full-size views: their own budget, shown apart
+  const subs = { running: 3, cap: 24, step: 'veryfast', units: 48, budgetUnits: 200 }
+  const mainIdle = renderHealth(data({ viewing: viewing({ ...subs, main: { running: 0, cap: 2, step: 'veryfast', units: 0, budgetUnits: 160 } }) })).viewingCards.encoding
+  check('... main conversions, none running: counted in what is allowed, and named apart', mainIdle.value === '7 running' && mainIdle.note === 'of 44 allowed · 120 % of a core · 3 of 24 for PCs without H.265 (veryfast, 0.5 of 2.0 cores) · 0 of 2 full-size views for PCs without H.265' && mainIdle.state === 'ok', JSON.stringify(mainIdle))
+  const mainOne = renderHealth(data({ viewing: viewing({ ...subs, main: { running: 1, cap: 2, step: 'veryfast', units: 95, budgetUnits: 160 } }) })).viewingCards.encoding
+  check('... one running: how many of how many, its step and the cores it counts as', mainOne.value === '8 running' && mainOne.note.endsWith('· 1 of 2 full-size views for PCs without H.265 (veryfast, 0.9 of 1.6 cores)') && mainOne.state === 'ok', JSON.stringify(mainOne))
+  const mainFull = renderHealth(data({ viewing: viewing({ ...subs, main: { running: 2, cap: 2, step: 'superfast', units: 160, budgetUnits: 160 } }) })).viewingCards.encoding
+  check('... their budget full: amber (the next full-size view stays on its sub-stream)', mainFull.state === 'warn' && mainFull.note.endsWith('(superfast, 1.6 of 1.6 cores)'), JSON.stringify(mainFull))
+  const mainOff = renderHealth(data({ viewing: viewing(subs) })).viewingCards.encoding
+  const mainZero = renderHealth(data({ viewing: viewing({ ...subs, main: { running: 0, cap: 0, step: 'veryfast', units: 0, budgetUnits: 0 } }) })).viewingCards.encoding
+  check('... main conversion off (no main in the summary, or a cap of 0): the card as it was', mainOff.value === '7 running' && mainOff.note === 'of 42 allowed · 120 % of a core · 3 of 24 for PCs without H.265 (veryfast, 0.5 of 2.0 cores)' && mainZero.note === mainOff.note && mainZero.state === 'ok', JSON.stringify(mainOff))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')

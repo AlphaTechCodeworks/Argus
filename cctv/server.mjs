@@ -633,7 +633,8 @@ const handleRequest = async (req, res) => {
       shares: listLocations().filter((l) => l.type === 'network').map((l) => ({ path: l.path, ok: l.health.ok, reason: l.health.reason })),
       // H.265 sub-streams being converted to H.264 for local PCs that cannot play them
       // (h264-fallback.mjs): how many of how many, the encoder step they are on, and the CPU they
-      // are counted as against their budget, in units of 1 % of a core
+      // are counted as against their budget, in units of 1 % of a core; under `main` the same for
+      // the main streams of their full-size views, which have a budget of their own
       h264: h264Fallback.summary()
     }
     // CCTV_LIVE_WORKER=on: each NVR's live worker (its own SDK calls are counted there, not above)
@@ -1086,7 +1087,8 @@ const handleRequest = async (req, res) => {
           playback: { running: playbackTranscodes.active, cap: playbackTranscodes.max },
           remote: { running: remote.conversions, cap: remote.conversionCap },
           phones: { running: phoneLive.pool.active, cap: phoneLive.pool.max },
-          // for local PCs without H.265, on their own budget (h264-fallback.mjs): { running, cap, step, units, budgetUnits, ... }
+          // for local PCs without H.265, on their own budget (h264-fallback.mjs): { running, cap, step, units, budgetUnits, ...,
+          // main: the same for their full-size views' main streams, unless those are off }
           h264: h264Fallback.summary(),
           cpu: ffmpegCpuPercent()
         }
