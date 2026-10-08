@@ -61,6 +61,48 @@ export function needsResync(tileServerMs, clockMs, { tolMs = RESYNC_MS, speed = 
 }
 
 /**
+ * How far a tile's picture is AHEAD of the shared clock, in the direction the wall plays (ms of
+ * footage; negative: behind). A tile that is ahead is not put back: it waits for the clock
+ * (aheadWait), which costs nothing, where a seek costs the seconds a stream takes to open.
+ */
+export function aheadBy(tileServerMs, clockMs, speed = 1) {
+  if (!Number.isFinite(tileServerMs) || !Number.isFinite(clockMs)) return 0
+  return (tileServerMs - clockMs) * (Number(speed) < 0 ? -1 : 1)
+}
+
+/**
+ * Whether a tile ahead of the clock should be held still until the clock reaches it. It starts
+ * waiting once it is further ahead than the drift tolerance, and goes on waiting until the clock
+ * has caught it up (`waiting`: it is waiting now), so it is not stopped and started on every tick.
+ */
+export function aheadWait(tileServerMs, clockMs, { tolMs = RESYNC_MS, speed = 1, waiting = false } = {}) {
+  const ahead = aheadBy(tileServerMs, clockMs, speed)
+  const rate = Number.isFinite(speed) ? Math.max(1, Math.abs(speed)) : 1
+  return waiting ? ahead > 0 : ahead > Math.max(0, tolMs) * rate
+}
+
+/** What a stream is taken to need from being asked for to its first picture, before one has been timed. */
+export const OPEN_LAG_MS = Object.freeze({ nvr: 2000, server: 600 })
+/** The furthest ahead of the clock a stream is ever asked for (ms of footage). */
+export const MAX_LEAD_MS = 60_000
+
+/**
+ * How far ahead of the shared clock to ask for a tile's stream while the wall plays (ms of footage,
+ * signed like the speed). A stream shows its first picture `lagMs` after it is asked for, and by
+ * then the clock has moved on by that long times the speed: asked for at the clock's own moment, a
+ * tile at 4x came up 4 to 12 s behind, over the tolerance, and was seeked again, for ever
+ * (measured 2026-10-07: every stream closed 3 to 8 s after it opened). Asked for where the clock
+ * WILL be, it comes up on time; a little early does no harm (aheadWait).
+ * lagMs: this tile's own last timings (null before the first: OPEN_LAG_MS for its source).
+ */
+export function openLead(lagMs, speed = 1, source = 'nvr') {
+  const lag = Number.isFinite(lagMs) && lagMs > 0 ? lagMs : (OPEN_LAG_MS[source] ?? OPEN_LAG_MS.nvr)
+  const s = Number.isFinite(speed) && speed !== 0 ? speed : 1
+  const lead = Math.min(MAX_LEAD_MS, lag * Math.abs(s))
+  return s < 0 ? -lead : lead
+}
+
+/**
  * The clock every tile follows. It is the wall's only source of "now": tiles never advance time of
  * their own accord, they are told where to be. Held apart from the DOM so that the arithmetic that
  * keeps eight cameras together can be tested without a browser.

@@ -845,6 +845,12 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
       this.resuming++
       try {
         await this.#control(PLAYCTRL.RESUME)
+        // RESUME plays at normal speed whatever the session was doing before the pause: a session at
+        // 4x that had been paused (by the viewer, or by this end because the link or the buffer was
+        // full) came back at 1x, and the pacer, which releases at 4x, simply ran dry. Measured on the
+        // camera wall on 2026-10-07: tiles paused and then played at 4x received about 1x. The speed
+        // is asked for again (and one changed while it was paused is asked for here, for the first time).
+        if (this.speed !== 1) await this.#control(PLAYCTRL.FF, SPEED_CODE[this.speed] ?? 0)
       } finally {
         this.resuming--
       }
@@ -885,7 +891,9 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
           this.hold = null
         }
         this.speed = speed
-        await this.#control(speed === 1 ? PLAYCTRL.NORMAL : PLAYCTRL.FF, SPEED_CODE[speed] ?? 0)
+        // (while the NVR is paused nothing is sent: a speed command there can set it playing behind a
+        // session that believes it paused; #updateNvr asks for the speed when it resumes)
+        if (this.nvrRunning) await this.#control(speed === 1 ? PLAYCTRL.NORMAL : PLAYCTRL.FF, SPEED_CODE[speed] ?? 0)
       }
       if ('pause' in cmd) {
         this.paused = Boolean(cmd.pause)

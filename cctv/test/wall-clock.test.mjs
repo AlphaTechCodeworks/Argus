@@ -20,6 +20,11 @@ import {
   laneRows,
   loadWarning,
   needsResync,
+  MAX_LEAD_MS,
+  OPEN_LAG_MS,
+  aheadBy,
+  aheadWait,
+  openLead,
   normaliseChoice,
   serverTime,
   tileState,
@@ -66,6 +71,27 @@ check('the tolerance can be widened', needsResync(T + 3000, T, { tolMs: 5000 }) 
 check('the default tolerance is under two seconds', RESYNC_MS <= 2000)
 // the tolerance is footage: at 4x and 8x the same real-time lag is 4 and 8 times as much of it
 check('at 1x the tolerance is the plain one', needsResync(T + RESYNC_MS + 1, T, { speed: 1 }) === true && needsResync(T + RESYNC_MS, T, { speed: 1 }) === false)
+// a stream is asked for where the clock will be, and a tile that comes up early waits for the clock
+check('lead: an NVR stream not yet timed, at 1x and at 4x', openLead(null, 1, 'nvr') === OPEN_LAG_MS.nvr && openLead(null, 4, 'nvr') === 4 * OPEN_LAG_MS.nvr)
+check('lead: the tile\'s own timing is used once there is one', openLead(1500, 4, 'nvr') === 6000 && openLead(500, 2, 'server') === 1000)
+check('lead: the server\'s own recordings open sooner', openLead(null, 4, 'server') === 4 * OPEN_LAG_MS.server)
+check('lead: backwards when the wall plays backwards', openLead(1000, -4, 'server') === -4000)
+check('lead: never further than MAX_LEAD_MS, and a silly speed is 1x', openLead(120_000, 8, 'nvr') === MAX_LEAD_MS && openLead(1000, 0, 'nvr') === 1000 && openLead(1000, NaN, 'nvr') === 1000)
+check('ahead: by how much, in the direction played', aheadBy(T + 3000, T, 4) === 3000 && aheadBy(T - 3000, T, 4) === -3000 && aheadBy(T - 3000, T, -4) === 3000 && aheadBy(null, T, 1) === 0)
+check('wait: a tile a little ahead plays on', aheadWait(T + 1000, T, { speed: 1 }) === false && aheadWait(T + 5000, T, { speed: 4 }) === false)
+check('wait: one further ahead than the tolerance is held', aheadWait(T + 2000, T, { speed: 1 }) === true && aheadWait(T + 7000, T, { speed: 4 }) === true)
+check('wait: held until the clock has caught it up, not only until it is back inside the tolerance', aheadWait(T + 1000, T, { speed: 1, waiting: true }) === true && aheadWait(T, T, { speed: 1, waiting: true }) === false && aheadWait(T - 10, T, { speed: 1, waiting: true }) === false)
+check('wait: a tile behind never waits', aheadWait(T - 9000, T, { speed: 4 }) === false && aheadWait(T - 9000, T, { speed: 4, waiting: true }) === false)
+// the 4x loop measured on production: a stream took 2.6 s to its first picture, asked for at the clock
+{
+  const lagMs = 2600
+  const behindWithout = lagMs * 4 // the clock moved on this far while it opened
+  check('(asked for at the clock, a 4x tile came up over the tolerance behind)', needsResync(T - behindWithout, T, { speed: 4 }) === true)
+  const first = T + openLead(lagMs, 4, 'nvr') - lagMs * 4 // asked ahead by the lead; the clock moved on meanwhile
+  check('asked for with the lead, it comes up on the clock', needsResync(first, T, { speed: 4 }) === false && aheadWait(first, T, { speed: 4 }) === false)
+  const early = T + openLead(lagMs, 4, 'nvr') - 800 * 4 // this time it opened in 0.8 s
+  check('and one that opened sooner than expected waits rather than being seeked', aheadWait(early, T, { speed: 4 }) === true)
+}
 check('three seconds of footage out at 4x is left alone', needsResync(T - 3000, T, { speed: 4 }) === false)
 check('... and past four times the tolerance it is put back', needsResync(T - (4 * RESYNC_MS + 1), T, { speed: 4 }) === true)
 check('eight seconds out at 8x is left alone, thirteen is not', needsResync(T + 8000, T, { speed: 8 }) === false && needsResync(T + 13_000, T, { speed: 8 }) === true)
