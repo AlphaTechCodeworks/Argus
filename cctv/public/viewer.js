@@ -689,10 +689,12 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   singleTiles.push(sub)
   startAhead(cam)
   // full screen at full quality (the main stream) with Live HD on the camera (/api/cameras hd; the
-  // server refuses it anyway). A P2P/VPN camera's main stream rides its relay, so it is pulled for a
-  // viewer on the local network but not for one coming in over the internet (the tunnel is the narrow
-  // part); a browser that could not play this main stream stays on the sub stream too.
-  if (cam.hd !== false && !noMain.has(single) && !(cam.remote && REMOTE_PAGE)) {
+  // server refuses it anyway); a browser that could not play this main stream stays on the sub
+  // stream. A P2P/VPN camera's main stream is asked for too, also by a viewer coming in over the
+  // internet (since 2026-10-08, at the owner's wish: it used not to be, because that stream rides the
+  // camera's relay and then the tunnel, and can take a long while to come). The sub-stream stays on
+  // screen until the main one has a picture, so asking costs the viewer nothing but the wait.
+  if (cam.hd !== false && !noMain.has(single)) {
     // the sub-stream shows at once; the HD is asked for almost immediately on a direct open, but only
     // once the view settles while stepping (UPGRADE_DELAY_MS), so stepping does not churn main streams.
     const o = overlay
