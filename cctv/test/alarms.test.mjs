@@ -24,7 +24,7 @@ const {
   forgetEventsBefore, getEvent, lastEventMs, listEvents, listRules, unackedEvents,
   unacknowledge, updateRule
 } = await import('../events-db.mjs')
-const { CLIP_PRE_S, CLIP_POST_S, clipOf, handleAlarms, makeAlarmNotifier, nameCameras } = await import('../alarms.mjs')
+const { CLIP_PRE_S, CLIP_POST_S, NOTIFY_MAX_AGE_MS, clipOf, handleAlarms, makeAlarmNotifier, nameCameras } = await import('../alarms.mjs')
 const { alarmRows, filterSummary, ruleSummary, timeAgo } = await import('../public/alarms-view.js')
 
 let failures = 0
@@ -340,6 +340,46 @@ const json = (o) => async () => o
   await notifier.handle(tamper(5))
   await new Promise((r) => setImmediate(r))
   check('... and the shorter gap decides when the next one goes', sent.length === 5 && /rule: tell me$/.test(sent[4]?.detail ?? ''), `${sent.length} ${sent[4]?.detail}`)
+}
+{
+  // An event read back long after it happened (the intake catching up after an outage or a restart,
+  // events.mjs CATCH_UP_MS) is graded and kept, but nobody is told: NOTIFY_MAX_AGE_MS.
+  const sent = []
+  const sender = { deliver: async (alerts) => sent.push(alerts[0]) }
+  const rules = [{ id: 21, name: 'door', enabled: true, cameras: [], types: ['sensor', 'line-crossing'], schedule: [], priority: 'high', notify: true, minGapS: 600 }]
+  const now = T0 + 190 * MIN
+  const notifier = makeAlarmNotifier({ sender, rules: () => rules, now: () => now, log: () => {} })
+  const filed = (startMs, extra = {}) => addEvent({ nvr: 'nvr1', ch: 7, type: 'sensor', startMs, source: 'recordings', ...extra }, now).event
+  const settle = () => new Promise((r) => setImmediate(r))
+  check('the age limit is hours, not minutes and not days', NOTIFY_MAX_AGE_MS >= 3_600_000 + 15 * MIN && NOTIFY_MAX_AGE_MS <= 6 * 3_600_000, `${NOTIFY_MAX_AGE_MS}`)
+
+  const old = filed(now - 3 * 24 * 60 * MIN)
+  const oldRow = await notifier.handle(old)
+  await settle()
+  check('an event three days old is graded by its rule', oldRow.priority === 'high' && oldRow.ruleName === 'door' && getEvent(old.id).priority === 'high' && getEvent(old.id).ruleName === 'door', JSON.stringify(getEvent(old.id)))
+  check('... but is not sent', sent.length === 0, JSON.stringify(sent))
+  check('... and is not marked as notified', !oldRow.notifiedMs && !getEvent(old.id).notifiedMs, JSON.stringify(getEvent(old.id)))
+  const justOver = filed(now - NOTIFY_MAX_AGE_MS - S)
+  await notifier.handle(justOver)
+  await settle()
+  check('one second past the limit is still not sent', sent.length === 0 && !getEvent(justOver.id).notifiedMs)
+
+  // the old ones did not start the rule's quiet gap (10 min here): the late one below still goes
+  const late = filed(now - NOTIFY_MAX_AGE_MS + MIN)
+  const lateRow = await notifier.handle(late)
+  await settle()
+  check('an event inside the limit (filed late, after a back-off) is sent as before', sent.length === 1 && lateRow.notifiedMs === now && getEvent(late.id).notifiedMs === now, `${sent.length} ${JSON.stringify(getEvent(late.id))}`)
+
+  // a live event: the alarm watcher's crossing (seconds old), and one whose NVR clock runs ahead
+  const live = makeAlarmNotifier({ sender, rules: () => rules, now: () => now, log: () => {} })
+  const crossing = addEvent({ nvr: 'nvr1', ch: 8, type: 'line-crossing', subtype: 'tripwire', startMs: now - 4 * S, source: 'alarm-status' }, now).event
+  const crossed = await live.handle(crossing)
+  await settle()
+  check('a live watcher crossing is sent and marked, as before', sent.length === 2 && crossed.notifiedMs === now && crossed.priority === 'high', `${sent.length} ${JSON.stringify(crossed)}`)
+  const ahead = addEvent({ nvr: 'nvr1', ch: 9, type: 'line-crossing', subtype: 'tripwire', startMs: now + 90 * S, source: 'alarm-status' }, now).event
+  await live.handle(ahead)
+  await settle()
+  check('an event stamped ahead of this server (the NVR clock runs fast) is sent', sent.length === 3, `${sent.length}`)
 }
 
 // --- the routes --------------------------------------------------------------------------------------

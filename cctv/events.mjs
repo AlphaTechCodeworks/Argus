@@ -300,6 +300,12 @@ export const CAMERA_REST_MS = 3000
 export const BACKOFF_MS = [60_000, 2 * 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000]
 /** How far back a first-ever poll of a camera looks. Not a month: that would be a very long search. */
 export const FIRST_LOOK_MS = 6 * 3_600_000
+/**
+ * How far back a camera is caught up after an outage, two days a pass. A camera with no event for
+ * a month has a cursor a month old as well, and is walked forward from here after every restart
+ * (where it had got to is kept in memory only), so this is a week and not the NVR's whole disk.
+ */
+export const CATCH_UP_MS = 7 * 86_400_000
 
 /** The delay after `fails` consecutive failures. */
 export const backoffFor = (fails) => BACKOFF_MS[Math.min(Math.max(0, fails - 1), BACKOFF_MS.length - 1)]
@@ -345,17 +351,17 @@ export function pollable(nvr, nowMs, { nextAt = 0, fails = 0, sdkBusy = false } 
 /**
  * The NVR-local days a stretch of time covers, as YYYY-MM-DD, because the recorded-file search is
  * asked per local day. Capped, so a camera nobody polled for a month does not ask for 30 searches
- * in one pass — it catches up a few days at a time instead.
+ * in one pass — it catches up a few days at a time instead, oldest first.
  */
 export function daysToAsk(fromMs, toMs, tzOffsetMs = 0, maxDays = 2) {
   const DAY = 86_400_000
   const out = []
   const last = Math.floor((toMs + tzOffsetMs) / DAY) * DAY
-  const first = Math.max(Math.floor((fromMs + tzOffsetMs) / DAY) * DAY, last - (maxDays - 1) * DAY)
-  // The newest days are the ones that matter; an older one waits for the next pass, which is how a
-  // camera nobody polled for a month catches up a couple of days at a time instead of asking for
-  // thirty searches in one go.
-  for (let d = first; d <= last; d += DAY) out.push(new Date(d).toISOString().slice(0, 10))
+  const first = Math.min(Math.floor((fromMs + tzOffsetMs) / DAY) * DAY, last)
+  // The oldest days first, and a newer one waits for the next pass: the caller goes on from where
+  // this pass stopped. Taking the newest days instead moved the camera's cursor to today, and the
+  // older days of an outage were then never read at all.
+  for (let d = first; d <= last && out.length < maxDays; d += DAY) out.push(new Date(d).toISOString().slice(0, 10))
   return out
 }
 
@@ -384,6 +390,13 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
   /** nvr id -> { nextAt, fails, queue: [ch], cams: Map(ch -> { fails, nextAt }), lastWhy } */
   const state = new Map()
   let offline = new Map() // camera key -> online, for the offline/online comparison
+  // camera key -> the start of the next day to ask while it catches up. The cursor alone cannot say:
+  // it only moves when an event is filed, and a day with none would be asked again for ever.
+  // Memory only, so a restart walks a quiet camera's week again, and today is the last day it reaches.
+  // Asking today first would be quicker, but today's events put the cursor at today, and a restart
+  // before the walk was done would then skip the older days for good. What is filed on the way is
+  // graded but not sent once it is old (alarms.mjs NOTIFY_MAX_AGE_MS).
+  const readTo = new Map()
   // A pass still waiting (its clock read or search queued behind a slow call) when the next 5 s
   // tick comes: that tick does nothing. Without this each tick asked another NVR's clock, and
   // every one of those queued behind the same stuck call.
@@ -406,9 +419,12 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
     const tzOffsetMs = clock ? (await clock(nvr).catch(() => ({ tzOffsetMs: 0 }))).tzOffsetMs ?? 0 : 0
     // its own rows only (events-db intakeCursorMs): a watcher crossing filed seconds after it started
     // must not move the intake past the recordings it has not read yet
-    const since = store.intakeCursorMs(nvr.id, ch) ?? nowMs - FIRST_LOOK_MS
+    const cursor = store.intakeCursorMs(nvr.id, ch) ?? nowMs - FIRST_LOOK_MS
+    const key = `${nvr.id}/${ch}`
+    const since = Math.max(cursor, readTo.get(key) ?? 0, nowMs - CATCH_UP_MS)
+    const days = daysToAsk(since, nowMs, tzOffsetMs)
     let stored = 0
-    for (const date of daysToAsk(since, nowMs, tzOffsetMs)) {
+    for (const date of days) {
       const recs = await recordings(nvr, ch, date)
       for (const e of eventsFromRecordings(nvr.id, ch, recs)) {
         // Everything already held is skipped by the unique key, so a re-read costs one insert that
@@ -420,6 +436,12 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
         }
       }
     }
+    // Every day asked has answered: the next pass goes on from the day after, but never from later
+    // than yesterday, so yesterday and today are still both asked once it has caught up (as they
+    // always were: yesterday's last minutes are only in yesterday's answer).
+    const DAY = 86_400_000
+    const today = Math.floor((nowMs + tzOffsetMs) / DAY) * DAY
+    readTo.set(key, Math.min(Date.parse(`${days.at(-1)}T00:00:00Z`) + DAY, today - DAY) - tzOffsetMs)
     return { stored, why: '' }
   }
 

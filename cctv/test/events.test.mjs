@@ -237,7 +237,8 @@ const S = 1000
   check('one NVR is never asked more than once a minute', MIN_POLL_MS >= 60_000)
   const days = daysToAsk(T0 - 3 * 86_400_000, T0, 0)
   check('a long catch-up is capped at two days a pass', days.length === 2, days.join())
-  check('and it catches up from the newest end', days.at(-1) === '2026-09-25', days.join())
+  check('and it catches up from the oldest end (the next pass goes on from there)', days.join() === '2026-09-22,2026-09-23', days.join())
+  check('the last two days are both asked', daysToAsk(T0 - 86_400_000, T0, 0).join() === '2026-09-24,2026-09-25')
   check('one day in the window is one day asked', daysToAsk(T0 - MIN, T0, 0).length === 1)
 }
 
@@ -664,6 +665,67 @@ const S = 1000
     typeof db.intakeCursorMs === 'function' && db.intakeCursorMs('cur1', 3) === midnight - 12 * MIN && db.intakeCursorMs('cur1', 9) === null)
   check('... while lastEventMs still means the camera’s newest row of any source', db.lastEventMs('cur1', 3) === midnight + MIN)
   db.closeEvents()
+}
+
+// After an outage the intake catches up from its cursor, oldest days first, two a pass. It asked the
+// newest two days only: their events moved the cursor to today and the days before were never read.
+{
+  const DAY = 86_400_000
+  const TZ = -4 * 3_600_000
+  const dayOf = (ms) => new Date(ms + TZ).toISOString().slice(0, 10)
+  let now = Date.UTC(2026, 9, 7, 16, 0, 0) // 12:00 on 2026-10-07 at the site
+  const run = async ({ cursor, events }) => {
+    const asked = []
+    let newest = cursor
+    const intake = makeEventIntake({
+      listNvrs: () => [{ id: 'out1', name: 'Outage', online: true }],
+      camerasOf: () => [{ ch: 0 }],
+      clock: async () => ({ tzOffsetMs: TZ }),
+      recordings: async (_nvr, _ch, date) => {
+        asked.push(date)
+        return { events: events ? [[Date.parse(`${date}T12:00:00Z`) - TZ, Date.parse(`${date}T12:00:10Z`) - TZ, 0x4]] : [] }
+      },
+      now: () => now,
+      log: () => {},
+      store: {
+        addEvent: (e) => {
+          const isNew = newest === null || e.startMs > newest
+          if (isNew) newest = e.startMs
+          return { event: { id: 1, ...e }, isNew }
+        },
+        intakeCursorMs: () => newest
+      }
+    })
+    const rounds = []
+    for (let i = 0; i < 4; i++) {
+      const before = asked.length
+      await intake.tick()
+      rounds.push(asked.slice(before).join('+'))
+      now += MIN_POLL_MS + 1
+    }
+    return { asked, rounds }
+  }
+  const start = now
+  // five days down, a camera with events on every day
+  const busy = await run({ cursor: start - 5 * DAY, events: true })
+  check('catch-up: the oldest days first, two a pass, none skipped', busy.rounds.slice(0, 3).join(' | ') === '2026-10-02+2026-10-03 | 2026-10-04+2026-10-05 | 2026-10-06+2026-10-07', busy.rounds.join(' | '))
+  check('... and once caught up it asks from its newest event, as before', busy.rounds[3] === '2026-10-07', busy.rounds[3])
+  // the same outage on a camera that recorded no event: its cursor never moves, and it still gets to today
+  now = start
+  const quiet = await run({ cursor: start - 5 * DAY, events: false })
+  check('catch-up: days with no event are not asked again for ever', quiet.rounds.slice(0, 3).join(' | ') === '2026-10-02+2026-10-03 | 2026-10-04+2026-10-05 | 2026-10-06+2026-10-07' && quiet.rounds[3] === '2026-10-06+2026-10-07', quiet.rounds.join(' | '))
+  // a restart part-way (the marker is memory only): it goes on from the newest event filed, no day lost
+  now = start
+  const again = await run({ cursor: Date.parse('2026-10-03T12:00:00Z') - TZ, events: true })
+  check('catch-up: after a restart it goes on from the cursor, and still reaches today', again.rounds.slice(0, 3).join(' | ') === '2026-10-03+2026-10-04 | 2026-10-05+2026-10-06 | 2026-10-06+2026-10-07', again.rounds.join(' | '))
+  // a cursor a month old: a week is caught up, not the month
+  now = start
+  const stale = await run({ cursor: start - 30 * DAY, events: false })
+  check('catch-up: no further back than CATCH_UP_MS (a week)', events.CATCH_UP_MS === 7 * DAY && stale.asked[0] === dayOf(start - 7 * DAY) && stale.rounds[3].endsWith('2026-10-07'), stale.rounds.join(' | '))
+  // nothing to catch up: one day's cursor asks yesterday and today at once
+  now = start
+  const fresh = await run({ cursor: start - DAY, events: false })
+  check('catch-up: a cursor from yesterday asks yesterday and today in the first pass', fresh.rounds.every((r) => r === '2026-10-06+2026-10-07'), fresh.rounds.join(' | '))
 }
 
 // --- the events route: only cameras this user may see ----------------------------------------------------------
