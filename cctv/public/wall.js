@@ -31,7 +31,11 @@ import {
   gridLayout,
   laneRows as buildLaneRows,
   loadWarning,
+  MAX_LEAD_MS,
+  aheadBy,
+  aheadWait,
   needsResync,
+  openLead,
   normaliseChoice,
   serverTime,
   tileState,
@@ -193,6 +197,9 @@ class Tile {
     this.ws = null
     this.shownKind = null
     this.blankOpens = 0 // sockets opened in a row that produced no picture at all
+    this.openLagMs = null // how long this camera's stream takes from being asked for to its first picture (wall-clock.js openLead)
+    this.askedAt = null // when the stream now open was asked for, until its first picture
+    this.waitingForClock = false // ahead of the shared clock and held still until it arrives (sync)
     // How this camera has been treated by its NVR lately: the refusal count and the moment before
     // which it must not ask again (grid-view.js). Held per tile, so one full NVR does not stop the
     // cameras on a different one from opening.
@@ -237,6 +244,12 @@ class Tile {
         // already server time (skew 0 below), the NVR's playback is the NVR's clock.
         this.position = serverTime(ts, this.sourceSkew())
         this.blankOpens = 0 // pictures are arriving again
+        if (this.askedAt !== null) {
+          // the first picture of this stream: how long it took, for where the next one is asked for
+          const lag = performance.now() - this.askedAt
+          this.openLagMs = this.openLagMs === null ? lag : (this.openLagMs + lag) / 2
+          this.askedAt = null
+        }
         // The NVR found room after all, so the refusal count and its backoff are cleared: they only
         // ever mean anything in a row.
         if (this.stream.refusals) this.stream = afterVideo(this.stream)
@@ -341,6 +354,10 @@ class Tile {
     if (!this.ws || this.position === null) return false
     // a paused tile holds the first picture it was sent: asked again, it would be sent the same one
     if (!clock.playing) return false
+    // Ahead of the clock: it waits for it (sync), which is quicker than opening it again. Only one
+    // further ahead than a stream is ever asked for has lost the clock altogether.
+    const ahead = aheadBy(this.position, atMs, clock.speed)
+    if (ahead > 0) return ahead > 2 * MAX_LEAD_MS
     // (measured against the speed the wall's clock runs at: wall-clock.js needsResync)
     return needsResync(this.position, atMs, { speed: clock.speed }) && performance.now() - this.lastSeekAt > RESYNC_EVERY_MS
   }
@@ -376,8 +393,11 @@ class Tile {
     if (this.position === null && this.ws && (this.blankOpens >= 2 || since > NO_PICTURE_MS)) {
       this.show({ kind: 'waiting', text: 'No picture from this camera. Trying again.' })
     }
+    // A tile ahead of the clock (its stream was asked for where the clock would be, open below, and
+    // came up sooner) is held on its picture until the clock reaches it.
+    this.waitingForClock = playing && this.position !== null && aheadWait(this.position, atMs, { speed: clock.speed, waiting: this.waitingForClock })
     // (a tile with no picture yet runs on until its first one, which pauses it: see onFrame)
-    if (this.ws) this.setPaused(!playing && this.position !== null)
+    if (this.ws) this.setPaused((!playing && this.position !== null) || this.waitingForClock)
   }
 
   show(st) {
@@ -403,6 +423,11 @@ class Tile {
     // and the viewer would never learn why the picture stopped.
     if (!this.undecodable) this.error = null
     const server = this.mode() === 'server'
+    // While the wall plays, the stream is asked for where the clock will be when its first picture
+    // comes, not where it is now (wall-clock.js openLead). Paused, at the moment itself.
+    this.askedAt = performance.now()
+    this.waitingForClock = false
+    if (clock.playing) atMs += openLead(this.openLagMs, clock.speed, server ? 'server' : 'nvr')
     const target = server ? (recordedFrom(this.stretches, atMs) ?? atMs) : atMs
     const start = Math.round(server ? target : cameraTime(target, this.skew))
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -893,8 +918,9 @@ function setPlaying(on) {
   else clock.pause()
   playBtn.textContent = on ? '❚❚' : '▶'
   playBtn.setAttribute('aria-label', on ? 'Pause' : 'Play')
-  // (a tile still waiting for its first picture is paused by that picture: Tile onFrame)
-  for (const t of state.tiles) t.setPaused(!on && t.position !== null)
+  // (a tile still waiting for its first picture is paused by that picture: Tile onFrame; one held
+  // ahead of the clock stays held until the clock reaches it: Tile sync)
+  for (const t of state.tiles) t.setPaused((!on && t.position !== null) || (on && t.waitingForClock))
 }
 
 /** Every tile to one moment. The clock is the only thing that decides where that is. */
