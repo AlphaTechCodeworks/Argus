@@ -54,8 +54,9 @@ globalThis.VideoDecoder = class {
     if (env.setupMs) await sleep(env.setupMs)
     return { supported: !(config.colorSpace && env.refuseColour), config }
   }
-  constructor({ output }) {
+  constructor({ output, error }) {
     this.output = output
+    this.error = error
     this.state = 'unconfigured'
     this.decodeQueueSize = 0
     this.decoded = []
@@ -157,6 +158,28 @@ const chunk = (n, key, { codecId = 0, full = false } = {}) => ({
 })
 
 const A = await import('../public/player.js')
+
+{
+  const unavailable = globalThis.VideoDecoder
+  delete globalThis.VideoDecoder
+  let refused = null
+  const p = new A.VideoPlayer(canvas(), { onUnsupported: id => { refused = id } })
+  await p.push(chunk(0, true))
+  check('missing WebCodecs reports unsupported rather than silently leaving a black tile', refused === 0)
+  p.close()
+  globalThis.VideoDecoder = unavailable
+}
+
+{
+  let refused = null
+  const p = new A.VideoPlayer(canvas(), { onUnsupported: id => { refused = id } })
+  await p.push(chunk(0, true, { codecId: 1 }))
+  await tick()
+  const decoder = p.decoder
+  decoder.error(new Error('HEVC stream rejected after capability probe'))
+  check('HEVC runtime failure requests the caller fallback and closes the rejected decoder', refused === 1 && p.decoder === null && decoder.state === 'closed')
+  p.close()
+}
 
 // ---- set-up and holding --------------------------------------------------------------------
 {

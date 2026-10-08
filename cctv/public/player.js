@@ -99,6 +99,7 @@ function h264Codec(data) {
 const H265_CODECS = ['hev1.1.6.L153.B0', 'hvc1.1.6.L153.B0', 'hev1.1.6.L120.90', 'hvc1.1.6.L120.90', 'hev1.1.6.L93.B0', 'hvc1.1.6.L93.B0']
 
 async function pickDecoderConfig(codecId, data, size, info, rangeFix = RANGE_FIX) {
+  if (typeof VideoDecoder === 'undefined' || typeof VideoDecoder.isConfigSupported !== 'function') return null
   const codecs = codecId === CODEC_H265 ? H265_CODECS : [h264Codec(data)]
   // without a size the decoder assumes 1280x720, which some hardware decoders keep (see sps.js)
   const dims = size ? { codedWidth: size.width, codedHeight: size.height } : {}
@@ -412,6 +413,10 @@ export class VideoPlayer {
         console.warn('decoder error', err)
         this.#closeDecoder()
         this.needKey = true
+        // A positive capability probe does not guarantee that this camera's HEVC
+        // stream decodes. Let the caller request its H.264 fallback rather than
+        // repeatedly opening the same failing decoder with a black picture.
+        if (!this.closed && codecId === CODEC_H265) this.onUnsupported?.(codecId)
       }
     })
     this.decoder.configure(config)
