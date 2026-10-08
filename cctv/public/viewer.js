@@ -7,7 +7,7 @@ import { activeTrace, downloadTrace, startTrace, stopTrace } from './frame-trace
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
 import { MAX_VIEW_CAMERAS, applyViews, checkView, normaliseViews } from './grid-view.js'
 import { freshenForPageChange, muxState, useMux } from './live-mux.js'
-import { LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML } from './live-tile.js'
+import { H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML, mainNotConvertedTitle } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
@@ -61,6 +61,10 @@ if (REMOTE_PAGE) {
 // while. Not for the whole session any more: the server now converts H.265 for phones and remote
 // viewers, and a phone that once failed (before it did) was kept on the blurry sub-stream for good.
 // A phone is never put on this list at all -- what it is sent is always H.264 it can play.
+// Nor is a PC that cannot play H.265 kept off the main stream by it now that the server converts
+// that too (h264-fallback.mjs): its tile first asks again for H.264 (live-tile.js), and a camera
+// lands here only when H.265 came all the same, from a server that does not convert mains. The list
+// lives in this page's memory and nowhere else, so nothing recorded before a reload outlasts it.
 const NO_MAIN_MS = 2 * 60_000
 const noMainUntil = new Map()
 const noMain = { has: (key) => (noMainUntil.get(key) ?? 0) > Date.now() }
@@ -738,6 +742,18 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   updatePager()
 }
 
+/**
+ * The full-size view's note that it stays on the sub-stream for now: the server did not convert the
+ * main one for this browser (live-tile.js mainNotConvertedTitle). The SD badge's look, nothing over
+ * the picture; it goes when the main stream's picture comes.
+ */
+function hdBusyBadge(why) {
+  const b = sdBadge()
+  b.classList.add('hd-busy')
+  b.title = mainNotConvertedTitle(why)
+  return b
+}
+
 /** The full-size view's note that it stays on the sub-stream: no Live HD on this camera. */
 function sdBadge() {
   const b = document.createElement('span')
@@ -759,12 +775,15 @@ function upgradeToMain(tile, cam, sub, opts) {
     noStill: true, // the sub-stream below it already shows the still
     onFirstFrame: () => {
       layer.classList.remove('pending')
-      const links = tile.querySelector(':scope > .label .links')
+      for (const b of tile.querySelectorAll('.hd-busy')) b.remove()
+      // (the links are in the view's own label, or in the layer this one replaces: onMainNotConverted)
+      const links = tile.querySelector(':scope > .label .links') ?? sub.tile.querySelector('.links')
       if (links) layer.querySelector('.name').after(links)
       // the sub-stream's LIVE badge goes with it: it sits above the layer, and where the two do not
       // line up exactly (an iPhone turned sideways) the view showed LIVE twice
       tile.querySelector(':scope > .status')?.remove()
       sub.close()
+      if (sub.tile !== tile) sub.tile.remove() // an earlier layer that had gone over to the sub-stream
     },
     onUnsupported: () => {
       rememberNoMain(camKey(cam))
@@ -778,6 +797,29 @@ function upgradeToMain(tile, cam, sub, opts) {
       main.close()
       layer.remove()
       return true
+    },
+    // An H.265 main the server did not convert for this browser (no room among the few it converts
+    // at once, or it failed): the view stays on the sub-stream, quietly, with a small mark that says
+    // why, and the main stream is asked for again every H264_RETRY_MS while the view is open. Not
+    // shown yet: this layer goes and the sub-stream under it stays. Shown already (its conversion
+    // ended under it): the tile goes over to the sub-stream itself (live-tile.js), and the next try
+    // layers over that.
+    onMainNotConverted: (why) => {
+      const pending = layer.classList.contains('pending')
+      if (pending) {
+        main.close()
+        layer.remove()
+        singleTiles = singleTiles.filter((t) => t !== main)
+      }
+      const under = pending ? sub : main
+      for (const b of tile.querySelectorAll('.hd-busy')) b.remove()
+      under.tile.querySelector('.name')?.after(hdBusyBadge(why))
+      clearTimeout(upgradeTimer)
+      upgradeTimer = setTimeout(() => {
+        upgradeTimer = null
+        if (overlay === tile && !under.closed) upgradeToMain(tile, cam, under, opts)
+      }, H264_RETRY_MS)
+      return pending
     }
   })
   singleTiles.push(main)

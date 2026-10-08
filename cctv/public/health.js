@@ -418,8 +418,12 @@ export function renderHealth(d) {
   // H.265 converted to H.264 for PCs on the network that cannot play it: its own budget, counted in
   // the same card (h264-fallback.mjs); absent from an older server
   const h264 = vw?.conversions.h264 ?? null
-  const all = running + (h264?.running ?? 0)
-  const allCap = cap + (h264?.cap ?? 0)
+  const all = running + (h264?.running ?? 0) + (h264?.main?.running ?? 0)
+  const allCap = cap + (h264?.cap ?? 0) + (h264?.main?.cap ?? 0)
+  // ...and the main streams of their full-size views, which have a budget of their own (h264.main;
+  // absent when they are off, or from a server that does not convert them)
+  const h264Main = h264?.main?.cap ? h264.main : null
+  const h264MainNote = h264Main ? ` · ${h264Main.running} of ${h264Main.cap} full-size views for PCs without H.265${h264Main.running ? ` (${h264Main.step}, ${(h264Main.units / 100).toFixed(1)} of ${(h264Main.budgetUnits / 100).toFixed(1)} cores)` : ''}` : ''
   const h264Note = h264?.cap ? ` · ${h264.running} of ${h264.cap} for PCs without H.265${h264.running ? ` (${h264.step}, ${(h264.units / 100).toFixed(1)} of ${(h264.budgetUnits / 100).toFixed(1)} cores)` : ''}` : ''
   const viewingCards = !vw ? null : {
     people: {
@@ -445,9 +449,9 @@ export function renderHealth(d) {
     encoding: {
       label: 'Video conversions',
       value: `${all} running`,
-      state: (cap && running >= cap) || (h264?.cap && h264.running >= h264.cap) ? 'warn' : Number.isFinite(cpu) && cpu > 300 ? 'warn' : 'ok',
+      state: (cap && running >= cap) || (h264?.cap && h264.running >= h264.cap) || (h264Main && h264Main.running >= h264Main.cap) ? 'warn' : Number.isFinite(cpu) && cpu > 300 ? 'warn' : 'ok',
       pct: allCap ? (all / allCap) * 100 : null,
-      note: `of ${allCap} allowed${Number.isFinite(cpu) ? ` · ${cpu} % of a core` : ''}${h264Note}`
+      note: `of ${allCap} allowed${Number.isFinite(cpu) ? ` · ${cpu} % of a core` : ''}${h264Note}${h264MainNote}`
     }
   }
   return { overall, openAlerts, viewingCards, cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, criticalText, sendingProblem, admins, adminText, adminState }

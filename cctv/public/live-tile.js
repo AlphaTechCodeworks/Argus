@@ -11,7 +11,7 @@ import { activeTrace } from './frame-trace.js'
 // stream opened before then is simply not told, and gets the safe H.264.
 let deviceH265 = null
 if (typeof window !== 'undefined') canDecodeH265().then((v) => (deviceH265 = v)).catch(() => {})
-// A viewer on the local network whose browser cannot play H.265 is sent an H.265 sub-stream converted
+// A viewer on the local network whose browser cannot play H.265 is sent an H.265 stream converted
 // to H.264 by the server (h264-fallback.mjs), but only when the page says so itself (h265=0): not
 // saying is not "cannot". So the answer goes both ways, and three things make it "cannot":
 //  - the check above answered no;
@@ -20,8 +20,8 @@ if (typeof window !== 'undefined') canDecodeH265().then((v) => (deviceH265 = v))
 //    the page lives, so every later tile asks for H.264 the first time;
 //  - ?h265=0 on the page's address, for testing the conversion from a PC that plays H.265 perfectly
 //    well (https://…/?h265=0). Honoured as a downgrade only: ?h265=1 or anything else is ignored, so
-//    the address can never claim a decoder the browser lacks. (Main streams are not converted, so
-//    such a PC's full-size view still plays the camera's own H.265 main; an old PC's stays on its sub.)
+//    the address can never claim a decoder the browser lacks. (The full-size view's main stream is
+//    asked for the same way, and comes converted too while the server has room for it.)
 let learnedNoH265 = false
 /** Whether the page's address forces "this browser cannot play H.265" (?h265=0, nothing else). */
 export function h265Forced(search) {
@@ -70,6 +70,19 @@ export function h265Text(why) {
   return { status: 'H.265 — set sub-stream to H.264', text: `This camera sends H.265, which this browser cannot play. ${H265_ADVICE}` }
 }
 export const CONVERTED_TITLE = 'This camera sends H.265, which this browser cannot play, so the server is converting it to H.264 for this PC. That costs the server CPU for as long as it is watched; setting the camera’s sub-stream to H.264 on the NVR removes the need.'
+// The server's reason for refusing a main stream it has no room to convert (NO_ROOM_MAIN): the server
+// converts few of those at once, and the full-size view has the sub-stream to show instead
+export const H264_NO_ROOM_MAIN = 'h265: no room to convert main'
+// ...and on a converted main stream (the full-size view): what it is, and that it is not the camera's full size
+export const CONVERTED_MAIN_TITLE = 'This camera sends H.265, which this browser cannot play, so the server is converting its full-quality picture to H.264 for this PC, at up to 1920 pixels wide. That costs the server most of a processor core for as long as it is watched; the "HEVC Video Extensions" from the Microsoft Store let Chrome and Edge play the camera’s own picture instead.'
+/**
+ * The title of the full-size view's small mark while it stays on the sub-stream because the server
+ * did not convert the main one (viewer.js): no room among the few it converts at once, or it failed.
+ */
+export function mainNotConvertedTitle(why) {
+  const what = why === H264_FAILED ? 'the server could not convert its full-quality picture just now' : 'the server is already converting as many full-quality pictures as it is allowed'
+  return `This camera sends H.265, which this browser cannot play, and ${what}. This view shows the standard picture meanwhile and tries the full-quality one again by itself.`
+}
 import { drawOsd, osdIsOff, osdLayout } from './osd-overlay.js'
 
 const HEADER_SIZE = 16
@@ -193,6 +206,9 @@ export class LiveTile {
    *   browser can't play the stream
    *   onHdRefused: the main stream was refused for want of Live HD; return true when handled
    *   (viewer.js drops a layer not shown yet), else the tile goes over to the sub-stream itself
+   *   onMainNotConverted: the server did not convert this H.265 main stream for a browser that cannot
+   *   play it (why: H264_NO_ROOM_MAIN, H264_FAILED); return true when handled (viewer.js, the same
+   *   way), else the tile goes over to the sub-stream itself
    */
   constructor(tile, cam, streamType, startDelayMs = 0, opts = {}) {
     this.tile = tile
@@ -233,11 +249,12 @@ export class LiveTile {
       noRewindMs: opts.noRewindMs,
       maxFps: opts.maxFps,
       onUnsupported: (codecId) => {
-        // this browser cannot play H.265, whatever the check said: every tile from now on says so. A
-        // sub-stream asks again, for H.264 (the server converts it); only when H.265 comes all the
-        // same does the tile give up as it used to
+        // this browser cannot play H.265, whatever the check said: every tile from now on says so.
+        // The tile asks again, for H.264 (the server converts it, a main stream as well as a sub);
+        // only when H.265 comes all the same does it give up as it used to (a main: over to the
+        // sub-stream, or what its caller does)
         if (codecId === CODEC_H265) learnedNoH265 = true
-        if (codecId === CODEC_H265 && this.streamType === SUB_STREAM && this.#askH264()) return
+        if (codecId === CODEC_H265 && this.#askH264()) return
         return opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)
       },
       onFrame: () => {
@@ -445,6 +462,9 @@ export class LiveTile {
       // the main stream refused for want of Live HD (at once, or taken away while it played): not
       // asked for again from here, the sub-stream instead
       if (e?.code === 1008 && e.reason === HD_REFUSED && this.streamType === MAIN_STREAM) return this.#hdRefused()
+      // a main stream the server did not convert (no room among the few it converts, or it failed):
+      // nothing is said over the picture, the sub-stream is there to show instead
+      if (this.streamType === MAIN_STREAM && (e?.reason === H264_NO_ROOM_MAIN || e?.reason === H264_FAILED)) return this.#mainNotConverted(e.reason)
       // H.265 that this browser cannot play and the server cannot convert just now: said, not black
       if (e?.reason === H264_NO_ROOM || e?.reason === H264_FAILED) return this.#noConversion(e.reason)
       this.opts.onDisconnect?.()
@@ -495,6 +515,18 @@ export class LiveTile {
   }
 
   /**
+   * The server did not convert this H.265 main stream: the caller may handle it (viewer.js: the
+   * layer goes, the sub-stream under it stays, and it asks again later); otherwise this tile goes
+   * over to the sub-stream at once, which the server converts on a budget with far more room.
+   */
+  #mainNotConverted(why) {
+    if (this.opts.onMainNotConverted?.(why) === true) return
+    this.streamType = SUB_STREAM
+    this.attempts = 0
+    this.connect()
+  }
+
+  /**
    * The mark on a tile whose camera the server converts for this browser, beside its name as the SD
    * badge is (viewer.js): small, and its title says what it costs and how to be rid of it.
    */
@@ -508,15 +540,16 @@ export class LiveTile {
     const b = document.createElement('span')
     b.className = 'sd-badge conv-badge'
     b.textContent = 'CONV'
-    b.title = CONVERTED_TITLE
+    b.title = this.streamType === MAIN_STREAM ? CONVERTED_MAIN_TITLE : CONVERTED_TITLE
     this.tile.querySelector('.label')?.append(b)
     this.convBadge = b
   }
 
   /**
-   * An H.265 keyframe this browser cannot decode, on a sub-stream: connect again at once, this time
-   * saying so (learnedNoH265 is set by now), and the server sends its H.264 conversion instead. At
-   * most H264_ASKS times in a row: after that the server is not converting, and the tile says why.
+   * An H.265 keyframe this browser cannot decode: connect again at once, this time saying so
+   * (learnedNoH265 is set by now), and the server sends its H.264 conversion instead. At most
+   * H264_ASKS times in a row: after that the server is not converting (a main: turned off, an older
+   * server, or a viewer through the tunnel on a path of its own), and the tile says why or falls back.
    * @returns {boolean} false: not asked again (the caller shows the message)
    */
   #askH264() {

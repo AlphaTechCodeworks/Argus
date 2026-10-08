@@ -1,15 +1,18 @@
 // Tests H.265 sub-streams converted to H.264 for local PCs whose browsers cannot play them
 // (h264-fallback.mjs): the encoder ladder, the change of step at a keyframe, the shared conversion
-// and its budget. Fake converters and a fake ffmpeg process: nothing here needs ffmpeg or the SDK.
+// and its budget; and the same for the main streams of their full-size views, a kind of their own
+// with its own ladder, budget and scaling. Fake converters and a fake ffmpeg process: nothing here
+// needs ffmpeg or the SDK.
 //   node cctv/test/h264-fallback.test.mjs
 import { EventEmitter } from 'node:events'
 import {
-  BUF_SECONDS, DEFAULT_CORES, DEFAULT_MAX, ENCODER_THREADS, FAILED, FAILED_QUIET_MS, H264Fallback, HANDOVER_MS, KEY_SECONDS, LADDER, NO_ROOM,
-  STEP_UP_SPARE, SteppedTranscoder, budgetUnits, capacity, maxFallbacks, stepFor
+  BUF_SECONDS, DEFAULT_CORES, DEFAULT_MAIN_CORES, DEFAULT_MAIN_MAX, DEFAULT_MAX, ENCODER_THREADS, FAILED, FAILED_QUIET_MS, H264Fallback, HANDOVER_MS, KEY_SECONDS, KINDS, LADDER,
+  LINGER_MS, MAIN_ENCODER_THREADS, MAIN_LADDER, MAIN_LINGER_MS, MAIN_MAX_WIDTH, MAIN_STEP_UP_SPARE, NO_ROOM, NO_ROOM_MAIN,
+  STEP_UP_SPARE, SteppedTranscoder, budgetUnits, capacity, mainBudgetUnits, maxFallbacks, maxMainFallbacks, stepFor
 } from '../h264-fallback.mjs'
 import { PhoneLive, encodeFrame, parseFrame } from '../phone-live.mjs'
 import { StreamHub } from '../stream-hub.mjs'
-import { CODEC_H264, CODEC_H265, CRF, PRESET, PRESETS, TranscodePool, Transcoder, ffmpegArgs } from '../transcode.mjs'
+import { CODEC_H264, CODEC_H265, CRF, DECODE_THREADS, PRESET, PRESETS, TranscodePool, Transcoder, ffmpegArgs } from '../transcode.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -368,6 +371,213 @@ const feed = (stream, from, n, make = h265) => { for (let i = from; i < from + n
   const s = fb.summary()
   check('the summary for Health: running, cap, step, units of budget', s.running === 1 && s.cap === 1 && s.step === 'veryfast' && s.crf === 21 && s.units === 0 && s.budgetUnits === 16 && s.viewers === 1 && s.refused === 1, JSON.stringify(s))
   for (const x of [...fb.streams.values(), ...phoneLive.streams.values()]) x.close()
+}
+
+// ---- main streams: their own budget and ladder ----
+{
+  const M = { ladder: MAIN_LADDER, spare: MAIN_STEP_UP_SPARE }
+  check('main streams: 2 at once and 1.6 cores unless said otherwise', DEFAULT_MAIN_MAX === 2 && DEFAULT_MAIN_CORES === 1.6 && maxMainFallbacks({}) === 2 && mainBudgetUnits({}) === 160)
+  check('CCTV_H264_FALLBACK_MAIN_MAX: a whole number; 0 turns main conversion off', maxMainFallbacks({ CCTV_H264_FALLBACK_MAIN_MAX: '1' }) === 1 && maxMainFallbacks({ CCTV_H264_FALLBACK_MAIN_MAX: '0' }) === 0 && capacity({ units: 160, max: 0, ladder: MAIN_LADDER }) === 0)
+  check('... negative, fractional, silly or empty: the default', ['-1', '1.5', '9', '', 'two'].every((v) => maxMainFallbacks({ CCTV_H264_FALLBACK_MAIN_MAX: v }) === 2))
+  check('CCTV_H264_FALLBACK_MAIN_CORES: cores; 0 off; nonsense the default', mainBudgetUnits({ CCTV_H264_FALLBACK_MAIN_CORES: '2.5' }) === 250 && mainBudgetUnits({ CCTV_H264_FALLBACK_MAIN_CORES: '0' }) === 0 && ['-1', '99', '', 'x'].every((v) => mainBudgetUnits({ CCTV_H264_FALLBACK_MAIN_CORES: v }) === 160))
+  const subOff = { CCTV_H264_FALLBACK_CORES: '0', CCTV_H264_FALLBACK_MAX: '0' }
+  const mainOff = { CCTV_H264_FALLBACK_MAIN_CORES: '0', CCTV_H264_FALLBACK_MAIN_MAX: '0' }
+  check('each budget reads its own settings only', budgetUnits(mainOff) === 200 && maxFallbacks(mainOff) === 24 && mainBudgetUnits(subOff) === 160 && maxMainFallbacks(subOff) === 2)
+  check('the main ladder: veryfast, then superfast, cheaper; both presets ffmpeg may be given', MAIN_LADDER.map((l) => l.preset).join() === 'veryfast,superfast' && MAIN_LADDER[1].cost < MAIN_LADDER[0].cost && MAIN_LADDER.every((l) => PRESETS.includes(l.preset)))
+  check('... crf 21-22, what looks right at 1080p; the weaker preset has the higher ceiling', MAIN_LADDER.every((l) => l.crf >= 21 && l.crf <= 22) && MAIN_LADDER[1].maxKbps > MAIN_LADDER[0].maxKbps)
+  check('... each cost is no less than the most measured on the server (90 and 75 % of a core)', MAIN_LADDER[0].cost >= 90 && MAIN_LADDER[1].cost >= 75)
+  check('... a main costs several times a sub-stream at every step', MAIN_LADDER.at(-1).cost >= 4 * LADDER[0].cost)
+  check('the default budget: one running at veryfast, two at superfast, never a third', stepFor(1, { units: 160, ...M }) === 0 && stepFor(2, { units: 160, ...M }) === 1 && 2 * MAIN_LADDER[1].cost <= 160 && capacity({ units: 160, max: 2, ladder: MAIN_LADDER }) === 2 && capacity({ units: 160, max: 8, ladder: MAIN_LADDER }) === 2)
+  check('... a budget under one conversion at the last step: none', capacity({ units: 79, max: 2, ladder: MAIN_LADDER }) === 0 && capacity({ units: 80, max: 2, ladder: MAIN_LADDER }) === 1)
+  check('down at once, and back up as soon as it fits (no spare to wait for with two at most)', stepFor(2, { units: 160, current: 0, ...M }) === 1 && stepFor(1, { units: 160, current: 1, ...M }) === 0 && MAIN_STEP_UP_SPARE === 0)
+  check('... the sub-streams\' rule is their own still: with their spare it would have stayed', stepFor(1, { units: 160, current: 1, ladder: MAIN_LADDER }) === 1 && stepFor(13, { units: 200 }) === 1 && stepFor(10, { units: 200, current: 1 }) === 0)
+  let ok = true
+  for (let units = 0; units <= 600; units += 5) {
+    const cap = capacity({ units, max: 8, ladder: MAIN_LADDER })
+    let last = 0
+    for (let n = 0; n <= 10; n++) {
+      for (const cur of [null, 0, 1]) {
+        const s = stepFor(n, { units, current: cur, ...M })
+        if (n >= 1 && n <= cap && n * MAIN_LADDER[s].cost > units) ok = false
+      }
+      const s = stepFor(n, { units, ...M })
+      if (s < last) ok = false
+      last = s
+    }
+  }
+  check('whatever the budget: n mains at the step for n are never over it, and more never means a better preset', ok)
+  check('the kinds: a sub-stream as it was, a main scaled to 1920 wide on two decoder threads, each picture ended as it goes in', KINDS.sub.stream.type === 1 && KINDS.sub.stream.maxWidth === undefined && KINDS.sub.stream.lowDelay === undefined && KINDS.sub.stream.endEach === undefined && KINDS.sub.stream.slowFps === 1000
+    && KINDS.main.stream.type === 0 && KINDS.main.stream.maxWidth === 1920 && MAIN_MAX_WIDTH === 1920 && KINDS.main.stream.lowDelay === false && KINDS.main.stream.endEach === true && KINDS.main.stream.slowFps === 10)
+  check('... both keep every frame, convert only H.265, a keyframe every 2 s, and are reset when 2 s behind', [KINDS.sub, KINDS.main].every((K) => K.stream.fps === 0 && K.stream.h264Only === true && K.stream.keySeconds === KEY_SECONDS && K.stream.maxLagS === 2 && K.stream.bufSeconds === BUF_SECONDS))
+  check('... a main lingers 3 s after its last viewer, a sub-stream 10', MAIN_LINGER_MS === 3000 && KINDS.main.lingerMs === 3000 && KINDS.sub.lingerMs === LINGER_MS && LINGER_MS === 10_000)
+  check('... the reasons a viewer is refused with are told apart', KINDS.sub.noRoom === NO_ROOM && KINDS.main.noRoom === NO_ROOM_MAIN && NO_ROOM_MAIN !== NO_ROOM && NO_ROOM_MAIN !== FAILED && Buffer.byteLength(NO_ROOM_MAIN) <= 123)
+
+  // what ffmpeg is given at each step: scaled through the maxWidth that playback and phones use
+  for (const L of MAIN_LADDER) {
+    const a = ffmpegArgs({ encoder: 'libx264', inCodec: CODEC_H265, maxWidth: MAIN_MAX_WIDTH, crf: L.crf, maxKbps: L.maxKbps, bufSeconds: BUF_SECONDS, preset: L.preset, encThreads: MAIN_ENCODER_THREADS, gop: 40, lowDelay: false })
+    const s = a.join(' ')
+    check(`ffmpeg for a main at ${L.id}: its preset and crf, one encoder thread, zerolatency, no B-frames, a keyframe every 40 pictures`, s.includes(`-c:v libx264 -preset ${L.preset} -threads 1 -crf ${L.crf} -tune zerolatency -bf 0 -g 40 `) && !/lookahead|-bf [1-9]/.test(s), s)
+    check('... two decoder threads, not low_delay; every frame kept at its own time; the ceiling with its buffer', a.indexOf('-threads') < a.indexOf('-i') && a[a.indexOf('-threads') + 1] === String(DECODE_THREADS) && DECODE_THREADS === 2 && !s.includes('low_delay') && s.includes('-fps_mode passthrough') && !s.includes('select=') && s.includes(`-maxrate ${L.maxKbps}k -bufsize ${L.maxKbps * BUF_SECONDS}k`), s)
+    check('... scaled to at most 1920 wide and never up (min with the input\'s width), the height following the shape, in even numbers (-2)', a[a.indexOf('-vf') + 1] === 'scale=min(1920\\,iw):-2', a[a.indexOf('-vf') + 1])
+  }
+  // the scale expression, worked: what a camera of each size comes out as
+  const scaled = (w, h) => { const ow = Math.min(MAIN_MAX_WIDTH, w); return [ow, 2 * Math.round((h * ow) / w / 2)] }
+  check('(a 2560x1440 main comes out 1920x1080, a 3840x2160 one too, 2592x1944 as 1920x1440, 1280x720 as it is)', scaled(2560, 1440).join('x') === '1920x1080' && scaled(3840, 2160).join('x') === '1920x1080' && scaled(2592, 1944).join('x') === '1920x1440' && scaled(1280, 720).join('x') === '1280x720')
+
+  // a converter on the main ladder
+  const { made, make } = slowMaker()
+  let step = 0
+  const x = new SteppedTranscoder({ inCodec: CODEC_H265, maxWidth: 1920, gop: 40, crf: 25, maxKbps: 2500, lowDelay: false, onFrame() {} }, { step: () => step, make, ladder: MAIN_LADDER, encThreads: MAIN_ENCODER_THREADS })
+  check('a converter on the main ladder: veryfast crf 22 with its ceiling, the scaling and the decoder threads as asked', made[0].o.preset === 'veryfast' && made[0].o.crf === 22 && made[0].o.maxKbps === 8000 && made[0].o.encThreads === 1 && made[0].o.maxWidth === 1920 && made[0].o.lowDelay === false && made[0].o.gop === 40)
+  step = 1
+  x.push(0, true)
+  check('... the step moved before its first frame: made again at superfast', made.length === 2 && made[0].closed && made[1].o.preset === 'superfast' && made[1].o.crf === 22 && made[1].o.maxKbps === 10000)
+  step = 5
+  x.push(50, false); x.push(100, true)
+  check('... a step past its ladder\'s end is its last one (two steps, not the sub-streams\' three)', x.index === 1 && made.length === 2)
+  x.close()
+  check('... closed: killed', made[1].closed)
+}
+
+/** 20 fps of a camera's main stream, a keyframe every 40 frames, from frame `from` for `n` frames. */
+const feedMain = (stream, from, n) => { for (let i = from; i < from + n; i++) stream.onFrame(h265(i % 40 === 0, i * 50), i % 40 === 0) }
+{
+  // one main converted, shared, lingering and killed
+  procs.length = 0
+  const logs = []
+  const hub = mkHub()
+  const src = hub.getStream(4, 0)
+  const fb = new H264Fallback({ units: 200, max: 24, mainUnits: 160, mainMax: 2, makeTranscoder: realMaker, log: (l) => logs.push(l), stopDelayMs: 15, mainStopDelayMs: 15 })
+  check('main conversion on: its own two places beside the sub-streams\' 24', fb.mainEnabled && fb.enabled && fb.kinds.main.pool.max === 2 && fb.pool.max === 24 && fb.kinds.main.pool !== fb.pool)
+  const a = channel()
+  check('a viewer is attached to the conversion of its camera\'s main stream', fb.attach('n1/4/0', src, a, { camera: 'n1/5', kind: 'main' }) === true && fb.summary().main.running === 1)
+  check('... which takes nothing from the sub-streams\' budget', fb.summary().running === 0 && fb.pool.active === 0 && fb.summary().units === 0)
+  check('... and is one more viewer of the camera\'s own main stream, in the foreground', src.clients.size === 1 && src.fg === true && hub.getStream(4, 1).clients.size === 0)
+  feedMain(src, 0, 20)
+  const args = procs[0]?.args.join(' ') ?? ''
+  check('one ffmpeg for it, niced like every conversion', procs.length === 1 && procs[0].bin === 'ionice' && procs[0].args.slice(0, 5).join(' ') === '-c 3 nice -n 10')
+  check('... H.265 in on two decoder threads (no low_delay), scaled to at most 1920 wide, never up', args.includes('-threads 2 -probesize') && args.includes('-f hevc -i pipe:0') && !args.includes('low_delay') && args.includes('-vf scale=min(1920\\,iw):-2'), args)
+  check('... libx264 veryfast crf 22, one encoder thread, zerolatency, no B-frames, its ceiling', args.includes('-c:v libx264 -preset veryfast -threads 1 -crf 22 -tune zerolatency -bf 0') && args.includes('-maxrate 8000k -bufsize 16000k'), args)
+  check(`... a keyframe every ${KEY_SECONDS} s of the camera's own rate (20 fps: 40 pictures), every frame kept at its own time`, / -g 40 /.test(args) && !args.includes('select=') && args.includes('-fps_mode passthrough'), args)
+  check('... every frame goes in, each ended as it goes (the parser holds none back)', procs[0].written.length === 40 && procs[0].written.every((b, i) => (i % 2 ? b.length === 7 && b[4] === 0x46 : b.length === 8)))
+  check('... its log line says it is a main stream, with the camera', logs.some((l) => l === '[h264-fallback] n1/5: converting a main stream at 20.0 fps to H.264, every frame kept'), logs.join(' | '))
+  procs[0].stdout.emit('data', Buffer.concat([IDR, P, P]))
+  check('converted pictures reach the viewer as H.264, with the camera\'s own capture times', a.got.length === 2 && parseFrame(a.got[0]).codec === CODEC_H264 && parseFrame(a.got[0]).isKey && Math.abs(parseFrame(a.got[0]).ts - 0) < 0.01 && Math.abs(parseFrame(a.got[1]).ts - 50) < 0.01)
+  check('... and its tile is told it is converted, once', JSON.stringify(a.notes) === '[{"op":"convert","on":true}]')
+  const b = sock()
+  check('a second viewer of the same main shares it: no second ffmpeg, no second place, a picture at once', fb.attach('n1/4/0', src, b, { camera: 'n1/5', kind: 'main' }) === true && procs.length === 1 && fb.summary().main.running === 1 && fb.summary().main.viewers === 2 && b.got.length === 2 && parseFrame(b.got[0]).isKey)
+  check('... counted as one conversion at veryfast\'s cost, of the main budget', fb.summary().main.units === 95 && fb.summary().main.budgetUnits === 160 && fb.summary().main.step === 'veryfast' && fb.summary().main.crf === 22 && fb.summary().viewers === 0)
+  const raw = sock()
+  src.add(raw)
+  const before = raw.got.length
+  feedMain(src, 20, 5)
+  check('a viewer who plays H.265 on the same main gets the camera\'s own frames, byte for byte', raw.got.length === before + 5 && raw.got.at(-1).equals(h265(false, 24 * 50)))
+  src.remove(raw)
+  a.close()
+  check('one viewer gone: still running for the other', !killed(procs[0]) && fb.summary().main.running === 1)
+  b.close()
+  check('the last one gone: runs on for its linger', !killed(procs[0]) && fb.summary().main.running === 1 && fb.summary().main.viewers === 0)
+  const c = sock()
+  fb.attach('n1/4/0', src, c, { camera: 'n1/5', kind: 'main' })
+  await sleep(40)
+  check('a viewer back within the linger keeps it', !killed(procs[0]) && procs.length === 1)
+  c.close()
+  await sleep(40)
+  check('the linger over: ffmpeg killed, its place free, off the camera\'s main stream', killed(procs[0]) && procs[0].ended === true && fb.summary().main.running === 0 && fb.streams.size === 0 && src.clients.size === 0 && fb.xcodes.size === 0)
+  check('unless a test says otherwise a main lingers 3 s, a sub-stream 10', new H264Fallback({ log: () => {} }).kinds.main.lingerMs === MAIN_LINGER_MS && new H264Fallback({ log: () => {} }).kinds.sub.lingerMs === LINGER_MS)
+}
+{
+  // two budgets: a wall of converted tiles and the full-size views do not take from each other
+  procs.length = 0
+  const logs = []
+  const hub = mkHub()
+  const fb = new H264Fallback({ units: 32, max: 2, mainUnits: 160, mainMax: 2, makeTranscoder: realMaker, log: (l) => logs.push(l), stopDelayMs: 15, mainStopDelayMs: 15 })
+  const m = []
+  const openMain = (ch) => { const w = sock(); m[ch] = w; const r = fb.attach(`n1/${ch}/0`, hub.getStream(ch, 0), w, { camera: `n1/${ch + 1}`, kind: 'main' }); if (r === true) feedMain(hub.getStream(ch, 0), 0, 20); return r }
+  const subs = []
+  const openSub = (ch) => { const w = sock(); subs[ch] = w; const r = fb.attach(`n1/${ch}/1`, hub.getStream(ch, 1), w, { camera: `n1/${ch + 1}` }); if (r === true) feed(hub.getStream(ch, 1), 0, 20); return r }
+  check('one main and one sub-stream of the same camera: two conversions, each in its own budget', openMain(0) === true && openSub(0) === true && procs.length === 2 && fb.summary().main.running === 1 && fb.summary().running === 1 && fb.streams.size === 2)
+  check('... the sub-stream is converted as it always was: veryfast crf 21, low_delay, nothing scaled', procs[1].args.join(' ').includes('-preset veryfast -threads 1 -crf 21') && procs[1].args.includes('low_delay') && !procs[1].args.join(' ').includes('scale='))
+  check('a second main: it starts at superfast (2 x 80 fits 1.6 cores, 2 x 95 does not)', openMain(1) === true && procs.length === 3 && procs[2].args.includes('superfast') && procs[2].args.join(' ').includes('-crf 22') && procs[2].args.join(' ').includes('-maxrate 10000k') && fb.summary().main.step === 'superfast')
+  check('... said in the log as the main streams\' step, with the cores it comes to', logs.some((l) => /^\[h264-fallback\] 2 of 2 main-stream conversions running: superfast crf 22 \(was veryfast\), each from its camera's next keyframe; about 1\.60 of 1\.60 cores/.test(l)), logs.filter((l) => l.includes('conversions running')).join(' | '))
+  check('... the sub-streams\' step has not moved, nor their conversion', fb.summary().step === 'veryfast' && fb.step === 0 && !killed(procs[1]))
+  feedMain(hub.getStream(0, 0), 20, 21) // frames 20-40: a keyframe at 40
+  check('... the main already running moves to superfast at its camera\'s next keyframe', procs.length === 4 && procs[3].args.includes('superfast') && procs[3].args.join(' ').includes('scale=min(1920') && procs[3].written[0][4] === 0x26 && !killed(procs[0]))
+  await sleep(HANDOVER_MS + 60)
+  check('... and the old ffmpeg is killed after its hand-over', killed(procs[0]) && !killed(procs[3]) && fb.summary().main.units === 160)
+  const full = sock()
+  const said = logs.length
+  check('a third main is refused with the main streams\' own reason', fb.attach('n1/2/0', hub.getStream(2, 0), full, { camera: 'n1/3', kind: 'main' }) === NO_ROOM_MAIN && fb.summary().main.refused === 1 && fb.summary().refused === 0 && full.closedWith === null && procs.length === 4)
+  check('... its camera\'s main stream is not asked for on its account', hub.getStream(2, 0).clients.size === 0 && hub.getStream(2, 0).wanted === false)
+  check('... said in the log once, with what raises it', logs.length === said + 1 && /no room to convert n1\/3's main stream: 2 of 2 main-stream conversions running \(1\.60 cores allowed\)/.test(logs.at(-1)) && logs.at(-1).includes('CCTV_H264_FALLBACK_MAIN_MAX') && logs.at(-1).includes('stays on the sub-stream'), logs.at(-1))
+  fb.attach('n1/2/0', hub.getStream(2, 0), sock(), { camera: 'n1/3', kind: 'main' })
+  check('... not again within the minute', logs.length === said + 1 && fb.summary().main.refused === 2)
+  check('the mains full: a sub-stream is still converted (its budget is its own)', openSub(2) === true && fb.summary().running === 2)
+  check('the sub-streams full as well: the next is refused with their reason, said in its own right', openSub(3) === NO_ROOM && fb.summary().refused === 1 && fb.summary().main.refused === 2 && /no room to convert n1\/4: 2 of 2 conversions running/.test(logs.at(-1)), logs.at(-1))
+  check('... and a viewer of a main already converted still joins', (() => { const j = sock(); const r = fb.attach('n1/1/0', hub.getStream(1, 0), j, { kind: 'main' }); j.close(); return r === true })())
+  // a sub-stream nobody watches does not give its place to a main, nor the other way round
+  subs[0].close()
+  check('an idle sub-stream conversion gives no place to a main', fb.attach('n1/2/0', hub.getStream(2, 0), sock(), { kind: 'main' }) === NO_ROOM_MAIN && fb.streams.has('n1/0/1'))
+  m[1].close()
+  const idleMain = fb.streams.get('n1/1/0')
+  check('an idle main gives no place to a sub-stream', openSub(4) === true && !idleMain.closed, String(fb.summary().running))
+  // (the idle sub-stream of camera 1 gave its place up for that one, as before)
+  const taker = sock()
+  check('... but to another main at once, its ffmpeg killed', fb.attach('n1/2/0', hub.getStream(2, 0), taker, { camera: 'n1/3', kind: 'main' }) === true && idleMain.closed && killed(procs[2]) && fb.summary().main.running === 2 && !fb.streams.has('n1/1/0'))
+  taker.close()
+  await sleep(40)
+  check('down to one main: back to veryfast at once, for its next keyframe', fb.summary().main.running === 1 && fb.summary().main.step === 'veryfast')
+  const n = procs.length
+  feedMain(hub.getStream(0, 0), 41, 40) // a keyframe at 80
+  await sleep(HANDOVER_MS + 60)
+  check('... where it starts again at veryfast', procs.length === n + 1 && procs.at(-1).args.includes('veryfast') && procs.at(-1).args.join(' ').includes('-crf 22') && killed(procs[3]))
+  for (const w of [m[0], ...subs.filter(Boolean)]) w.close()
+  await sleep(40)
+  check('everyone gone: every ffmpeg ever started is killed, both budgets empty', procs.every(killed) && fb.summary().running === 0 && fb.summary().main.running === 0 && fb.xcodes.size === 0 && fb.streams.size === 0, procs.map((p) => (killed(p) ? 'k' : '-')).join(''))
+}
+{
+  // a main whose conversion fails outright, and a camera's stream made again
+  procs.length = 0
+  const logs = []
+  let now = 1_000_000
+  const hub = mkHub()
+  const src = hub.getStream(6, 0)
+  const fb = new H264Fallback({ units: 200, max: 24, mainUnits: 160, mainMax: 2, makeTranscoder: realMaker, log: (l) => logs.push(l), mainStopDelayMs: 15, now: () => now })
+  const a = sock()
+  fb.attach('n1/6/0', src, a, { camera: 'n1/7', kind: 'main' })
+  feedMain(src, 0, 20)
+  procs[0].emit('error', new Error('spawn ffmpeg ENOENT'))
+  check('a main\'s ffmpeg that never ran: the viewer is dropped, the place freed, off the camera', a.closedWith?.code === 1011 && fb.summary().main.running === 0 && fb.streams.size === 0 && src.clients.size === 0)
+  const again = sock()
+  check('... asking again is refused as failed, and starts nothing; the camera\'s sub-stream is not affected', fb.attach('n1/6/0', src, again, { camera: 'n1/7', kind: 'main' }) === FAILED && procs.length === 1 && fb.attach('n1/6/1', hub.getStream(6, 1), sock()) === true)
+  now += FAILED_QUIET_MS
+  check('... after a minute it is tried again', fb.attach('n1/6/0', src, again, { camera: 'n1/7', kind: 'main' }) === true && fb.summary().main.running === 1)
+  feedMain(src, 0, 20)
+  const first = fb.streams.get('n1/6/0')
+  const p = procs.at(-1)
+  const hub2 = mkHub()
+  const b = sock()
+  fb.attach('n1/6/0', hub2.getStream(6, 0), b, { kind: 'main' })
+  check('the camera\'s main stream made again: the old conversion closed, its ffmpeg killed, a new one on the new stream', first.closed && killed(p) && again.closedWith?.code === 1011 && fb.streams.get('n1/6/0').source === hub2.getStream(6, 0) && fb.summary().main.running === 1)
+  for (const s of [...fb.streams.values()]) s.close()
+  check('closing the streams kills what runs', procs.filter((x) => x !== procs[0]).every(killed) && fb.xcodes.size === 0)
+}
+{
+  // main conversion off: everything as it was before there was any
+  const made = []
+  const mk = (o) => { made.push(o); return { push() {}, close() {} } }
+  for (const [what, o] of [['CCTV_H264_FALLBACK_MAIN_MAX=0', { mainMax: 0 }], ['a main budget of nothing', { mainUnits: 0 }], ['a main budget under one conversion', { mainUnits: 79 }]]) {
+    const fb = new H264Fallback({ units: 200, max: 24, ...o, makeTranscoder: mk, log: () => {} })
+    const hub = mkHub()
+    check(`${what}: main conversion is off, the sub-streams' untouched`, fb.mainEnabled === false && fb.enabled === true && fb.pool.max === 24)
+    check('... the summary is the one it was, with nothing about mains', Object.keys(fb.summary()).join() === 'running,cap,step,crf,units,budgetUnits,viewers,refused')
+    const n = made.length
+    check('... and a main asked for all the same is refused, nothing started, its camera not asked', fb.attach('n1/0/0', hub.getStream(0, 0), sock(), { kind: 'main' }) === NO_ROOM_MAIN && made.length === n && hub.getStream(0, 0).clients.size === 0 && fb.streams.size === 0)
+  }
+  const subOnlyOff = new H264Fallback({ units: 0, mainUnits: 160, mainMax: 2, makeTranscoder: mk, log: () => {} })
+  check('the sub-streams off and the mains on: each switch is its own', subOnlyOff.enabled === false && subOnlyOff.mainEnabled === true && subOnlyOff.summary().cap === 0 && subOnlyOff.summary().main.cap === 2)
+  const s = new H264Fallback({ units: 200, max: 24, mainUnits: 160, mainMax: 2, makeTranscoder: mk, log: () => {} }).summary()
+  check('the summary for Health with mains on: theirs under main, the same fields', JSON.stringify(s.main) === '{"running":0,"cap":2,"step":"veryfast","crf":22,"units":0,"budgetUnits":160,"viewers":0,"refused":0}' && s.cap === 24 && s.step === 'veryfast' && s.crf === 21, JSON.stringify(s))
 }
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
