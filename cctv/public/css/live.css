@@ -1,5 +1,6 @@
 /* Live workspace: keep the picture dominant and controls easy to scan. */
 .live-page { --workspace-gutter: 24px; }
+.mobile-controls { display: none; }
 .live-heading { display: flex; align-items: center; gap: var(--s4); padding: var(--s4) var(--workspace-gutter) var(--s3); flex-shrink: 0; }
 .live-heading h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.03em; }
 .live-heading p { margin: var(--s1) 0 0; color: var(--text-muted); font-size: var(--fs-dense); }
@@ -83,9 +84,18 @@
   .live-page.has-shell .app-main > header .controls { gap: var(--s2); }
   .live-heading { flex-wrap: wrap; gap: var(--s1) var(--s3); }
   .live-state { margin-inline-start: 0; }
+  .live-heading { padding: 8px 12px; }
+  .live-heading p { font-size: 12px; }
+  .live-page .mobile-controls { display: inline-flex; align-items: center; justify-content: center; }
+  .live-page:not(.mobile-controls-open) .live-display { display: none; }
+  .live-page .live-scope #siteLabel { display: none; }
+  .live-page .live-navigation { gap: 4px; margin-inline-start: auto; }
+  .live-page .live-pager { gap: 4px; }
+  .live-page .controls select, .live-page .camera-search input { font-size: 16px; }
+  .live-page .live-options-panel { max-height: calc(100dvh - var(--bar-h) - env(safe-area-inset-bottom) - 32px); overflow-y: auto; bottom: calc(var(--bar-h) + env(safe-area-inset-bottom) + 8px); }
   .live-scope { width: 100%; min-width: 0; flex-wrap: wrap; }
   .live-scope .camera-browser-launch { flex: 1 1 100%; max-width: 100%; }
-  .live-scope #siteLabel { flex: 1 1 100%; min-width: 0; display: flex; align-items: center; gap: 8px; }
+  .live-scope #siteLabel { flex: 1 1 100%; min-width: 0; align-items: center; gap: 8px; }
   .live-scope #site { flex: 1; min-width: 0; width: 100%; }
   .live-page .controls button, .live-page .controls select, .live-options summary { min-height: 44px; }
   .camera-search { width: 100%; }

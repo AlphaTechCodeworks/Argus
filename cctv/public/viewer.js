@@ -28,6 +28,12 @@ if (!liveMuxOff) useMux(true)
 const grid = document.getElementById('grid')
 const layoutSelect = document.getElementById('layout')
 const pictureFit = document.getElementById('pictureFit')
+const mobileControls = document.getElementById('mobileControls')
+mobileControls.addEventListener('click', () => {
+  const expanded = mobileControls.getAttribute('aria-expanded') !== 'true'
+  mobileControls.setAttribute('aria-expanded', String(expanded))
+  document.body.classList.toggle('mobile-controls-open', expanded)
+})
 const PICTURE_MODES = ['auto', 'fit', 'fill', 'stretch']
 const savedPictureFit = preferenceStorage.getItem('cctv.pictureFit')
 pictureFit.value = PICTURE_MODES.includes(savedPictureFit) ? savedPictureFit : 'auto'
