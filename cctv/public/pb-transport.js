@@ -85,6 +85,17 @@ export function frameStep(currentS, direction, fps) {
 }
 
 /**
+ * The time (ms) the frame of a step must be at or after, when the step is a seek that plays until
+ * that frame (the NVR's playback: it starts at the keyframe before the time asked for, up to a GOP
+ * earlier, and the frames from there are not the step's). Forward: the first frame later than the
+ * one on screen. Back: the frame one frame time before it, give or take half a frame.
+ */
+export function stepNotBefore(currentMs, direction, fps) {
+  const frameMs = 1000 / (Number(fps) > 0 ? Number(fps) : 25)
+  return direction < 0 ? Math.max(0, currentMs - 1.5 * frameMs) : currentMs + 0.5
+}
+
+/**
  * Whether only keyframes are worth fetching at this rate. Above 8x the decoder cannot keep up with
  * every frame anyway, and reverse has to be assembled backwards from keyframes at any speed.
  */
