@@ -69,6 +69,7 @@
 // an async handler nobody awaited; process-guard.mjs). This process only: a worker still ends on one.
 import './process-guard-server.mjs'
 import { clientIpOf, localProbe, routeOf, securityHeaders } from './security.mjs'
+import { userSessions } from './user-sessions.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleNetStatus } from './nvr-netstatus.mjs'
 import { handleRelays } from './relays.mjs'
@@ -670,7 +671,9 @@ const handleRequest = async (req, res) => {
     // Clearing the cookie signs out this browser only: the token would stay good for its 7 days, and a
     // page still open with it would keep its video and could open more. Revoked, it is refused from
     // now on, and the sockets it opened are closed (auth.mjs revokeSession, access-watch.mjs).
-    auth.revokeSession(auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME])
+    const leavingToken = auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME]
+    auth.revokeSession(leavingToken)
+    userSessions.forgetToken(leavingToken)
     return sendJson(res, 200, { ok: true }, { 'set-cookie': auth.clearCookie() })
   }
   if (PUBLIC_PATHS.has(pathname)) return serveFile(res, pathname, req)
@@ -683,6 +686,8 @@ const handleRequest = async (req, res) => {
     res.writeHead(302, { location: '/login.html', ...SECURITY_HEADERS }).end()
     return
   }
+
+  if (!AUTH_OFF) userSessions.touch(auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME], user, req.socket.remoteAddress, req.headers['cf-connecting-ip'])
 
   if (pathname === '/change-password.html' || pathname === '/change-password.js') return serveFile(res, pathname, req)
   if (pathname === '/api/me/password' && req.method === 'POST') {
@@ -858,7 +863,7 @@ const handleRequest = async (req, res) => {
     // reached the page as a bare 500 with nothing to show.
     let usersRoute
     try {
-      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who)
+      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who, { disconnectUser: name => presence.disconnectUser(name) })
     } catch (e) {
       if (!Number.isInteger(e?.status)) throw e
       usersRoute = [e.status, { error: e.message }]

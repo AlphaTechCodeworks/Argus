@@ -29,6 +29,7 @@ export const ACTION_LABELS = Object.freeze({
   login: 'Signed in',
   'login-failed': 'Sign-in refused',
   logout: 'Signed out',
+  'user-sign-out': 'User signed out by administrator',
   'settings-change': 'Settings changed',
   'rights-change': 'Rights changed',
   export: 'Export made',
@@ -289,14 +290,30 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       })
       const name = document.createElement('td'); name.textContent = u.name
       const role = document.createElement('td'); role.textContent = u.role === 'admin' ? 'Admin' : 'Viewer'
+      const connections = el('td')
+      const sessions = Array.isArray(u.sessions) ? u.sessions : []
+      if (!sessions.length) connections.textContent = 'Not connected'
+      for (const session of sessions) connections.append(el('div', { textContent: `${session.connection} · ${session.address}` }))
+      const kick = el('button', { type: 'button', className: 'btn-ghost', textContent: 'Sign out user', disabled: u.self === true })
+      kick.setAttribute('aria-label', `Sign out all sessions for ${u.name}`)
+      if (u.self) kick.title = 'Use Sign out in the sidebar for your own account'
+      kick.addEventListener('click', async () => {
+        kick.disabled = true
+        try {
+          await usersApi('POST', `/${encodeURIComponent(u.name)}/sign-out`, {})
+          uSay(`Signed out ${u.name} from all sessions. They can sign in again.`)
+          await loadUsers()
+        } catch (e) { uSay(e.message, true); kick.disabled = false }
+      })
       const reset = el('button', { type: 'button', className: 'btn-ghost', textContent: 'Reset password' })
       reset.setAttribute('aria-label', `Reset password for ${u.name}`)
       reset.addEventListener('click', () => openPasswordReset(u.name))
-      const act = document.createElement('td'); act.className = 'ac-user-actions'; act.append(edit, reset, rm)
-      tr.append(name, role, act)
+      const act = document.createElement('td'); act.className = 'ac-user-actions'; act.append(edit, reset, kick, rm)
+      tr.append(name, role, connections, act)
       return tr
     }))
   }
+  setInterval(() => { if (!document.hidden) void loadUsers() }, 30_000)
   document.getElementById('addUser')?.addEventListener('submit', async (e) => {
     e.preventDefault()
     const name = document.getElementById('u-name').value.trim()

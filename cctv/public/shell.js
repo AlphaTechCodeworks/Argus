@@ -151,6 +151,18 @@ export function mountShell() {
 
 mountShell()
 
+// Presence heartbeat also notices an administrator revoking this browser's cookie.
+setInterval(async () => {
+  try {
+    const response = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(10_000) })
+    if (response.status === 401) location.href = '/login.html'
+    else if (response.status === 403) {
+      const body = await response.json()
+      if (body.mustChangePassword) location.href = '/change-password.html'
+    }
+  } catch { /* A transient connection loss is not a sign-out. */ }
+}, 30_000)
+
 // keep the app's own files on the device (sw.js): Argus opens at once on a weak signal
 if ('serviceWorker' in navigator && isSecureContext) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {})

@@ -131,6 +131,7 @@
 //  - Parsed files are kept per session (an LRU of 64 open readers, closed after 60 s unused), so
 //    scrubbing and seeking back and forth do not read an .idx twice.
 import * as fsp from 'node:fs/promises'
+import { createReadAhead } from './read-ahead.mjs'
 import { canPlayNvr, canPlayServer, mayHd } from './rights.mjs'
 import { HD_ASK_MESSAGE, HD_NOT_ALLOWED, MAIN, streamParam } from './stream-param.mjs'
 import { audit } from './audit.mjs'
@@ -143,26 +144,7 @@ import { CODEC_H264, DECODE_THREADS, PLAYBACK_LIMITS, Transcoder, clientCanDecod
 // When playback opens a file, the one after it is read through (1 MB at a time into one reused
 // buffer, nothing kept) so the operating system has it cached by the time playback -- or a jump
 // forward -- gets there: from memory instead of from the disk or the share. Each file at most once.
-const aheadDone = new Set()
-let aheadBusy = false
-const aheadBuf = Buffer.allocUnsafe(1024 * 1024)
-async function readAhead(path) {
-  if (!path || aheadBusy || aheadDone.has(path)) return
-  aheadBusy = true
-  aheadDone.add(path)
-  if (aheadDone.size > 500) aheadDone.delete(aheadDone.values().next().value)
-  let fh
-  try {
-    fh = await fsp.open(path, 'r')
-    for (;;) {
-      const { bytesRead } = await fh.read(aheadBuf, 0, aheadBuf.length, null)
-      if (bytesRead < aheadBuf.length) break
-    }
-  } catch {} finally {
-    await fh?.close().catch(() => {})
-    aheadBusy = false
-  }
-}
+const readAhead = createReadAhead()
 
 export const HEADER_SIZE = 16
 /** Speeds a server playback accepts (R9). */

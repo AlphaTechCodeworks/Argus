@@ -409,6 +409,7 @@ export class LiveTile {
         `decoded ${s.coded} · visible ${s.visible} · canvas ${this.player?.canvas?.width ?? '?'}×${this.player?.canvas?.height ?? '?'}`,
         `${s.fps} fps · jitter ${s.jitterMs} ms`,
         `buffer ${s.delayMs} ms · ${s.kbps} kbps`,
+        `queue ${s.queuedFrames ?? 0} frames · image estimate ${s.queuedImageMiB ?? 0} MiB · decoding ${s.decodeQueue ?? 0}`,
         // (older: frames held back for being at or before one shown, on a page through the tunnel)
         `dropped ${s.dropped} · late ${s.late} · resync ${s.resyncs}${s.older ? ` · older ${s.older}` : ''}`
       ].join('\n')

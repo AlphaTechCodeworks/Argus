@@ -109,7 +109,7 @@ const without = { clock: REMOTE_LIVE.clock, playerOptions: { maxQueuedFrames: RE
 
 // ---- who has it ----
 {
-  const src = (f) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8')
+  const src = (f) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const viewer = src('viewer.js')
   const tileOptions = viewer.match(/\nconst tileOptions = \(cam\) => \(\{[\s\S]*?\n\}\)\n/)?.[0] ?? ''
   check('viewer.js: a page through the tunnel gives its tiles the window, a local page nothing', /\n {2}noRewindMs: REMOTE_PAGE \? REMOTE_NO_REWIND_MS : undefined,?\n/.test(tileOptions) && /import \{[^}]*\bREMOTE_NO_REWIND_MS\b[^}]*\} from '\.\/player\.js'/.test(viewer), tileOptions)

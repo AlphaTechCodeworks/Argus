@@ -192,6 +192,9 @@ export class VideoPlayer {
     this.clock = new PlayoutClock(options.clock)
     this.remote = null
     this.maxQueued = options.maxQueuedFrames ?? MAX_QUEUED_FRAMES
+    // Experimental opt-in: exact pause/resume must be measured before enabling
+    // a tighter image budget in operator views. Defaults retain existing frames.
+    this.maxQueuedImageBytes = options.maxQueuedImageBytes ?? Infinity
     this.arrivalClock = options.arrivalClock === true && this.pacing // (without pacing there is no clock)
     // noRewindMs: capture times (ms) of the newest frame timed as it arrived, and of the newest queued
     // to be shown (or drawn); kept across reset(), as a reconnect's replay starts before what was shown
@@ -401,7 +404,8 @@ export class VideoPlayer {
     this.info = info
     this.rangeFixed = Boolean(config.colorSpace)
     this.stats.codec = config.codec
-    this.stats.hw = config.hardwareAcceleration === 'prefer-hardware' ? 'hardware' : 'auto'
+    // WebCodecs exposes a preference, not proof of the decoder backend in use.
+    this.stats.hw = config.hardwareAcceleration === 'prefer-hardware' ? 'hardware preferred' : 'auto'
     this.decoder = new VideoDecoder({
       output: (frame) => this.#onDecoded(frame),
       error: (err) => {
@@ -489,7 +493,13 @@ export class VideoPlayer {
       this.onFrame?.(ts)
     }
     this.queue.push({ frame, ts })
-    while (this.queue.length > (this.paused ? MAX_PAUSED_FRAMES : this.maxQueued)) {
+    // Conservatively allow four bytes per pixel (RGBA/10-bit surface overhead).
+    // A frame-count cap alone retains over a gigabyte of paused 4K YUV video.
+    const bytesPerFrame = Math.max(1, frame.codedWidth * frame.codedHeight * 4)
+    const imageLimit = Math.max(2, Math.floor(this.maxQueuedImageBytes / bytesPerFrame))
+    // Preserve the running clock's jitter buffer; only paused video uses this cap.
+    const queueLimit = this.paused ? Math.min(MAX_PAUSED_FRAMES, imageLimit) : this.maxQueued
+    while (this.queue.length > queueLimit) {
       this.queue.shift().frame.close()
       this.stats.dropped++
     }
@@ -834,7 +844,10 @@ export class VideoPlayer {
       late: this.clock.lateTotal,
       resyncs: this.clock.resyncs,
       width: this.videoWidth,
-      height: this.videoHeight
+      height: this.videoHeight,
+      queuedFrames: this.queue.length,
+      decodeQueue: this.decoder?.decodeQueueSize ?? 0,
+      queuedImageMiB: Math.round(this.queue.reduce((bytes, { frame }) => bytes + frame.codedWidth * frame.codedHeight * 4, 0) / 1024 / 1024)
     })
     w.frames = 0
     w.bytes = 0

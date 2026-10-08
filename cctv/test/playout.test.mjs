@@ -349,14 +349,14 @@ for (const drift of [0.0049, -0.0049]) {
   const r2 = slowDown({ extra: (c, n) => n === 2 && c.reset() })
   check('  a re-anchor or a reset ends it', r1.c.catchUp === null && r2.c.catchUp === null)
   const { readFileSync } = await import('node:fs')
-  const player = readFileSync(new URL('../public/player.js', import.meta.url), 'utf8')
+  const player = readFileSync(new URL('../public/player.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   check('  player.push passes every frame to it, except while paused (resume re-anchors)', /\n {4}if \(!this\.paused\) this\.clock\.arrived\(chunk\.timestampUs \/ 1000, performance\.now\(\)\)\r?\n {4}if \(this\.configuring\) return this\.#hold\(chunk\)/.test(player) && player.split('.arrived(').length === 2)
 }
 
 // ---- server: an 11 s outage is not restarted as a stall (live.mjs; the live worker uses the same) --
 {
   const { readFileSync } = await import('node:fs')
-  const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')
+  const src = (f) => readFileSync(new URL(`../${f}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const m = src('live.mjs').match(/export const STALL_MS = (?:.*\|\| )?([\d_]+)$/m) // (a test-only override may come first)
   const stall = m ? Number(m[1].replace(/_/g, '')) : 0
   check('live.mjs STALL_MS is 15 s (an 11 s outage recovers by itself)', stall === 15_000, `STALL_MS ${stall}`)
@@ -410,7 +410,7 @@ for (const drift of [0.0049, -0.0049]) {
   // Only playback re-anchors at once: live keeps its second's grace (a live stream's bursts are the
   // NVR's, and the live pages never pass these options).
   const { readFileSync } = await import('node:fs')
-  const page = (f) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8')
+  const page = (f) => readFileSync(new URL(`../public/${f}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   check('the playback clock re-anchors at once, with the buffer playback had', PLAYBACK_CLOCK.lateForMs === 0 && PLAYBACK_CLOCK.startDelayMs === 300 && PLAYBACK_CLOCK.minDelayMs === 200 && PLAYBACK_CLOCK.maxDelayMs === 1000)
   check('live keeps a second before it re-anchors', PLAYOUT_DEFAULTS.lateForMs === 1000)
   check('the playback page and the camera wall use the playback clock', /clock: PLAYBACK_CLOCK/.test(page('playback.js')) && /clock: PLAYBACK_CLOCK/.test(page('wall.js')))
@@ -499,7 +499,7 @@ const jittery = () => {
 {
   const { createHash } = await import('node:crypto')
   const { readFileSync } = await import('node:fs')
-  const viewer = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8')
+  const viewer = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const m = viewer.match(/const SMOOTH_CLOCK = \{ startDelayMs: (\d+), minDelayMs: (\d+), maxDelayMs: (\d+) \}/)
   const SMOOTH = m && { startDelayMs: Number(m[1]), minDelayMs: Number(m[2]), maxDelayMs: Number(m[3]) }
   check('the viewer\'s Smooth clock is the one pinned here', JSON.stringify(SMOOTH) === '{"startDelayMs":400,"minDelayMs":300,"maxDelayMs":1200}', JSON.stringify(SMOOTH))
@@ -703,7 +703,7 @@ const stalled = ({ durMs = 120_000, stalls = [], stallMs = 1200 } = {}) => {
   // a local address and one through the tunnel (device.js isLocalHost), with Smooth off and on
   const { readFileSync } = await import('node:fs')
   const { isLocalHost } = await import('../public/device.js')
-  const viewer = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8')
+  const viewer = readFileSync(new URL('../public/viewer.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const lines = viewer.match(/\nconst SMOOTH_CLOCK = [\s\S]*?\nconst clockOptions = [^\n]*\n/)?.[0] ?? ''
   const choose = (host, smooth) => {
     try {

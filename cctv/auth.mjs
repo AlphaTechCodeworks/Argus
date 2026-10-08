@@ -103,8 +103,18 @@ const secret = loadSecret()
 const sign = (payload) => createHmac('sha256', secret).update(payload).digest('base64url')
 
 export const createSession = (user) => {
-  const payload = `${Buffer.from(user).toString('base64url')}.${Date.now() + SESSION_TTL_MS}`
+  const issued = Math.max(Date.now(), loadUsers()[user]?.since || 0)
+  const payload = `${Buffer.from(user).toString('base64url')}.${issued + SESSION_TTL_MS}`
   return `${payload}.${sign(payload)}`
+}
+
+/** Revoke all existing cookies without changing the account or password. */
+export function signOutUser(user) {
+  const users = loadUsers()
+  if (!Object.hasOwn(users, user)) return false
+  users[user] = { ...users[user], since: Math.max(Date.now() + 1, (users[user].since || 0) + 1) }
+  saveUsers(users) // access-watch closes live/playback sockets immediately
+  return true
 }
 
 /** Returns the user name for a valid session token, otherwise null. */

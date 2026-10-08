@@ -36,7 +36,8 @@
     <section class="se-section" data-tab="access" data-tab-label="Users &amp; access" data-tab-help="Who can sign in, and what each of them may watch, play back and export, per site or per camera." aria-labelledby="users-title" id="usersSection" hidden>
       <h2 id="users-title">Accounts</h2>
       <p class="st-help">Who can sign in. A <b>viewer</b> watches, plays back and exports only what <b>Edit access</b> allows, per site or per camera; an <b>admin</b> can do and change everything. A new viewer sees nothing until you tick something: the access editor opens as soon as they are added. Type the new person's password yourself and give it to them in person.</p>
-      <table class="hp-table"><thead><tr><th>Name</th><th>Role</th><th></th></tr></thead><tbody id="userRows"></tbody></table>
+      <p class="st-help">Connections update every 30 seconds. Sign out user ends all their sessions; they can sign in again.</p>
+      <table class="hp-table"><thead><tr><th>Name</th><th>Role</th><th>Connections</th><th>Actions</th></tr></thead><tbody id="userRows"></tbody></table>
       <form id="addUser" class="se-grid" autocomplete="off">
         <label>Name <input id="u-name" required maxlength="64" pattern="[\w.@\-]{1,64}" title="Letters, digits and . _ @ -" autocapitalize="off" spellcheck="false" /></label>
         <label>Password (8 or more) <input id="u-pass" type="password" minlength="8" autocomplete="new-password" /></label>

@@ -16,7 +16,8 @@
 // a name that comes back never inherits what its last holder was allowed. A new account records
 // `since`, so the last holder's unexpired cookie does not sign in as the new one (auth.mjs).
 import { audit } from './audit.mjs'
-import { DATA_DIR, hashPassword, loadUsers, saveUsers } from './auth.mjs'
+import { DATA_DIR, hashPassword, loadUsers, saveUsers, signOutUser } from './auth.mjs'
+import { userSessions } from './user-sessions.mjs'
 import { HttpError } from './nvr-xml.mjs'
 import { forgetRights } from './rights.mjs'
 
@@ -30,12 +31,31 @@ const admins = (users) => Object.entries(users).filter(([, u]) => u.role === 'ad
  * @returns {Promise<[number, object]|null>} null when the path is not ours
  * @param {{ user: string, admin: boolean }} who from the signed session, never the request body
  */
-export async function handleUsers(method, pathname, readJson, who) {
+export async function handleUsers(method, pathname, readJson, who, { disconnectUser = () => {} } = {}) {
   if (pathname !== '/api/admin/users' && !pathname.startsWith('/api/admin/users/')) return null
   if (!who?.admin) throw new HttpError(403, 'Only an admin can manage accounts')
-  const users = loadUsers()
+  let users = loadUsers()
 
-  if (method === 'GET' && pathname === '/api/admin/users') return [200, { users: list(users) }]
+  if (method === 'GET' && pathname === '/api/admin/users') {
+    const sessions = userSessions.list()
+    const byUser = new Map()
+    for (const session of sessions) {
+      if (!byUser.has(session.user)) byUser.set(session.user, [])
+      byUser.get(session.user).push(session)
+    }
+    return [200, { users: list(users).map(u => ({ ...u, self: u.name === who.user, sessions: byUser.get(u.name) ?? [] })) }, { 'cache-control': 'no-store' }]
+  }
+
+  const kick = /^\/api\/admin\/users\/([^/]+)\/sign-out$/.exec(pathname)
+  if (method === 'POST' && kick) {
+    const name = decodeURIComponent(kick[1])
+    if (name === who.user) throw new HttpError(409, 'Use Sign out to end your own session')
+    if (!signOutUser(name)) throw new HttpError(404, 'No such user')
+    disconnectUser(name)
+    userSessions.forget(name)
+    audit(DATA_DIR, { user: who.user, action: 'user-sign-out', target: name, ok: true })
+    return [200, { signedOut: name }]
+  }
 
   if (method === 'POST' && pathname === '/api/admin/users') {
     const body = await readJson()
@@ -51,8 +71,13 @@ export async function handleUsers(method, pathname, readJson, who) {
       throw new HttpError(409, `${name} is the only admin: add another admin first`)
     }
     const hash = password !== null ? await hashPassword(password) : null
-    users[name] = { ...(users[name] ?? {}), role, ...(hash !== null ? { hash, ...(existed ? { mustChangePassword: true, since: Date.now() } : {}) } : {}), ...(existed ? {} : { since: Date.now() }) }
+    // Hashing yields: preserve any other account's concurrent sign-out/change.
+    users = loadUsers()
+    if (Object.hasOwn(users, name) !== existed) throw new HttpError(409, 'This account changed; refresh and try again')
+    if (existed && users[name].role === 'admin' && role !== 'admin' && admins(users).length <= 1) throw new HttpError(409, `${name} is the only admin: add another admin first`)
+    users[name] = { ...(users[name] ?? {}), role, ...(hash !== null ? { hash, ...(existed ? { mustChangePassword: true, since: Math.max(Date.now() + 1, (users[name].since || 0) + 1) } : {}) } : {}), ...(existed ? {} : { since: Date.now() }) }
     saveUsers(users)
+    if (hash !== null && existed) userSessions.forget(name)
     if (!existed) forgetRights(name) // a row left behind by an earlier account of this name
     audit(DATA_DIR, { user: who.user, action: existed ? 'user-change' : 'user-add', target: name, detail: `${role}${password !== null ? ', password set' : ''}`, ok: true })
     console.log(`[users] ${who.user} ${existed ? 'changed' : 'added'} ${name} (${role}${password !== null ? ', password set' : ''})`)
@@ -67,6 +92,7 @@ export async function handleUsers(method, pathname, readJson, who) {
     if (users[name].role === 'admin' && admins(users).length <= 1) throw new HttpError(409, `${name} is the only admin`)
     delete users[name]
     saveUsers(users)
+    userSessions.forget(name)
     forgetRights(name)
     audit(DATA_DIR, { user: who.user, action: 'user-remove', target: name, ok: true })
     console.log(`[users] ${who.user} removed ${name}`)

@@ -2207,6 +2207,7 @@ setInterval(() => {
     `decoded ${s.coded} · visible ${s.visible} · canvas ${player.canvas.width}×${player.canvas.height}`,
     `${s.fps} fps · jitter ${s.jitterMs} ms`,
     `buffer ${s.delayMs} ms · ${s.kbps} kbps`,
+    `queue ${s.queuedFrames ?? 0} frames · image estimate ${s.queuedImageMiB ?? 0} MiB · decoding ${s.decodeQueue ?? 0}`,
     `dropped ${s.dropped} · late ${s.late}`,
     `src ${src} · start ${startMs ?? '-'} ms`
   ].join('\n')

@@ -60,6 +60,18 @@ export function makePresence() {
       for (const v of viewers.values()) if (v.remote) remote++; else local++
       return { people: viewers.size, local, remote }
     },
+    disconnectUser(user) {
+      let sockets = 0
+      for (const [key, viewer] of viewers) {
+        if (viewer.user !== user) continue
+        viewers.delete(key)
+        for (const ws of viewer.sockets) {
+          sockets++
+          try { ws.close(1008, 'Signed out by administrator') } catch {}
+        }
+      }
+      return sockets
+    },
     /**
      * Each viewer with what it has open, longest connected first, bounded (MAX_VIEWERS, and
      * MAX_OPEN_EACH of each kind): { user, address, remote, since, live, playback, other, counts }.
