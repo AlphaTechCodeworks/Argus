@@ -127,6 +127,8 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
 }
 /* A benign "no cameras yet / none shared with you" message is not a fault: neutral, not amber. */
 #notice.as-info { background: transparent; color: var(--muted); border-bottom: 1px solid var(--border); }
+/* A note about the page itself, in that neutral style (the grid limited on a PC without H.265) */
+.page-note { margin: 0; padding: 6px 16px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
 
 .account { display: flex; align-items: center; gap: 8px; color: var(--muted); }
 
