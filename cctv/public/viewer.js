@@ -1465,6 +1465,12 @@ addEventListener('pagehide', () => {
   tiles = []
 })
 addEventListener('pageshow', (event) => {
+  if (event.persisted) {
+    // WebKit can restore a document whose WebCodecs/GPU resources no longer
+    // function. Recreate the document itself, not just its player objects.
+    location.reload()
+    return
+  }
   if (!event.persisted && !pageSuspended) return
   pageSuspended = false
   clearTimeout(hiddenTimer)

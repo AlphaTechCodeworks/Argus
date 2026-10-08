@@ -11,6 +11,7 @@ test('history restoration discards frozen players and restores fresh streams', (
   const context = vm.createContext({
     hiddenTimer: 7,
     tiles: [{ close: () => events.push('close') }],
+    location: { reload: () => events.push('reload') },
     addEventListener: (name, handler) => { handlers[name] = handler },
     clearTimeout: () => events.push('clear'),
     freshenForPageChange: () => events.push('fresh'),
@@ -26,5 +27,11 @@ test('history restoration discards frozen players and restores fresh streams', (
   assert.equal(context.tiles.length, 0)
   assert.deepEqual(events, ['clear', 'close'])
   handlers.pageshow({ persisted: true })
-  assert.deepEqual(events.slice(2), ['clear', 'fresh', 'render', 'session', 'settings', 'list'])
+  assert.deepEqual(events.slice(2), ['reload'])
+  events.length = 0
+  handlers.pageshow({ persisted: false })
+  assert.deepEqual(events, ['clear', 'fresh', 'render', 'session', 'settings', 'list'])
+  events.length = 0
+  handlers.pageshow({ persisted: false })
+  assert.deepEqual(events, [])
 })
