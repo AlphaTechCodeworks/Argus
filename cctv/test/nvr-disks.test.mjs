@@ -9,7 +9,7 @@
 // unrecognised answer has to end as "not available" rather than as a wrong-but-confident number.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { FRESH_MS, STALE_OK_MS, carrySmart, diskState, makeNvrStorage, parseDate, parseDiskStatus, parseStorageDevInfo, parseSmart, parseSystemCaps, readStorage, sizeBytes, smartRequest } from '../nvr-disks.mjs'
+import { FRESH_MS, STALE_OK_MS, bandwidthOf, carrySmart, diskState, makeNvrStorage, parseDate, parseDiskStatus, parseStorageDevInfo, parseSmart, parseSystemCaps, readStorage, sizeBytes, smartRequest } from '../nvr-disks.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -210,6 +210,7 @@ const at = (t) => () => t
   check('the raid type lists are not mistaken for disks', r.disks.length === 1)
   check('the camera limit is read', r.caps.maxCameras === 32 && r.caps.maxPlaybackWindows === 16)
   check('the bandwidth figures are read', r.caps.totalBandwidthMbps === 192 && r.caps.usedBandwidthKbps === 131072, JSON.stringify(r.caps))
+  check('and shown as the NVR counts them: 128 of 192 Mb, 67 %', JSON.stringify(bandwidthOf(r.caps)) === JSON.stringify({ usedMbps: 128, totalMbps: 192, pct: 67 }), JSON.stringify(bandwidthOf(r.caps)))
 }
 
 // ---- SMART ----------------------------------------------------------------------------------------
