@@ -1474,7 +1474,7 @@ addEventListener('pageshow', (event) => {
   if (!event.persisted && !pageSuspended) return
   pageSuspended = false
   clearTimeout(hiddenTimer)
-  freshenForPageChange()
+  freshenForPageChange(0)
   render()
   checkSession()
   sync.refresh()
@@ -1483,6 +1483,12 @@ addEventListener('pageshow', (event) => {
 document.addEventListener('visibilitychange', () => {
   clearTimeout(hiddenTimer)
   if (document.hidden) {
+    if (isPhone()) {
+      for (const t of tiles) t.close()
+      tiles = []
+      freshenForPageChange(0)
+      return
+    }
     hiddenTimer = setTimeout(() => {
       for (const t of tiles) t.close()
       tiles = []
@@ -1490,6 +1496,11 @@ document.addEventListener('visibilitychange', () => {
     return
   }
   // the camera order may have been changed on another screen meanwhile
+  if (isPhone()) {
+    for (const t of tiles) t.close()
+    tiles = []
+    freshenForPageChange(0)
+  }
   sync.refresh()
   if (tiles.length === 0) render()
   else if (gridStale) render({ keepSingle: true })

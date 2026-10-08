@@ -773,6 +773,20 @@ const cam = (ch, more = {}) => ({ nvr: 'n1', ch, stream: 1, fps: null, h265: nul
   check('small grid: 4 channels on one open connection', muxState().channels === 4 && muxState().socket === 'open')
   freshenForPageChange(17)
   check('freshenForPageChange leaves a small grid (below the threshold) alone', s.closedWith == null && muxState().socket === 'open' && muxState().channels === 4, `${s.closedWith} ${muxState().socket} ${muxState().channels}`)
+  freshenForPageChange(0)
+  advance(0)
+  check('mobile resume force-drops even a four-channel socket', s.closedWith != null && muxState().socket === 'none' && muxState().channels === 0)
+}
+
+{
+  mux._test.reset(clock)
+  useMux(true)
+  liveSocket(cam(0))
+  const s = sockets.at(-1)
+  check('resume regression: the old socket is still opening', muxState().socket === 'connecting')
+  freshenForPageChange(0)
+  advance(0)
+  check('mobile resume also discards an opening socket', s.closedWith != null && muxState().socket === 'none' && muxState().waiting === 0)
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall passed')

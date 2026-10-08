@@ -417,7 +417,7 @@ export function muxState() {
  * @param {number} [minChannels] act only when the page being left has at least this many tiles
  */
 export function freshenForPageChange(minChannels = 17) {
-  if (sock && sockOpen && channels.size + waiting.length >= minChannels) drop(sock, 'the page changed on a big grid', false)
+  if (sock && (minChannels === 0 || (sockOpen && channels.size + waiting.length >= minChannels))) drop(sock, 'the page changed', false)
 }
 
 /** (tests) Forgets every channel and the connection, off again; clock: { now, later, cancel }. */
