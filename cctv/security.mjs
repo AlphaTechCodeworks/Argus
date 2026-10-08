@@ -43,6 +43,17 @@ const IP_TEXT = /^[0-9A-Fa-f:.]{2,45}$/
 export const clientIpOf = (peer, cfHeader) =>
   LOOPBACK.test(peer ?? '') && typeof cfHeader === 'string' && IP_TEXT.test(cfHeader) ? cfHeader : (peer ?? '')
 
+/**
+ * How this visitor reached the server, for showing to them (/api/me, the foot of the menu): their
+ * address as the server sees it, and whether they came straight to it (the office network, the VPN)
+ * or round through the Cloudflare tunnel. The same name (cctv.jfl.gripe) does both, depending on
+ * what the visitor's DNS answered, so the address bar cannot tell them which.
+ */
+export function routeOf(peer, cfHeader) {
+  const address = clientIpOf(peer, cfHeader).replace(/^::ffff:/i, '')
+  return { address, direct: address === (peer ?? '').replace(/^::ffff:/i, '') }
+}
+
 // /healthz tells the watchers on this machine (cctv-healthwatch.mjs, cctv-watch.ps1, the Docker
 // healthcheck) which share is stuck and how each NVR's worker is doing. It needs no sign-in, and the
 // same port is reachable through the tunnel, whose cloudflared also connects from 127.0.0.1 but always

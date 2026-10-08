@@ -46,7 +46,7 @@ function render(parts, me) {
     <div class="shell-foot">
       ${themeButton(theme, 'shell-theme btn-ghost')}
       <div class="shell-user"><span class="shell-avatar">${esc((me.user ?? '?').slice(0, 1).toUpperCase())}</span>
-        <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small></span>
+        <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small>${me.address ? `<small class="shell-route" title="${me.direct ? 'You are connected straight to the server on the local network' : 'You are connected over the internet (through Cloudflare)'}">${esc(me.address)} · ${me.direct ? 'local' : 'internet'}</small>` : ''}</span>
         <button type="button" class="btn-ghost btn-icon" data-sign-out title="Sign out" aria-label="Sign out">${icon('out')}</button></div>
     </div>`
   // the phone bar: the four used most, then More for everything else
@@ -121,8 +121,8 @@ export function mountShell() {
     .then((r) => (r.ok ? r.json() : null))
     .then((fresh) => {
       if (!fresh) return
-      try { session?.setItem(ME_KEY, JSON.stringify({ user: fresh.user, admin: fresh.admin, build: fresh.build })) } catch {}
-      const changed = fresh.user !== me.user || fresh.admin !== me.admin || fresh.build?.version !== me.build?.version
+      try { session?.setItem(ME_KEY, JSON.stringify({ user: fresh.user, admin: fresh.admin, build: fresh.build, address: fresh.address, direct: fresh.direct })) } catch {}
+      const changed = fresh.user !== me.user || fresh.admin !== me.admin || fresh.build?.version !== me.build?.version || fresh.address !== me.address || fresh.direct !== me.direct
       me = fresh
       if (changed) render(parts, me)
     })

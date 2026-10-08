@@ -68,7 +68,7 @@
 // socket, a running export and every NVR worker (2026-10: a playback command of 'null' threw inside
 // an async handler nobody awaited; process-guard.mjs). This process only: a worker still ends on one.
 import './process-guard-server.mjs'
-import { clientIpOf, localProbe, securityHeaders } from './security.mjs'
+import { clientIpOf, localProbe, routeOf, securityHeaders } from './security.mjs'
 import { handleNvrLog } from './nvr-log.mjs'
 import { handleNetStatus } from './nvr-netstatus.mjs'
 import { handleRelays } from './relays.mjs'
@@ -695,7 +695,7 @@ const handleRequest = async (req, res) => {
   // links, overlays) keep every other camera out of their answers with it.
   const canSee = (nvr, ch) => who.admin || ['live', 'playback-server', 'playback-nvr'].some((a) => can(who, a, { nvr, ch }))
 
-  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
+  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
 
   // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
