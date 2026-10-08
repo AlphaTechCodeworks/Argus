@@ -18,25 +18,34 @@
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/components.css" />
   <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="css/camera-browser.css" />
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="colour-check.css" />
   <link rel="stylesheet" href="grid-order.css" />
+  <link rel="stylesheet" href="css/live.css" />
 </head>
 <body class="live-page">
+  <section class="live-heading" aria-label="Live view overview">
+    <h1>Live cameras</h1><p id="cameraSummary">Loading your cameras…</p><span id="liveState" class="live-state" aria-label="Video connection summary"></span>
+  </section>
   <header>
     <div class="brand">
       <h1>CCTV</h1>
     </div>
     <div class="controls">
+      <div class="live-scope">
       <label id="siteLabel" hidden>Site
         <select id="site"><option value="">All sites</option></select>
       </label>
+      </div><div class="live-display">
+      <div class="camera-search"><label class="visually-hidden" for="cameraSearch">Find cameras</label><input id="cameraSearch" type="search" placeholder="Find cameras…" title="Search by camera, site, recorder or channel. Press / to focus search." autocomplete="off" /><button id="clearCameraSearch" type="button" aria-label="Clear camera search" hidden>×</button></div>
       <label>Layout
         <select id="layout">
+          <option value="auto" selected>Auto</option>
           <optgroup label="Grid">
             <option value="g1">1</option>
             <option value="g2">2 × 2</option>
-            <option value="g3" selected>3 × 3</option>
+            <option value="g3">3 × 3</option>
             <option value="g4">4 × 4</option>
             <option value="g5">5 × 5</option>
             <option value="g6">6 × 6</option>
@@ -57,15 +66,22 @@
           <option value="">(not saved)</option>
         </select>
       </label>
+      </div>
+      <details class="live-options"><summary>View options</summary><div class="live-options-panel">
       <button id="saveView" type="button" title="Save the cameras shown and this layout as a named view">Save view…</button>
       <button id="deleteView" type="button" title="Delete the saved view shown" hidden>Delete view</button>
       <label title="Leave offline cameras out of the layout"><input id="hideOffline" type="checkbox" checked /> Hide offline</label>
       <label title="Steadier motion: holds about 0.4 s more video (a little more delay)"><input id="smooth" type="checkbox" /> Smooth</label>
       <button id="resetOrder" type="button" title="Your cameras are in your own order (drag a tile onto another to swap them, or onto ‹ › to move it to another page). This puts them back in the default order." hidden>Reset order</button>
+      <p class="live-help">Open a camera with a click or Enter. Use its Move button to reorder, or drag it onto another camera.</p>
+      </div></details>
+      <div class="live-navigation"><div id="livePager" class="live-pager" hidden>
       <button id="prev" type="button" aria-label="Previous page">‹</button>
       <span id="page">1 / 1</span>
       <button id="next" type="button" aria-label="Next page">›</button>
+      </div>
       <button id="fullscreen" type="button" title="Full screen (F)" aria-label="Full screen">⛶</button>
+      </div>
     </div>
     <span id="remoteMark" class="remote-mark" hidden title="You are connected through the internet, so the video is heavier on the link. On site, open the local address instead — it is faster.">through the internet</span>
     <div class="account">
@@ -74,7 +90,8 @@
       <button id="logout" type="button">Sign out</button>
     </div>
   </header>
-  <main id="grid"></main>
+  <p id="filterNote" class="filter-note" role="status" hidden></p>
+  <main id="grid" aria-label="Live camera grid"></main>
   <p id="notice" hidden></p>
   <p id="layoutNote" class="page-note" role="status" hidden></p>
   <p id="orderNote" class="order-note" role="status" hidden></p>
@@ -88,6 +105,12 @@
         <button type="submit" value="cancel">Cancel</button>
         <button type="button" id="viewSave" class="pb-primary">Save</button>
       </div>
+    </form>
+  </dialog>
+  <dialog id="moveCameraDlg" class="wall-pick">
+    <form method="dialog"><h2>Move camera</h2><p id="moveCameraName"></p>
+      <label for="moveCameraTarget">Swap with</label><select id="moveCameraTarget"></select>
+      <div class="pb-ex-actions"><button value="cancel">Cancel</button><button id="moveCameraApply" type="button">Move</button></div>
     </form>
   </dialog>
   <script type="module" src="shell.js"></script>

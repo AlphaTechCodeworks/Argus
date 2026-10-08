@@ -5,7 +5,10 @@ import { diffCameras, shownCameras, visibleCameras } from './grid-diff.js'
 import { enableGridDrag } from './grid-drag.js'
 import { activeTrace, downloadTrace, startTrace, stopTrace } from './frame-trace.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
-import { MAX_VIEW_CAMERAS, applyViews, checkView, normaliseViews } from './grid-view.js'
+import { MAX_VIEW_CAMERAS, applyViews, autoLiveGrid, checkView, normaliseViews, searchCameras } from './grid-view.js'
+import { icon } from './icons.js'
+import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
+import { preferenceStorage } from './user-settings.js'
 import { freshenForPageChange, muxState, useMux } from './live-mux.js'
 import { H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML, mainNotConvertedTitle } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
@@ -24,11 +27,14 @@ if (!liveMuxOff) useMux(true)
 
 const grid = document.getElementById('grid')
 const layoutSelect = document.getElementById('layout')
+const cameraSearch = document.getElementById('cameraSearch')
+let cameraQuery = ''
 const pageLabel = document.getElementById('page')
 const prevBtn = document.getElementById('prev')
 const nextBtn = document.getElementById('next')
 const notice = document.getElementById('notice')
 const siteSelect = document.getElementById('site')
+let liveBrowser
 const hideOffline = document.getElementById('hideOffline')
 const smoothBox = document.getElementById('smooth')
 const fullBtn = document.getElementById('fullscreen')
@@ -114,7 +120,9 @@ window.cctvMux = muxState
 
 // Layouts: a grid size plus the large tiles (column, row, width, height; 1-based).
 // Remaining cells are filled with single tiles in reading order.
+let noH265Limit = false
 const LAYOUTS = {
+  auto: { auto: true },
   g1: { size: 1 },
   g2: { size: 2 },
   g3: { size: 3 },
@@ -136,6 +144,14 @@ const LIST_PAGE = 48
 
 /** Cells of a layout as [column, row, width, height], large tiles first. */
 function layoutCells(id) {
+  if (id === 'auto') {
+    const count = shownCameras(gridCameras(), gridView(144)).length
+    const style = getComputedStyle(grid)
+    const width = grid.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+    const height = grid.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+    const { size, rows } = autoLiveGrid(count, { noH265: noH265Limit, phone: isPhone(), width, height, gap: parseFloat(style.gap) || 8 })
+    return { size, rows, cells: Array.from({ length: size * rows }, (_, i) => [i % size + 1, Math.floor(i / size) + 1, 1, 1]) }
+  }
   if (LAYOUTS[id]?.list) return { size: 1, cells: Array.from({ length: LIST_PAGE }, (_, i) => [1, i + 1, 1, 1]) }
   const { size, big = [] } = LAYOUTS[id] ?? LAYOUTS.g3
   const used = new Set()
@@ -150,13 +166,50 @@ function tileLabel(cam) {
   const where = cam && multiSite() && !siteSelect.value ? `${cam.site} · ` : ''
   return cam ? `${where}${cam.ch + 1} · ${cam.name}` : ''
 }
+function refreshTileName(tile, cam) {
+  const label = tileLabel(cam)
+  tile.querySelector('.name').textContent = label
+  tile.querySelector('.tile-open')?.setAttribute('aria-label', `Open ${label}`)
+  tile.querySelector('.tile-move')?.setAttribute('aria-label', `Move ${label}`)
+  const source = tile.querySelector('.tile-source')
+  if (source) source.textContent = cam?.site || cam?.nvrName || ''
+}
 
-function makeTile(cam) {
+function makeTile(cam, { controls = true } = {}) {
   const tile = document.createElement('div')
   // an unused cell: a grid keeps its shape with it; the phone's list leaves it out (style.css)
   tile.className = cam ? 'tile' : 'tile tile-empty'
   tile.innerHTML = TILE_HTML
   tile.querySelector('.name').textContent = tileLabel(cam)
+  if (cam) {
+    const placeholder = document.createElement('div')
+    placeholder.className = 'tile-placeholder'
+    placeholder.setAttribute('aria-hidden', 'true')
+    placeholder.innerHTML = `${icon('live')}<strong></strong><span></span>`
+    placeholder.querySelector('strong').textContent = cam.online ? 'Connecting to camera' : 'Camera offline'
+    placeholder.querySelector('span').textContent = cam.online ? 'The picture will appear automatically' : 'Waiting for the camera to come back online'
+    tile.append(placeholder)
+    const source = document.createElement('span')
+    source.className = 'tile-source'
+    source.textContent = cam.site || cam.nvrName || ''
+    tile.querySelector('.label').append(source)
+  }
+  if (cam && controls) {
+    const open = document.createElement('button')
+    open.type = 'button'
+    open.className = 'tile-open'
+    open.setAttribute('aria-label', `Open ${tileLabel(cam)}`)
+    open.disabled = !cam.online
+    open.addEventListener('click', (e) => { e.stopPropagation(); openSingle(cameras.find((c) => camKey(c) === camKey(cam)) ?? cam, { fromTap: true }) })
+    const move = document.createElement('button')
+    move.type = 'button'
+    move.className = 'tile-move'
+    move.textContent = 'Move'
+    move.setAttribute('aria-label', `Move ${tileLabel(cam)}`)
+    move.addEventListener('click', (e) => { e.stopPropagation(); showMoveCamera(cameras.find((c) => camKey(c) === camKey(cam)) ?? cam) })
+    move.addEventListener('pointerdown', (e) => e.stopPropagation())
+    tile.append(open, move)
+  }
   return tile
 }
 
@@ -198,10 +251,10 @@ function render({ keepSingle = false } = {}) {
   for (const n of [...grid.children]) if (!kept.includes(n)) { inView?.unobserve(n); n.remove() } // unobserve: phone-list tiles must not leak into the observer
   const before = kept[0] ?? null
 
-  const { size, cells } = layoutCells(layoutSelect.value)
+  const { size, rows = size, cells } = layoutCells(layoutSelect.value)
   const perPage = cells.length
   grid.style.gridTemplateColumns = `repeat(${size}, 1fr)`
-  grid.style.gridTemplateRows = `repeat(${size}, 1fr)`
+  grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`
   grid.dataset.size = String(size)
 
   gridStale = false
@@ -243,9 +296,9 @@ const gridArea = ([c, r, w, h]) => `${r} / ${c} / span ${h} / span ${w}`
  * pager, the full-size ‹ › — reads this, so a view needs no special case in any of them.
  */
 function gridCameras() {
-  if (!activeView) return cameras
+  if (!activeView) return searchCameras(cameras, cameraQuery)
   const byKey = new Map(cameras.map((c) => [camKey(c), c]))
-  return activeView.cameras.map((k) => byKey.get(k)).filter(Boolean)
+  return searchCameras(activeView.cameras.map((k) => byKey.get(k)).filter(Boolean), cameraQuery)
 }
 
 /** The grid's filters and page, for visibleCameras / diffCameras. A view carries its own set, so the
@@ -349,7 +402,7 @@ function updateTiles(changed) {
       // under an open full-size view the grid decodes nothing
       if (single !== null) slot.live?.suspend()
     } else if (name) {
-      slot.el.querySelector('.name').textContent = tileLabel(cam)
+      refreshTileName(slot.el, cam)
     }
   }
   syncTiles()
@@ -467,7 +520,58 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
   pageLabel.textContent = single !== null ? 'full' : `${page + 1} / ${pages}`
   prevBtn.disabled = single !== null || page === 0
   nextBtn.disabled = single !== null || page >= pages - 1
+  document.getElementById('livePager').hidden = pages <= 1 || single !== null
+  const summary = document.getElementById('cameraSummary')
+  const shown = shownCameras(gridCameras(), gridView())
+  const onPage = visibleCameras(gridCameras(), gridView()).visible.length
+  grid.dataset.empty = String(onPage === 0)
+  const context = activeView?.name || siteSelect.selectedOptions[0]?.textContent.trim() || 'All sites'
+  if (summary) summary.textContent = `${context} · ${shown.length} camera${shown.length === 1 ? '' : 's'} · ${onPage} on this page`
+  const note = document.getElementById('filterNote')
+  note.hidden = shown.length > 0 || !cameraQuery
+  note.textContent = `No cameras match “${cameraQuery}” in this view. Clear the search or select another site.`
+  updateLiveState()
 }
+
+function updateLiveState() {
+  const occupied = gridSlots.filter((s) => s.cam)
+  const live = occupied.filter((s) => s.el.querySelector('.status')?.classList.contains('live')).length
+  const offline = occupied.filter((s) => !s.cam.online).length
+  const waiting = occupied.length - live - offline
+  const label = occupied.length ? [`${live} live`, waiting ? `${waiting} waiting` : '', offline ? `${offline} offline` : ''].filter(Boolean).join(' · ') : 'No cameras'
+  const state = document.getElementById('liveState')
+  if (state.textContent !== label) state.textContent = label
+  state.classList.toggle('all-live', live > 0 && live === occupied.length)
+}
+let stateFrame = null
+new MutationObserver(() => {
+  if (stateFrame !== null) return
+  stateFrame = requestAnimationFrame(() => { stateFrame = null; updateLiveState() })
+}).observe(grid, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
+
+function applyCameraSearch() {
+  cameraQuery = cameraSearch.value.trim()
+  document.getElementById('clearCameraSearch').hidden = !cameraSearch.value
+  page = 0
+  if (single !== null) closeSingle()
+  relayout()
+}
+let searchTimer = null
+cameraSearch.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(applyCameraSearch, 150) })
+document.getElementById('clearCameraSearch').addEventListener('click', () => {
+  clearTimeout(searchTimer)
+  cameraSearch.value = ''
+  applyCameraSearch()
+  cameraSearch.focus()
+})
+document.addEventListener('keydown', (e) => {
+  if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.target.closest('input, textarea, select, [contenteditable], dialog')) { e.preventDefault(); cameraSearch.focus() }
+})
+const viewOptions = document.querySelector('.live-options')
+document.addEventListener('pointerdown', (e) => { if (!viewOptions.contains(e.target)) viewOptions.open = false })
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && viewOptions.open) { viewOptions.open = false; viewOptions.querySelector('summary').focus() }
+})
 
 /**
  * Full-size view of one camera, laid over the grid. The grid keeps its connections and last
@@ -642,7 +746,7 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   // Keep the one it borrows (the lender, lenderFor); release the rest, which reconnect on return.
   const lender = gridTiles.find((t) => t.nvr === cam.nvr && t.ch === cam.ch && t.streamType === SUB_STREAM && t.lendable)
   for (const t of gridTiles) { if (t === lender) t.suspend(); else t.release() }
-  overlay = makeTile(cam)
+  overlay = makeTile(cam, { controls: false })
   overlay.classList.add('single', 'single-overlay')
   // links sit next to the name (not in it): a long name is cut short, the links never are
   const links = document.createElement('span')
@@ -662,6 +766,13 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   overlay.querySelector('.name').after(links)
   if (isPhone()) overlay.append(nativeFullButton(overlay))
   overlay.append(...stepArrows()) // ‹ › on every screen (keys: ← →)
+  const close = document.createElement('button')
+  close.type = 'button'
+  close.className = 'single-close'
+  close.textContent = 'Close'
+  close.setAttribute('aria-label', 'Close camera')
+  close.addEventListener('click', (e) => { e.stopPropagation(); closeSingle() })
+  overlay.append(close)
   // closing the view discards the panel's unsent changes: ask first
   overlay.addEventListener('click', () => closeSingle())
   // zoom: the wheel, a pinch, drag to pan, double-click / double-tap back (pinch-zoom.js). Only the
@@ -688,6 +799,8 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   badge.hidden = true
   overlay.append(badge)
   grid.append(overlay)
+  for (const slot of gridSlots) slot.el.inert = true
+  close.focus({ preventScroll: true })
   // inside the tap itself: a browser allows full screen only in answer to one
   if (fromTap) enterPhoneFull()
   const opts = tileOptions(cam)
@@ -715,12 +828,15 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
 
 /** Back to the grid: the grid tiles pick up again straight away. */
 function closeSingle({ resumeGrid = true, keep = null } = {}) {
+  const returnKey = single
+  const restoreFocus = Boolean(overlay?.contains(document.activeElement))
   if (upgradeTimer) { clearTimeout(upgradeTimer); upgradeTimer = null } // a pending HD upgrade is cancelled
   overlayZoom = null
   for (const t of singleTiles) if (t !== keep) t.close()
   singleTiles = []
   overlay?.remove()
   overlay = null
+  for (const slot of gridSlots) slot.el.inert = false
   if (!resumeGrid) return
   stopAhead()
   leavePhoneFull()
@@ -740,6 +856,7 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   for (const t of gridTiles) t.resume()
   syncTiles()
   updatePager()
+  if (restoreFocus) gridSlots.find((s) => s.cam && camKey(s.cam) === returnKey)?.el.querySelector('.tile-open')?.focus({ preventScroll: true })
 }
 
 /**
@@ -898,10 +1015,13 @@ function showOrder() {
  * came onto it opens.
  */
 function relayout() {
-  const { cells } = layoutCells(layoutSelect.value)
+  const { size, rows = size, cells } = layoutCells(layoutSelect.value)
   const perPage = cells.length
   const v = visibleCameras(gridCameras(), gridView(perPage))
-  if (gridSlots.length !== perPage || v.page !== page) return render({ keepSingle: true })
+  if (v.page !== page) return render({ keepSingle: true })
+  grid.style.gridTemplateColumns = `repeat(${size}, 1fr)`
+  grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`
+  grid.dataset.size = String(size)
   const before = [overlay].find((n) => n?.parentNode === grid) ?? null
   const keys = cells.map((_, i) => (v.visible[i] ? camKey(v.visible[i]) : null))
   const { from, unused } = reuseSlots(gridSlots.map((s) => (s.cam ? camKey(s.cam) : null)), keys)
@@ -928,7 +1048,7 @@ function relayout() {
         fillSlot(s, gridArea(cell))
         old.replaceWith(s.el)
         if (single !== null) s.live?.suspend()
-      } else if (tileLabel(was) !== tileLabel(s.cam)) s.el.querySelector('.name').textContent = tileLabel(s.cam) // (name or site)
+      } else if (tileLabel(was) !== tileLabel(s.cam)) refreshTileName(s.el, s.cam) // (name or site)
       return s
     }
     const s = { cam: v.visible[i], el: null, live: null }
@@ -944,6 +1064,28 @@ function relayout() {
   syncTiles()
   updatePager(v.pages)
 }
+
+let cameraToMove = null
+function showMoveCamera(cam) {
+  cameraToMove = camKey(cam)
+  const select = document.getElementById('moveCameraTarget')
+  select.replaceChildren(...shownCameras(gridCameras(), gridView()).filter((c) => camKey(c) !== cameraToMove).map((c) => new Option(tileLabel(c), camKey(c))))
+  document.getElementById('moveCameraName').textContent = tileLabel(cam)
+  document.getElementById('moveCameraApply').disabled = !select.options.length
+  document.getElementById('moveCameraDlg').showModal()
+}
+document.getElementById('moveCameraApply').addEventListener('click', () => {
+  const target = document.getElementById('moveCameraTarget').value
+  const valid = shownCameras(gridCameras(), gridView()).map(camKey)
+  if (valid.includes(cameraToMove) && valid.includes(target)) sync.change(swapOp(cameraToMove, target))
+  document.getElementById('moveCameraDlg').close()
+})
+let resizeFrame = null
+new ResizeObserver(() => {
+  if (layoutSelect.value !== 'auto' || !gridSlots.length || document.hidden) return
+  cancelAnimationFrame(resizeFrame)
+  resizeFrame = requestAnimationFrame(() => relayout())
+}).observe(grid)
 
 /** A tile dropped onto another tile (they swap places) or onto a pager arrow (first place of that page). */
 function dropTile(dragged, target) {
@@ -997,16 +1139,16 @@ document.addEventListener('fullscreenchange', () => {
 if (!document.fullscreenEnabled) fullBtn.hidden = true
 
 try {
-  smoothBox.checked = localStorage.getItem('cctv.smooth') === '1'
+  smoothBox.checked = preferenceStorage.getItem('cctv.smooth') === '1'
 } catch {}
 smoothBox.addEventListener('change', () => {
-  try { localStorage.setItem('cctv.smooth', smoothBox.checked ? '1' : '0') } catch {}
+  preferenceStorage.setItem('cctv.smooth', smoothBox.checked ? '1' : '0')
   render()
 })
 
 // A phone has room for one camera, or four: the other layouts are taken off its menu, and it keeps
 // its own choice (a PC's 4 x 4 must not follow the same user onto a phone).
-const PHONE_LAYOUTS = ['list', 'g1', 'g2']
+const PHONE_LAYOUTS = ['auto', 'list', 'g1', 'g2']
 const LAYOUT_KEY = isPhone() ? 'cctv.layout.phone' : 'cctv.layout'
 if (isPhone()) {
   for (const o of [...layoutSelect.querySelectorAll('option')]) if (!PHONE_LAYOUTS.includes(o.value)) o.remove()
@@ -1015,21 +1157,21 @@ if (isPhone()) {
   opt.value = 'list'
   opt.textContent = 'List'
   layoutSelect.prepend(opt)
-  layoutSelect.value = 'list'
+  layoutSelect.value = 'auto'
 }
 const markPhoneLayout = () => {
   document.body.classList.toggle('phone-g2', isPhone() && layoutSelect.value === 'g2')
   document.body.classList.toggle('phone-list', isPhone() && layoutSelect.value === 'list')
 }
 try {
-  const saved = localStorage.getItem(LAYOUT_KEY)
+  const saved = preferenceStorage.getItem(LAYOUT_KEY)
   if (saved && LAYOUTS[saved] && (!isPhone() || PHONE_LAYOUTS.includes(saved))) layoutSelect.value = saved
 } catch {}
 markPhoneLayout()
 layoutSelect.addEventListener('change', () => {
   page = 0
   markPhoneLayout()
-  try { localStorage.setItem(LAYOUT_KEY, layoutSelect.value) } catch {}
+  preferenceStorage.setItem(LAYOUT_KEY, layoutSelect.value)
   freshenForPageChange() // the cameras on the page change: drop a big grid's backlog (like the pager)
   render({ keepSingle: true })
 })
@@ -1040,8 +1182,8 @@ layoutSelect.addEventListener('change', () => {
 // a larger one on screen becomes 4 x 4, and a note says why. The layout this PC last chose is left as
 // it was stored: only choosing one stores it. Not a phone: it has its own short menu above.
 const layoutNote = document.getElementById('layoutNote')
-const LAYOUT_TILES = Object.fromEntries(Object.keys(LAYOUTS).map((id) => [id, layoutCells(id).cells.length]))
-let noH265Limit = false
+// Auto caps itself when the codec result arrives, so it remains offered at every camera count.
+const LAYOUT_TILES = Object.fromEntries(Object.keys(LAYOUTS).map((id) => [id, id === 'auto' ? 1 : layoutCells(id).cells.length]))
 /** The layout to show for one asked for (a saved view's): cut to 4 x 4 on such a PC, and said. */
 function layoutOnThisPc(wanted) {
   const { layout, limited } = layoutShown(wanted, LAYOUT_TILES, { noH265: noH265Limit })
@@ -1062,7 +1204,7 @@ function limitForNoH265({ draw = true } = {}) {
   layoutSelect.title = NO_H265_NOTE
   const shown = layoutOnThisPc(wanted)
   layoutSelect.value = shown
-  if (shown === wanted || !draw) return
+  if ((shown === wanted && wanted !== 'auto') || !draw) return
   page = 0
   freshenForPageChange()
   render({ keepSingle: true })
@@ -1070,19 +1212,22 @@ function limitForNoH265({ draw = true } = {}) {
 const noH265Timer = isPhone() ? null : setInterval(limitForNoH265, 1000)
 if (!isPhone()) limitForNoH265({ draw: false }) // (?h265=0 is known already; the first drawing is still to come)
 try {
-  hideOffline.checked = localStorage.getItem('cctv.hideOffline') !== '0'
+  hideOffline.checked = preferenceStorage.getItem('cctv.hideOffline') !== '0'
 } catch {}
 hideOffline.addEventListener('change', () => {
   page = 0
-  try { localStorage.setItem('cctv.hideOffline', hideOffline.checked ? '1' : '0') } catch {}
+  preferenceStorage.setItem('cctv.hideOffline', hideOffline.checked ? '1' : '0')
   freshenForPageChange()
   render({ keepSingle: true })
 })
 siteSelect.addEventListener('change', () => {
+  rememberSite(siteSelect.value.startsWith('@nvr:') ? cameras.find((c) => `@nvr:${c.nvr}` === siteSelect.value)?.site || '' : siteSelect.value)
+  liveBrowser?.refresh()
   page = 0
   activeView = null // browsing by site leaves the saved view; the dropdown goes back to "(not saved)"
+  preferenceStorage.setItem('cctv.activeView', '')
   renderViewSel()
-  try { localStorage.setItem('cctv.site', siteSelect.value) } catch {}
+  preferenceStorage.setItem('cctv.site', siteSelect.value)
   // a whole different set of cameras is about to subscribe; drop the old site's video still draining
   // on the shared socket, or on a big grid the new site's streams queue behind it (never switching)
   freshenForPageChange()
@@ -1096,6 +1241,7 @@ siteSelect.addEventListener('change', () => {
 // A named set of cameras and a layout, kept with the account and shared with the Wall. Selecting one
 // restricts the grid to its cameras in its order; "(not saved)" shows every camera again. Versioned
 // exactly as the camera order is: a save on a stale version is refused and the list reloaded.
+let viewsRestored = false
 async function loadViews() {
   try {
     const res = await fetch('/api/me/views')
@@ -1103,6 +1249,11 @@ async function loadViews() {
     const got = await res.json()
     views = normaliseViews(got.views).views
     viewsVersion = Number.isSafeInteger(got.version) ? got.version : 0
+    if (!viewsRestored) {
+      viewsRestored = true
+      activeView = views.find((v) => v.id === preferenceStorage.getItem('cctv.activeView')) ?? null
+      if (activeView && LAYOUTS[activeView.layout] && !isPhone()) { layoutSelect.value = layoutOnThisPc(activeView.layout); markPhoneLayout() }
+    }
   } catch {
     views = [] // a page that cannot read its views still shows the grid
   }
@@ -1145,12 +1296,13 @@ const currentViewCameras = () => shownCameras(gridCameras(), { ...gridView(), hi
 
 function selectView(id) {
   activeView = views.find((v) => v.id === id) ?? null
+  preferenceStorage.setItem('cctv.activeView', activeView?.id || '')
   // a live-page layout rides with the view; a Wall layout ('3x3' etc.) the live grid cannot draw is
   // left as it is (layoutCells falls back anyway), rather than blanking the dropdown
-  if (activeView && LAYOUTS[activeView.layout]) {
+  if (activeView && LAYOUTS[activeView.layout] && (!isPhone() || PHONE_LAYOUTS.includes(activeView.layout))) {
     layoutSelect.value = layoutOnThisPc(activeView.layout) // (4 x 4 on a PC without H.265; the view stays as saved)
     markPhoneLayout()
-    try { localStorage.setItem(LAYOUT_KEY, layoutSelect.value) } catch {}
+    preferenceStorage.setItem(LAYOUT_KEY, layoutSelect.value)
   }
   page = 0
   renderViewSel()
@@ -1184,6 +1336,7 @@ document.getElementById('viewSave').addEventListener('click', async () => {
   const saved = await putViews([...views.filter((v) => v.id !== value.id), value])
   if (!saved.ok) return (viewMsgEl.textContent = saved.error)
   activeView = views.find((v) => v.id === value.id) ?? value
+  preferenceStorage.setItem('cctv.activeView', activeView.id)
   renderViewSel()
   render({ keepSingle: true })
   viewDlg.close()
@@ -1194,6 +1347,7 @@ deleteViewBtn.addEventListener('click', async () => {
   const saved = await putViews(views.filter((v) => v.id !== activeView.id))
   if (!saved.ok) return
   activeView = null
+  preferenceStorage.setItem('cctv.activeView', '')
   renderViewSel()
   render({ keepSingle: true })
 })
@@ -1331,10 +1485,11 @@ async function loadCameras(pre = null) {
   // site filter, shown only when there is more than one site; a multi-NVR site gets an NVR submenu
   const names = [...new Set(sites.map((s) => s.site))]
   document.getElementById('siteLabel').hidden = names.length < 2
-  const current = siteSelect.value || (() => { try { return localStorage.getItem('cctv.site') ?? '' } catch { return '' } })()
+  const current = siteSelect.value || (workspaceSite() ?? preferenceStorage.getItem('cctv.site') ?? '')
   const opts = siteOptions(sites)
   siteSelect.replaceChildren(...opts)
   siteSelect.value = opts.some((o) => o.value === current) ? current : ''
+  liveBrowser?.refresh()
 
   const down = sites.filter((s) => s.status !== 'online')
   notice.hidden = down.length === 0 && cameras.length > 0
@@ -1379,6 +1534,12 @@ async function loadCameras(pre = null) {
 const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(r, ms))])
 await within(early.catch(() => {}), 6000)
 await within(loadCameras(prefetched).catch(() => listSoon()), 8000)
+liveBrowser = mountCameraBrowser({
+  host: document.querySelector('.live-scope'), cameras: () => cameras,
+  selectedSite: () => siteSelect.value.startsWith('@nvr:') ? cameras.find((c) => `@nvr:${c.nvr}` === siteSelect.value)?.site || '' : siteSelect.value,
+  onSite: (name) => { siteSelect.value = name; siteSelect.dispatchEvent(new Event('change')) },
+  onCamera: (cam) => { siteSelect.value = cam.site; siteSelect.dispatchEvent(new Event('change')); openSingle(cam, { fromTap: true }) }
+})
 listSoon() // (whatever happened above, the list is re-read every 5 s for the next minute)
 if (sync.unsaved) sync.refresh()
 // the camera list, and this user's order (another screen may have changed it)
@@ -1398,25 +1559,6 @@ setInterval(() => {
   if (Date.now() < fastUntil && !document.hidden) loadCameras().catch(() => {})
 }, 5000)
 
-// Once per browser: say that the grid can be rearranged, which nothing on screen otherwise shows.
-{
-  let seen = false
-  try { seen = localStorage.getItem('cctv.tip.drag') === '1' } catch {}
-  if (!seen && !matchMedia('(pointer: coarse)').matches) {
-    const tip = document.createElement('div')
-    tip.className = 'live-tip'
-    tip.innerHTML = '<span>Tip: drag a camera onto another to swap them, or onto ‹ › to move it to another page. Your order is kept.</span>'
-    const ok = document.createElement('button')
-    ok.type = 'button'
-    ok.textContent = 'Got it'
-    ok.addEventListener('click', () => {
-      tip.remove()
-      try { localStorage.setItem('cctv.tip.drag', '1') } catch {}
-    })
-    tip.append(ok)
-    document.body.append(tip)
-  }
-}
 
 // ---- phones: flick left and right to go through the cameras ----
 /** The next (dir 1) or previous (-1) camera of the grid, full-size. */

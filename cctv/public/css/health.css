@@ -1,0 +1,30 @@
+.health-page main.health { max-width: 1500px; width: 100%; padding: 24px; gap: 20px; box-sizing: border-box; }
+.health-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.health-heading h1 { margin: 0; font-size: 28px; }
+.health-heading p { color: var(--text-muted); margin: 8px 0 0; }
+.health-page button, .health-page input { min-height: 44px; }
+.health-page button:focus-visible, .health-page input:focus-visible, .health-page summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.health-fresh { color: var(--ok-text); }
+.health-stale { color: var(--text); background: var(--warn-soft); border-left: 4px solid var(--warn); padding: 12px; }
+.health-page .hp-hero { padding: 20px; border-radius: var(--r-lg); }
+.health-page .hp-hero-tags { max-height: 180px; overflow: auto; }
+.health-page .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }
+.health-page .card { padding: 18px; border-radius: var(--r-md); }
+.health-page .card .note { font-size: 13px; line-height: 1.5; }
+.health-filters { display: flex; align-items: end; flex-wrap: wrap; gap: 20px; padding: 16px; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-md); }
+.health-filters label { display: grid; gap: 8px; }
+.health-filters input[type=search] { min-width: 280px; }
+.health-filters .health-issues { display: flex; align-items: center; min-height: 44px; }
+.health-issues input { width: 20px; }
+#healthResults { color: var(--text-muted); padding-bottom: 12px; }
+.health-pager { display: flex; gap: 16px; align-items: center; justify-content: flex-end; }
+.health-page .nvr-sum { padding: 18px; }
+.health-page .hp-history { overflow: auto; }
+@media (max-width: 700px) {
+  .health-page main.health { padding: 16px; }
+  .health-heading { align-items: flex-start; flex-direction: column; }
+  .health-filters > label { width: 100%; }
+  .health-filters input[type=search] { min-width: 0; width: 100%; box-sizing: border-box; }
+  .health-page .nvr-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .health-page .nvr-sum-head { flex-wrap: wrap; }
+}

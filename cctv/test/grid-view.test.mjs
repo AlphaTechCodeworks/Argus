@@ -17,6 +17,7 @@ import {
   afterRefusal,
   afterVideo,
   applyViews,
+  autoLiveGrid,
   backoffMs,
   checkView,
   colsOf,
@@ -38,6 +39,16 @@ const check = (name, ok, extra = '') => {
   if (!ok) failures++
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? `  (${extra})` : ''}`)
 }
+
+check('auto live: six cameras fill three columns and two rows', JSON.stringify(autoLiveGrid(6)) === '{"size":3,"rows":2}')
+check('auto live: one camera fills the screen', JSON.stringify(autoLiveGrid(1)) === '{"size":1,"rows":1}')
+check('auto live: an empty roster still has a valid grid', JSON.stringify(autoLiveGrid(0)) === '{"size":1,"rows":1}')
+check('auto live: a browser without H.265 never opens more than sixteen', JSON.stringify(autoLiveGrid(90, { noH265: true })) === '{"size":4,"rows":4}')
+check('auto live: a phone never opens more than four', JSON.stringify(autoLiveGrid(90, { phone: true })) === '{"size":2,"rows":2}')
+check('auto live: large rosters are capped for paging', JSON.stringify(autoLiveGrid(200)) === '{"size":12,"rows":12}')
+check('auto live: a wide viewport favors three columns for six cameras', JSON.stringify(autoLiveGrid(6, { width: 1600, height: 650 })) === '{"size":3,"rows":2}')
+check('auto live: a tall viewport favors two columns for six cameras', JSON.stringify(autoLiveGrid(6, { width: 650, height: 1000 })) === '{"size":2,"rows":3}')
+check('auto live: viewport fitting respects the conversion cap', (() => { const g = autoLiveGrid(200, { width: 1800, height: 700, noH265: true }); return g.size * g.rows <= 16 })())
 
 const cams = [
   { nvr: 'nvr-1', ch: 0, name: 'Front gate', nvrName: 'Office NVR', site: 'Depot' },
@@ -234,10 +245,10 @@ const names = (list) => list.map((c) => c.name).join(', ')
   const read = (name) => readFileSync(new URL(`../public/${name}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const src = read('viewer.js')
   const block = src.slice(src.indexOf('const layoutNote ='), src.indexOf('const noH265Timer ='))
-  check('viewer.js: tile counts come from layoutCells for every layout it defines', /const LAYOUT_TILES = Object\.fromEntries\(Object\.keys\(LAYOUTS\)\.map\(\(id\) => \[id, layoutCells\(id\)\.cells\.length\]\)\)/.test(block) && !/g5|g6|g8|g10|g12/.test(block))
+  check('viewer.js: fixed tile counts come from layoutCells, Auto caps itself', block.includes("id === 'auto' ? 1 : layoutCells(id).cells.length") && !/g5|g6|g8|g10|g12/.test(block))
   check('viewer.js: the limit is applied whenever the page comes to know, not only at load', /const noH265Timer = isPhone\(\) \? null : setInterval\(limitForNoH265, 1000\)/.test(src) && /if \(noH265Limit \|\| !cannotPlayH265\(\)\) return/.test(block))
   check('viewer.js: the larger layouts leave the menu', /if \(!offered\.includes\(o\.value\)\) o\.remove\(\)/.test(block) && /layoutsOffered\(LAYOUT_TILES, \{ noH265: true \}\)/.test(block))
-  check('viewer.js: a larger layout on screen becomes the fallback and is drawn again', /const wanted = layoutSelect\.value/.test(block) && /layoutSelect\.value = shown\n\s*if \(shown === wanted \|\| !draw\) return\n\s*page = 0\n\s*freshenForPageChange\(\)\n\s*render\(\{ keepSingle: true \}\)/.test(block))
+  check('viewer.js: a larger layout falls back, and Auto redraws when the codec limit arrives', block.includes("shown === wanted && wanted !== 'auto'") && /page = 0\n\s*freshenForPageChange\(\)\n\s*render\(\{ keepSingle: true \}\)/.test(block))
   check('viewer.js: the limit itself stores nothing (the PC\'s own choice and the saved views stay)', !/localStorage|putViews/.test(block))
   check('viewer.js: the note is set as text, when a layout was cut', /if \(limited && layoutNote\) \{\n\s*layoutNote\.textContent = NO_H265_NOTE\n\s*layoutNote\.hidden = false/.test(block) && !/innerHTML/.test(block))
   check('viewer.js: a saved view opens through the same limit', /layoutSelect\.value = layoutOnThisPc\(activeView\.layout\)/.test(src))

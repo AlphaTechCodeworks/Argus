@@ -289,6 +289,8 @@ export class LiveTile {
     // (only when it changes: a big grid would otherwise write every badge every second)
     if (this.status.textContent !== text) this.status.textContent = text
     this.status.classList.toggle('live', live)
+    const placeholder = this.tile?.querySelector('.tile-placeholder strong')
+    if (placeholder && placeholder.textContent !== text) placeholder.textContent = text === 'LIVE' ? 'Live video' : text
   }
 
   /** Paints the state dot (only when it changes: a big grid would otherwise rewrite every tile every second). */
@@ -390,6 +392,10 @@ export class LiveTile {
       this.setStatus('LIVE', true)
       const fps = `${s.fps} fps`
       if (this.status.title !== fps) this.status.title = fps
+    }
+    if (!this.closed && !this.suspended && this.ws?.readyState === 0 && !this.lastDataAt && /connecting|Waiting for video|No video received/.test(this.status.textContent)) {
+      const seconds = Math.max(0, Math.floor((this.now() - this.connectAt) / 1000))
+      this.setStatus(seconds >= 30 ? 'No video received · waiting to connect' : `Waiting for video · ${seconds}s`)
     }
     this.setDot({
       hasVideo: Boolean(open && this.lastDataAt && s.fps > 0),

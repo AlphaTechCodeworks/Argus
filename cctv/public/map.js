@@ -9,6 +9,10 @@
 // screen = (world - centre) * 2^zoom + half the viewport.
 import { LiveTile, SUB_STREAM, TILE_HTML } from './live-tile.js'
 import { showStill } from './stills.js'
+import { searchCameras } from './grid-view.js'
+import { planFlight, flightPose } from './map-flight.js'
+import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
+import { preferenceStorage } from './user-settings.js'
 import {
   MAX_LAT,
   STATES,
@@ -223,55 +227,39 @@ class MapView {
    * @param {number} ms how long to take
    * @returns {Promise<void>} resolves when it lands
    */
-  flyTo(to, ms = 1100) {
+  flyTo(to, ms) {
     this.cancelFly()
     const from = { cx: this.cx, cy: this.cy, zoom: this.zoom }
     // distance in screen pixels at the starting zoom: that, not raw coordinates, is what decides
     // how far back we need to pull to show both ends
-    const scale = 2 ** from.zoom
-    const dx = (to.cx - from.cx) * scale
-    const dy = (to.cy - from.cy) * scale
-    const dist = Math.hypot(dx, dy)
     const { w, h } = this.size()
-    const span = Math.max(w, h, 1)
 
     // how much to pull back: enough that the whole journey fits on screen at the midpoint,
     // capped so a trip across the world does not end up at zoom -20
-    const out = dist <= span ? 0 : Math.min(Math.log2(dist / span), 4)
-    const lowest = Math.max(this.minZoom, Math.min(from.zoom, to.zoom) - out)
+    const { pullback: out, lowest, duration } = planFlight(from, to, { width: w, height: h, minZoom: this.minZoom, duration: ms })
     const worthIt = out > 0.15 // a short hop should just glide, not lurch outwards and back
 
     // warm the pulled-back tiles now, so the way out does not show blank squares before they load
     // (the cache-warming loads land in the service worker's tile cache too; map.js sw.js)
-    if (worthIt) this.#preloadFly(from, to, lowest)
 
     // a person in the room may prefer no animation at all
-    if (matchMedia('(prefers-reduced-motion: reduce)').matches || ms <= 0) {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches || duration <= 0) {
       this.cx = to.cx; this.cy = to.cy; this.zoom = to.zoom
       this.#clampCentre(); this.requestRender()
       return Promise.resolve()
     }
 
-    const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2) // slow, quick, slow
+    if (worthIt) this.#preloadFly(from, to, lowest)
     const start = performance.now()
     return new Promise((done) => {
+      this.flyDone = done
       const step = (now) => {
-        const t = Math.min(1, (now - start) / ms)
-        const e = ease(t)
-        this.cx = from.cx + (to.cx - from.cx) * e
-        this.cy = from.cy + (to.cy - from.cy) * e
-        if (worthIt) {
-          // a hump: out on the way, back in on arrival. sin gives 0 at both ends, 1 in the middle.
-          const hump = Math.sin(Math.PI * e)
-          const straight = from.zoom + (to.zoom - from.zoom) * e
-          this.zoom = straight - (straight - lowest) * hump
-        } else {
-          this.zoom = from.zoom + (to.zoom - from.zoom) * e
-        }
+        const t = Math.min(1, (now - start) / duration)
+        Object.assign(this, flightPose(from, to, lowest, out, t))
         this.#clampCentre()
         this.render()
         if (t < 1) this.flyFrame = requestAnimationFrame(step)
-        else { this.flyFrame = 0; this.cx = to.cx; this.cy = to.cy; this.zoom = to.zoom; this.#clampCentre(); this.requestRender(); done() }
+        else { this.flyFrame = 0; this.flyDone = null; this.cx = to.cx; this.cy = to.cy; this.zoom = to.zoom; this.#clampCentre(); done() }
       }
       this.flyFrame = requestAnimationFrame(step)
     })
@@ -281,6 +269,8 @@ class MapView {
   cancelFly() {
     if (this.flyFrame) cancelAnimationFrame(this.flyFrame)
     this.flyFrame = 0
+    this.flyDone?.()
+    this.flyDone = null
   }
 
   /**
@@ -324,12 +314,14 @@ class MapView {
   }
 
   zoomBy(dz) {
+    this.cancelFly()
     const { w, h } = this.size()
     this.zoomAt(this.zoom + dz, w / 2, h / 2)
     this.onViewChange()
   }
 
   panBy(dx, dy) {
+    this.cancelFly()
     this.cx -= dx / this.scale
     this.cy -= dy / this.scale
     this.#clampCentre()
@@ -346,6 +338,7 @@ class MapView {
   }
 
   requestRender() {
+    if (this.flyFrame) return // The flight already draws each frame, including arriving tiles.
     if (!this.frame) this.frame = requestAnimationFrame(() => this.render())
   }
 
@@ -515,6 +508,16 @@ const linksBtn = $('links')
 const side = $('side')
 const emptyEl = $('empty')
 const liveEl = $('live')
+let mapListQuery = ''
+let mapBrowser
+let mapListPage = 0
+let mapListScope = ''
+const MAP_LIST_LIMIT = 50
+$('mapCameraSearch').addEventListener('input', (e) => {
+  mapListQuery = e.target.value.trim()
+  mapListPage = 0
+  renderSide() // Filter the camera list only: markers, positions, cones and saved maps stay intact.
+})
 
 let isAdmin = false
 let cameras = [] // /api/cameras: { nvr, site, nvrName, ch, name, online, configured }
@@ -816,7 +819,15 @@ view.onDraw = () => {
   const m = current()
   const cones = svgEl('g')
   const marks = svgEl('g')
-  const { markers, badges } = scene()
+  const sceneNow = scene()
+  const { w, h } = view.size()
+  // Include coverage intersecting the viewport, even when its camera is just off screen.
+  // This only bounds SVG work; saved placements and site/cluster navigation remain intact.
+  const markers = sceneNow.markers.filter((m) => {
+    const margin = Math.max(128, m.r || 0)
+    return m.x >= -margin && m.x <= w + margin && m.y >= -margin && m.y <= h + margin
+  })
+  const badges = sceneNow.badges.filter((b) => b.sx >= -256 && b.sx <= w + 256 && b.sy >= -64 && b.sy <= h + 64)
   if (m && view.mode) {
     const showNames = namesBox.checked
     // While editing, every camera stays its own marker: an admin is moving and aiming individual
@@ -1305,7 +1316,9 @@ function leavePlan() {
 /** A site button, a badge, or "All sites" (''): choose it and fly there on the one map. */
 function goSite(name) {
   site = siteNames.includes(name) ? name : ''
-  try { localStorage.setItem('cctv.mapSite', site) } catch {}
+  rememberSite(site)
+  mapBrowser?.refresh()
+  preferenceStorage.setItem('cctv.mapSite', site)
   selected = null
   placing = null
   placingSite = false
@@ -1366,7 +1379,10 @@ function renderSites({ reveal = true } = {}) {
   const all = btn('all', { className: 'map-site-go', textContent: 'All sites', 'aria-pressed': String(!planSite && !site) })
   all.addEventListener('click', () => goSite(''))
   parts.push(el('span', { className: `map-site${!planSite && !site ? ' sel' : ''}` }, all))
-  for (const s of oneMap().sites) {
+  const quickSites = oneMap().sites
+  const selectedQuick = quickSites.find((s) => s.name === site)
+  const shownSites = selectedQuick ? [selectedQuick, ...quickSites.filter((s) => s !== selectedQuick).slice(0, 11)] : quickSites.slice(0, 12)
+  for (const s of shownSites) {
     const offline = s.keys.filter((k) => stateFor(k) === 'offline').length
     // said in full for a screen reader: read as written, "37" and "4 offline" run together as 374
     const spoken = `${s.name}, ${s.count} camera${s.count === 1 ? '' : 's'}${offline ? `, ${offline} offline` : ''}${s.placed ? '' : ', not placed on the map'}`
@@ -1466,17 +1482,27 @@ function viewPanel() {
   const where = placed()
   const list = el('ul', { className: 'map-cams' })
   const names = name ? [name] : siteNames
+  const scope = JSON.stringify([name, planSite, mapListQuery])
+  if (scope !== mapListScope) { mapListPage = 0; mapListScope = scope }
   let on = 0
   let total = 0
+  const matches = names.flatMap((n) => searchCameras(siteCams(n), mapListQuery))
+  const pageCount = Math.max(1, Math.ceil(matches.length / MAP_LIST_LIMIT))
+  mapListPage = Math.min(mapListPage, pageCount - 1)
+  const visibleKeys = new Set(matches.slice(mapListPage * MAP_LIST_LIMIT, (mapListPage + 1) * MAP_LIST_LIMIT).map(camKey))
   for (const n of names) {
+    const matching = searchCameras(siteCams(n), mapListQuery)
+    if (!matching.length) continue
     // every site at once: each under its own name, so the list reads the way the map does
-    if (names.length > 1) list.append(el('li', { className: 'map-cams-site', textContent: n }))
-    for (const cam of siteCams(n)) {
+    if (names.length > 1 && matching.some((c) => visibleKeys.has(camKey(c)))) list.append(el('li', { className: 'map-cams-site', textContent: n }))
+    for (const cam of matching) {
       const key = camKey(cam)
       total++
+      if (where[key]) on++
+      if (!visibleKeys.has(key)) continue
       if (where[key]) {
-        on++
         const btn = el('button', { type: 'button', className: 'st-link', textContent: 'Show' })
+        btn.setAttribute('aria-label', `Show ${cam.name || camLabel(cam, key)} on map and open live video`)
         const li = camRow(cam, key, btn, { placed: true })
         const show = () => {
           showCamera(key)
@@ -1503,9 +1529,20 @@ function viewPanel() {
     if (isAdmin) acts.append(el('button', { type: 'button', className: 'st-primary', textContent: 'Place this site', onclick: () => startPlaceSite(name) }))
     if (acts.childElementCount) parts.push(acts)
   } else {
-    parts.push(el('p', { className: 'map-help', textContent: `${on} of ${total} on the ${planSite ? 'plan' : 'map'}. Click a camera for live video.` }))
+    parts.push(el('p', { className: 'map-help', textContent: mapListQuery ? `${total} matching camera${total === 1 ? '' : 's'} · ${on} placed. Search filters this list only.` : `${on} of ${total} on the ${planSite ? 'plan' : 'map'}. Select a camera for live video.` }))
   }
   parts.push(legend(), coneLegend(), list)
+  if (!total) parts.push(el('p', { className: 'map-help', textContent: 'No cameras match. Try another name, site or recorder.' }))
+  if (pageCount > 1) {
+    const pager = el('div', { className: 'map-actions', role: 'group', 'aria-label': 'Camera result pages' })
+    const change = (delta) => { mapListPage += delta; renderSide(); side.querySelector('.map-result-count')?.focus() }
+    pager.append(
+      el('button', { type: 'button', textContent: 'Previous', disabled: mapListPage === 0, onclick: () => change(-1) }),
+      el('span', { className: 'map-result-count', tabIndex: -1, textContent: `${mapListPage * MAP_LIST_LIMIT + 1}–${Math.min(total, (mapListPage + 1) * MAP_LIST_LIMIT)} of ${total}` }),
+      el('button', { type: 'button', textContent: 'Next', disabled: mapListPage === pageCount - 1, onclick: () => change(1) })
+    )
+    parts.push(pager)
+  }
   return parts
 }
 
@@ -2150,21 +2187,59 @@ document.addEventListener('keydown', (e) => {
 $('zoomIn').addEventListener('click', () => view.zoomBy(1))
 $('zoomOut').addEventListener('click', () => view.zoomBy(-1))
 $('fit').addEventListener('click', fitAll)
+const mapFullscreen = $('mapFullscreen')
+let mapFullscreenFallback = false
+function syncMapFullscreen() {
+  const on = Boolean(document.fullscreenElement) || mapFullscreenFallback
+  document.body.classList.toggle('map-fullscreen', on)
+  mapFullscreen.setAttribute('aria-pressed', String(on))
+  mapFullscreen.setAttribute('aria-label', on ? 'Exit full screen map' : 'Full screen map')
+  mapFullscreen.title = on ? 'Exit full screen map (Escape)' : 'Full screen map'
+  mapFullscreen.textContent = on ? '✕' : '⛶'
+  view.cancelFly()
+  view.requestRender()
+}
+mapFullscreen.addEventListener('click', async () => {
+  if (document.fullscreenElement) {
+    try { await document.exitFullscreen() } catch { /* retain the exit control if exit was refused */ }
+  } else if (mapFullscreenFallback) {
+    mapFullscreenFallback = false
+  } else {
+    try {
+      if (!document.fullscreenEnabled || !document.documentElement.requestFullscreen) throw new Error('Fullscreen unavailable')
+      await document.documentElement.requestFullscreen({ navigationUI: 'hide' })
+    } catch {
+      // Browsers without the Fullscreen API still get a map workspace filling the page.
+      mapFullscreenFallback = true
+    }
+  }
+  syncMapFullscreen()
+})
+document.addEventListener('fullscreenchange', syncMapFullscreen)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && mapFullscreenFallback && !document.querySelector('dialog[open]')) {
+    mapFullscreenFallback = false
+    syncMapFullscreen()
+    mapFullscreen.focus()
+    e.preventDefault()
+    e.stopImmediatePropagation()
+  }
+}, true)
 editBtn.addEventListener('click', startEdit)
 linksBtn.addEventListener('click', startLinks)
 
 try {
-  namesBox.checked = localStorage.getItem('cctv.mapNames') !== '0'
+  namesBox.checked = preferenceStorage.getItem('cctv.mapNames') !== '0'
 } catch {}
 namesBox.addEventListener('change', () => {
-  try { localStorage.setItem('cctv.mapNames', namesBox.checked ? '1' : '0') } catch {}
+  preferenceStorage.setItem('cctv.mapNames', namesBox.checked ? '1' : '0')
   view.requestRender()
 })
 
 // street map or satellite pictures: one choice for the whole map, remembered in this browser
 satBox.addEventListener('change', () => {
   layer = satBox.checked ? 'satellite' : 'street'
-  try { localStorage.setItem('cctv.mapLayer', layer) } catch {}
+  preferenceStorage.setItem('cctv.mapLayer', layer)
   if (!planSite && view.mode === 'geo') view.setGeo({ layer, ...view.geoView() }, true)
 })
 
@@ -2199,6 +2274,7 @@ function setCameras(list) {
   cameras = list
   siteNames = [...new Set(cameras.filter((c) => c.configured !== false).map((c) => c.site))].sort((a, b) => String(a).localeCompare(String(b)))
   stale()
+  mapBrowser?.refresh()
 }
 
 {
@@ -2210,8 +2286,8 @@ function setCameras(list) {
   let savedSite = ''
   let savedLayer = ''
   try {
-    savedSite = localStorage.getItem('cctv.mapSite') ?? ''
-    savedLayer = localStorage.getItem('cctv.mapLayer') ?? ''
+    savedSite = workspaceSite() ?? preferenceStorage.getItem('cctv.mapSite') ?? ''
+    savedLayer = preferenceStorage.getItem('cctv.mapLayer') ?? ''
   } catch {}
   site = siteNames.includes(savedSite) ? savedSite : '' // every site, unless one was chosen last time
   // the layer chosen in this browser, else the one the first placed site was saved with
@@ -2220,6 +2296,11 @@ function setCameras(list) {
   satBox.checked = layer === 'satellite'
 }
 editBtn.hidden = linksBtn.hidden = !isAdmin
+mapBrowser = mountCameraBrowser({
+  host: document.querySelector('header .controls'), cameras: () => cameras.filter((c) => c.configured !== false), selectedSite: () => site,
+  onSite: goSite,
+  onCamera: (cam) => { goSite(cam.site); showCamera(camKey(cam)); openLive(camKey(cam)); renderSide() }
+})
 applyView(false)
 renderSites()
 renderSide()

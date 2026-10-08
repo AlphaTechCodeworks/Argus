@@ -337,6 +337,10 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
       const keyOf = (c) => cameraKey(c.nvr ?? c.nvrId, c.ch)
       const mine = cams.filter((c) => canSee(c.nvr ?? c.nvrId, c.ch))
       let camKeys = want.cameras?.length ? want.cameras : null
+      if (p.get('site')) {
+        const siteKeys = new Set(mine.filter((c) => c.site === p.get('site')).map(keyOf))
+        camKeys = camKeys ? camKeys.filter((k) => siteKeys.has(k)) : [...siteKeys]
+      }
       // (everything this server knows: an admin, who also sees the alarms of cameras since removed)
       if (mine.length < cams.length) {
         const seen = new Set(mine.map(keyOf))

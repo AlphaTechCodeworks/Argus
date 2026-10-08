@@ -7,8 +7,9 @@
 import { PHONE_BAR, currentId, navFor } from './nav-model.js'
 import { icon } from './icons.js'
 import { nextTheme, readTheme, saveTheme } from './theme.js'
+import { preferenceStorage, savePendingSettings } from './user-settings.js'
 
-const store = (() => { try { return window.localStorage } catch { return null } })()
+const store = preferenceStorage
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
 
 function applyTheme(t) {
@@ -18,7 +19,7 @@ function applyTheme(t) {
 
 function link(item, here, cls = '') {
   const on = item.id === here
-  return `<a class="${cls}" href="${item.href}"${on ? ' aria-current="page"' : ''} title="${esc(item.label)}">${icon(item.icon)}<span>${esc(item.label)}</span></a>`
+  return `<a class="${cls}" href="${item.href}" aria-label="${esc(item.label)}"${on ? ' aria-current="page"' : ''} title="${esc(item.label)}">${icon(item.icon)}<span>${esc(item.label)}</span></a>`
 }
 
 // Who is signed in, as last seen: the shell is drawn from this at once, and corrected when /api/me
@@ -39,11 +40,13 @@ function render(parts, me) {
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
   const version = me.build?.version ? esc(me.build.version) : ''
   side.innerHTML = `
-    <a class="shell-brand" href="/"><img class="shell-logo" src="/logo.svg" alt="" /><span>Argus</span></a>
+    <a class="shell-brand" href="/" aria-label="Argus home"><img class="shell-logo" src="/logo.svg" alt="" /><span class="shell-brand-type"><strong>Argus</strong><small>Security everywhere</small></span></a>
+    <button type="button" class="shell-pin" data-sidebar-pin aria-label="Keep sidebar expanded" aria-pressed="${document.body.classList.contains('sidebar-pinned')}" title="Keep sidebar expanded">${icon('pin')}<span class="shell-pin-label">Keep sidebar open</span></button>
     <nav class="shell-nav">
       ${groups.map((g) => `<div class="shell-group"><div class="shell-group-label">${esc(g.label)}</div>${g.items.map((i) => link(i, here)).join('')}</div>`).join('')}
     </nav>
     <div class="shell-foot">
+      <button type="button" class="shell-settings-status" data-settings-retry hidden aria-live="polite"></button>
       ${themeButton(theme, 'shell-theme btn-ghost')}
       <div class="shell-user"><span class="shell-avatar">${esc((me.user ?? '?').slice(0, 1).toUpperCase())}</span>
         <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small>${me.address ? `<small class="shell-route" title="${me.direct ? 'You are connected straight to the server on the local network' : 'You are connected over the internet (through Cloudflare)'}">${esc(me.address)} · ${me.direct ? 'local' : 'internet'}</small>` : ''}</span>
@@ -62,6 +65,7 @@ function render(parts, me) {
 export function mountShell() {
   if (document.body.classList.contains('has-shell')) return
   applyTheme(readTheme(store))
+  try { document.body.classList.toggle('sidebar-pinned', store?.getItem('cctv.sidebarPinned') === '1') } catch {}
 
   // the page's own content, moved as it is into the main column. This runs before the page's own
   // scripts (shell.js is the first module on every page), so no video has started yet: a playing
@@ -98,9 +102,15 @@ export function mountShell() {
 
   // one listener for the lot, so a re-render needs no re-binding
   document.body.addEventListener('click', async (e) => {
-    const t = e.target.closest?.('.shell-more-btn, [data-theme-toggle], [data-sign-out]')
+    const t = e.target.closest?.('.shell-more-btn, [data-theme-toggle], [data-sign-out], [data-sidebar-pin], [data-settings-retry]')
     if (!t) return
-    if (t.matches('.shell-more-btn')) {
+    if (t.matches('[data-settings-retry]')) {
+      savePendingSettings()
+    } else if (t.matches('[data-sidebar-pin]')) {
+      const pinned = document.body.classList.toggle('sidebar-pinned')
+      t.setAttribute('aria-pressed', String(pinned))
+      try { store?.setItem('cctv.sidebarPinned', pinned ? '1' : '0') } catch {}
+    } else if (t.matches('.shell-more-btn')) {
       sheet.hidden = !sheet.hidden
       t.setAttribute('aria-expanded', String(!sheet.hidden))
     } else if (t.matches('[data-theme-toggle]')) {
@@ -116,6 +126,14 @@ export function mountShell() {
   })
 
   addEventListener('hashchange', () => render(parts, me))
+  document.addEventListener('preferences-save', (e) => {
+    const status = side.querySelector('[data-settings-retry]')
+    if (!status) return
+    status.hidden = e.detail === 'saved'
+    status.textContent = e.detail === 'failed' ? 'Settings sync failed · Retry' : e.detail === 'accountchanged' ? 'Account changed · Reload to save' : 'Saving settings…'
+    status.disabled = e.detail !== 'failed'
+    status.title = status.textContent
+  })
 
   fetch('/api/me', { credentials: 'same-origin' })
     .then((r) => (r.ok ? r.json() : null))

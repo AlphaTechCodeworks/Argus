@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="css/components.css" />
   <link rel="stylesheet" href="css/shell.css" />
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="css/health.css" />
 </head>
 <body class="health-page">
   <header>
@@ -33,6 +34,8 @@
   </header>
 
   <main class="health">
+    <div class="health-heading"><div><h1>System health</h1><p>Recording continuity, recorder faults and server capacity.</p></div><button id="healthRefresh" type="button">Refresh health</button></div>
+    <p id="healthFreshness" role="status">Connecting to the server...</p>
     <div id="hero" class="hp-hero" role="status"><div class="hp-hero-text"><strong>Checking the system…</strong></div></div>
     <p id="sending" class="hp-sending" role="status"></p>
 
@@ -56,7 +59,9 @@
     <h2>This server</h2>
     <div id="system" class="cards"></div>
 
-    <h2>NVRs</h2>
+    <h2>Recorder diagnostics</h2>
+    <div class="health-filters"><label>Search recorders<input id="healthSearch" type="search" placeholder="Recorder name or ID" /></label><label class="health-issues"><input id="healthIssues" type="checkbox" /> Needs attention only</label><span id="healthResults" role="status"></span></div>
+    <div class="health-pager"><button id="healthPrevious" type="button">Previous</button><span id="healthPage"></span><button id="healthNext" type="button">Next</button></div>
     <!-- One panel per NVR. Its own disks are the headline: the NVR's copy of roughly the last
          30 days is the only redundancy this system has, and nothing used to look at it. -->
     <div id="nvrs" class="nvr-panels"></div>

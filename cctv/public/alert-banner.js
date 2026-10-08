@@ -45,13 +45,18 @@ async function poll() {
   const text = document.createElement('div')
   text.className = 'alert-lines'
   text.append(...lines)
-  bar.replaceChildren(text, link)
+  const details = document.createElement('details')
+  details.className = 'alert-disclosure'
+  details.open = Boolean(bar.querySelector('details')?.open)
+  const summary = document.createElement('summary')
+  summary.textContent = bannerText ? `⚠ ${bannerText.split(':')[0]} · Show details` : 'Show details'
+  details.append(summary, text)
+  // Critical failures remain visible even when the routine problem list is collapsed.
+  const critical = document.createElement('strong')
+  critical.textContent = criticalText ? `⛔ ${criticalText}` : ''
+  critical.hidden = !criticalText
+  bar.replaceChildren(critical, details, link)
   bar.classList.toggle('critical', Boolean(criticalText))
-  // phones: one line until tapped (css clamps it)
-  if (!bar.dataset.tap) {
-    bar.dataset.tap = '1'
-    bar.addEventListener('click', (e) => { if (e.target.tagName !== 'A') bar.classList.toggle('open') })
-  }
   bar.hidden = false
   // inside the page's own column once the shell is there (body is then the two-column frame)
   const host = document.querySelector('.app-main') ?? document.body

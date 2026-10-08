@@ -160,7 +160,7 @@ import { recordCrashes } from './crash-record.mjs'
 import { loopWorstMs } from './loop-lag.mjs'
 import { processErrors } from './process-guard.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
-import { GRID_ORDER_PATH, handleGridOrder } from './user-prefs.mjs'
+import { GRID_ORDER_PATH, handleGridOrder, UI_PREFS_PATH, handleUiPreferences } from './user-prefs.mjs'
 import { xmlOnline } from './xml-session.mjs'
 
 const {
@@ -698,6 +698,7 @@ const handleRequest = async (req, res) => {
 
   if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
+  if (pathname === UI_PREFS_PATH) return sendJson(res, ...(await handleUiPreferences(req, user)))
 
   // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
   // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own.

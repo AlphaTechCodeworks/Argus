@@ -223,7 +223,7 @@ check('key pattern refuses the rest', ['nvr1', 'nvr1/', '/1', 'nvr1/12345', 'nvr
   // every save keeps the previous good file as user-prefs.json.bak
   const before = readFileSync(PREFS_FILE, 'utf8')
   const [s3] = await put('carol', { order: ['nvr2/1'], version: 0 })
-  check('a save keeps the previous file as user-prefs.json.bak (mode 0600)', s3 === 200 && readFileSync(`${PREFS_FILE}.bak`, 'utf8') === before && (statSync(`${PREFS_FILE}.bak`).mode & 0o777) === 0o600)
+  check('a save keeps the previous file as user-prefs.json.bak (mode 0600 on POSIX)', s3 === 200 && readFileSync(`${PREFS_FILE}.bak`, 'utf8') === before && (process.platform === 'win32' || (statSync(`${PREFS_FILE}.bak`).mode & 0o777) === 0o600))
   check('  and the new file has everyone', fileJson().carol.gridOrder[0] === 'nvr2/1' && fileJson().alice.gridOrder.length === 4)
 }
 {

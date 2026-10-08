@@ -18,16 +18,20 @@
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/components.css" />
   <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="css/camera-browser.css" />
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="css/review.css" />
 </head>
 <body class="map-page">
+  <section class="workspace-heading" aria-label="Map overview"><h1>Camera map</h1><p>Explore sites and camera coverage</p></section>
   <header>
     <div class="brand">
       <h1>CCTV</h1>
     </div>
     <div class="controls">
+      <label class="map-find"><span class="visually-hidden">Find a camera in the list</span><input id="mapCameraSearch" type="search" placeholder="Find cameras in the list…" autocomplete="off" /></label>
       <label title="Satellite pictures instead of the street map"><input id="sat" type="checkbox" /> Satellite</label>
-      <label title="Show camera names on the map"><input id="names" type="checkbox" checked /> Names</label>
+      <label title="Show camera names on the map"><input id="names" type="checkbox" checked /> Camera names</label>
       <button id="edit" type="button" hidden>Edit map</button>
       <button id="links" type="button" hidden title="Say which camera leads to which, so a follow can step from one to the next">Edit links</button>
     </div>
@@ -49,7 +53,8 @@
       <div class="map-zoom">
         <button type="button" id="zoomIn" aria-label="Zoom in">+</button>
         <button type="button" id="zoomOut" aria-label="Zoom out">−</button>
-        <button type="button" id="fit" aria-label="Show every camera" title="Show every camera">⤢</button>
+        <button type="button" id="fit" aria-label="Fit cameras in view" title="Fit cameras in view">◎</button>
+        <button type="button" id="mapFullscreen" aria-label="Full screen map" title="Full screen map" aria-pressed="false">⛶</button>
       </div>
       <div class="map-credit" hidden></div>
       <div id="empty" class="map-empty" hidden></div>

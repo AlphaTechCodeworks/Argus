@@ -153,7 +153,7 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   const w3 = sockets.at(-1)
   now += 3000
   t3.updateStatus()
-  check('socket still connecting after 3 s: badge stays "connecting…"', /connecting/.test(parts['.status'].textContent) && !w3.closed, parts['.status'].textContent)
+  check('socket still connecting after 3 s: badge shows elapsed wait', parts['.status'].textContent === 'Waiting for video · 3s' && !w3.closed, parts['.status'].textContent)
   now += 5500
   t3.updateStatus()
   check('... never opened after 8 s, nothing else opening: dropped, and a retry is scheduled', w3.closed && Boolean(t3.retry) && /reconnecting/.test(parts['.status'].textContent), `${w3.closed} ${parts['.status'].textContent}`)

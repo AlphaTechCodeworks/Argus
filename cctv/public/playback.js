@@ -26,6 +26,8 @@
 // Switching between them (quality "SD (NVR)", or a camera or day in the other mode) converts the
 // position by the NVR's clock skew.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { searchCameras } from './grid-view.js'
+import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
 import { PLAYBACK_CLOCK, REMOTE_PLAYBACK_CLOCK } from './playout.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
@@ -1932,7 +1934,7 @@ function drawBookmarkList() {
  */
 async function openBookmark(b) {
   const key = b.cameras?.[0]
-  const known = Boolean(key) && [...cameraSel.options].some((o) => o.value === key)
+  const known = Boolean(key) && playbackCams.some((c) => `${c.nvr}/${c.ch}` === key)
   const day = fmtDate(b.startMs)
   if (day !== state.date) {
     clearClip()
@@ -2159,6 +2161,7 @@ document.addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return
   // a held arrow: one seek per press, not one NVR playback per auto-repeat (pb-transport.js)
   if (ignoredRepeat(e)) return
+  if (e.target === timeline && ['ArrowLeft', 'ArrowRight', '+', '=', '-', '_', '0'].includes(e.key)) e.preventDefault()
   if (e.key === ' ') {
     e.preventDefault()
     togglePause()
@@ -2484,9 +2487,25 @@ state.h265 = await canDecodeH265()
 // be used. The camera being watched stays even if it goes offline (marked so), rather than vanishing
 // from under the viewer. Re-read every 30 s, so a camera that comes back appears by itself.
 let cameraListSig = ''
+const cameraSite = $('cameraSite')
+const cameraSearch = $('playbackCameraSearch')
+const CAMERA_RESULT_LIMIT = 50
 function fillCameraList(list, keep) {
-  const shown = list.filter((c) => c.online || `${c.nvr}/${c.ch}` === keep)
-  const sig = JSON.stringify(shown.map((c) => [c.nvr, c.ch, c.name, c.online]))
+  const sites = [...new Set(list.map((c) => c.site).filter(Boolean))].sort()
+  const siteSig = JSON.stringify(sites)
+  if (cameraSite.dataset.sites !== siteSig) {
+    const previous = cameraSite.value
+    cameraSite.replaceChildren(new Option('All sites', ''), ...sites.map((s) => new Option(s, s)))
+    cameraSite.value = sites.includes(previous) ? previous : ''
+    cameraSite.dataset.sites = siteSig
+  }
+  const matching = searchCameras(list.filter((c) => c.online && (!cameraSite.value || c.site === cameraSite.value)), cameraSearch.value)
+  const shown = matching.slice(0, CAMERA_RESULT_LIMIT)
+  const current = list.find((c) => `${c.nvr}/${c.ch}` === keep)
+  const retained = current && !shown.includes(current)
+  if (retained) shown.unshift(current)
+  $('cameraResultCount').textContent = (matching.length > CAMERA_RESULT_LIMIT ? `${matching.length} matches · first ${CAMERA_RESULT_LIMIT} shown; refine search` : `${matching.length} matching camera${matching.length === 1 ? '' : 's'}`) + (retained ? ' · current camera retained' : '')
+  const sig = JSON.stringify(shown.map((c) => [c.nvr, c.ch, c.name, c.online, c.site, c.nvrName]))
   if (sig === cameraListSig) return
   cameraListSig = sig
   const groups = Map.groupBy(shown, (c) => `${c.site} · ${c.nvrName}`)
@@ -2498,11 +2517,25 @@ function fillCameraList(list, keep) {
   }))
   if (keep) cameraSel.value = keep
 }
+cameraSite.addEventListener('change', () => { rememberSite(cameraSite.value); fillCameraList(playbackCams, cameraSel.value); playbackBrowser.refresh() })
+let cameraSearchTimer
+cameraSearch.addEventListener('input', () => {
+  clearTimeout(cameraSearchTimer)
+  cameraSearchTimer = setTimeout(() => fillCameraList(playbackCams, cameraSel.value), 150)
+})
 // ?nvr=ID&ch=N from the Live view; otherwise the first online camera
 const params = new URLSearchParams(location.search)
 const wanted = cameras.find((c) => c.nvr === params.get('nvr') && String(c.ch) === params.get('ch'))
-const first = wanted ?? cameras.find((c) => c.online) ?? cameras[0]
+const context = workspaceSite()
+const first = wanted ?? cameras.find((c) => c.online && c.site === context) ?? cameras.find((c) => c.online) ?? cameras[0]
 if (first) fillCameraList(cameras, `${first.nvr}/${first.ch}`)
+cameraSite.value = [...cameraSite.options].some((o) => o.value === (wanted?.site ?? context)) ? wanted?.site ?? context : ''
+if (first) fillCameraList(cameras, `${first.nvr}/${first.ch}`)
+const playbackBrowser = mountCameraBrowser({
+  host: document.querySelector('header .controls'), cameras: () => playbackCams, selectedSite: () => cameraSite.value,
+  onSite: (name) => { cameraSite.value = name; fillCameraList(playbackCams, cameraSel.value) },
+  onCamera: (cam) => { cameraSite.value = cam.site; fillCameraList(playbackCams, `${cam.nvr}/${cam.ch}`); cameraSel.value = `${cam.nvr}/${cam.ch}`; cameraSel.dispatchEvent(new Event('change')) }
+})
 setInterval(async () => {
   const list = await fetch('/api/cameras?for=playback').then((r) => (r.ok ? r.json() : null)).catch(() => null)
   if (!Array.isArray(list)) return
@@ -2872,7 +2905,8 @@ const keyOf = (nvr, ch) => `${nvr}/${ch}`
 
 /** Whoever is in the camera list, by key, for names. */
 const cameraNameOf = (key) => {
-  for (const o of cameraSel.options) if (o.value === key) return o.textContent
+  const c = playbackCams.find((c) => keyOf(c.nvr, c.ch) === key)
+  if (c) return `${c.ch + 1} · ${c.name}${c.online ? '' : ' (offline)'}`
   return key
 }
 
@@ -2941,6 +2975,7 @@ followBackEl.addEventListener('click', async () => {
 async function goToCamera(nvr, ch, atMs) {
   state.nvr = nvr
   state.ch = ch
+  fillCameraList(playbackCams, keyOf(nvr, ch))
   cameraSel.value = keyOf(nvr, ch)
   history.replaceState(null, '', `?${nvrQ()}&ch=${ch}`)
   clearSearch(true)

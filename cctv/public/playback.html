@@ -18,9 +18,12 @@
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/components.css" />
   <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="css/camera-browser.css" />
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="css/review.css" />
 </head>
 <body class="playback-page">
+  <section class="workspace-heading" aria-label="Playback overview"><h1>Playback</h1><p>Review footage, mark moments, export evidence</p></section>
   <header>
     <div class="pb-mode" role="group" aria-label="View">
       <button type="button" aria-pressed="true">One camera</button>
@@ -30,8 +33,11 @@
       <h1>CCTV</h1>
     </div>
     <div class="controls">
-      <label>Camera <select id="camera"></select></label>
-      <label>Date <input id="date" type="date" /></label>
+      <label for="cameraSite">Site <select id="cameraSite"><option value="">All sites</option></select></label>
+      <label for="playbackCameraSearch">Find camera <input id="playbackCameraSearch" type="search" placeholder="Name or recorder" /></label>
+      <label for="camera">Camera <select id="camera"></select></label>
+      <span id="cameraResultCount" role="status" class="camera-meta"></span>
+      <label for="date">Date <input id="date" type="date" /></label>
     </div>
     <span id="remoteMark" class="remote-mark" hidden title="You are connected through the internet, so the picture is converted and slower. On site, open the local address instead — it is faster.">through the internet</span>
     <div class="account">
@@ -51,7 +57,7 @@
       <div class="pb-badge" id="srcBadge" hidden title="The server has not recorded this stretch: it plays from the NVR">from NVR</div>
       <div class="pb-notice" id="pbNotice" role="status" hidden></div>
       <div class="pb-spinner" id="spinner" hidden aria-hidden="true"></div>
-      <div class="pb-message" id="message" hidden></div>
+      <div class="pb-message" id="message" role="status" hidden></div>
       <div class="pb-box-layer" id="boxLayer" hidden><div class="pb-box" id="box" hidden></div></div>
     </div>
     <aside class="pb-search" id="searchPanel" hidden aria-label="Motion search">
@@ -125,8 +131,8 @@
     </div>
 
     <!-- 3. the timeline itself: recorded stretches above, motion below -->
-    <div class="pb-timeline" id="timeline"
-         aria-label="Timeline: click to jump, drag the playhead to scrub, scroll to zoom, drag to pan">
+    <div class="pb-timeline" id="timeline" tabindex="0" role="group"
+         aria-label="Timeline: left and right arrows seek ten seconds; plus and minus zoom. Click to jump, drag the playhead to scrub, scroll to zoom, drag to pan">
       <div class="pb-lane pb-lane-rec" id="laneRec"></div>
       <div class="pb-lane pb-lane-motion" id="laneMotion"></div>
       <div class="pb-now" id="tlNow" hidden></div>

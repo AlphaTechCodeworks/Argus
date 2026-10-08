@@ -9,6 +9,8 @@
 import { EVENT_KINDS, PRIORITIES, alarmRows, eventFromHash, filterSummary, labelOf, linkedEventNote, priorityClass, ruleSummary, snapshotMayArrive } from './alarms-view.js'
 import { fillCameraSelect } from './camera-choice.js'
 import { MotionTuner } from './motion-tune.js'
+import { mountCameraBrowser, workspaceSite } from './camera-browser.js'
+import { preferenceStorage } from './user-settings.js'
 
 const $ = (id) => document.getElementById(id)
 const REFRESH_MS = 30_000
@@ -16,6 +18,9 @@ const REFRESH_MS = 30_000
 let cameras = []
 let admin = false
 let tuner = null
+let alarmRowsNow = [], alarmPage = 0, alarmRequest, alarmRequestId = 0, appliedFilters = null
+let alarmBrowser
+const ALARM_PAGE_SIZE = 50
 // The alarm a link pointed at (a phone alert opens /alarms.html#event=<id>): marked in the list on
 // every repaint, scrolled to once per link.
 let linked = eventFromHash(location.hash)
@@ -91,6 +96,7 @@ function filterParams() {
   if (from !== null) p.set('from', String(from))
   if (to !== null) p.set('to', String(to))
   if (f.camera.value) p.set('cameras', f.camera.value)
+  if (f.site.value) p.set('site', f.site.value)
   if (f.type.value) p.set('types', f.type.value)
   if (f.priority.value) p.set('priorities', f.priority.value)
   if (f.acked.value) p.set('acked', f.acked.value)
@@ -101,18 +107,59 @@ function filterParams() {
 // ---- the list ----------------------------------------------------------------------------------
 
 async function loadAlarms() {
-  const res = await fetch(`/api/alarms?${filterParams()}`, { headers: { accept: 'application/json' } })
+  const requestId = ++alarmRequestId
+  $('list').setAttribute('aria-busy', 'true')
+  alarmRequest?.abort()
+  alarmRequest = new AbortController()
+  try {
+  const res = await fetch(`/api/alarms?${appliedFilters ?? filterParams()}`, { headers: { accept: 'application/json' }, signal: alarmRequest.signal })
   if (res.status === 401) return void (location.href = '/login.html')
   const body = await jsonOf(res)
+  if (requestId !== alarmRequestId) return
   if (!res.ok) return say($('summary'), body.error ?? 'The alarms could not be read.')
   admin = body.admin === true
   const rows = alarmRows(body.alarms)
+  alarmRowsNow = rows
+  if (linked !== null && scrolledTo !== linked) {
+    const index = rows.findIndex((r) => r.id === linked)
+    if (index >= 0) alarmPage = Math.floor(index / ALARM_PAGE_SIZE)
+  }
   // A linked alarm that is not in this list is explained on the summary line, which is read out as
   // a status: whoever followed the link learns why they are not looking at it.
-  say($('summary'), [filterSummary(body.summary, { acked: $('filters').elements.acked.value === 'false' }), body.scanLimited ? 'the search stopped before the start of this window: narrow the dates or the filters to see older matches' : '', linkedEventNote(linked, rows)].filter(Boolean).join(' · '))
-  paintAlarms(rows)
+  say($('summary'), [filterSummary(body.summary, { acked: (appliedFilters ?? filterParams()).get('acked') === 'false' ? false : undefined }), body.scanLimited ? 'the search stopped before the start of this window: narrow the dates or the filters to see older matches' : '', linkedEventNote(linked, rows)].filter(Boolean).join(' · '))
+  paintOverview(rows)
+  paintAlarmPage()
+  $('alarmUpdated').textContent = `Updated ${new Date().toLocaleTimeString()} · Auto-refresh every 30 seconds · Counts cover loaded results${rows.length >= 500 ? ' (500-result limit; narrow filters for more detail)' : ''}`
   paintSources(body.sources)
   showLinked()
+  } catch (e) {
+    if (e.name !== 'AbortError') say($('summary'), 'Alarms could not be refreshed. Previous results remain visible. Use Refresh alarms to try again.')
+  } finally { if (requestId === alarmRequestId) $('list').setAttribute('aria-busy', 'false') }
+}
+
+function paintOverview(rows) {
+  $('alarmOverview').replaceChildren(...PRIORITIES.map((priority) => {
+    const b = button('', () => { const f = $('filters').elements; f.priority.value = f.priority.value === priority ? '' : priority; applyAlarmFilters() })
+    b.className = priorityClass(priority)
+    const label = document.createElement('span'); label.textContent = priority[0].toUpperCase() + priority.slice(1)
+    const count = document.createElement('strong'); count.textContent = rows.filter((r) => r.priority === priority).length
+    const note = document.createElement('small'); note.textContent = 'In loaded results'
+    b.setAttribute('aria-pressed', String($('filters').elements.priority.value === priority)); b.append(label, count, note); return b
+  }))
+}
+function paintAlarmPage() {
+  alarmPage = Math.min(alarmPage, Math.max(0, Math.ceil(alarmRowsNow.length / ALARM_PAGE_SIZE) - 1))
+  paintAlarms(alarmRowsNow.slice(alarmPage * ALARM_PAGE_SIZE, (alarmPage + 1) * ALARM_PAGE_SIZE))
+  $('alarmPage').textContent = alarmRowsNow.length ? `${alarmPage * ALARM_PAGE_SIZE + 1}–${Math.min(alarmRowsNow.length, (alarmPage + 1) * ALARM_PAGE_SIZE)} of ${alarmRowsNow.length} loaded alarms` : 'No matching alarms'
+  $('alarmPrev').disabled = alarmPage === 0
+  $('alarmNext').disabled = (alarmPage + 1) * ALARM_PAGE_SIZE >= alarmRowsNow.length
+}
+function applyAlarmFilters() {
+  const f = $('filters').elements
+  f.to.setCustomValidity(f.from.value && f.to.value && f.from.value > f.to.value ? 'End date must be on or after the start date.' : '')
+  if (!$('filters').reportValidity()) return
+  preferenceStorage.setItem('cctv.alarmFilters', JSON.stringify(Object.fromEntries(['acked', 'type', 'priority', 'text', 'from', 'to'].map((k) => [k, f[k].value]))))
+  alarmPage = 0; appliedFilters = filterParams(); loadAlarms()
 }
 
 function paintAlarms(rows) {
@@ -153,16 +200,23 @@ function paintAlarms(rows) {
     const what = cell(r.what)
     // a line crossing's picture sits under its name (event-snapshot.mjs takes it from the recording)
     if (r.snapshot && !noPicture.has(r.id)) what.append(thumbFor(r))
-    tr.append(pri, when, cell(r.camera), what, cell(r.lasted), cell(r.ack || (r.needsAck ? 'not yet' : '')))
+    tr.append(pri, when, cell(r.camera), what, cell(r.lasted), cell(r.ack || (r.needsAck ? 'Needs review' : '')))
 
     const actions = document.createElement('td')
     actions.className = 'al-actions'
     if (r.needsAck) actions.append(button('Acknowledge…', () => acknowledge(r), 'st-primary'))
     // Opening in playback a little before the alarm: the useful part starts before the trigger.
     actions.append(link('Playback', `/playback.html?nvr=${encodeURIComponent(r.nvr)}&ch=${r.ch}&t=${r.startMs - 30_000}`))
-    actions.append(button('Bookmark', () => bookmark(r)))
-    actions.append(button('Export', () => exportClip(r)))
+    const evidence = document.createElement('details'); evidence.className = 'al-evidence'
+    const evidenceTitle = document.createElement('summary'); evidenceTitle.textContent = 'Evidence'
+    evidenceTitle.setAttribute('aria-label', `Evidence actions for ${r.camera}`)
+    const evidenceActions = document.createElement('div'); evidenceActions.className = 'al-evidence-actions'
+    evidenceActions.append(button('Bookmark', () => bookmark(r)), button('Export clip', () => exportClip(r)))
+    evidence.append(evidenceTitle, evidenceActions); actions.append(evidence)
+    const group = document.createElement('div'); group.className = 'al-action-group'
+    group.append(...actions.childNodes); actions.append(group)
     tr.append(actions)
+    ;['Urgency', 'When', 'Camera', 'Event', 'Duration', 'Review', 'Actions'].forEach((label, i) => { tr.children[i].dataset.label = label })
     list.append(tr)
   }
   // pictures of rows that have left the list (acknowledged, filtered out, too old) are let go
@@ -344,7 +398,7 @@ async function addRule(e) {
 
 function fillChoices() {
   // grouped by site, "3 · North Gate" (camera-choice.js); tuning lists only cameras it can measure
-  fillCameraSelect($('filters').elements.camera, cameras)
+  fillCameraSelect($('filters').elements.camera, cameras.slice(0, 50))
   fillCameraSelect($('ruleForm').elements.cameras, cameras)
   fillCameraSelect($('tuneCamera'), cameras, { onlineOnly: true })
   for (const t of EVENT_KINDS) {
@@ -365,9 +419,28 @@ async function start() {
   cameras = await fetch('/api/cameras', { headers: { accept: 'application/json' } }).then(jsonOf).catch(() => [])
   if (!Array.isArray(cameras)) cameras = cameras.cameras ?? []
   fillChoices()
+  const f = $('filters').elements
+  try {
+    const saved = JSON.parse(preferenceStorage.getItem('cctv.alarmFilters') || '{}')
+    for (const key of ['acked', 'type', 'priority', 'text', 'from', 'to']) {
+      if (typeof saved[key] !== 'string') continue
+      if (f[key].tagName !== 'SELECT' || [...f[key].options].some((o) => o.value === saved[key])) f[key].value = saved[key]
+    }
+  } catch {}
+  const savedSite = workspaceSite()
+  f.site.value = cameras.some((c) => c.site === savedSite) ? savedSite : ''
+  f.camera.replaceChildren(new Option('Any camera', ''))
+  fillCameraSelect(f.camera, cameras.filter((c) => !f.site.value || c.site === f.site.value).slice(0, 50))
+  alarmBrowser = mountCameraBrowser({ host: $('filters'), cameras: () => cameras, selectedSite: () => f.site.value,
+    onSite: (site) => { f.site.value = site; f.camera.replaceChildren(new Option('Any camera', '')); fillCameraSelect(f.camera, cameras.filter((c) => !site || c.site === site).slice(0, 50)); applyAlarmFilters() },
+    onCamera: (cam) => { f.site.value = cam.site; const key = `${cam.nvr}/${cam.ch}`; if (![...f.camera.options].some((o) => o.value === key)) f.camera.append(new Option(`${cam.ch + 1} · ${cam.name}`, key)); f.camera.value = key; applyAlarmFilters() }
+  })
+  $('refreshAlarms').addEventListener('click', () => loadAlarms())
+  $('resetAlarmFilters').addEventListener('click', () => { $('filters').reset(); f.site.value = ''; f.camera.replaceChildren(new Option('Any camera', '')); fillCameraSelect(f.camera, cameras.slice(0, 50)); alarmBrowser.refresh(); applyAlarmFilters() })
+  for (const [id, step] of [['alarmPrev', -1], ['alarmNext', 1]]) $(id).addEventListener('click', () => { alarmPage += step; paintAlarmPage() })
   $('filters').addEventListener('submit', (e) => {
     e.preventDefault()
-    loadAlarms()
+    applyAlarmFilters()
   })
   $('ruleForm').addEventListener('submit', addRule)
 
@@ -394,9 +467,10 @@ async function start() {
 
   // A link to one alarm must find it even if someone has acknowledged it already: the list opens on
   // "still needing a look", which would hide exactly the alarm the link was sent about.
-  if (linked !== null) $('filters').elements.acked.value = ''
+  if (linked !== null) { f.acked.value = ''; f.site.value = ''; alarmBrowser.refresh() }
+  appliedFilters = filterParams()
   await Promise.all([loadAlarms(), loadRules()])
-  setInterval(loadAlarms, REFRESH_MS)
+  setInterval(() => { if (!document.hidden && !document.querySelector('dialog[open]') && !$('list').querySelector('details[open]') && !$('list').contains(document.activeElement)) loadAlarms() }, REFRESH_MS)
 }
 
 $('logout')?.addEventListener('click', async () => {
@@ -414,6 +488,9 @@ addEventListener('hashchange', () => {
   for (const tr of $('list').querySelectorAll('tr.al-target')) tr.classList.remove('al-target')
   if (id === null) return
   $('filters').elements.acked.value = ''
+  $('filters').elements.site.value = ''
+  alarmBrowser?.refresh()
+  appliedFilters = filterParams()
   loadAlarms()
 })
 

@@ -4,6 +4,8 @@
 // It also marks the page as waiting for its shell, so css/shell.css can hold the sidebar's space
 // open from the first paint instead of the page jumping sideways when shell.js adds it.
 try {
-  if (localStorage.getItem('cctv.theme') === 'light') document.documentElement.dataset.theme = 'light'
+  const user = JSON.parse(sessionStorage.getItem('cctv.me') || '{}').user
+  const prefs = user ? JSON.parse(localStorage.getItem(`cctv.ui:${user}`) || '{}') : {}
+  if (prefs['cctv.theme'] === 'light') document.documentElement.dataset.theme = 'light'
 } catch {}
 if (!/\/login\.html$/.test(location.pathname)) document.documentElement.classList.add('shell-pending')

@@ -397,6 +397,12 @@ const json = (o) => async () => o
   check('it carries the summary', typeof listed[1].summary.unacked === 'number')
   check('it names the cameras', listed[1].alarms.some((a) => a.camera === 'Gate'))
   check('it is never cached', listed[2]['cache-control'] === 'no-store')
+  const siteWho = { ...who, cameras: () => who.cameras().map((c) => ({ ...c, site: c.nvr === 'nvr1' && c.ch === 0 ? 'Gate site' : 'Other site' })) }
+  const atSite = await handleAlarms('GET', '/api/alarms?from=0&site=Gate+site', json({}), siteWho)
+  check('site filtering finds only cameras in that site', atSite[1].alarms.length > 0 && atSite[1].alarms.every((a) => a.nvr === 'nvr1' && a.ch === 0))
+  check('an unknown site returns no alarms', (await handleAlarms('GET', '/api/alarms?from=0&site=Unknown', json({}), siteWho))[1].alarms.length === 0)
+  check('camera and site filters intersect', (await handleAlarms('GET', '/api/alarms?from=0&site=Gate+site&cameras=rigginglot/2', json({}), siteWho))[1].alarms.length === 0)
+  check('site filtering does not grant camera access', (await handleAlarms('GET', '/api/alarms?from=0&site=Gate+site', json({}), { ...siteWho, admin: false, canSee: () => false }))[1].alarms.length === 0)
   // The honest bit the page prints under the filters.
   check('and it states what cannot be reported', listed[1].sources.notAvailable.length >= 3)
   const filtered = await handleAlarms('GET', '/api/alarms?from=0&types=pos', json({}), who)

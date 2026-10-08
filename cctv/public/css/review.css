@@ -1,0 +1,76 @@
+/* Shared Argus review workspace. Map geometry and recording logic are unchanged. */
+.map-page, .playback-page { --workspace-gutter: 24px; }
+.workspace-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s4); padding: var(--s4) var(--workspace-gutter) var(--s3); flex-shrink: 0; }
+.workspace-heading h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -0.03em; }
+.workspace-heading p { margin: 0; font-size: var(--fs-dense); color: var(--text-muted); }
+:is(.map-page, .playback-page) .app-main > header { margin: 0 var(--workspace-gutter) var(--s3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-1); padding: var(--s3); gap: var(--s4); }
+:is(.map-page, .playback-page) .app-main > header .brand { display: none; }
+:is(.map-page, .playback-page).has-shell .app-main > header .controls { gap: var(--s4); }
+:is(.map-page, .playback-page).has-shell .app-main > header label { font-size: var(--fs-body); }
+:is(.map-page, .playback-page) button, :is(.map-page, .playback-page) select, :is(.map-page, .playback-page) input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) { min-height: 40px; font-size: var(--fs-body); }
+:is(.map-page, .playback-page) button:hover:not(:disabled) { border-color: var(--text-faint); }
+:is(.map-page, .playback-page) input[type="checkbox"], :is(.map-page, .playback-page) input[type="radio"] { accent-color: var(--accent); }
+:is(.map-page, .playback-page) [hidden] { display: none !important; }
+.map-page .app-main > header .map-find input { width: 260px; max-width: 100%; padding: 8px 12px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); font: inherit; }
+.map-page .app-main > header .map-find input::placeholder { color: var(--text-muted); }
+.map-page .map-sites { margin: 0 var(--workspace-gutter) var(--s3); padding: 0; background: transparent; border: 0; gap: var(--s2); }
+.map-page .map-sites button { min-height: 40px; border-radius: 999px; padding-inline: var(--s4); }
+.map-page .map-sites button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-strong); border-color: var(--accent); }
+.map-page .map-main { padding: 0 var(--workspace-gutter) var(--s4); gap: var(--s4); }
+.map-page .map-view { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); }
+.map-page .map-side { width: 320px; padding: var(--s4); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-1); }
+.map-page .map-side h2 { font-size: var(--fs-section); letter-spacing: -0.02em; margin-top: 0; }
+.map-page .map-help { color: var(--text-muted); font-size: var(--fs-dense); line-height: 1.6; }
+.map-page .map-cams li { padding: var(--s2); border-radius: var(--r-sm); min-height: 48px; gap: var(--s2); }
+.map-page .map-cams li:hover { background: var(--surface-hover); }
+.map-page .map-cams li.sel { background: var(--accent-soft); }
+.map-page .map-cams-site { color: var(--text-muted); font-size: var(--fs-meta); font-weight: 650; }
+.map-page .map-cam-name { font-size: var(--fs-dense); }
+.map-page .map-zoom { top: var(--s3); right: var(--s3); gap: var(--s2); }
+.map-page .map-zoom button { width: 40px; height: 40px; background: var(--surface-1); border-color: var(--border); box-shadow: var(--shadow); }
+.map-page .map-live { border: 1px solid var(--border); border-radius: var(--r-md); }
+.map-page .map-live-head { padding: var(--s2) var(--s3); }
+.map-page.map-fullscreen .app-shell, .map-page.map-fullscreen .shell-bar, .map-page.map-fullscreen .workspace-heading, .map-page.map-fullscreen .alert-banner { display: none; }
+.map-page.map-fullscreen .app-main { position: fixed; inset: 0; z-index: 1000; width: 100%; height: 100dvh; background: var(--bg); padding-top: var(--s2); }
+.map-page.map-fullscreen { --workspace-gutter: 8px; }
+.playback-page .pb-main { padding: 0 var(--workspace-gutter) var(--s3); gap: var(--s3); }
+.playback-page .camera-meta { color: var(--text-muted); font-size: var(--fs-dense); }
+.playback-page #playbackCameraSearch { width: 180px; padding: 8px 12px; background: var(--surface-2); color: var(--text); border: 1px solid var(--text-faint); border-radius: var(--r-sm); }
+.playback-page #camera { max-width: 260px; }
+.map-page .map-result-count { color: var(--text-muted); font-size: var(--fs-dense); align-self: center; }
+.playback-page .pb-video { border: 1px solid var(--border); border-radius: var(--r-md); }
+.playback-page .pb-bar { margin: 0 var(--workspace-gutter) var(--s4); padding: var(--s3) var(--s4); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-1); gap: var(--s2); flex-shrink: 0; }
+.playback-page .pb-when { gap: var(--s2); flex-wrap: wrap; }
+.playback-page .pb-clock { font-variant-numeric: tabular-nums; font-size: 20px; color: var(--text); }
+.playback-page .pb-timeline { min-height: 56px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.playback-page .pb-controls { gap: var(--s4); }
+.playback-page #play { min-width: 64px; background: var(--accent-solid); color: var(--on-accent); border-color: var(--accent-solid); }
+.playback-page .pb-capped { min-width: 56px; min-height: 48px; }
+.playback-page .pb-cap { font-size: 12px; }
+.playback-page .pb-more { border-top: 1px solid var(--border); padding-top: var(--s3); }
+.playback-page .pb-legend { color: var(--text-muted); font-size: var(--fs-meta); flex-wrap: wrap; }
+.playback-page .pb-search, .playback-page .pb-bookmarks { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s4); }
+.playback-page .pb-message { color: var(--text); background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s4); font-size: var(--fs-body); }
+.playback-page.is-fullscreen .workspace-heading { display: none; }
+.playback-page.is-fullscreen .pb-main { padding: 0; }
+.playback-page.is-fullscreen .pb-bar { margin: 0; }
+@media (max-width: 1099px) { .map-page .map-side { width: 270px; } }
+@media (max-width: 699px), (pointer: coarse) and (max-height: 500px) {
+  .map-page, .playback-page { --workspace-gutter: 8px; }
+  .workspace-heading { gap: var(--s1) var(--s2); padding: var(--s3) var(--workspace-gutter); }
+  .workspace-heading h1 { font-size: var(--fs-section); }
+  .workspace-heading p { font-size: var(--fs-meta); }
+  :is(.map-page, .playback-page) button, :is(.map-page, .playback-page) select, :is(.map-page, .playback-page) input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) { min-height: 44px; }
+  .map-page .map-main { flex-direction: column; overflow: auto; }
+  .map-page .map-view { flex: 1 0 300px; min-height: 300px; }
+  .map-page .map-side { width: 100%; max-height: 300px; flex-shrink: 0; }
+  .map-page .map-find { width: 100%; }
+  .map-page .map-find input { width: 100%; }
+  .map-page .map-zoom button { width: 44px; height: 44px; }
+  .playback-page .app-main > header .controls { width: 100%; }
+  .playback-page .app-main > header .controls label { min-width: 0; flex: 1 1 130px; }
+  .playback-page .app-main > header .controls select, .playback-page .app-main > header .controls input { min-width: 0; width: 100%; max-width: 100%; }
+  .playback-page .pb-bar { padding: var(--s2); }
+  .playback-page .pb-controls { flex-wrap: wrap; }
+  .playback-page .pb-tools { flex-wrap: wrap; }
+}

@@ -24,6 +24,7 @@ import { dirname, join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 
 export const GRID_ORDER_PATH = '/api/me/grid-order'
+export const UI_PREFS_PATH = '/api/me/preferences'
 export const PREFS_FILE = join(DATA_DIR, 'user-prefs.json')
 /** A camera key: "<nvr id>/<channel>" (the same rule as public/grid-order.js). */
 export const KEY_RE = /^[A-Za-z0-9._-]{1,64}\/\d{1,4}$/
@@ -100,6 +101,61 @@ function saveAll(all, previousText) {
 }
 
 const isVersion = (v) => Number.isSafeInteger(v) && v >= 0
+
+const UI_KEYS = new Set(['cctv.theme', 'cctv.sidebarPinned', 'cctv.layout', 'cctv.layout.phone', 'cctv.activeView', 'cctv.smooth', 'cctv.hideOffline', 'cctv.site', 'cctv.workspaceSite', 'cctv.favoriteSites', 'cctv.recentSites', 'cctv.mapSite', 'cctv.mapNames', 'cctv.mapLayer', 'cctv.alarmFilters'])
+const layouts = new Set(['auto', 'list', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', '1+5', '1+7', '1+12', '2+8'])
+function validUiValue(key, value) {
+  if (!UI_KEYS.has(key) || typeof value !== 'string') return false
+  if (key === 'cctv.theme') return ['dark', 'light'].includes(value)
+  if (key === 'cctv.mapLayer') return ['street', 'satellite'].includes(value)
+  if (['cctv.sidebarPinned', 'cctv.smooth', 'cctv.hideOffline', 'cctv.mapNames'].includes(key)) return ['0', '1'].includes(value)
+  if (key.startsWith('cctv.layout')) return layouts.has(value) && (key !== 'cctv.layout.phone' || ['auto', 'list', 'g1', 'g2'].includes(value))
+  if (key === 'cctv.alarmFilters') {
+    try {
+      const data = JSON.parse(value)
+      return isPlainObject(data) && Object.entries(data).every(([k, v]) => ['acked', 'type', 'priority', 'text', 'from', 'to'].includes(k) && typeof v === 'string' && v.length <= 256)
+    } catch { return false }
+  }
+  if (['cctv.favoriteSites', 'cctv.recentSites', 'cctv.workspaceSite'].includes(key)) {
+    try {
+      const data = JSON.parse(value)
+      return key === 'cctv.workspaceSite' ? typeof data === 'string' && data.length <= 256 :
+        Array.isArray(data) && data.length <= (key === 'cctv.recentSites' ? 8 : 100) && data.every((s) => typeof s === 'string' && s.length <= 256)
+    } catch { return false }
+  }
+  return value.length <= 256
+}
+
+function uiState(entry) {
+  return Object.fromEntries(Object.entries(isPlainObject(entry?.ui) ? entry.ui : {}).filter(([k, v]) => validUiValue(k, v)))
+}
+
+/** A patch changes only named preferences, so unrelated changes from another screen survive. */
+export async function handleUiPreferences(req, user) {
+  if (!user) return [401, { error: 'Not logged in' }, NO_STORE]
+  if (req.method !== 'GET' && req.method !== 'PATCH') return [405, { error: 'Method not allowed' }, { ...NO_STORE, allow: 'GET, PATCH' }]
+  if (req.method === 'PATCH' && !sameOriginJson(req)) return [403, { error: 'Same-origin JSON required' }, NO_STORE]
+  let patch
+  if (req.method === 'PATCH') {
+    try {
+      const body = JSON.parse(await readBody(req, 32 * 1024))
+      if (!isPlainObject(body) || Object.keys(body).some((k) => !['preferences', 'account'].includes(k)) || !isPlainObject(body.preferences)) throw new Error('Expected preferences object')
+      if (body.account !== user) return [409, { error: 'Signed-in account changed. Reload before saving preferences.' }, NO_STORE]
+      patch = body.preferences
+      if (Object.entries(patch).some(([k, v]) => !validUiValue(k, v))) throw new Error('Unknown preference or invalid value')
+    } catch (e) { return [e.status || 400, { error: e.message || 'Bad JSON' }, NO_STORE] }
+  }
+  try {
+    const { all, text } = loadAll()
+    const entry = isPlainObject(all[user]) ? { ...all[user] } : {}
+    if (patch) {
+      entry.ui = { ...uiState(entry), ...patch }
+      all[user] = entry
+      saveAll(all, text)
+    }
+    return [200, { user, preferences: uiState(entry) }, NO_STORE]
+  } catch { return [500, { error: 'Preferences could not be read or saved' }, NO_STORE] }
+}
 
 /** A user's saved camera order and its version, from everyone's preferences. */
 function stateOf(all, user) {

@@ -290,6 +290,11 @@ export function renderHealth(d) {
   if (Number.isFinite(d?.siteTzMin)) siteTzMs = d.siteTzMin * 60_000 // show times on the site's clock
   const cameras = d.cameras ?? []
   const nvrs = d.nvrs ?? []
+  const camerasByRecorder = new Map()
+  for (const camera of cameras) {
+    if (!camerasByRecorder.has(camera.nvrId)) camerasByRecorder.set(camera.nvrId, [])
+    camerasByRecorder.get(camera.nvrId).push(camera)
+  }
   const loc = d.locations?.[0] ?? null
   const recording = cameras.filter((c) => c.recording && c.online).length
 
@@ -330,7 +335,7 @@ export function renderHealth(d) {
 
   const nvrRows = nvrs.map((n) => {
     const secs = Math.round((n.clockSkewMs ?? 0) / 1000)
-    const mine = cameras.filter((c) => c.nvrId === n.id)
+    const mine = (camerasByRecorder.get(n.id) ?? [])
     return {
       id: n.id,
       name: n.name,
@@ -346,7 +351,7 @@ export function renderHealth(d) {
     }
   })
 
-  const nvrPanels = nvrs.map((n) => nvrPanel(n, cameras.filter((c) => c.nvrId === n.id), d.now))
+  const nvrPanels = nvrs.map((n) => nvrPanel(n, (camerasByRecorder.get(n.id) ?? []), d.now))
 
   // History: pair each "cleared" with the "opened" that came before it, so one episode is one row.
   // Walking newest first means a second episode of the same problem never swallows the first.
@@ -457,6 +462,16 @@ export function renderHealth(d) {
   return { overall, openAlerts, viewingCards, cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, criticalText, sendingProblem, admins, adminText, adminState }
 }
 
+export function healthRecorderPage(panels, { query = '', issuesOnly = false, page = 0 } = {}) {
+  const faulty = (n) => [n.status, n.disks, ...Object.values(n.glance ?? {})].some((v) => ['bad', 'warn'].includes(v?.state))
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const matches = panels.filter((n) => (!issuesOnly || faulty(n)) && words.every((w) => `${n.name} ${n.id}`.toLowerCase().includes(w)))
+    .sort((a, b) => Number(b.status?.state === 'bad' || b.disks?.state === 'bad') - Number(a.status?.state === 'bad' || a.disks?.state === 'bad') || Number(faulty(b)) - Number(faulty(a)) || String(a.name).localeCompare(String(b.name)))
+  const pages = Math.max(1, Math.ceil(matches.length / 25))
+  const current = Math.min(Math.max(0, page), pages - 1)
+  return { rows: matches.slice(current * 25, current * 25 + 25), total: matches.length, page: current, pages }
+}
+
 // ---- the page itself (skipped when a test imports this module: there is no document) ------------
 if (typeof document !== 'undefined' && document.getElementById('cards')) {
   const el = (tag, props = {}, ...kids) => {
@@ -507,7 +522,10 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     }
   }
 
+  let latestHealth = null
+  let recorderPage = 0
   const paint = (d) => {
+    latestHealth = d
     const r = renderHealth(d)
 
     const paintCards = (id, cards) => {
@@ -547,7 +565,13 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     // ...and so is each disk's SMART report: the 2 s refresh rebuilt it closed a moment after it
     // was opened (the owner: "why does the SMART report drop down not stay open?")
     const smartOpen = new Set([...document.querySelectorAll('#nvrs details.hp-smart[open]')].map((x) => x.dataset.key))
-    document.getElementById('nvrs').replaceChildren(...r.nvrPanels.map((n) => {
+    const selected = healthRecorderPage(r.nvrPanels, { query: document.getElementById('healthSearch').value, issuesOnly: document.getElementById('healthIssues').checked, page: recorderPage })
+    recorderPage = selected.page
+    document.getElementById('healthResults').textContent = `${selected.total} of ${r.nvrPanels.length} recorders  /  faults first`
+    document.getElementById('healthPage').textContent = `Page ${selected.page + 1} of ${selected.pages}`
+    document.getElementById('healthPrevious').disabled = selected.page === 0
+    document.getElementById('healthNext').disabled = selected.page + 1 === selected.pages
+    document.getElementById('nvrs').replaceChildren(...selected.rows.map((n) => {
       const panel = el('details', { className: `nvr-panel nvr-tile ${n.status.state}` })
       panel.dataset.id = n.id
       panel.open = wasOpen.has(n.id)
@@ -778,32 +802,36 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     location.href = '/login.html'
   })
 
-  const load = () => fetch('/api/health').then((x) => x.json()).then(paint).catch(() => {})
-  load()
-  // live: every 2 s while the page is visible (a hidden tab asks nothing), with a dot that pulses at
-  // each fresh answer and goes grey when the server stops answering
-  const liveDot = document.createElement('span')
-  liveDot.className = 'hp-live'
-  liveDot.title = 'Updating live'
-  liveDot.textContent = 'Live'
-  document.querySelector('main')?.prepend(liveDot)
+  const freshness = document.getElementById('healthFreshness')
+  let refreshing = false
   let lastOk = 0
   const tick = async () => {
-    if (document.hidden) return
+    if (document.hidden || refreshing) return
+    refreshing = true
+    document.getElementById('healthRefresh').disabled = true
     loadWatching()
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 8000)
     try {
-      const r = await fetch('/api/health')
-      if (!r.ok) throw new Error(String(r.status))
-      paint(await r.json())
+      const response = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' })
+      if (!response.ok) throw new Error(String(response.status))
+      paint(await response.json())
       lastOk = Date.now()
-      liveDot.classList.remove('stale')
-      liveDot.classList.remove('pulse')
-      void liveDot.offsetWidth // restart the animation
-      liveDot.classList.add('pulse')
+      freshness.className = 'health-fresh'
+      freshness.textContent = `Connected  /  updated ${new Date(lastOk).toLocaleTimeString()}  /  refreshes every 15 seconds`
     } catch {
-      if (Date.now() - lastOk > 8000) liveDot.classList.add('stale')
+      freshness.className = 'health-stale'
+      freshness.textContent = lastOk ? `Connection lost  /  showing data from ${new Date(lastOk).toLocaleTimeString()}. Retry with Refresh health.` : 'Health unavailable. Retry with Refresh health.'
+    } finally {
+      clearTimeout(timeout)
+      refreshing = false
+      document.getElementById('healthRefresh').disabled = false
     }
   }
-  setInterval(tick, 2000)
+  document.getElementById('healthRefresh').addEventListener('click', tick)
+  for (const id of ['healthSearch', 'healthIssues']) document.getElementById(id).addEventListener('input', () => { recorderPage = 0; if (latestHealth) paint(latestHealth) })
+  for (const [id, step] of [['healthPrevious', -1], ['healthNext', 1]]) document.getElementById(id).addEventListener('click', () => { recorderPage += step; if (latestHealth) paint(latestHealth) })
+  tick()
+  setInterval(() => { if (!document.querySelector('#nvrs :focus')) tick() }, 15000)
   document.addEventListener('visibilitychange', tick)
 }

@@ -1137,7 +1137,13 @@ body.phone-full #grid > .lines-panel, body.phone-full #grid > .osd-panel { z-ind
 /* ---- Health page and the alert banner -------------------------------------------------------- */
 /* The banner sits above everything on every page: a problem should be seen by whoever is looking
    at a camera, not only by someone who thinks to open Health. */
-.alert-banner { background: #3a1416; color: #ffb3b5; padding: 8px 16px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #5a1f22; }
+.alert-banner { background: var(--bad-soft); color: var(--text); padding: 8px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.alert-disclosure { flex: 1; min-width: 0; }
+.alert-disclosure summary { cursor: pointer; min-height: 40px; display: flex; align-items: center; gap: 8px; }
+.alert-disclosure summary::before { content: '›'; }
+.alert-disclosure[open] summary::before { content: '⌄'; }
+.alert-disclosure .alert-lines { padding: 8px 0; }
+.alert-disclosure[open] .alert-lines > * { display: block !important; overflow: visible !important; }
 .alert-banner a { color: #fff; margin-left: auto; }
 .health { padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
 .hp-sending { margin: 0; color: var(--tl-evt); }

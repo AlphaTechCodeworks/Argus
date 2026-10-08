@@ -18,9 +18,12 @@
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/components.css" />
   <link rel="stylesheet" href="css/shell.css" />
+  <link rel="stylesheet" href="css/camera-browser.css" />
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="css/alarms.css" />
 </head>
 <body class="alarms-page">
+  <section class="al-heading"><div><h1>Alarms</h1><p>Review events, acknowledge findings and preserve evidence</p></div><button type="button" id="refreshAlarms">Refresh alarms</button></section>
   <header>
     <div class="brand">
       <h1>CCTV</h1>
@@ -33,20 +36,22 @@
   </header>
 
   <main class="alarms">
-    <section data-tab="list" data-tab-label="Alarms" data-tab-help="What happened on the cameras, newest first. Acknowledge what you have looked at.">
+    <section data-tab="list" data-tab-label="Alarms" data-tab-help="Events ordered for review. Acknowledge what you have checked.">
     <!-- The filters. Everything left alone means "no restriction", so the page opens on everything
          from the last week rather than on an empty list waiting to be configured. -->
     <form id="filters" class="al-filters" aria-label="Filters">
       <label>Show
         <select name="acked">
-          <option value="false">still needing a look</option>
-          <option value="">everything</option>
-          <option value="true">already acknowledged</option>
+          <option value="false">Needs review</option>
+          <option value="">All alarms</option>
+          <option value="true">Acknowledged</option>
         </select>
       </label>
-      <label>Camera <select name="camera"><option value="">any</option></select></label>
+      <input type="hidden" name="site" />
+      <label>Camera <select name="camera" title="First 50 cameras in scope. Use Browse to find any camera."><option value="">Any camera</option></select></label>
       <label class="al-search">Search <input type="search" name="text" placeholder="camera, kind, note" /></label>
       <button type="submit" class="st-primary">Apply</button>
+      <button type="button" id="resetAlarmFilters">Reset filters</button>
       <details class="al-more">
         <summary>More filters</summary>
         <div class="al-more-body">
@@ -58,14 +63,17 @@
       </details>
     </form>
 
+    <div id="alarmOverview" class="al-overview" aria-label="Urgency filters for loaded results"></div>
     <p id="summary" class="al-summary" role="status">Loading the alarms…</p>
+    <p id="alarmUpdated" class="al-updated"></p>
 
-    <table class="al-table">
+    <div class="al-table-wrap"><table class="al-table" aria-label="Alarm results">
       <thead>
-        <tr><th>Urgency</th><th>When</th><th>Camera</th><th>What</th><th>Lasted</th><th>Acknowledged</th><th></th></tr>
+        <tr><th scope="col">Urgency</th><th scope="col">When</th><th scope="col">Camera</th><th scope="col">Event</th><th scope="col">Duration</th><th scope="col">Review</th><th scope="col">Actions</th></tr>
       </thead>
       <tbody id="list"></tbody>
-    </table>
+    </table></div>
+    <div class="al-pagination" role="group" aria-label="Alarm result pages"><button id="alarmPrev" type="button">Previous</button><span id="alarmPage" role="status"></span><button id="alarmNext" type="button">Next</button></div>
 
     <!-- What this page cannot tell you. Printed, not hidden: an empty list must never be read as
          "nothing happened" when the real answer is "we cannot see that kind of thing yet". -->
