@@ -31,9 +31,8 @@ import {
   gridLayout,
   laneRows as buildLaneRows,
   loadWarning,
-  MAX_LEAD_MS,
   aheadBy,
-  aheadWait,
+  aheadTooFar,
   needsResync,
   openLead,
   normaliseChoice,
@@ -199,7 +198,6 @@ class Tile {
     this.blankOpens = 0 // sockets opened in a row that produced no picture at all
     this.openLagMs = null // how long this camera's stream takes from being asked for to its first picture (wall-clock.js openLead)
     this.askedAt = null // when the stream now open was asked for, until its first picture
-    this.waitingForClock = false // ahead of the shared clock and held still until it arrives (sync)
     // How this camera has been treated by its NVR lately: the refusal count and the moment before
     // which it must not ask again (grid-view.js). Held per tile, so one full NVR does not stop the
     // cameras on a different one from opening.
@@ -354,12 +352,13 @@ class Tile {
     if (!this.ws || this.position === null) return false
     // a paused tile holds the first picture it was sent: asked again, it would be sent the same one
     if (!clock.playing) return false
-    // Ahead of the clock: it waits for it (sync), which is quicker than opening it again. Only one
-    // further ahead than a stream is ever asked for has lost the clock altogether.
-    const ahead = aheadBy(this.position, atMs, clock.speed)
-    if (ahead > 0) return ahead > 2 * MAX_LEAD_MS
-    // (measured against the speed the wall's clock runs at: wall-clock.js needsResync)
-    return needsResync(this.position, atMs, { speed: clock.speed }) && performance.now() - this.lastSeekAt > RESYNC_EVERY_MS
+    // Ahead of the clock (its stream opened sooner than its lead allowed for): left alone unless it
+    // is further ahead than any lead can put it (wall-clock.js aheadTooFar); the clock is catching it up.
+    const tooFar = aheadBy(this.position, atMs, clock.speed) > 0
+      ? aheadTooFar(this.position, atMs, { speed: clock.speed })
+      // (measured against the speed the wall's clock runs at: wall-clock.js needsResync)
+      : needsResync(this.position, atMs, { speed: clock.speed })
+    return tooFar && performance.now() - this.lastSeekAt > RESYNC_EVERY_MS
   }
 
   /**
@@ -393,11 +392,8 @@ class Tile {
     if (this.position === null && this.ws && (this.blankOpens >= 2 || since > NO_PICTURE_MS)) {
       this.show({ kind: 'waiting', text: 'No picture from this camera. Trying again.' })
     }
-    // A tile ahead of the clock (its stream was asked for where the clock would be, open below, and
-    // came up sooner) is held on its picture until the clock reaches it.
-    this.waitingForClock = playing && this.position !== null && aheadWait(this.position, atMs, { speed: clock.speed, waiting: this.waitingForClock })
     // (a tile with no picture yet runs on until its first one, which pauses it: see onFrame)
-    if (this.ws) this.setPaused((!playing && this.position !== null) || this.waitingForClock)
+    if (this.ws) this.setPaused(!playing && this.position !== null)
   }
 
   show(st) {
@@ -426,7 +422,6 @@ class Tile {
     // While the wall plays, the stream is asked for where the clock will be when its first picture
     // comes, not where it is now (wall-clock.js openLead). Paused, at the moment itself.
     this.askedAt = performance.now()
-    this.waitingForClock = false
     if (clock.playing) atMs += openLead(this.openLagMs, clock.speed, server ? 'server' : 'nvr')
     const target = server ? (recordedFrom(this.stretches, atMs) ?? atMs) : atMs
     const start = Math.round(server ? target : cameraTime(target, this.skew))
@@ -918,9 +913,19 @@ function setPlaying(on) {
   else clock.pause()
   playBtn.textContent = on ? '❚❚' : '▶'
   playBtn.setAttribute('aria-label', on ? 'Pause' : 'Play')
-  // (a tile still waiting for its first picture is paused by that picture: Tile onFrame; one held
-  // ahead of the clock stays held until the clock reaches it: Tile sync)
-  for (const t of state.tiles) t.setPaused((!on && t.position !== null) || (on && t.waitingForClock))
+  for (const t of state.tiles) {
+    // Play at another speed than 1x, on a tile the NVR plays: asked for again, not resumed. A paused
+    // NVR playback comes back at about normal speed whatever speed it is then given (measured
+    // 2026-10-07: tiles resumed at 4x received 1.2 to 1.5x), so the tile fell behind at once and was
+    // asked for again some seconds later anyway. The pump opens it, where the clock will be.
+    if (on && clock.speed !== 1 && t.ws && t.paused && t.mode() !== 'server') {
+      t.close()
+      t.position = null
+      continue
+    }
+    // (a tile still waiting for its first picture is paused by that picture: Tile onFrame)
+    t.setPaused(!on && t.position !== null)
+  }
 }
 
 /** Every tile to one moment. The clock is the only thing that decides where that is. */
