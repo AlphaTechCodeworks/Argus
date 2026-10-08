@@ -771,6 +771,150 @@ for (const speed of [2, 4]) {
   ws.close(1000)
 }
 
+// ---- frame step: one frame on or back, sent with its GOP before it, then paused ---------------------------
+// camera 3: frames 0-99, 100-199 and 200-299 in three files, a keyframe every 50
+{
+  const by3 = usMap(exp3)
+  const msOf = (i) => exp3[i].us / 1000 // a frame's time as the browser reads it off the frame
+  /** One step on ws from frame `from` of exp3 (null: not said): the reply, and what was sent after it. */
+  const stepOn = async (ws, gen, dir, from) => {
+    ws.command(from === null ? { step: dir, gen } : { step: dir, from: msOf(from), gen })
+    await until(() => ws.texts.some((m) => m.type === 'step' && m.gen === gen), 2000)
+    await sleep(40)
+    const at = ws.log.findIndex((e) => e.text?.type === 'step' && e.text.gen === gen)
+    const after = at < 0 ? [] : ws.log.slice(at + 1)
+    return { reply: ws.log[at]?.text, bins: after.filter((e) => e.bin).map((e) => e.bin), texts: after.filter((e) => e.text).map((e) => e.text) }
+  }
+  /** '' when a step answered with frame `to` and sent frames first..to of exp3 (first: its keyframe), nothing else. */
+  const sent = (s, first, to, edge = null) => {
+    if (!s.reply) return 'no reply'
+    if (s.reply.at !== msOf(to) || s.reply.from !== msOf(first) || s.reply.src !== 'server') return `at ${s.reply.at} from ${s.reply.from}, wanted ${msOf(to)} from ${msOf(first)}`
+    if ((s.reply.edge ?? null) !== edge) return `edge ${s.reply.edge}`
+    if (s.bins.length !== to - first + 1) return `${s.bins.length} frames, wanted ${to - first + 1}`
+    if (s.bins[0].us !== exp3[first].us || !s.bins[0].key || s.bins.at(-1).us !== exp3[to].us) return 'not from the keyframe to the frame asked for'
+    if (s.texts.length) return `also sent ${J(s.texts)}`
+    return seqCheck(s.bins, exp3, by3)
+  }
+  check('footage: camera 3 is 3 files of 100 frames, a keyframe every 50', exp3.length === 300 && [0, 50, 100, 150, 200, 250].every((i) => exp3[i].isKey) && exp3[99].seg !== exp3[100].seg && exp3.filter((f) => f.isKey).length === 6)
+
+  const { ws, session } = open(3, exp3[10].ts)
+  await until(() => ws.bins.some((b) => b.us >= exp3[10].us), 2000)
+  ws.command({ pause: true })
+  await sleep(50)
+  let gen = 0
+  const step = (dir, from) => stepOn(ws, ++gen, dir, from)
+  let s = await step(1, 10)
+  check('step forward inside a GOP: the reply names the next frame and its keyframe; the frames from the keyframe to it follow', !sent(s, 0, 11), sent(s, 0, 11))
+  {
+    const n = ws.log.length
+    await sleep(300)
+    check('  then nothing more is sent, and the session is paused', ws.log.length === n && session.paused === true && ws.closedWith === 0, `${ws.log.length - n} more`)
+  }
+  s = await step(1, 49)
+  check('step forward from a GOP\'s last frame: the next GOP\'s keyframe alone', !sent(s, 50, 50), sent(s, 50, 50))
+  s = await step(1, 99)
+  check('step forward from a file\'s last frame: the next file\'s first keyframe', !sent(s, 100, 100), sent(s, 100, 100))
+  s = await step(-1, 30)
+  check('step back inside a GOP: the frame before, with the 29 before it', !sent(s, 0, 29), sent(s, 0, 29))
+  s = await step(-1, 50)
+  check('step back from a keyframe: the last frame of the GOP before, with that whole GOP', !sent(s, 0, 49), sent(s, 0, 49))
+  s = await step(-1, 100)
+  check('step back from a file\'s first keyframe: the last frame of the file before', !sent(s, 50, 99), sent(s, 50, 99))
+  s = await step(-1, 0)
+  check('step back at the camera\'s first frame: that frame again, edge start', !sent(s, 0, 0, 'start'), sent(s, 0, 0, 'start'))
+  s = await step(1, 299)
+  check('step forward at the newest frame: that frame again, edge end', !sent(s, 250, 299, 'end'), sent(s, 250, 299, 'end'))
+  {
+    const n = ws.log.length
+    await sleep(300)
+    check('  no {type:end}, nothing more sent, the socket stays open', ws.log.length === n && ws.closedWith === 0 && session.paused === true, J(ws.log.slice(n).map((e) => e.text ?? 'frame')))
+  }
+  // a time that is no frame's (a seek target, a scrub's): the frames on either side of it
+  ws.command({ step: 1, from: msOf(10) + 0.3, gen: ++gen })
+  await until(() => ws.texts.some((m) => m.type === 'step' && m.gen === gen), 2000)
+  const up = ws.texts.find((m) => m.type === 'step' && m.gen === gen)
+  ws.command({ step: -1, from: msOf(10) + 0.3, gen: ++gen })
+  await until(() => ws.texts.some((m) => m.type === 'step' && m.gen === gen), 2000)
+  const down = ws.texts.find((m) => m.type === 'step' && m.gen === gen)
+  check('step from a time between two frames: forward the one after, back the one before', up?.at === msOf(11) && down?.at === msOf(10), `${up?.at} ${down?.at}`)
+  // without `from` the last frame sent is the one stepped from: here the frame the step before showed
+  s = await step(-1, 120)
+  const s2 = await step(1, null)
+  const s3 = await step(-1, null)
+  check('step without `from`: from the last frame sent', !sent(s, 100, 119) && !sent(s2, 100, 120) && !sent(s3, 100, 119), `${sent(s, 100, 119)} | ${sent(s2, 100, 120)} | ${sent(s3, 100, 119)}`)
+  // not a step: ignored, as a speed that is none is
+  {
+    const n = ws.log.length
+    for (const bad of [0, 2, -3, 1.5, 'x', null, {}]) ws.command({ step: bad, gen: 99 })
+    await sleep(100)
+    check('step: anything but 1 or -1 is ignored', ws.log.length === n && session.gen === gen && session.paused === true, `gen ${session.gen}`)
+  }
+  // play after a step: on from the frame after it, with no new start (the browser's decoder is there already)
+  s = await step(1, 20)
+  {
+    const n = ws.log.length
+    ws.command({ pause: false })
+    await until(() => ws.log.length >= n + 10, 2000)
+    const after = ws.log.slice(n)
+    const bins = after.filter((e) => e.bin).map((e) => e.bin)
+    check('play after a step: the frames after it follow in order, with no {type:started}', !sent(s, 0, 21) && !after.some((e) => e.text) && bins.length >= 10 && bins[0].us === exp3[22].us && !seqCheck(bins, exp3, by3) && session.paused === false, `${sent(s, 0, 21)} first #${by3.get(bins[0]?.us)} ${seqCheck(bins, exp3, by3)}`)
+    check('  at their own times, not in a burst', bins.at(-1).at - bins[0].at > (bins.at(-1).tsMs - bins[0].tsMs) * 0.5, `${Math.round(bins.at(-1).at - bins[0].at)} ms for ${Math.round(bins.at(-1).tsMs - bins[0].tsMs)} ms`)
+  }
+  // a step while playing, with nothing said of the frame shown: from the last frame sent; ends paused
+  {
+    const last = ws.bins.at(-1)
+    const i = by3.get(last.us)
+    s = await step(1, null)
+    const n = ws.log.length
+    await sleep(300)
+    check('step while playing: the frame after the last one sent, and the session ends paused', !sent(s, i + 1 - ((i + 1) % 50), i + 1) && session.paused === true && ws.log.length === n, `${sent(s, i + 1 - ((i + 1) % 50), i + 1)}; ${ws.log.length - n} more`)
+  }
+  // ... and from the frame the browser says it shows, which is behind what was sent (its buffer)
+  ws.command({ pause: false })
+  await sleep(200)
+  s = await step(-1, 60)
+  {
+    const n = ws.log.length
+    await sleep(300)
+    check('step while playing, from the frame shown: the frame before that one; paused, nothing more', !sent(s, 50, 59) && session.paused === true && ws.log.length === n, `${sent(s, 50, 59)}; ${ws.log.length - n} more`)
+  }
+  // a seek right behind a step: the step is dropped unanswered, the seek plays
+  {
+    const g = ++gen
+    ws.command({ step: 1, from: msOf(10), gen: g })
+    ws.command({ seek: exp3[150].ts, gen: ++gen })
+    await until(() => started(ws, gen), 2000)
+    await sleep(200)
+    const at = ws.log.findIndex((e) => e.text?.type === 'started' && e.text.gen === gen)
+    const bins = ws.log.slice(at + 1).filter((e) => e.bin).map((e) => e.bin)
+    check('a step superseded by a seek: never answered, and the seek plays from its keyframe', !ws.texts.some((m) => m.type === 'step' && m.gen === g) && bins.length > 2 && bins[0].us === exp3[150].us && !seqCheck(bins, exp3, by3) && session.paused === false, `${bins.length} frames, first #${by3.get(bins[0]?.us)}`)
+    check('  nothing of the step went out: the frames before the seek\'s start are the play\'s own', ws.log.slice(0, at).filter((e) => e.bin).at(-1).bin.us === s.bins.at(-1).us)
+  }
+  // two steps in a row: only the newer is answered
+  {
+    const g = ++gen
+    const n = ws.log.length
+    ws.command({ step: 1, from: msOf(10), gen: g })
+    const s4 = await stepOn(ws, ++gen, 1, 60)
+    const between = ws.log.slice(n, ws.log.findIndex((e) => e.text?.type === 'step' && e.text.gen === gen))
+    check('a step superseded by a step: only the newer is answered', !ws.texts.some((m) => m.type === 'step' && m.gen === g) && !sent(s4, 50, 61) && !between.some((e) => e.text?.type === 'step'), sent(s4, 50, 61))
+  }
+  check('step: the session never failed or closed over any of these', ws.closedWith === 0 && !ws.texts.some((m) => m.type === 'error'))
+  ws.close(1000)
+
+  // across a hole (camera 1: 4 s, 10 s not recorded, 4 s): the step is said like a jump in play
+  const h = open(1, exp1[90].ts)
+  await until(() => h.ws.bins.some((b) => b.us >= exp1[90].us), 2000)
+  h.ws.command({ step: 1, from: exp1[99].us / 1000, gen: 1 })
+  await until(() => h.ws.texts.some((m) => m.type === 'step'), 2000)
+  await sleep(40)
+  const iNotice = h.ws.log.findIndex((e) => e.text?.type === 'notice')
+  const iStep = h.ws.log.findIndex((e) => e.text?.type === 'step')
+  const hop = h.ws.log[iStep]?.text
+  check('step forward over a hole: a notice of the stretch skipped, then the first frame after it', iNotice >= 0 && iNotice < iStep && hop.at === exp1[100].us / 1000 && h.ws.log.slice(iStep + 1).filter((e) => e.bin).length === 1 && h.ws.bins.at(-1).us === exp1[100].us && h.ws.bins.at(-1).key, J(hop))
+  h.ws.close(1000)
+}
+
 // ---- crossing segments ----------------------------------------------------------------------------------
 {
   const { ws } = open(3, exp3[0].ts)
@@ -1243,6 +1387,32 @@ for (const speed of [2, 4]) {
   const exp10 = await readBack(cam10.segs)
   const keys10 = exp10.filter((f) => f.isKey)
   check('h265 footage (camera 10): 200 H.265 pictures read back, a keyframe every 25', exp10.length === 200 && keys10.length === 8, `${exp10.length} frames, ${keys10.length} keys`)
+  {
+    // A frame step sends a GOP up to one frame and then nothing: every picture of it is ended, as a
+    // scrub's is, or the frame asked for would stay inside ffmpeg. Play afterwards starts afresh at
+    // that frame: the ffmpeg of the step was set up for one picture at a time.
+    const key = 50 // (camera 10: a keyframe every 25)
+    const xs = []
+    const pool = { active: 0, acquire: () => ({ release: () => {} }) }
+    const { ws, session } = open(10, T10 + 100, { extra: '&h265=0', opts: { pool, makeTranscoder: fakeXcode(xs) } })
+    await until(() => ws.bins.length >= 2, 2000)
+    const before = xs[0].calls.length
+    const resets = xs[0].resets
+    const sentBefore = ws.bins.length
+    ws.command({ step: 1, from: exp10[key + 2].us / 1000, gen: 1 })
+    await until(() => ws.texts.some((t) => t.type === 'step' && t.gen === 1), 2000)
+    await sleep(50)
+    const st = ws.texts.find((t) => t.type === 'step' && t.gen === 1)
+    const out = ws.bins.slice(sentBefore)
+    check('a converted step: the converter is reset, the 4 frames from the keyframe pushed and each ended', xs[0].resets === resets + 1 && J(xs[0].calls.slice(before)) === J(['push', 'end', 'push', 'end', 'push', 'end', 'push', 'end']) && st?.at === exp10[key + 3].us / 1000 && st.from === exp10[key].us / 1000, `${xs[0].calls.slice(before).join()} at ${st?.at}`)
+    check('  they come out converted, the last one the frame asked for; low_delay and maxKeysPerS a second for them', out.length === 4 && out.every((b) => b.codec === 0) && out.at(-1).us === exp10[key + 3].us && xs[0].low.slice(-4).every((v) => v === true) && xs[0].perS.slice(-4).every((v) => v === 8), `${out.length} out, low ${J(xs[0].low.slice(-4))}`)
+    const pushed = xs[0].pushed.length
+    ws.command({ pause: false })
+    await until(() => ws.texts.filter((t) => t.type === 'started' && t.gen === 1).length === 1 && xs[0].pushed.length > pushed, 2000)
+    const again = ws.texts.find((t) => t.type === 'started' && t.gen === 1)
+    check('  play after it: a start at the frame shown, in the same generation, on a converter started afresh', again?.at === st.at && xs[0].resets === resets + 2 && xs[0].low.at(-1) === false && xs[0].pushed[pushed] === exp10[key].ts, `${J(again)} resets ${xs[0].resets - resets}`)
+    session.close()
+  }
   const T11 = Date.UTC(2026, 8, 24, 16, 0, 10)
   const all11 = makeFrames(prng(13), T11, 200, { gop: 25 })
   const cam11a = await recordGroups(11, [all11.slice(0, 100)], 'h264')

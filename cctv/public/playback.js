@@ -14,6 +14,8 @@
 //    from the keyframe before T) is skipped by the player, its keyframe shown at once as a poster.
 //    Speeds -32x..32x: reverse and 8x+ are keyframes, reverse shown as stills. Dragging the
 //    playhead scrubs (one scrub in flight, pb-sources.js ScrubThrottle); releasing plays.
+//    A frame step ({step: 1|-1, from, gen}, one in flight) is answered with {type:'step'} and the
+//    frames from the keyframe to the one wanted: only that one is drawn, and the page stays paused.
 //    Today the file being written counts as recorded up to the live edge (pb-sources.js liveEdge:
 //    the timeline's now plus the time since, less 1 s); later times are not recorded yet, as in
 //    NVR mode, and a scrub stops at the edge.
@@ -202,7 +204,7 @@ const rightsNow = () => pbRights(playbackCams.find((c) => c.nvr === state.nvr &&
 let ws = null
 let showStats = false
 let scrub = null // { t } while the playhead is dragged (server mode)
-let stepHold = false // a frame step's seek is playing: its first picture pauses it (stepFrame)
+let stepHold = false // a frame step's seek is playing: its first picture pauses it (stepFrame; the NVR's playback)
 let seekAt = null // performance.now() of the last seek, until its first picture (D overlay)
 let startMs = null // seek to first picture, ms
 let lastEndSkip = -Infinity // the last stretch jumped to at an end (never the same one twice)
@@ -217,6 +219,7 @@ const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   clock: PLAYBACK_CLOCK,
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
+    if (ws?.stepGen != null) ws.stepGen = null // a server step's frame is on screen: the next may go
     if (stepHold && !scrub) {
       // the picture a frame step asked for: hold it
       stepHold = false
@@ -911,6 +914,8 @@ function openServer(start, { reconnected = false } = {}) {
   sock.okGen = -1 // the generation whose frames are shown (announced by started or scrub)
   sock.pending = null
   sock.ackOnFrame = null // a scrub's reply came: its keyframe frees the throttle
+  sock.stepGen = null // the generation of a frame step whose frame is not on screen yet (serverStep)
+  sock.stepAt = 0 // ... and when it was sent
   sock.startTimer = null // watchStart: no answer to the start or a seek yet
   sock.ended = false // the end of the footage was reached (not a drop to reconnect through)
   sock.reconnected = reconnected // this socket is itself a reconnect: it does not reconnect again (no loop)
@@ -970,6 +975,23 @@ function onServerStatus(sock, msg) {
       scheduleDraw()
       return
     }
+    case 'step':
+      if (msg.gen !== sock.gen) return
+      sock.okGen = msg.gen
+      settleStart(sock) // (a start still watched is answered by this too)
+      if (msg.none) {
+        sock.stepGen = null // nothing could be read: the picture stays
+        return
+      }
+      // The frames from the keyframe before it follow at once and then nothing: decoded unseen, and
+      // only the one at `at` is drawn, on a player that stays paused (player.stepTo). Reset here and
+      // not when the step was sent: the frames now coming start at a keyframe.
+      player.seekReset()
+      player.stepTo(msg.at)
+      if (msg.edge !== 'end') sock.ended = false // back from the end of the footage: a later drop may reconnect
+      setSource(msg.src)
+      if (msg.edge) showNotice(msg.edge === 'start' ? 'This is the first recorded frame of this camera.' : 'This is the newest recorded frame.')
+      return
     case 'scrub':
       if (msg.gen !== sock.gen) return
       sock.okGen = msg.gen
@@ -1113,15 +1135,46 @@ function setSpeed(speed) {
   return allowed
 }
 
+// A server step not answered within this long no longer holds back the next one.
+const STEP_WAIT_MS = 1000
+
 /**
- * One frame back or on (pb-transport frameStep), paused where it lands. The seek plays, and the first
- * picture it shows pauses it (the player's onFrame above): the frame at or after the target, since
- * the frames before it are the preroll the player skips. Paused straight after the seek, as this
- * used to do, the clock moved and the picture did not: the server sends a paused playback no frames
- * (rec-playback.mjs), and a paused player draws none.
+ * One frame back or on from the server's recordings: {step, from, gen} on the open socket
+ * (rec-playback.mjs). The server finds the frame next to the one on screen (`from`, its exact time)
+ * and sends it with the frames it decodes from; the page is paused first, so the button says Play
+ * throughout and nothing plays in between. One at a time: a held key repeats faster than a step is
+ * answered, and each new one would drop the one before it unshown (its frames are of an older
+ * generation by then), so the key did nothing until it was let go.
+ */
+function serverStep(sock, direction) {
+  if (sock.stepGen === sock.gen && performance.now() - sock.stepAt < STEP_WAIT_MS) return
+  stepHold = false
+  throttle.cancel()
+  if (!state.paused) {
+    state.paused = true
+    player.pause()
+    stopStallWatch() // (as in togglePause: the frames stop because the viewer said so)
+    updatePlayButton()
+  }
+  const gen = ++sock.gen // (what is still on its way from before the step is dropped, as at a seek)
+  sock.ackOnFrame = null
+  sock.stepGen = gen
+  sock.stepAt = performance.now()
+  sock.send(JSON.stringify({ step: direction < 0 ? -1 : 1, from: state.position, gen }))
+}
+
+/**
+ * One frame back or on, paused where it lands. From the server's recordings the server does it
+ * (serverStep). The NVR's own playback has no such command, in NVR mode or in a stretch of server
+ * mode that plays from the NVR: there the step is a seek to the time one frame away (pb-transport
+ * frameStep) that plays until its first picture, which pauses it (the player's onFrame above): the
+ * frame at or after the target, since the frames before it are the preroll the player skips.
+ * Paused straight after the seek, as this used to do, the clock moved and the picture did not: a
+ * paused playback is sent no frames, and a paused player draws none.
  */
 function stepFrame(direction) {
   if (state.position === null) return
+  if (state.mode === 'server' && state.src !== 'nvr' && !scrub && ws?.kind === 'server' && ws.cam === camKey() && ws.readyState === WebSocket.OPEN) return serverStep(ws, direction)
   const fps = Number(player.stats?.fps) > 0 ? Number(player.stats.fps) : 25
   const target = frameStep(state.position / 1000, direction, fps) * 1000
   seek(target)

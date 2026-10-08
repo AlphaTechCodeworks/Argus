@@ -37,6 +37,16 @@
 //    announced by {type:'started'} or {type:'scrub'} comes before the frames that belong to it; the
 //    browser drops frames of older generations. A scrub sends the keyframe at or before T and
 //    pauses; only the newest scrub is answered.
+//  - A frame step {step: 1|-1, from: T, gen} works on the open socket too: the frame after (1) or
+//    before (-1) T, the time of the frame the browser shows (without `from`: the last frame sent),
+//    whichever GOP or file it is in. A frame decodes only from its GOP's keyframe, so
+//    {type:'step', gen, at, from, src:'server'} is followed at once by the frames from that keyframe
+//    (`from`) up to the one asked for (`at`, as the browser reads it off the frame: whole µs), and
+//    then nothing: the session is paused, whatever it was doing. The browser decodes them all and
+//    draws the last. With nothing recorded on that side the frame at T goes again, with edge:
+//    'start' or 'end'; with no footage to read at all, {type:'step', gen, none:true}. Play ({pause:
+//    false}) goes on from the frame after it, with no new start. A step closes an NVR leg, and takes
+//    its frame from the server's own footage.
 //  - Files: at the end of one the next one follows (index.next) without a message. A gap of
 //    noticeGapMs or more is played from the NVR when it has it (below), else it is jumped with a
 //    {type:'notice'} when playback reaches it.
@@ -217,6 +227,9 @@ export function encodeDiskFrame(buf, isKey, codec, tsMs) {
   buf.copy(msg, HEADER_SIZE)
   return msg
 }
+
+/** A frame's time as it goes over the wire (encodeDiskFrame) and as the browser reads it back: whole µs. */
+const usOf = (tsMs) => Math.round(tsMs * 1000)
 
 const sendJson = (ws, obj) => {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj))
@@ -506,7 +519,7 @@ export class ServerPlayback {
     this.convLagMax = 0
     this.pushWalls = [] // wall times of frames handed to the converter and not yet out (FIFO; conversion lag)
     this.timing = { index: null, idx: null, first: null }
-    // cursor: { phase: 'start'|'resume'|'scrub'|'play'|'scrubbed'|'end', ... }
+    // cursor: { phase: 'start'|'resume'|'scrub'|'step'|'play'|'scrubbed'|'end', ... }
     this.cur = { phase: 'start', t: start, gen: 0 }
     ws.on('message', (data, isBinary) => {
       if (!isBinary) this.#onCommand(String(data))
@@ -621,12 +634,13 @@ export class ServerPlayback {
   }
 
   /**
-   * One picture at a time goes to the conversion: a scrub (one keyframe, then paused) and keyframes
-   * only. Nothing follows such a picture for a while (a second at 2x), and ffmpeg's parser holds a
-   * picture until the next one begins, so each one is ended at once (Transcoder.endPicture).
+   * One picture at a time goes to the conversion: a scrub (one keyframe, then paused), a frame step
+   * (its GOP up to the frame asked for, then paused) and keyframes only. Nothing follows such a
+   * picture for a while (a second at 2x), and ffmpeg's parser holds a picture until the next one
+   * begins, so each one is ended at once (Transcoder.endPicture).
    */
   #oneAtATime() {
-    return this.cur.phase === 'scrub' || this.#keyMode()
+    return this.cur.phase === 'scrub' || this.cur.phase === 'step' || this.#keyMode()
   }
 
   // ---- commands --------------------------------------------------------------------------------
@@ -644,6 +658,7 @@ export class ServerPlayback {
       const gen = Number.isSafeInteger(cmd.gen) ? cmd.gen : this.gen + 1
       if ('seek' in cmd) return this.#seek(Number(cmd.seek), gen)
       if ('scrub' in cmd) return this.#scrub(Number(cmd.scrub), gen)
+      if ('step' in cmd) return this.#frameStep(Number(cmd.step), Number(cmd.from ?? NaN), gen)
       if ('speed' in cmd) this.#setSpeed(Number(cmd.speed))
       if ('pause' in cmd) this.#setPaused(Boolean(cmd.pause))
     } catch (e) {
@@ -694,9 +709,35 @@ export class ServerPlayback {
     this.#fill()
   }
 
+  /**
+   * One frame on (dir 1) or back (dir -1) from `from`, the time of the frame the browser shows; not
+   * given, the last frame sent stands in (while playing that is ahead of the picture, by the
+   * browser's buffer). Like a seek it starts a new generation and drops what was queued; unlike one
+   * it ends paused (#stepStep).
+   */
+  #frameStep(dir, from, gen) {
+    if (dir !== 1 && dir !== -1) return
+    const t = Number.isFinite(from) ? from : this.leg ? (this.leg.handle.lastTs ?? this.leg.fromMs) : (this.preroll ?? this.lastTs ?? this.posRef)
+    this.#reset()
+    this.gen = gen
+    this.paused = true
+    this.posRef = t
+    this.cur = { phase: 'step', t, dir, gen }
+    this.#updateStills()
+    this.#fill()
+  }
+
   #setPaused(p) {
     // play after a scrub: from the keyframe shown (the page normally sends {seek})
     if (!p && this.cur.phase === 'scrubbed') return this.#seek(this.cur.t, this.gen)
+    // Play after a frame step whose frames were converted: that ffmpeg was started for one picture at
+    // a time (low_delay, and stamped maxKeysPerS a second: #transcode), which is not how it plays. A
+    // start at the frame shown begins a fresh one. Not converted, play goes on with the next frame.
+    if (!p && this.paused && this.cur.stepped != null) {
+      const at = this.cur.stepped
+      this.cur.stepped = null
+      if (this.xcode) return this.#seek(at, this.gen)
+    }
     if (p === this.paused) return
     this.paused = p
     this.leg?.handle.command({ pause: p })
@@ -739,7 +780,8 @@ export class ServerPlayback {
     if (reason) this.#send({ type: 'speed', speed: s, reason })
     this.#updateStills()
     const phase = this.cur.phase
-    if (phase === 'scrub' || phase === 'scrubbed' || phase === 'end') return
+    // (a frame step on its way picks its mode when it lands, #stepStep)
+    if (phase === 'scrub' || phase === 'scrubbed' || phase === 'step' || phase === 'end') return
     if (phase === 'start') {
       // not started yet: start again in the new mode (a remote viewer's run decided again at this speed)
       this.#bumpEpoch()
@@ -1140,7 +1182,7 @@ export class ServerPlayback {
   /** Whether the next step may run now (flow control; waits at the end of the footage). */
   #wantRead() {
     const c = this.cur
-    if (c.phase === 'start' || c.phase === 'resume' || c.phase === 'scrub') return true
+    if (c.phase === 'start' || c.phase === 'resume' || c.phase === 'scrub' || c.phase === 'step') return true
     if (c.phase !== 'play') return false
     if (this.now() < (c.waitUntil ?? 0)) return false
     // during an NVR leg the next file is read up to its first GOP (the switch back is instant)
@@ -1201,6 +1243,8 @@ export class ServerPlayback {
         return this.#resumeStep(c, stale)
       case 'scrub':
         return this.#scrubStep(c, stale)
+      case 'step':
+        return this.#stepStep(c, stale)
       case 'play':
         if (!c.reader) return this.speed > 0 ? this.#nextFile(c, stale) : this.#prevFile(c, stale)
         c.reader.lastUsed = this.now()
@@ -1319,6 +1363,101 @@ export class ServerPlayback {
     this.#deliver({ buf: kf.buf, isKey: true, codec: r.codec, ts: kf.ts })
     this.cur = { phase: 'scrubbed', t: kf.ts }
     return false
+  }
+
+  /**
+   * A frame step: the frame after or before c.t, sent with the frames of its GOP before it (the
+   * browser can decode it from nothing else), all at once and past the pacer, as a scrub's keyframe
+   * is; then paused. With no frame on that side (the camera's first recording, or its newest frame)
+   * the frame at c.t goes again and the reply says which edge: the browser and this session then
+   * agree on the frame shown whatever was in flight when the step came, as after any other step.
+   * The reader is left after the frame sent, in a play: frames are queued behind it as in any paused
+   * play, and {pause:false} goes on with the next one, which the browser's decoder can take as it is.
+   */
+  async #stepStep(c, stale) {
+    const fwd = c.dir > 0
+    let edge = null
+    let hit = fwd ? await this.#frameAfter(c.t, false, stale) : await this.#frameBefore(c.t, false, stale)
+    if (stale()) return false
+    if (!hit) {
+      edge = fwd ? 'end' : 'start'
+      hit = fwd ? await this.#frameBefore(c.t, true, stale) : await this.#frameAfter(c.t, true, stale)
+      if (stale()) return false
+    }
+    if (!hit) {
+      // no footage that can be read, on either side
+      this.cur = { phase: 'end' }
+      this.#send({ type: 'step', gen: c.gen, none: true })
+      return false
+    }
+    const { seg, reader: r, k, i, frames } = hit
+    // (the times as the browser reads them off the frames: it shows the one that is exactly `at`)
+    const at = usOf(frames[i].ts) / 1000
+    // the step crossed a hole (between two files or inside one): said, as when playback jumps one
+    if (Math.abs(at - c.t) > this.gapMs) this.#send(this.#notice(Math.min(at, c.t), Math.max(at, c.t)))
+    this.#send({ type: 'step', gen: c.gen, at, from: usOf(frames[0].ts) / 1000, src: 'server', ...(edge ? { edge } : {}) })
+    // Converted, each picture is ended in #deliver (#oneAtATime, while the phase is still 'step'):
+    // nothing follows the last one, and ffmpeg would hold it until a next picture began.
+    for (let j = 0; j <= i; j++) {
+      this.#deliver({ buf: frames[j].buf, isKey: frames[j].isKey, codec: r.codec, ts: frames[j].ts })
+      if (this.closed) return false
+    }
+    this.posRef = at
+    // keyframe modes read on by time (#keyStep): the next keyframe after it, in reverse the one before.
+    // stepped: the frame shown, until play goes on (#setPaused; not when Play came before this landed)
+    const target = this.speed > 0 ? frames[i].ts + 0.001 : frames[i].ts - 0.001
+    this.cur = { phase: 'play', seg, reader: r, k, i: i + 1, target, needPoll: false, waitUntil: 0, stepped: this.paused ? at : null }
+    this.#readAheadNext()
+    return true
+  }
+
+  /**
+   * The first frame after t (incl: at or after), by its time in whole µs: { seg, reader, k, i,
+   * frames } with frames GOP k and i the frame's place in it, or null (none, or stale). Looked for
+   * from the file t falls in or follows, since a file's last GOP may run past its endMs, and on
+   * through the files after it.
+   */
+  async #frameAfter(t, incl, stale) {
+    const id = this.nvr.id
+    const us = usOf(t)
+    const first = this.index.at(id, this.ch, t) ?? this.index.prev(id, this.ch, t) ?? this.index.next(id, this.ch, t)
+    let opened = first ? await this.#openSeg(first, 1, stale) : null
+    let k = opened ? Math.max(0, keyAtOrBefore(opened.reader.times, t)) : 0
+    while (opened && !stale()) {
+      const r = opened.reader
+      for (; k < r.rows.length; k++) {
+        const frames = await r.gop(k)
+        if (stale()) return null
+        const i = frames.findIndex((f) => (incl ? usOf(f.ts) >= us : usOf(f.ts) > us))
+        if (i >= 0) return { ...opened, k, i, frames }
+      }
+      const next = this.index.next(id, this.ch, opened.seg.startMs)
+      opened = next ? await this.#openSeg(next, 1, stale) : null
+      k = 0
+    }
+    return null
+  }
+
+  /** The last frame before t (incl: at or before): as #frameAfter, back through the files before it. */
+  async #frameBefore(t, incl, stale) {
+    const id = this.nvr.id
+    const us = usOf(t)
+    const first = this.index.at(id, this.ch, t) ?? this.index.prev(id, this.ch, t)
+    let opened = first ? await this.#openSeg(first, -1, stale) : null
+    let k = opened ? keyAtOrBefore(opened.reader.times, t) : -1
+    while (opened && !stale()) {
+      const r = opened.reader
+      for (; k >= 0; k--) {
+        const frames = await r.gop(k)
+        if (stale()) return null
+        const i = frames.findLastIndex((f) => (incl ? usOf(f.ts) <= us : usOf(f.ts) < us))
+        if (i >= 0) return { ...opened, k, i, frames }
+      }
+      const prev = this.index.prev(id, this.ch, opened.seg.startMs)
+      opened = prev ? await this.#openSeg(prev, -1, stale) : null
+      k = opened ? opened.reader.rows.length - 1 : -1
+    }
+    return null
   }
 
   /** 1x-4x: the next GOP (or what has arrived of the newest one in the open file). */
