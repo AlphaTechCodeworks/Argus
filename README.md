@@ -1,177 +1,113 @@
-# TVT Device SDK
+# Argus
 
-[![NPM version](https://img.shields.io/npm/v/@2bad/tvt)](https://www.npmjs.com/package/@2bad/tvt)
-[![License](https://img.shields.io/npm/l/@2bad/tvt)](https://opensource.org/license/MIT)
-[![GitHub Build Status](https://img.shields.io/github/actions/workflow/status/2BAD/tvt/build.yml)](https://github.com/2BAD/tvt/actions/workflows/build.yml)
-[![Code coverage](https://img.shields.io/codecov/c/github/2BAD/tvt)](https://codecov.io/gh/2BAD/tvt)
-[![Written in TypeScript](https://img.shields.io/github/languages/top/2BAD/tvt)](https://www.typescriptlang.org/)
+Argus is a self-hosted CCTV system for TVT recorders (NVRs): one web app to watch live, play back,
+record and manage cameras across many NVRs and many sites, in any modern browser, with no plugin.
 
-A modern TypeScript SDK for TVT CCTV devices, providing a clean and type-safe interface for device management, monitoring, and control. This project is the result of extensive research and reverse engineering of TVT (Tongwei Video Technology) CCTV systems.
+It began as a fork of [2BAD/tvt](https://github.com/2BAD/tvt), a TypeScript SDK for TVT devices,
+and has since grown into a complete application of its own. The SDK is still here, in `source/`
+(see [docs/SDK.md](docs/SDK.md)); the application is everything in `cctv/` and `deploy/`.
 
-## Installation
+## What it does
 
-```bash
-npm install tvt
-```
+**Watching**
 
-## Quick Start
+- Live grids from one camera to a wall of them, drag to arrange, saved views per user
+- Sub-streams in the grid, the camera's main stream at full size
+- Plays H.265 and H.264 in the browser itself; for a PC whose browser cannot play H.265 the server
+  converts the picture to H.264, so the cameras can stay on H.265
+- A lighter stream for phones and for viewers coming in over the internet
+- Maps with cameras placed on them
 
-```typescript
-import { Device } from 'tvt'
+**Playback**
 
-try {
-  // Create and initialize a new device instance
-  const device = await Device.create('192.168.1.100', 9008)
+- Playback straight from the NVR's own disks, or from recordings Argus keeps itself
+- A timeline with motion and events, frame step, speeds up to 16x
+- "Many cameras": several cameras played back together on one clock
+- Bookmarks, and clips exported as MP4 with a signature that shows they have not been altered
 
-  // Login to the device
-  await device.login('admin', 'password')
+**Recording and events**
 
-  // Get device information
-  const info = await device.getInfo()
-  console.log(`Connected to ${info.deviceName}`)
+- Argus's own recording to local disks, USB drives and network shares, with retention rules
+- Backfill from the NVR for any time the server was not recording
+- Alarms and events from the NVRs (motion, line crossing and others), each with a snapshot, with
+  rules for who is told and when
 
-  // Capture a snapshot
-  await device.saveSnapshot(0, '/path/to/snapshot.jpg')
+**Managing**
 
-  // Clean up
-  await device.dispose()
-} catch (error) {
-  console.error('Error:', error)
-}
+- Many NVRs across many sites, found on the network or added by address or by serial number
+- Camera settings from the app: stream resolution, codec and bit rate, on-screen text, picture
+- Health: every NVR, camera, disk and conversion at a glance, and who is watching what
+- Users with per-camera rights for live, playback and export; an audit log of what was done
 
-```
+## Reaching NVRs
 
-## Core Features
+| How | When to use it |
+|---|---|
+| By address | The NVR is on the server's network, or reachable through a VPN |
+| By serial number (P2P) | The NVR is somewhere else, behind a router that cannot be changed |
+| Site connector | A whole remote site, through a small gateway that dials out to the server |
 
-### Device Management
-- Device discovery
-- Async connection management
-- Authentication
-- Device information retrieval
+**P2P by serial number** is the part that did not exist anywhere. TVT's recorders reach their cloud
+through an undocumented protocol that the vendor's own Linux SDK does not get right. Argus
+implements it from a study of the protocol as it appears on the wire: the direct route (NAT 2.0)
+and the relayed one (NAT 1.0). An NVR is added by the serial number printed on it, with no port
+forward and no change at the site.
 
-### Security Features
-- Alarm management
-- Manual alarm triggering
-- Event monitoring
+The site connector is described in [deploy/vpn/README.md](deploy/vpn/README.md).
 
-### Media Operations
-- Snapshot capture
-- Live stream management
-- Video recording
+## How it is built
 
-## API Reference
+- Node.js 24, plain ES modules, SQLite from Node's own `node:sqlite`. The web pages are plain
+  JavaScript: there is no build step for the application.
+- TVT's device SDK (a native library) is called through [koffi](https://koffi.dev). Each NVR has
+  its own worker process, so a recorder that misbehaves cannot take the others down.
+- Video goes to the browser over WebSockets and is decoded there with WebCodecs.
+- ffmpeg is used only where a picture has to be decoded on the server: motion search, the phone
+  stream and the H.264 conversion.
 
-### Device Class
+| Folder | What is in it |
+|---|---|
+| `cctv/` | The application: the server, and `cctv/public/` for the pages |
+| `cctv/test/` | Its tests; each is a plain script, `node cctv/test/<name>.test.mjs` |
+| `deploy/` | Install and update scripts for Ubuntu, the systemd units, the site connector |
+| `source/` | The device SDK this project started from (TypeScript) |
+| `bin/`, `native/` | TVT's native libraries and the glue for them |
+| `docs/` | TVT's SDK manual, and design notes |
 
-The main interface for interacting with TVT devices.
+## Running it
 
-```typescript
-class Device {
-  static create(ip: string, port?: number, settings?: Settings): Promise<Device>
-  login(user: string, pass: string): Promise<boolean>
-  logout(): Promise<boolean>
-  getInfo(): Promise<DeviceInfo>
-  triggerAlarm(value: boolean): Promise<boolean>
-  saveSnapshot(channel: number, filePath: string): Promise<boolean>
-  dispose(): Promise<boolean>
-  // ... and more
-}
-```
-
-See [API Documentation](source/lib/sdk.ts) for detailed method descriptions.
-
-## Development
-
-### Prerequisites
-
-- Node.js 18 or higher
-- Linux operating system (required for SDK operations)
-
-### Building from Source
+Argus runs on Linux (Ubuntu 24.04 is what it is used on), x86-64, with Node.js 24.
 
 ```bash
-git clone https://github.com/yourusername/tvt.git
-cd tvt
-npm install
-npm run build
+# on the machine it will run on, as root: installs Node, ffmpeg and the service
+bash deploy/install-ubuntu.sh
+
+# the first account
+node cctv/adduser.mjs <name> --admin
 ```
 
-### Running Tests
+Then open `http://<server>:8080`, or `https://<server>:8443`, sign in, and add the first NVR under
+Sites. Later versions are sent to a running server with `deploy/push.sh`, which checks that the
+NVRs come back afterwards and returns to the previous version by itself if they do not.
+
+A `Dockerfile` and `docker-compose.yml` are included for running it in a container instead.
+
+## Tests
 
 ```bash
-npm test
+node cctv/test/<name>.test.mjs
 ```
 
-## Project Structure
+Most tests load the native library and so run on Linux only. Every pull request runs all of them
+(`.github/workflows/cctv-tests.yml`).
 
-```
-tvt/
-├── bin/            # Precompiled SDK libraries
-├── docs/           # Documentation and examples
-├── proto/          # Protocol definitions and dissectors
-└── source/         # TypeScript implementation
-    ├── lib/        # Core SDK implementation
-    ├── helpers/    # Utility functions
-    └── types/      # TypeScript type definitions
-```
+## Credits and licence
 
-## Migration from v1.x to v2.x
+MIT, see [LICENSE](LICENSE).
 
-### Breaking Changes
+The device SDK in `source/` is the work of [2BAD](https://github.com/2BAD) (Jason Hyde), whose
+project this was forked from. The application, the P2P implementation and everything else under
+`cctv/` and `deploy/` are by AlphaTech Codeworks.
 
-1. All SDK methods now return Promises and require `await`:
-```typescript
-// Before
-const info = device.info
-
-// After
-const info = await device.getInfo()
-```
-
-2. Device creation is now async and uses a factory method:
-```typescript
-// Before
-const device = new Device('192.168.1.100')
-
-// After
-const device = await Device.create('192.168.1.100')
-```
-
-3. Property access changes:
-```typescript
-// Before
-device.info.deviceName
-
-// After
-const info = await device.getInfo()
-info.deviceName
-```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-### Development Guidelines
-
-1. Follow TypeScript best practices
-2. Include tests for new features
-3. Update documentation as needed
-4. Follow the existing code style
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Disclaimer
-
-This project is not officially associated with TVT Digital Technology Co., Ltd. It is an independent implementation based on research and reverse engineering. Use at your own risk.
-
-## Acknowledgments
-
-- TVT Digital Technology for their CCTV systems
-- The open-source community for various tools and libraries used in this project
-- Contributors who have helped improve this SDK
-
-## Support
-
-- Create an issue for bug reports or feature requests
+TVT's native libraries and manuals in `bin/` and `docs/` belong to TVT. This project is not
+affiliated with or endorsed by TVT.
