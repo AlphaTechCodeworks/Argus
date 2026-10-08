@@ -2,7 +2,8 @@
 // which behaves as a socket of its own. The rights first, then the NVR, then the channel; then the
 // path its frames take: the main stream as a stand-in for a cold sub-stream (sub-bridge.mjs), the
 // frame rate a remote viewer's link can carry (adaptive-live.mjs), the shared thinned stream for a
-// phone asking for 15 fps (phone-live.mjs), or else the camera's stream itself. A refusal closes it
+// phone asking for 15 fps (phone-live.mjs), an H.265 sub-stream converted to H.264 for a PC on the
+// local network whose browser cannot play it (h264-fallback.mjs), or else the camera's stream itself. A refusal closes it
 // with the code a /live socket has always had; on a channel that is an "end" message, and the page's
 // other tiles carry on. One that is let in is tracked (access-watch.mjs) for as long as it is open, so
 // losing the live right to that camera, the account or the session ends it too.
@@ -18,6 +19,7 @@ import { waitForSub } from './live-wait.mjs'
 import { isPhoneRequest } from './phone-live.mjs'
 import { HD_NOT_ALLOWED } from './stream-param.mjs'
 import { bridgeSub } from './sub-bridge.mjs'
+import { CODEC_H265 } from './transcode.mjs'
 
 // Conversions a phone's stand-in leaves free, for full-size views (phone-live.mjs caps them at 16)
 export const PHONE_SPARE = 4
@@ -67,17 +69,20 @@ const standInHandle = (ws, bridge, wait) => ({
 
 /**
  * @param {{ can: Function, currentUser: (req: object) => string|null, isAdmin?: (user: string) => boolean,
- *   adaptiveLive: { attach: Function }, phoneLive: { attach: Function }, track?: Function,
+ *   adaptiveLive: { attach: Function }, phoneLive: { attach: Function }, h264Fallback?: { enabled: boolean, attach: Function }|null, track?: Function,
  *   waitTimers?: { every?: Function, clear?: Function, now?: () => number },
  *   log?: (line: string) => void, now?: () => number }} o
  *   can: rights.mjs can; currentUser: the request's signed-in user; isAdmin: the account's role now
  *   (without it, the `who` a socket was let in with, for the same user); track: access-watch.mjs's,
  *   which asks the rights again while the socket or channel is open; waitTimers: live-wait.mjs's timers
- *   (tests); log: the stand-ins' lines; now: the clock (tests)
+ *   (tests); log: the stand-ins' lines; now: the clock (tests); h264Fallback: the conversions for local
+ *   PCs without H.265 (h264-fallback.mjs), none without it
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
- *   clientH265: boolean, phone15: boolean }) => void} attachLive
+ *   clientH265: boolean, noH265?: boolean, phone15: boolean }) => void} attachLive
+ *   clientH265: the page said its browser plays H.265 (h265=1); noH265: it said it does not (h265=0).
+ *   Neither: it did not say (an older page, or one that does not know yet), which is not "cannot"
  */
-export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now }) {
+export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, h264Fallback = null, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now }) {
   const quiet = new Map() // camera and viewer -> { at, left }: its H.265 stand-in line last said, and those left out since
   /** The H.265 stand-in line for a camera and viewer, or null when it was said less than H265_QUIET_MS ago. */
   const h265Line = (line, key) => {
@@ -91,7 +96,7 @@ export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, p
     quiet.set(key, { at: t, left: 0 })
     return `${line}; said once in ${H265_QUIET_MS / 60_000} min for this camera and viewer${q?.left ? `, ${q.left} left out since the last` : ''}`
   }
-  return function attachLive(ws, req, { nvr, who, ch, streamType, clientH265, phone15 }) {
+  return function attachLive(ws, req, { nvr, who, ch, streamType, clientH265, noH265 = false, phone15 }) {
     if (!can(who, 'live', { nvr: nvr.id, ch })) return ws.close(1008, 'not allowed')
     // live video: with a live worker, the worker's own login decides (it polls the camera list)
     if (!nvr.liveOnline) {
@@ -170,6 +175,22 @@ export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, p
     // which a phone may not play as it is (a sub tile that cannot decode its stream closes for good)
     const subH265 = nvr.codecSeen?.get?.(`${ch}:1`)?.codec === 'h265'
     if (phone && (!held || subH265) && phoneLive.attach(`${nvr.id}/${ch}/${streamType}`, stream, streamType, ws, { camera: `${nvr.id}/${ch + 1}` })) return
+    // A PC on the local network whose page said its browser cannot play H.265 (h265=0: never one that
+    // only did not say), on an H.265 sub-stream: the shared H.264 conversion of it (h264-fallback.mjs).
+    // Not a remote viewer or a phone, which went their own ways above and keep them; not a main stream
+    // (not converted: see that file); not an H.264 camera, ever. The codec is the one on the stream's
+    // own last keyframe, or with none yet, what the NVR last saw it send. Not known at all: the
+    // camera's own stream, as before, and the tile asks again when an H.265 keyframe reaches it
+    // (live-tile.js), by which time that keyframe is here to say. No room, or a conversion that
+    // failed: closed with the reason, which the tile shows instead of sitting black on H.265.
+    if (noH265 && !phone && streamType === 1 && h264Fallback?.enabled) {
+      const key = stream.gop?.[0]
+      if (key ? key[1] === CODEC_H265 : subH265) {
+        const got = h264Fallback.attach(`${nvr.id}/${ch}/1`, stream, ws, { camera: `${nvr.id}/${ch + 1}` })
+        if (got !== true) ws.close(1013, got)
+        return
+      }
+    }
     stream.add(ws)
     ws.on('close', () => stream.remove(ws))
   }

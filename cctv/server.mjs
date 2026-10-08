@@ -104,6 +104,7 @@ import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
 import { PhoneLive } from './phone-live.mjs'
+import { H264Fallback } from './h264-fallback.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher, viewerOf } from './live-attach.mjs'
@@ -1203,7 +1204,7 @@ const onConnection = (ws, req) => {
         // the rights as they are now, on every "sub"; a channel let in is watched while it is open
         // (attachLive tracks it), so a change also ends the tiles already playing
         const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
-        attachLive(channel, req, { nvr, who, ch: sub.ch, streamType: sub.stream, clientH265: sub.h265, phone15: sub.fps === 15 })
+        attachLive(channel, req, { nvr, who, ch: sub.ch, streamType: sub.stream, clientH265: sub.h265, noH265: sub.noH265, phone15: sub.fps === 15 })
       }
     }))
     return
@@ -1265,6 +1266,7 @@ const onConnection = (ws, req) => {
     ch: target.ch,
     streamType: streamParam(url.searchParams.get('stream')),
     clientH265: url.searchParams.get('h265') === '1',
+    noH265: url.searchParams.get('h265') === '0', // said, not left out (live-attach.mjs)
     phone15: url.searchParams.get('fps') === '15'
   })
 }
@@ -1288,7 +1290,10 @@ startWarmStreams({
 const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on conversions for phones and remote viewers together
 // one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs); isAdmin: a
 // remote main moved between streams asks Live HD again, with the account's role as it is then
-const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, track: watch.track })
+// H.265 sub-streams converted to H.264 for PCs on the local network whose browsers cannot play them,
+// on a budget of their own (h264-fallback.mjs): never from the pool phones and remote viewers share
+const h264Fallback = new H264Fallback()
+const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track })
 
 // This listener is synchronous and nothing above it catches: anything that throws here takes the
 // whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27

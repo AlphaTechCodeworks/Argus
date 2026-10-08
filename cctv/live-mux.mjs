@@ -108,7 +108,8 @@ function subFields({ nvr, ch, stream, fps, h265 }) {
   // the optional ones: absent, or null from a client that writes what it does not know
   if (fps != null && typeof fps !== 'number') return null
   if (h265 != null && ![0, 1, false, true].includes(h265)) return null
-  return { nvr, ch, stream, fps: fps ?? null, h265: h265 === 1 || h265 === true }
+  // (noH265: it said so, 0; left out is not "cannot": live-attach.mjs)
+  return { nvr, ch, stream, fps: fps ?? null, h265: h265 === 1 || h265 === true, noH265: h265 === 0 || h265 === false }
 }
 
 /**
@@ -364,7 +365,7 @@ class MuxChannel {
 /**
  * Serves one /live-mux socket.
  * @param {object} ws the page's socket (ws)
- * @param {{ attach: (channel: MuxChannel, sub: { nvr: string, ch: number, stream: 0|1, fps: number|null, h265: boolean }, user: string) => void,
+ * @param {{ attach: (channel: MuxChannel, sub: { nvr: string, ch: number, stream: 0|1, fps: number|null, h265: boolean, noH265: boolean }, user: string) => void,
  *   session: () => string|null, now?: () => number, log?: (line: string) => void, who?: string }} o
  *   attach: what the /live path does with a socket (live-attach.mjs), refusing with channel.close(code, reason);
  *   session: the signed-in user of the upgrade request now, or null; who: "remote" or "local", for the log
