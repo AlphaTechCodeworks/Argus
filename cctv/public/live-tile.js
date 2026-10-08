@@ -11,6 +11,57 @@ import { activeTrace } from './frame-trace.js'
 // stream opened before then is simply not told, and gets the safe H.264.
 let deviceH265 = null
 if (typeof window !== 'undefined') canDecodeH265().then((v) => (deviceH265 = v)).catch(() => {})
+// A viewer on the local network whose browser cannot play H.265 is sent an H.265 sub-stream converted
+// to H.264 by the server (h264-fallback.mjs), but only when the page says so itself (h265=0): not
+// saying is not "cannot". So the answer goes both ways, and three things make it "cannot":
+//  - the check above answered no;
+//  - a tile's decoder refused a real H.265 keyframe (the check can say yes for a decoder that then
+//    fails, and a stream opened before the check answered was not told): remembered for as long as
+//    the page lives, so every later tile asks for H.264 the first time;
+//  - ?h265=0 on the page's address, for testing the conversion from a PC that plays H.265 perfectly
+//    well (https://…/?h265=0). Honoured as a downgrade only: ?h265=1 or anything else is ignored, so
+//    the address can never claim a decoder the browser lacks. (Main streams are not converted, so
+//    such a PC's full-size view still plays the camera's own H.265 main; an old PC's stays on its sub.)
+let learnedNoH265 = false
+/** Whether the page's address forces "this browser cannot play H.265" (?h265=0, nothing else). */
+export function h265Forced(search) {
+  try {
+    return new URLSearchParams(search ?? '').get('h265') === '0'
+  } catch {
+    return false
+  }
+}
+const forcedNoH265 = typeof location !== 'undefined' && h265Forced(location.search)
+/**
+ * What a stream is opened with: true (plays H.265), false (cannot: forced, learnt, or the check said
+ * so), null (not known yet: the server is told nothing, and sends the camera's stream as it is).
+ * @param {{ device: boolean|null, forced?: boolean, learned?: boolean }} o
+ */
+export function h265Answer({ device, forced = false, learned = false }) {
+  if (forced || learned) return false
+  return device === true ? true : device === false ? false : null
+}
+// The server's reasons for closing a stream it could not convert (h264-fallback.mjs NO_ROOM, FAILED)
+export const H264_NO_ROOM = 'h265: no room to convert'
+export const H264_FAILED = 'h265: conversion failed'
+// ...after which the tile asks again this often: room comes back when another viewer closes a camera
+export const H264_RETRY_MS = 30_000
+// H.265 keyframes a tile may meet in a row, each answered by asking again for H.264, before it gives
+// up and shows the message: the first can be a stream opened before the page knew, the second one the
+// server attached before it had seen what the camera sends. A third is a server that does not convert.
+export const H264_ASKS = 2
+const H265_ADVICE = 'On Windows, Chrome and Edge need the "HEVC Video Extensions" from the Microsoft Store — installing it usually fixes this. Otherwise set the camera’s sub-stream to H.264 on the NVR.'
+/**
+ * What a tile says when it cannot show an H.265 camera: the badge and the message under it.
+ * why: H264_NO_ROOM / H264_FAILED (the server said it cannot convert it); anything else: this
+ * browser cannot play it and nothing converts it (a main stream, a remote viewer, an older server).
+ */
+export function h265Text(why) {
+  if (why === H264_NO_ROOM) return { status: 'H.265 — server busy', text: `This camera sends H.265, which this browser cannot play, and the server has no room to convert another H.265 camera right now: it is already converting as many as it is allowed. It will try again by itself. ${H265_ADVICE}` }
+  if (why === H264_FAILED) return { status: 'H.265 — not converted', text: `This camera sends H.265, which this browser cannot play, and the server could not convert it. It will try again by itself. ${H265_ADVICE}` }
+  return { status: 'H.265 — set sub-stream to H.264', text: `This camera sends H.265, which this browser cannot play. ${H265_ADVICE}` }
+}
+export const CONVERTED_TITLE = 'This camera sends H.265, which this browser cannot play, so the server is converting it to H.264 for this PC. That costs the server CPU for as long as it is watched; setting the camera’s sub-stream to H.264 on the NVR removes the need.'
 import { drawOsd, osdIsOff, osdLayout } from './osd-overlay.js'
 
 const HEADER_SIZE = 16
@@ -154,6 +205,9 @@ export class LiveTile {
     this.now = opts.now ?? (() => Date.now()) // (tests)
     this.lastDataAt = 0 // the last frame on this socket, or when it opened
     this.maxFps = opts.maxFps ?? null // a phone asks the server for its 15 fps stream (phone-live.mjs)
+    this.h264Asks = 0 // H.265 keyframes in a row answered by asking again for H.264 (#askH264)
+    this.converted = false // the server converts this camera to H.264 for this browser (its badge)
+    this.convMsg = null // the message shown while the server cannot convert it (#noConversion)
     this.taps = new Set() // tiles borrowing this one's stream (#borrow)
     this.gop = null // the stream since its last keyframe (#keep)
     this.gopBytes = 0
@@ -170,8 +224,17 @@ export class LiveTile {
       maxQueuedFrames: opts.maxQueuedFrames,
       noRewindMs: opts.noRewindMs,
       maxFps: opts.maxFps,
-      onUnsupported: (codecId) => (opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)),
+      onUnsupported: (codecId) => {
+        // this browser cannot play H.265, whatever the check said: every tile from now on says so. A
+        // sub-stream asks again, for H.264 (the server converts it); only when H.265 comes all the
+        // same does the tile give up as it used to
+        if (codecId === CODEC_H265) learnedNoH265 = true
+        if (codecId === CODEC_H265 && this.streamType === SUB_STREAM && this.#askH264()) return
+        return opts.onUnsupported ? opts.onUnsupported(codecId) : this.onUnsupported(codecId)
+      },
       onFrame: () => {
+        this.h264Asks = 0
+        if (this.convMsg) this.#clearConvMsg()
         if (!shown) clearStill(tile)
         // keep the last picture of this camera on this device, for the next time its tile appears
         if (typeof document !== 'undefined') maybeKeepStill(this.player.canvas, this.nvr, this.ch)
@@ -343,7 +406,8 @@ export class LiveTile {
     this.setStatus('connecting…')
     // On the Live page a channel on the page's one shared connection (live-mux.js), which behaves
     // like a socket here; elsewhere a socket of its own to /live, as always
-    this.ws = liveSocket({ nvr: this.nvr, ch: this.ch, stream: this.streamType, fps: this.maxFps, h265: deviceH265 })
+    this.#setConverted(false) // (said again by the server if this connection is converted too)
+    this.ws = liveSocket({ nvr: this.nvr, ch: this.ch, stream: this.streamType, fps: this.maxFps, h265: h265Answer({ device: deviceH265, forced: forcedNoH265, learned: learnedNoH265 }) })
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
     this.connectAt = this.now()
@@ -373,6 +437,8 @@ export class LiveTile {
       // the main stream refused for want of Live HD (at once, or taken away while it played): not
       // asked for again from here, the sub-stream instead
       if (e?.code === 1008 && e.reason === HD_REFUSED && this.streamType === MAIN_STREAM) return this.#hdRefused()
+      // H.265 that this browser cannot play and the server cannot convert just now: said, not black
+      if (e?.reason === H264_NO_ROOM || e?.reason === H264_FAILED) return this.#noConversion(e.reason)
       this.opts.onDisconnect?.()
       this.setStatus('reconnecting…')
       // back off (1, 2, 4, 8 s: reconnectDelay) with jitter, so many tiles don't reconnect in lockstep
@@ -386,6 +452,7 @@ export class LiveTile {
    * A note from the server:
    *  - {"op":"wait","why":…}  while the sub-stream has no picture yet
    *  - {"op":"ease","on":bool} quality is (no longer) being eased for bandwidth (adaptive-live.mjs)
+   *  - {"op":"convert","on":true} this H.265 camera is converted to H.264 for this browser (h264-fallback.mjs)
    */
   #note(text) {
     let m
@@ -399,6 +466,7 @@ export class LiveTile {
       else easedTiles.delete(this)
       return updateEaseChip()
     }
+    if (m?.op === 'convert') return this.#setConverted(m.on === true)
     if (m?.op !== 'wait') return
     this.waiting = true
     this.setStatus(waitText(m.why))
@@ -416,6 +484,85 @@ export class LiveTile {
     this.tile.querySelector('.name')?.append(' (SD: full quality needs Live HD)')
     this.attempts = 0
     this.connect()
+  }
+
+  /**
+   * The mark on a tile whose camera the server converts for this browser, beside its name as the SD
+   * badge is (viewer.js): small, and its title says what it costs and how to be rid of it.
+   */
+  #setConverted(on) {
+    if (this.converted === on) return
+    this.converted = on
+    if (typeof document === 'undefined') return
+    this.convBadge?.remove()
+    this.convBadge = null
+    if (!on) return
+    const b = document.createElement('span')
+    b.className = 'sd-badge conv-badge'
+    b.textContent = 'CONV'
+    b.title = CONVERTED_TITLE
+    this.tile.querySelector('.label')?.append(b)
+    this.convBadge = b
+  }
+
+  /**
+   * An H.265 keyframe this browser cannot decode, on a sub-stream: connect again at once, this time
+   * saying so (learnedNoH265 is set by now), and the server sends its H.264 conversion instead. At
+   * most H264_ASKS times in a row: after that the server is not converting, and the tile says why.
+   * @returns {boolean} false: not asked again (the caller shows the message)
+   */
+  #askH264() {
+    if (this.closed || this.h264Asks >= H264_ASKS) return false
+    this.h264Asks++
+    this.#unborrow() // (another tile's stream of this camera is the same H.265)
+    this.gop = null // nothing of it to lend, or to pick up from
+    const ws = this.ws
+    if (ws) {
+      ws.onclose = null
+      ws.onmessage = null
+      ws.close()
+    }
+    // (called from inside the player: its reset and the new connection after this turn)
+    clearTimeout(this.retry)
+    this.retry = setTimeout(() => {
+      if (this.closed) return
+      this.player.reset()
+      this.connect()
+    }, 0)
+    return true
+  }
+
+  /**
+   * The server closed the stream because it cannot convert this H.265 camera now (no room in its
+   * budget, or the conversion failed). The tile says so, with the same advice as ever, and asks again
+   * every H264_RETRY_MS: the first picture that comes takes the message away.
+   */
+  #noConversion(why) {
+    const { status, text } = h265Text(why)
+    this.setStatus(status)
+    if (typeof document !== 'undefined') {
+      if (!this.convMsg) {
+        this.convMsg = document.createElement('div')
+        this.convMsg.className = 'tile-msg'
+        this.tile.append(this.convMsg)
+      }
+      if (this.convMsg.textContent !== text) this.convMsg.textContent = text
+    } else this.convMsg = { textContent: text, remove() {} } // (tests: no page)
+    clearTimeout(this.retry)
+    this.retry = setTimeout(() => this.#retryConversion(status), H264_RETRY_MS * (0.8 + Math.random() * 0.4))
+  }
+
+  #retryConversion(status) {
+    if (this.closed) return
+    // hidden meanwhile (under the full-size view): resume() connects when it is shown again
+    if (this.suspended) return
+    this.connect()
+    this.setStatus(status) // (not "connecting…": the message is still up, and says what it waits for)
+  }
+
+  #clearConvMsg() {
+    this.convMsg?.remove?.()
+    this.convMsg = null
   }
 
   onMessage(buf) {
@@ -469,6 +616,7 @@ export class LiveTile {
   #borrow(src) {
     if (!src?.lendable || src.streamType !== this.streamType || src.nvr !== this.nvr || src.ch !== this.ch) return false
     this.source = src
+    this.#setConverted(src.converted === true) // (its stream is this one's now)
     this.lastDataAt = this.now()
     activeTrace()?.event(this, 'borrow', src) // its frames are the source's, traced there
     for (const m of src.gop) this.onMessage(m)
@@ -497,17 +645,17 @@ export class LiveTile {
       this.ws.close()
       return
     }
-    this.setStatus(codecId === CODEC_H265 ? 'H.265 — set sub-stream to H.264' : 'unsupported codec')
+    // Reached for H.265 only when asking the server for H.264 did not help (#askH264: a server that
+    // does not convert, or a path it does not convert on). Same correction as playback.js (h265Text's
+    // advice): on Windows this is nearly always a missing codec, not a machine that cannot cope.
+    // Saying "change it on the NVR" first sends people to reconfigure a camera when installing one
+    // extension would have done.
+    this.setStatus(codecId === CODEC_H265 ? h265Text().status : 'unsupported codec')
     // the browser can't show this stream: stop pulling it rather than load the NVR for nothing
+    this.#clearConvMsg()
     const msg = document.createElement('div')
     msg.className = 'tile-msg'
-    msg.textContent =
-      codecId === CODEC_H265
-        // Same correction as playback.js: on Windows this is nearly always a missing codec, not a
-        // machine that cannot cope. Saying "change it on the NVR" first sends people to reconfigure
-        // a camera when installing one extension would have done.
-        ? 'This camera sends H.265, which this browser cannot play. On Windows, Chrome and Edge need the "HEVC Video Extensions" from the Microsoft Store — installing it usually fixes this. Otherwise set the camera’s sub-stream to H.264 on the NVR.'
-        : 'This browser cannot play this camera’s video format.'
+    msg.textContent = codecId === CODEC_H265 ? h265Text().text : 'This browser cannot play this camera’s video format.'
     this.tile.append(msg)
     liveTiles.delete(this) // (off the ticker too)
     this.closed = true
@@ -599,6 +747,7 @@ export class LiveTile {
     if (!this.closed) activeTrace()?.event(this, 'end')
     liveTiles.delete(this)
     if (easedTiles.delete(this)) updateEaseChip()
+    this.#clearConvMsg()
     this.closed = true
     this.#unborrow()
     this.taps.clear()

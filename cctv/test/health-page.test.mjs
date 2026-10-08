@@ -335,5 +335,24 @@ const sys = (o = {}) => ({
   check('offline wins over borrowing', r.status.value === 'Offline' && r.status.state === 'bad')
 }
 
+// ---- video conversions: those for local PCs without H.265 are counted in the same card -----------
+{
+  const viewing = (h264) => ({
+    traffic: { internet: { bps: 0, sockets: 0 }, local: { bps: 0, sockets: 0 } }, people: { people: 1, local: 1, remote: 0 },
+    remote: { viewers: [], budgetBps: 0 },
+    conversions: { playback: { running: 1, cap: 2 }, remote: { running: 0, cap: 16 }, phones: { running: 3, cap: 16 }, cpu: { percent: 120 }, ...(h264 ? { h264 } : {}) }
+  })
+  const before = renderHealth(data({ viewing: viewing(null) })).viewingCards.encoding
+  check('conversions card, a server that reports none for PCs: as it was', before.value === '4 running' && before.note === 'of 18 allowed · 120 % of a core' && before.state === 'ok', JSON.stringify(before))
+  const idle = renderHealth(data({ viewing: viewing({ running: 0, cap: 24, step: 'veryfast', units: 0, budgetUnits: 200 }) })).viewingCards.encoding
+  check('... with the PCs\' budget, none running: counted in what is allowed, and named', idle.value === '4 running' && idle.note === 'of 42 allowed · 120 % of a core · 0 of 24 for PCs without H.265' && idle.state === 'ok', JSON.stringify(idle))
+  const busy = renderHealth(data({ viewing: viewing({ running: 13, cap: 24, step: 'superfast', units: 169, budgetUnits: 200 }) })).viewingCards.encoding
+  check('... some running: how many, the encoder step they are on, and the cores they count as', busy.value === '17 running' && busy.note.endsWith('· 13 of 24 for PCs without H.265 (superfast, 1.7 of 2.0 cores)') && busy.state === 'ok', JSON.stringify(busy))
+  const full = renderHealth(data({ viewing: viewing({ running: 24, cap: 24, step: 'ultrafast', units: 192, budgetUnits: 200 }) })).viewingCards.encoding
+  check('... their budget full: amber (the next such PC is refused)', full.state === 'warn', JSON.stringify(full))
+  const off = renderHealth(data({ viewing: viewing({ running: 0, cap: 0, step: 'veryfast', units: 0, budgetUnits: 0 }) })).viewingCards.encoding
+  check('... turned off: not mentioned', off.note === before.note && off.state === 'ok', JSON.stringify(off))
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

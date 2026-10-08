@@ -15,6 +15,8 @@
 //   server -> page, text:   {"op":"wait","id":N,"why":".."} (that channel's sub-stream has no picture yet,
 //                           and this viewer is shown no main stream meanwhile: live-wait.mjs). Handed
 //                           to the tile as a text message, as a /live socket's tile gets it
+//   server -> page, text:   {"op":"convert","id":N,"on":true} (that channel's H.265 camera is being
+//                           converted to H.264 for this browser: h264-fallback.mjs). Handed on the same way
 // The server allows 128 channels on one connection, and subs at a burst of 200, then 20 a second;
 // past that it closes the whole connection, every tile with it: this side paces its subs (flush).
 // Unsubs cost nothing there (they only free what a sub took) and go at once.
@@ -336,7 +338,7 @@ function control(text) {
     return
   }
   if (!Number.isInteger(m?.id)) return
-  if (m.op === 'wait') {
+  if (m.op === 'wait' || m.op === 'convert') {
     const ch = channels.get(m.id)
     if (!ch) return
     if (ch.opening) opened(ch)

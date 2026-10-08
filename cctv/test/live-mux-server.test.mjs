@@ -149,6 +149,15 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('h265 and fps may be left out (then no H.265, no phone stream)', attached[1].sub.h265 === false && attached[1].sub.fps === null)
   ws.msg(sub(9, { h265: null, fps: null }))
   check('... or sent as null', attached.length === 3 && attached[2].sub.h265 === false && attached[2].sub.fps === null)
+  // "cannot play H.265" is only what the page said (h265 0), never h265 left out (live-attach.mjs
+  // gives such a local PC the H.264 conversion: h264-fallback.mjs)
+  check('... neither of which says "cannot play H.265" (noH265), nor does h265 1', a.sub.noH265 === false && attached[1].sub.noH265 === false && attached[2].sub.noH265 === false)
+  {
+    const said = setup()
+    said.ws.msg(sub(10, { h265: 0 }))
+    said.ws.msg(sub(11, { h265: false }))
+    check('... h265 0 (or false) does: noH265, and not clientH265', said.attached.length === 2 && said.attached.every((x) => x.sub.noH265 === true && x.sub.h265 === false), JSON.stringify(said.attached.map((x) => x.sub)))
+  }
 
   // frames: the id in front, the frame itself untouched and not copied
   const f = frame(true, 5)
@@ -1374,7 +1383,7 @@ const fanOut = (c, buf, isKey, type, now) => {
   check('... pinged like the others (a pong late behind its backlog is waited for: backpressure.test), with the same connection handler', /keepAlive\(muxWss, \{ quiet: /.test(src) && /wss\.on\('connection', onConnection\)/.test(src) && /muxWss\.on\('connection', onConnection\)/.test(src))
   const conn = src.slice(src.indexOf('const onConnection'))
   check('/live-mux is served right after meterSocket, before the NVR lookup', /meterSocket\(ws, [^)]*\)\n[\s\S]*?if \(url\.pathname === '\/live-mux'\) \{\n\s*pageSockets\.set\(ws, serveMux\(ws,/.test(conn) && conn.indexOf("'/live-mux'") < conn.indexOf('nvrs.get('))
-  check('/live and every mux channel go through the same attachLive (live-attach.mjs)', (src.match(/attachLive\((ws|channel), req,/g) ?? []).length === 2 && /const attachLive = liveAttacher\(\{ can, currentUser, isAdmin: \(u\) => AUTH_OFF \|\| auth\.isAdmin\(u\), adaptiveLive, phoneLive, track: watch\.track \}\)/.test(src) && !/function attachLive/.test(src))
+  check('/live and every mux channel go through the same attachLive (live-attach.mjs)', (src.match(/attachLive\((ws|channel), req,/g) ?? []).length === 2 && /const attachLive = liveAttacher\(\{ can, currentUser, isAdmin: \(u\) => AUTH_OFF \|\| auth\.isAdmin\(u\), adaptiveLive, phoneLive, h264Fallback, track: watch\.track \}\)/.test(src) && !/function attachLive/.test(src))
   check('the session is checked again for each sub', /session: \(\) => currentUser\(req\)/.test(src))
   check('/live parses its stream once, strictly (stream-param.mjs)', /streamType: streamParam\(url\.searchParams\.get\('stream'\)\)/.test(src) && !/Number\(url\.searchParams\.get\('stream'\)/.test(src))
   check('the page socket\'s close is logged as remote or local, by the rule live-attach uses', /serveMux\(ws, \{[\s\S]{0,400}?who: isRemoteAddress\(req\.socket\.remoteAddress\) \? 'remote' : 'local'/.test(src))

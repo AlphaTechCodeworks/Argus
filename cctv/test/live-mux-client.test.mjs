@@ -721,6 +721,9 @@ const cam = (ch, more = {}) => ({ nvr: 'n1', ch, stream: 1, fps: null, h265: nul
   s.text({ op: 'wait', id: 424242, why: 'held' })
   s.text({ op: 'wait', why: 'held' })
   check('... one for an unknown id, or with no id, is dropped', la.msgs.length === 1 && lb.msgs.length === 0)
+  // "convert" (h264-fallback.mjs: this channel's H.265 camera is converted to H.264 for this browser)
+  s.text({ op: 'convert', id: b.id, on: true })
+  check('"convert": handed to its channel\'s tile the same way', lb.msgs.length === 1 && typeof lb.msgs[0] === 'string' && JSON.parse(lb.msgs[0]).op === 'convert' && JSON.parse(lb.msgs[0]).on === true && la.msgs.length === 1 && b.readyState === 1, JSON.stringify(lb.msgs))
   // a Live tile on a channel: the notes are activity (no stall reconnect), and it says why it waits
   reset()
   useMux(true)

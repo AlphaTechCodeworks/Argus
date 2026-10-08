@@ -104,6 +104,7 @@ import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
 import { PhoneLive } from './phone-live.mjs'
+import { H264Fallback } from './h264-fallback.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher, viewerOf } from './live-attach.mjs'
@@ -629,7 +630,11 @@ const handleRequest = async (req, res) => {
       errors: processErrors(),
       // network shares as last checked (never checked here): the outside watcher remounts one that
       // stopped answering, which the server itself, no longer frozen by it, would otherwise hide
-      shares: listLocations().filter((l) => l.type === 'network').map((l) => ({ path: l.path, ok: l.health.ok, reason: l.health.reason }))
+      shares: listLocations().filter((l) => l.type === 'network').map((l) => ({ path: l.path, ok: l.health.ok, reason: l.health.reason })),
+      // H.265 sub-streams being converted to H.264 for local PCs that cannot play them
+      // (h264-fallback.mjs): how many of how many, the encoder step they are on, and the CPU they
+      // are counted as against their budget, in units of 1 % of a core
+      h264: h264Fallback.summary()
     }
     // CCTV_LIVE_WORKER=on: each NVR's live worker (its own SDK calls are counted there, not above)
     if (list.some((n) => n.worker)) {
@@ -1081,6 +1086,8 @@ const handleRequest = async (req, res) => {
           playback: { running: playbackTranscodes.active, cap: playbackTranscodes.max },
           remote: { running: remote.conversions, cap: remote.conversionCap },
           phones: { running: phoneLive.pool.active, cap: phoneLive.pool.max },
+          // for local PCs without H.265, on their own budget (h264-fallback.mjs): { running, cap, step, units, budgetUnits, ... }
+          h264: h264Fallback.summary(),
           cpu: ffmpegCpuPercent()
         }
       }
@@ -1203,7 +1210,7 @@ const onConnection = (ws, req) => {
         // the rights as they are now, on every "sub"; a channel let in is watched while it is open
         // (attachLive tracks it), so a change also ends the tiles already playing
         const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
-        attachLive(channel, req, { nvr, who, ch: sub.ch, streamType: sub.stream, clientH265: sub.h265, phone15: sub.fps === 15 })
+        attachLive(channel, req, { nvr, who, ch: sub.ch, streamType: sub.stream, clientH265: sub.h265, noH265: sub.noH265, phone15: sub.fps === 15 })
       }
     }))
     return
@@ -1265,6 +1272,7 @@ const onConnection = (ws, req) => {
     ch: target.ch,
     streamType: streamParam(url.searchParams.get('stream')),
     clientH265: url.searchParams.get('h265') === '1',
+    noH265: url.searchParams.get('h265') === '0', // said, not left out (live-attach.mjs)
     phone15: url.searchParams.get('fps') === '15'
   })
 }
@@ -1288,7 +1296,10 @@ startWarmStreams({
 const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on conversions for phones and remote viewers together
 // one viewer's live video, for /live and every /live-mux channel alike (live-attach.mjs); isAdmin: a
 // remote main moved between streams asks Live HD again, with the account's role as it is then
-const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, track: watch.track })
+// H.265 sub-streams converted to H.264 for PCs on the local network whose browsers cannot play them,
+// on a budget of their own (h264-fallback.mjs): never from the pool phones and remote viewers share
+const h264Fallback = new H264Fallback()
+const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track })
 
 // This listener is synchronous and nothing above it catches: anything that throws here takes the
 // whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27
