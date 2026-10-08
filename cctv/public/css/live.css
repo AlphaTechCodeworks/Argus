@@ -87,6 +87,7 @@
   .live-heading { padding: 8px 12px; }
   .live-heading p { font-size: 12px; }
   .live-page .mobile-controls { display: inline-flex; align-items: center; justify-content: center; }
+  .live-page .phone-list-btn { display: none; }
   .live-page:not(.mobile-controls-open) .live-display { display: none; }
   .live-page .live-scope #siteLabel { display: none; }
   .live-page .live-navigation { gap: 4px; margin-inline-start: auto; }

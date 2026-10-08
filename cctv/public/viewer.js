@@ -1455,6 +1455,25 @@ showTraceBtn()
 
 // no video while the tab is hidden: saves CPU, GPU and NVR bandwidth
 let hiddenTimer
+let pageSuspended = false
+addEventListener('pagehide', () => {
+  pageSuspended = true
+  clearTimeout(hiddenTimer)
+  // iPhone history navigation can freeze this page before its delayed visibility
+  // cleanup runs. Do not retain sockets or decoders across that frozen document.
+  for (const t of tiles) t.close()
+  tiles = []
+})
+addEventListener('pageshow', (event) => {
+  if (!event.persisted && !pageSuspended) return
+  pageSuspended = false
+  clearTimeout(hiddenTimer)
+  freshenForPageChange()
+  render()
+  checkSession()
+  sync.refresh()
+  listSoon()
+})
 document.addEventListener('visibilitychange', () => {
   clearTimeout(hiddenTimer)
   if (document.hidden) {
