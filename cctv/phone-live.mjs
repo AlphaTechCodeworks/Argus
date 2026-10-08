@@ -383,7 +383,12 @@ export class PhoneStream {
       lowDelay: this.eachPicture || this.lowDelay,
       gop: this.keySeconds > 0 ? gopFor(fps, keepEvery, this.keySeconds) : 0,
       onFrame: (ts, isKey, out) => this.#onConverted(ts, isKey, out),
-      onFail: (e) => this.log(`${this.who} conversion failed: ${e.message}`),
+      onFail: (e) => {
+        this.log(`${this.who} conversion failed: ${e.message}`)
+        // Release the failed shared conversion and reconnect its viewers. Leaving
+        // it in the pool kept every joining phone on a dead encoder indefinitely.
+        queueMicrotask(() => this.close())
+      },
       // its own lines ("[transcode] conversion ended after N frames", the hardware encoder given
       // up) name the camera as well: a level change ends 15-24 conversions at once
       log: (line) => this.log(`${this.who} ${line}`)

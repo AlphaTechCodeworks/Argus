@@ -699,5 +699,21 @@ check('  a trickle at 0.8 fps is one (1250 ms steps); two steps, one a hole: the
   check('the same stream again: the running conversion is joined, not made again', live.streams.get('n1/2/1') === second && !second.closed && pool.active === 1)
 }
 
+{
+  const pool = new TranscodePool(1)
+  const live = new PhoneLive({ pool, makeTranscoder, log: () => {} })
+  const src = fakeSource(), a = fakeWs(), b = fakeWs()
+  live.attach('failure/0/0', src, 0, a)
+  live.attach('failure/0/0', src, 0, b)
+  for (let i = 0; i < 24; i++) src.emit(encodeFrame(Buffer.from([0, 0, 1, 1]), i % 12 === 0, 1, i * 33.3))
+  const failed = made.at(-1)
+  failed.o.onFail(new Error('encoder stopped'))
+  await new Promise(resolve => queueMicrotask(resolve))
+  check('failed encoder closes both viewers and frees its source, slot and shared registry entry', a.readyState === 3 && b.readyState === 3 && src.viewers.size === 0 && pool.active === 0 && !live.has('failure/0/0'))
+  const next = fakeWs()
+  check('a reconnect after encoder failure can acquire a fresh conversion', live.attach('failure/0/0', src, 0, next) && pool.active === 1)
+  live.streams.get('failure/0/0').close()
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)
