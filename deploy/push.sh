@@ -3,8 +3,8 @@
 #   deploy/push.sh                          test PC: Ubuntu in WSL on 192.168.3.147 (test install, sign-in off)
 #   deploy/push.sh --code-only              ... only the app code (and bin/linux/libp2pserial.so), laid over a
 #                                           copy of the release already installed there (no Docker needed
-#                                           on this PC; refused if package.json changed, as the npm
-#                                           packages would differ)
+#                                           on this PC; refused if package.json's dependencies
+#                                           changed, as the npm packages would differ)
 #   deploy/push.sh --data                   ... and on the first install copy this PC's NVR list (data/nvrs.json)
 #   deploy/push.sh --linux user@server      a Linux server (runs the installer with sudo; normal sign-in)
 # Each push installs a new release next to the previous ones (the last 3 are kept); see deploy/install-ubuntu.sh.
@@ -66,8 +66,10 @@ cp -a "\$cur" "\$new"
 rm -rf "\$new/cctv" "\$new/deploy"
 tar -xf "$wsl_tmp/$name" -C "\$new"
 cleanup() { rm -rf /tmp/cctv-release "$wsl_tmp/$name" "$wsl_tmp/cctv-push.sh"; }
-if ! cmp -s "\$new/package.json" "\$cur/package.json"; then
-  echo "package.json changed since the installed release: the npm packages may differ. Run a full push (without --code-only)." >&2
+# only what npm installs from: a new name or description in package.json changes no package
+deps() { node -e 'const p = require(process.argv[1]); console.log(JSON.stringify([p.dependencies ?? {}, p.optionalDependencies ?? {}]))' "\$1"; }
+if [ "\$(deps "\$new/package.json")" != "\$(deps "\$cur/package.json")" ]; then
+  echo "package.json's dependencies changed since the installed release: the npm packages may differ. Run a full push (without --code-only)." >&2
   cleanup
   exit 3
 fi
@@ -107,8 +109,9 @@ else
     # The same overlay the test PC gets: the new app code laid over the packages and the compiled
     # SDK bindings of the release already installed there. Those come out of the Docker build, and
     # a change that touches neither has no business needing Docker running on this PC to reach the
-    # server. package.json is compared because a new dependency would not be installed by this
-    # route, and the app would start without it.
+    # server. package.json's dependencies are compared because a new one would not be installed by
+    # this route, and the app would start without it (only those: a new name or description in
+    # package.json changes no package).
     ssh -t "${ssh_opts[@]}" "$host" "set -e
 cur=\"\$(readlink -f /opt/cctv/current)\"
 new=/tmp/cctv-release/cctv-$release
@@ -116,8 +119,9 @@ rm -rf /tmp/cctv-release && mkdir -p /tmp/cctv-release
 sudo cp -a \"\$cur\" \"\$new\"
 sudo rm -rf \"\$new/cctv\" \"\$new/deploy\"
 sudo tar -xf /tmp/$name -C \"\$new\"
-if ! cmp -s \"\$new/package.json\" \"\$cur/package.json\"; then
-  echo 'package.json changed since the installed release: the npm packages would differ. Run a full push (without --code-only).' >&2
+deps() { node -e 'const p = require(process.argv[1]); console.log(JSON.stringify([p.dependencies ?? {}, p.optionalDependencies ?? {}]))' \"\$1\"; }
+if [ \"\$(deps \"\$new/package.json\")\" != \"\$(deps \"\$cur/package.json\")\" ]; then
+  echo 'package.json dependencies changed since the installed release: the npm packages would differ. Run a full push (without --code-only).' >&2
   sudo rm -rf /tmp/cctv-release; rm -f /tmp/$name; exit 3
 fi
 echo \"code $release over \$(cat \"\$cur/RELEASE\" 2>/dev/null || basename \"\$cur\")'s packages\"
