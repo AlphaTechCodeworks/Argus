@@ -109,7 +109,7 @@ async function loadAlarms() {
   const rows = alarmRows(body.alarms)
   // A linked alarm that is not in this list is explained on the summary line, which is read out as
   // a status: whoever followed the link learns why they are not looking at it.
-  say($('summary'), [filterSummary(body.summary, { acked: $('filters').elements.acked.value === 'false' }), linkedEventNote(linked, rows)].filter(Boolean).join(' · '))
+  say($('summary'), [filterSummary(body.summary, { acked: $('filters').elements.acked.value === 'false' }), body.scanLimited ? 'the search stopped before the start of this window: narrow the dates or the filters to see older matches' : '', linkedEventNote(linked, rows)].filter(Boolean).join(' · '))
   paintAlarms(rows)
   paintSources(body.sources)
   showLinked()

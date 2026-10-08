@@ -44,7 +44,7 @@ import {
   listEvents, listRules, noteNotified, unacknowledge, updateRule
 } from './events-db.mjs'
 import {
-  alarmMessage, applyRules, cameraKey, checkAck, eventWindow,
+  TYPE_NAMES, alarmMessage, applyRules, cameraKey, checkAck, eventWindow,
   filterAlarms, labelOf, prioritise, summarise, withinQuietGap
 } from './event-rules.mjs'
 
@@ -54,6 +54,8 @@ export const DEFAULT_WINDOW_MS = 7 * 86_400_000
 /** Seconds either side of an alarm that a bookmark or an export starts out covering. */
 export const CLIP_PRE_S = 30
 export const CLIP_POST_S = 60
+/** A search word found in more camera names than this is not handed to the database as a list of cameras. */
+const MAX_WORD_CAMERAS = 200
 /**
  * An event that started longer ago than this is graded and kept like any other, but nobody is told.
  * The recorded-file intake (events.mjs) files late: a round of every camera takes minutes, a camera
@@ -81,9 +83,14 @@ const tri = (v) => (v === 'true' ? true : v === 'false' ? false : null)
  * key, which is still true and still findable.
  */
 export function nameCameras(alarms, cameras) {
+  return alarms.map(cameraNamer(cameras))
+}
+
+/** nameCameras for one alarm at a time: the names are looked up once, however many alarms follow. */
+export function cameraNamer(cameras) {
   const names = new Map()
   for (const c of cameras ?? []) names.set(cameraKey(c.nvr ?? c.nvrId, c.ch), c.name)
-  return alarms.map((a) => ({ ...a, camera: names.get(cameraKey(a.nvr, a.ch)) ?? cameraKey(a.nvr, a.ch), typeLabel: labelOf(a.type) }))
+  return (a) => ({ ...a, camera: names.get(cameraKey(a.nvr, a.ch)) ?? cameraKey(a.nvr, a.ch), typeLabel: labelOf(a.type) })
 }
 
 // ---- classifying and notifying -------------------------------------------------------------------
@@ -322,17 +329,53 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
       // Rights and filters are applied as the rows are read, so the limit counts the alarms shown.
       // Cutting to the newest 500 of everything first hid an older unacknowledged alarm behind a busy
       // fleet's motion events, and left a viewer of one quiet camera with an empty list.
-      const filtered = nameCameras(listEvents({
-        fromMs,
-        toMs,
-        limit: num(p.get('limit')) ?? 500,
-        keep: (row) => visible(row) && filterAlarms(nameCameras([row], cams), want).length > 0
-      }), cams)
+      // The kind, priority, camera and acknowledged filters go to the database, and so do the
+      // cameras of a viewer who may not see all of them: what is left for JS (the rights, again, and
+      // the text search, which needs the camera's name) then runs on the rows that can match, not on
+      // every event of the week. All of it in JS, a filter matching nothing held the whole server
+      // for 21 s on its main thread while it read 400,000 rows (2026-10-07).
+      const keyOf = (c) => cameraKey(c.nvr ?? c.nvrId, c.ch)
+      const mine = cams.filter((c) => canSee(c.nvr ?? c.nvrId, c.ch))
+      let camKeys = want.cameras?.length ? want.cameras : null
+      // (everything this server knows: an admin, who also sees the alarms of cameras since removed)
+      if (mine.length < cams.length) {
+        const seen = new Set(mine.map(keyOf))
+        camKeys = camKeys ? camKeys.filter((k) => seen.has(k)) : [...seen]
+      }
+      const camOf = (key) => ({ nvr: key.slice(0, key.lastIndexOf('/')), ch: Number(key.slice(key.lastIndexOf('/') + 1)) })
+      const named = cameraNamer(cams)
+      const text = { text: want.text }
+      const needle = String(want.text ?? '').trim().toLowerCase()
+      const hasText = needle !== ''
+      // The text search is filterAlarms', on the labels and names only this side knows. The database
+      // first narrows the rows to those that can match: each word of the search is in one of the
+      // fields filterAlarms joins (it holds no space, so it cannot run from one field into the next).
+      // Not for a word in most camera names (it narrows nothing), nor for letters LIKE cannot fold.
+      const words = !hasText || /[^ -~]/.test(needle)
+        ? []
+        : needle.split(/s+/).map((word) => ({
+            word,
+            types: TYPE_NAMES.filter((t) => labelOf(t).toLowerCase().includes(word)),
+            cameras: cams.filter((c) => String(c.name ?? '').toLowerCase().includes(word)).map((c) => ({ nvr: c.nvr ?? c.nvrId, ch: c.ch }))
+          })).filter((w) => w.cameras.length <= MAX_WORD_CAMERAS)
+      // (a viewer who may see none of the cameras asked for: nothing, without a search)
+      const found = camKeys && !camKeys.length
+        ? []
+        : listEvents({
+            fromMs,
+            toMs,
+            limit: num(p.get('limit')) ?? 500,
+            where: { types: want.types, priorities: want.priorities, acked: want.acked, cameras: camKeys?.map(camOf).filter((c) => Number.isInteger(c.ch)), words },
+            keep: (row) => visible(row) && (!hasText || filterAlarms([named(row)], text).length > 0)
+          })
+      const filtered = found.map(named)
       const { sourceReport } = await import('./events.mjs')
       return [200, {
         alarms: prioritise(filtered),
         summary: summarise(filtered),
         window: { fromMs, toMs },
+        // the search stopped before the start of the window (events-db MAX_SCAN): older matches may exist
+        scanLimited: found.scanLimited === true,
         user,
         admin,
         // Printed under the filters, so the page states plainly what it cannot report rather than
