@@ -115,7 +115,8 @@ export const EACH_PICTURE_BELOW_FPS = 1000
  * so the parser does not hold a second one back. Through the real ffmpeg (the server's image on a
  * slower PC, 2560x1440 H.265 at 20 fps, paced as a camera sends, superfast): a picture came out
  * 180-185 ms after it went in with two threads alone, 135-140 ms with each picture ended; with
- * low_delay 100-130 ms while it kept up, which there it did not (reset twice in 20 s).
+ * low_delay 100-130 ms while it kept up, which there it did not (reset twice in 20 s). On the server
+ * itself, niced, at veryfast: 131 ms in the middle, 136 ms for nine pictures in ten, none reset.
  */
 export const MAIN_EACH_PICTURE_BELOW_FPS = 10
 /** More than this many seconds of pictures in a converter and not out: it is reset (PhoneStream maxLagS). */
