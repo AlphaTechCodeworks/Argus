@@ -31,6 +31,7 @@ import { spareWhile } from './watchdog.mjs'
 import { checkHealth, listLocations, onChange as onStorageChange, startHealthChecks } from './storage.mjs'
 import { SPOOL_ID, drainSpool, spoolLocation, trimSpool, writableLocations } from './ram-spool.mjs'
 import { noteRecorderGap, noteRecorderQueues } from './thin-pace.mjs'
+import { HOLD_CHECK_MS, holdControlLogin } from './login-hold.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
 
@@ -485,6 +486,8 @@ export class Nvr {
     this.stallsHeld = false // stalled streams left alone while the NVR cools down (logged once)
     this.probeFailedAt = 0
     this.relogins = [] // times of recent relogins, for back-off
+    this.lastLoginTryAt = 0 // when this process last really tried its control login (login-hold.mjs)
+    this.loginHeld = false // that login is being left untried: said once in the journal, and once when it ends
     this.gen = 0 // session generation: results from an older session are ignored
     this.controlFailed = false // this login has failed since it was last up (or since the start): see borrowing
     this.lane = new Lane(cfg.id, LANE_CONCURRENCY, { holdAt: LANE_HOLD_AT })
@@ -638,6 +641,20 @@ export class Nvr {
         // Also a repeatedly-reconnecting NVR (relogins.length > 1), so one flapping P2P site does not
         // keep the healthy NVRs' logins waiting behind it, even while it still shows "connecting".
         const priority = this.status === 'offline' || this.relogins.length > 1 ? PRIORITY.LOW : PRIORITY.NORMAL
+        // An NVR by serial number that this process could not reach, and that its own worker cannot
+        // reach either: the login is not made this turn. It would sit in the one login lane for ~20 s
+        // and fail, with a playback login to a healthy NVR waiting behind it (login-hold.mjs). Looked
+        // at again in a few seconds: the moment the worker is in, so is this.
+        if (holdControlLogin({ sn, failed: this.controlFailed, workerState: this.worker?.state(), workerStatus: this.worker?.stats()?.status, sinceTryMs: Date.now() - this.lastLoginTryAt })) {
+          if (!this.loginHeld) console.log(`[${this.id}] its worker cannot reach ${where} either: this login waits for the worker's (and is tried anyway every 10 min)`)
+          this.loginHeld = true
+          await sleep(jittered(HOLD_CHECK_MS))
+          delay = RETRY_MIN_MS / 2
+          continue
+        }
+        if (this.loginHeld) console.log(`[${this.id}] trying the login to ${where} again`)
+        this.loginHeld = false
+        this.lastLoginTryAt = Date.now()
         const { userId, why } = await login({ host, port, user, password, sn, nat }, { tag: 'login', nvr: this.id, info, priority })
         if (this.stopped) {
           if (userId >= 0) logoutLate('login', this.id)(userId)
