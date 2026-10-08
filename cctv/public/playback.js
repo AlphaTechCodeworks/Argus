@@ -63,7 +63,7 @@ import {
 } from './pb-sources.js'
 import { MAX_BOXES, boxSeekMs, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
-import { allowedSpeeds, clampSpeed, frameStep, ignoredRepeat, , shuttleLabel, shuttleRate, stepNotBefore } from './pb-transport.js'
+import { allowedSpeeds, clampSpeed, frameStep, ignoredRepeat, shuttleLabel, shuttleRate, stepNotBefore } from './pb-transport.js'
 import { DEFAULT_OSD, drawOsd, osdFont, osdIsOff, osdLayout } from './osd-overlay.js'
 
 // Video is decoded here in the browser, exactly as the camera encoded it; the
