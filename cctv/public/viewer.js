@@ -1466,10 +1466,22 @@ document.addEventListener('visibilitychange', () => {
 
 /** Sends the browser to the sign-in page if the session has expired or been revoked. */
 async function checkSession() {
-  const res = await fetch('/api/me').catch(() => null)
+  const res = await fetchLiveJson('/api/me', true).catch(() => null)
   noteServerClock(res) // this runs every minute, so the overlay's clock never drifts from the server's
   if (res?.status === 401) location.href = '/login.html'
-  return res?.ok ? res.json() : null
+  return res?.ok ? res.data : null
+}
+
+async function fetchLiveJson(url, withResponse = false) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const response = await fetch(url, { signal: controller.signal, cache: 'no-store' })
+    if (response.status === 401) { location.href = '/login.html'; throw new Error('Session expired') }
+    if (!response.ok) throw new Error(`Camera request failed (${response.status})`)
+    const data = await response.json()
+    return withResponse ? { ok: response.ok, headers: response.headers, data } : data
+  } finally { clearTimeout(timer) }
 }
 
 document.getElementById('logout').addEventListener('click', async () => {
@@ -1480,7 +1492,7 @@ document.getElementById('logout').addEventListener('click', async () => {
 // Everything the first screen needs is asked for at once: the session, this user's order, the
 // overlay settings and the camera list were four round trips one after another (about a second of
 // empty page over mobile data).
-const fetchLists = () => Promise.all([fetch('/api/cameras').then((r) => r.json()), fetch('/api/sites').then((r) => r.json())])
+const fetchLists = () => Promise.all([fetchLiveJson('/api/cameras'), fetchLiveJson('/api/sites')])
 const prefetched = fetchLists()
 prefetched.catch(() => {}) // (handled where it is used; a signed-out session is sent to sign-in first)
 const early = Promise.all([sync.load(), loadOsd().catch(() => {}), loadViews().catch(() => {})])
