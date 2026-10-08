@@ -1045,10 +1045,13 @@ $('dayNext').addEventListener('click', () => seek(clock.atMs + DAY))
 
 dateInput.addEventListener('change', () => {
   if (!dateInput.value) return
-  state.date = dateInput.value
-  // the same clock time on the chosen day, so a wall set to 14:00 stays at 14:00
+  // the same clock time on the chosen day, so a wall set to 14:00 stays at 14:00.
+  // state.date is left for seek() to set: it loads the day's recordings when the date it lands on
+  // is not the one held, and with the date already set here it never did. The label and the clock
+  // moved to the chosen day while every tile kept the old day's recordings ("Nothing recorded at
+  // this moment" on a day full of footage); only the day arrows worked.
   const into = clock.atMs - dayStartOf(fmtDate(clock.atMs))
-  seek(dayStartOf(state.date) + into)
+  seek(dayStartOf(dateInput.value) + into)
 })
 
 qualitySel.addEventListener('change', () => {
