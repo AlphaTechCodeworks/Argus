@@ -414,6 +414,12 @@ export function renderHealth(d) {
   const running = vw ? vw.conversions.playback.running + vw.conversions.phones.running : 0 // phones and remote viewers share one pool
   const cap = vw ? vw.conversions.playback.cap + vw.conversions.phones.cap : 0
   const cpu = vw?.conversions.cpu?.percent
+  // H.265 converted to H.264 for PCs on the network that cannot play it: its own budget, counted in
+  // the same card (h264-fallback.mjs); absent from an older server
+  const h264 = vw?.conversions.h264 ?? null
+  const all = running + (h264?.running ?? 0)
+  const allCap = cap + (h264?.cap ?? 0)
+  const h264Note = h264?.cap ? ` · ${h264.running} of ${h264.cap} for PCs without H.265${h264.running ? ` (${h264.step}, ${(h264.units / 100).toFixed(1)} of ${(h264.budgetUnits / 100).toFixed(1)} cores)` : ''}` : ''
   const viewingCards = !vw ? null : {
     people: {
       label: 'People connected',
@@ -437,10 +443,10 @@ export function renderHealth(d) {
     },
     encoding: {
       label: 'Video conversions',
-      value: `${running} running`,
-      state: cap && running >= cap ? 'warn' : Number.isFinite(cpu) && cpu > 300 ? 'warn' : 'ok',
-      pct: cap ? (running / cap) * 100 : null,
-      note: `of ${cap} allowed${Number.isFinite(cpu) ? ` · ${cpu} % of a core` : ''}`
+      value: `${all} running`,
+      state: (cap && running >= cap) || (h264?.cap && h264.running >= h264.cap) ? 'warn' : Number.isFinite(cpu) && cpu > 300 ? 'warn' : 'ok',
+      pct: allCap ? (all / allCap) * 100 : null,
+      note: `of ${allCap} allowed${Number.isFinite(cpu) ? ` · ${cpu} % of a core` : ''}${h264Note}`
     }
   }
   return { overall, openAlerts, viewingCards, cards, systemCards: systemCards(d.system), nvrRows, nvrPanels, historyRows, bannerText, criticalText, sendingProblem, admins, adminText, adminState }

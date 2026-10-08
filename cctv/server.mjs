@@ -630,7 +630,11 @@ const handleRequest = async (req, res) => {
       errors: processErrors(),
       // network shares as last checked (never checked here): the outside watcher remounts one that
       // stopped answering, which the server itself, no longer frozen by it, would otherwise hide
-      shares: listLocations().filter((l) => l.type === 'network').map((l) => ({ path: l.path, ok: l.health.ok, reason: l.health.reason }))
+      shares: listLocations().filter((l) => l.type === 'network').map((l) => ({ path: l.path, ok: l.health.ok, reason: l.health.reason })),
+      // H.265 sub-streams being converted to H.264 for local PCs that cannot play them
+      // (h264-fallback.mjs): how many of how many, the encoder step they are on, and the CPU they
+      // are counted as against their budget, in units of 1 % of a core
+      h264: h264Fallback.summary()
     }
     // CCTV_LIVE_WORKER=on: each NVR's live worker (its own SDK calls are counted there, not above)
     if (list.some((n) => n.worker)) {
@@ -1082,6 +1086,8 @@ const handleRequest = async (req, res) => {
           playback: { running: playbackTranscodes.active, cap: playbackTranscodes.max },
           remote: { running: remote.conversions, cap: remote.conversionCap },
           phones: { running: phoneLive.pool.active, cap: phoneLive.pool.max },
+          // for local PCs without H.265, on their own budget (h264-fallback.mjs): { running, cap, step, units, budgetUnits, ... }
+          h264: h264Fallback.summary(),
           cpu: ffmpegCpuPercent()
         }
       }
