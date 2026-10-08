@@ -409,6 +409,28 @@ const json = (o) => async () => o
   const one = await handleAlarms('GET', `/api/alarms?from=0&types=${older.type}&limit=1`, json({}), who)
   check('a filter with a limit of 1 finds the newest match, not nothing', one[1].alarms.length === 1 && one[1].alarms[0].id === older.id, JSON.stringify(one[1].alarms.map((x) => x.id)))
   check('listEvents with keep: the limit counts kept rows', listEvents({ limit: 1, keep: (e) => e.id === older.id }).length === 1)
+  // The kind, priority, camera and acknowledged tests are the database's, not JS on every row.
+  const kinds = listEvents({ where: { types: [older.type] } })
+  check('listEvents where: a kind', kinds.length > 0 && kinds.every((e) => e.type === older.type) && kinds.some((e) => e.id === older.id))
+  const ofCam = listEvents({ where: { cameras: [{ nvr: older.nvr, ch: older.ch }] }, keep: () => true })
+  check('listEvents where: a camera', ofCam.length > 0 && ofCam.every((e) => e.nvr === older.nvr && e.ch === older.ch))
+  check('listEvents where: acknowledged or not', listEvents({ where: { acked: false } }).every((e) => !e.ackMs) && listEvents({ where: { acked: true } }).every((e) => e.ackMs))
+  check('listEvents where: a kind and a limit', listEvents({ where: { types: [older.type] }, limit: 1 }).length === 1)
+  check('listEvents where: nothing given tests nothing', listEvents({ where: { types: [], priorities: null, cameras: [], acked: null }, limit: 1000 }).length === everything.length)
+  // a JS test reads a bounded number of rows, and says when it stopped short
+  const cut = listEvents({ keep: () => false, maxScan: 1 })
+  check('listEvents keep: stops at maxScan and says so', cut.length === 0 && cut.scanLimited === true)
+  check('... and does not say so when it read everything', listEvents({ keep: () => false }).scanLimited !== true)
+  const byCam = await handleAlarms('GET', `/api/alarms?from=0&cameras=${older.nvr}/${older.ch}&priorities=${older.priority}`, json({}), who)
+  check('the route: camera and priority filters still hold', byCam[1].alarms.length > 0 && byCam[1].alarms.every((x) => x.nvr === older.nvr && x.ch === older.ch && x.priority === older.priority) && byCam[1].scanLimited === false)
+  const byText = await handleAlarms('GET', '/api/alarms?from=0&text=gate', json({}), who)
+  check('the route: the text search still finds a camera by its name', byText[1].alarms.length > 0 && byText[1].alarms.every((x) => /gate/i.test(`${x.camera} ${x.detail ?? ''} ${x.typeLabel} ${x.subtype ?? ''} ${x.ackNote ?? ''}`)))
+  // the text search is narrowed by the database first, and must find exactly what it found before
+  for (const text of ['gate', 'GATE', labelOf(older.type).split(' ')[0], `${older.nvr}/${older.ch}`, 'no-such-word-anywhere', '100%', 'a_b', 'é']) {
+    const got = await handleAlarms('GET', `/api/alarms?from=0&text=${encodeURIComponent(text)}`, json({}), who)
+    const want = filterAlarms(nameCameras(everything, who.cameras()), { text }).map((x) => x.id).sort((x, y) => x - y)
+    check(`the route: text "${text}" finds what a search of every row finds`, JSON.stringify(got[1].alarms.map((x) => x.id).sort((x, y) => x - y)) === JSON.stringify(want), `${got[1].alarms.length} vs ${want.length}`)
+  }
 
   // rights: a viewer who may see no camera sees no alarm, and cannot act on one by its id
   const blind = { user: 'carol', admin: false, cameras: who.cameras, now: who.now, canSee: () => false }

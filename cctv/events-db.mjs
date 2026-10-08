@@ -20,6 +20,8 @@ import { DEFAULT_PRIORITY, PRIORITIES, checkRule } from './event-rules.mjs'
 export const EVENTS_DB = join(DATA_DIR, 'recordings.db')
 /** One page of results. A guard against a runaway query, not a paging scheme. */
 export const MAX_RESULTS = 1000
+/** The most rows one list reads through a JS test (listEvents `keep`): under a second of the main thread. */
+export const MAX_SCAN = 50_000
 /**
  * Line crossings on one camera starting closer together than this are one event. One crossing
  * reaches us twice: the alarm watcher (alarm-watch.mjs) sees the camera's alarm within seconds, and
@@ -71,8 +73,6 @@ function open(file = EVENTS_DB) {
     // The window query is the only filter with an index behind it; the rest are applied in JS by
     // event-rules.filterAlarms, which the page uses on the same data.
     inWindow: db.prepare(`SELECT ${EV_COLS} FROM events WHERE start_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC LIMIT ?`),
-    // the same without a limit, read a row at a time (listEvents with `keep`)
-    inWindowAll: db.prepare(`SELECT ${EV_COLS} FROM events WHERE start_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC`),
     ofCamera: db.prepare(`SELECT ${EV_COLS} FROM events WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? ORDER BY start_ms`),
     unacked: db.prepare(`SELECT ${EV_COLS} FROM events WHERE ack_ms IS NULL ORDER BY start_ms DESC LIMIT ?`),
     ack: db.prepare('UPDATE events SET ack_ms = ?, ack_user = ?, ack_note = ? WHERE id = ?'),
@@ -235,15 +235,68 @@ export const getEvent = (id) => plain(open().byId.get(Number(id)))
  * keep: a test each row must pass to be returned. The limit then counts the rows kept, not the rows
  * read: limiting first and filtering afterwards loses whatever is older than the newest `limit` rows
  * of every camera and kind, which on a busy fleet is an unacknowledged alarm from an hour ago.
+ *
+ * where: what the database can test itself, { types, priorities, cameras: [{ nvr, ch }], acked, words }
+ * (a list not given or empty, and acked null, test nothing). words: [{ word, types, cameras }], for
+ * a text search: each word must be in the event's own text (subtype, detail, note, type, "nvr/ch")
+ * or the event be of one of that word's types or cameras (the caller knows which labels and camera
+ * names hold the word; this table does not). ASCII words only: LIKE folds the case of nothing else. Whatever can be said here must be: `keep`
+ * runs in JS on the main thread for every row read, and a week of a busy fleet is 400,000 rows. A
+ * rare kind looked for through `keep` alone held the whole server for 21 s (2026-10-07).
+ *
+ * maxScan: with `keep`, the most rows read. Past it the search stops and the list returned has
+ * `scanLimited` set: the caller says so rather than pass a cut-off list off as everything.
  */
-export function listEvents({ fromMs = null, toMs = null, limit = MAX_RESULTS, keep = null } = {}) {
+export function listEvents({ fromMs = null, toMs = null, limit = MAX_RESULTS, keep = null, where = null, maxScan = MAX_SCAN } = {}) {
   const s = open()
   const cap = Math.min(Math.max(1, Math.floor(Number(limit) || MAX_RESULTS)), MAX_RESULTS)
   const from = Number.isFinite(fromMs) ? Math.round(fromMs) : -8.64e15
   const to = Number.isFinite(toMs) ? Math.round(toMs) : 8.64e15
-  if (typeof keep !== 'function') return s.inWindow.all(from, to, cap).map(plain)
+  const tests = []
+  const args = [from, to]
+  const oneOf = (col, values) => {
+    if (!values?.length) return
+    tests.push(`${col} IN (${values.map(() => '?').join(', ')})`)
+    args.push(...values.map(String))
+  }
+  oneOf('type', where?.types)
+  oneOf('priority', where?.priorities)
+  if (where?.cameras?.length) {
+    tests.push(`(${where.cameras.map(() => '(nvr = ? AND ch = ?)').join(' OR ')})`)
+    for (const c of where.cameras) args.push(String(c.nvr), Number(c.ch))
+  }
+  // (+ack_ms: not by the acknowledgements' index. Nearly every row is unacknowledged, and found
+  // through that index the whole week is sorted before the newest 500 can be handed over: 2.4 s.
+  // Read in time order, the newest that pass are simply the first.)
+  if (where?.acked === true) tests.push('+ack_ms IS NOT NULL')
+  if (where?.acked === false) tests.push('+ack_ms IS NULL')
+  for (const w of where?.words ?? []) {
+    // (! escapes the two LIKE wildcards and itself, so a search for "100%" looks for exactly that)
+    const like = `%${String(w.word).replace(/[!%_]/g, '!$&')}%`
+    const any = ['subtype', "IFNULL(detail, '')", "IFNULL(ack_note, '')", 'type', "(nvr || '/' || ch)"].map((col) => `${col} LIKE ? ESCAPE '!'`)
+    args.push(like, like, like, like, like)
+    if (w.types?.length) {
+      any.push(`type IN (${w.types.map(() => '?').join(', ')})`)
+      args.push(...w.types.map(String))
+    }
+    for (const c of w.cameras ?? []) {
+      any.push('(nvr = ? AND ch = ?)')
+      args.push(String(c.nvr), Number(c.ch))
+    }
+    tests.push(`(${any.join(' OR ')})`)
+  }
+  if (typeof keep !== 'function' && !tests.length) return s.inWindow.all(from, to, cap).map(plain)
+  // (prepared per call: the tests differ from one request to the next, and this is a page being opened)
+  const q = db.prepare(`SELECT ${EV_COLS} FROM events WHERE start_ms >= ? AND start_ms <= ?${tests.map((t) => ` AND ${t}`).join('')} ORDER BY start_ms DESC LIMIT ?`)
+  if (typeof keep !== 'function') return q.all(...args, cap).map(plain)
   const out = []
-  for (const r of s.inWindowAll.iterate(from, to)) {
+  let read = 0
+  // (one more than may be read, so that stopping short can be told from reaching the end)
+  for (const r of q.iterate(...args, maxScan + 1)) {
+    if (++read > maxScan) {
+      out.scanLimited = true
+      break
+    }
     const row = plain(r)
     if (!keep(row)) continue
     out.push(row)
