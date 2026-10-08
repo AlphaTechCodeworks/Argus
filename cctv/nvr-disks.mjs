@@ -292,8 +292,10 @@ export function bandwidthOf(caps) {
   const total = caps?.totalBandwidthMbps
   const usedKb = caps?.usedBandwidthKbps
   if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(usedKb)) return null
-  // kbit/s -> Mbit/s is decimal (1 Mbit/s = 1000 kbit/s), as totalBandwidthMbps is; 1024 under-read it ~2.3%
-  const used = Math.round((usedKb / 1000) * 10) / 10
+  // The NVR counts 1024 kbit to its Mbit: nvr-2 reports 131072 Kb used, which is its 32 cameras at
+  // 4096 kbit/s and the 128 Mb of 192 its own page shows. Health (public/health.js) and the stream
+  // editor's estimate (streams.mjs) divide by 1024 as well; this divided by 1000 and read 2.4 % high.
+  const used = Math.round((usedKb / 1024) * 10) / 10
   return { usedMbps: used, totalMbps: total, pct: Math.round((used / total) * 100) }
 }
 
