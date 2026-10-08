@@ -105,6 +105,7 @@ const isVersion = (v) => Number.isSafeInteger(v) && v >= 0
 const UI_KEYS = new Set(['cctv.theme', 'cctv.sidebarPinned', 'cctv.layout', 'cctv.layout.phone', 'cctv.activeView', 'cctv.smooth', 'cctv.hideOffline', 'cctv.site', 'cctv.workspaceSite', 'cctv.favoriteSites', 'cctv.recentSites', 'cctv.mapSite', 'cctv.mapNames', 'cctv.mapLayer', 'cctv.alarmFilters'])
 const layouts = new Set(['auto', 'list', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', '1+5', '1+7', '1+12', '2+8'])
 function validUiValue(key, value) {
+  if (key === 'cctv.pictureFit') return ['auto', 'fit', 'fill', 'stretch'].includes(value)
   if (!UI_KEYS.has(key) || typeof value !== 'string') return false
   if (key === 'cctv.theme') return ['dark', 'light'].includes(value)
   if (key === 'cctv.mapLayer') return ['street', 'satellite'].includes(value)

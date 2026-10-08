@@ -83,6 +83,11 @@
   .live-page.has-shell .app-main > header .controls { gap: var(--s2); }
   .live-heading { flex-wrap: wrap; gap: var(--s1) var(--s3); }
   .live-state { margin-inline-start: 0; }
+  .live-scope { width: 100%; min-width: 0; flex-wrap: wrap; }
+  .live-scope .camera-browser-launch { flex: 1 1 100%; max-width: 100%; }
+  .live-scope #siteLabel { flex: 1 1 100%; min-width: 0; display: flex; align-items: center; gap: 8px; }
+  .live-scope #site { flex: 1; min-width: 0; width: 100%; }
+  .live-page .controls button, .live-page .controls select, .live-options summary { min-height: 44px; }
   .camera-search { width: 100%; }
   .camera-search input { width: 100%; min-height: 44px; }
   .camera-search button { min-height: 44px; width: 44px; }
@@ -101,11 +106,13 @@
 }
 @media (pointer: coarse) { .tile-move { opacity: 1; min-height: 44px; } }
 
-/* Fullscreen uses the whole tile, including the space behind the name strip.
-   Fill keeps the complete camera picture visible; no edges are cropped. */
+/* Preserve camera geometry by default; cropping and distortion are explicit choices.
+   The OSD shares the video's fit so labels stay aligned with the picture. */
+.live-page #grid { --camera-fit: contain; }
+.live-page #grid[data-picture-fit="fill"] { --camera-fit: cover; }
+.live-page #grid[data-picture-fit="stretch"] { --camera-fit: fill; }
+.live-page #grid .tile canvas:not(.ln-overlay):not(.ln-loupe) { object-fit: var(--camera-fit); }
 .live-page #grid:fullscreen { padding: 0; gap: 2px; }
-.live-page #grid:fullscreen .tile canvas:not(.ln-overlay):not(.ln-loupe),
-.live-page.phone-full #grid .tile canvas:not(.ln-overlay):not(.ln-loupe) { object-fit: fill; }
 .live-page #grid:fullscreen .tile[data-live="1"] > .label,
 .live-page.phone-full #grid .tile[data-live="1"] > .label {
   opacity: 0; visibility: hidden; transform: translateY(6px);

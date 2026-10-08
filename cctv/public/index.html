@@ -72,6 +72,15 @@
       <button id="deleteView" type="button" title="Delete the saved view shown" hidden>Delete view</button>
       <label title="Leave offline cameras out of the layout"><input id="hideOffline" type="checkbox" checked /> Hide offline</label>
       <label title="Steadier motion: holds about 0.4 s more video (a little more delay)"><input id="smooth" type="checkbox" /> Smooth</label>
+      <label for="pictureFit">Picture
+        <select id="pictureFit" aria-describedby="pictureFitHelp">
+          <option value="auto">Auto — whole picture</option>
+          <option value="fit">Fit — whole picture</option>
+          <option value="fill">Fill — crop edges</option>
+          <option value="stretch">Stretch — fill box</option>
+        </select>
+      </label>
+      <p id="pictureFitHelp" class="live-help">Auto also adapts the Auto grid to camera proportions. Fit keeps the whole image; Fill crops edges; Stretch can distort shapes.</p>
       <button id="resetOrder" type="button" title="Your cameras are in your own order (drag a tile onto another to swap them, or onto ‹ › to move it to another page). This puts them back in the default order." hidden>Reset order</button>
       <p class="live-help">Open a camera with a click or Enter. Use its Move button to reorder, or drag it onto another camera.</p>
       </div></details>

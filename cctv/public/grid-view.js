@@ -34,7 +34,7 @@ export const LAYOUTS = Object.freeze(['auto', '2x2', '3x3', '4x4', '5x5', '6x6',
 export const LIVE_LAYOUTS = Object.freeze(['auto', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', '1+5', '1+7', '1+12', '2+8'])
 
 /** Auto uses only as many rows as the filtered cameras need; larger sets are paged. */
-export function autoLiveGrid(count, { noH265 = false, phone = false, width = 0, height = 0, gap = 8 } = {}) {
+export function autoLiveGrid(count, { noH265 = false, phone = false, width = 0, height = 0, gap = 8, pictureAspect = 16 / 9 } = {}) {
   // Automatic layout must not create hundreds of hardware decoders on first load.
   // Keep the previous nine-camera default as its budget; larger grids remain explicit.
   const cap = phone ? 4 : 9
@@ -44,10 +44,11 @@ export function autoLiveGrid(count, { noH265 = false, phone = false, width = 0, 
     return { size, rows: Math.ceil(visible / size) }
   }
   let best = { size: 1, rows: visible, score: -1 }
+  const aspect = Number.isFinite(pictureAspect) && pictureAspect > 0 ? pictureAspect : 16 / 9
   for (let size = 1; size <= Math.min(12, visible); size++) {
     const rows = Math.ceil(visible / size)
     if (size * rows > cap) continue
-    const score = Math.min((width - gap * (size - 1)) / size / 16, (height - gap * (rows - 1)) / rows / 9)
+    const score = Math.min((width - gap * (size - 1)) / size / aspect, (height - gap * (rows - 1)) / rows)
     if (score > best.score) best = { size, rows, score }
   }
   return { size: best.size, rows: best.rows }

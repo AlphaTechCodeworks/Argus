@@ -15,6 +15,15 @@ function req(method, body, headers = {}) {
 const get = (user) => handleUiPreferences(req('GET'), user)
 const patch = (user, preferences, account = user, headers) => handleUiPreferences(req('PATCH', { account, preferences }, headers), user)
 
+test('picture fit is validated and remains private to each account', async () => {
+  for (const mode of ['auto', 'fit', 'fill', 'stretch']) {
+    assert.equal((await patch('aspect-alice', { 'cctv.pictureFit': mode }))[0], 200)
+    assert.equal((await get('aspect-alice'))[1].preferences['cctv.pictureFit'], mode)
+  }
+  assert.equal((await patch('aspect-alice', { 'cctv.pictureFit': 'invalid' }))[0], 400)
+  assert.equal((await get('aspect-bob'))[1].preferences['cctv.pictureFit'], undefined)
+})
+
 test('settings follow each account and patches retain unrelated settings and camera order', async () => {
   assert.deepEqual((await get('alice'))[1], { user: 'alice', preferences: {} })
   assert.equal((await patch('alice', { 'cctv.layout': 'g4', 'cctv.theme': 'light' }))[0], 200)

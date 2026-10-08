@@ -49,6 +49,8 @@ check('auto live: large rosters keep the previous nine-camera default and use pa
 check('auto live: a wide viewport favors three columns for six cameras', JSON.stringify(autoLiveGrid(6, { width: 1600, height: 650 })) === '{"size":3,"rows":2}')
 check('auto live: a tall viewport favors two columns for six cameras', JSON.stringify(autoLiveGrid(6, { width: 650, height: 1000 })) === '{"size":2,"rows":3}')
 check('auto live: viewport fitting respects the conversion cap', (() => { const g = autoLiveGrid(200, { width: 1800, height: 700, noH265: true }); return g.size * g.rows <= 16 })())
+check('auto live: portrait cameras use six tall cells instead of six wide cells', JSON.stringify(autoLiveGrid(6, { width: 1600, height: 900, pictureAspect: 9 / 16 })) === '{"size":6,"rows":1}')
+check('auto live: invalid camera proportions use the normal default', JSON.stringify(autoLiveGrid(6, { width: 1600, height: 900, pictureAspect: NaN })) === JSON.stringify(autoLiveGrid(6, { width: 1600, height: 900 })))
 
 const cams = [
   { nvr: 'nvr-1', ch: 0, name: 'Front gate', nvrName: 'Office NVR', site: 'Depot' },

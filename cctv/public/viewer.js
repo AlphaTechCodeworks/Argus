@@ -27,6 +27,16 @@ if (!liveMuxOff) useMux(true)
 
 const grid = document.getElementById('grid')
 const layoutSelect = document.getElementById('layout')
+const pictureFit = document.getElementById('pictureFit')
+const PICTURE_MODES = ['auto', 'fit', 'fill', 'stretch']
+const savedPictureFit = preferenceStorage.getItem('cctv.pictureFit')
+pictureFit.value = PICTURE_MODES.includes(savedPictureFit) ? savedPictureFit : 'auto'
+grid.dataset.pictureFit = pictureFit.value
+pictureFit.addEventListener('change', () => {
+  grid.dataset.pictureFit = pictureFit.value
+  preferenceStorage.setItem('cctv.pictureFit', pictureFit.value)
+  if (layoutSelect.value === 'auto') relayout()
+})
 const cameraSearch = document.getElementById('cameraSearch')
 let cameraQuery = ''
 const pageLabel = document.getElementById('page')
@@ -149,7 +159,10 @@ function layoutCells(id) {
     const style = getComputedStyle(grid)
     const width = grid.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
     const height = grid.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
-    const { size, rows } = autoLiveGrid(count, { noH265: noH265Limit, phone: isPhone(), width, height, gap: parseFloat(style.gap) || 8 })
+    const ratios = pictureFit.value === 'auto' ? gridTiles.map(t => t.player?.videoWidth / t.player?.videoHeight).filter(r => Number.isFinite(r) && r > 0).sort((a, b) => a - b) : []
+    const pictureAspect = ratios.length ? ratios[Math.floor(ratios.length / 2)] : 16 / 9
+    const compactViewport = matchMedia('(max-width: 699px), (pointer: coarse) and (max-height: 500px)').matches
+    const { size, rows } = autoLiveGrid(count, { noH265: noH265Limit, phone: isPhone() || compactViewport, width, height, gap: parseFloat(style.gap) || 8, pictureAspect })
     return { size, rows, cells: Array.from({ length: size * rows }, (_, i) => [i % size + 1, Math.floor(i / size) + 1, 1, 1]) }
   }
   if (LAYOUTS[id]?.list) return { size: 1, cells: Array.from({ length: LIST_PAGE }, (_, i) => [1, i + 1, 1, 1]) }
@@ -214,6 +227,13 @@ function makeTile(cam, { controls = true } = {}) {
 }
 
 let gridTiles = [] // LiveTiles of the grid
+let pictureLayoutTimer
+function refreshPictureLayout() {
+  clearTimeout(pictureLayoutTimer)
+  pictureLayoutTimer = setTimeout(() => {
+    if (pictureFit.value === 'auto' && layoutSelect.value === 'auto' && !document.hidden && single === null) relayout()
+  }, 500)
+}
 let gridSlots = [] // one per grid cell: { cam, el, live: LiveTile | null }
 let gridStale = false // the camera list changed while the tab was hidden
 let singleTiles = [] // LiveTiles of the full-size view (sub, then main)
@@ -503,6 +523,7 @@ function osdForTile(cam) {
 }
 
 const tileOptions = (cam) => ({
+  onFirstFrame: refreshPictureLayout,
   pacing: PACING,
   clock: clockOptions(),
   maxQueuedFrames: REMOTE_PAGE ? REMOTE_QUEUED_FRAMES : undefined,
