@@ -1619,6 +1619,12 @@ body.has-shell .app-main > header { background: none; border-bottom: 1px solid v
 .hp-history > summary h2::before { content: '▸'; color: var(--muted); font-size: 0.8em; transition: transform var(--t-fast); }
 .hp-history[open] > summary h2::before { transform: rotate(90deg); }
 .hp-count { color: var(--muted); font-weight: 400; font-size: 0.85em; }
+/* Health, "Who is watching": thirty people must fit, so the rows are tight and what each is watching
+   unfolds under its count */
+.hp-watching th, .hp-watching td { padding: 5px 12px; vertical-align: top; }
+.hp-watch > summary { cursor: pointer; }
+.hp-watch ul { margin: 2px 0 6px; padding-left: 18px; font-size: 12px; }
+.hp-watch li { white-space: normal; }
 /* Recording storage gone: the loudest thing on the page, on every page */
 .alert-lines { display: flex; flex-direction: column; gap: 4px; }
 .alert-banner.critical { background: var(--bad); color: #fff; border-bottom: 0; padding: 12px 16px; }
