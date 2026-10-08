@@ -37,6 +37,9 @@ body.has-shell .app-main { display: flex; flex-direction: column; min-width: 0; 
 .shell-pin[aria-pressed="true"] { color: var(--accent-strong); border-color: var(--accent); }
 .shell-settings-status { width: 100%; overflow-wrap: anywhere; font-size: 12px; color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 4px; }
 .shell-settings-status[hidden] { display: none; }
+.alert-banner[hidden] { display: none !important; }
+.alert-dismiss { min-width: 44px; min-height: 44px; padding: 8px 12px; border: 1px solid currentColor; border-radius: var(--r-sm); background: transparent; color: inherit; cursor: pointer; }
+.alert-dismiss:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* the old page header's brand and tab strip are replaced by the shell */
 body.has-shell header .brand h1, body.has-shell header nav.tabs, body.has-shell header .account { display: none; }

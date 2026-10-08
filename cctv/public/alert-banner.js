@@ -8,6 +8,9 @@
 import { renderHealth } from './health.js'
 
 const POLL_MS = 30_000
+const dismissalKey = 'cctv.dismissedHealthBanner'
+let dismissed = ''
+try { dismissed = sessionStorage.getItem(dismissalKey) ?? '' } catch {}
 
 const bar = document.createElement('div')
 bar.className = 'alert-banner'
@@ -25,8 +28,16 @@ async function poll() {
   const { bannerText, criticalText } = renderHealth(data)
   if (!bannerText && !criticalText) {
     bar.hidden = true
+    dismissed = ''
+    try { sessionStorage.removeItem(dismissalKey) } catch {}
     return
   }
+  // Include the account and the actual problems, so another account or a changed
+  // warning never inherits this tab's dismissal. A cleared problem can recur.
+  let account = ''
+  try { account = JSON.parse(sessionStorage.getItem('cctv.me') ?? '{}').user ?? '' } catch {}
+  const signature = JSON.stringify([account, criticalText, (data.open ?? []).map((a) => [a.key, a.kind, a.severity, a.title]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))])
+  if (dismissed === signature) { bar.hidden = true; return }
   const link = document.createElement('a')
   link.href = '/health.html'
   link.textContent = 'Open Health'
@@ -55,7 +66,18 @@ async function poll() {
   const critical = document.createElement('strong')
   critical.textContent = criticalText ? `⛔ ${criticalText}` : ''
   critical.hidden = !criticalText
-  bar.replaceChildren(critical, details, link)
+  const dismiss = document.createElement('button')
+  dismiss.type = 'button'
+  dismiss.textContent = 'Dismiss'
+  dismiss.className = 'alert-dismiss'
+  dismiss.setAttribute('aria-label', 'Dismiss this warning banner')
+  dismiss.title = 'Hide these warnings in this tab. Changed problems will appear again.'
+  dismiss.addEventListener('click', () => {
+    dismissed = signature
+    try { sessionStorage.setItem(dismissalKey, signature) } catch {}
+    bar.hidden = true
+  })
+  bar.replaceChildren(critical, details, link, dismiss)
   bar.classList.toggle('critical', Boolean(criticalText))
   bar.hidden = false
   // inside the page's own column once the shell is there (body is then the two-column frame)

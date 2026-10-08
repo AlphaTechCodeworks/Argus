@@ -129,6 +129,17 @@
     </form>
   </dialog>
 
+  <dialog id="resetPasswordDialog" aria-labelledby="resetPasswordTitle">
+    <form id="resetPasswordForm" class="se-grid">
+      <h2 id="resetPasswordTitle">Reset password</h2>
+      <p id="resetPasswordAccount" class="st-help"></p>
+      <label>New password (8 or more characters)<input id="resetPasswordNew" type="password" required minlength="8" autocomplete="new-password" /></label>
+      <label>Confirm new password<input id="resetPasswordConfirm" type="password" required minlength="8" autocomplete="new-password" /></label>
+      <p id="resetPasswordError" role="alert" class="st-error"></p>
+      <div class="se-actions"><button id="resetPasswordCancel" type="button">Cancel</button><button id="resetPasswordSave" type="submit" class="st-primary">Reset password</button></div>
+    </form>
+  </dialog>
+
   <script type="module" src="shell.js"></script>
   <script type="module" src="audit.js"></script>
   <script type="module" src="page-tabs.js"></script>

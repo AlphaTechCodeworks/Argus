@@ -227,6 +227,46 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
     return j
   }
   const uSay = (t, bad = false) => { const m = document.getElementById('u-msg'); m.textContent = t; m.classList.toggle('st-error-text', bad) }
+  const resetDialog = document.getElementById('resetPasswordDialog')
+  const resetForm = document.getElementById('resetPasswordForm')
+  const resetNew = document.getElementById('resetPasswordNew')
+  const resetConfirm = document.getElementById('resetPasswordConfirm')
+  const resetError = document.getElementById('resetPasswordError')
+  const resetSave = document.getElementById('resetPasswordSave')
+  let resetAccount = null
+  let resettingPassword = false
+  const openPasswordReset = (name) => {
+    resetAccount = name
+    resetForm.reset()
+    resetConfirm.setCustomValidity('')
+    resetError.textContent = ''
+    document.getElementById('resetPasswordAccount').textContent = `Set a new password for ${name}.`
+    resetDialog.showModal()
+    resetNew.focus()
+  }
+  resetConfirm.addEventListener('input', () => resetConfirm.setCustomValidity(''))
+  resetNew.addEventListener('input', () => resetConfirm.setCustomValidity(''))
+  document.getElementById('resetPasswordCancel').addEventListener('click', () => { if (!resettingPassword) resetDialog.close() })
+  resetDialog.addEventListener('cancel', (e) => { if (resettingPassword) e.preventDefault() })
+  resetDialog.addEventListener('close', () => { resetForm.reset(); resetAccount = null })
+  resetForm.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    if (resettingPassword || !resetAccount) return
+    resetConfirm.setCustomValidity(resetNew.value === resetConfirm.value ? '' : 'Passwords do not match')
+    if (!resetForm.reportValidity()) return
+    resettingPassword = true
+    resetSave.disabled = true
+    resetError.textContent = ''
+    try {
+      // Re-read the role rather than trusting the account list from when this page opened.
+      const current = (await usersApi('GET')).users.find((u) => u.name === resetAccount)
+      if (!current) throw new Error('This account no longer exists. Reload the account list.')
+      await usersApi('POST', '', { name: current.name, role: current.role, password: resetNew.value })
+      uSay(`Password reset for ${current.name}`)
+      resetDialog.close()
+    } catch (err) { resetError.textContent = err.message }
+    finally { resettingPassword = false; resetSave.disabled = false }
+  })
   // the names on the list, so adding a viewer can tell a new account from a changed one
   let knownUsers = new Set()
   const loadUsers = async () => {
@@ -249,7 +289,10 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       })
       const name = document.createElement('td'); name.textContent = u.name
       const role = document.createElement('td'); role.textContent = u.role === 'admin' ? 'Admin' : 'Viewer'
-      const act = document.createElement('td'); act.className = 'ac-user-actions'; act.append(edit, rm)
+      const reset = el('button', { type: 'button', className: 'btn-ghost', textContent: 'Reset password' })
+      reset.setAttribute('aria-label', `Reset password for ${u.name}`)
+      reset.addEventListener('click', () => openPasswordReset(u.name))
+      const act = document.createElement('td'); act.className = 'ac-user-actions'; act.append(edit, reset, rm)
       tr.append(name, role, act)
       return tr
     }))

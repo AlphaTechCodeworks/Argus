@@ -100,3 +100,23 @@
   .live-page .app-main > header .live-options label:has(#smooth), .live-page .app-main > header .live-options label:has(#hideOffline) { display: flex !important; }
 }
 @media (pointer: coarse) { .tile-move { opacity: 1; min-height: 44px; } }
+
+/* Fullscreen uses the whole tile, including the space behind the name strip.
+   Fill keeps the complete camera picture visible; no edges are cropped. */
+.live-page #grid:fullscreen { padding: 0; gap: 2px; }
+.live-page #grid:fullscreen .tile canvas:not(.ln-overlay):not(.ln-loupe),
+.live-page.phone-full #grid .tile canvas:not(.ln-overlay):not(.ln-loupe) { object-fit: fill; }
+.live-page #grid:fullscreen .tile[data-live="1"] > .label,
+.live-page.phone-full #grid .tile[data-live="1"] > .label {
+  opacity: 0; visibility: hidden; transform: translateY(6px);
+  transition: opacity 180ms ease, transform 180ms ease, visibility 0s linear 180ms;
+}
+.live-page #grid:fullscreen .tile[data-live="1"]:is(:hover, :focus-within) > .label,
+.live-page.phone-full #grid .tile[data-live="1"]:is(:hover, :focus-within) > .label {
+  opacity: 1; visibility: visible; transform: translateY(0);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-page #grid:fullscreen .tile > .label,
+  .live-page.phone-full #grid .tile > .label { transition: none; transform: none; }
+}
