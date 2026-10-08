@@ -63,7 +63,7 @@ import {
 } from './pb-sources.js'
 import { MAX_BOXES, boxSeekMs, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
-import { allowedSpeeds, clampSpeed, frameStep, ignoredRepeat, shuttleLabel, shuttleRate } from './pb-transport.js'
+import { allowedSpeeds, clampSpeed, frameStep, ignoredRepeat, shuttleLabel, shuttleRate, stepNotBefore } from './pb-transport.js'
 import { DEFAULT_OSD, drawOsd, osdFont, osdIsOff, osdLayout } from './osd-overlay.js'
 
 // Video is decoded here in the browser, exactly as the camera encoded it; the
@@ -205,6 +205,7 @@ let ws = null
 let showStats = false
 let scrub = null // { t } while the playhead is dragged (server mode)
 let stepHold = false // a frame step's seek is playing: its first picture pauses it (stepFrame; the NVR's playback)
+let knownFps = { cam: null, fps: 0 } // the camera's frame rate as last measured while it played (it reads 0 while paused)
 let seekAt = null // performance.now() of the last seek, until its first picture (D overlay)
 let startMs = null // seek to first picture, ms
 let lastEndSkip = -Infinity // the last stretch jumped to at an end (never the same one twice)
@@ -220,6 +221,8 @@ const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
     if (ws?.stepGen != null) ws.stepGen = null // a server step's frame is on screen: the next may go
+    const fpsNow = Number(player.stats?.fps)
+    if (fpsNow > 0) knownFps = { cam: camKey(), fps: fpsNow }
     if (stepHold && !scrub) {
       // the picture a frame step asked for: hold it
       stepHold = false
@@ -796,6 +799,11 @@ function onStatus(msg) {
   }
   if (msg.type === 'end') {
     stopStallWatch() // (no more frames are due: "Waiting for the server…" 2 s later was wrong)
+    if (stepHold) {
+      // a frame step ran into the end before its frame came: nothing is playing, and the button says so
+      stepHold = false
+      if (!state.paused) togglePause()
+    }
     // skip gaps between recordings automatically
     const next = state.ranges.find(([s]) => s > (state.position ?? 0) + 1000)
     if (next) seek(next[0])
@@ -1175,10 +1183,18 @@ function serverStep(sock, direction) {
 function stepFrame(direction) {
   if (state.position === null) return
   if (state.mode === 'server' && state.src !== 'nvr' && !scrub && ws?.kind === 'server' && ws.cam === camKey() && ws.readyState === WebSocket.OPEN) return serverStep(ws, direction)
-  const fps = Number(player.stats?.fps) > 0 ? Number(player.stats.fps) : 25
-  const target = frameStep(state.position / 1000, direction, fps) * 1000
+  // (the rate measured while it last played: paused, the player's own figure is 0, and at an assumed
+  // 25 a back step on a slower camera landed on the frame it left)
+  const fps = Number(player.stats?.fps) > 0 ? Number(player.stats.fps) : knownFps.cam === camKey() && knownFps.fps > 0 ? knownFps.fps : 25
+  const from = state.position
+  const target = frameStep(from / 1000, direction, fps) * 1000
   seek(target)
   stepHold = true
+  // The NVR starts at the keyframe before the time asked for, up to a GOP earlier. Held at its first
+  // picture, a step forward went BACK to that keyframe (2 s, on a camera with a keyframe every 2 s).
+  // The frames up to the one wanted are decoded unseen (player.stepTo, after seek()'s reset): the
+  // picture stays until the frame of the step replaces it, and that frame is the one held.
+  player.stepTo(stepNotBefore(from, direction, fps))
 }
 
 function jumpEvent(direction) {

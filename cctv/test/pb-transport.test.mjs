@@ -9,6 +9,7 @@ import {
   allowedSpeeds,
   clampSpeed,
   frameStep,
+  stepNotBefore,
   ignoredRepeat,
   needsKeyframesOnly,
   shuttleLabel,
@@ -121,6 +122,11 @@ const check = (name, ok, extra = '') => {
   check('  back one frame', Math.abs(frameStep(10, -1, 25) - 9.96) < 1e-9, String(frameStep(10, -1, 25)))
   check('  never before the start of the day', frameStep(0.01, -1, 25) === 0, String(frameStep(0.01, -1, 25)))
   check('  a missing or silly fps falls back to 25', frameStep(10, 1, 0) === frameStep(10, 1, 25))
+  // a step that is a seek playing up to its frame (the NVR's playback, which starts at a keyframe)
+  check('step by seek, forward: the first frame after the one on screen, not the keyframe before it', stepNotBefore(10_000, 1, 25) > 10_000 && stepNotBefore(10_000, 1, 25) < 10_040)
+  check('  back: the frame before, within half a frame', stepNotBefore(10_000, -1, 25) === 9940 && stepNotBefore(10_000, -1, 10) === 9850)
+  check('  back at 10 fps takes the previous frame (9900), not the one it left (10000)', [9800, 9900, 10_000].find((ts) => ts >= stepNotBefore(10_000, -1, 10)) === 9900)
+  check('  never before the start, and a silly fps is 25', stepNotBefore(20, -1, 25) === 0 && stepNotBefore(10_000, -1, 0) === 9940)
 }
 
 // ---- keyframes only -------------------------------------------------------------------------------
