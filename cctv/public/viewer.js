@@ -11,6 +11,8 @@ import { H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML, mainNotCon
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
+import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
+import { cannotPlayH265 } from './live-tile.js'
 // ?pacing=off draws frames as soon as they decode (for before/after comparison)
 const PACING = new URLSearchParams(location.search).get('pacing') !== 'off'
 // Every tile's stream on one connection (live-mux.js): the browser opens WebSockets one at a time,
@@ -1031,6 +1033,42 @@ layoutSelect.addEventListener('change', () => {
   freshenForPageChange() // the cameras on the page change: drop a big grid's backlog (like the pager)
   render({ keepSingle: true })
 })
+// A PC whose browser cannot play H.265 gets no grid of more than 16 tiles (grid-view.js: each H.265
+// camera on it is converted by the server). The page can learn it at any time: the check answers a
+// moment after the page loads, and a decoder can refuse an H.265 keyframe much later (live-tile.js),
+// so it is asked now and then again every second. From then on the larger layouts are off the menu,
+// a larger one on screen becomes 4 x 4, and a note says why. The layout this PC last chose is left as
+// it was stored: only choosing one stores it. Not a phone: it has its own short menu above.
+const layoutNote = document.getElementById('layoutNote')
+const LAYOUT_TILES = Object.fromEntries(Object.keys(LAYOUTS).map((id) => [id, layoutCells(id).cells.length]))
+let noH265Limit = false
+/** The layout to show for one asked for (a saved view's): cut to 4 x 4 on such a PC, and said. */
+function layoutOnThisPc(wanted) {
+  const { layout, limited } = layoutShown(wanted, LAYOUT_TILES, { noH265: noH265Limit })
+  if (limited && layoutNote) {
+    layoutNote.textContent = NO_H265_NOTE
+    layoutNote.hidden = false
+  }
+  return layout
+}
+function limitForNoH265({ draw = true } = {}) {
+  if (noH265Limit || !cannotPlayH265()) return
+  noH265Limit = true
+  clearInterval(noH265Timer)
+  const wanted = layoutSelect.value // read first: removing the chosen option changes it
+  const offered = layoutsOffered(LAYOUT_TILES, { noH265: true })
+  for (const o of [...layoutSelect.querySelectorAll('option')]) if (!offered.includes(o.value)) o.remove()
+  for (const g of [...layoutSelect.querySelectorAll('optgroup')]) if (!g.children.length) g.remove()
+  layoutSelect.title = NO_H265_NOTE
+  const shown = layoutOnThisPc(wanted)
+  layoutSelect.value = shown
+  if (shown === wanted || !draw) return
+  page = 0
+  freshenForPageChange()
+  render({ keepSingle: true })
+}
+const noH265Timer = isPhone() ? null : setInterval(limitForNoH265, 1000)
+if (!isPhone()) limitForNoH265({ draw: false }) // (?h265=0 is known already; the first drawing is still to come)
 try {
   hideOffline.checked = localStorage.getItem('cctv.hideOffline') !== '0'
 } catch {}
@@ -1110,7 +1148,7 @@ function selectView(id) {
   // a live-page layout rides with the view; a Wall layout ('3x3' etc.) the live grid cannot draw is
   // left as it is (layoutCells falls back anyway), rather than blanking the dropdown
   if (activeView && LAYOUTS[activeView.layout]) {
-    layoutSelect.value = activeView.layout
+    layoutSelect.value = layoutOnThisPc(activeView.layout) // (4 x 4 on a PC without H.265; the view stays as saved)
     markPhoneLayout()
     try { localStorage.setItem(LAYOUT_KEY, layoutSelect.value) } catch {}
   }

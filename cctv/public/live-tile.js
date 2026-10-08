@@ -41,6 +41,14 @@ export function h265Answer({ device, forced = false, learned = false }) {
   if (forced || learned) return false
   return device === true ? true : device === false ? false : null
 }
+/**
+ * Whether the page knows by now that this browser cannot play H.265 (the check said so, a decoder
+ * refused, or the address forces it): the Live page limits its grid then (viewer.js). It can turn
+ * true at any moment while the page lives, and never turns back.
+ */
+export function cannotPlayH265() {
+  return h265Answer({ device: deviceH265, forced: forcedNoH265, learned: learnedNoH265 }) === false
+}
 // The server's reasons for closing a stream it could not convert (h264-fallback.mjs NO_ROOM, FAILED)
 export const H264_NO_ROOM = 'h265: no room to convert'
 export const H264_FAILED = 'h265: conversion failed'

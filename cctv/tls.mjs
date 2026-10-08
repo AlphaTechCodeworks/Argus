@@ -3,7 +3,7 @@
 import { execFileSync } from 'node:child_process'
 import { X509Certificate } from 'node:crypto'
 import { createSecureContext } from 'node:tls'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 
@@ -55,6 +55,33 @@ const REAL_DIR = join(CERT_DIR, 'named')
 export const namedCertPaths = { dir: REAL_DIR, cert: join(REAL_DIR, 'cert.pem'), key: join(REAL_DIR, 'key.pem') }
 
 /**
+ * Every real certificate there is: the one above, and one in each folder beside it
+ * (certs/named/<any name>/cert.pem and key.pem). A second name needs a second certificate: the
+ * tailnet name's comes from Tailscale and covers nothing else, so the public name the office uses
+ * (reached directly on the LAN once its DNS says so) has its own, from its own renewal script.
+ * Only folders holding both files; in name order, so which one answers for a name two of them
+ * share does not depend on the disk.
+ * @returns {{ cert: string, key: string }[]}
+ */
+export function namedCertFiles(dir = REAL_DIR, { exists = existsSync, list = (d) => readdirSync(d, { withFileTypes: true }) } = {}) {
+  const pair = (d) => ({ cert: join(d, 'cert.pem'), key: join(d, 'key.pem') })
+  const both = (p) => exists(p.cert) && exists(p.key)
+  const out = [pair(dir)].filter(both)
+  let folders = []
+  try {
+    folders = list(dir).filter((e) => e.isDirectory()).map((e) => e.name).sort()
+  } catch {} // no folder yet: only the self-signed certificate
+  for (const name of folders) if (both(pair(join(dir, name)))) out.push(pair(join(dir, name)))
+  return out
+}
+
+/** The context to answer `servername` with: the first certificate that names it, else undefined (the default). */
+export function contextFor(servername, certs) {
+  const want = String(servername ?? '').toLowerCase()
+  return certs.find((c) => c.names.includes(want))?.context
+}
+
+/**
  * The https options: the self-signed certificate as the default, plus an SNI callback that serves
  * a real certificate to anyone who asked for its name. Everything is read once at start; a renewed
  * certificate arrives with a restart, which is what the renewal script does anyway.
@@ -62,25 +89,24 @@ export const namedCertPaths = { dir: REAL_DIR, cert: join(REAL_DIR, 'cert.pem'),
  */
 export function httpsOptions(hosts) {
   const base = loadCertificate(hosts)
-  if (!existsSync(namedCertPaths.cert) || !existsSync(namedCertPaths.key)) return base
-
-  let real
-  let names = []
-  try {
-    real = createSecureContext({ cert: readFileSync(namedCertPaths.cert), key: readFileSync(namedCertPaths.key) })
-    names = certNames(readFileSync(namedCertPaths.cert, 'utf8'))
-    console.log(`Using the real certificate for ${names.join(', ') || 'its own name'}; self-signed elsewhere`)
-  } catch (e) {
-    // A certificate we cannot read must not stop the server starting: it would take every camera
-    // off the air to fix a browser warning.
-    console.warn(`Could not read the real certificate, using the self-signed one: ${e.message}`)
-    return base
+  const certs = []
+  for (const p of namedCertFiles()) {
+    try {
+      const context = createSecureContext({ cert: readFileSync(p.cert), key: readFileSync(p.key) })
+      const names = certNames(readFileSync(p.cert, 'utf8'))
+      certs.push({ context, names })
+      console.log(`Using the real certificate for ${names.join(', ') || 'its own name'}; self-signed elsewhere`)
+    } catch (e) {
+      // A certificate we cannot read must not stop the server starting: it would take every camera
+      // off the air to fix a browser warning. The others, and the self-signed one, still serve.
+      console.warn(`Could not read the real certificate ${p.cert}, leaving it out: ${e.message}`)
+    }
   }
+  if (!certs.length) return base
   return {
     ...base,
     SNICallback(servername, cb) {
-      const want = String(servername ?? '').toLowerCase()
-      cb(null, names.includes(want) ? real : undefined) // undefined = fall back to the default above
+      cb(null, contextFor(servername, certs)) // undefined = fall back to the default above
     }
   }
 }
