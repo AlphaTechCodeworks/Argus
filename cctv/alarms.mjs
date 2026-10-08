@@ -54,6 +54,15 @@ export const DEFAULT_WINDOW_MS = 7 * 86_400_000
 /** Seconds either side of an alarm that a bookmark or an export starts out covering. */
 export const CLIP_PRE_S = 30
 export const CLIP_POST_S = 60
+/**
+ * An event that started longer ago than this is graded and kept like any other, but nobody is told.
+ * The recorded-file intake (events.mjs) files late: a round of every camera takes minutes, a camera
+ * or an NVR whose search failed is not asked again for up to an hour (BACKOFF_MS), and after a
+ * restart or an outage it reads back up to a week (CATCH_UP_MS). Two hours is the longest back-off
+ * step, the rounds either side of it and room to spare, so an alert that is only late still goes;
+ * yesterday's motion arriving on a phone today is not an alert, it is a reason to mute them all.
+ */
+export const NOTIFY_MAX_AGE_MS = 2 * 3_600_000
 
 // Number(null) and Number('') are both 0, and a 0 nobody asked for is a window that ends at the
 // epoch: a missing parameter has to come back as null, never as a number.
@@ -86,8 +95,9 @@ export function nameCameras(alarms, cameras) {
  * the rules what to make of it, writes that onto the row, and — only if a rule said so — hands it
  * to the phase 1 sender.
  *
- * Two gates stand between an event and a notification, because the failure mode here is not
+ * Three gates stand between an event and a notification, because the failure mode here is not
  * missing a message, it is a hundred messages at 3 a.m. and a phone that gets muted for ever:
+ *   - the event's age (NOTIFY_MAX_AGE_MS): one read back after an outage is history, not news
  *   - the rule's own quiet gap (minGapS), kept per rule and camera
  *   - the row's notified_ms, so the same alarm is never sent twice whatever happens upstream
  *
@@ -112,6 +122,9 @@ export function makeAlarmNotifier({ sender, rules = listRules, tzOffsetMin = () 
       if (!verdict.notify || row.notifiedMs) return row
 
       const nowMs = now()
+      // Too old to be news. Before the quiet gap, and not marked as notified: an old event must not
+      // start a gap that then silences a live one, and the row must not say somebody was told.
+      if (nowMs - row.startMs > NOTIFY_MAX_AGE_MS) return row
       // The gap, its gate and the name in the message belong to a rule that asked to notify.
       // verdict.rule is the most urgent matching rule, which may not notify at all: a critical
       // rule with no gap and notify off took away the gap of the rule that does notify.

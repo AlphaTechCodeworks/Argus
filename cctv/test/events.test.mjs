@@ -714,6 +714,10 @@ const S = 1000
   now = start
   const quiet = await run({ cursor: start - 5 * DAY, events: false })
   check('catch-up: days with no event are not asked again for ever', quiet.rounds.slice(0, 3).join(' | ') === '2026-10-02+2026-10-03 | 2026-10-04+2026-10-05 | 2026-10-06+2026-10-07' && quiet.rounds[3] === '2026-10-06+2026-10-07', quiet.rounds.join(' | '))
+  // a restart part-way (the marker is memory only): it goes on from the newest event filed, no day lost
+  now = start
+  const again = await run({ cursor: Date.parse('2026-10-03T12:00:00Z') - TZ, events: true })
+  check('catch-up: after a restart it goes on from the cursor, and still reaches today', again.rounds.slice(0, 3).join(' | ') === '2026-10-03+2026-10-04 | 2026-10-05+2026-10-06 | 2026-10-06+2026-10-07', again.rounds.join(' | '))
   // a cursor a month old: a week is caught up, not the month
   now = start
   const stale = await run({ cursor: start - 30 * DAY, events: false })

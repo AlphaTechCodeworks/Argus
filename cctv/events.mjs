@@ -392,6 +392,10 @@ export function makeEventIntake({ listNvrs, camerasOf, recordings, clock = null,
   let offline = new Map() // camera key -> online, for the offline/online comparison
   // camera key -> the start of the next day to ask while it catches up. The cursor alone cannot say:
   // it only moves when an event is filed, and a day with none would be asked again for ever.
+  // Memory only, so a restart walks a quiet camera's week again, and today is the last day it reaches.
+  // Asking today first would be quicker, but today's events put the cursor at today, and a restart
+  // before the walk was done would then skip the older days for good. What is filed on the way is
+  // graded but not sent once it is old (alarms.mjs NOTIFY_MAX_AGE_MS).
   const readTo = new Map()
   // A pass still waiting (its clock read or search queued behind a slow call) when the next 5 s
   // tick comes: that tick does nothing. Without this each tick asked another NVR's clock, and
