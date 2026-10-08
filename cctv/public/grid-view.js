@@ -40,6 +40,36 @@ export const MAX_VIEW_NAME = 60
 /** Enough views for a working site; a guard against a runaway client filling the preferences file. */
 export const MAX_VIEWS = 50
 
+// A PC whose browser cannot play H.265 has its H.265 cameras converted to H.264 on the server
+// (h264-fallback.mjs), and each one costs the server CPU for as long as it is on screen. So the Live
+// page offers such a PC no grid of more than 16 tiles, and shows a larger one it is asked for (the
+// layout it last used, a saved view's) as 4 x 4. What is saved is not changed: the same view on a PC
+// that plays H.265 opens as it was saved. viewer.js hands in each layout's tile count (it draws
+// them), so nothing here names a layout but the one fallen back to.
+export const NO_H265_MAX_TILES = 16
+export const NO_H265_LAYOUT = 'g4'
+export const NO_H265_NOTE = 'This PC’s browser cannot play H.265, so the server converts those cameras for it; the grid is limited to 4 × 4.'
+
+/**
+ * The layouts a page may offer, in the order given.
+ * @param {Record<string, number>} tiles layout id -> how many tiles it shows at once
+ * @param {{ noH265?: boolean }} [o] noH265: the page knows its browser cannot play H.265
+ * @returns {string[]}
+ */
+export function layoutsOffered(tiles, { noH265 = false } = {}) {
+  return Object.keys(tiles ?? {}).filter((id) => !noH265 || tiles[id] <= NO_H265_MAX_TILES)
+}
+
+/**
+ * The layout to draw when `wanted` is asked for: itself, or 4 x 4 for one too large for a PC without
+ * H.265. An id the page does not draw is left alone (the caller has its own fallback for those).
+ * @returns {{ layout: string, limited: boolean }} limited: it was cut down, and the page says why
+ */
+export function layoutShown(wanted, tiles, { noH265 = false } = {}) {
+  const limited = noH265 && Number(tiles?.[wanted]) > NO_H265_MAX_TILES
+  return { layout: limited ? NO_H265_LAYOUT : wanted, limited }
+}
+
 /** export-job.mjs refuses more than this in one job, so the page must not offer more. */
 export const MAX_EXPORT_CLIPS = 32
 

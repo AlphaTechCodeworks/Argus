@@ -207,5 +207,45 @@ const names = (list) => list.map((c) => c.name).join(', ')
   check('  a refusal is said even while others are still opening', openNote({ waiting: 4, refused: 1 }).level === 'over')
 }
 
+// ---- a PC whose browser cannot play H.265: no grid of more than 16 tiles ---------------------------
+{
+  const { NO_H265_LAYOUT, NO_H265_MAX_TILES, NO_H265_NOTE, layoutShown, layoutsOffered } = await import('../public/grid-view.js')
+  // the live page's layouts and how many tiles each shows (viewer.js layoutCells), the list last
+  const tiles = { g1: 1, g2: 4, g3: 9, g4: 16, g5: 25, g6: 36, g8: 64, g10: 100, g12: 144, '1+5': 6, '1+7': 8, '1+12': 13, '2+8': 10, list: 48 }
+  const all = Object.keys(tiles)
+  check('no-H.265 limit: 16 tiles, and the layout fallen back to has exactly that', NO_H265_MAX_TILES === 16 && NO_H265_LAYOUT === 'g4' && tiles[NO_H265_LAYOUT] === NO_H265_MAX_TILES)
+  check('  a browser that plays H.265 is offered every layout', layoutsOffered(tiles).join() === all.join() && layoutsOffered(tiles, { noH265: false }).join() === all.join())
+  check('  one that cannot: nothing over 16 tiles, in the menu\'s order', layoutsOffered(tiles, { noH265: true }).join() === 'g1,g2,g3,g4,1+5,1+7,1+12,2+8')
+  check('  ...counted from the tiles, not the names', layoutsOffered({ wide: 17, small: 16, g12: 4 }, { noH265: true }).join() === 'small,g12')
+  check('  no layouts at all is none, not a crash', layoutsOffered(null, { noH265: true }).length === 0)
+  check('  a larger layout is shown as 4 x 4, and said', JSON.stringify(layoutShown('g8', tiles, { noH265: true })) === JSON.stringify({ layout: 'g4', limited: true }) && layoutShown('g5', tiles, { noH265: true }).layout === 'g4')
+  check('  4 x 4 and smaller are left as they are, with nothing to say', ['g1', 'g4', '1+12', '2+8'].every((id) => { const s = layoutShown(id, tiles, { noH265: true }); return s.layout === id && s.limited === false }))
+  check('  a browser that plays H.265 keeps the larger layout', JSON.stringify(layoutShown('g12', tiles, { noH265: false })) === JSON.stringify({ layout: 'g12', limited: false }) && layoutShown('g12', tiles).layout === 'g12')
+  check('  a layout the page does not draw is left for the caller', layoutShown('8x8', tiles, { noH265: true }).layout === '8x8' && layoutShown(undefined, tiles, { noH265: true }).limited === false)
+  // a saved view with a larger layout: shown at 4 x 4, and still what it was
+  const view = Object.freeze({ id: 'v1', name: 'Yard', cameras: Object.freeze(['nvr1/0', 'nvr1/1']), layout: 'g8' })
+  const before = JSON.stringify(view)
+  const shown = layoutShown(view.layout, tiles, { noH265: true })
+  check('  a saved 8 x 8 view opens at 4 x 4 without being rewritten', shown.layout === 'g4' && shown.limited && JSON.stringify(view) === before && checkView(view).value.layout === 'g8')
+  check('  the note says why, and what the limit is', /cannot play H\.265/.test(NO_H265_NOTE) && /server converts/.test(NO_H265_NOTE) && /4 × 4/.test(NO_H265_NOTE))
+
+  // viewer.js, live-tile.js and index.html wiring (source scan: the viewer needs a browser)
+  const { readFileSync } = await import('node:fs')
+  const read = (name) => readFileSync(new URL(`../public/${name}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  const src = read('viewer.js')
+  const block = src.slice(src.indexOf('const layoutNote ='), src.indexOf('const noH265Timer ='))
+  check('viewer.js: tile counts come from layoutCells for every layout it defines', /const LAYOUT_TILES = Object\.fromEntries\(Object\.keys\(LAYOUTS\)\.map\(\(id\) => \[id, layoutCells\(id\)\.cells\.length\]\)\)/.test(block) && !/g5|g6|g8|g10|g12/.test(block))
+  check('viewer.js: the limit is applied whenever the page comes to know, not only at load', /const noH265Timer = isPhone\(\) \? null : setInterval\(limitForNoH265, 1000\)/.test(src) && /if \(noH265Limit \|\| !cannotPlayH265\(\)\) return/.test(block))
+  check('viewer.js: the larger layouts leave the menu', /if \(!offered\.includes\(o\.value\)\) o\.remove\(\)/.test(block) && /layoutsOffered\(LAYOUT_TILES, \{ noH265: true \}\)/.test(block))
+  check('viewer.js: a larger layout on screen becomes the fallback and is drawn again', /const wanted = layoutSelect\.value/.test(block) && /layoutSelect\.value = shown\n\s*if \(shown === wanted \|\| !draw\) return\n\s*page = 0\n\s*freshenForPageChange\(\)\n\s*render\(\{ keepSingle: true \}\)/.test(block))
+  check('viewer.js: the limit itself stores nothing (the PC\'s own choice and the saved views stay)', !/localStorage|putViews/.test(block))
+  check('viewer.js: the note is set as text, when a layout was cut', /if \(limited && layoutNote\) \{\n\s*layoutNote\.textContent = NO_H265_NOTE\n\s*layoutNote\.hidden = false/.test(block) && !/innerHTML/.test(block))
+  check('viewer.js: a saved view opens through the same limit', /layoutSelect\.value = layoutOnThisPc\(activeView\.layout\)/.test(src))
+  check('index.html: the note has a place of its own, hidden until needed', /<p id="layoutNote" class="page-note" role="status" hidden><\/p>/.test(read('index.html')))
+  const tile = read('live-tile.js')
+  check('live-tile.js: cannotPlayH265 is the answer the streams are opened with', /export function cannotPlayH265\(\) \{\n\s*return h265Answer\(\{ device: deviceH265, forced: forcedNoH265, learned: learnedNoH265 \}\) === false\n\}/.test(tile))
+  check('wall.js: the wall plays recordings (/playback), not the live conversion, and has no such limit', !/cannotPlayH265|layoutsOffered/.test(read('wall.js')))
+}
+
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

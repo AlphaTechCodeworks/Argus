@@ -103,12 +103,13 @@ import { makeSysinfo } from './sysinfo.mjs'
 import { makeSender } from './alert-send.mjs'
 import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
-import { PhoneLive } from './phone-live.mjs'
+import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
 import { H264Fallback } from './h264-fallback.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher, viewerOf } from './live-attach.mjs'
 import { makePresence } from './presence.mjs'
+import { handleViewers, liveKind, trackingOpen } from './viewers.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
@@ -749,6 +750,9 @@ const handleRequest = async (req, res) => {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
     return sendJson(res, 200, { at: new Date().toISOString(), nvrs: nvrRegister(nvrs) })
   }
+  // GET /api/admin/viewers — who is connected and what each has open now (admins; viewers.mjs)
+  const viewersRoute = handleViewers(req.method, pathname, who, presence, { nameOf: cameraNames })
+  if (viewersRoute) return sendJson(res, ...viewersRoute)
   if (pathname === '/api/admin/register.xlsx') {
     if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
@@ -1186,6 +1190,38 @@ onRightsSaved(watch.sweepSoon)
 auth.onUsersChanged(watch.sweepSoon)
 // who is connected right now (presence.mjs): one viewer per browser, over the internet or on the network
 const presence = makePresence()
+// ...and what each has open, for the admins' "Who is watching" (viewers.mjs): every socket and channel
+// passes through the watch's track when it is let in, so that is where presence is told, and track
+// is replaced by one that does both (before anything has read it: attachLive below, and the
+// connections). What a live stream is sent is worked out from what its request said (liveKind):
+// asked holds that for a /live-mux channel, whose request is the page's; a /live socket says it in
+// its own address.
+const asked = new WeakMap() // mux channel -> its "sub" message
+watch.track = trackingOpen({
+  track: watch.track,
+  presence,
+  keyOf: (req) => viewerOf(req, currentUser),
+  describe: (handle, req, open, nvrId, ch) => {
+    const q = new URL(req.url, 'http://localhost').searchParams
+    const sub = asked.get(handle) ?? { noH265: q.get('h265') === '0', fps: q.get('fps') === '15' ? 15 : null }
+    const remote = isRemoteAddress(req.socket.remoteAddress)
+    return {
+      kind: liveKind({
+        remote,
+        phone: !remote && sub.fps === 15 && isPhoneRequest(req.headers),
+        noH265: sub.noH265 === true,
+        stream: open.stream,
+        codec: nvrs.get(nvrId)?.codecSeen?.get?.(`${ch}:1`)?.codec ?? null,
+        h264On: h264Fallback.enabled === true
+      })
+    }
+  }
+})
+/** A camera's names for that list: its site, its NVR and its own. */
+const cameraNames = (nvrId, ch) => {
+  const n = nvrs.get(nvrId)
+  return n ? { site: n.site, nvrName: n.name, camera: n.channels.find((c) => c.ch === ch)?.name ?? null } : null
+}
 const onConnection = (ws, req) => {
   // A frame ws cannot parse (a text frame with invalid UTF-8, a bad opcode) is an 'error' event on
   // the socket, which then closes; with no listener Node treats it as unhandled and exits: one
@@ -1195,7 +1231,8 @@ const onConnection = (ws, req) => {
   meterSocket(ws, req.socket.remoteAddress)
   // count this browser among the people connected now; its other tiles/tabs share the one key
   const vkey = viewerOf(req, currentUser)
-  presence.join(vkey, ws, { remote: isRemoteAddress(req.socket.remoteAddress) })
+  // (the name and the visitor's own address, not cloudflared's, are for the admins' list of who is watching)
+  presence.join(vkey, ws, { remote: isRemoteAddress(req.socket.remoteAddress), user: currentUser(req), address: clientIp(req) })
   ws.on('close', () => presence.leave(vkey, ws))
   // every live tile of a page on this one socket (live-mux.mjs)
   if (url.pathname === '/live-mux') {
@@ -1207,6 +1244,7 @@ const onConnection = (ws, req) => {
       attach: (channel, sub, user) => {
         const nvr = nvrs.get(sub.nvr)
         if (!nvr) return channel.close(1013, 'unknown NVR')
+        asked.set(channel, sub) // what this tile asked for, for "Who is watching" (the watch above)
         // the rights as they are now, on every "sub"; a channel let in is watched while it is open
         // (attachLive tracks it), so a change also ends the tiles already playing
         const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }

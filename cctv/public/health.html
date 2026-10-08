@@ -40,6 +40,19 @@
 
     <h2>Remote viewing</h2>
     <div id="viewing" class="cards"></div>
+    <!-- Admins only (health.js shows it): who has video open and what each is watching, from
+         /api/admin/viewers. The server knows the browsers with a stream open, not everyone holding
+         a sign-in, which is why the sign-ins are pointed to rather than listed. -->
+    <details id="watching" class="hp-history" open hidden>
+      <summary><h2>Who is watching <span id="watchingCount" class="hp-count"></span></h2></summary>
+      <table class="hp-table hp-watching">
+        <thead>
+          <tr><th>Person</th><th>From</th><th>Address</th><th>Connected</th><th>Watching</th></tr>
+        </thead>
+        <tbody id="watchingRows"></tbody>
+      </table>
+      <p class="hp-note"><span id="watchingNote"></span> This lists people with video open now; someone signed in with no camera open is not on it. Sign-ins are on the <a href="/audit.html">Audit</a> page.</p>
+    </details>
     <h2>This server</h2>
     <div id="system" class="cards"></div>
 

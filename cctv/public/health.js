@@ -3,6 +3,7 @@
 // the DOM code at the bottom only paints. alert-banner.js reuses bannerText on every other page,
 // which is why the banner wording lives here rather than in the page.
 import { smartRows, smartSummary } from './smart-view.js'
+import { viewersView } from './viewers-view.js'
 
 // Absolute times are shown on the site's wall clock, not the viewing PC's zone (a screen set to UTC
 // otherwise showed UTC): add the site offset, then read it back as UTC. siteTzMs is set from
@@ -718,12 +719,48 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     }
   }
 
+  // Who is watching (admins only; viewers-view.js shapes it): one row per browser with video open,
+  // and under each what it has open, by site and NVR. Asked on the page's own refresh; the rows are
+  // rebuilt each time, so which of them were open is kept across it, as for the NVR panels. Every
+  // name and address is set as text.
+  const paintWatching = (d) => {
+    const box = document.getElementById('watching')
+    if (!box) return
+    const r = viewersView(d)
+    box.hidden = false
+    document.getElementById('watchingCount').textContent = `(${r.count})`
+    const body = document.getElementById('watchingRows')
+    const wasOpen = new Set([...body.querySelectorAll('details[open]')].map((x) => x.dataset.key))
+    body.replaceChildren(...r.rows.map((p) => {
+      const what = el('details', { className: 'hp-watch' }, el('summary', { textContent: p.watching }))
+      what.dataset.key = p.key
+      what.open = wasOpen.has(p.key)
+      for (const g of p.groups) {
+        const list = el('ul')
+        for (const line of g.lines) list.append(el('li', { textContent: line }))
+        what.append(el('div', { className: 'hp-sub', textContent: g.label }), list)
+      }
+      if (p.more) what.append(el('div', { className: 'hp-sub', textContent: p.more }))
+      const tr = el('tr')
+      for (const text of [p.name, p.where, p.address, p.connected]) tr.append(el('td', { textContent: text }))
+      // nothing to unfold: the words alone
+      tr.append(p.groups.length ? el('td', {}, what) : el('td', { textContent: p.watching }))
+      return tr
+    }))
+    document.getElementById('watchingNote').textContent = [r.rows.length ? r.summary : r.empty, r.more].filter(Boolean).join(' ')
+  }
+  const loadWatching = () => {
+    if (!isAdmin) return
+    fetch('/api/admin/viewers').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))).then(paintWatching).catch(() => {})
+  }
+
   // The same account wiring every page does: who is signed in, and the admin-only tabs.
   fetch('/api/me')
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error('signed out'))))
     .then((me) => {
       document.getElementById('whoami').textContent = me.user
       isAdmin = me.admin === true
+      loadWatching()
       if (me.admin) {
         const sitesTab = document.getElementById('sitesTab'); if (sitesTab) sitesTab.hidden = false
         const settingsTab = document.getElementById('settingsTab'); if (settingsTab) settingsTab.hidden = false
@@ -749,6 +786,7 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
   let lastOk = 0
   const tick = async () => {
     if (document.hidden) return
+    loadWatching()
     try {
       const r = await fetch('/api/health')
       if (!r.ok) throw new Error(String(r.status))
