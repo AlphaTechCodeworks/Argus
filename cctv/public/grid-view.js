@@ -35,7 +35,9 @@ export const LIVE_LAYOUTS = Object.freeze(['auto', 'g1', 'g2', 'g3', 'g4', 'g5',
 
 /** Auto uses only as many rows as the filtered cameras need; larger sets are paged. */
 export function autoLiveGrid(count, { noH265 = false, phone = false, width = 0, height = 0, gap = 8 } = {}) {
-  const cap = phone ? 4 : noH265 ? 16 : 144
+  // Automatic layout must not create hundreds of hardware decoders on first load.
+  // Keep the previous nine-camera default as its budget; larger grids remain explicit.
+  const cap = phone ? 4 : 9
   const visible = Math.min(cap, Math.max(1, Math.floor(Number(count) || 0)))
   if (!(width > 0 && height > 0)) {
     const size = Math.ceil(Math.sqrt(visible))

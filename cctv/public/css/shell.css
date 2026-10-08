@@ -87,6 +87,59 @@ body.has-shell header .brand h1, body.has-shell header nav.tabs, body.has-shell 
   .app-shell:is(:hover, :focus-within) .shell-pin, .sidebar-pinned .app-shell .shell-pin { width: auto; justify-content: flex-start; padding: var(--s2) var(--s3); }
 }
 
+/* Keep a fixed inner canvas: only the clipping frame moves, so icons never jump
+   and labels can fade in both directions instead of switching display states. */
+@media (min-width: 700px) {
+  body.has-shell .app-shell,
+  body.has-shell .app-shell:is(:hover, :focus-within),
+  body.has-shell.sidebar-pinned .app-shell {
+    padding: var(--s4) var(--s2);
+    align-items: flex-start;
+    transition: width 300ms cubic-bezier(.22, 1, .36, 1), box-shadow 300ms ease;
+  }
+  .app-shell .shell-nav, .app-shell .shell-foot,
+  .app-shell .shell-brand, .app-shell .shell-pin {
+    width: calc(var(--shell-w) - 17px);
+    flex-shrink: 0;
+    box-sizing: border-box;
+  }
+  .app-shell .shell-brand,
+  .app-shell:is(:hover, :focus-within) .shell-brand,
+  .sidebar-pinned .app-shell .shell-brand { padding: 0 8px var(--s4); }
+  .app-shell .shell-nav a,
+  .app-shell:is(:hover, :focus-within) .shell-nav a,
+  .sidebar-pinned .app-shell .shell-nav a,
+  .app-shell .shell-theme,
+  .app-shell:is(:hover, :focus-within) .shell-theme,
+  .sidebar-pinned .app-shell .shell-theme {
+    width: 100%; justify-content: flex-start; padding: 9px 11px; box-sizing: border-box;
+  }
+  .app-shell .shell-pin,
+  .app-shell:is(:hover, :focus-within) .shell-pin,
+  .sidebar-pinned .app-shell .shell-pin { justify-content: flex-start; padding: 8px 10px; }
+  .app-shell .shell-foot,
+  .app-shell:is(:hover, :focus-within) .shell-foot,
+  .sidebar-pinned .app-shell .shell-foot { align-items: stretch; }
+  .app-shell .shell-user,
+  .app-shell:is(:hover, :focus-within) .shell-user,
+  .sidebar-pinned .app-shell .shell-user { flex-direction: row; position: relative; height: 88px; align-items: flex-start; padding: 4px 6px; box-sizing: border-box; }
+  .app-shell .shell-user [data-sign-out] { position: absolute; bottom: 0; left: 0; }
+  .app-shell .shell-brand-type { display: flex; }
+  .app-shell :is(.shell-nav a span, .shell-group-label, .shell-theme span, .shell-who, .shell-pin-label) { display: block; }
+  .app-shell :is(.shell-brand-type, .shell-nav a span, .shell-group-label, .shell-theme span, .shell-who, .shell-pin-label) {
+    opacity: 0; visibility: hidden; white-space: nowrap;
+    transition: opacity 180ms ease, visibility 0s linear 180ms;
+  }
+  .app-shell:is(:hover, :focus-within) :is(.shell-brand-type, .shell-nav a span, .shell-group-label, .shell-theme span, .shell-who, .shell-pin-label),
+  .sidebar-pinned .app-shell :is(.shell-brand-type, .shell-nav a span, .shell-group-label, .shell-theme span, .shell-who, .shell-pin-label) {
+    opacity: 1; visibility: visible;
+    transition: opacity 220ms ease 60ms, visibility 0s;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.has-shell .app-shell, .app-shell :is(.shell-brand-type, .shell-nav a span, .shell-group-label, .shell-theme span, .shell-who, .shell-pin-label) { transition: none !important; }
+}
+
 @media (max-width: 699px), (pointer: coarse) and (max-height: 500px) {
   body.has-shell .app-main { grid-column: 1; }
   body.has-shell, body.has-shell.sidebar-pinned { grid-template-columns: minmax(0, 1fr); padding-bottom: calc(var(--bar-h) + env(safe-area-inset-bottom)); }
