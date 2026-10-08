@@ -62,29 +62,34 @@ export function needsResync(tileServerMs, clockMs, { tolMs = RESYNC_MS, speed = 
 
 /**
  * How far a tile's picture is AHEAD of the shared clock, in the direction the wall plays (ms of
- * footage; negative: behind). A tile that is ahead is not put back: it waits for the clock
- * (aheadWait), which costs nothing, where a seek costs the seconds a stream takes to open.
+ * footage; negative: behind).
  */
 export function aheadBy(tileServerMs, clockMs, speed = 1) {
   if (!Number.isFinite(tileServerMs) || !Number.isFinite(clockMs)) return 0
   return (tileServerMs - clockMs) * (Number(speed) < 0 ? -1 : 1)
 }
 
-/**
- * Whether a tile ahead of the clock should be held still until the clock reaches it. It starts
- * waiting once it is further ahead than the drift tolerance, and goes on waiting until the clock
- * has caught it up (`waiting`: it is waiting now), so it is not stopped and started on every tick.
- */
-export function aheadWait(tileServerMs, clockMs, { tolMs = RESYNC_MS, speed = 1, waiting = false } = {}) {
-  const ahead = aheadBy(tileServerMs, clockMs, speed)
-  const rate = Number.isFinite(speed) ? Math.max(1, Math.abs(speed)) : 1
-  return waiting ? ahead > 0 : ahead > Math.max(0, tolMs) * rate
-}
-
 /** What a stream is taken to need from being asked for to its first picture, before one has been timed. */
 export const OPEN_LAG_MS = Object.freeze({ nvr: 2000, server: 600 })
-/** The furthest ahead of the clock a stream is ever asked for (ms of footage). */
-export const MAX_LEAD_MS = 60_000
+/**
+ * The longest opening time a lead is worked out from. One slow opening (12 s, measured behind a busy
+ * NVR) must not send the next one a minute ahead of the clock; and it bounds how far ahead a tile
+ * can come up when its stream opens at once (aheadTooFar).
+ */
+export const MAX_OPEN_LAG_MS = 3000
+
+/**
+ * Whether a tile is so far AHEAD of the clock that it has to be asked for again. A tile comes up
+ * ahead whenever its stream opened sooner than the lead allowed for (openLead), by at most
+ * MAX_OPEN_LAG_MS of the clock's time; that much is left alone on top of the ordinary tolerance: a
+ * tile a few seconds of footage early at 4x is under two seconds of real time early, and the clock
+ * is catching it up. (It was first held still until the clock arrived, by pausing it. A paused NVR
+ * playback comes back at normal speed whatever speed it had, so that put the tile behind for good.)
+ */
+export function aheadTooFar(tileServerMs, clockMs, { tolMs = RESYNC_MS, speed = 1 } = {}) {
+  const rate = Number.isFinite(speed) ? Math.max(1, Math.abs(speed)) : 1
+  return aheadBy(tileServerMs, clockMs, speed) > (Math.max(0, tolMs) + MAX_OPEN_LAG_MS) * rate
+}
 
 /**
  * How far ahead of the shared clock to ask for a tile's stream while the wall plays (ms of footage,
@@ -92,13 +97,14 @@ export const MAX_LEAD_MS = 60_000
  * then the clock has moved on by that long times the speed: asked for at the clock's own moment, a
  * tile at 4x came up 4 to 12 s behind, over the tolerance, and was seeked again, for ever
  * (measured 2026-10-07: every stream closed 3 to 8 s after it opened). Asked for where the clock
- * WILL be, it comes up on time; a little early does no harm (aheadWait).
- * lagMs: this tile's own last timings (null before the first: OPEN_LAG_MS for its source).
+ * WILL be, it comes up on time; a little early does no harm (aheadTooFar).
+ * lagMs: this tile's own last timings (null before the first: OPEN_LAG_MS for its source), taken
+ * as MAX_OPEN_LAG_MS at most.
  */
 export function openLead(lagMs, speed = 1, source = 'nvr') {
-  const lag = Number.isFinite(lagMs) && lagMs > 0 ? lagMs : (OPEN_LAG_MS[source] ?? OPEN_LAG_MS.nvr)
+  const lag = Math.min(MAX_OPEN_LAG_MS, Number.isFinite(lagMs) && lagMs > 0 ? lagMs : (OPEN_LAG_MS[source] ?? OPEN_LAG_MS.nvr))
   const s = Number.isFinite(speed) && speed !== 0 ? speed : 1
-  const lead = Math.min(MAX_LEAD_MS, lag * Math.abs(s))
+  const lead = lag * Math.abs(s)
   return s < 0 ? -lead : lead
 }
 

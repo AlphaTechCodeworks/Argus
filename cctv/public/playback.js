@@ -1104,6 +1104,10 @@ const throttle = new ScrubThrottle(
 function togglePause() {
   stepHold = false // Play or Pause pressed while a frame step was on its way: the viewer's choice stands
   if (!ws && state.position !== null) return seek(state.position)
+  // Play again at 2x, 4x or 8x from the NVR: asked for again from the moment on screen, not resumed.
+  // A paused NVR playback comes back at about normal speed whatever speed it is given (measured on
+  // the camera wall, 2026-10-07), and the page then waited on frames that came at a quarter of the rate.
+  if (state.paused && state.speed !== 1 && state.mode !== 'server' && ws?.kind === 'nvr' && state.position !== null) return seek(state.position)
   state.paused = !state.paused
   send({ pause: state.paused })
   if (state.paused) {
