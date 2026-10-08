@@ -8,26 +8,10 @@ try {
   globalThis.caches?.delete('argus-stills').catch(() => {})
 } catch {}
 
-// Show / Hide beside the password: a mistyped password is the usual reason a sign-in fails, and on
-// a phone there is no other way to see it. Shown only while the button says so, and hidden again
-// before the form is sent, so the browser's password manager is offered a password field.
-const showPass = document.getElementById('show-pass')
-const setShown = (on) => {
-  form.password.type = on ? 'text' : 'password'
-  showPass.textContent = on ? 'Hide' : 'Show'
-  showPass.title = on ? 'Hide the password' : 'Show the password'
-  showPass.setAttribute('aria-pressed', String(on))
-}
-showPass.addEventListener('click', () => {
-  setShown(form.password.type === 'password')
-  form.password.focus()
-})
-
 form.addEventListener('submit', async (e) => {
   e.preventDefault()
   error.hidden = true
-  setShown(false)
-  const button = form.querySelector('button[type="submit"]')
+  const button = form.querySelector('button[type="submit"]') // not the password's Show button (show-password.js)
   const label = button.textContent
   button.disabled = true
   button.textContent = 'Signing in…'
