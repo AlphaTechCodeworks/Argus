@@ -493,7 +493,7 @@ const MIME = {
   '.webmanifest': 'application/manifest+json'
 }
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/show-password.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
 const SECURITY_HEADERS = securityHeaders()
 
 // CCTV_AUTH=off is for local development only: never publish such an instance beyond 127.0.0.1
