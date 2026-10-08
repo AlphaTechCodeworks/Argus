@@ -11,7 +11,7 @@ try {
 form.addEventListener('submit', async (e) => {
   e.preventDefault()
   error.hidden = true
-  const button = form.querySelector('button')
+  const button = form.querySelector('button[type="submit"]') // not the password's Show button (show-password.js)
   const label = button.textContent
   button.disabled = true
   button.textContent = 'Signing in…'

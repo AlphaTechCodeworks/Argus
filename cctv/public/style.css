@@ -1730,6 +1730,15 @@ body.playback-page.is-fullscreen .pb-legend { display: none; }
 body.playback-page.is-fullscreen .pb-bar { gap: 6px; padding: 10px 14px; }
 body.playback-page.is-fullscreen .pb-timeline { height: 48px; }
 .login-brand { display: flex; align-items: center; gap: 12px; }
+/* a password box with its Show / Hide button inside the right edge (show-password.js) */
+.pass-wrap { position: relative; display: flex; }
+.pass-wrap > input { flex: 1; min-width: 0; padding-right: 58px; }
+.pass-wrap > button.pass-show {
+  position: absolute; top: 50%; right: 4px; transform: translateY(-50%);
+  margin: 0; padding: 4px 8px; min-height: 0; width: auto; background: transparent; border-color: transparent;
+  color: var(--muted); font-size: 12px; font-weight: 600;
+}
+.pass-wrap > button.pass-show:hover { color: var(--text); }
 .login-brand img { border-radius: 10px; }
 /* Settings > Storage: the rarely needed parts folded under their heading */
 .se-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
