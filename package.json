@@ -1,22 +1,26 @@
 {
-  "name": "@2bad/tvt",
+  "name": "argus",
+  "private": true,
   "version": "2.0.0",
-  "description": "",
+  "description": "Self-hosted CCTV for TVT NVRs: live view, playback, recording and management in the browser, with P2P access by serial number",
   "keywords": [
+    "cctv",
+    "nvr",
     "tvt",
-    "ipc",
-    "cctv"
+    "p2p",
+    "h265",
+    "video-surveillance"
   ],
-  "homepage": "https://github.com/2BAD/tvt#readme",
+  "homepage": "https://github.com/AlphaTechCodeworks/Argus#readme",
   "bugs": {
-    "url": "https://github.com/2BAD/tvt/issues"
+    "url": "https://github.com/AlphaTechCodeworks/Argus/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/2BAD/tvt.git"
+    "url": "git+https://github.com/AlphaTechCodeworks/Argus.git"
   },
   "license": "MIT",
-  "author": "2BAD (https://github.com/2BAD)",
+  "author": "AlphaTech Codeworks (https://github.com/AlphaTechCodeworks)",
   "contributors": [
     {
       "name": "Jason Hyde",
