@@ -14,6 +14,8 @@
 //    a poster, so a picture appears before the first frame due is decoded.
 //  - setStills(on): reverse and scrubbing send single keyframes: each is drawn as soon as it is
 //    decoded, without the playout clock. Stills never skip: turning them on ends a skipUntil.
+//  - stepTo(ts): a frame step sends the frames from the keyframe up to the one wanted and no more.
+//    They are decoded without a poster, and the one wanted is drawn at once, paused or not.
 //  - seekReset(): a seek keeps the decoder set up (reset + configure with the same config), so it
 //    needs no isConfigSupported round trip.
 import { PlayoutClock, REMOTE_CLOCK } from './playout.js'
@@ -204,6 +206,7 @@ export class VideoPlayer {
     this.needKey = true
     this.skipTs = null // skipUntil: decoded frames before this time (ms) are not shown
     this.posterShown = false
+    this.stepShow = false // stepTo: the first frame not skipped is drawn at once, even while paused
     this.stills = false // setStills: every decoded frame is drawn at once
     this.seekSeq = 0 // counts seekReset()s: a frame set up for before one is not decoded after it
     this.queue = [] // { frame: VideoFrame, ts: ms } in decode order, waiting for display
@@ -463,7 +466,9 @@ export class VideoPlayer {
       return
     }
     if (this.noRewindMs) this.newestOut = ts
-    if (!this.pacing || this.stills) {
+    // (stepShow: the frame a step asked for. Queued, a paused player would never show it.)
+    if (!this.pacing || this.stills || this.stepShow) {
+      this.stepShow = false
       this.#draw(frame, performance.now())
       this.onFrame?.(ts)
       return
@@ -845,6 +850,7 @@ export class VideoPlayer {
     this.needKey = true
     if (this.held) this.held.length = 0
     this.skipTs = null
+    this.stepShow = false
     this.stills = false
     // a measurement can't pair frames across a restart: it ends with what it has
     if (this.gop) this.#gopEnd('stream restarted')
@@ -863,6 +869,7 @@ export class VideoPlayer {
     if (this.held) this.held.length = 0
     this.skipTs = null
     this.posterShown = false
+    this.stepShow = false
     this.seekSeq++
     this.fed = [] // (the decoder's reset below discards them)
     // a seek goes where it is told, back too (noRewindMs is live's; playback does not set it anyway)
@@ -895,6 +902,21 @@ export class VideoPlayer {
   skipUntil(tsMs) {
     this.skipTs = tsMs
     this.posterShown = false
+    this.stepShow = false
+  }
+
+  /**
+   * A frame step (server playback): the server sends the frames from the keyframe up to the one at
+   * tsMs, and then nothing. As after skipUntil the ones before tsMs are decoded and closed unseen,
+   * but none is a poster: the picture on screen stays until the frame asked for replaces it. That
+   * one (the first decoded at or after tsMs) is drawn at once and reported to onFrame, whether the
+   * player is paused or not: it does not wait in the queue, which a paused player never shows.
+   * Ends there, or at the next (seek)reset or skipUntil.
+   */
+  stepTo(tsMs) {
+    this.skipTs = tsMs
+    this.posterShown = true
+    this.stepShow = true
   }
 
   /**

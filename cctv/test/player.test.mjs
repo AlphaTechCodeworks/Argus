@@ -474,6 +474,62 @@ check('no VideoFrame left open by the grabs (queued display frames closed on clo
   check('  seekReset before the first frame is harmless', q.needKey && !q.decoder)
   q.close()
 }
+{
+  // a frame step on a paused player: the server sends the GOP from the keyframe (frame 0) up to the
+  // frame asked for (31) and nothing after it
+  const draws = []
+  const shown = []
+  const posters = []
+  const p = new A.VideoPlayer(drawCanvas(draws), { onFrame: (ts) => shown.push(ts), onPoster: (ts) => posters.push(ts) })
+  await play(p, 0, 31, (n) => n === 0) // playing, frames waiting for their display time
+  p.pause()
+  const waiting = p.queue.map((q) => q.frame)
+  draws.length = 0
+  shown.length = 0
+  p.seekReset()
+  p.stepTo(31 * 50)
+  const mark = allFrames.length
+  for (let n = 0; n <= 31; n++) p.push(chunk(n, n === 0)) // all at once
+  await tick()
+  await tick()
+  const made = allFrames.slice(mark)
+  check('stepTo: the frame asked for is drawn at once on a paused player, and reported to onFrame', draws.join() === '31' && shown.join() === '1550' && p.paused, `draws ${draws.join()} shown ${shown.join()}`)
+  check('  no poster: the keyframe and the frames before the one asked for are decoded and closed unseen', posters.length === 0 && made.length === 32 && made.every((f) => f.closed) && p.stats.dropped === 0 && !p.needKey, `${posters.length} posters, ${made.filter((f) => !f.closed).length} open, ${p.stats.dropped} dropped`)
+  check('  nothing is left waiting for display, and the frames that were are closed', p.queue.length === 0 && waiting.length > 0 && waiting.every((f) => f.closed) && p.skipTs === null && p.stepShow === false, `queue ${p.queue.length}`)
+  // play goes on with the frames after it: decoded by the same decoder, shown by the clock again
+  p.resume()
+  p.push(chunk(32, false))
+  await tick()
+  await tick()
+  check('  the frame after it, on play, is queued for its display time as always (not drawn at once)', p.queue.length === 1 && p.queue[0].ts === 1600 && draws.join() === '31', `queue ${p.queue.length} draws ${draws.join()}`)
+  // a seek's start after a step skips with a poster again
+  p.seekReset()
+  p.skipUntil(110 * 50)
+  for (let n = 100; n <= 111; n++) p.push(chunk(n, n === 100))
+  await tick()
+  await tick()
+  check('  skipUntil after a step: the poster is back, and the frames due wait for the clock', draws.join() === '31,100' && posters.join() === '5000' && p.queue.length === 2 && shown.join() === '1550', `draws ${draws.join()} queue ${p.queue.length}`)
+  p.close()
+}
+{
+  // the same before any decoder is set up (a step as the first thing after opening the page), and in
+  // stills (reverse chosen, paused): only the frame asked for is drawn there too
+  env.setupMs = 20
+  const draws = []
+  const shown = []
+  const p = new A.VideoPlayer(drawCanvas(draws), { onFrame: (ts) => shown.push(ts) })
+  p.pause()
+  p.setStills(true)
+  p.seekReset()
+  p.stepTo(40 * 50)
+  for (let n = 0; n <= 40; n++) p.push(chunk(n, n === 0))
+  await sleep(60)
+  await tick()
+  await tick()
+  check('stepTo at the first start, in stills: frames held during set-up are all decoded, one drawn', env.decoders.at(-1).decoded.length === 41 && draws.join() === '40' && shown.join() === '2000' && p.stats.dropped === 0, `${env.decoders.at(-1).decoded.length} decoded, draws ${draws.join()}`)
+  p.close()
+  env.setupMs = 0
+}
 check('no VideoFrame left open after the server-playback cases', live === 0, `${live} open`)
 
 // ---- display range fix --------------------------------------------------------------------------
