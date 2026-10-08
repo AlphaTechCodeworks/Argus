@@ -1,7 +1,7 @@
 // Security headers and the visitor's address behind the Cloudflare tunnel (security.mjs).
 //   node cctv/test/security.test.mjs
 import { readFileSync } from 'node:fs'
-import { CSP, clientIpOf, localProbe, securityHeaders } from '../security.mjs'
+import { CSP, clientIpOf, localProbe, routeOf, securityHeaders } from '../security.mjs'
 
 let failures = 0
 const check = (n, ok, e = '') => { if (!ok) failures++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${e ? `  (${e})` : ''}`) }
@@ -11,6 +11,13 @@ check('through the tunnel (cloudflared on this machine): the visitor behind it',
 check('... IPv6 visitors too', clientIpOf('127.0.0.1', '2001:db8::1') === '2001:db8::1' && clientIpOf('::1', '2001:db8::2') === '2001:db8::2')
 check('a LAN client cannot claim another address with the header', clientIpOf('192.168.1.50', '1.2.3.4') === '192.168.1.50')
 check('a garbage header from loopback is ignored', clientIpOf('127.0.0.1', '1.2.3.4, 5.6.7.8') === '127.0.0.1' && clientIpOf('127.0.0.1', '<script>') === '127.0.0.1')
+{
+  const office = routeOf('::ffff:192.168.2.57', undefined)
+  check('shown to the visitor: an office PC is direct, by its own address', office.address === '192.168.2.57' && office.direct === true)
+  const tunnel = routeOf('::ffff:127.0.0.1', '203.0.113.9')
+  check('... one through the tunnel is not direct, by the address behind it', tunnel.address === '203.0.113.9' && tunnel.direct === false)
+  check('... an office PC sending the header is still direct', routeOf('192.168.1.50', '1.2.3.4').direct === true && routeOf('192.168.1.50', '1.2.3.4').address === '192.168.1.50')
+}
 check('no header: the socket address', clientIpOf('::ffff:127.0.0.1', undefined) === '::ffff:127.0.0.1' && clientIpOf(undefined, undefined) === '')
 
 // who gets the whole of /healthz (NVR ids, share paths, SDK load): the watcher on this machine
