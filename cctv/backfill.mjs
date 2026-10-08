@@ -35,10 +35,24 @@
 // glue that calls those functions and does the I/O, with every dependency injectable so that the
 // whole of it can be tested on Windows with fakes and no Linux SDK anywhere in sight.
 //
+// Faster than 1x, and checked (2026-10-07). A leg at 1x takes an hour for an hour of footage, and a
+// night's window got back about as much footage as it is long; after an outage of days most of the
+// hole ages out on the NVR first. So a leg is asked for at LEG_SPEEDS[0] (4x). What the NVR sends at
+// 2x and 4x is not written down anywhere (playback.mjs: "from 8x the NVR sends keyframes only"), it
+// cannot be measured in advance, and a leg of keyframes only stored as filled would be footage lost
+// for good behind a row that says it is there. So every faster leg is judged by what it delivered
+// (frameWatch), and one that fails is thrown away whole: its files deleted, nothing of it indexed
+// (pull()), the NVR's legs a speed slower from then on, the hole tried again without a failure
+// counted (fill()). At 1x there is nothing slower to compare with and everything is kept, as it
+// always was; a camera whose footage looks thinned at 1x too (every frame a keyframe) is remembered
+// and pulled at 1x, and the steps down it caused are taken back. All of that is in memory: after a
+// restart each NVR starts at 4x again and finds its speed again within a leg or two.
+//
 //   GET  /api/admin/backfill        -> { enabled, running, window, state, gaps, permanent, ... }
 //   POST /api/admin/backfill/run    -> starts the job (still only works inside the window)
 //   POST /api/admin/backfill/stop   -> stops it; anything in flight is closed cleanly
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { writeFileAtomicSync } from './atomic-write.mjs'
 import { siteMinutesOfDay } from './site-time.mjs'
 import { join } from 'node:path'
@@ -125,12 +139,40 @@ export const MIN_PROGRESS_MS = 1000
 /**
  * How long a leg may play before the first frame inside the hole is written. The NVR starts a playback
  * at the file holding the asked-for time, often minutes before the hole, and the session paces those
- * frames at 1x before the leg drops them (pull()). Generous, as the NVR's files can be long; a leg that
- * never reaches the hole still ends.
+ * frames (at the leg's speed) before the leg drops them (pull()). Generous, as the NVR's files can be
+ * long; a leg that never reaches the hole still ends.
  */
 export const LEG_LEAD_IN_MS = 30 * MINUTE
-/** How long a leg may go on from its first written frame: the stretch itself plus generous slack. */
+/**
+ * How long a leg may go on from its first frame: the stretch itself plus generous slack. In time on
+ * the wall, whatever the leg's speed: a leg at 4x is through its stretch in a quarter of the time and
+ * simply ends sooner, and one that turns out slower than asked is never cut earlier than a 1x leg was.
+ * (At 1x the 30 minutes hold 30 minutes of footage; at 4x they would hold two hours, so there it is
+ * maxGapMinutes, an hour by default, that bounds a leg: fill()'s chunkRanges.)
+ */
 export const legBudgetMs = (lengthMs) => Math.min(30 * MINUTE, lengthMs * 2 + 60_000)
+/**
+ * The speeds a leg is asked for, fastest first; an NVR found thinning at one gets the next (BackfillJob
+ * legSpeed). All of them speeds the NVR session takes (rec-fallback.mjs NVR_SPEEDS); never 8, which
+ * playback.mjs knows to be keyframes only. The last is 1: the speed nothing is judged at.
+ */
+export const LEG_SPEEDS = Object.freeze([4, 2, 1])
+/**
+ * This many keyframes one after the other, with no other frame between them, is a stream of keyframes
+ * only. A camera with ordinary pictures between its keyframes never sends two keyframes in a row (two
+ * at most where one of the NVR's files ends and the next begins), however low its frame rate: at 1
+ * frame a second with a keyframe every 2 s it is still key, other, key. Eight is 8-32 s of footage at
+ * a keyframe every 1-4 s, so 2-8 s of a leg at 4x: soon, and far from chance.
+ */
+export const KEYS_TO_JUDGE = 8
+/** A leg that ENDS on this many keyframes in a row (and fewer than KEYS_TO_JUDGE) is too short to judge. */
+const KEYS_UNSURE = 3
+// A keyframe "has frames missing before it" when the frame before it is this many of the camera's
+// ordinary frame steps earlier (and at least CUT_MIN_MS): the step is the middle one of the leg's
+// first STEP_SAMPLE steps between ordinary frames.
+const CUT_STEPS = 3
+const CUT_MIN_MS = 200
+const STEP_SAMPLE = 64
 
 /**
  * The backfill settings, repeated here so that this module never has to import settings.mjs.
@@ -467,6 +509,67 @@ function writeRunFlag(running, who, file = STATE_FILE()) {
 }
 
 /**
+ * Watches the frames of one leg and says whether the NVR sent all of them. Pure: it is told each
+ * frame's key flag and time (server ms), in order, and keeps a few counts.
+ *
+ * An NVR playing faster than 1x that does not send everything has two ways to leave frames out and
+ * still send pictures that decode, and both show in the stream itself, with nothing to compare with:
+ *  - keyframes only (what playback.mjs says of 8x): KEYS_TO_JUDGE keyframes in a row;
+ *  - the end of each group left off (a keyframe, some of the frames after it, then the next
+ *    keyframe): the frame before a keyframe is then far further back than the camera's frames are
+ *    apart. A real break in the NVR's recording looks the same, once; this is more than half of at
+ *    least KEYS_TO_JUDGE keyframes.
+ * What it cannot see: every second frame left out of a stream encoded so that this is possible
+ * (temporal layers). That looks exactly like a camera at half the frame rate, and only the camera's
+ * true rate would tell; fill() logs each leg's frames per second of footage for that.
+ *
+ * verdict(): null (nothing against it), { thinned: true, why } or, only for a leg that has ended,
+ * { unsure: true, why }: it looked thinned for as long as it lasted, and that was not long enough.
+ */
+export function frameWatch() {
+  const w = { keys: 0, others: 0, run: 0, firstTs: null, lastTs: null }
+  const keyGaps = [] // for each keyframe but the first: how far back the frame before it was (ms)
+  const steps = [] // the first STEP_SAMPLE steps from a frame to an ordinary frame after it (ms)
+  const cutShare = () => {
+    if (!steps.length || !keyGaps.length) return 0
+    const step = [...steps].sort((a, b) => a - b)[steps.length >> 1]
+    const far = Math.max(CUT_STEPS * step, CUT_MIN_MS)
+    return keyGaps.filter((g) => g > far).length / keyGaps.length
+  }
+  return {
+    stats: w,
+    note(isKey, ts) {
+      const step = w.lastTs === null ? null : ts - w.lastTs
+      if (w.firstTs === null) w.firstTs = ts
+      w.lastTs = ts
+      if (isKey) {
+        w.keys++
+        w.run++
+        if (step !== null) keyGaps.push(step)
+      } else {
+        w.others++
+        w.run = 0
+        if (step > 0 && steps.length < STEP_SAMPLE) steps.push(step)
+      }
+    },
+    /** Frames per second of footage, over the whole leg (null before two frames at different times). */
+    framesPerS() {
+      return w.lastTs > w.firstTs ? ((w.keys + w.others - 1) * 1000) / (w.lastTs - w.firstTs) : null
+    },
+    verdict({ ended = false } = {}) {
+      if (w.run >= KEYS_TO_JUDGE) return { thinned: true, why: 'keyframes only' }
+      // (looked at once every KEYS_TO_JUDGE keyframes while the leg runs: it reads every gap so far)
+      const enough = keyGaps.length >= KEYS_TO_JUDGE
+      if (enough && (ended || keyGaps.length % KEYS_TO_JUDGE === 0) && cutShare() > 0.5) return { thinned: true, why: 'frames missing before most keyframes' }
+      if (!ended || !w.keys) return null
+      if (!w.others || w.run >= KEYS_UNSURE) return { unsure: true, why: 'it ended on keyframes only, too few to judge' }
+      if (!enough && keyGaps.length >= 2 && cutShare() > 0.5) return { unsure: true, why: 'frames missing before its keyframes, too few to judge' }
+      return null
+    }
+  }
+}
+
+/**
  * A sink shaped like the browser WebSocket rec-fallback's startLeg writes to, but it writes the
  * frames into a SegmentWriter instead of sending them anywhere. The leg has already rewritten each
  * frame's time to server time, so the files land at the times the footage really has.
@@ -476,9 +579,35 @@ function writeRunFlag(running, who, file = STATE_FILE()) {
  * the recorders are writing to.
  *
  * onFirst: called once, when the first frame has been written (pull() starts the leg's time budget there).
+ *
+ * watch: a frameWatch, told every frame that comes. fast: the leg plays faster than 1x and is judged
+ * as it goes. Its keyframes are then kept back, in memory, until a frame that is not one has come:
+ * an NVR that sends keyframes only at this speed is found out (onThinned, once; nothing is taken
+ * after it) before a single byte of the leg is on disk, which is the ordinary way a thinned leg ends.
+ * At most KEYS_TO_JUDGE - 1 frames are ever kept back, and onFirst is then called at the first of them.
+ * A leg found thinned later than that has files, and pull() deletes them.
  */
-export function writerSink(writer, { onFirst = () => {} } = {}) {
+export function writerSink(writer, { onFirst = () => {}, watch = null, fast = false, onThinned = () => {} } = {}) {
   const stats = { frames: 0, bytes: 0, firstTs: null, lastTs: null, dropped: 0 }
+  let held = fast && watch ? [] : null
+  let begun = false
+  let stopped = false
+  const first = () => {
+    if (!begun) onFirst()
+    begun = true
+  }
+  const put = (buf, ts) => {
+    const ok = writer.write(buf.subarray(HEADER_SIZE), { isKey: buf[0] === 1, ts, codec: buf[1] === 1 ? 'h265' : 'h264' })
+    if (!ok) {
+      stats.dropped++
+      return
+    }
+    stats.frames++
+    stats.bytes += buf.length - HEADER_SIZE
+    if (stats.firstTs === null) stats.firstTs = ts
+    stats.lastTs = ts
+    if (stats.frames === 1) first()
+  }
   return {
     OPEN: 1,
     readyState: 1,
@@ -492,16 +621,24 @@ export function writerSink(writer, { onFirst = () => {} } = {}) {
       if (buf.length <= HEADER_SIZE) return
       const ts = Number(buf.readBigInt64LE(8)) / 1000
       if (!Number.isFinite(ts) || ts <= 0) return // a frame without a usable time is not written anywhere
-      const ok = writer.write(buf.subarray(HEADER_SIZE), { isKey: buf[0] === 1, ts, codec: buf[1] === 1 ? 'h265' : 'h264' })
-      if (!ok) {
-        stats.dropped++
-        return
+      if (stopped) return
+      const isKey = buf[0] === 1
+      watch?.note(isKey, ts)
+      if (fast && watch) {
+        const v = watch.verdict()
+        if (v?.thinned) {
+          stopped = true
+          held = null
+          return onThinned(v)
+        }
+        if (held && isKey) {
+          held.push([buf, ts])
+          return first()
+        }
+        if (held) for (const [b, t] of held.splice(0)) put(b, t)
+        held = null
       }
-      stats.frames++
-      stats.bytes += buf.length - HEADER_SIZE
-      if (stats.firstTs === null) stats.firstTs = ts
-      stats.lastTs = ts
-      if (stats.frames === 1) onFirst()
+      put(buf, ts)
     }
   }
 }
@@ -514,7 +651,10 @@ export class BackfillJob {
    *   now?: () => number, exportsBusy?: () => boolean, recordingBusy?: () => boolean,
    *   refusingOf?: (nvrId:string) => boolean, coolingOf?: (nvrId:string) => boolean,
    *   tickMs?: number, stateFile?: string, log?: Function, legLeadInMs?: number,
-   *   legBudgetMs?: (lengthMs:number) => number }} deps legLeadInMs, legBudgetMs: a leg's two time limits (pull())
+   *   legBudgetMs?: (lengthMs:number) => number, legSpeeds?: number[],
+   *   removeFile?: (path:string) => Promise<void> }} deps legLeadInMs, legBudgetMs: a leg's two time limits (pull());
+   *   legSpeeds: the speeds to try, fastest first (LEG_SPEEDS; 1 is always the last); removeFile: deletes one
+   *   file of a discarded leg (a file that is not there is not an error)
    */
   constructor(deps = {}) {
     // deps.index may be the recordings index itself or, from server.mjs at start-up (before it is
@@ -541,6 +681,9 @@ export class BackfillJob {
     this.tickMs = deps.tickMs ?? 30_000
     this.legLeadInMs = deps.legLeadInMs ?? LEG_LEAD_IN_MS
     this.legBudgetMs = deps.legBudgetMs ?? legBudgetMs
+    // (whatever is handed in: only speeds above 1, fastest first, and 1 after them)
+    this.legSpeeds = [...new Set((deps.legSpeeds ?? LEG_SPEEDS).map(Number).filter((v) => v > 1))].sort((a, b) => b - a).concat(1)
+    this.removeFile = deps.removeFile ?? ((f) => rm(f, { force: true }))
     this.stateFile = deps.stateFile ?? STATE_FILE()
     this.log = deps.log ?? ((m) => console.log(`[backfill] ${m}`))
     this.running = readRunFlag(this.stateFile)
@@ -558,6 +701,12 @@ export class BackfillJob {
     this.busyNvrs = new Set()
     this.nvrBackoff = new Map() // NVR id -> when it may be asked again (a refusal covers every camera on it)
     this.nextTry = new Map() // ledger row id -> the time it may be tried again (memory only)
+    // How fast legs are asked for (memory only; see "Faster than 1x" at the top, and legSpeed()):
+    this.legSteps = new Map() // NVR id -> [{ from, cam, why }]: each time a leg at speed `from` was discarded as thinned (cam null: not about a camera)
+    this.plainCams = new Map() // "nvr/ch" -> why this camera's legs are at 1x: its footage looks thinned at 1x too, so no faster leg of it can be judged
+    this.plainRows = new Set() // ledger row ids whose next legs are at 1x: a faster leg of that hole was too short to judge
+    this.saidSpeed = new Map() // NVR id -> the speed last written to the journal for it
+    this.leftovers = new Set() // files of discarded legs that could not be deleted: tried again before every pull, counted in status()
     this.last = { at: null, what: 'not started yet', filledMs: 0, bytes: 0, errors: 0 }
     this.current = null
   }
@@ -582,6 +731,47 @@ export class BackfillJob {
   retentionMs() {
     const d = Number(this.cfg().nvrRetentionDays)
     return (Number.isFinite(d) && d > 0 ? d : 30) * DAY
+  }
+
+  // ---- how fast
+
+  /** The speed this NVR's legs are asked for: the first of legSpeeds below every speed a leg of it was discarded at. */
+  nvrSpeed(nvrId) {
+    const steps = this.legSteps.get(nvrId) ?? []
+    if (!steps.length) return this.legSpeeds[0]
+    const low = Math.min(...steps.map((s) => s.from))
+    return this.legSpeeds.find((v) => v < low) ?? 1
+  }
+
+  /** The speed of the next leg for one hole: its NVR's, or 1 for a camera or a hole that is only pulled at 1x. */
+  legSpeed(row) {
+    return this.plainCams.has(`${row.nvr}/${row.ch}`) || this.plainRows.has(row.id) ? 1 : this.nvrSpeed(row.nvr)
+  }
+
+  /** Says an NVR's speed in the journal, once each time it is another. */
+  #saySpeed(nvrId, why = '') {
+    const speed = this.nvrSpeed(nvrId)
+    if (this.saidSpeed.get(nvrId) === speed) return
+    this.saidSpeed.set(nvrId, speed)
+    this.log(why || `backfill legs for ${nvrId} at ${speed}x`)
+  }
+
+  /**
+   * Deletes the files of a discarded leg (each with its .idx), and whatever an earlier one left. A file
+   * that will not go is kept in `leftovers` and tried again before the next pull: nothing in the index
+   * points at it, but the recovery scan at the service's start (rec-recover.mjs) indexes any segment
+   * file it finds without a row, so it must not stay.
+   */
+  async #removeFiles(paths = []) {
+    for (const p of paths) this.leftovers.add(p).add(`${p}.idx`)
+    for (const f of [...this.leftovers]) {
+      try {
+        await this.removeFile(f)
+        this.leftovers.delete(f)
+      } catch (e) {
+        console.warn(`[backfill] a discarded leg's file could not be deleted, and must not be indexed: ${f} (${e?.message ?? e})`)
+      }
+    }
   }
 
   // ---- the ledger
@@ -1043,11 +1233,15 @@ export class BackfillJob {
     if (!loc) return fail('no storage location available', { stop: 'job' })
 
     // 4. One piece per turn. Anything can have changed by the next one, so it is checked again.
+    //    At the NVR's speed (legSpeed), a faster leg judged by what it delivers: see step 4b.
+    const cam = `${row.nvr}/${row.ch}`
+    const speed = this.legSpeed(row)
+    this.#saySpeed(row.nvr)
     this.busyNvrs.add(row.nvr)
     const started = this.now()
     let result
     try {
-      result = await this.pull({ nvr, row, loc, fromMs: work[0][0], toMs: work[0][1], skewMs: cov.skewMs ?? 0 })
+      result = await this.pull({ nvr, row, loc, fromMs: work[0][0], toMs: work[0][1], skewMs: cov.skewMs ?? 0, speed })
     } catch (e) {
       this.busyNvrs.delete(row.nvr)
       // a throw here is this end (the writer, the disk), not the row or the NVR: the job waits
@@ -1072,6 +1266,43 @@ export class BackfillJob {
       this.log(`${row.nvr} refused (${result.message}); leaving it alone for ${Math.round(wait / 60_000)} min`)
       return wait
     }
+    // 4b. A faster leg that did not deliver every frame (or too little to tell) is not footage: pull()
+    //     has deleted its files and hands back no segments, so nothing of it is indexed. Not a failed
+    //     try either: no attempt is counted and neither the hole nor the NVR backs off, the hole is
+    //     simply pulled again, slower. (How often: once per speed above 1 for an NVR, once for a hole
+    //     too short to judge. Every one of them ends at 1x, where nothing is discarded.)
+    if (result.discarded) {
+      const d = result.discarded
+      let what
+      if (d.thinned) {
+        // the NVR, at this speed: all its legs go a speed slower. Which camera showed it is kept, as a
+        // camera that looks the same at 1x proves nothing about the NVR (below).
+        this.legSteps.set(row.nvr, [...(this.legSteps.get(row.nvr) ?? []), { from: speed, cam: d.ours ? null : cam, why: d.why }])
+        const next = this.nvrSpeed(row.nvr)
+        what = d.ours ? `${d.why} with ${row.nvr} at ${speed}x: this leg discarded, trying ${next}x` : `${row.nvr} sends ${d.why} at ${speed}x: this leg discarded, trying ${next}x`
+        this.#saySpeed(row.nvr, what)
+      } else {
+        // too short to judge: says nothing about the NVR. This hole is pulled at 1x.
+        this.plainRows.add(row.id)
+        what = `${row.nvr}/${row.ch + 1}: a leg at ${speed}x was discarded (${d.why}); this hole is pulled at 1x`
+        this.log(what)
+      }
+      this.index.backfillSet(row.id, { lastTryMs: now, lastError: null, note: `a leg at ${speed}x was discarded (${d.why})` })
+      this.last = { ...this.last, at: now, what }
+      return rested
+    }
+    // A leg at 1x that looks thinned: that is how this camera records (every frame a keyframe, or
+    // its recording broken up before most keyframes), since at 1x the NVR sends what it has. The leg
+    // is kept like any 1x leg. But no faster leg of this camera can ever be judged, so its legs stay
+    // at 1x, and a step down it caused is taken back: it was this camera, not the NVR.
+    if (speed === 1 && result.verdict?.thinned && !this.plainCams.has(cam)) {
+      this.plainCams.set(cam, result.verdict.why)
+      const steps = this.legSteps.get(row.nvr) ?? []
+      this.legSteps.set(row.nvr, steps.filter((s) => s.cam !== cam))
+      const back = steps.some((s) => s.cam === cam) ? `, and ${row.nvr} goes back to ${this.nvrSpeed(row.nvr)}x` : ''
+      this.log(`${row.nvr}/${row.ch + 1}: ${result.verdict.why} at 1x too, so this camera records that way: its legs stay at 1x${back}`)
+      this.saidSpeed.set(row.nvr, this.nvrSpeed(row.nvr))
+    }
     if (!result.segments.length) {
       // A leg that played to its end with nothing usable is about this stretch (row 2658: the NVR has
       // nothing inside the hole, and the floor drops what it plays from before it). One that broke off
@@ -1094,7 +1325,6 @@ export class BackfillJob {
     // count each time, so the NVR was pulled every five minutes for as long as the fault lasted.
     // (Also when what follows counts the try as failed, the hole less than a second shorter: what is
     // known by then is that this end can index footage of this camera.)
-    const cam = `${row.nvr}/${row.ch}`
     this.nvrThrows.delete(row.nvr)
     this.camThrows.delete(cam)
     this.camThrowAt.delete(cam)
@@ -1111,20 +1341,47 @@ export class BackfillJob {
     }
     this.index.backfillSet(row.id, left.length ? { attempts: row.attempts ?? 0, lastTryMs: now, lastError: null, note: `partly filled, ${left.length} piece(s) left` } : { state: 'filled', filledMs: filledAt, lastError: null, note: null })
     this.nextTry.delete(row.id)
+    if (!left.length) this.plainRows.delete(row.id)
     this.last = { at: filledAt, what: `${row.nvr}/${row.ch + 1}: filled ${Math.round(ms / 1000)} s (${result.bytes} bytes)`, filledMs: this.last.filledMs + ms, bytes: this.last.bytes + result.bytes, errors: this.last.errors }
-    this.log(this.last.what)
+    // (the journal also says how fast, and the frames per second of footage that came: the one thing
+    // about a faster leg that cannot be judged here, as the camera's true rate is not known here)
+    const perS = result.framesPerS
+    this.log(`${this.last.what} at ${speed}x in ${Math.round(elapsed / 1000)} s${perS ? `, ${perS.toFixed(1)} frames per second of footage` : ''}`)
     return restAfterMs(result.bytes, elapsed, Number(cfg.perNvrMbps ?? 8), Number(cfg.restSeconds ?? 30))
   }
 
   /**
    * One NVR playback leg written straight to disk. This is the only place that talks to an NVR.
-   * @returns {Promise<{ segments: object[], bytes: number, refused: boolean, message: string|null }>}
+   *
+   * speed: how fast the NVR is asked to play it (startLeg hands it to the session, which paces at that
+   * speed and sends every frame it gets: playback.mjs #pace). A leg faster than 1x is watched
+   * (frameWatch), and one the NVR thinned, or that ended too soon to tell, comes back `discarded`:
+   * { thinned, why } or { unsure, why }, with NO segments, and every file it made deleted. So is one
+   * during which this end dropped frames (the disk did not keep up; `ours`): at 1x the disk would have
+   * kept up, and a faster leg must never leave less than a 1x leg would have.
+   * Why deleting is enough: a segment gets into the index in one place only, fill()'s step 5, from the
+   * `segments` returned here after the leg is over; nothing is indexed while a leg runs. And the files
+   * are this leg's alone: the writer creates each one new (never an existing file: segment-writer.mjs
+   * opens 'wx'), and says so ('open'), so the list below is all of them and nothing else.
+   * verdict: what the watch made of a leg at 1x (fill() remembers a camera that looks thinned at 1x).
+   * @returns {Promise<{ segments: object[], bytes: number, refused: boolean, message: string|null,
+   *   discarded?: object|null, verdict?: object|null, framesPerS?: number|null }>}
    */
-  async pull({ nvr, row, loc, fromMs, toMs, skewMs }) {
+  async pull({ nvr, row, loc, fromMs, toMs, skewMs, speed = 1 }) {
+    if (this.leftovers.size) await this.#removeFiles()
+    const fast = speed > 1
     const writer = this.makeWriter({ root: loc.path, nvrId: row.nvr, ch: row.ch })
     const segments = []
-    writer.on('segment', (s) => segments.push(s))
-    writer.on('error', (e) => this.log(`write failed: ${e.message}`))
+    const files = new Set() // every file this leg made, finished or not: a discarded leg takes them all with it
+    writer.on('open', (f) => files.add(f.path))
+    writer.on('segment', (s) => {
+      segments.push(s)
+      files.add(s.path)
+    })
+    writer.on('error', (e) => {
+      if (e.path) files.add(e.path) // (given up on, perhaps half made)
+      this.log(`write failed: ${e.message}`)
+    })
     // The leg's clock: legLeadInMs to write its first frame, then the budget from that frame on.
     let timer = null
     let outOfTime
@@ -1134,36 +1391,58 @@ export class BackfillJob {
       timer = setTimeout(() => outOfTime({ reason: 'timeout', message }), ms)
       timer.unref?.()
     }
-    const sink = writerSink(writer, { onFirst: () => within(this.legBudgetMs(toMs - fromMs), 'the NVR leg ran out of time') })
+    const watch = frameWatch()
+    const sink = writerSink(writer, {
+      watch,
+      fast,
+      onFirst: () => within(this.legBudgetMs(toMs - fromMs), 'the NVR leg ran out of time'),
+      // thinned: the leg ends here, as one out of time does (it may not exist yet: a leg can send as it is made)
+      onThinned: (v) => outOfTime({ reason: 'thinned', verdict: v })
+    })
     let leg = null
     let done
     try {
       // floorMs: the NVR starts a playback at the file holding fromMs, often minutes before the hole,
       // and without a floor the leg kept those frames: copies of footage already on disk (108 of 293
       // backfilled segments), written again on every pull of the row
-      leg = this.leg({ nvr, ch: row.ch, fromMs, toMs, skewMs, real: sink, gen: null, at: fromMs, floorMs: fromMs - 1 })
+      leg = this.leg({ nvr, ch: row.ch, fromMs, toMs, skewMs, speed, real: sink, gen: null, at: fromMs, floorMs: fromMs - 1 })
       this.current = { row: row.id, abort: () => leg.close() }
       // A leg is bounded: the stretch itself plus generous slack. A session that stops sending is
       // closed rather than left holding an NVR login all night.
       // The budget runs from the first frame written, not from the start of the leg: the frames
-      // before the hole are paced at 1x like any others before the floor drops them, so a short hole
-      // some minutes into the NVR's file ran out of time on every pull and was never filled
-      // (2026-10-07 audit, M14). The lead-in has a limit of its own.
+      // before the hole are paced like any others (at 1x then) before the floor drops them, so a
+      // short hole some minutes into the NVR's file ran out of time on every pull and was never
+      // filled (2026-10-07 audit, M14). The lead-in has a limit of its own. Both are time on the
+      // wall and the same at every speed (legBudgetMs).
       if (!sink.stats.frames) within(this.legLeadInMs, 'the NVR leg did not reach the hole in time')
       done = await Promise.race([leg.done, timeout])
-      if (done.reason === 'timeout') leg.close()
+      if (done.reason === 'timeout' || done.reason === 'thinned') leg.close()
     } finally {
       clearTimeout(timer)
       this.current = null
       await writer.close()
       await writer.drained()
+      await turn() // (a file's 'open' can be said a moment after the close before it: segment-writer.mjs #doOpen)
+    }
+    // The judgement, on everything the leg delivered. Asked again now that it is over: a leg that
+    // ended on a few keyframes, or was all keyframes and short, was never stopped, and is not kept.
+    const verdict = (done.reason === 'thinned' ? done.verdict : null) ?? watch.verdict({ ended: true })
+    const framesPerS = watch.framesPerS()
+    let discarded = null
+    if (fast) {
+      if (verdict) discarded = verdict
+      else if (sink.stats.dropped) discarded = { thinned: true, ours: true, why: `the disk did not keep up (${sink.stats.dropped} frames dropped)` }
+    }
+    if (discarded) {
+      await this.#removeFiles([...files])
+      return { segments: [], bytes: sink.stats.bytes, frames: 0, refused: false, brokeOff: done.reason === 'error' || done.reason === 'timeout', message: null, discarded, verdict, framesPerS }
     }
     const message = done.message ?? null
     // A leg that failed before a single frame, with a refusal-shaped message, is the NVR saying no.
     const refused = done.reason === 'error' && sink.stats.frames === 0 && /refus|busy|limit|resource|no capacity|failed to start/i.test(String(message ?? ''))
     // brokeOff: the leg errored or ran out of time, as against playing to its end
     const brokeOff = done.reason === 'error' || done.reason === 'timeout'
-    return { segments, bytes: sink.stats.bytes, frames: sink.stats.frames, refused, brokeOff, message: segments.length ? null : (message ?? 'the NVR sent no video') }
+    return { segments, bytes: sink.stats.bytes, frames: sink.stats.frames, refused, brokeOff, message: segments.length ? null : (message ?? 'the NVR sent no video'), discarded: null, verdict, framesPerS }
   }
 
   // ---- what the page shows
@@ -1179,6 +1458,13 @@ export class BackfillJob {
       running: this.running,
       window: { start: cfg.windowStart, end: cfg.windowEnd, open: inWindow(minutesOfDay(now), cfg.windowStart, cfg.windowEnd), opensInMs: msUntilWindow(now, cfg.windowStart, cfg.windowEnd) },
       nvrRetentionDays: Number(cfg.nvrRetentionDays ?? 30),
+      // speeds: how fast each NVR's legs are asked for now; plainCameras: the cameras only pulled at
+      // 1x, and why; undeleted: files of discarded legs still on disk (0 unless a delete failed)
+      legs: {
+        speeds: Object.fromEntries((this.nvrs instanceof Map ? [...this.nvrs.keys()] : Object.keys(this.nvrs ?? {})).map((id) => [id, this.nvrSpeed(id)])),
+        plainCameras: Object.fromEntries(this.plainCams),
+        undeleted: this.leftovers.size
+      },
       state: { ...this.last, failsInARow: this.failsInARow, lastFailure: this.lastFailure, busyNvrs: [...this.busyNvrs], mayRun: mayRun({ now, cfg, running: this.running, exportsBusy: this.exportsBusy(), recordingBusy: this.recordingBusy() }) },
       counts: {
         pending: pending.length,

@@ -13,12 +13,15 @@
 //                   real .idx files land at the right times and are indexed as backfilled; a refusal
 //                   backs off hard and does not retry; an unknown answer leaves the row pending;
 //                   a restart picks up where it left off
+//   leg speed       frameWatch; a leg at 4x with every frame is kept; one of keyframes only is
+//                   discarded (nothing indexed, no file left), the NVR steps down, the hole is not
+//                   backed off; 1x keeps everything; an all-intra camera does not drag its NVR down
 //   the routes      handleBackfill: admin only, methods, GET/run/stop
 //
 // Temp dirs, a temp index, fake NVRs and a fake leg only: nothing reaches an NVR and nothing here
 // imports the SDK, so it runs on Windows.
 // Run:  node cctv/test/backfill.test.mjs
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -300,6 +303,9 @@ function makeJob(over = {}) {
     refusingOf: over.refusingOf ?? (() => false),
     stateFile: join(DATA, over.stateFile ?? 'backfill-state.json'),
     log: () => {},
+    // At 1x unless a test says otherwise: the fake legs here send one keyframe a second and nothing
+    // else, which a faster leg is rightly discarded for ("leg speed" below is where that is tested).
+    legSpeeds: [1],
     ...(over.extra ?? {})
   })
 }
@@ -669,6 +675,264 @@ const pulled = (ch) => index.segments('nvr-1', ch, HOLE_FROM - 20 * MIN, HOLE_TO
   }
   clearInterval(alive)
   check('leg time: the budget is twice the stretch and a minute, at most 30 minutes', bf.legBudgetMs(3 * MIN) === 7 * MIN && bf.legBudgetMs(HOUR) === 30 * MIN && bf.LEG_LEAD_IN_MS === 30 * MIN)
+}
+
+// ---- faster legs that are checked (2026-10-07) ----------------------------------------------------
+//
+// A leg is asked for at 4x and judged by the frames that come: an NVR either sends them all or leaves
+// some out, and a leg with frames left out must never be indexed as filled.
+{
+  const { frameWatch, KEYS_TO_JUDGE, LEG_SPEEDS } = bf
+  /** What a watch says of frames given as 'K' (keyframe) and 'p' letters, stepMs apart ('_': a frame left out). */
+  const watched = (letters, { stepMs = 40, ended = false } = {}) => {
+    const w = frameWatch()
+    let t = 1_000_000
+    let said = null
+    for (const c of letters) {
+      if (c !== '_') w.note(c === 'K', t)
+      t += stepMs
+      said ??= w.verdict()
+    }
+    return said ?? w.verdict({ ended })
+  }
+  const gop = (n) => `K${'p'.repeat(n - 1)}`
+  check('speeds: 4x first, then 2x, then 1x; never 8x', J(LEG_SPEEDS) === J([4, 2, 1]) && KEYS_TO_JUDGE === 8)
+  check('watch: keyframes with frames between them is a whole stream', watched(gop(50).repeat(20), { ended: true }) === null)
+  check('watch: ... also at 1 frame a second with a keyframe every 2 s', watched('Kp'.repeat(200), { stepMs: 1000, ended: true }) === null)
+  check('watch: 8 keyframes in a row is keyframes only', watched('K'.repeat(8), { stepMs: 2000 })?.thinned === true && watched('K'.repeat(8), { stepMs: 2000 }).why === 'keyframes only')
+  check('watch: ... 7 are not yet, while the leg runs', watched('K'.repeat(7), { stepMs: 2000 }) === null)
+  check('watch: ... and a leg that ENDS after 7 could not be judged', watched('K'.repeat(7), { stepMs: 2000, ended: true })?.unsure === true)
+  check('watch: whole at first (the speed not yet taken), then keyframes only: thinned', watched(gop(50) + `K${'_'.repeat(49)}`.repeat(8))?.thinned === true)
+  check('watch: two keyframes in a row (one NVR file ends, the next begins) is nothing', watched(gop(50).repeat(3) + 'K' + gop(50).repeat(3), { ended: true }) === null)
+  check('watch: a leg that ends on 3 keyframes in a row could not be judged', watched(gop(50).repeat(3) + 'KKK', { ended: true })?.unsure === true)
+  const cutGop = `K${'p'.repeat(24)}${'_'.repeat(25)}` // the second half of each group left out
+  check('watch: the end of every group left out is thinned', watched(cutGop.repeat(20))?.why === 'frames missing before most keyframes')
+  check('watch: ... one break in the recording is not', watched(gop(50).repeat(5) + cutGop + gop(50).repeat(14), { ended: true }) === null)
+  check('watch: frames per second of footage', (() => { const w = frameWatch(); for (let i = 0; i <= 250; i++) w.note(i % 50 === 0, 1000 + i * 40); return Math.round(w.framesPerS()) === 25 })())
+
+  /**
+   * A leg from an NVR whose cameras record 5 frames a second with a keyframe every 2 s. What it sends
+   * depends on the speed it is asked for: keyframes only at the speeds in thinAt (after thinAfterMs of
+   * the stretch, if given); every frame a keyframe for the cameras intra(ch) says; at most maxFrames.
+   */
+  const speedLeg = ({ thinAt = [], thinAfterMs = 0, intra = () => false, maxFrames = Infinity } = {}) => {
+    const fn = ({ ch, fromMs, toMs, real, speed = 1 }) => {
+      fn.calls.push({ ch, fromMs, toMs, speed })
+      const done = (async () => {
+        let sent = 0
+        for (let t = fromMs, i = 0; t < toMs && sent < maxFrames; t += 200, i++) {
+          const isKey = intra(ch) || i % 10 === 0
+          if (!isKey && thinAt.includes(speed) && t - fromMs >= thinAfterMs) continue
+          real.send(frame(t, isKey))
+          sent++
+        }
+        await new Promise((r) => setImmediate(r)) // (a real leg ends after what it sent has been taken)
+        return { reason: 'reached' }
+      })()
+      return { done, close: () => fn.closes++, command() {}, fromMs, toMs }
+    }
+    fn.calls = []
+    fn.closes = 0
+    return fn
+  }
+  /** A job at the real speeds, with what it logged and every file its writers made. */
+  const fastJob = (leg, extra = {}) => {
+    const said = []
+    const made = []
+    const job = makeJob({
+      leg,
+      extra: {
+        legSpeeds: LEG_SPEEDS,
+        log: (m) => said.push(m),
+        makeWriter: (o) => {
+          const w = new SegmentWriter(o)
+          w.on('open', (f) => made.push(f.path))
+          return w
+        },
+        ...extra
+      }
+    })
+    return { job, said, made }
+  }
+  /** The segment files (and their .idx) on disk for one camera of nvr-1. */
+  const onDisk = (ch) => {
+    const dir = join(root, 'nvr-1', String(ch))
+    return existsSync(dir) ? readdirSync(dir, { recursive: true }).filter((f) => /\.h26[45](\.idx)?$/.test(String(f))) : []
+  }
+  const untouched = (job, row) => {
+    const r = index.backfillRow(row.id)
+    return r.state === 'pending' && r.attempts === 0 && r.lastError === null && !job.nextTry.has(row.id) && !job.nvrBackoff.has('nvr-1') && job.last.errors === 0
+  }
+
+  {
+    // every frame comes at 4x: kept, as a 1x leg is
+    const leg = speedLeg()
+    const { job, said } = fastJob(leg)
+    const row = holeOn(30)
+    await job.fill(row)
+    const segs = pulled(30)
+    check('4x: the leg is asked for at 4x', leg.calls.length === 1 && leg.calls[0].speed === 4, J(leg.calls))
+    check('4x: a leg with keyframes and the frames between them is kept and indexed', index.backfillRow(row.id).state === 'filled' && segs.length >= 3 && segs.every((x) => x.source === 'backfill:nvr-1' && existsSync(x.path)), J(index.backfillRow(row.id)))
+    check('4x: ... all of it (5 frames a second: 400 bytes each)', segs.reduce((n, x) => n + x.bytes, 0) === 900 * 400, `${segs.reduce((n, x) => n + x.bytes, 0)}`)
+    check('4x: the journal says the speed once, and the frames per second of footage that came', said.filter((m) => m === 'backfill legs for nvr-1 at 4x').length === 1 && said.some((m) => /filled \d+ s .* at 4x in \d+ s, 5\.0 frames per second of footage/.test(m)), J(said))
+    check('4x: the status says each NVR\'s speed', job.status().legs.speeds['nvr-1'] === 4 && job.status().legs.undeleted === 0, J(job.status().legs))
+  }
+  {
+    // the NVR sends keyframes only at 4x, everything at 2x
+    const leg = speedLeg({ thinAt: [4] })
+    const { job, said, made } = fastJob(leg)
+    const row = holeOn(31)
+    const wait = await job.fill(row)
+    check('thinned: a leg of keyframes only is stopped', leg.calls.length === 1 && leg.calls[0].speed === 4 && leg.closes === 1, J({ calls: leg.calls, closes: leg.closes }))
+    check('thinned: nothing of it is indexed', pulled(31).length === 0 && job.holesOf('nvr-1', 31, HOLE_FROM - MIN, HOLE_TO + MIN).length === 1, J(pulled(31)))
+    check('thinned: no file of it is on disk (found out before anything was written)', onDisk(31).length === 0 && made.length === 0, J({ disk: onDisk(31), made }))
+    check('thinned: the NVR steps down to the next speed', job.nvrSpeed('nvr-1') === 2 && job.status().legs.speeds['nvr-1'] === 2)
+    check('thinned: the journal says so, once', said.filter((m) => m === 'nvr-1 sends keyframes only at 4x: this leg discarded, trying 2x').length === 1 && !said.some((m) => /at 2x$/.test(m)), J(said))
+    check('thinned: the hole stays pending and is not a failure: no attempt, no back-off, no error', untouched(job, row) && /discarded/.test(index.backfillRow(row.id).note ?? ''), J(index.backfillRow(row.id)))
+    check('thinned: ... the job only rests, and the pick takes the same hole again', wait >= job.tickMs && wait < bf.ERROR_BACKOFF_MS[0] && chooseGap([index.backfillRow(row.id)], { now: NOW + wait, nvrs: job.nvrView(), retentionMsOf: () => 30 * DAY }).row?.id === row.id, `${wait}`)
+    await job.fill(index.backfillRow(row.id))
+    check('thinned: the next leg is at 2x, and is kept', leg.calls.length === 2 && leg.calls[1].speed === 2 && index.backfillRow(row.id).state === 'filled' && pulled(31).length >= 3, J({ calls: leg.calls, row: index.backfillRow(row.id) }))
+    check('thinned: ... with every frame', pulled(31).reduce((n, x) => n + x.bytes, 0) === 900 * 400)
+  }
+  {
+    // the leg starts whole (the NVR has not taken the speed yet) and turns to keyframes only after
+    // 30 s: files of it are on disk by then
+    const leg = speedLeg({ thinAt: [4], thinAfterMs: 30_000 })
+    const { job, made } = fastJob(leg)
+    const row = holeOn(32)
+    await job.fill(row)
+    check('thinned later: the leg had written files', made.length >= 1, J(made))
+    check('thinned later: every one is deleted, with its .idx', made.every((p) => !existsSync(p) && !existsSync(`${p}.idx`)) && onDisk(32).length === 0, J(onDisk(32)))
+    check('thinned later: nothing of it is indexed, and the NVR steps down', pulled(32).length === 0 && made.every((p) => !index.byPath(p)) && job.nvrSpeed('nvr-1') === 2 && untouched(job, row))
+    await job.fill(index.backfillRow(row.id))
+    check('thinned later: the 2x leg fills the hole', index.backfillRow(row.id).state === 'filled' && leg.calls[1]?.speed === 2)
+  }
+  {
+    // an NVR that thins at 4x and at 2x: down to 1x, where the leg is kept
+    const leg = speedLeg({ thinAt: [4, 2] })
+    const { job, said } = fastJob(leg)
+    const row = holeOn(33)
+    await job.fill(row)
+    await job.fill(index.backfillRow(row.id))
+    check('down to 1x: two legs discarded, at 4x and at 2x', J(leg.calls.map((c) => c.speed)) === J([4, 2]) && pulled(33).length === 0 && onDisk(33).length === 0 && job.nvrSpeed('nvr-1') === 1 && untouched(job, row), J(leg.calls))
+    await job.fill(index.backfillRow(row.id))
+    check('down to 1x: the third, at 1x, is kept', leg.calls[2]?.speed === 1 && index.backfillRow(row.id).state === 'filled' && pulled(33).reduce((n, x) => n + x.bytes, 0) === 900 * 400, J(leg.calls))
+    check('down to 1x: the NVR stays at 1x (the camera has ordinary frames at 1x: it was the NVR)', job.nvrSpeed('nvr-1') === 1 && job.plainCams.size === 0 && said.includes('nvr-1 sends keyframes only at 2x: this leg discarded, trying 1x'), J(said))
+  }
+  {
+    // a camera that records keyframes only (all-intra): it looks thinned at every speed. At 1x it is
+    // kept, not discarded for ever, and it is the camera that is remembered, not the NVR
+    const leg = speedLeg({ intra: (ch) => ch === 34 })
+    const { job, said } = fastJob(leg)
+    const row = holeOn(34)
+    await job.fill(row)
+    await job.fill(index.backfillRow(row.id))
+    check('all-intra: discarded at 4x and at 2x, as it cannot be told from a thinned leg there', J(leg.calls.map((c) => c.speed)) === J([4, 2]) && pulled(34).length === 0 && onDisk(34).length === 0 && untouched(job, row))
+    await job.fill(index.backfillRow(row.id))
+    check('all-intra: keyframes only at 1x is accepted, and the hole is filled', leg.calls.length === 3 && leg.calls[2].speed === 1 && index.backfillRow(row.id).state === 'filled' && pulled(34).length >= 3, J({ calls: leg.calls, row: index.backfillRow(row.id) }))
+    check('all-intra: the camera is remembered, and its legs stay at 1x', job.plainCams.has('nvr-1/34') && job.legSpeed({ nvr: 'nvr-1', ch: 34, id: -1 }) === 1 && job.status().legs.plainCameras['nvr-1/34'] === 'keyframes only', J(job.status().legs))
+    check('all-intra: its NVR is not dragged down: the other cameras are back at 4x', job.nvrSpeed('nvr-1') === 4 && job.legSpeed({ nvr: 'nvr-1', ch: 35, id: -2 }) === 4 && said.some((m) => /nvr-1\/35: keyframes only at 1x too.*nvr-1 goes back to 4x/.test(m)), J(said))
+    const other = holeOn(35)
+    await job.fill(other)
+    check('all-intra: ... and the next camera is pulled at 4x and kept', leg.calls[3]?.ch === 35 && leg.calls[3].speed === 4 && index.backfillRow(other.id).state === 'filled', J(leg.calls))
+  }
+  {
+    // a leg too short to say anything (3 keyframes, then the end): not kept, and nothing said about the NVR
+    const leg = speedLeg({ thinAt: [4], maxFrames: 3 })
+    const { job } = fastJob(leg)
+    const row = holeOn(36)
+    await job.fill(row)
+    check('too short: a faster leg that ended on a few keyframes is not kept', pulled(36).length === 0 && onDisk(36).length === 0 && untouched(job, row))
+    check('too short: the NVR keeps its speed; that hole is pulled at 1x', job.nvrSpeed('nvr-1') === 4 && job.legSpeed(index.backfillRow(row.id)) === 1)
+  }
+  {
+    // this end drops frames during a faster leg (the disk did not keep up): a 1x leg would have had them
+    const leg = speedLeg()
+    const { job, made, said } = fastJob(leg, {
+      makeWriter: (o) => {
+        const w = new SegmentWriter(o)
+        const write = w.write.bind(w)
+        w.on('open', (f) => made.push(f.path))
+        w.write = (buf, meta) => (meta.ts >= HOLE_FROM + 70_000 && meta.ts < HOLE_FROM + 75_000 ? false : write(buf, meta))
+        return w
+      }
+    })
+    const row = holeOn(37)
+    await job.fill(row)
+    check('disk too slow: a faster leg with frames dropped at this end is discarded too', made.length >= 2 && made.every((p) => !existsSync(p) && !existsSync(`${p}.idx`)) && pulled(37).length === 0 && untouched(job, row), J(onDisk(37)))
+    check('disk too slow: ... and the legs go a speed slower', job.nvrSpeed('nvr-1') === 2 && said.some((m) => /^the disk did not keep up \(25 frames dropped\) with nvr-1 at 4x: this leg discarded, trying 2x$/.test(m)), J(said))
+  }
+  {
+    // a file of a discarded leg that will not delete is not forgotten
+    const realWarn = console.warn
+    const warned = []
+    console.warn = (m) => warned.push(String(m))
+    try {
+      let refuse = true
+      const { rm } = await import('node:fs/promises')
+      const leg = speedLeg({ thinAt: [4], thinAfterMs: 30_000 })
+      const { job, made } = fastJob(leg, { removeFile: (f) => (refuse ? Promise.reject(new Error('EBUSY')) : rm(f, { force: true })) })
+      const row = holeOn(38)
+      await job.fill(row)
+      check('undeleted: a file that will not delete is counted in the status and said in the journal', made.length >= 1 && job.status().legs.undeleted === made.length * 2 && warned.some((m) => /could not be deleted/.test(m)) && pulled(38).length === 0, J({ legs: job.status().legs, warned }))
+      refuse = false
+      await job.fill(index.backfillRow(row.id))
+      check('undeleted: ... and deleted before the next pull', job.status().legs.undeleted === 0 && made.filter((p) => !index.byPath(p)).every((p) => !existsSync(p) && !existsSync(`${p}.idx`)), J(job.status().legs))
+    } finally {
+      console.warn = realWarn
+    }
+  }
+  {
+    // the leg's time at 4x: the same budget on the wall as at 1x (it ends sooner, it is never cut
+    // sooner), counted from its first frame, also while that frame is kept back
+    const asked = []
+    const { job } = fastJob(speedLeg(), { legBudgetMs: (len) => (asked.push(len), bf.legBudgetMs(len)) })
+    await job.fill(holeOn(39))
+    check('leg time at 4x: the budget is that of the stretch, not a quarter of it', asked.length === 1 && asked[0] === 3 * MIN && bf.legBudgetMs(asked[0]) === 7 * MIN, J(asked))
+    check('leg time at 4x: an hour of footage (maxGapMinutes) is 15 minutes of a leg, inside the 30-minute budget', bf.legBudgetMs(HOUR) === 30 * MIN && HOUR / LEG_SPEEDS[0] < bf.legBudgetMs(HOUR) && bf.DEFAULT_BACKFILL.maxGapMinutes === 60)
+    const stalled = ({ fromMs, toMs, real }) => {
+      let close
+      const closed = new Promise((r) => (close = () => r({ reason: 'closed' })))
+      setTimeout(() => real.send(frame(fromMs, true)), 50)
+      stalled.closes = 0
+      return { done: closed, close: () => (stalled.closes++, close()), command() {}, fromMs, toMs }
+    }
+    const alive = setInterval(() => {}, 1000)
+    const { job: job2 } = fastJob(stalled, { tickMs: 1, legLeadInMs: 60_000, legBudgetMs: () => 120 })
+    const row = holeOn(40)
+    const t0 = Date.now()
+    await job2.fill(row)
+    const took = Date.now() - t0
+    clearInterval(alive)
+    check('leg time at 4x: a leg that stops after its first keyframe ends when the budget is up, not at the lead-in limit', took >= 150 && took < 10_000 && stalled.closes === 1, `${took} ms`)
+    check('leg time at 4x: ... its one keyframe is not kept', pulled(40).length === 0 && onDisk(40).length === 0 && job2.plainRows.has(row.id))
+    index.backfillSet(row.id, { state: 'permanent', note: 'test tidy-up' })
+  }
+  {
+    // through the real startLeg: the NVR session is told the speed
+    const { startLeg } = await import('../rec-fallback.mjs')
+    const cmds = []
+    const nvr = {
+      id: 'nvr-1',
+      online: true,
+      playback: {
+        connect(ws, url) {
+          const start = Number(url.searchParams.get('start'))
+          ws.on('message', (data) => cmds.push(JSON.parse(String(data))))
+          setImmediate(() => {
+            ws.send(JSON.stringify({ type: 'started' }))
+            for (let t = start - MIN, i = 0; t < start + 5 * MIN; t += 200, i++) ws.send(frame(t, i % 10 === 0))
+            ws.send(JSON.stringify({ type: 'end' }))
+          })
+        }
+      }
+    }
+    const { job } = fastJob(startLeg, { nvrs: new Map([['nvr-1', nvr]]) })
+    const row = holeOn(41)
+    await job.fill(row)
+    check('startLeg: the session gets {speed: 4} for a backfill leg', J(cmds) === J([{ speed: 4 }]), J(cmds))
+    check('startLeg: ... and the hole is filled from it', index.backfillRow(row.id).state === 'filled' && pulled(41).every((x) => x.startMs >= HOLE_FROM - 1))
+  }
 }
 
 // ---- one stuck row must not hold the whole job (playback report 9, review) -----------------------
