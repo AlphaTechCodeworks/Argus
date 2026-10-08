@@ -103,6 +103,15 @@ const edit = (list, i, fields) => list.map((c, j) => (j === i ? { ...c, ...field
   check('viewer.js: the full-size view is rebuilt when Live HD flips', /if \(keep && Boolean\(singleCam\?\.hd\) === Boolean\(cam\.hd\)\)/.test(src))
   check('viewer.js: "Recordings" only with a playback right', /if \(cam\.playback !== false\) \{/.test(src))
   check('viewer.js: a main layer refused before it showed goes, the sub-stream stays', /onHdRefused: \(\) => \{\n\s*if \(!layer\.classList\.contains\('pending'\)\) return false/.test(src))
+  // an H.265 main the server did not convert for a browser without H.265 (h264-fallback.mjs NO_ROOM_MAIN, FAILED)
+  const not = src.slice(src.indexOf('onMainNotConverted: (why) => {'), src.indexOf('singleTiles.push(main)'))
+  check('viewer.js: a main the server did not convert: a layer not shown yet goes, the sub-stream under it stays', /const pending = layer\.classList\.contains\('pending'\)\n\s*if \(pending\) \{\n\s*main\.close\(\)\n\s*layer\.remove\(\)/.test(not) && /return pending\n/.test(not), not.slice(0, 200))
+  check('viewer.js: ... a small mark in the SD badge\'s style says why, on whichever picture is showing, once', /for \(const b of tile\.querySelectorAll\('\.hd-busy'\)\) b\.remove\(\)\n\s*under\.tile\.querySelector\('\.name'\)\?\.after\(hdBusyBadge\(why\)\)/.test(not) && /function hdBusyBadge\(why\) \{\n\s*const b = sdBadge\(\)\n\s*b\.classList\.add\('hd-busy'\)\n\s*b\.title = mainNotConvertedTitle\(why\)/.test(src))
+  check('viewer.js: ... the main is asked for again after H264_RETRY_MS, once, only while this view is still open on a live sub-stream', /clearTimeout\(upgradeTimer\)\n\s*upgradeTimer = setTimeout\(\(\) => \{\n\s*upgradeTimer = null\n\s*if \(overlay === tile && !under\.closed\) upgradeToMain\(tile, cam, under, opts\)\n\s*\}, H264_RETRY_MS\)/.test(not), not)
+  check('viewer.js: ... never rememberNoMain for it (the browser plays what a conversion sends), and closing the view cancels the retry', !/rememberNoMain/.test(not) && /if \(upgradeTimer\) \{ clearTimeout\(upgradeTimer\); upgradeTimer = null \}/.test(src))
+  check('viewer.js: the main\'s first picture takes the mark away, and an earlier layer left on the sub-stream', /layer\.classList\.remove\('pending'\)\n\s*for \(const b of tile\.querySelectorAll\('\.hd-busy'\)\) b\.remove\(\)/.test(src) && /sub\.close\(\)\n\s*if \(sub\.tile !== tile\) sub\.tile\.remove\(\)/.test(src))
+  check('viewer.js: the sub-stream still closes only at the main\'s first picture (no flash, no blank)', /onFirstFrame: \(\) => \{[\s\S]*?sub\.close\(\)/.test(src) && /layer\.className = 'tile-upgrade pending'/.test(src))
+  check('viewer.js: the cameras kept off the main stream live in the page\'s memory only, for two minutes, and only after H.265 came all the same', /const noMainUntil = new Map\(\)/.test(src) && /const NO_MAIN_MS = 2 \* 60_000/.test(src) && !/(local|session)Storage\.setItem\('cctv\.noMain'/.test(src) && /onUnsupported: \(\) => \{\n\s*rememberNoMain\(camKey\(cam\)\)/.test(src) && (src.match(/rememberNoMain\(/g) ?? []).length === 1)
 }
 
 console.log(failures ?`\n${failures} FAILED` : '\nall passed')

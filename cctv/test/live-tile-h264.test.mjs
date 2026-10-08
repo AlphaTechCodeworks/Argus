@@ -41,8 +41,8 @@ const mkTileEl = () => {
   return { parts, appended: [], dataset: {}, classList: { contains: () => false }, querySelector(s) { return parts[s] }, append(...k) { this.appended.push(...k) } }
 }
 
-const { CONVERTED_TITLE, H264_ASKS, H264_FAILED, H264_NO_ROOM, H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, h265Answer, h265Forced, h265Text } = await import('../public/live-tile.js')
-const { FAILED, NO_ROOM } = await import('../h264-fallback.mjs')
+const { CONVERTED_MAIN_TITLE, CONVERTED_TITLE, H264_ASKS, H264_FAILED, H264_NO_ROOM, H264_NO_ROOM_MAIN, H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, h265Answer, h265Forced, h265Text, mainNotConvertedTitle } = await import('../public/live-tile.js')
+const { FAILED, NO_ROOM, NO_ROOM_MAIN } = await import('../h264-fallback.mjs')
 await sleep(5) // the page's check has answered: this browser says it plays H.265
 
 // ---- the pure parts
@@ -52,7 +52,7 @@ check('what a stream is opened with: the check\'s answer, both ways', h265Answer
 check('... not known yet: nothing said (null), which the server does not read as "cannot"', h265Answer({ device: null }) === null && h265Answer({ device: undefined }) === null)
 check('... forced, or learnt from a keyframe the decoder refused: "cannot", whatever the check said', h265Answer({ device: true, forced: true }) === false && h265Answer({ device: true, learned: true }) === false && h265Answer({ device: null, learned: true }) === false && h265Answer({ device: null, forced: true }) === false)
 check('... never "can" for a browser whose check said no', h265Answer({ device: false, forced: false, learned: false }) === false)
-check('the reasons are the server\'s, letter for letter', H264_NO_ROOM === NO_ROOM && H264_FAILED === FAILED)
+check('the reasons are the server\'s, letter for letter', H264_NO_ROOM === NO_ROOM && H264_FAILED === FAILED && H264_NO_ROOM_MAIN === NO_ROOM_MAIN)
 {
   const plain = h265Text()
   const room = h265Text(H264_NO_ROOM)
@@ -191,10 +191,20 @@ check('a new connection starts unmarked (the server says it again if it still co
   e.t.player.onUnsupported(7)
   delete globalThis.document
   check('a codec that is not H.265 at all: the old message at once, nothing asked again', e.t.closed && e.status.textContent === 'unsupported codec' && e.tileEl.appended[0]?.textContent === 'This browser cannot play this camera’s video format.' && sockets.length === n)
+  // a main stream asks again for H.264 as a sub-stream does (the server converts it for the full-size view)
   const m = mk(6, MAIN_STREAM)
   n = sockets.length
   m.t.player.onUnsupported(1)
-  check('an H.265 main stream: the tile goes over to the sub-stream, as before (mains are not converted)', m.t.streamType === SUB_STREAM && m.ws.closed && m.t.h264Asks === 0 && !m.t.closed)
+  await sleep(5)
+  check('an H.265 main stream the decoder refuses: the tile stays on the main stream and asks again for H.264', m.t.streamType === MAIN_STREAM && m.ws.closed && m.t.h264Asks === 1 && !m.t.closed && sockets.length === n + 1 && /stream=0(&|$)/.test(sockets.at(-1).url) && /[?&]h265=0(&|$)/.test(sockets.at(-1).url), sockets.at(-1).url)
+  sockets.at(-1).readyState = 1
+  m.t.player.onUnsupported(1)
+  await sleep(5)
+  sockets.at(-1).readyState = 1
+  check(`... ${H264_ASKS} times at most`, sockets.length === n + H264_ASKS && m.t.streamType === MAIN_STREAM)
+  const last = sockets.at(-1)
+  m.t.player.onUnsupported(1)
+  check('... H.265 all the same (a server that does not convert mains): over to the sub-stream, as before', m.t.streamType === SUB_STREAM && last.closed && !m.t.closed)
   clearTimeout(m.t.retry)
   m.t.connect()
   check('... which it asks for as H.264', /stream=1(&|$)/.test(sockets.at(-1).url) && /[?&]h265=0(&|$)/.test(sockets.at(-1).url), sockets.at(-1).url)
@@ -202,9 +212,74 @@ check('a new connection starts unmarked (the server says it again if it still co
   // a caller's own handling of a main (viewer.js: the full-size layer) is still the caller's
   let told = null
   const own = mk(7, MAIN_STREAM, { onUnsupported: (c) => (told = c) })
+  for (let i = 0; i < H264_ASKS; i++) {
+    own.t.player.onUnsupported(1)
+    await sleep(5)
+    sockets.at(-1).readyState = 1
+  }
+  check('a caller\'s own handler for a main stream is not called while the tile still asks for H.264', told === null && own.t.streamType === MAIN_STREAM)
   own.t.player.onUnsupported(1)
-  check('a caller\'s own handler for a main stream is still called', told === 1 && own.t.streamType === MAIN_STREAM)
+  check('... and is called when H.265 still comes', told === 1 && own.t.streamType === MAIN_STREAM)
   own.t.close()
+  let other = null
+  const own2 = mk(7, MAIN_STREAM, { onUnsupported: (c) => (other = c) })
+  n = sockets.length
+  own2.t.player.onUnsupported(7)
+  check('... at once for a codec that is not H.265', other === 7 && sockets.length === n)
+  own2.t.close()
+}
+
+// the server did not convert a main stream: the full-size view stays on its sub-stream, quietly
+{
+  check('the mark\'s title for a view left on the sub-stream: no room among the mains, or a failed conversion; both say it tries again', /already converting as many full-quality pictures as it is allowed/.test(mainNotConvertedTitle(H264_NO_ROOM_MAIN)) && /could not convert its full-quality picture/.test(mainNotConvertedTitle(H264_FAILED)) && [H264_NO_ROOM_MAIN, H264_FAILED].every((w) => /standard picture meanwhile/.test(mainNotConvertedTitle(w)) && /again by itself/.test(mainNotConvertedTitle(w))))
+  // the caller handles it (viewer.js: the layer goes, the sub-stream under it stays)
+  for (const why of [H264_NO_ROOM_MAIN, H264_FAILED]) {
+    let said = null
+    const v = mk(10, MAIN_STREAM, { onMainNotConverted: (w) => { said = w; return true } })
+    n = sockets.length
+    const timer = v.t.retry
+    v.ws.readyState = 3
+    v.ws.onclose({ code: 1013, reason: why })
+    check(`a main closed with "${why}": the caller is told why`, said === why)
+    check('... no message over the picture, no "server busy", no reconnect of its own', v.t.convMsg === null && v.tileEl.appended.length === 0 && !/H\.265|reconnecting/.test(v.status.textContent) && sockets.length === n && v.t.retry === timer, v.status.textContent)
+    v.t.close()
+  }
+  // nobody handles it (the map, the camera editor): the tile goes over to the sub-stream itself
+  const lone = mk(11, MAIN_STREAM)
+  n = sockets.length
+  lone.ws.readyState = 3
+  lone.ws.onclose({ code: 1013, reason: H264_NO_ROOM_MAIN })
+  check('nobody to handle it: the tile goes over to the sub-stream at once, asked for as H.264, with no message', lone.t.streamType === SUB_STREAM && sockets.length === n + 1 && /stream=1(&|$)/.test(sockets.at(-1).url) && /[?&]h265=0(&|$)/.test(sockets.at(-1).url) && lone.t.convMsg === null && lone.tileEl.appended.length === 0, sockets.at(-1).url)
+  lone.t.close()
+  // a handler that declines (viewer.js: the layer is already what is on screen): the same
+  const shown = mk(12, MAIN_STREAM, { onMainNotConverted: () => false })
+  n = sockets.length
+  shown.ws.readyState = 3
+  shown.ws.onclose({ code: 1013, reason: H264_FAILED })
+  check('a caller that declines: the tile goes over to the sub-stream itself', shown.t.streamType === SUB_STREAM && sockets.length === n + 1 && /stream=1(&|$)/.test(sockets.at(-1).url))
+  shown.t.close()
+  // a sub-stream tile is as it was: the failed reason is a message there, and the mains' reason means nothing to it
+  const s = mk(13)
+  s.ws.readyState = 3
+  s.ws.onclose({ code: 1013, reason: H264_FAILED })
+  check('a sub-stream closed with "conversion failed" still says so on the tile', s.status.textContent === 'H.265 — not converted' && s.t.streamType === SUB_STREAM)
+  s.t.close()
+  // an ordinary close of a main is an ordinary reconnect
+  let asked = 0
+  const plain = mk(14, MAIN_STREAM, { onMainNotConverted: () => { asked++; return true } })
+  plain.ws.readyState = 3
+  plain.ws.onclose({ code: 1011, reason: 'stream ended' })
+  check('any other close of a main: reconnecting with the back-off, as before', asked === 0 && plain.status.textContent === 'reconnecting…' && Boolean(plain.t.retry))
+  plain.t.close()
+  // the converted main carries the mark, with a title of its own
+  const made = []
+  globalThis.document = { createElement: () => { const e = el(); made.push(e); return e } }
+  const conv = mk(15, MAIN_STREAM)
+  conv.ws.onmessage({ data: '{"op":"convert","on":true}' })
+  const badge = conv.tileEl.parts['.label'].kids?.at(-1)
+  check('a converted main stream carries the CONV badge like a converted sub-stream, its title saying it is the full-quality picture at up to 1920 wide', conv.t.converted === true && badge?.textContent === 'CONV' && /\bconv-badge\b/.test(badge.className) && badge.title === CONVERTED_MAIN_TITLE && /1920 pixels wide/.test(CONVERTED_MAIN_TITLE) && CONVERTED_MAIN_TITLE !== CONVERTED_TITLE)
+  delete globalThis.document
+  conv.t.close()
 }
 
 // a tile borrowing another tile's stream takes its mark with it
