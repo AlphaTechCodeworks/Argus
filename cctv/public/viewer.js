@@ -12,7 +12,7 @@ import { preferenceStorage, preferencesReady } from './user-settings.js'
 import { freshenForPageChange, muxState, useMux } from './live-mux.js'
 import { H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML, mainNotConvertedTitle } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
-import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
+import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
 import { startTelemetry } from './telemetry.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
@@ -143,6 +143,7 @@ const telemetry = startTelemetry({
     return {
       nvr: t.nvr, ch: t.ch, stream: t.streamType, role: singleTiles.includes(t) ? 'focus' : 'grid', playing: shown, attempts: t.attempts, decoderErrors: s.decoderErrors ?? 0,
       fps: s.fps, jitterMs: s.jitterMs, bufMs: s.delayMs, dropped: s.dropped, late: s.late, resync: s.resyncs, decQueue: s.decodeQueue ?? 0, kbps: s.kbps,
+      arrived: s.arrived, decoded: s.decoded, gapMs: s.arriveGapMs, rafHz: loopStats.hz, rafGapMs: loopStats.gapMs,
       w: t.player.canvas.clientWidth, h: t.player.canvas.clientHeight, stalled: shown && s.fps === 0, visible: !document.hidden
     }
   })

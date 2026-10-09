@@ -61,6 +61,7 @@ export function cleanBatch(b, now = Date.now()) {
       t: when(s.t), ...c, stream: s.stream === 0 ? 0 : 1, role: s.role === 'focus' ? 'focus' : 'grid',
       fps: num(s.fps, 0, 120), fpsSrc: num(s.fpsSrc, 0, 120), jitterMs: num(s.jitterMs, 0, 10_000), bufMs: num(s.bufMs, 0, 60_000),
       dropped: num(s.dropped, 0, 1e9), late: num(s.late, 0, 1e9), resync: num(s.resync, 0, 1e9), decQueue: num(s.decQueue, 0, 10_000),
+      in: num(s.in, 0, 240), dec: num(s.dec, 0, 240), gapMs: num(s.gapMs, 0, 60_000), rafHz: num(s.rafHz, 0, 1000), rafGapMs: num(s.rafGapMs, 0, 60_000),
       kbps: num(s.kbps, 0, 1e6), w: num(s.w, 0, 16_384), h: num(s.h, 0, 16_384), stalled: s.stalled === true, visible: s.visible !== false
     })
   }

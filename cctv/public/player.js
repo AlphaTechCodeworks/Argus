@@ -138,7 +138,22 @@ export function canDecodeH265() {
 const active = new Set()
 let rafId = 0
 
+// How often the page really redraws, and the longest it went without: with many tiles open, whether
+// frames are lost to a slow page or to frames arriving in clumps is told apart by this (telemetry).
+export const loopStats = { hz: 0, gapMs: 0 }
+const loopWin = { since: 0, ticks: 0, gap: 0, last: 0 }
+
 function tick(now) {
+  if (loopWin.last) loopWin.gap = Math.max(loopWin.gap, now - loopWin.last)
+  loopWin.last = now
+  loopWin.ticks++
+  if (now - loopWin.since >= 1000) {
+    loopStats.hz = Math.round((loopWin.ticks * 1000) / (now - loopWin.since))
+    loopStats.gapMs = Math.round(loopWin.gap)
+    loopWin.since = now
+    loopWin.ticks = 0
+    loopWin.gap = 0
+  }
   for (const player of active) player.present(now)
   rafId = active.size > 0 ? requestAnimationFrame(tick) : 0
 }
@@ -221,7 +236,7 @@ export class VideoPlayer {
     this.closed = false
     // older: frames decoded and not shown for being at or before one already shown (noRewindMs)
     this.stats = { fps: 0, jitterMs: 0, delayMs: 0, dropped: 0, late: 0, resyncs: 0, older: 0, kbps: 0, width: 0, height: 0, codec: '', hw: '', coded: '', visible: '' }
-    this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0 }
+    this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0, arrived: 0, decoded: 0, gap: 0, lastIn: 0 }
     this.grabs = [] // callers waiting for the next frame shown, at full size (grab())
     this.onChunk = null // (chunk) => void: sees every encoded frame as it arrives (set while the picture panel is open)
     this.keyTs = [] // timestamps (µs) of the last keyframes received, oldest first
@@ -248,6 +263,11 @@ export class VideoPlayer {
   push(chunk) {
     if (this.closed) return
     this.win.bytes += chunk.data.length
+    // (frames in this second and the longest wait between two: where a low frame rate is lost)
+    const cameIn = performance.now()
+    if (this.win.lastIn) this.win.gap = Math.max(this.win.gap, cameIn - this.win.lastIn)
+    this.win.lastIn = cameIn
+    this.win.arrived++
     if (chunk.isKey) this.#noteKey(chunk.timestampUs)
     if (this.onChunk) {
       try {
@@ -426,6 +446,7 @@ export class VideoPlayer {
   }
 
   #onDecoded(frame) {
+    this.win.decoded++
     if (this.closed) {
       frame.close()
       return
@@ -844,6 +865,9 @@ export class VideoPlayer {
     const variance = n ? w.intervals.reduce((a, b) => a + (b - mean) ** 2, 0) / n : 0
     Object.assign(this.stats, {
       fps: w.frames,
+      arrived: w.arrived,
+      decoded: w.decoded,
+      arriveGapMs: Math.round(w.gap),
       jitterMs: Math.round(Math.sqrt(variance) * 10) / 10,
       kbps: Math.round((w.bytes * 8) / 1000),
       delayMs: this.pacing ? this.clock.delay : 0,
@@ -856,6 +880,9 @@ export class VideoPlayer {
       queuedImageMiB: Math.round(this.queue.reduce((bytes, { frame }) => bytes + frame.codedWidth * frame.codedHeight * 4, 0) / 1024 / 1024)
     })
     w.frames = 0
+    w.arrived = 0
+    w.decoded = 0
+    w.gap = 0
     w.bytes = 0
     w.intervals = []
   }
