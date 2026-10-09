@@ -580,7 +580,9 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
   if (summary) {
     // how many are online and which are not, counted over this site or view whatever "Hide offline"
     // says (it hides them from the grid: the more reason to name them here)
-    const all = shownCameras(gridCameras(), { ...gridView(), hideOffline: false })
+    // (an empty channel slot on an NVR is not a camera: the server sends it as not online, and
+    // counted here it read as hundreds of cameras offline)
+    const all = realCameras()
     const off = all.filter((c) => c.online === false)
     const count = off.length ? `${all.length - off.length} of ${all.length} cameras online` : `${all.length} camera${all.length === 1 ? '' : 's'} online`
     // the number offline is a button: it lists them (showOffline)
@@ -594,7 +596,7 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
         b.className = 'offline-count'
         b.textContent = `${off.length} offline`
         b.title = 'Show which cameras are offline'
-        b.addEventListener('click', () => showOffline(shownCameras(gridCameras(), { ...gridView(), hideOffline: false }).filter((c) => c.online === false), context))
+        b.addEventListener('click', () => showOffline(realCameras().filter((c) => c.online === false), context))
         parts.push(' · ', b)
       }
       parts.push(` · ${onPage} on this page`)
@@ -608,6 +610,9 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
 }
 
 /** The cameras that are offline, by site, in a small dialog: what the header's "N offline" opens. */
+/** The cameras of this site or view, offline ones too, without the NVRs' empty channel slots. */
+const realCameras = () => shownCameras(gridCameras(), { ...gridView(), hideOffline: false }).filter((c) => c.configured !== false)
+
 function showOffline(off, context) {
   let dlg = document.getElementById('offlineDlg')
   if (!dlg) {
