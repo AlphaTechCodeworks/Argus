@@ -53,6 +53,9 @@ const MAX_DECODE_QUEUE = 12
 // keyframe froze the picture until it came, 2 s on a camera and more on a converted stream (stutter
 // report 2.2, 29 Sep).
 const BEHIND_MS = 250
+const OVERLOAD_QUIET_MS = 10_000 // a decoder that skipped to a keyframe this recently is overloaded, not just holding frames
+const KEEP_UP_S = 3 // ... and so is one that gave back fewer frames than it was fed over this many seconds,
+const KEEP_UP_SLACK = 5 // by more than this many (or 6%)
 const HARD_DECODE_QUEUE = 150 // ... and at most this many wait whatever the clock says (memory)
 // Live: a frame is timed as if it came this much later, about what decoding it takes, so one that comes
 // just before its display time, too late to be decoded for it, counts as late (and the buffer grows)
@@ -138,7 +141,22 @@ export function canDecodeH265() {
 const active = new Set()
 let rafId = 0
 
+// How often the page really redraws, and the longest it went without: with many tiles open, whether
+// frames are lost to a slow page or to frames arriving in clumps is told apart by this (telemetry).
+export const loopStats = { hz: 0, gapMs: 0 }
+const loopWin = { since: 0, ticks: 0, gap: 0, last: 0 }
+
 function tick(now) {
+  if (loopWin.last) loopWin.gap = Math.max(loopWin.gap, now - loopWin.last)
+  loopWin.last = now
+  loopWin.ticks++
+  if (now - loopWin.since >= 1000) {
+    loopStats.hz = Math.round((loopWin.ticks * 1000) / (now - loopWin.since))
+    loopStats.gapMs = Math.round(loopWin.gap)
+    loopWin.since = now
+    loopWin.ticks = 0
+    loopWin.gap = 0
+  }
   for (const player of active) player.present(now)
   rafId = active.size > 0 ? requestAnimationFrame(tick) : 0
 }
@@ -197,6 +215,20 @@ export class VideoPlayer {
     // a tighter image budget in operator views. Defaults retain existing frames.
     this.maxQueuedImageBytes = options.maxQueuedImageBytes ?? Infinity
     this.arrivalClock = options.arrivalClock === true && this.pacing // (without pacing there is no clock)
+    // Live on the local network: a frame the decoder handed back after its display time is told to the
+    // clock, as recorded footage for a remote viewer already is (#onDecoded). A decoder that keeps about ten frames
+    // back (H.264 at 1280x720 on the viewing PC, 2026-10-09: 0.33 s at 30 fps, 0.83 s at 12) releases
+    // them past a 350 ms buffer whenever the frames come in clumps, and the page drew four in five; the
+    // clock never knew, so the buffer never grew. false: as before.
+    this.countDecoderHold = options.countDecoderHold !== false
+    this.overloadedAt = -Infinity // when the decoder last fell so far behind that frames were skipped to a keyframe
+    this.keepingUp = true // the decoder gives back as many frames as it is fed (#everySecond)
+    this.keysOnly = false // shown from keyframes alone (setKeysOnly)
+    this.totals = { arrived: 0, decoded: 0, bytes: 0 } // since this player was made
+    this.keyEveryMs = 0 // the camera's time between its last two keyframes (0: not seen two yet)
+    this.lastKeyInUs = null
+    this.afterThin = false // back at full rate, waiting for the keyframe to carry on from
+    this.lately = [] // [arrived, decoded] of the last few seconds
     // noRewindMs: capture times (ms) of the newest frame timed as it arrived, and of the newest queued
     // to be shown (or drawn); kept across reset(), as a reconnect's replay starts before what was shown
     this.noRewindMs = options.noRewindMs > 0 ? options.noRewindMs : 0
@@ -221,7 +253,7 @@ export class VideoPlayer {
     this.closed = false
     // older: frames decoded and not shown for being at or before one already shown (noRewindMs)
     this.stats = { fps: 0, jitterMs: 0, delayMs: 0, dropped: 0, late: 0, resyncs: 0, older: 0, kbps: 0, width: 0, height: 0, codec: '', hw: '', coded: '', visible: '' }
-    this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0 }
+    this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0, arrived: 0, decoded: 0, gap: 0, lastIn: 0, decMax: 0, skip: 0, over: 0, thinned: 0 }
     this.grabs = [] // callers waiting for the next frame shown, at full size (grab())
     this.onChunk = null // (chunk) => void: sees every encoded frame as it arrives (set while the picture panel is open)
     this.keyTs = [] // timestamps (µs) of the last keyframes received, oldest first
@@ -248,7 +280,30 @@ export class VideoPlayer {
   push(chunk) {
     if (this.closed) return
     this.win.bytes += chunk.data.length
+    // (running totals, and the keyframe spacing: what wall-thin.js is told, over its own interval)
+    this.totals.bytes += chunk.data.length
+    this.totals.arrived++
+    if (chunk.isKey) {
+      if (this.lastKeyInUs !== null && chunk.timestampUs > this.lastKeyInUs) this.keyEveryMs = (chunk.timestampUs - this.lastKeyInUs) / 1000
+      this.lastKeyInUs = chunk.timestampUs
+    }
+    // (frames in this second and the longest wait between two: where a low frame rate is lost)
+    const cameIn = performance.now()
+    if (this.win.lastIn) this.win.gap = Math.max(this.win.gap, cameIn - this.win.lastIn)
+    this.win.lastIn = cameIn
+    this.win.arrived++
     if (chunk.isKey) this.#noteKey(chunk.timestampUs)
+    // A wall the device cannot decode in full (wall-thin.js): this tile is shown from its keyframes
+    // alone, a current picture every keyframe interval, and its other frames are let go here, before
+    // the decoder. Back at full rate it carries on from the next keyframe: the frames between lean on
+    // ones that were never decoded.
+    if (this.keysOnly || this.afterThin) {
+      if (!chunk.isKey) {
+        this.win.thinned++
+        return
+      }
+      this.afterThin = false
+    }
     if (this.onChunk) {
       try {
         this.onChunk(chunk)
@@ -364,6 +419,7 @@ export class VideoPlayer {
     const limit = this.skipTs !== null ? MAX_PREROLL_FRAMES : MAX_DECODE_QUEUE + (backlog ? MAX_HELD : 0)
     if (this.decoder.decodeQueueSize > limit && !isKey && this.#behind()) {
       this.needKey = true
+      this.overloadedAt = performance.now() // (the decoder cannot keep up: see #onDecoded)
       this.stats.dropped++
       return
     }
@@ -411,6 +467,7 @@ export class VideoPlayer {
       output: (frame) => this.#onDecoded(frame),
       error: (err) => {
         console.warn('decoder error', err)
+        this.stats.decoderErrors = (this.stats.decoderErrors ?? 0) + 1 // (telemetry.js: the score's stability part)
         this.#closeDecoder()
         this.needKey = true
         // A positive capability probe does not guarantee that this camera's HEVC
@@ -425,6 +482,8 @@ export class VideoPlayer {
   }
 
   #onDecoded(frame) {
+    this.win.decoded++
+    this.totals.decoded++
     if (this.closed) {
       frame.close()
       return
@@ -435,6 +494,11 @@ export class VideoPlayer {
     while (this.fed.length && this.fed[0].ts <= frame.timestamp) {
       const f = this.fed.shift()
       if (f.ts === frame.timestamp) fedAt = f.at
+    }
+    // (how long the decoder held this frame, the longest this second: telemetry, why frames are skipped)
+    if (fedAt !== null) {
+      const held = performance.now() - fedAt
+      if (held > this.win.decMax) this.win.decMax = held
     }
     // position in the keyframe interval (the decoder keeps timestamps; there are no B-frames)
     if (this.keyTsSet.has(frame.timestamp)) {
@@ -483,10 +547,19 @@ export class VideoPlayer {
       return
     }
     if (!this.paused && !this.arrivalClock) this.clock.schedule(ts, performance.now()) // (live: timed as it arrived, push)
-    else if (!this.paused && this.remote) {
+    // (not live through the tunnel: its clock grows by a late frame's whole lateness at once
+    // (REMOTE_CLOCK stretchLate), and replayed with an overloaded decoder that took the delay from
+    // 0.7 s to 2.5 s and the longest still picture from 1 s to 2 s. As before there, for now.)
+    else if (!this.paused && (this.remote || (this.countDecoderHold && !this.clock.opts.stretchLate))) {
       const now = performance.now()
-      if (this.clock.anchor === null) this.clock.schedule(ts, now)
-      else if (fedAt !== null && this.clock.presentAt(ts) >= fedAt) this.clock.decodedLate(ts, now)
+      // (no anchor: recorded footage starts its clock here; live's is started by the next frame to arrive, push)
+      if (this.clock.anchor === null) { if (this.remote) this.clock.schedule(ts, now) }
+      // (local live: only a hold the buffer could grow to cover, and only from a decoder that keeps
+      // up: one that gives back fewer frames than it is fed (#everySecond), has had to skip to a
+      // keyframe lately (#decode), or keeps frames longer than the buffer may grow, is overloaded,
+      // 2-7 s on a wall of 100. A bigger buffer then only shows the same few frames later: replayed,
+      // 58% shown became 52% and the longest still picture 1.0 s -> 1.6 s)
+      else if (fedAt !== null && this.clock.presentAt(ts) >= fedAt && (this.remote || (this.keepingUp && now - fedAt <= this.clock.opts.maxDelayMs && now - this.overloadedAt > OVERLOAD_QUIET_MS))) this.clock.decodedLate(ts, now)
     }
     // The first picture after a (re)start is painted the moment it is decoded rather than after
     // the playout delay (350 ms, more with Smooth): the camera appears at once, and the frames
@@ -507,6 +580,7 @@ export class VideoPlayer {
     while (this.queue.length > queueLimit) {
       this.queue.shift().frame.close()
       this.stats.dropped++
+      this.win.over++
     }
   }
 
@@ -527,6 +601,7 @@ export class VideoPlayer {
     for (let i = 0; i < due; i++) {
       this.queue[i].frame.close()
       this.stats.dropped++
+      this.win.skip++ // (decoded, but another frame was due by the time the page drew)
     }
     const { frame, ts } = this.queue[due]
     this.queue.splice(0, due + 1)
@@ -556,6 +631,13 @@ export class VideoPlayer {
   #remoteClock() {
     const c = this.remote?.clock
     if (c) this.clock.setOptions(this.clock.rate === 1 ? c : this.clockOptions)
+  }
+
+  /** Keyframes only (true), or every frame again from the next keyframe (false). See push. */
+  setKeysOnly(on) {
+    if (Boolean(on) === this.keysOnly) return
+    this.keysOnly = Boolean(on)
+    if (!this.keysOnly) this.afterThin = true
   }
 
   /** Freezes on the current picture; buffered frames are kept. */
@@ -838,11 +920,26 @@ export class VideoPlayer {
   #everySecond() {
     if (this.pacing) this.clock.adapt(performance.now())
     const w = this.win
+    // keeping up: over the last KEEP_UP_S seconds the decoder gave back all it was fed, less what a
+    // clump across the ends of that time can account for (a decoder that only holds frames back
+    // returns every one of them; one too slow for the stream falls behind by more each second)
+    this.lately.push([w.arrived, w.decoded])
+    if (this.lately.length > KEEP_UP_S) this.lately.shift()
+    const fedIn = this.lately.reduce((a, x) => a + x[0], 0)
+    const out = this.lately.reduce((a, x) => a + x[1], 0)
+    this.keepingUp = out >= fedIn - Math.max(KEEP_UP_SLACK, 0.06 * fedIn)
     const n = w.intervals.length
     const mean = n ? w.intervals.reduce((a, b) => a + b, 0) / n : 0
     const variance = n ? w.intervals.reduce((a, b) => a + (b - mean) ** 2, 0) / n : 0
     Object.assign(this.stats, {
       fps: w.frames,
+      arrived: w.arrived,
+      decoded: w.decoded,
+      arriveGapMs: Math.round(w.gap),
+      decodeMs: Math.round(w.decMax),
+      skipped: w.skip,
+      thinned: w.thinned,
+      overflowed: w.over,
       jitterMs: Math.round(Math.sqrt(variance) * 10) / 10,
       kbps: Math.round((w.bytes * 8) / 1000),
       delayMs: this.pacing ? this.clock.delay : 0,
@@ -855,6 +952,13 @@ export class VideoPlayer {
       queuedImageMiB: Math.round(this.queue.reduce((bytes, { frame }) => bytes + frame.codedWidth * frame.codedHeight * 4, 0) / 1024 / 1024)
     })
     w.frames = 0
+    w.arrived = 0
+    w.decoded = 0
+    w.gap = 0
+    w.decMax = 0
+    w.skip = 0
+    w.thinned = 0
+    w.over = 0
     w.bytes = 0
     w.intervals = []
   }

@@ -94,7 +94,9 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
   pointer-events: none;
 }
 .tile .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* the state badge, top left of every picture: a red LIVE while frames arrive, otherwise what it is doing */
+/* the state badge, top left of every picture: a green LIVE while frames arrive, red when the camera
+   is offline, otherwise (dark) what it is doing. Green and red at the owner's wish (2026-10-08): on
+   a wall of tiles, which cameras are down should show at a glance. The word is always there too. */
 .tile .status {
   position: absolute; top: 8px; left: 8px; z-index: 3; pointer-events: none;
   padding: 3px 8px; border-radius: 999px; white-space: nowrap;
@@ -102,7 +104,7 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
   background: rgba(20, 22, 26, .55); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
 }
 .tile .status:empty { display: none; }
-.tile .status.live { background: rgba(220, 38, 38, .88); }
+.tile .status.live { background: rgba(21, 128, 61, .92); }
 .single-overlay > .status { z-index: 4; }
 .tile .status.live::before {
   content: ""; background: #fff !important;
@@ -114,9 +116,8 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
   vertical-align: 1px;
 }
 .tile.offline { cursor: default; }
-/* readable muted grey, not the faint --offline (~3:1 on the dark pill, under AA for this small text);
-   the offline state still reads from the word itself, the dimmed tile and the dot. */
-.tile.offline .status { color: var(--muted); }
+/* white on red, as LIVE is white on green; the state also reads from the word itself and the dot */
+.tile.offline .status { color: #fff; background: rgba(200, 30, 30, .92); text-transform: uppercase; }
 .tile.single { cursor: zoom-out; }
 
 #notice {
@@ -570,15 +571,18 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
    colour on purpose: at this site that is a real failure, and painting it the same green as a
    recording camera is how it goes unnoticed. Grey is "we have not been told", never "fine". */
 .map-overlay .cone { fill: rgba(59, 163, 255, 0.2); stroke: rgba(59, 163, 255, 0.85); stroke-width: 1.5; }
-.map-overlay .cone.st-offline, .map-overlay .cone.st-unknown { fill: rgba(138, 147, 160, 0.16); stroke: rgba(138, 147, 160, 0.7); }
+.map-overlay .cone.st-unknown { fill: rgba(138, 147, 160, 0.16); stroke: rgba(138, 147, 160, 0.7); }
+/* Green while it is live, red when it is offline (the owner, 2026-10-09): what is down shows at a glance. */
+.map-overlay .cone.st-live, .map-overlay .cone.st-recording { fill: rgba(63, 185, 80, 0.18); stroke: rgba(63, 185, 80, 0.85); }
+.map-overlay .cone.st-offline { fill: rgba(229, 72, 77, 0.16); stroke: rgba(229, 72, 77, 0.8); }
 .map-overlay .cone.st-idle { fill: rgba(224, 160, 48, 0.18); stroke: rgba(224, 160, 48, 0.8); }
 .map-overlay .cone.st-alert { fill: rgba(229, 72, 77, 0.18); stroke: rgba(229, 72, 77, 0.85); }
 .map-overlay .cone.sel { fill: rgba(59, 163, 255, 0.3); stroke-width: 2.5; }
 .map-overlay .cam-dot { fill: var(--accent); stroke: #fff; stroke-width: 2; }
-.map-overlay .cam.st-recording .cam-dot { fill: var(--rec-ok); }
+.map-overlay .cam.st-recording .cam-dot, .map-overlay .cam.st-live .cam-dot { fill: var(--rec-ok); }
 .map-overlay .cam.st-idle .cam-dot { fill: var(--rec-idle); }
 .map-overlay .cam.st-alert .cam-dot { fill: var(--rec-alert); }
-.map-overlay .cam.st-offline .cam-dot { fill: var(--offline); }
+.map-overlay .cam.st-offline .cam-dot { fill: var(--rec-alert); }
 /* Dashed edge: unknown must not be mistaken for a state we actually checked. */
 .map-overlay .cam.st-unknown .cam-dot { fill: var(--rec-unknown); stroke-dasharray: 3 3; }
 .map-overlay .cam.cluster .cam-dot { stroke-width: 3; }
@@ -615,7 +619,7 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-overlay .site-badge-text { font: 600 12px system-ui, sans-serif; }
 .map-overlay .site-badge-off { fill: var(--rec-alert); }
 .map-overlay .site-badge-dot { fill: var(--rec-unknown); }
-.map-overlay .site-badge.st-recording .site-badge-dot { fill: var(--rec-ok); }
+.map-overlay .site-badge.st-recording .site-badge-dot, .map-overlay .site-badge.st-live .site-badge-dot { fill: var(--rec-ok); }
 .map-overlay .site-badge.st-idle .site-badge-dot { fill: var(--rec-idle); }
 .map-overlay .site-badge.st-alert .site-badge-dot, .map-overlay .site-badge.st-offline .site-badge-dot { fill: var(--rec-alert); }
 .map-overlay .site-badge.st-offline .site-badge-pill { stroke: var(--rec-alert); }
@@ -734,8 +738,8 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-cams li.unplaced .map-cam-name { color: var(--muted); }
 .map-cam-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .map-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--rec-unknown); }
-.map-dot.off, .map-dot.st-offline { background: var(--offline); }
-.map-dot.st-recording { background: var(--rec-ok); }
+.map-dot.off, .map-dot.st-offline { background: var(--rec-alert); }
+.map-dot.st-recording, .map-dot.st-live { background: var(--rec-ok); }
 .map-dot.st-idle { background: var(--rec-idle); }
 .map-dot.st-alert { background: var(--rec-alert); }
 /* A ring rather than a solid dot: unknown should not read as one of the states we did check. */
@@ -770,7 +774,7 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-hover .tile { aspect-ratio: 16 / 9; border-radius: 0; cursor: default; }
 .map-legend li { display: flex; align-items: center; gap: 6px; }
 .map-live-state { font-size: 12px; color: var(--muted); }
-.map-live-state.st-recording { color: var(--rec-ok); }
+.map-live-state.st-recording, .map-live-state.st-live { color: var(--rec-ok); }
 .map-live-state.st-idle { color: var(--rec-idle); }
 .map-live-state.st-alert { color: var(--rec-alert); }
 .map-selected { padding-top: 10px; border-top: 1px solid var(--border); }
@@ -1203,15 +1207,16 @@ body.phone-full #grid > .lines-panel, body.phone-full #grid > .osd-panel { z-ind
 .nvr-facts dd.bad { color: #e5484d; }
 .nvr-disks { background: transparent; }
 
-/* Live tile state dot (live-tile.js tileDot): green video arriving, red also being recorded,
-   grey nothing arriving. Colour is never the only clue: the state is written out in the dot's
-   title, and the recording dot also pulses. */
+/* Live tile state dot (live-tile.js tileDot): green video arriving (ringed and pulsing when it is
+   also being recorded), grey nothing arriving yet, red the camera is offline. Colour is never the
+   only clue: the state is written out in the dot's title. */
 .tile .dot { flex: 0 0 auto; align-self: center; width: 9px; height: 9px; border-radius: 50%; background: var(--muted, #7a8290); box-shadow: 0 0 0 1px rgb(0 0 0 / 45%); pointer-events: auto; }
 /* the label is a space-between row: let the name take the slack so the dot sits beside it */
 .tile .label .name { flex: 1 1 auto; }
-.tile .dot-live { background: #3fb27f; }
-.tile .dot-rec { background: #e5484d; border-radius: 50%; box-shadow: 0 0 0 1px rgb(0 0 0 / 45%), 0 0 5px rgb(229 72 77 / 70%); }
+.tile .dot-live { background: #22c55e; }
+.tile .dot-rec { background: #22c55e; border-radius: 50%; box-shadow: 0 0 0 1px rgb(0 0 0 / 45%), 0 0 0 3px rgb(34 197 94 / 35%); }
 .tile .dot-off { background: #7a8290; opacity: 0.75; }
+.tile.offline .dot-off { background: #ef4444; opacity: 1; }
 @media (prefers-reduced-motion: no-preference) {
   .tile .dot-rec { animation: dot-rec-pulse 2s ease-in-out infinite; }
 }
@@ -1956,7 +1961,7 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .cam-sheet-row:active { background: var(--surface-hover); }
 .cam-sheet-row .cam-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); flex: none; }
 .cam-sheet-row.off { opacity: .45; }
-.cam-sheet-row.off .cam-dot { background: var(--text-faint); box-shadow: none; }
+.cam-sheet-row.off .cam-dot { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
 .cam-sheet-row .cam-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cam-sheet-row .cam-ch { color: var(--text-muted); font-size: 13px; }
 @media (max-width: 699px), (pointer: coarse) and (max-height: 500px) { .phone-list-btn { display: inline-flex; align-items: center; font-weight: 600; } }
@@ -1971,7 +1976,7 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
   body.phone-list .tile .label .name { font-weight: 600; }
   body.phone-list .tile:has(.dot-live, .dot-rec)::before {
     content: 'LIVE'; position: absolute; top: 10px; left: 10px; z-index: 3; padding: 3px 8px; border-radius: 6px;
-    font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #fff; background: rgba(229, 72, 77, .92);
+    font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #fff; background: rgba(21, 128, 61, .92);
   }
   body.phone-list .tile.offline { opacity: .5; }
 }

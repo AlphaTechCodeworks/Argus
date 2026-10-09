@@ -12,7 +12,7 @@ import { showStill } from './stills.js'
 import { searchCameras } from './grid-view.js'
 import { planFlight, flightPose } from './map-flight.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
-import { preferenceStorage } from './user-settings.js'
+import { preferenceStorage, preferencesReady } from './user-settings.js'
 import {
   MAX_LAT,
   STATES,
@@ -56,6 +56,10 @@ import {
   visibleMarkers
 } from './map-model.js'
 
+// The names switch, the layer and the site last chosen come with the account: this page's own
+// script waits here until they are known (user-settings.js, which may not wait itself).
+await preferencesReady
+
 const $ = (id) => document.getElementById(id)
 const LAYERS = {
   street: {
@@ -76,6 +80,7 @@ const DEFAULT_GEO = { lat: 30, lng: -40, zoom: 2, layer: 'street' }
 const MAX_RANGE = { geo: 5000, plan: 20_000 }
 /** Marker centres closer together than this are one illegible smudge, so they are clustered. */
 const CLUSTER_GAP = 26
+const CONES_IN_CLUSTER = 8 // a cluster of up to this many cameras still draws each one's cone
 
 // ---- map engine -------------------------------------------------------------
 
@@ -835,10 +840,12 @@ view.onDraw = () => {
     const pinned = [selected, popup?.key].filter(Boolean)
     const clusters = editing ? markers.map((x) => ({ x: x.x, y: x.y, members: [x], state: x.state, count: 1, key: x.key })) : clusterMarkers(markers, CLUSTER_GAP, pinned)
     const alone = new Set(clusters.filter((c) => c.count === 1).map((c) => c.key))
+    // A few cameras under one count still show where each looks (the owner, 2026-10-09: "I can't see
+    // the 3 cameras' coverage"); the cones of a big pile would be a smear saying nothing, so past
+    // CONES_IN_CLUSTER its cameras keep their positions and lose their cones, as before.
+    const coned = new Set(clusters.filter((c) => c.count > 1 && c.count <= CONES_IN_CLUSTER).flatMap((c) => c.members.map((x) => x.key)))
     for (const marker of markers) {
-      // A cone belongs to one camera; drawing the cones of a whole cluster would be a blue smear
-      // saying nothing, so a clustered camera keeps its position and loses its cone.
-      if (!alone.has(marker.key)) continue
+      if (!alone.has(marker.key) && !coned.has(marker.key)) continue
       const sel = marker.key === selected || marker.key === popup?.key ? ' sel' : ''
       const cone = svgEl('path', { d: conePath([marker.x, marker.y], marker.dir, marker.fov, marker.r), class: `cone st-${marker.state}${sel}` })
       // an admin-chosen group colour overrides the status colour of the cone; the dot still carries
@@ -854,6 +861,7 @@ view.onDraw = () => {
         cone.style.strokeOpacity = '0.9'
       }
       cones.append(cone)
+      if (!alone.has(marker.key)) continue // (in a cluster: its cone only, the count is its marker)
       marks.append(markerNode(marker, sel, showNames))
       if (editing && marker.key === selected) {
         const p = [marker.x, marker.y]

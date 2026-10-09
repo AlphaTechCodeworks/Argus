@@ -138,3 +138,64 @@
   .live-page #grid:fullscreen .tile > .label,
   .live-page.phone-full #grid .tile > .label { transition: none; transform: none; }
 }
+/* Which page of the grid this is, for a moment after ← → or a flick turned it in full screen
+   (viewer.js notePage): the pager is out of sight there. Never in the way of a tile. */
+.live-page #grid > .page-note { display: none; }
+.live-page #grid:fullscreen > .page-note {
+  display: block; position: absolute; z-index: 4;
+  left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  padding: 6px 14px; border-radius: 999px;
+  background: rgba(20, 22, 26, .82); color: #fff; border: 1px solid rgba(255, 255, 255, .18);
+  font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: .02em;
+  pointer-events: none;
+}
+/* The header's count of offline cameras: a button that lists them (viewer.js showOffline). Red, as
+   an offline tile's badge is: it is the number that needs someone. */
+.live-page .offline-count {
+  font: inherit; font-weight: 600; color: #fff; background: rgba(200, 30, 30, .92);
+  border: 0; border-radius: 999px; padding: 1px 9px; cursor: pointer;
+}
+.live-page .offline-count:hover, .live-page .offline-count:focus-visible { background: rgb(220, 38, 38); }
+.offline-dlg { max-width: min(92vw, 460px); padding: 14px 16px; }
+.offline-dlg h3 { font-size: 15px; color: var(--text); margin: 0 0 8px; }
+.offline-dlg h4 { margin: 10px 0 2px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.offline-dlg ul { margin: 0; padding-left: 18px; }
+.offline-list { max-height: 60vh; overflow: auto; margin-bottom: 12px; }
+/* LIVE is a small green dot in the corner, not a pill over the picture (the owner, 2026-10-09: on a
+   wall of small tiles the pills hid the cameras). Every other state keeps its words; the word LIVE
+   stays in the element for a screen reader. */
+.live-page #grid .tile .status.live, .live-page .tile .status.live, .live-page .single-overlay > .status.live {
+  top: 5px; left: 5px; width: 8px; height: 8px; padding: 0; font-size: 0; line-height: 0; letter-spacing: 0;
+  overflow: hidden; border-radius: 50%; background: var(--ok, #22c55e); border: 1px solid rgba(0, 0, 0, .5);
+  -webkit-backdrop-filter: none; backdrop-filter: none; box-sizing: content-box;
+}
+.live-page #grid .tile .status.live::before, .live-page .tile .status.live::before { display: none; }
+body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-inset-top)); left: calc(6px + env(safe-area-inset-left)); }
+/* No Move box over the picture (the owner, 2026-10-09): a tile is moved by dragging it. The button
+   stays for the keyboard, shown only while it has the keyboard's focus. */
+.live-page .tile .tile-move { opacity: 0 !important; pointer-events: none; }
+.live-page .tile .tile-move:focus-visible { opacity: 1 !important; pointer-events: auto; }
+/* One click to a linked camera, beside the name in the full-size view (viewer.js linkedCameras). */
+.live-page .single-overlay .links .cam-link {
+  font: inherit; font-size: var(--fs-meta, 12px); font-weight: 600; color: #fff; cursor: pointer;
+  background: rgba(20, 22, 26, .6); border: 1px solid rgba(255, 255, 255, .35); border-radius: 999px;
+  padding: 3px 10px; margin-inline-start: 6px; min-height: 0; white-space: nowrap; max-width: 22ch; overflow: hidden; text-overflow: ellipsis;
+}
+.live-page .single-overlay .links .cam-link:hover, .live-page .single-overlay .links .cam-link:focus-visible { background: rgba(40, 44, 52, .85); }
+.live-page .single-overlay .links .cam-link.suggested { border-style: dashed; font-weight: 400; }
+/* The share of arriving frames this screen draws (viewer.js updateWallHealth). */
+.live-page .wall-health { margin-inline-start: auto; margin-inline-end: 8px; cursor: help; }
+.live-page .wall-health + .live-state { margin-inline-start: 0; }
+.live-page .wall-health[data-level="ok"] { color: var(--ok-text); }
+.live-page .wall-health[data-level="warn"] { color: #f5b942; border-color: #f5b942; }
+.live-page .wall-health[data-level="bad"] { color: #fff; background: rgba(200, 30, 30, .92); border-color: transparent; }
+/* The administrator's wall tolerance, in View options (viewer.js wallToleranceSetup). */
+.live-page .wall-tol { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.live-page .wall-tol input[type="number"] { width: 5ch; min-height: 32px; }
+.live-page .wall-tol button { min-height: 32px; }
+/* Mark: bookmark what is on screen under a case title (viewer.js openMark). */
+.live-page .single-overlay .links .cam-mark { border-color: rgba(245, 185, 66, .8); }
+.mark-dlg label { display: block; margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+.mark-dlg input[type="text"], .mark-dlg textarea { display: block; width: min(80vw, 420px); margin-top: 3px; font: inherit; color: var(--text); }
+.mark-dlg .mark-when { margin: 0; font-size: 12px; color: var(--muted); }
+.mark-dlg .mark-said { min-height: 1.2em; margin: 8px 0 0; font-size: 13px; }

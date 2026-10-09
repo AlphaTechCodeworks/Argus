@@ -8,14 +8,24 @@ import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-
 import { MAX_VIEW_CAMERAS, applyViews, autoLiveGrid, checkView, normaliseViews, searchCameras } from './grid-view.js'
 import { icon } from './icons.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
-import { preferenceStorage } from './user-settings.js'
+import { preferenceStorage, preferencesReady } from './user-settings.js'
 import { freshenForPageChange, muxState, useMux } from './live-mux.js'
 import { H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML, mainNotConvertedTitle } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
-import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
+import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
+import { deviceId, startTelemetry } from './telemetry.js'
+import { loadSicex, sicexOn } from './sicex.js'
+import { checkBookmark } from './bookmarks-view.js'
+import { TOLERANCE, knownCapacity, layoutNote as profileNote, noteCapacity, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
+import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
+// This page is set up from the account's preferences (picture fit, layout, hide offline, the view
+// and site last chosen), from its first lines on: it waits here until they are known. It is this
+// page's own script, which nothing imports, so it may wait at the top level; user-settings.js, which
+// every page shares, may not (the reason is at the top of that file).
+await preferencesReady
 // ?pacing=off draws frames as soon as they decode (for before/after comparison)
 const PACING = new URLSearchParams(location.search).get('pacing') !== 'off'
 // Every tile's stream on one connection (live-mux.js): the browser opens WebSockets one at a time,
@@ -127,6 +137,21 @@ if (!('VideoDecoder' in window)) {
     : 'Video needs a secure connection. Open this page with https:// (port 8443) instead.'
 }
 
+// What the viewer actually gets, measured and sent to the server (telemetry.js): each playing tile
+// once a second, and how long a first picture and full quality took. It decides nothing.
+const telemetry = startTelemetry({
+  page: 'live',
+  tiles: () => tiles.filter((t) => !t.closed && !t.suspended).map((t) => {
+    const s = t.player.stats
+    const shown = t.player.firstPainted === true
+    return {
+      nvr: t.nvr, ch: t.ch, stream: t.streamType, role: singleTiles.includes(t) ? 'focus' : 'grid', playing: shown, attempts: t.attempts, decoderErrors: s.decoderErrors ?? 0,
+      fps: s.fps, jitterMs: s.jitterMs, bufMs: s.delayMs, dropped: s.dropped, late: s.late, resync: s.resyncs, decQueue: s.decodeQueue ?? 0, kbps: s.kbps,
+      arrived: s.arrived, decoded: s.decoded, gapMs: s.arriveGapMs, decMs: s.decodeMs, skip: s.skipped, over: s.overflowed, rafHz: loopStats.hz, rafGapMs: loopStats.gapMs,
+      w: t.player.canvas.clientWidth, h: t.player.canvas.clientHeight, stalled: shown && s.fps === 0 && !t.player.keysOnly && !t.player.afterThin, visible: !document.hidden
+    }
+  })
+})
 // for diagnostics from the console: stats of every visible tile
 window.cctvStats = () => tiles.map((t) => ({ nvr: t.nvr, ch: t.ch + 1, stream: t.streamType, ...t.player.stats }))
 // the cameras started ahead of a full-size view (‹ ›): whether each could be shown at once
@@ -270,6 +295,7 @@ function render({ keepSingle = false } = {}) {
     singleTiles = []
     overlay = null
     stopAhead()
+    stopAheadMain()
   }
   grid.classList.toggle('show-stats', showStats)
   // the kept view stays in place (moving it would close an open dialog)
@@ -556,11 +582,77 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
   const onPage = visibleCameras(gridCameras(), gridView()).visible.length
   grid.dataset.empty = String(onPage === 0)
   const context = activeView?.name || siteSelect.selectedOptions[0]?.textContent.trim() || 'All sites'
-  if (summary) summary.textContent = `${context} · ${shown.length} camera${shown.length === 1 ? '' : 's'} · ${onPage} on this page`
+  if (summary) {
+    // how many are online and which are not, counted over this site or view whatever "Hide offline"
+    // says (it hides them from the grid: the more reason to name them here)
+    // (an empty channel slot on an NVR is not a camera: the server sends it as not online, and
+    // counted here it read as hundreds of cameras offline)
+    const all = realCameras()
+    const off = all.filter((c) => c.online === false)
+    const count = off.length ? `${all.length - off.length} of ${all.length} cameras online` : `${all.length} camera${all.length === 1 ? '' : 's'} online`
+    // the number offline is a button: it lists them (showOffline)
+    const key = `${context}|${all.length}|${off.map(camKey).join(',')}|${onPage}`
+    if (summary.dataset.key !== key) {
+      summary.dataset.key = key
+      const parts = [`${context} · ${count}`]
+      if (off.length) {
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.className = 'offline-count'
+        b.textContent = `${off.length} offline`
+        b.title = 'Show which cameras are offline'
+        b.addEventListener('click', () => showOffline(realCameras().filter((c) => c.online === false), context))
+        parts.push(' · ', b)
+      }
+      parts.push(` · ${onPage} on this page`)
+      summary.replaceChildren(...parts)
+    }
+  }
   const note = document.getElementById('filterNote')
   note.hidden = shown.length > 0 || !cameraQuery
   note.textContent = `No cameras match “${cameraQuery}” in this view. Clear the search or select another site.`
   updateLiveState()
+}
+
+/** The cameras that are offline, by site, in a small dialog: what the header's "N offline" opens. */
+/** The cameras of this site or view, offline ones too, without the NVRs' empty channel slots. */
+function realCameras() {
+  return shownCameras(gridCameras(), { ...gridView(), hideOffline: false }).filter((c) => c.configured !== false)
+}
+
+function showOffline(off, context) {
+  let dlg = document.getElementById('offlineDlg')
+  if (!dlg) {
+    dlg = document.createElement('dialog')
+    dlg.id = 'offlineDlg'
+    dlg.className = 'wall-pick offline-dlg'
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close() }) // (a click on the backdrop)
+    document.body.append(dlg)
+  }
+  const head = document.createElement('h3')
+  head.textContent = `${off.length} camera${off.length === 1 ? '' : 's'} offline · ${context}`
+  const bySite = new Map()
+  for (const c of off) (bySite.get(c.site || c.nvrName || '') ?? bySite.set(c.site || c.nvrName || '', []).get(c.site || c.nvrName || '')).push(c)
+  const body = document.createElement('div')
+  body.className = 'offline-list'
+  for (const [site, cams] of [...bySite].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const h = document.createElement('h4')
+    h.textContent = `${site} (${cams.length})`
+    const ul = document.createElement('ul')
+    for (const c of cams) {
+      const li = document.createElement('li')
+      li.textContent = `${c.ch + 1} · ${c.name}${c.nvrName && c.nvrName !== site ? ` — ${c.nvrName}` : ''}`
+      ul.append(li)
+    }
+    body.append(h, ul)
+  }
+  if (!off.length) body.textContent = 'Every camera is online.'
+  const close = document.createElement('button')
+  close.type = 'button'
+  close.textContent = 'Close'
+  close.addEventListener('click', () => dlg.close())
+  dlg.replaceChildren(head, body, close)
+  if (!dlg.open) dlg.showModal()
 }
 
 function updateLiveState() {
@@ -573,6 +665,152 @@ function updateLiveState() {
   if (state.textContent !== label) state.textContent = label
   state.classList.toggle('all-live', live > 0 && live === occupied.length)
 }
+// ---- how much of the video this screen is actually showing ----
+// Of the frames that arrive for the tiles on screen, the share drawn, over the last 10 s: the one
+// number that says whether this device keeps up with this layout (a 36-tile grid drew 72-80% on the
+// viewing PC, a 100-tile one 8%, 2026-10-09). Shown beside the connection summary from four tiles
+// up, green from 90%, amber from 70%, red below; the measurements behind it are in its tooltip.
+let wallProfile = null // this device's measured layouts (wall-profile.js), read when first needed
+let wallTol = TOLERANCE // the administrator's, once read (wall-tolerance.mjs); the owner's defaults until then
+let wallProfileSavedAt = 0
+const storageOrNull = () => { try { return globalThis.localStorage } catch { return null } }
+const wallWindow = [] // one entry a second: { n, arrived, decoded, drawn, held }
+function updateWallHealth() {
+  let el = document.getElementById('wallHealth')
+  if (!el) {
+    el = document.createElement('span')
+    el.id = 'wallHealth'
+    el.className = 'live-state wall-health'
+    el.hidden = true
+    document.getElementById('liveState').before(el)
+  }
+  if (document.hidden) return // (a hidden page draws nothing: that is not the device falling behind)
+  const playing = tiles.filter((x) => !x.closed && !x.suspended && x.player?.firstPainted === true)
+  // (judged on the tiles at full rate while some are shown from keyframes only)
+  const low = playing.filter((x) => x.player.keysOnly || x.player.afterThin).length
+  const fullRate = playing.filter((x) => !x.player.keysOnly && !x.player.afterThin)
+  const sum = (k) => fullRate.reduce((a, x) => a + (Number(x.player.stats?.[k]) || 0), 0)
+  wallWindow.push({ n: playing.length, low, arrived: sum('arrived'), decoded: sum('decoded'), drawn: sum('fps'), held: fullRate.reduce((a, x) => Math.max(a, Number(x.player.stats?.decodeMs) || 0), 0) })
+  if (wallWindow.length > 10) wallWindow.shift()
+  const full = wallWindow.filter((w) => w.n === playing.length && w.low === low) // (a layout or the thinning just changed: only its own seconds)
+  const arrived = full.reduce((a, w) => a + w.arrived, 0)
+  if (playing.length < 4 || full.length < 5 || !(arrived > 0)) { el.hidden = true; return }
+  const drawn = full.reduce((a, w) => a + w.drawn, 0)
+  const decoded = full.reduce((a, w) => a + w.decoded, 0)
+  const share = Math.min(1, drawn / arrived)
+  const per = (x) => (x / full.length / Math.max(1, playing.length - low)).toFixed(1)
+  const label = low ? `${playing.length - low} of ${playing.length} at full rate · ${Math.round(share * 100)}% of their frames shown` : `${Math.round(share * 100)}% of frames shown`
+  if (el.textContent !== label) el.textContent = label
+  // (some shown from keyframes only: amber at best, this layout is more than the device can play in full)
+  const level = statusOf(share, wallTol)
+  el.dataset.level = level === 'ok' && low ? 'warn' : level
+  el.title = `Last ${full.length} s, ${playing.length} cameras playing. Each second, per camera: ${per(arrived)} frames arrive, ${per(decoded)} are decoded, ${per(drawn)} are drawn. The decoder held a frame up to ${Math.round(Math.max(...full.map((w) => w.held)))} ms.${low ? ` This screen cannot decode every camera in this layout: the ${playing.length - low} busiest play every frame, the other ${low} show a current picture every few seconds.` : level !== 'ok' ? ' This screen is not keeping up with this layout: a smaller layout will be smoother.' : ''}`
+  // into this device's profile, kept every 15 s; the layout picker says what it has seen
+  wallProfile ??= readProfile(storageOrNull())
+  wallProfile = noteSecond(wallProfile, playing.length, share, { thinned: low > 0 })
+  if (Date.now() - wallProfileSavedAt > 15_000) {
+    wallProfileSavedAt = Date.now()
+    saveProfile(storageOrNull(), wallProfile)
+    markLayouts()
+  }
+  el.hidden = false
+}
+setInterval(() => { try { updateWallHealth() } catch {} }, 1000)
+
+// ---- a wall this device cannot decode in full: the busiest tiles keep every frame (wall-thin.js) ----
+// On unless this browser was told otherwise: localStorage 'argus.wallThin' = 'off' leaves every tile
+// at full rate, as before.
+const THIN_START_FPS = 25 // what a tile is taken to cost before it has been measured
+let thin = thinStart()
+const thinSeen = new Map() // camera -> { player, since, fullSince, arrived, decoded, bytes, fps, dec, kbps }
+let thinAt = 0
+const wallThinOn = () => { try { return sicexOn('wallThin') && localStorage.getItem('argus.wallThin') !== 'off' } catch { return true } }
+function updateWallThin() {
+  if (document.hidden) return
+  const now = performance.now()
+  const playing = tiles.filter((x) => !x.closed && !x.suspended && gridTiles.includes(x) && x.player?.firstPainted === true)
+  if (single !== null || playing.length < THIN_MIN_TILES || !wallThinOn()) {
+    // (a smaller grid, a camera opened full-size, or switched off: everything at full rate again)
+    thin = thinStart()
+    thinSeen.clear()
+    thinAt = 0
+    for (const x of tiles) if (x.player?.keysOnly) x.player.setKeysOnly(false)
+    return
+  }
+  // rates over the time since the last look, from the players' running totals: a one-second figure
+  // read every 2 s catches the same half of each keyframe interval every time
+  const dt = now - thinAt
+  const fresh = !(thinAt > 0) || dt > 5000 // the first look, or the page was away: only take the totals down
+  thinAt = now
+  const rows = []
+  const here = new Set()
+  for (const x of playing) {
+    const key = camKey(x)
+    const tot = x.player.totals
+    here.add(key)
+    const s = thinSeen.get(key)
+    if (!s || s.player !== x.player) {
+      // (new here, or its player was made again: measured from the next look)
+      thinSeen.set(key, { player: x.player, since: now, fullSince: now, arrived: tot.arrived, decoded: tot.decoded, bytes: tot.bytes, fps: 0, dec: 0, kbps: null })
+      continue
+    }
+    if (!fresh) {
+      const sec = dt / 1000
+      const kbps = ((tot.bytes - s.bytes) * 8) / 1000 / sec
+      s.fps = (tot.arrived - s.arrived) / sec
+      s.dec = (tot.decoded - s.decoded) / sec
+      s.kbps = s.kbps === null ? kbps : (s.kbps + kbps) / 2
+    }
+    s.arrived = tot.arrived
+    s.decoded = tot.decoded
+    s.bytes = tot.bytes
+    rows.push({ x, key, s })
+  }
+  for (const k of thinSeen.keys()) if (!here.has(k)) thinSeen.delete(k)
+  if (fresh) {
+    // A wall this screen is known not to manage in full starts shared out, instead of overloaded for
+    // its first ten seconds while that is found out again (wall-profile.js knownCapacity). The first
+    // tiles in order keep every frame until the next looks say which are busiest.
+    wallProfile ??= readProfile(storageOrNull())
+    const cap = knownCapacity(wallProfile)
+    if (cap && thin.budget === Infinity && playing.length * THIN_START_FPS > cap) {
+      thin = { ...thinStart(), budget: cap, changedAt: now }
+      let spent = 0
+      for (const x of playing) {
+        spent += THIN_START_FPS
+        x.player.setKeysOnly(spent > cap)
+      }
+    }
+    return
+  }
+  if (rows.length === 0) return
+  // keeping up is judged on tiles that have played at full rate long enough to have caught up
+  const settled = rows.filter(({ x, s }) => !x.player.keysOnly && !x.player.afterThin && now - s.since >= THIN_SETTLE_MS && now - s.fullSince >= THIN_SETTLE_MS)
+  const held = settled.map(({ x }) => Number(x.player.stats?.decodeMs) || 0).sort((p, q) => q - p)
+  thin = nextBudget(thin, {
+    now,
+    fed: settled.reduce((n, r) => n + r.s.fps, 0),
+    decoded: settled.reduce((n, r) => n + r.s.dec, 0),
+    heldMs: held[Math.floor(held.length * 0.2)] ?? 0, // (a figure a fifth of them reach: one stalled link is not the device)
+    all: rows.reduce((n, r) => n + r.s.fps, 0),
+    capacity: rows.reduce((n, r) => n + r.s.dec, 0)
+  })
+  // what it settles at is kept as this screen's capacity, for the next wall's start
+  if (Number.isFinite(thin.budget) && thin.okSince !== null && now - thin.changedAt > 15_000) wallProfile = noteCapacity(wallProfile ?? readProfile(storageOrNull()), thin.budget)
+  // never thinned: a camera whose keyframes are far apart would look frozen (one whose spacing is
+  // not known yet is given 10 s to show two keyframes before it is taken for such a camera)
+  const fixed = (r) => r.x.player.keyEveryMs > THIN_MAX_KEY_MS || (!(r.x.player.keyEveryMs > 0) && now - r.s.since > 10_000)
+  const left = thin.budget - rows.filter(fixed).reduce((n, r) => n + r.s.fps, 0)
+  const keep = fullRateTiles(rows.filter((r) => !fixed(r)).map(({ x, key, s }) => ({ key, fps: s.fps, kbps: s.kbps ?? 0, full: !x.player.keysOnly })), left)
+  for (const r of rows) {
+    const { x, key, s } = r
+    const full = fixed(r) || keep.has(key)
+    if (full && x.player.keysOnly) s.fullSince = now
+    x.player.setKeysOnly(!full)
+  }
+}
+setInterval(() => { try { updateWallThin() } catch {} }, 2000)
+
 let stateFrame = null
 new MutationObserver(() => {
   if (stateFrame !== null) return
@@ -757,6 +995,206 @@ function stopAhead() {
   ahead.clear()
 }
 
+// ...and its full quality at once too. The cameras either side are started ahead on their sub-streams
+// only, so a step showed the next camera at once but in SD: its main stream was asked for a second
+// later (UPGRADE_DELAY_MS) and then had to start on the NVR. Once the view has settled on a camera
+// whose own main stream is showing, the main stream of the camera a step further on -- the way the
+// viewer last stepped -- is started as well, connected but not decoded, and a step to it borrows it.
+// One at most, and only where it costs nothing but a second stream on the local network: a PC there
+// whose browser plays H.265, a camera on a local NVR. A phone's or a remote viewer's main streams,
+// and any for a browser without H.265, are converted by the server, which converts few at once; a
+// P2P or VPN camera's main stream rides the same slow link as the one being watched.
+const AHEAD_MAIN_MS = 1500 // on a camera this long at full quality before the next one's is started
+let aheadMain = null // { key, tile }: the one main stream started ahead
+let aheadMainTimer = null
+let stepDir = 1 // the way the viewer last stepped (stepCamera): which neighbour is "the next"
+let onLan = false // this browser reaches the server on the local network (/api/me), not by tunnel or VPN
+window.cctvAheadMain = () => (aheadMain ? { k: aheadMain.key, ws: aheadMain.tile.ws?.readyState ?? null, gopKB: Math.round(aheadMain.tile.gopBytes / 1024), lendable: aheadMain.tile.lendable } : null)
+const mayStartMainAhead = (c) => onLan && !isPhone() && !cannotPlayH265() && c.online !== false && c.hd !== false && c.remote !== true && !noMain.has(camKey(c))
+/** Starts the main stream of the camera a step on from this one (see above), and lets any other go. */
+function startAheadMain(cam, { onServer = false } = {}) {
+  const list = shownCameras(gridCameras(), gridView())
+  const i = list.findIndex((c) => camKey(c) === camKey(cam))
+  const next = i >= 0 && list.length > 1 ? list[(i + stepDir + list.length) % list.length] : null
+  const k = next ? camKey(next) : null
+  if (aheadMain && aheadMain.key === k && !aheadMain.tile.closed) return
+  stopAheadMain()
+  if (!next || k === camKey(cam)) return
+  // (SICE-X: started ahead by this browser, or kept running by the server, each its own switch)
+  if (!sicexOn('ahead', next.site)) return holdAhead(next)
+  // Everyone else (a phone, a viewer through the tunnel or the VPN, a browser without H.265) has the
+  // server keep that stream running instead, sent to nobody (stream-holds.mjs): when they step to it
+  // the NVR does not have to start it, and it costs their link and the server's conversions nothing.
+  if (onServer || !mayStartMainAhead(next)) return holdAhead(next)
+  const el = document.createElement('div')
+  el.className = 'tile'
+  el.innerHTML = TILE_HTML
+  // Refused, dropped, or not the camera's own stream after all: it is let go, not asked for again
+  // and again behind the viewer's back. The next view to settle asks afresh. (After this turn: the
+  // tile is still inside its own close handler.)
+  // Handed over to a view by then (aheadMain no longer names it): it is closed all the same, and the
+  // layer that was borrowing it connects by itself (live-tile.js). Left to reconnect, it came back
+  // beside that layer's own connection: the camera on screen with two main streams.
+  const drop = () => queueMicrotask(() => { if (aheadMain?.tile === t) stopAheadMain(); else t.close() })
+  const t = new LiveTile(el, next, MAIN_STREAM, 0, {
+    ...tileOptions(next),
+    noStill: true,
+    onDisconnect: drop,
+    onUnsupported: drop,
+    onHdRefused: () => (drop(), true),
+    onMainNotConverted: () => (drop(), true)
+  })
+  t.suspend()
+  aheadMain = { key: k, tile: t }
+}
+function stopAheadMain() {
+  clearTimeout(aheadMainTimer)
+  aheadMainTimer = null
+  clearInterval(holdTimer)
+  holdTimer = null
+  aheadMain?.tile.close()
+  aheadMain = null
+}
+// A hold lasts 20 s on the server and is asked for again while this camera is still the one expected
+// (stream-holds.mjs HOLD_MS); stopAheadMain ends the asking, and the hold then ends by itself. A
+// server that will not hold it (too many held, the NVR busy, an older server) is not asked again.
+const HOLD_AGAIN_MS = 12_000
+let holdTimer = null
+function holdAhead(c) {
+  if (!sicexOn('hold', c.site)) return
+  if (c.online === false || c.hd === false || c.remote === true || noMain.has(camKey(c))) return
+  const ask = () => fetch('/api/live/hold', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nvr: c.nvr, ch: c.ch }) })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((a) => { if (a?.held !== true) { clearInterval(holdTimer); holdTimer = null } })
+    .catch(() => {})
+  ask()
+  holdTimer = setInterval(() => { if (!document.hidden) ask() }, HOLD_AGAIN_MS)
+}
+/** The main stream started ahead for this camera, handed over to its view; any other is let go. */
+function takeAheadMain(cam) {
+  const t = aheadMain?.key === camKey(cam) && !aheadMain.tile.closed ? aheadMain.tile : null
+  if (t) aheadMain = null
+  stopAheadMain()
+  return t
+}
+
+// ---- Mark: what is on screen now, bookmarked under a case title (bookmarks.mjs) ----
+// A bookmark is the platform's own record of a stretch that matters: one or more cameras, a time,
+// a title, notes, kept by the core and found again on the Playback page. Following someone from
+// camera to camera (the linked-camera buttons) and pressing Mark on each builds the case as it
+// happens: every mark carries the same title until it is changed. The last MARK_BACK_MS are marked,
+// since what made someone press it has just happened.
+const MARK_BACK_MS = 30_000
+const MARK_TITLE_KEY = 'argus.markTitle'
+function markButton(cam) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.className = 'cam-link cam-mark'
+  b.textContent = 'Mark'
+  b.title = 'Bookmark the last 30 seconds of this camera under a case title'
+  b.addEventListener('click', (e) => { e.stopPropagation(); openMark(cam) })
+  return b
+}
+function openMark(cam) {
+  let dlg = document.getElementById('markDlg')
+  if (!dlg) {
+    dlg = document.createElement('dialog')
+    dlg.id = 'markDlg'
+    dlg.className = 'wall-pick offline-dlg mark-dlg'
+    dlg.addEventListener('click', (e) => e.stopPropagation())
+    document.body.append(dlg)
+  }
+  const at = Date.now()
+  const h = document.createElement('h3')
+  h.textContent = `Mark ${cam.name}`
+  const when = document.createElement('p')
+  when.className = 'mark-when'
+  when.textContent = `The 30 seconds up to ${new Date(at).toLocaleTimeString()}`
+  const title = document.createElement('input')
+  title.type = 'text'
+  title.maxLength = 120
+  title.placeholder = 'Case or incident, e.g. Pallet missing from Bay 3'
+  try { title.value = localStorage.getItem(MARK_TITLE_KEY) ?? '' } catch {}
+  const note = document.createElement('textarea')
+  note.rows = 2
+  note.placeholder = 'What you saw (optional)'
+  const said = document.createElement('p')
+  said.setAttribute('role', 'status')
+  said.className = 'mark-said'
+  const save = document.createElement('button')
+  save.type = 'button'
+  save.textContent = 'Save mark'
+  const cancel = document.createElement('button')
+  cancel.type = 'button'
+  cancel.textContent = 'Cancel'
+  cancel.addEventListener('click', () => dlg.close())
+  const label = (text, field) => { const l = document.createElement('label'); l.append(text, field); return l }
+  const row = document.createElement('p')
+  row.append(save, ' ', cancel)
+  save.addEventListener('click', async () => {
+    const checked = checkBookmark({ cameras: [camKey(cam)], startMs: at - MARK_BACK_MS, endMs: at, title: title.value, description: note.value })
+    if (!checked.ok) { said.textContent = checked.error; return }
+    save.disabled = true
+    said.textContent = 'Saving…'
+    try {
+      const r = await fetch('/api/bookmarks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(checked.value) })
+      const j = await r.json().catch(() => null)
+      if (!r.ok) { said.textContent = j?.error ?? 'Not saved'; save.disabled = false; return }
+      try { localStorage.setItem(MARK_TITLE_KEY, checked.value.title) } catch {}
+      const open = document.createElement('a')
+      open.href = `/playback.html?nvr=${encodeURIComponent(cam.nvr)}&ch=${cam.ch}&t=${at - MARK_BACK_MS}`
+      open.textContent = 'Open in Recordings'
+      said.replaceChildren('Marked. ', open)
+      row.replaceChildren(cancel)
+      cancel.textContent = 'Close'
+    } catch {
+      said.textContent = 'Not saved: the server did not answer'
+      save.disabled = false
+    }
+  })
+  dlg.replaceChildren(h, when, label('Case ', title), label('Note ', note), said, row)
+  if (!dlg.open) dlg.showModal()
+  ;(title.value ? note : title).focus()
+}
+
+// ---- linked cameras: one click to the camera a person walks to next (camera-links.mjs) ----
+// The links an administrator drew on the map; where none were drawn for this camera, the two
+// nearest on its map, marked as a guess. Read once and kept five minutes.
+let camLinks = null
+let camLinksAt = 0
+async function cameraLinks() {
+  if (camLinks && Date.now() - camLinksAt < 5 * 60_000) return camLinks
+  try {
+    const r = await fetch('/api/camera-links')
+    if (r.ok) { camLinks = await r.json(); camLinksAt = Date.now() }
+  } catch {}
+  return camLinks
+}
+function linkedCameras(cam, host) {
+  if (!sicexOn('linked', cam.site)) return
+  const key = `${cam.nvr}/${cam.ch}`
+  cameraLinks().then((d) => {
+    if (!d || !host.isConnected) return // (the view was closed or moved on while the links were read)
+    const drawn = d.links?.[key] ?? []
+    const list = drawn.length ? drawn : (d.suggestions?.[key] ?? []).slice(0, 2)
+    const byKey = new Map(cameras.map((c) => [`${c.nvr}/${c.ch}`, c]))
+    for (const n of list.slice(0, 4)) {
+      const to = byKey.get(n.to)
+      if (!to || to.online === false || to.configured === false) continue
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = drawn.length ? 'cam-link' : 'cam-link suggested'
+      b.textContent = `→ ${n.label || to.name}`
+      b.title = drawn.length ? `Go to ${to.name}` : `Nearest on the map: ${to.name}`
+      b.addEventListener('click', (e) => {
+        e.stopPropagation()
+        openSingle(to, { stepping: true })
+      })
+      host.append(b)
+    }
+  })
+}
+
 function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   // the camera being left (a step with ‹ ›): the connection that carries its stream is kept, started
   // ahead as the new camera's neighbour, rather than closed and opened again a moment later
@@ -771,11 +1209,13 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   }
   single = camKey(cam)
   singleCam = cam
+  telemetry.event(stepping ? 'step' : 'open', { nvr: cam.nvr, ch: cam.ch, dir: stepping ? stepDir : undefined })
   // free the grid's streams while watching one camera: suspend alone leaves them flowing (frames only
   // dropped at the client), so on a tunnel 25-64 grid streams kept competing with the full-size view.
   // Keep the one it borrows (the lender, lenderFor); release the rest, which reconnect on return.
   const lender = gridTiles.find((t) => t.nvr === cam.nvr && t.ch === cam.ch && t.streamType === SUB_STREAM && t.lendable)
   for (const t of gridTiles) { if (t === lender) t.suspend(); else t.release() }
+  pageNote?.remove() // (the note of a page just turned would sit on top of the view)
   overlay = makeTile(cam, { controls: false })
   overlay.classList.add('single', 'single-overlay')
   // links sit next to the name (not in it): a long name is cut short, the links never are
@@ -793,6 +1233,8 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
     link.addEventListener('click', (e) => e.stopPropagation())
     links.append(link)
   }
+  links.append(markButton(cam))
+  linkedCameras(cam, links)
   overlay.querySelector('.name').after(links)
   if (isPhone()) overlay.append(nativeFullButton(overlay))
   overlay.append(...stepArrows()) // ‹ › on every screen (keys: ← →)
@@ -843,15 +1285,21 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   // internet (since 2026-10-08, at the owner's wish: it used not to be, because that stream rides the
   // camera's relay and then the tunnel, and can take a long while to come). The sub-stream stays on
   // screen until the main one has a picture, so asking costs the viewer nothing but the wait.
+  const warm = takeAheadMain(cam) // its main stream, when it was started ahead (aheadMain)
   if (cam.hd !== false && !noMain.has(single)) {
     // the sub-stream shows at once; the HD is asked for almost immediately on a direct open, but only
     // once the view settles while stepping (UPGRADE_DELAY_MS), so stepping does not churn main streams.
+    // One started ahead is here already: shown now, with nothing to churn.
     const o = overlay
-    upgradeTimer = setTimeout(() => {
+    if (warm) upgradeToMain(overlay, cam, sub, opts, warm)
+    else upgradeTimer = setTimeout(() => {
       upgradeTimer = null
       if (overlay === o && !sub.closed) upgradeToMain(overlay, cam, sub, opts)
     }, stepping ? UPGRADE_DELAY_MS : QUICK_UPGRADE_MS)
-  } else if (cam.hd === false) overlay.querySelector('.name').after(sdBadge())
+  } else {
+    warm?.close()
+    if (cam.hd === false) overlay.querySelector('.name').after(sdBadge())
+  }
   syncTiles()
   updatePager()
 }
@@ -861,6 +1309,10 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   const returnKey = single
   const restoreFocus = Boolean(overlay?.contains(document.activeElement))
   if (upgradeTimer) { clearTimeout(upgradeTimer); upgradeTimer = null } // a pending HD upgrade is cancelled
+  // ...and so is starting the next camera's main stream ahead; one started already stays for the
+  // camera being stepped to (openSingle takes it, or lets it go)
+  clearTimeout(aheadMainTimer)
+  aheadMainTimer = null
   overlayZoom = null
   for (const t of singleTiles) if (t !== keep) t.close()
   singleTiles = []
@@ -869,6 +1321,7 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   for (const slot of gridSlots) slot.el.inert = false
   if (!resumeGrid) return
   stopAhead()
+  stopAheadMain()
   leavePhoneFull()
   single = null
   singleCam = null
@@ -910,7 +1363,8 @@ function sdBadge() {
   return b
 }
 
-function upgradeToMain(tile, cam, sub, opts) {
+/** warm: this camera's main stream, started ahead (aheadMain): the layer shows that instead of its own. */
+function upgradeToMain(tile, cam, sub, opts, warm = null) {
   const layer = document.createElement('div')
   // full size but invisible until its first frame (a hidden element would give the canvas no size)
   layer.className = 'tile-upgrade pending'
@@ -920,6 +1374,14 @@ function upgradeToMain(tile, cam, sub, opts) {
   const main = new LiveTile(layer, cam, MAIN_STREAM, 0, {
     ...opts,
     noStill: true, // the sub-stream below it already shows the still
+    borrowFrom: warm,
+    // the layer has stopped showing the stream started ahead (that one stalled or ended and the layer
+    // connected by itself; the layer was closed, or is asking for H.264 instead): it has no other use
+    onUnborrow: (src) => {
+      if (src !== warm) return
+      warm.close()
+      singleTiles = singleTiles.filter((t) => t !== warm)
+    },
     onFirstFrame: () => {
       layer.classList.remove('pending')
       for (const b of tile.querySelectorAll('.hd-busy')) b.remove()
@@ -931,6 +1393,21 @@ function upgradeToMain(tile, cam, sub, opts) {
       tile.querySelector(':scope > .status')?.remove()
       sub.close()
       if (sub.tile !== tile) sub.tile.remove() // an earlier layer that had gone over to the sub-stream
+      // one started ahead that had nothing kept to lend (too long a stretch since its keyframe) only
+      // kept the stream running on the server until this layer's own connection had it: done
+      if (warm && main.source !== warm) {
+        warm.close()
+        singleTiles = singleTiles.filter((t) => t !== warm)
+      }
+      // settled here at full quality, and it is the camera's own stream, not a conversion: the main
+      // stream of the camera a step on is started ahead (aheadMain)
+      clearTimeout(aheadMainTimer)
+      aheadMainTimer = setTimeout(() => {
+        aheadMainTimer = null
+        // (not in a hidden tab: the first picture is painted there too, and nothing would close it)
+        // (a conversion on screen: the next one would be another, so the server holds it instead)
+        if (overlay === tile && !main.closed && !document.hidden) startAheadMain(cam, { onServer: main.converted === true })
+      }, AHEAD_MAIN_MS)
     },
     onUnsupported: () => {
       rememberNoMain(camKey(cam))
@@ -970,6 +1447,10 @@ function upgradeToMain(tile, cam, sub, opts) {
     }
   })
   singleTiles.push(main)
+  if (warm) singleTiles.push(warm) // the view's own now: closed with it
+  // among the page's tiles from now on: a tab hidden for a while closes them, and this one was left
+  // out (added after the list was made), so a main stream nobody could see kept running
+  syncTiles()
 }
 
 // ---- this user's camera order ------------------------------------------------------------------
@@ -1177,8 +1658,9 @@ smoothBox.addEventListener('change', () => {
 })
 
 // A phone has room for one camera, or four: the other layouts are taken off its menu, and it keeps
-// its own choice (a PC's 4 x 4 must not follow the same user onto a phone).
-const PHONE_LAYOUTS = ['auto', 'list', 'g1', 'g2']
+// its own choice (a PC's 4 x 4 must not follow the same user onto a phone). Not Auto: its tiles ask
+// for the main stream, and each main stream a phone watches is converted by the server.
+const PHONE_LAYOUTS = ['list', 'g1', 'g2']
 const LAYOUT_KEY = isPhone() ? 'cctv.layout.phone' : 'cctv.layout'
 if (isPhone()) {
   for (const o of [...layoutSelect.querySelectorAll('option')]) if (!PHONE_LAYOUTS.includes(o.value)) o.remove()
@@ -1187,7 +1669,7 @@ if (isPhone()) {
   opt.value = 'list'
   opt.textContent = 'List'
   layoutSelect.prepend(opt)
-  layoutSelect.value = 'auto'
+  layoutSelect.value = 'list'
 }
 const markPhoneLayout = () => {
   document.body.classList.toggle('phone-g2', isPhone() && layoutSelect.value === 'g2')
@@ -1198,7 +1680,91 @@ try {
   if (saved && LAYOUTS[saved] && (!isPhone() || PHONE_LAYOUTS.includes(saved))) layoutSelect.value = saved
 } catch {}
 markPhoneLayout()
+/** Beside each layout this screen has played for a while: the share of frames it drew there. */
+function markLayouts() {
+  wallProfile ??= readProfile(storageOrNull())
+  for (const o of layoutSelect.querySelectorAll('option')) {
+    if (!LAYOUTS[o.value] || LAYOUTS[o.value].list || o.value === 'auto') continue
+    o.dataset.base ??= o.textContent
+    const note = sicexOn('wallProfile') ? profileNote(wallProfile, layoutCells(o.value).cells.length, { tol: wallTol }) : null
+    const text = note ? `${o.dataset.base} · ${note.short}` : o.dataset.base
+    if (o.textContent !== text) o.textContent = text
+    o.title = note ? note.long : ''
+  }
+}
+/** Choosing a layout this screen handled badly says so, once a visit for each. It never stops anyone. */
+const layoutWarned = new Set()
+function warnLayout() {
+  if (!sicexOn('wallProfile')) return
+  const note = profileNote(wallProfile ?? readProfile(storageOrNull()), layoutCells(layoutSelect.value).cells.length, { tol: wallTol })
+  if (!note || note.status === 'ok' || layoutWarned.has(layoutSelect.value)) return
+  layoutWarned.add(layoutSelect.value)
+  const el = document.createElement('div')
+  el.className = 'page-note layout-note'
+  el.setAttribute('role', 'status')
+  el.textContent = note.long
+  const host = document.getElementById('layoutNote') ?? grid // (where the page's other layout note goes)
+  host.after(el)
+  setTimeout(() => el.remove(), 7000)
+}
+try { markLayouts() } catch {}
+// what SICE-X allows here (sicex.js): asked once; until it answers, what it said last time
+loadSicex(deviceId()).then(() => { try { markLayouts() } catch {} })
+
+// ---- the administrator's tolerance for a wall (wall-tolerance.mjs) ----
+// Read once for everyone; an administrator can change it in View options. A server without it
+// (an older one) leaves the owner's defaults in place.
+async function wallToleranceSetup(isAdmin) {
+  try {
+    const r = await fetch('/api/wall-tolerance')
+    const t = r.ok ? await r.json() : null
+    if (t && t.okShare > t.poorShare) wallTol = { okShare: t.okShare, poorShare: t.poorShare }
+    else if (!r.ok) return // (no such route: nothing to set either)
+  } catch {
+    return
+  }
+  markLayouts()
+  const panel = document.querySelector('.live-options-panel')
+  if (!isAdmin || !panel || panel.querySelector('.wall-tol')) return
+  const num = (value, title) => {
+    const i = document.createElement('input')
+    i.type = 'number'
+    i.min = '10'
+    i.max = '100'
+    i.step = '1'
+    i.value = String(Math.round(value * 100))
+    i.title = title
+    return i
+  }
+  const fine = num(wallTol.okShare, 'A wall drawing at least this share of its frames is fine')
+  const poor = num(wallTol.poorShare, 'Below this share a wall is poor; between the two it is below recommended')
+  const save = document.createElement('button')
+  save.type = 'button'
+  save.textContent = 'Save'
+  const said = document.createElement('span')
+  said.setAttribute('role', 'status')
+  const box = document.createElement('label')
+  box.className = 'wall-tol'
+  box.title = 'What counts as an acceptable wall, for everyone. It warns; it never stops a layout being used.'
+  box.append('Wall fine from ', fine, '% of frames shown, poor below ', poor, '% ', save, ' ', said)
+  save.addEventListener('click', async () => {
+    said.textContent = 'Saving…'
+    try {
+      const r = await fetch('/api/admin/wall-tolerance', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ okShare: Number(fine.value) / 100, poorShare: Number(poor.value) / 100 }) })
+      const t = await r.json().catch(() => null)
+      if (!r.ok) { said.textContent = t?.error ?? 'Not saved'; return }
+      wallTol = { okShare: t.okShare, poorShare: t.poorShare }
+      said.textContent = 'Saved'
+      markLayouts()
+    } catch {
+      said.textContent = 'Not saved: the server did not answer'
+    }
+  })
+  panel.append(box)
+}
+
 layoutSelect.addEventListener('change', () => {
+  try { warnLayout() } catch {}
   page = 0
   markPhoneLayout()
   preferenceStorage.setItem(LAYOUT_KEY, layoutSelect.value)
@@ -1386,12 +1952,48 @@ deleteViewBtn.addEventListener('click', async () => {
 // streams behind it. The tiles are rebuilt by render() regardless.
 prevBtn.addEventListener('click', () => { page--; freshenForPageChange(); render() })
 nextBtn.addEventListener('click', () => { page++; freshenForPageChange(); render() })
+/**
+ * The next (dir 1) or previous (-1) page of the grid, for ← → and a flick: round past either end, as
+ * stepCamera goes round the cameras. In full screen the pager is out of sight, so these are the only
+ * way to turn the page there, and a small note says for a moment which page it is.
+ */
+function stepPage(dir) {
+  const pages = Number(pageLabel.dataset.pages ?? 1)
+  if (single !== null || !(pages > 1)) return
+  page = (page + dir + pages) % pages
+  telemetry.event('page', { dir })
+  freshenForPageChange()
+  render()
+  notePage()
+}
+let pageNote = null
+let pageNoteTimer = null
+function notePage() {
+  clearTimeout(pageNoteTimer)
+  pageNote?.remove() // (render has taken the last one off the grid already)
+  pageNote = null
+  if (document.fullscreenElement !== grid) return // elsewhere the pager itself says it
+  pageNote = document.createElement('div')
+  pageNote.className = 'page-note'
+  pageNote.setAttribute('role', 'status')
+  pageNote.textContent = pageLabel.textContent
+  grid.append(pageNote)
+  pageNoteTimer = setTimeout(() => { pageNote?.remove(); pageNote = null }, 1500)
+}
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && single !== null && !document.fullscreenElement) closeSingle()
   // the full-size view: ← → go through the cameras, the same as ‹ › and a flick
   if (single !== null && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && !e.target.closest?.('input, select, textarea')) {
     e.preventDefault()
     stepCamera(e.key === 'ArrowRight' ? 1 : -1)
+  }
+  // the grid: ← → turn its page the same way. Once a press, not while the key is held (every page
+  // opens its cameras' streams); not with Alt, Ctrl or ⌘ (Alt+← is the browser's Back); and not from
+  // a field, a menu or an open dialog, where the arrows are that control's own.
+  if (single === null && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && !e.repeat && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.defaultPrevented &&
+    !e.target.closest?.('input, select, textarea, [contenteditable], dialog, .cam-sheet') && !document.querySelector('dialog[open]')) {
+    e.preventDefault()
+    stepPage(e.key === 'ArrowRight' ? 1 : -1)
   }
   if ((e.key === 'f' || e.key === 'F') && !e.target.closest?.('input, select, textarea')) toggleFullscreen()
   if (e.key === 'd' || e.key === 'D') {
@@ -1463,6 +2065,7 @@ addEventListener('pagehide', () => {
   // cleanup runs. Do not retain sockets or decoders across that frozen document.
   for (const t of tiles) t.close()
   tiles = []
+  stopAheadMain()
 })
 addEventListener('pageshow', (event) => {
   if (event.persisted) {
@@ -1492,6 +2095,7 @@ document.addEventListener('visibilitychange', () => {
     hiddenTimer = setTimeout(() => {
       for (const t of tiles) t.close()
       tiles = []
+      stopAheadMain() // (a whole main stream nobody is looking at)
     }, 3000)
     return
   }
@@ -1541,8 +2145,14 @@ const early = Promise.all([sync.load(), loadOsd().catch(() => {}), loadViews().c
 const me = await checkSession()
 if (me) document.getElementById('whoami').textContent = me.user
 if (me?.admin) { const st = document.getElementById('sitesTab'); if (st) st.hidden = false; const se = document.getElementById('settingsTab'); if (se) se.hidden = false }
+wallToleranceSetup(me?.admin === true)
 isAdmin = Boolean(me?.admin)
 user = me?.user ?? null
+// where the server sees this browser coming from: the name in the address bar is the same on the
+// office network and through the tunnel, so it cannot say (security.mjs routeOf). For aheadMain.
+// Only a dotted IPv4 is judged: isLocalHost reads an address-bar host, where IPv6 comes in brackets, and
+// takes a bare one (a visitor's own, through the tunnel or the VPN) for a name without a dot: local.
+onLan = me?.direct === true && typeof me.address === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(me.address) && isLocalHost(me.address)
 setInterval(checkSession, 60_000)
 
 function multiSite() {
@@ -1645,6 +2255,7 @@ function stepCamera(dir) {
   if (list.length < 2 || single === null) return
   const i = list.findIndex((c) => camKey(c) === single)
   const next = list[(i + dir + list.length) % list.length]
+  stepDir = dir < 0 ? -1 : 1
   openSingle(next, { stepping: true })
 }
 
@@ -1673,13 +2284,25 @@ function stepArrows() {
   let t0 = null
   let swipedAt = 0
   const rotated = () => false // the picture is no longer turned sideways on an upright phone
+  // ...and with the grid in full screen a flick turns its page (stepPage): the pager is out of sight
+  // there. A finger held on a tile first is moving that tile (grid-drag.js), not flicking.
+  const gridFull = () => single === null && document.fullscreenElement === grid
   document.addEventListener('touchstart', (e) => {
-    if (!document.body.classList.contains('phone-full') || e.touches.length !== 1) return (t0 = null)
+    if (!(document.body.classList.contains('phone-full') || gridFull()) || e.touches.length !== 1) return (t0 = null)
     if (overlayZoom && overlayZoom.zoom > 1) return (t0 = null) // zoomed: one finger moves the picture
-    t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+    t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY, at: performance.now() }
+  }, { passive: true })
+  // A flick starts moving at once. A finger that rested first (grid-drag.js lifts a tile after 400 ms)
+  // is not one, even when that drag has since been taken away by the browser: Chrome reports the
+  // first touchmove only once the finger has left its slop, by when the drag can have come and gone.
+  const RESTED_MS = 300
+  document.addEventListener('touchmove', () => {
+    if (!t0) return
+    if (drag.dragging() || (!t0.moved && performance.now() - t0.at >= RESTED_MS)) return (t0 = null)
+    t0.moved = true
   }, { passive: true })
   document.addEventListener('touchend', (e) => {
-    if (!t0 || single === null) return
+    if (!t0 || (single === null && !gridFull())) return (t0 = null)
     if (overlayZoom && overlayZoom.zoom > 1) return (t0 = null) // (a pinch that started as one finger)
     const t = e.changedTouches[0]
     const dx = t.clientX - t0.x
@@ -1690,7 +2313,8 @@ function stepArrows() {
     const across = rotated() ? dx : dy
     if (Math.abs(along) < SWIPE_PX || Math.abs(along) < Math.abs(across) * 1.5) return
     swipedAt = performance.now()
-    stepCamera(along < 0 ? 1 : -1)
+    if (single !== null) stepCamera(along < 0 ? 1 : -1)
+    else stepPage(along < 0 ? 1 : -1)
   }, { passive: true })
   // the click a browser sends after the flick must not close the view
   document.addEventListener('click', (e) => {

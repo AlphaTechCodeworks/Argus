@@ -10,7 +10,7 @@ import { EVENT_KINDS, PRIORITIES, alarmRows, eventFromHash, filterSummary, label
 import { fillCameraSelect } from './camera-choice.js'
 import { MotionTuner } from './motion-tune.js'
 import { mountCameraBrowser, workspaceSite } from './camera-browser.js'
-import { preferenceStorage } from './user-settings.js'
+import { preferenceStorage, preferencesReady } from './user-settings.js'
 
 const $ = (id) => document.getElementById(id)
 const REFRESH_MS = 30_000
@@ -420,6 +420,9 @@ async function start() {
   if (!Array.isArray(cameras)) cameras = cameras.cameras ?? []
   fillChoices()
   const f = $('filters').elements
+  // the filters and the site last chosen come with the account: not read before they are known
+  // (user-settings.js; asked for while the cameras above were, so this seldom waits at all)
+  await preferencesReady
   try {
     const saved = JSON.parse(preferenceStorage.getItem('cctv.alarmFilters') || '{}')
     for (const key of ['acked', 'type', 'priority', 'text', 'from', 'to']) {

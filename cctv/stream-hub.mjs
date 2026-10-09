@@ -2,6 +2,7 @@
 // out to every viewer. The worker sends each stream once; everything per viewer (GOP replay, slow
 // sockets) happens here, with the same rules as live.mjs LiveStream.
 import { CAP_BYTES, gateSend } from './backpressure.mjs'
+import { frameGaps } from './frame-gaps.mjs'
 import { replayGop } from './gop-replay.mjs'
 import { MSG, restart, streamKey, want, unwant } from './worker-ipc.mjs'
 
@@ -14,6 +15,9 @@ const MAX_GOP_FRAMES = 400 // frames kept since the last keyframe, so new viewer
 // are small; the main stream, the heavy one, still stops after 10 s.
 const SUB_LINGER_MS = (() => { const n = Number(process.env.CCTV_SUB_LINGER_S); return (Number.isFinite(n) && n >= 0 ? n : 180) * 1000 })()
 const STOP_DELAY_MS = { 0: 10_000, 1: SUB_LINGER_MS }
+
+// how evenly frames reach the main process from the NVRs' workers (frame-gaps.mjs); watches only
+const gaps = frameGaps('to viewers')
 
 export class HubStream {
   constructor(hub, ch, type) {
@@ -100,6 +104,7 @@ export class HubStream {
   }
 
   onFrame(buf, isKey) {
+    gaps?.note(`${this.hub?.nvrId}/${this.key}`)
     if (isKey) this.gop = [buf]
     else if (this.gop.length >= MAX_GOP_FRAMES) this.gop = [] // too long to replay intact
     else if (this.gop.length > 0) this.gop.push(buf)

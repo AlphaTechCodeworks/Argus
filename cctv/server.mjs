@@ -16,6 +16,9 @@
 //   /api/camera-links, /api/admin/camera-links -> which camera adjoins which, see camera-links.mjs
 //   /api/admin/discovery       -> find TVT NVRs on the network (admins), see discovery.mjs
 //   GET  /api/admin/vpn        -> VPN hub status and the remote sites (admins), see vpn.mjs
+//   GET  /api/app/android[/download] -> the Android app's installer: its version and checksum, and
+//                                 the file, for the app to update itself (any signed-in user), see
+//                                 app-download.mjs; app-fetch.mjs brings each new release from GitHub
 //   GET  /api/admin/connector[/installer] -> the NVR site-server installer: its status, and the
 //                                 download (admins), see connector-download.mjs
 //   /api/admin/nvrs/:id/substreams -> sub-stream codec per channel, switch to H.264 (admins), see substreams.mjs
@@ -113,6 +116,7 @@ import { makePresence } from './presence.mjs'
 import { handleViewers, liveKind, trackingOpen } from './viewers.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
+import { pagesFrom } from './page-reload.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
 import { allGridOrders } from './user-prefs.mjs'
 import { pool as playbackTranscodes } from './transcode.mjs'
@@ -130,6 +134,8 @@ import { NVR_MAIN_ACTIONS, connectPlayback } from './rec-playback.mjs'
 import { accessWatch } from './access-watch.mjs'
 import { vpnView } from './vpn.mjs'
 import { sendInstaller, statusOf } from './connector-download.mjs'
+import { describeApp, sendApp } from './app-download.mjs'
+import { startAppFetch } from './app-fetch.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
 import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
 import { recentRefusals } from './nvr-health.mjs'
@@ -162,6 +168,10 @@ import { loopWorstMs } from './loop-lag.mjs'
 import { processErrors } from './process-guard.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder, UI_PREFS_PATH, handleUiPreferences } from './user-prefs.mjs'
+import { cohortOf, handleTelemetry, makeTelemetry } from './telemetry.mjs'
+import { handleSicex, makeSicex } from './sicex.mjs'
+import { handleHold, makeHolds } from './stream-holds.mjs'
+import { handleTolerance, makeTolerance } from './wall-tolerance.mjs'
 import { xmlOnline } from './xml-session.mjs'
 
 const {
@@ -170,7 +180,7 @@ const {
   CERT_HOSTS = '' // extra names/IPs for the certificate, e.g. this PC's LAN address
 } = process.env
 
-const PUBLIC_DIR = join(import.meta.dirname, 'public')
+let PUBLIC_DIR = join(import.meta.dirname, 'public') // (let: a pages-only release is taken up without a restart, see SIGHUP)
 
 startWatchdog()
 // an error that ends this process leaves DATA_DIR/last-crash.json behind (the watchdog covers hangs, not these)
@@ -226,6 +236,9 @@ function thinAndRetain(roundStart = Date.now()) {
     limit: MAX_SEGMENTS_PER_RUN
   })
 }
+
+// The Android app's releases come from GitHub by themselves once a token has been placed (app-fetch.mjs).
+startAppFetch()
 
 // server recording (CCTV_LIVE_WORKER=on only): retention, each location's space limit and low-space
 // deletion every 5 minutes. Its file calls go to each location's helper (housekeeping.mjs); it keeps
@@ -291,6 +304,22 @@ if (LIVE_WORKER) {
 // ---- health alerts and nightly settings backups ---------------------------
 
 const DATA_DIR = auth.DATA_DIR
+const telemetry = makeTelemetry()
+// SICE-X: the optional speed-ups, switched from one place, and switched off by itself when the screens
+// running it measurably fare worse than the ones kept without it (sicex.mjs; looked at once an hour)
+const sicex = makeSicex({ dir: auth.DATA_DIR, log: console.log })
+setInterval(() => { try { sicex.autoCheck(telemetry.summary()) } catch (e) { console.warn(`[sicex] check failed: ${e?.message ?? e}`) } }, 3_600_000).unref()
+// Only on an NVR reached on the local network that is refusing nothing: a P2P or VPN NVR's main
+// stream rides the same slow link as the one being watched, and one that refuses streams has none
+// to spare (warm-streams.mjs keeps away from it for the same reason).
+const wallTolerance = makeTolerance({ dir: auth.DATA_DIR })
+const holds = makeHolds({
+  streamOf: (id, ch) => {
+    const n = nvrs.get(id)
+    return n?.liveOnline && !(n.cfg?.sn || n.cfg?.remote) && refusalsOf(n) === 0 ? n.getStream(ch, 0) : null
+  },
+  log: console.log
+})
 const STARTED_MS = Date.now()
 
 // Only a hang from just before this start is worth reporting as "the server restarted": an older
@@ -511,7 +540,7 @@ const read = (name, fallback) => {
   }
 }
 const VERSION = read('VERSION', '0.0')
-const RELEASE = read('RELEASE', 'dev')
+let RELEASE = read('RELEASE', 'dev')
 const BUILD = { version: `v${VERSION}`, release: RELEASE }
 if (AUTH_OFF) console.warn('WARNING: CCTV_AUTH=off, sign-in is disabled. Development use only.')
 
@@ -723,6 +752,24 @@ const handleRequest = async (req, res) => {
   if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
   if (pathname === UI_PREFS_PATH) return sendJson(res, ...(await handleUiPreferences(req, user)))
+  // what viewers actually got, as their pages measured it, and the score made from it (telemetry.mjs)
+  const telemetryRoute = await handleTelemetry(req, pathname, who, telemetry)
+  if (telemetryRoute) return sendJson(res, ...telemetryRoute)
+  const sicexRoute = await handleSicex(req, pathname, { user, admin: who.admin === true, store: sicex, cohortOf, device: url.searchParams.get('device') ?? '', log: console.log })
+  if (sicexRoute) return sendJson(res, ...sicexRoute)
+  // (the hold is one of the engine's modules: with it switched off nothing is held, whatever a page asks)
+  if (pathname === '/api/live/hold' && user && (() => { const s = sicex.get(); return !s.enabled || s.modules.hold === false })()) return sendJson(res, 200, { held: false, why: 'switched off' })
+  // the main stream of the camera this viewer is expected to open next, kept running (stream-holds.mjs)
+  const holdRoute = await handleHold(req, pathname, {
+    user,
+    viewer: viewerOf(req, currentUser),
+    holds,
+    mayHd: (nvr, ch) => can(who, 'live', { nvr, ch }) === true && can(who, 'live-hd', { nvr, ch }) === true
+  })
+  if (holdRoute) return sendJson(res, ...holdRoute)
+  // what counts as an acceptable wall, as the administrator says (wall-tolerance.mjs)
+  const toleranceRoute = await handleTolerance(req, pathname, { user, admin: who.admin === true, store: wallTolerance, log: console.log })
+  if (toleranceRoute) return sendJson(res, ...toleranceRoute)
 
   // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
   // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own.
@@ -1131,6 +1178,14 @@ const handleRequest = async (req, res) => {
   // ?for=playback: the ones they may play back instead (playbackCameras: sd, hd, nvrHd, legs). An admin
   // gets every camera with everything allowed.
   if (pathname === '/api/cameras') return sendJson(res, 200, url.searchParams.get('for') === 'playback' ? playbackCameras(who, allCameras({ live: true })) : liveCameras(who, allCameras({ live: true })))
+  // Argus for Android updates itself from the server it is signed in to: what installer this server
+  // holds, and the installer (app-download.mjs). Any signed-in user: it is the app they are running.
+  if (pathname === '/api/app/android' || pathname === '/api/app/android/download') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    if (pathname.endsWith('/download')) return sendApp(res)
+    const app = await describeApp()
+    return app ? sendJson(res, 200, app) : sendJson(res, 404, { error: 'No app installer has been placed on this server.' })
+  }
   // a map shows where cameras are and what they cover: only the sites and cameras this user may see
   // (maps.mjs mapsFor; a site is visible when one of its NVRs' cameras is)
   const siteVisible = (site) => [...nvrs.values()].some((n) => n.site === site && n.channels.some((c) => canSee(n.id, c.ch)))
@@ -1459,3 +1514,21 @@ const shutdown = async () => {
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
+// A release that changes only pages is taken up without a restart (page-reload.mjs): the installer
+// switches the `current` link and sends this process SIGHUP. Anything else in it: said, and left for
+// a restart. Never throws: a failed reload leaves the pages being served as they were.
+process.on('SIGHUP', () => {
+  try {
+    const r = pagesFrom({ running: join(import.meta.dirname, '..'), link: process.env.CCTV_CURRENT_LINK ?? join(import.meta.dirname, '..', '..', '..', 'current') })
+    if (!r.ok) return console.warn(`[pages] not taken up without a restart: ${r.why}`)
+    if (r.release === RELEASE) return console.log(`[pages] already serving ${RELEASE}`)
+    PUBLIC_DIR = r.publicDir
+    RELEASE = r.release
+    BUILD.release = r.release
+    setAssetStamp(RELEASE)
+    warmFiles(PUBLIC_DIR, MIME)
+    console.log(`[pages] now serving the pages of ${RELEASE} (no restart)`)
+  } catch (e) {
+    console.warn(`[pages] reload failed, pages unchanged: ${e?.message ?? e}`)
+  }
+})

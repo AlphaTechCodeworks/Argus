@@ -4,6 +4,7 @@
 // which is why the banner wording lives here rather than in the page.
 import { smartRows, smartSummary } from './smart-view.js'
 import { viewersView } from './viewers-view.js'
+import { experienceView } from './experience-view.js'
 
 // Absolute times are shown on the site's wall clock, not the viewing PC's zone (a screen set to UTC
 // otherwise showed UTC): add the site offset, then read it back as UTC. siteTzMs is set from
@@ -777,8 +778,67 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     }))
     document.getElementById('watchingNote').textContent = [r.rows.length ? r.summary : r.empty, r.more].filter(Boolean).join(' ')
   }
+  // Viewing experience (admins only; experience-view.js shapes it): the score viewers' pages measured.
+  const paintExperience = (d) => {
+    const box = document.getElementById('experience')
+    if (!box) return
+    const v = experienceView(d)
+    box.hidden = false
+    document.getElementById('experienceHeads').replaceChildren(...v.heads.map((h) => el('th', { textContent: h })))
+    document.getElementById('experienceRows').replaceChildren(...v.rows.map((r) => { const tr = el('tr'); for (const c of r) tr.append(el('td', { textContent: c })); return tr }))
+    document.getElementById('experienceNote').textContent = v.note
+    const rowsOf = (rows) => rows.map((r) => { const tr = el('tr'); for (const c of r) tr.append(el('td', { textContent: c })); return tr })
+    document.getElementById('experienceNvrHeads')?.replaceChildren(...v.nvrHeads.map((h) => el('th', { textContent: h })))
+    document.getElementById('experienceNvrRows')?.replaceChildren(...rowsOf(v.nvrRows))
+    document.getElementById('experienceWallHeads')?.replaceChildren(...v.wallHeads.map((h) => el('th', { textContent: h })))
+    document.getElementById('experienceWallRows')?.replaceChildren(...rowsOf(v.wallRows))
+  }
+  // SICE-X (admins only; sicex.mjs): the engine's switches. Read once and after a save, so the
+  // page's own refresh never undoes a change being made.
+  let sicexAsked = false
+  const paintSicex = (s) => {
+    const box = document.getElementById('sicex')
+    if (!box || !Array.isArray(s?.list)) return
+    box.hidden = false
+    document.getElementById('sicexState').textContent = s.enabled ? 'on' : 'OFF'
+    const auto = document.getElementById('sicexAuto')
+    auto.hidden = !s.auto
+    auto.textContent = s.auto ? `It switched itself off at ${String(s.auto.at).slice(0, 16).replace('T', ' ')} UTC: ${s.auto.why}. Turn it on again here once that has been looked into.` : ''
+    document.getElementById('sicexEnabled').checked = s.enabled === true
+    document.getElementById('sicexSites').value = (s.sitesOff ?? []).join(', ')
+    document.getElementById('sicexRows').replaceChildren(...s.list.map((m) => {
+      const on = el('input', { type: 'checkbox', checked: s.set?.[m.id] !== false })
+      on.dataset.module = m.id
+      on.setAttribute('aria-label', `${m.name} on`)
+      const tr = el('tr')
+      tr.append(el('td', { textContent: m.name }), el('td', { textContent: m.what }), el('td', {}, on))
+      return tr
+    }))
+  }
+  const saveSicex = async () => {
+    const said = document.getElementById('sicexSaid')
+    said.textContent = 'Saving…'
+    const modules = {}
+    for (const b of document.querySelectorAll('#sicexRows input[data-module]')) modules[b.dataset.module] = b.checked
+    const sitesOff = document.getElementById('sicexSites').value.split(',').map((x) => x.trim()).filter(Boolean)
+    try {
+      const r = await fetch('/api/admin/sicex', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: document.getElementById('sicexEnabled').checked, modules, sitesOff }) })
+      const j = await r.json().catch(() => null)
+      if (!r.ok) { said.textContent = j?.error ?? 'Not saved'; return }
+      paintSicex(j)
+      said.textContent = 'Saved'
+    } catch {
+      said.textContent = 'Not saved: the server did not answer'
+    }
+  }
+  document.getElementById('sicexSave')?.addEventListener('click', saveSicex)
   const loadWatching = () => {
     if (!isAdmin) return
+    if (!sicexAsked) {
+      sicexAsked = true
+      fetch('/api/sicex').then((x) => (x.ok ? x.json() : null)).then(paintSicex).catch(() => {})
+    }
+    fetch('/api/admin/telemetry').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))).then(paintExperience).catch(() => {})
     fetch('/api/admin/viewers').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))).then(paintWatching).catch(() => {})
   }
 

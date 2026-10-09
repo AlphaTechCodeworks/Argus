@@ -11,6 +11,7 @@
 // Inside an NVR's worker, viewers' starts are paced (live-pacer.mjs); a stream nobody
 // wants any more is stopped through the NVR's idle-stop queue (idle-stops.mjs).
 import { CAP_BYTES, gateSend } from './backpressure.mjs'
+import { frameGaps } from './frame-gaps.mjs'
 import { replayGop } from './gop-replay.mjs'
 import { idleStopQueue } from './idle-stops.mjs'
 import { PRIORITY, RANK, connectLane } from './lanes.mjs'
@@ -68,6 +69,8 @@ export const FIRST_FRAME_P2P_MAIN_MS = (process.env.CCTV_WORKER_FAKE_SDK === '1'
 // The main process without workers (CCTV_LIVE_WORKER off) starts them as it always has.
 const PACED = Boolean(process.env.CCTV_WORKER_NVR)
 const pacers = new Map() // NVR id -> livePacer
+// how evenly the SDK hands frames over, said once a minute (frame-gaps.mjs); watches only
+const gaps = frameGaps('from the NVR')
 const idleStops = new Map() // NVR id -> idleStopQueue
 const pacerFor = (id) => {
   let p = pacers.get(id)
@@ -316,6 +319,7 @@ export class LiveStream {
       return
     }
     if (info.frameType !== FRAME_TYPE_VIDEO || info.length === 0) return
+    gaps?.note(this.label)
     const now = Date.now()
     this.lastFrameAt = now
     this.gotVideo = true

@@ -2,6 +2,7 @@
 // Used by the live grid (viewer.js) and the map's live popup (map.js).
 import { clearStill, maybeKeepStill, showStill } from './stills.js'
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { sicexOn } from './sicex.js'
 import { liveSocket } from './live-mux.js'
 import { activeTrace } from './frame-trace.js'
 
@@ -188,6 +189,20 @@ export function tileDot({ hasVideo = false, recording = undefined, stale = false
   return { className: 'dot dot-live', title: 'Video is arriving' }
 }
 
+/**
+ * Whether a frame the decoder kept past its display time grows the playout buffer (player.js
+ * countDecoderHold). On unless this browser was told otherwise: localStorage 'argus.decoderHold' =
+ * 'off' puts the player back as it was, for comparing the two on the same screen.
+ */
+export function decoderHoldCounted(storage) {
+  try {
+    // (read in here: where storage is blocked, reading the property itself throws)
+    return (storage ?? globalThis.localStorage)?.getItem('argus.decoderHold') !== 'off'
+  } catch {
+    return true
+  }
+}
+
 export class LiveTile {
   /**
    * @param {HTMLElement} tile element with TILE_HTML inside
@@ -244,6 +259,7 @@ export class LiveTile {
       // each frame timed as it arrives, and the burst after a hiccup decoded, not dropped to the next
       // keyframe as if the decoder could not keep up (player.js; stutter report 2.2, 29 Sep)
       arrivalClock: true,
+      countDecoderHold: decoderHoldCounted() && sicexOn('decoderHold'),
       clock: opts.clock,
       maxQueuedFrames: opts.maxQueuedFrames,
       noRewindMs: opts.noRewindMs,
@@ -398,7 +414,8 @@ export class LiveTile {
       this.setStatus(seconds >= 30 ? 'No video received · waiting to connect' : `Waiting for video · ${seconds}s`)
     }
     this.setDot({
-      hasVideo: Boolean(open && this.lastDataAt && s.fps > 0),
+      // (a tile shown from its keyframes alone draws nothing in most seconds: it has video all the same, wall-thin.js)
+      hasVideo: Boolean(open && this.lastDataAt && (s.fps > 0 || this.player.keysOnly || this.player.afterThin)),
       stale: Boolean(open && since >= NO_VIDEO_MS),
       // the live grid has no per-camera recording flag yet; a caller that knows can supply one
       recording: this.opts.recording?.(this)
@@ -679,9 +696,11 @@ export class LiveTile {
   /** Stops borrowing (the source went away, or this tile closes). */
   #unborrow() {
     if (!this.source) return
-    this.source.taps.delete(this.tap)
+    const src = this.source
+    src.taps.delete(this.tap)
     this.source = null
     this.tap = null
+    this.opts.onUnborrow?.(src) // (viewer.js: a main stream started ahead goes when nothing shows it)
   }
 
   onUnsupported(codecId) {

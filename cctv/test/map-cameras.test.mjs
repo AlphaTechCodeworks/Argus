@@ -184,3 +184,14 @@ const planMap = (cams) => ({ mode: 'plan', plan: { w: 1000, h: 800, cams } })
 
 console.log(failures ? `\n${failures} FAILED` : '\nAll passed')
 process.exit(failures ? 1 : 0)
+
+// ---- recording switched off: live is green, not "not recording" ---------------------------------
+{
+  const off = cameraStates({ cameras: [{ nvrId: 'a', ch: 0, online: true, recording: false }, { nvrId: 'a', ch: 1, online: false, recording: false }] })
+  check('nothing recording anywhere: an online camera is live', off.byKey['a/0'].state === 'live')
+  check('  and an offline one is offline', off.byKey['a/1'].state === 'offline')
+  const on = cameraStates({ cameras: [{ nvrId: 'a', ch: 0, online: true, recording: false }, { nvrId: 'b', ch: 0, online: true, recording: true }] })
+  check('one camera recording somewhere: one that is not stays "not recording"', on.byKey['a/0'].state === 'idle' && on.byKey['b/0'].state === 'recording')
+  check('live ranks with recording: a cluster of live cameras is not coloured as a fault', STATES.live.rank === STATES.recording.rank)
+}
+assert.equal(stateCounts([{ state: 'live' }, { state: 'live' }, { state: 'offline' }]).live, 2, 'live cameras are counted for the legend')
