@@ -9,7 +9,7 @@ import { Readable } from 'node:stream'
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'argus-telemetry-'))
 const { WEIGHTS, attention, score, smoothness, stability, startupScore, switchScore, scrubScore } = await import('../public/qoe.js')
 const { createCollector, MAX_SAMPLES } = await import('../public/telemetry.js')
-const { TELEMETRY_PATH, TELEMETRY_ADMIN_PATH, cleanBatch, cohortOf, handleTelemetry, makeTelemetry } = await import('../telemetry.mjs')
+const { BODY_LIMIT, TELEMETRY_PATH, TELEMETRY_ADMIN_PATH, cleanBatch, cohortOf, handleTelemetry, makeTelemetry } = await import('../telemetry.mjs')
 
 const near = (a, b, e = 1e-9) => Math.abs(a - b) < e
 
@@ -250,4 +250,16 @@ test('by NVR: the slowest to a first picture comes first, with its frozen share'
   assert.ok(near(nvrs[0].frozenShare, 0.5))
   const { nvrView } = await import('../public/experience-view.js')
   assert.deepEqual(nvrView({ nvrs }).nvrRows[1].slice(0, 5), ['quick', '1', '0.4 s', '0.4 s', '–'])
+})
+
+test('a page of many tiles is sampled less often, so its batch stays under what the server reads', () => {
+  const sent = []
+  const c = createCollector({ now: () => 5_000_000, send: (b) => sent.push(b), device: 'd', page: 'live' })
+  const wall = Array.from({ length: 100 }, (_, i) => tile({ ch: i, arrived: 25, decoded: 25, gapMs: 180, rafHz: 60, rafGapMs: 17 }))
+  c.watch(wall)
+  for (let i = 0; i < 10; i++) c.sample(wall) // ten seconds of a 10 x 10
+  c.flush()
+  assert.equal(sent[0].samples.length, 200)
+  assert.ok(JSON.stringify(sent[0]).length < BODY_LIMIT, `${JSON.stringify(sent[0]).length} bytes`)
+  assert.deepEqual([sent[0].samples[0].in, sent[0].samples[0].rafHz], [25, 60])
 })

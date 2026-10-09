@@ -14,6 +14,7 @@
 export const SAMPLE_MS = 1000
 export const WATCH_MS = 200 // how closely a first picture is timed
 export const FLUSH_MS = 10_000
+export const PAGE_SAMPLES = 20 // samples a second a page sends at most: 100 tiles are each sampled every 5 s
 export const MAX_SAMPLES = 600 // a minute of a 3 x 3 with room to spare; older ones go first
 export const MAX_EVENTS = 200
 const round = (x, p = 1) => (Number.isFinite(x) ? Math.round(x * p) / p : 0)
@@ -56,8 +57,15 @@ export function createCollector({ now, send, device, page }) {
     }
     for (const k of seen.keys()) if (!here.has(k)) seen.delete(k)
   }
-  /** One sample per playing tile (SAMPLE_MS). tiles as for watch, with the player's counters. */
+  /**
+   * One sample per playing tile (SAMPLE_MS). tiles as for watch, with the player's counters. A page
+   * of many tiles is sampled less often, all of its tiles at once: a batch from a 6 x 6 was already
+   * past what the server reads (telemetry.mjs BODY_LIMIT) and was refused whole, so the big layouts,
+   * the ones in question, were the ones never measured.
+   */
+  let turn = 0
   const sample = (tiles) => {
+    if (turn++ % Math.max(1, Math.ceil(tiles.length / PAGE_SAMPLES)) !== 0) return
     const t = now()
     for (const tile of tiles) {
       const s = seen.get(keyOf(tile))
