@@ -193,9 +193,10 @@ export function tileDot({ hasVideo = false, recording = undefined, stale = false
  * countDecoderHold). On unless this browser was told otherwise: localStorage 'argus.decoderHold' =
  * 'off' puts the player back as it was, for comparing the two on the same screen.
  */
-export function decoderHoldCounted(storage = globalThis.localStorage) {
+export function decoderHoldCounted(storage) {
   try {
-    return storage?.getItem('argus.decoderHold') !== 'off'
+    // (read in here: where storage is blocked, reading the property itself throws)
+    return (storage ?? globalThis.localStorage)?.getItem('argus.decoderHold') !== 'off'
   } catch {
     return true
   }
