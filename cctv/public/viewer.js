@@ -15,6 +15,7 @@ import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
 import { startTelemetry } from './telemetry.js'
+import { THIN_MIN_TILES, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
 // This page is set up from the account's preferences (picture fit, layout, hide offline, the view
@@ -690,13 +691,42 @@ function updateWallHealth() {
   const decoded = full.reduce((a, w) => a + w.decoded, 0)
   const share = Math.min(1, drawn / arrived)
   const per = (x) => (x / full.length / playing.length).toFixed(1)
-  const label = `${Math.round(share * 100)}% of frames shown`
+  const low = playing.filter((x) => x.player.keysOnly).length
+  const label = `${Math.round(share * 100)}% of frames shown${low ? ` · ${playing.length - low} at full rate` : ''}`
   if (el.textContent !== label) el.textContent = label
   el.dataset.level = share >= WALL_OK ? 'ok' : share >= WALL_POOR ? 'warn' : 'bad'
-  el.title = `Last ${full.length} s, ${playing.length} cameras playing. Each second, per camera: ${per(arrived)} frames arrive, ${per(decoded)} are decoded, ${per(drawn)} are drawn. The decoder held a frame up to ${Math.round(Math.max(...full.map((w) => w.held)))} ms.${share < WALL_OK ? ' This device is not keeping up with this layout: a smaller layout will be smoother.' : ''}`
+  el.title = `Last ${full.length} s, ${playing.length} cameras playing. Each second, per camera: ${per(arrived)} frames arrive, ${per(decoded)} are decoded, ${per(drawn)} are drawn. The decoder held a frame up to ${Math.round(Math.max(...full.map((w) => w.held)))} ms.${low ? ` This device cannot decode every camera in this layout: the ${playing.length - low} busiest play every frame, the other ${low} show a current picture every couple of seconds.` : share < WALL_OK ? ' This device is not keeping up with this layout: a smaller layout will be smoother.' : ''}`
   el.hidden = false
 }
 setInterval(() => { try { updateWallHealth() } catch {} }, 1000)
+
+// ---- a wall this device cannot decode in full: the busiest tiles keep every frame (wall-thin.js) ----
+// On unless this browser was told otherwise: localStorage 'argus.wallThin' = 'off' leaves every tile
+// at full rate, as before.
+let thin = thinStart()
+const wallThinOn = () => { try { return localStorage.getItem('argus.wallThin') !== 'off' } catch { return true } }
+function updateWallThin() {
+  if (document.hidden) return
+  const playing = tiles.filter((x) => !x.closed && !x.suspended && gridTiles.includes(x) && x.player?.firstPainted === true)
+  if (single !== null || playing.length < THIN_MIN_TILES || !wallThinOn()) {
+    // (a smaller grid, a camera opened full-size, or switched off: everything at full rate again)
+    if (Number.isFinite(thin.budget)) thin = thinStart()
+    for (const x of tiles) if (x.player?.keysOnly) x.player.setKeysOnly(false)
+    return
+  }
+  const stat = (x, k) => Number(x.player.stats?.[k]) || 0
+  const full = playing.filter((x) => !x.player.keysOnly && !x.player.afterThin)
+  thin = nextBudget(thin, {
+    now: performance.now(),
+    fed: full.reduce((a, x) => a + stat(x, 'arrived'), 0),
+    decoded: full.reduce((a, x) => a + stat(x, 'decoded'), 0),
+    heldMs: full.reduce((a, x) => Math.max(a, stat(x, 'decodeMs')), 0),
+    all: playing.reduce((a, x) => a + stat(x, 'arrived'), 0)
+  })
+  const keep = fullRateTiles(playing.map((x) => ({ key: camKey(x), fps: stat(x, 'arrived'), kbps: stat(x, 'kbps'), full: !x.player.keysOnly })), thin.budget)
+  for (const x of playing) x.player.setKeysOnly(!keep.has(camKey(x)))
+}
+setInterval(() => { try { updateWallThin() } catch {} }, 2000)
 
 let stateFrame = null
 new MutationObserver(() => {

@@ -223,6 +223,8 @@ export class VideoPlayer {
     this.countDecoderHold = options.countDecoderHold !== false
     this.overloadedAt = -Infinity // when the decoder last fell so far behind that frames were skipped to a keyframe
     this.keepingUp = true // the decoder gives back as many frames as it is fed (#everySecond)
+    this.keysOnly = false // shown from keyframes alone (setKeysOnly)
+    this.afterThin = false // back at full rate, waiting for the keyframe to carry on from
     this.lately = [] // [arrived, decoded] of the last few seconds
     // noRewindMs: capture times (ms) of the newest frame timed as it arrived, and of the newest queued
     // to be shown (or drawn); kept across reset(), as a reconnect's replay starts before what was shown
@@ -248,7 +250,7 @@ export class VideoPlayer {
     this.closed = false
     // older: frames decoded and not shown for being at or before one already shown (noRewindMs)
     this.stats = { fps: 0, jitterMs: 0, delayMs: 0, dropped: 0, late: 0, resyncs: 0, older: 0, kbps: 0, width: 0, height: 0, codec: '', hw: '', coded: '', visible: '' }
-    this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0, arrived: 0, decoded: 0, gap: 0, lastIn: 0, decMax: 0, skip: 0, over: 0 }
+    this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0, arrived: 0, decoded: 0, gap: 0, lastIn: 0, decMax: 0, skip: 0, over: 0, thinned: 0 }
     this.grabs = [] // callers waiting for the next frame shown, at full size (grab())
     this.onChunk = null // (chunk) => void: sees every encoded frame as it arrives (set while the picture panel is open)
     this.keyTs = [] // timestamps (µs) of the last keyframes received, oldest first
@@ -281,6 +283,17 @@ export class VideoPlayer {
     this.win.lastIn = cameIn
     this.win.arrived++
     if (chunk.isKey) this.#noteKey(chunk.timestampUs)
+    // A wall the device cannot decode in full (wall-thin.js): this tile is shown from its keyframes
+    // alone, a current picture every keyframe interval, and its other frames are let go here, before
+    // the decoder. Back at full rate it carries on from the next keyframe: the frames between lean on
+    // ones that were never decoded.
+    if (this.keysOnly || this.afterThin) {
+      if (!chunk.isKey) {
+        this.win.thinned++
+        return
+      }
+      this.afterThin = false
+    }
     if (this.onChunk) {
       try {
         this.onChunk(chunk)
@@ -609,6 +622,13 @@ export class VideoPlayer {
     if (c) this.clock.setOptions(this.clock.rate === 1 ? c : this.clockOptions)
   }
 
+  /** Keyframes only (true), or every frame again from the next keyframe (false). See push. */
+  setKeysOnly(on) {
+    if (Boolean(on) === this.keysOnly) return
+    this.keysOnly = Boolean(on)
+    if (!this.keysOnly) this.afterThin = true
+  }
+
   /** Freezes on the current picture; buffered frames are kept. */
   pause() {
     this.paused = true
@@ -907,6 +927,7 @@ export class VideoPlayer {
       arriveGapMs: Math.round(w.gap),
       decodeMs: Math.round(w.decMax),
       skipped: w.skip,
+      thinned: w.thinned,
       overflowed: w.over,
       jitterMs: Math.round(Math.sqrt(variance) * 10) / 10,
       kbps: Math.round((w.bytes * 8) / 1000),
@@ -925,6 +946,7 @@ export class VideoPlayer {
     w.gap = 0
     w.decMax = 0
     w.skip = 0
+    w.thinned = 0
     w.over = 0
     w.bytes = 0
     w.intervals = []
