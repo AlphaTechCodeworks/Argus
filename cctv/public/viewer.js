@@ -15,6 +15,7 @@ import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
 import { startTelemetry } from './telemetry.js'
+import { layoutNote as profileNote, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
 import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
@@ -667,8 +668,9 @@ function updateLiveState() {
 // number that says whether this device keeps up with this layout (a 36-tile grid drew 72-80% on the
 // viewing PC, a 100-tile one 8%, 2026-10-09). Shown beside the connection summary from four tiles
 // up, green from 90%, amber from 70%, red below; the measurements behind it are in its tooltip.
-const WALL_OK = 0.9
-const WALL_POOR = 0.7
+let wallProfile = null // this device's measured layouts (wall-profile.js), read when first needed
+let wallProfileSavedAt = 0
+const storageOrNull = () => { try { return globalThis.localStorage } catch { return null } }
 const wallWindow = [] // one entry a second: { n, arrived, decoded, drawn, held }
 function updateWallHealth() {
   let el = document.getElementById('wallHealth')
@@ -697,8 +699,17 @@ function updateWallHealth() {
   const label = low ? `${playing.length - low} of ${playing.length} at full rate · ${Math.round(share * 100)}% of their frames shown` : `${Math.round(share * 100)}% of frames shown`
   if (el.textContent !== label) el.textContent = label
   // (some shown from keyframes only: amber at best, this layout is more than the device can play in full)
-  el.dataset.level = share < WALL_POOR ? 'bad' : share < WALL_OK || low ? 'warn' : 'ok'
-  el.title = `Last ${full.length} s, ${playing.length} cameras playing. Each second, per camera: ${per(arrived)} frames arrive, ${per(decoded)} are decoded, ${per(drawn)} are drawn. The decoder held a frame up to ${Math.round(Math.max(...full.map((w) => w.held)))} ms.${low ? ` This device cannot decode every camera in this layout: the ${playing.length - low} busiest play every frame, the other ${low} show a current picture every few seconds.` : share < WALL_OK ? ' This device is not keeping up with this layout: a smaller layout will be smoother.' : ''}`
+  const level = statusOf(share)
+  el.dataset.level = level === 'ok' && low ? 'warn' : level
+  el.title = `Last ${full.length} s, ${playing.length} cameras playing. Each second, per camera: ${per(arrived)} frames arrive, ${per(decoded)} are decoded, ${per(drawn)} are drawn. The decoder held a frame up to ${Math.round(Math.max(...full.map((w) => w.held)))} ms.${low ? ` This screen cannot decode every camera in this layout: the ${playing.length - low} busiest play every frame, the other ${low} show a current picture every few seconds.` : level !== 'ok' ? ' This screen is not keeping up with this layout: a smaller layout will be smoother.' : ''}`
+  // into this device's profile, kept every 15 s; the layout picker says what it has seen
+  wallProfile ??= readProfile(storageOrNull())
+  wallProfile = noteSecond(wallProfile, playing.length, share, { thinned: low > 0 })
+  if (Date.now() - wallProfileSavedAt > 15_000) {
+    wallProfileSavedAt = Date.now()
+    saveProfile(storageOrNull(), wallProfile)
+    markLayouts()
+  }
   el.hidden = false
 }
 setInterval(() => { try { updateWallHealth() } catch {} }, 1000)
@@ -1560,7 +1571,36 @@ try {
   if (saved && LAYOUTS[saved] && (!isPhone() || PHONE_LAYOUTS.includes(saved))) layoutSelect.value = saved
 } catch {}
 markPhoneLayout()
+/** Beside each layout this screen has played for a while: the share of frames it drew there. */
+function markLayouts() {
+  wallProfile ??= readProfile(storageOrNull())
+  for (const o of layoutSelect.querySelectorAll('option')) {
+    if (!LAYOUTS[o.value] || LAYOUTS[o.value].list || o.value === 'auto') continue
+    o.dataset.base ??= o.textContent
+    const note = profileNote(wallProfile, layoutCells(o.value).cells.length)
+    const text = note ? `${o.dataset.base} · ${note.short}` : o.dataset.base
+    if (o.textContent !== text) o.textContent = text
+    o.title = note ? note.long : ''
+  }
+}
+/** Choosing a layout this screen handled badly says so, once a visit for each. It never stops anyone. */
+const layoutWarned = new Set()
+function warnLayout() {
+  const note = profileNote(wallProfile ?? readProfile(storageOrNull()), layoutCells(layoutSelect.value).cells.length)
+  if (!note || note.status === 'ok' || layoutWarned.has(layoutSelect.value)) return
+  layoutWarned.add(layoutSelect.value)
+  const el = document.createElement('div')
+  el.className = 'page-note layout-note'
+  el.setAttribute('role', 'status')
+  el.textContent = note.long
+  const host = document.getElementById('layoutNote') ?? grid // (where the page's other layout note goes)
+  host.after(el)
+  setTimeout(() => el.remove(), 7000)
+}
+try { markLayouts() } catch {}
+
 layoutSelect.addEventListener('change', () => {
+  try { warnLayout() } catch {}
   page = 0
   markPhoneLayout()
   preferenceStorage.setItem(LAYOUT_KEY, layoutSelect.value)
