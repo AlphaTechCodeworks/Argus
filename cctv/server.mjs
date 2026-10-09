@@ -16,6 +16,9 @@
 //   /api/camera-links, /api/admin/camera-links -> which camera adjoins which, see camera-links.mjs
 //   /api/admin/discovery       -> find TVT NVRs on the network (admins), see discovery.mjs
 //   GET  /api/admin/vpn        -> VPN hub status and the remote sites (admins), see vpn.mjs
+//   GET  /api/app/android[/download] -> the Android app's installer: its version and checksum, and
+//                                 the file, for the app to update itself (any signed-in user), see
+//                                 app-download.mjs
 //   GET  /api/admin/connector[/installer] -> the NVR site-server installer: its status, and the
 //                                 download (admins), see connector-download.mjs
 //   /api/admin/nvrs/:id/substreams -> sub-stream codec per channel, switch to H.264 (admins), see substreams.mjs
@@ -129,6 +132,7 @@ import { NVR_MAIN_ACTIONS, connectPlayback } from './rec-playback.mjs'
 import { accessWatch } from './access-watch.mjs'
 import { vpnView } from './vpn.mjs'
 import { sendInstaller, statusOf } from './connector-download.mjs'
+import { describeApp, sendApp } from './app-download.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
 import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
 import { recentRefusals } from './nvr-health.mjs'
@@ -1106,6 +1110,14 @@ const handleRequest = async (req, res) => {
   // ?for=playback: the ones they may play back instead (playbackCameras: sd, hd, nvrHd, legs). An admin
   // gets every camera with everything allowed.
   if (pathname === '/api/cameras') return sendJson(res, 200, url.searchParams.get('for') === 'playback' ? playbackCameras(who, allCameras({ live: true })) : liveCameras(who, allCameras({ live: true })))
+  // Argus for Android updates itself from the server it is signed in to: what installer this server
+  // holds, and the installer (app-download.mjs). Any signed-in user: it is the app they are running.
+  if (pathname === '/api/app/android' || pathname === '/api/app/android/download') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    if (pathname.endsWith('/download')) return sendApp(res)
+    const app = await describeApp()
+    return app ? sendJson(res, 200, app) : sendJson(res, 404, { error: 'No app installer has been placed on this server.' })
+  }
   // a map shows where cameras are and what they cover: only the sites and cameras this user may see
   // (maps.mjs mapsFor; a site is visible when one of its NVRs' cameras is)
   const siteVisible = (site) => [...nvrs.values()].some((n) => n.site === site && n.channels.some((c) => canSee(n.id, c.ch)))
