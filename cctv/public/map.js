@@ -12,7 +12,7 @@ import { showStill } from './stills.js'
 import { searchCameras } from './grid-view.js'
 import { planFlight, flightPose } from './map-flight.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
-import { preferenceStorage } from './user-settings.js'
+import { preferenceStorage, preferencesReady } from './user-settings.js'
 import {
   MAX_LAT,
   STATES,
@@ -55,6 +55,10 @@ import {
   siteView,
   visibleMarkers
 } from './map-model.js'
+
+// The names switch, the layer and the site last chosen come with the account: this page's own
+// script waits here until they are known (user-settings.js, which may not wait itself).
+await preferencesReady
 
 const $ = (id) => document.getElementById(id)
 const LAYERS = {

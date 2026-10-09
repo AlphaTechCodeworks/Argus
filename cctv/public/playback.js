@@ -28,6 +28,7 @@
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
 import { searchCameras } from './grid-view.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
+import { preferencesReady } from './user-settings.js'
 import { PLAYBACK_CLOCK, REMOTE_PLAYBACK_CLOCK } from './playout.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
@@ -67,6 +68,11 @@ import { MAX_BOXES, boxSeekMs, follow as followView, fmtClock, laneBoxes, makeVi
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
 import { allowedSpeeds, clampSpeed, frameStep, ignoredRepeat, shuttleLabel, shuttleRate, stepNotBefore } from './pb-transport.js'
 import { DEFAULT_OSD, drawOsd, osdFont, osdIsOff, osdLayout } from './osd-overlay.js'
+
+// The site last worked in (camera-browser.js workspaceSite) comes with the account, and decides
+// which camera opens: this page's own script waits here until the preferences are known
+// (user-settings.js, which may not wait itself).
+await preferencesReady
 
 // Video is decoded here in the browser, exactly as the camera encoded it; the
 // server never converts it. Recordings in H.265 need a browser/PC that can decode H.265.

@@ -8,7 +8,7 @@ import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-
 import { MAX_VIEW_CAMERAS, applyViews, autoLiveGrid, checkView, normaliseViews, searchCameras } from './grid-view.js'
 import { icon } from './icons.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
-import { preferenceStorage } from './user-settings.js'
+import { preferenceStorage, preferencesReady } from './user-settings.js'
 import { freshenForPageChange, muxState, useMux } from './live-mux.js'
 import { H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML, mainNotConvertedTitle } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
@@ -16,6 +16,11 @@ import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
+// This page is set up from the account's preferences (picture fit, layout, hide offline, the view
+// and site last chosen), from its first lines on: it waits here until they are known. It is this
+// page's own script, which nothing imports, so it may wait at the top level; user-settings.js, which
+// every page shares, may not (the reason is at the top of that file).
+await preferencesReady
 // ?pacing=off draws frames as soon as they decode (for before/after comparison)
 const PACING = new URLSearchParams(location.search).get('pacing') !== 'off'
 // Every tile's stream on one connection (live-mux.js): the browser opens WebSockets one at a time,

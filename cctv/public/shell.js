@@ -7,7 +7,7 @@
 import { PHONE_BAR, currentId, navFor } from './nav-model.js'
 import { icon } from './icons.js'
 import { nextTheme, readTheme, saveTheme } from './theme.js'
-import { preferenceStorage, savePendingSettings } from './user-settings.js'
+import { preferenceStorage, preferencesReady, savePendingSettings } from './user-settings.js'
 
 const store = preferenceStorage
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
@@ -149,7 +149,12 @@ export function mountShell() {
     })
 }
 
-mountShell()
+// The theme and the pinned sidebar come with the account, so the shell is drawn when its preferences
+// are known (user-settings.js: it always says so, within seconds even when the server does not
+// answer). Asked for with then(), not a top-level await: this file is the first script of every page
+// and stays one that never waits. It asks first, so it is still drawn before a page script that
+// waits for the same preferences goes on.
+preferencesReady.then(() => mountShell())
 
 // Presence heartbeat also notices an administrator revoking this browser's cookie.
 setInterval(async () => {
