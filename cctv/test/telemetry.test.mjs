@@ -199,3 +199,14 @@ test('the store stays inside its size and its days, and a full one drops the bat
   assert.doesNotThrow(() => broken.add('u', cleanBatch(batch(), t)))
   assert.equal(broken.counts.notWritten, 1)
 })
+
+test('the Health card: two rows, the parts not seen said so, an empty period said so', async () => {
+  const { experienceView } = await import('../public/experience-view.js')
+  assert.equal(experienceView(null).note, 'Nothing measured yet in this period.')
+  const v = experienceView({ hours: 24, kept: { notWritten: 2 }, cohorts: { apsi: { score: 0.681, from: ['smoothness', 'startup'], parts: { smoothness: 0.56, startup: 0.85 }, sessions: 3, tileSeconds: 600, batches: 9 }, holdout: { score: null, from: [], parts: {}, sessions: 0, tileSeconds: 0, batches: 0 } } })
+  assert.equal(v.heads.length, 10)
+  assert.deepEqual(v.rows[0], ['Optimised', '68', '56', '85', '–', '–', '–', '–', '3', '10 tile-min'])
+  assert.deepEqual(v.rows[1].slice(1, 3), ['–', '–'])
+  assert.match(v.note, /not seen yet: scrubbing, switching, stability, efficiency/)
+  assert.match(v.note, /2 batches were not kept/)
+})

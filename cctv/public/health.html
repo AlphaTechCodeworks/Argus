@@ -56,6 +56,16 @@
       </table>
       <p class="hp-note"><span id="watchingNote"></span> This lists people with video open now; someone signed in with no camera open is not on it. Sign-ins are on the <a href="/audit.html">Audit</a> page.</p>
     </details>
+    <!-- Admins only: the experience score viewers' pages measured (telemetry.mjs), the optimised
+         viewers beside the holdout that stays on today's rules. -->
+    <details id="experience" class="hp-history" open hidden>
+      <summary><h2>Viewing experience</h2></summary>
+      <table class="hp-table">
+        <thead><tr id="experienceHeads"></tr></thead>
+        <tbody id="experienceRows"></tbody>
+      </table>
+      <p class="hp-note" id="experienceNote"></p>
+    </details>
     <h2>This server</h2>
     <div id="system" class="cards"></div>
 

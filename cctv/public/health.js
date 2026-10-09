@@ -4,6 +4,7 @@
 // which is why the banner wording lives here rather than in the page.
 import { smartRows, smartSummary } from './smart-view.js'
 import { viewersView } from './viewers-view.js'
+import { experienceView } from './experience-view.js'
 
 // Absolute times are shown on the site's wall clock, not the viewing PC's zone (a screen set to UTC
 // otherwise showed UTC): add the site offset, then read it back as UTC. siteTzMs is set from
@@ -777,8 +778,19 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     }))
     document.getElementById('watchingNote').textContent = [r.rows.length ? r.summary : r.empty, r.more].filter(Boolean).join(' ')
   }
+  // Viewing experience (admins only; experience-view.js shapes it): the score viewers' pages measured.
+  const paintExperience = (d) => {
+    const box = document.getElementById('experience')
+    if (!box) return
+    const v = experienceView(d)
+    box.hidden = false
+    document.getElementById('experienceHeads').replaceChildren(...v.heads.map((h) => el('th', { textContent: h })))
+    document.getElementById('experienceRows').replaceChildren(...v.rows.map((r) => { const tr = el('tr'); for (const c of r) tr.append(el('td', { textContent: c })); return tr }))
+    document.getElementById('experienceNote').textContent = v.note
+  }
   const loadWatching = () => {
     if (!isAdmin) return
+    fetch('/api/admin/telemetry').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))).then(paintExperience).catch(() => {})
     fetch('/api/admin/viewers').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))).then(paintWatching).catch(() => {})
   }
 
