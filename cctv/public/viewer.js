@@ -611,7 +611,9 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
 
 /** The cameras that are offline, by site, in a small dialog: what the header's "N offline" opens. */
 /** The cameras of this site or view, offline ones too, without the NVRs' empty channel slots. */
-const realCameras = () => shownCameras(gridCameras(), { ...gridView(), hideOffline: false }).filter((c) => c.configured !== false)
+function realCameras() {
+  return shownCameras(gridCameras(), { ...gridView(), hideOffline: false }).filter((c) => c.configured !== false)
+}
 
 function showOffline(off, context) {
   let dlg = document.getElementById('offlineDlg')
