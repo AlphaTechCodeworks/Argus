@@ -183,3 +183,9 @@ body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-ins
 }
 .live-page .single-overlay .links .cam-link:hover, .live-page .single-overlay .links .cam-link:focus-visible { background: rgba(40, 44, 52, .85); }
 .live-page .single-overlay .links .cam-link.suggested { border-style: dashed; font-weight: 400; }
+/* The share of arriving frames this screen draws (viewer.js updateWallHealth). */
+.live-page .wall-health { margin-inline-start: auto; margin-inline-end: 8px; cursor: help; }
+.live-page .wall-health + .live-state { margin-inline-start: 0; }
+.live-page .wall-health[data-level="ok"] { color: var(--ok-text); }
+.live-page .wall-health[data-level="warn"] { color: #f5b942; border-color: #f5b942; }
+.live-page .wall-health[data-level="bad"] { color: #fff; background: rgba(200, 30, 30, .92); border-color: transparent; }

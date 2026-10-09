@@ -661,6 +661,43 @@ function updateLiveState() {
   if (state.textContent !== label) state.textContent = label
   state.classList.toggle('all-live', live > 0 && live === occupied.length)
 }
+// ---- how much of the video this screen is actually showing ----
+// Of the frames that arrive for the tiles on screen, the share drawn, over the last 10 s: the one
+// number that says whether this device keeps up with this layout (a 36-tile grid drew 72-80% on the
+// viewing PC, a 100-tile one 8%, 2026-10-09). Shown beside the connection summary from four tiles
+// up, green from 90%, amber from 70%, red below; the measurements behind it are in its tooltip.
+const WALL_OK = 0.9
+const WALL_POOR = 0.7
+const wallWindow = [] // one entry a second: { n, arrived, decoded, drawn, held }
+function updateWallHealth() {
+  let el = document.getElementById('wallHealth')
+  if (!el) {
+    el = document.createElement('span')
+    el.id = 'wallHealth'
+    el.className = 'live-state wall-health'
+    el.hidden = true
+    document.getElementById('liveState').before(el)
+  }
+  if (document.hidden) return // (a hidden page draws nothing: that is not the device falling behind)
+  const playing = tiles.filter((x) => !x.closed && !x.suspended && x.player?.firstPainted === true)
+  const sum = (k) => playing.reduce((a, x) => a + (Number(x.player.stats?.[k]) || 0), 0)
+  wallWindow.push({ n: playing.length, arrived: sum('arrived'), decoded: sum('decoded'), drawn: sum('fps'), held: playing.reduce((a, x) => Math.max(a, Number(x.player.stats?.decodeMs) || 0), 0) })
+  if (wallWindow.length > 10) wallWindow.shift()
+  const full = wallWindow.filter((w) => w.n === playing.length) // (a layout just changed: only its own seconds)
+  const arrived = full.reduce((a, w) => a + w.arrived, 0)
+  if (playing.length < 4 || full.length < 5 || !(arrived > 0)) { el.hidden = true; return }
+  const drawn = full.reduce((a, w) => a + w.drawn, 0)
+  const decoded = full.reduce((a, w) => a + w.decoded, 0)
+  const share = Math.min(1, drawn / arrived)
+  const per = (x) => (x / full.length / playing.length).toFixed(1)
+  const label = `${Math.round(share * 100)}% of frames shown`
+  if (el.textContent !== label) el.textContent = label
+  el.dataset.level = share >= WALL_OK ? 'ok' : share >= WALL_POOR ? 'warn' : 'bad'
+  el.title = `Last ${full.length} s, ${playing.length} cameras playing. Each second, per camera: ${per(arrived)} frames arrive, ${per(decoded)} are decoded, ${per(drawn)} are drawn. The decoder held a frame up to ${Math.round(Math.max(...full.map((w) => w.held)))} ms.${share < WALL_OK ? ' This device is not keeping up with this layout: a smaller layout will be smoother.' : ''}`
+  el.hidden = false
+}
+setInterval(() => { try { updateWallHealth() } catch {} }, 1000)
+
 let stateFrame = null
 new MutationObserver(() => {
   if (stateFrame !== null) return
