@@ -165,6 +165,7 @@ import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder, UI_PREFS_PATH, handleUiPreferences } from './user-prefs.mjs'
 import { handleTelemetry, makeTelemetry } from './telemetry.mjs'
 import { handleHold, makeHolds } from './stream-holds.mjs'
+import { handleTolerance, makeTolerance } from './wall-tolerance.mjs'
 import { xmlOnline } from './xml-session.mjs'
 
 const {
@@ -298,6 +299,7 @@ const telemetry = makeTelemetry()
 // Only on an NVR reached on the local network that is refusing nothing: a P2P or VPN NVR's main
 // stream rides the same slow link as the one being watched, and one that refuses streams has none
 // to spare (warm-streams.mjs keeps away from it for the same reason).
+const wallTolerance = makeTolerance({ dir: auth.DATA_DIR })
 const holds = makeHolds({
   streamOf: (id, ch) => {
     const n = nvrs.get(id)
@@ -748,6 +750,9 @@ const handleRequest = async (req, res) => {
     mayHd: (nvr, ch) => can(who, 'live', { nvr, ch }) === true && can(who, 'live-hd', { nvr, ch }) === true
   })
   if (holdRoute) return sendJson(res, ...holdRoute)
+  // what counts as an acceptable wall, as the administrator says (wall-tolerance.mjs)
+  const toleranceRoute = await handleTolerance(req, pathname, { user, admin: who.admin === true, store: wallTolerance, log: console.log })
+  if (toleranceRoute) return sendJson(res, ...toleranceRoute)
 
   // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
   // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own.

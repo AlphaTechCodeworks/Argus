@@ -15,7 +15,7 @@ import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
 import { startTelemetry } from './telemetry.js'
-import { layoutNote as profileNote, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
+import { TOLERANCE, layoutNote as profileNote, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
 import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
@@ -669,6 +669,7 @@ function updateLiveState() {
 // viewing PC, a 100-tile one 8%, 2026-10-09). Shown beside the connection summary from four tiles
 // up, green from 90%, amber from 70%, red below; the measurements behind it are in its tooltip.
 let wallProfile = null // this device's measured layouts (wall-profile.js), read when first needed
+let wallTol = TOLERANCE // the administrator's, once read (wall-tolerance.mjs); the owner's defaults until then
 let wallProfileSavedAt = 0
 const storageOrNull = () => { try { return globalThis.localStorage } catch { return null } }
 const wallWindow = [] // one entry a second: { n, arrived, decoded, drawn, held }
@@ -699,7 +700,7 @@ function updateWallHealth() {
   const label = low ? `${playing.length - low} of ${playing.length} at full rate · ${Math.round(share * 100)}% of their frames shown` : `${Math.round(share * 100)}% of frames shown`
   if (el.textContent !== label) el.textContent = label
   // (some shown from keyframes only: amber at best, this layout is more than the device can play in full)
-  const level = statusOf(share)
+  const level = statusOf(share, wallTol)
   el.dataset.level = level === 'ok' && low ? 'warn' : level
   el.title = `Last ${full.length} s, ${playing.length} cameras playing. Each second, per camera: ${per(arrived)} frames arrive, ${per(decoded)} are decoded, ${per(drawn)} are drawn. The decoder held a frame up to ${Math.round(Math.max(...full.map((w) => w.held)))} ms.${low ? ` This screen cannot decode every camera in this layout: the ${playing.length - low} busiest play every frame, the other ${low} show a current picture every few seconds.` : level !== 'ok' ? ' This screen is not keeping up with this layout: a smaller layout will be smoother.' : ''}`
   // into this device's profile, kept every 15 s; the layout picker says what it has seen
@@ -1577,7 +1578,7 @@ function markLayouts() {
   for (const o of layoutSelect.querySelectorAll('option')) {
     if (!LAYOUTS[o.value] || LAYOUTS[o.value].list || o.value === 'auto') continue
     o.dataset.base ??= o.textContent
-    const note = profileNote(wallProfile, layoutCells(o.value).cells.length)
+    const note = profileNote(wallProfile, layoutCells(o.value).cells.length, { tol: wallTol })
     const text = note ? `${o.dataset.base} · ${note.short}` : o.dataset.base
     if (o.textContent !== text) o.textContent = text
     o.title = note ? note.long : ''
@@ -1586,7 +1587,7 @@ function markLayouts() {
 /** Choosing a layout this screen handled badly says so, once a visit for each. It never stops anyone. */
 const layoutWarned = new Set()
 function warnLayout() {
-  const note = profileNote(wallProfile ?? readProfile(storageOrNull()), layoutCells(layoutSelect.value).cells.length)
+  const note = profileNote(wallProfile ?? readProfile(storageOrNull()), layoutCells(layoutSelect.value).cells.length, { tol: wallTol })
   if (!note || note.status === 'ok' || layoutWarned.has(layoutSelect.value)) return
   layoutWarned.add(layoutSelect.value)
   const el = document.createElement('div')
@@ -1598,6 +1599,58 @@ function warnLayout() {
   setTimeout(() => el.remove(), 7000)
 }
 try { markLayouts() } catch {}
+
+// ---- the administrator's tolerance for a wall (wall-tolerance.mjs) ----
+// Read once for everyone; an administrator can change it in View options. A server without it
+// (an older one) leaves the owner's defaults in place.
+async function wallToleranceSetup(isAdmin) {
+  try {
+    const r = await fetch('/api/wall-tolerance')
+    const t = r.ok ? await r.json() : null
+    if (t && t.okShare > t.poorShare) wallTol = { okShare: t.okShare, poorShare: t.poorShare }
+    else if (!r.ok) return // (no such route: nothing to set either)
+  } catch {
+    return
+  }
+  markLayouts()
+  const panel = document.querySelector('.live-options-panel')
+  if (!isAdmin || !panel || panel.querySelector('.wall-tol')) return
+  const num = (value, title) => {
+    const i = document.createElement('input')
+    i.type = 'number'
+    i.min = '10'
+    i.max = '100'
+    i.step = '1'
+    i.value = String(Math.round(value * 100))
+    i.title = title
+    return i
+  }
+  const fine = num(wallTol.okShare, 'A wall drawing at least this share of its frames is fine')
+  const poor = num(wallTol.poorShare, 'Below this share a wall is poor; between the two it is below recommended')
+  const save = document.createElement('button')
+  save.type = 'button'
+  save.textContent = 'Save'
+  const said = document.createElement('span')
+  said.setAttribute('role', 'status')
+  const box = document.createElement('label')
+  box.className = 'wall-tol'
+  box.title = 'What counts as an acceptable wall, for everyone. It warns; it never stops a layout being used.'
+  box.append('Wall fine from ', fine, '% of frames shown, poor below ', poor, '% ', save, ' ', said)
+  save.addEventListener('click', async () => {
+    said.textContent = 'Saving…'
+    try {
+      const r = await fetch('/api/admin/wall-tolerance', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ okShare: Number(fine.value) / 100, poorShare: Number(poor.value) / 100 }) })
+      const t = await r.json().catch(() => null)
+      if (!r.ok) { said.textContent = t?.error ?? 'Not saved'; return }
+      wallTol = { okShare: t.okShare, poorShare: t.poorShare }
+      said.textContent = 'Saved'
+      markLayouts()
+    } catch {
+      said.textContent = 'Not saved: the server did not answer'
+    }
+  })
+  panel.append(box)
+}
 
 layoutSelect.addEventListener('change', () => {
   try { warnLayout() } catch {}
@@ -1981,6 +2034,7 @@ const early = Promise.all([sync.load(), loadOsd().catch(() => {}), loadViews().c
 const me = await checkSession()
 if (me) document.getElementById('whoami').textContent = me.user
 if (me?.admin) { const st = document.getElementById('sitesTab'); if (st) st.hidden = false; const se = document.getElementById('settingsTab'); if (se) se.hidden = false }
+wallToleranceSetup(me?.admin === true)
 isAdmin = Boolean(me?.admin)
 user = me?.user ?? null
 // where the server sees this browser coming from: the name in the address bar is the same on the

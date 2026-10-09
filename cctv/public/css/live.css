@@ -189,3 +189,7 @@ body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-ins
 .live-page .wall-health[data-level="ok"] { color: var(--ok-text); }
 .live-page .wall-health[data-level="warn"] { color: #f5b942; border-color: #f5b942; }
 .live-page .wall-health[data-level="bad"] { color: #fff; background: rgba(200, 30, 30, .92); border-color: transparent; }
+/* The administrator's wall tolerance, in View options (viewer.js wallToleranceSetup). */
+.live-page .wall-tol { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.live-page .wall-tol input[type="number"] { width: 5ch; min-height: 32px; }
+.live-page .wall-tol button { min-height: 32px; }
