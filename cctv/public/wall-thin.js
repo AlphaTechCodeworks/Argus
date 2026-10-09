@@ -31,9 +31,12 @@ export const thinStart = () => ({ budget: Infinity, changedAt: -Infinity, okSinc
 /**
  * The frame budget after one more reading.
  * @param {ReturnType<typeof thinStart>} s
- * @param {{ now: number, fed: number, decoded: number, heldMs: number, all: number }} m frames a
+ * @param {{ now: number, fed: number, decoded: number, heldMs: number, all: number, capacity?: number }} m frames a
  *   second: fed to and decoded by the tiles settled at full rate; heldMs: how long their decoders
- *   keep a frame (not the worst one: a figure a fifth of them reach); all: arriving for every tile
+ *   keep a frame (not the worst one: a figure a fifth of them reach); all: arriving for every tile;
+ *   capacity: decoded by every tile together, which on a device that is behind is what it can decode
+ *   (the first real wall of 133, 2026-10-09: 726 a second in all, but the cut was made from the settled
+ *   tiles' share of it and left 16 tiles at full rate where 21 would have fitted)
  */
 export function nextBudget(s, m) {
   const isBehind = m.fed > 0 && (m.decoded < FALLING_BEHIND * m.fed || m.heldMs > HELD_TOO_LONG_MS)
@@ -43,7 +46,7 @@ export function nextBudget(s, m) {
     const failed = Number.isFinite(s.budget) && m.now - s.raisedAt < RAISE_FAILED_MS
     return {
       ...s,
-      budget: Math.max(MIN_BUDGET, Math.floor(Math.min(s.budget, m.decoded) * CUT)),
+      budget: Math.max(MIN_BUDGET, Math.floor(Math.min(s.budget, m.capacity ?? m.decoded) * CUT)),
       changedAt: m.now,
       okSince: null,
       behind: 0,

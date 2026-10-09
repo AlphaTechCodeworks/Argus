@@ -15,7 +15,7 @@ import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
 import { startTelemetry } from './telemetry.js'
-import { TOLERANCE, layoutNote as profileNote, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
+import { TOLERANCE, knownCapacity, layoutNote as profileNote, noteCapacity, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
 import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
@@ -718,6 +718,7 @@ setInterval(() => { try { updateWallHealth() } catch {} }, 1000)
 // ---- a wall this device cannot decode in full: the busiest tiles keep every frame (wall-thin.js) ----
 // On unless this browser was told otherwise: localStorage 'argus.wallThin' = 'off' leaves every tile
 // at full rate, as before.
+const THIN_START_FPS = 25 // what a tile is taken to cost before it has been measured
 let thin = thinStart()
 const thinSeen = new Map() // camera -> { player, since, fullSince, arrived, decoded, bytes, fps, dec, kbps }
 let thinAt = 0
@@ -764,7 +765,23 @@ function updateWallThin() {
     rows.push({ x, key, s })
   }
   for (const k of thinSeen.keys()) if (!here.has(k)) thinSeen.delete(k)
-  if (fresh || rows.length === 0) return
+  if (fresh) {
+    // A wall this screen is known not to manage in full starts shared out, instead of overloaded for
+    // its first ten seconds while that is found out again (wall-profile.js knownCapacity). The first
+    // tiles in order keep every frame until the next looks say which are busiest.
+    wallProfile ??= readProfile(storageOrNull())
+    const cap = knownCapacity(wallProfile)
+    if (cap && thin.budget === Infinity && playing.length * THIN_START_FPS > cap) {
+      thin = { ...thinStart(), budget: cap, changedAt: now }
+      let spent = 0
+      for (const x of playing) {
+        spent += THIN_START_FPS
+        x.player.setKeysOnly(spent > cap)
+      }
+    }
+    return
+  }
+  if (rows.length === 0) return
   // keeping up is judged on tiles that have played at full rate long enough to have caught up
   const settled = rows.filter(({ x, s }) => !x.player.keysOnly && !x.player.afterThin && now - s.since >= THIN_SETTLE_MS && now - s.fullSince >= THIN_SETTLE_MS)
   const held = settled.map(({ x }) => Number(x.player.stats?.decodeMs) || 0).sort((p, q) => q - p)
@@ -773,14 +790,19 @@ function updateWallThin() {
     fed: settled.reduce((n, r) => n + r.s.fps, 0),
     decoded: settled.reduce((n, r) => n + r.s.dec, 0),
     heldMs: held[Math.floor(held.length * 0.2)] ?? 0, // (a figure a fifth of them reach: one stalled link is not the device)
-    all: rows.reduce((n, r) => n + r.s.fps, 0)
+    all: rows.reduce((n, r) => n + r.s.fps, 0),
+    capacity: rows.reduce((n, r) => n + r.s.dec, 0)
   })
-  // never thinned: a camera whose keyframes are far apart (or not yet known) would look frozen
-  const fixed = (x) => !(x.player.keyEveryMs > 0) || x.player.keyEveryMs > THIN_MAX_KEY_MS
-  const left = thin.budget - rows.filter((r) => fixed(r.x)).reduce((n, r) => n + r.s.fps, 0)
-  const keep = fullRateTiles(rows.filter((r) => !fixed(r.x)).map(({ x, key, s }) => ({ key, fps: s.fps, kbps: s.kbps ?? 0, full: !x.player.keysOnly })), left)
-  for (const { x, key, s } of rows) {
-    const full = fixed(x) || keep.has(key)
+  // what it settles at is kept as this screen's capacity, for the next wall's start
+  if (Number.isFinite(thin.budget) && thin.okSince !== null && now - thin.changedAt > 15_000) wallProfile = noteCapacity(wallProfile ?? readProfile(storageOrNull()), thin.budget)
+  // never thinned: a camera whose keyframes are far apart would look frozen (one whose spacing is
+  // not known yet is given 10 s to show two keyframes before it is taken for such a camera)
+  const fixed = (r) => r.x.player.keyEveryMs > THIN_MAX_KEY_MS || (!(r.x.player.keyEveryMs > 0) && now - r.s.since > 10_000)
+  const left = thin.budget - rows.filter(fixed).reduce((n, r) => n + r.s.fps, 0)
+  const keep = fullRateTiles(rows.filter((r) => !fixed(r)).map(({ x, key, s }) => ({ key, fps: s.fps, kbps: s.kbps ?? 0, full: !x.player.keysOnly })), left)
+  for (const r of rows) {
+    const { x, key, s } = r
+    const full = fixed(r) || keep.has(key)
     if (full && x.player.keysOnly) s.fullSince = now
     x.player.setKeysOnly(!full)
   }

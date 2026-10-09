@@ -56,6 +56,20 @@ export function noteSecond(profile, tiles, share, { now = Date.now(), thinned = 
   return { ...profile, layouts }
 }
 
+const CAPACITY_DAYS = 7
+
+/** The frames a second this device was last seen to manage on a wall it could not play in full (wall-thin.js). */
+export function noteCapacity(profile, budget, now = Date.now()) {
+  if (!(budget > 0) || !Number.isFinite(budget)) return profile
+  return { ...profile, capacity: { budget: Math.round(budget), at: now } }
+}
+
+/** That figure, while it is fresh enough to start a wall from; else null. */
+export function knownCapacity(profile, now = Date.now()) {
+  const c = profile?.capacity
+  return c && c.budget > 0 && now - c.at < CAPACITY_DAYS * 86_400_000 ? c.budget : null
+}
+
 /**
  * What to say about a layout of `tiles` cameras on this device, or null when it has not been
  * watched long enough to say anything.

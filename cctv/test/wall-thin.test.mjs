@@ -91,3 +91,9 @@ test('the busiest tiles keep every frame, and one already at full rate is not sw
   // nothing left once the cameras that are never thinned have taken their share: none, not all
   assert.equal(fullRateTiles(tiles, -50).size, 0)
 })
+
+test('the cut is made from what the whole device decoded, when that is known', () => {
+  // the first real wall of 133: 726 frames a second decoded in all, 300 of them by the settled tiles
+  const s = run(thinStart(), 0, 2000, { fed: 600, decoded: 300, heldMs: 2300, all: 3000, capacity: 726 })
+  assert.equal(s.budget, 580)
+})

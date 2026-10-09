@@ -55,3 +55,17 @@ test('bad readings are passed over, and the profile does not grow without end', 
   assert.equal(Object.keys(p.layouts).length, 40)
   assert.equal(p.layouts[1], undefined) // (the one seen longest ago went first)
 })
+
+test('what the screen settled at on a wall it could not play in full is kept for a week', async () => {
+  const { knownCapacity, noteCapacity } = await import('../public/wall-profile.js')
+  const t = Date.parse('2026-10-09T20:00:00Z')
+  const s = store()
+  let p = readProfile(s, nav)
+  assert.equal(knownCapacity(p, t), null)
+  assert.equal(noteCapacity(p, Infinity, t), p) // (no limit: nothing to keep)
+  p = noteCapacity(p, 580.4, t)
+  saveProfile(s, p)
+  assert.equal(knownCapacity(readProfile(s, nav), t + 3 * 86_400_000), 580)
+  assert.equal(knownCapacity(readProfile(s, nav), t + 8 * 86_400_000), null)
+  assert.equal(layoutNote(watch(p, 36, 0.9, 40), 36).pct, 90) // (the layouts are kept beside it)
+})
