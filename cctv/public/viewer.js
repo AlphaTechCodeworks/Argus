@@ -794,7 +794,10 @@ function startAheadMain(cam) {
   // Refused, dropped, or not the camera's own stream after all: it is let go, not asked for again
   // and again behind the viewer's back. The next view to settle asks afresh. (After this turn: the
   // tile is still inside its own close handler.)
-  const drop = () => queueMicrotask(() => { if (aheadMain?.tile === t) stopAheadMain() })
+  // Handed over to a view by then (aheadMain no longer names it): it is closed all the same, and the
+  // layer that was borrowing it connects by itself (live-tile.js). Left to reconnect, it came back
+  // beside that layer's own connection: the camera on screen with two main streams.
+  const drop = () => queueMicrotask(() => { if (aheadMain?.tile === t) stopAheadMain(); else t.close() })
   const t = new LiveTile(el, next, MAIN_STREAM, 0, {
     ...tileOptions(next),
     noStill: true,
@@ -839,6 +842,7 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   // Keep the one it borrows (the lender, lenderFor); release the rest, which reconnect on return.
   const lender = gridTiles.find((t) => t.nvr === cam.nvr && t.ch === cam.ch && t.streamType === SUB_STREAM && t.lendable)
   for (const t of gridTiles) { if (t === lender) t.suspend(); else t.release() }
+  pageNote?.remove() // (the note of a page just turned would sit on top of the view)
   overlay = makeTile(cam, { controls: false })
   overlay.classList.add('single', 'single-overlay')
   // links sit next to the name (not in it): a long name is cut short, the links never are
@@ -996,6 +1000,13 @@ function upgradeToMain(tile, cam, sub, opts, warm = null) {
     ...opts,
     noStill: true, // the sub-stream below it already shows the still
     borrowFrom: warm,
+    // the layer has stopped showing the stream started ahead (that one stalled or ended and the layer
+    // connected by itself; the layer was closed, or is asking for H.264 instead): it has no other use
+    onUnborrow: (src) => {
+      if (src !== warm) return
+      warm.close()
+      singleTiles = singleTiles.filter((t) => t !== warm)
+    },
     onFirstFrame: () => {
       layer.classList.remove('pending')
       for (const b of tile.querySelectorAll('.hd-busy')) b.remove()
@@ -1018,7 +1029,8 @@ function upgradeToMain(tile, cam, sub, opts, warm = null) {
       clearTimeout(aheadMainTimer)
       aheadMainTimer = setTimeout(() => {
         aheadMainTimer = null
-        if (overlay === tile && !main.closed && main.converted !== true) startAheadMain(cam)
+        // (not in a hidden tab: the first picture is painted there too, and nothing would close it)
+        if (overlay === tile && !main.closed && main.converted !== true && !document.hidden) startAheadMain(cam)
       }, AHEAD_MAIN_MS)
     },
     onUnsupported: () => {
@@ -1676,7 +1688,9 @@ isAdmin = Boolean(me?.admin)
 user = me?.user ?? null
 // where the server sees this browser coming from: the name in the address bar is the same on the
 // office network and through the tunnel, so it cannot say (security.mjs routeOf). For aheadMain.
-onLan = typeof me?.address === 'string' && me.address !== '' && isLocalHost(me.address)
+// Only a dotted IPv4 is judged: isLocalHost reads an address-bar host, where IPv6 comes in brackets, and
+// takes a bare one (a visitor's own, through the tunnel or the VPN) for a name without a dot: local.
+onLan = me?.direct === true && typeof me.address === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(me.address) && isLocalHost(me.address)
 setInterval(checkSession, 60_000)
 
 function multiSite() {
@@ -1814,10 +1828,16 @@ function stepArrows() {
   document.addEventListener('touchstart', (e) => {
     if (!(document.body.classList.contains('phone-full') || gridFull()) || e.touches.length !== 1) return (t0 = null)
     if (overlayZoom && overlayZoom.zoom > 1) return (t0 = null) // zoomed: one finger moves the picture
-    t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+    t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY, at: performance.now() }
   }, { passive: true })
+  // A flick starts moving at once. A finger that rested first (grid-drag.js lifts a tile after 400 ms)
+  // is not one, even when that drag has since been taken away by the browser: Chrome reports the
+  // first touchmove only once the finger has left its slop, by when the drag can have come and gone.
+  const RESTED_MS = 300
   document.addEventListener('touchmove', () => {
-    if (t0 && drag.dragging()) t0 = null
+    if (!t0) return
+    if (drag.dragging() || (!t0.moved && performance.now() - t0.at >= RESTED_MS)) return (t0 = null)
+    t0.moved = true
   }, { passive: true })
   document.addEventListener('touchend', (e) => {
     if (!t0 || (single === null && !gridFull())) return (t0 = null)

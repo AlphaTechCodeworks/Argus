@@ -679,9 +679,11 @@ export class LiveTile {
   /** Stops borrowing (the source went away, or this tile closes). */
   #unborrow() {
     if (!this.source) return
-    this.source.taps.delete(this.tap)
+    const src = this.source
+    src.taps.delete(this.tap)
     this.source = null
     this.tap = null
+    this.opts.onUnborrow?.(src) // (viewer.js: a main stream started ahead goes when nothing shows it)
   }
 
   onUnsupported(codecId) {
