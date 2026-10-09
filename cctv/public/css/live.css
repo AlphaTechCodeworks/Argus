@@ -171,3 +171,7 @@
 }
 .live-page #grid .tile .status.live::before, .live-page .tile .status.live::before { display: none; }
 body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-inset-top)); left: calc(6px + env(safe-area-inset-left)); }
+/* No Move box over the picture (the owner, 2026-10-09): a tile is moved by dragging it. The button
+   stays for the keyboard, shown only while it has the keyboard's focus. */
+.live-page .tile .tile-move { opacity: 0 !important; pointer-events: none; }
+.live-page .tile .tile-move:focus-visible { opacity: 1 !important; pointer-events: auto; }
