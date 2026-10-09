@@ -1392,12 +1392,47 @@ deleteViewBtn.addEventListener('click', async () => {
 // streams behind it. The tiles are rebuilt by render() regardless.
 prevBtn.addEventListener('click', () => { page--; freshenForPageChange(); render() })
 nextBtn.addEventListener('click', () => { page++; freshenForPageChange(); render() })
+/**
+ * The next (dir 1) or previous (-1) page of the grid, for ← → and a flick: round past either end, as
+ * stepCamera goes round the cameras. In full screen the pager is out of sight, so these are the only
+ * way to turn the page there, and a small note says for a moment which page it is.
+ */
+function stepPage(dir) {
+  const pages = Number(pageLabel.dataset.pages ?? 1)
+  if (single !== null || !(pages > 1)) return
+  page = (page + dir + pages) % pages
+  freshenForPageChange()
+  render()
+  notePage()
+}
+let pageNote = null
+let pageNoteTimer = null
+function notePage() {
+  clearTimeout(pageNoteTimer)
+  pageNote?.remove() // (render has taken the last one off the grid already)
+  pageNote = null
+  if (document.fullscreenElement !== grid) return // elsewhere the pager itself says it
+  pageNote = document.createElement('div')
+  pageNote.className = 'page-note'
+  pageNote.setAttribute('role', 'status')
+  pageNote.textContent = pageLabel.textContent
+  grid.append(pageNote)
+  pageNoteTimer = setTimeout(() => { pageNote?.remove(); pageNote = null }, 1500)
+}
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && single !== null && !document.fullscreenElement) closeSingle()
   // the full-size view: ← → go through the cameras, the same as ‹ › and a flick
   if (single !== null && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && !e.target.closest?.('input, select, textarea')) {
     e.preventDefault()
     stepCamera(e.key === 'ArrowRight' ? 1 : -1)
+  }
+  // the grid: ← → turn its page the same way. Once a press, not while the key is held (every page
+  // opens its cameras' streams); not with Alt, Ctrl or ⌘ (Alt+← is the browser's Back); and not from
+  // a field, a menu or an open dialog, where the arrows are that control's own.
+  if (single === null && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && !e.repeat && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.defaultPrevented &&
+    !e.target.closest?.('input, select, textarea, [contenteditable], dialog, .cam-sheet') && !document.querySelector('dialog[open]')) {
+    e.preventDefault()
+    stepPage(e.key === 'ArrowRight' ? 1 : -1)
   }
   if ((e.key === 'f' || e.key === 'F') && !e.target.closest?.('input, select, textarea')) toggleFullscreen()
   if (e.key === 'd' || e.key === 'D') {
@@ -1679,13 +1714,19 @@ function stepArrows() {
   let t0 = null
   let swipedAt = 0
   const rotated = () => false // the picture is no longer turned sideways on an upright phone
+  // ...and with the grid in full screen a flick turns its page (stepPage): the pager is out of sight
+  // there. A finger held on a tile first is moving that tile (grid-drag.js), not flicking.
+  const gridFull = () => single === null && document.fullscreenElement === grid
   document.addEventListener('touchstart', (e) => {
-    if (!document.body.classList.contains('phone-full') || e.touches.length !== 1) return (t0 = null)
+    if (!(document.body.classList.contains('phone-full') || gridFull()) || e.touches.length !== 1) return (t0 = null)
     if (overlayZoom && overlayZoom.zoom > 1) return (t0 = null) // zoomed: one finger moves the picture
     t0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }
   }, { passive: true })
+  document.addEventListener('touchmove', () => {
+    if (t0 && drag.dragging()) t0 = null
+  }, { passive: true })
   document.addEventListener('touchend', (e) => {
-    if (!t0 || single === null) return
+    if (!t0 || (single === null && !gridFull())) return (t0 = null)
     if (overlayZoom && overlayZoom.zoom > 1) return (t0 = null) // (a pinch that started as one finger)
     const t = e.changedTouches[0]
     const dx = t.clientX - t0.x
@@ -1696,7 +1737,8 @@ function stepArrows() {
     const across = rotated() ? dx : dy
     if (Math.abs(along) < SWIPE_PX || Math.abs(along) < Math.abs(across) * 1.5) return
     swipedAt = performance.now()
-    stepCamera(along < 0 ? 1 : -1)
+    if (single !== null) stepCamera(along < 0 ? 1 : -1)
+    else stepPage(along < 0 ? 1 : -1)
   }, { passive: true })
   // the click a browser sends after the flick must not close the view
   document.addEventListener('click', (e) => {
