@@ -1177,8 +1177,9 @@ smoothBox.addEventListener('change', () => {
 })
 
 // A phone has room for one camera, or four: the other layouts are taken off its menu, and it keeps
-// its own choice (a PC's 4 x 4 must not follow the same user onto a phone).
-const PHONE_LAYOUTS = ['auto', 'list', 'g1', 'g2']
+// its own choice (a PC's 4 x 4 must not follow the same user onto a phone). Not Auto: its tiles ask
+// for the main stream, and each main stream a phone watches is converted by the server.
+const PHONE_LAYOUTS = ['list', 'g1', 'g2']
 const LAYOUT_KEY = isPhone() ? 'cctv.layout.phone' : 'cctv.layout'
 if (isPhone()) {
   for (const o of [...layoutSelect.querySelectorAll('option')]) if (!PHONE_LAYOUTS.includes(o.value)) o.remove()
@@ -1187,7 +1188,7 @@ if (isPhone()) {
   opt.value = 'list'
   opt.textContent = 'List'
   layoutSelect.prepend(opt)
-  layoutSelect.value = 'auto'
+  layoutSelect.value = 'list'
 }
 const markPhoneLayout = () => {
   document.body.classList.toggle('phone-g2', isPhone() && layoutSelect.value === 'g2')
