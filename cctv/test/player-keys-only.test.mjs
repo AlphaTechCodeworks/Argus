@@ -23,6 +23,9 @@ const FAST = { pool: 11, decodeMs: 5, inFlight: 1 }
   // 20 s of keyframes only, then every frame again: it carries on from the next keyframe
   const arr = arrivals({ fps: 30, durMs: 60_000 })
   let n = 0
+  let sawKeyAt = null // the first keyframe after the switch back
+  let between = 0 // frames between the switch and it
+  let leaked = 0 // ... that reached the decoder
   const r = await play(arr, {
     decoder: FAST,
     playerOptions: { arrivalClock: true },
@@ -30,11 +33,23 @@ const FAST = { pool: 11, decodeMs: 5, inFlight: 1 }
       p.setKeysOnly(true)
       const push = p.push.bind(p)
       p.push = (chunk) => {
-        if (++n === 600) p.setKeysOnly(false) // 20 s in, mid keyframe interval
-        return push(chunk)
+        if (++n === 610) p.setKeysOnly(false) // 20 s in, mid keyframe interval
+        const fedBefore = p.decoder?.fed ?? 0
+        const out = push(chunk)
+        // (the replay's decoder does not model frames leaning on earlier ones, so this is checked
+        // here: between the switch and the next keyframe nothing may be handed to the decoder)
+        if (n >= 610 && sawKeyAt === null) {
+          if (chunk.isKey) sawKeyAt = n
+          else {
+            between++
+            if ((p.decoder?.fed ?? 0) !== fedBefore || p.afterThin !== true) leaked++
+          }
+        }
+        return out
       }
     }
   })
+  check('between the switch back and the next keyframe, no frame reaches the decoder', between > 10 && leaked === 0 && sawKeyAt !== null, `${between} frames, ${leaked} reached it`)
   check('back at full rate from the next keyframe: two thirds of the minute at every frame, never a step back, never a corrupt start', r.shownPct > 60 && r.shownPct < 75 && r.backwards === 0 && r.maxStillMs <= 2100, brief(r))
 }
 {

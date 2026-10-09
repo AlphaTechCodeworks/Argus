@@ -413,7 +413,8 @@ export class LiveTile {
       this.setStatus(seconds >= 30 ? 'No video received · waiting to connect' : `Waiting for video · ${seconds}s`)
     }
     this.setDot({
-      hasVideo: Boolean(open && this.lastDataAt && s.fps > 0),
+      // (a tile shown from its keyframes alone draws nothing in most seconds: it has video all the same, wall-thin.js)
+      hasVideo: Boolean(open && this.lastDataAt && (s.fps > 0 || this.player.keysOnly || this.player.afterThin)),
       stale: Boolean(open && since >= NO_VIDEO_MS),
       // the live grid has no per-camera recording flag yet; a caller that knows can supply one
       recording: this.opts.recording?.(this)

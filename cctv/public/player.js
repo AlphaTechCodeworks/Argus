@@ -224,6 +224,9 @@ export class VideoPlayer {
     this.overloadedAt = -Infinity // when the decoder last fell so far behind that frames were skipped to a keyframe
     this.keepingUp = true // the decoder gives back as many frames as it is fed (#everySecond)
     this.keysOnly = false // shown from keyframes alone (setKeysOnly)
+    this.totals = { arrived: 0, decoded: 0, bytes: 0 } // since this player was made
+    this.keyEveryMs = 0 // the camera's time between its last two keyframes (0: not seen two yet)
+    this.lastKeyInUs = null
     this.afterThin = false // back at full rate, waiting for the keyframe to carry on from
     this.lately = [] // [arrived, decoded] of the last few seconds
     // noRewindMs: capture times (ms) of the newest frame timed as it arrived, and of the newest queued
@@ -277,6 +280,13 @@ export class VideoPlayer {
   push(chunk) {
     if (this.closed) return
     this.win.bytes += chunk.data.length
+    // (running totals, and the keyframe spacing: what wall-thin.js is told, over its own interval)
+    this.totals.bytes += chunk.data.length
+    this.totals.arrived++
+    if (chunk.isKey) {
+      if (this.lastKeyInUs !== null && chunk.timestampUs > this.lastKeyInUs) this.keyEveryMs = (chunk.timestampUs - this.lastKeyInUs) / 1000
+      this.lastKeyInUs = chunk.timestampUs
+    }
     // (frames in this second and the longest wait between two: where a low frame rate is lost)
     const cameIn = performance.now()
     if (this.win.lastIn) this.win.gap = Math.max(this.win.gap, cameIn - this.win.lastIn)
@@ -473,6 +483,7 @@ export class VideoPlayer {
 
   #onDecoded(frame) {
     this.win.decoded++
+    this.totals.decoded++
     if (this.closed) {
       frame.close()
       return

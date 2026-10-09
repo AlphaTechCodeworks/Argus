@@ -15,7 +15,7 @@ import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
 import { startTelemetry } from './telemetry.js'
-import { THIN_MIN_TILES, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
+import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
 // This page is set up from the account's preferences (picture fit, layout, hide offline, the view
@@ -145,7 +145,7 @@ const telemetry = startTelemetry({
       nvr: t.nvr, ch: t.ch, stream: t.streamType, role: singleTiles.includes(t) ? 'focus' : 'grid', playing: shown, attempts: t.attempts, decoderErrors: s.decoderErrors ?? 0,
       fps: s.fps, jitterMs: s.jitterMs, bufMs: s.delayMs, dropped: s.dropped, late: s.late, resync: s.resyncs, decQueue: s.decodeQueue ?? 0, kbps: s.kbps,
       arrived: s.arrived, decoded: s.decoded, gapMs: s.arriveGapMs, decMs: s.decodeMs, skip: s.skipped, over: s.overflowed, rafHz: loopStats.hz, rafGapMs: loopStats.gapMs,
-      w: t.player.canvas.clientWidth, h: t.player.canvas.clientHeight, stalled: shown && s.fps === 0, visible: !document.hidden
+      w: t.player.canvas.clientWidth, h: t.player.canvas.clientHeight, stalled: shown && s.fps === 0 && !t.player.keysOnly && !t.player.afterThin, visible: !document.hidden
     }
   })
 })
@@ -681,21 +681,24 @@ function updateWallHealth() {
   }
   if (document.hidden) return // (a hidden page draws nothing: that is not the device falling behind)
   const playing = tiles.filter((x) => !x.closed && !x.suspended && x.player?.firstPainted === true)
-  const sum = (k) => playing.reduce((a, x) => a + (Number(x.player.stats?.[k]) || 0), 0)
-  wallWindow.push({ n: playing.length, arrived: sum('arrived'), decoded: sum('decoded'), drawn: sum('fps'), held: playing.reduce((a, x) => Math.max(a, Number(x.player.stats?.decodeMs) || 0), 0) })
+  // (judged on the tiles at full rate while some are shown from keyframes only)
+  const low = playing.filter((x) => x.player.keysOnly || x.player.afterThin).length
+  const fullRate = playing.filter((x) => !x.player.keysOnly && !x.player.afterThin)
+  const sum = (k) => fullRate.reduce((a, x) => a + (Number(x.player.stats?.[k]) || 0), 0)
+  wallWindow.push({ n: playing.length, low, arrived: sum('arrived'), decoded: sum('decoded'), drawn: sum('fps'), held: fullRate.reduce((a, x) => Math.max(a, Number(x.player.stats?.decodeMs) || 0), 0) })
   if (wallWindow.length > 10) wallWindow.shift()
-  const full = wallWindow.filter((w) => w.n === playing.length) // (a layout just changed: only its own seconds)
+  const full = wallWindow.filter((w) => w.n === playing.length && w.low === low) // (a layout or the thinning just changed: only its own seconds)
   const arrived = full.reduce((a, w) => a + w.arrived, 0)
   if (playing.length < 4 || full.length < 5 || !(arrived > 0)) { el.hidden = true; return }
   const drawn = full.reduce((a, w) => a + w.drawn, 0)
   const decoded = full.reduce((a, w) => a + w.decoded, 0)
   const share = Math.min(1, drawn / arrived)
-  const per = (x) => (x / full.length / playing.length).toFixed(1)
-  const low = playing.filter((x) => x.player.keysOnly).length
-  const label = `${Math.round(share * 100)}% of frames shown${low ? ` · ${playing.length - low} at full rate` : ''}`
+  const per = (x) => (x / full.length / Math.max(1, playing.length - low)).toFixed(1)
+  const label = low ? `${playing.length - low} of ${playing.length} at full rate · ${Math.round(share * 100)}% of their frames shown` : `${Math.round(share * 100)}% of frames shown`
   if (el.textContent !== label) el.textContent = label
-  el.dataset.level = share >= WALL_OK ? 'ok' : share >= WALL_POOR ? 'warn' : 'bad'
-  el.title = `Last ${full.length} s, ${playing.length} cameras playing. Each second, per camera: ${per(arrived)} frames arrive, ${per(decoded)} are decoded, ${per(drawn)} are drawn. The decoder held a frame up to ${Math.round(Math.max(...full.map((w) => w.held)))} ms.${low ? ` This device cannot decode every camera in this layout: the ${playing.length - low} busiest play every frame, the other ${low} show a current picture every couple of seconds.` : share < WALL_OK ? ' This device is not keeping up with this layout: a smaller layout will be smoother.' : ''}`
+  // (some shown from keyframes only: amber at best, this layout is more than the device can play in full)
+  el.dataset.level = share < WALL_POOR ? 'bad' : share < WALL_OK || low ? 'warn' : 'ok'
+  el.title = `Last ${full.length} s, ${playing.length} cameras playing. Each second, per camera: ${per(arrived)} frames arrive, ${per(decoded)} are decoded, ${per(drawn)} are drawn. The decoder held a frame up to ${Math.round(Math.max(...full.map((w) => w.held)))} ms.${low ? ` This device cannot decode every camera in this layout: the ${playing.length - low} busiest play every frame, the other ${low} show a current picture every few seconds.` : share < WALL_OK ? ' This device is not keeping up with this layout: a smaller layout will be smoother.' : ''}`
   el.hidden = false
 }
 setInterval(() => { try { updateWallHealth() } catch {} }, 1000)
@@ -704,27 +707,71 @@ setInterval(() => { try { updateWallHealth() } catch {} }, 1000)
 // On unless this browser was told otherwise: localStorage 'argus.wallThin' = 'off' leaves every tile
 // at full rate, as before.
 let thin = thinStart()
+const thinSeen = new Map() // camera -> { player, since, fullSince, arrived, decoded, bytes, fps, dec, kbps }
+let thinAt = 0
 const wallThinOn = () => { try { return localStorage.getItem('argus.wallThin') !== 'off' } catch { return true } }
 function updateWallThin() {
   if (document.hidden) return
+  const now = performance.now()
   const playing = tiles.filter((x) => !x.closed && !x.suspended && gridTiles.includes(x) && x.player?.firstPainted === true)
   if (single !== null || playing.length < THIN_MIN_TILES || !wallThinOn()) {
     // (a smaller grid, a camera opened full-size, or switched off: everything at full rate again)
-    if (Number.isFinite(thin.budget)) thin = thinStart()
+    thin = thinStart()
+    thinSeen.clear()
+    thinAt = 0
     for (const x of tiles) if (x.player?.keysOnly) x.player.setKeysOnly(false)
     return
   }
-  const stat = (x, k) => Number(x.player.stats?.[k]) || 0
-  const full = playing.filter((x) => !x.player.keysOnly && !x.player.afterThin)
+  // rates over the time since the last look, from the players' running totals: a one-second figure
+  // read every 2 s catches the same half of each keyframe interval every time
+  const dt = now - thinAt
+  const fresh = !(thinAt > 0) || dt > 5000 // the first look, or the page was away: only take the totals down
+  thinAt = now
+  const rows = []
+  const here = new Set()
+  for (const x of playing) {
+    const key = camKey(x)
+    const tot = x.player.totals
+    here.add(key)
+    const s = thinSeen.get(key)
+    if (!s || s.player !== x.player) {
+      // (new here, or its player was made again: measured from the next look)
+      thinSeen.set(key, { player: x.player, since: now, fullSince: now, arrived: tot.arrived, decoded: tot.decoded, bytes: tot.bytes, fps: 0, dec: 0, kbps: null })
+      continue
+    }
+    if (!fresh) {
+      const sec = dt / 1000
+      const kbps = ((tot.bytes - s.bytes) * 8) / 1000 / sec
+      s.fps = (tot.arrived - s.arrived) / sec
+      s.dec = (tot.decoded - s.decoded) / sec
+      s.kbps = s.kbps === null ? kbps : (s.kbps + kbps) / 2
+    }
+    s.arrived = tot.arrived
+    s.decoded = tot.decoded
+    s.bytes = tot.bytes
+    rows.push({ x, key, s })
+  }
+  for (const k of thinSeen.keys()) if (!here.has(k)) thinSeen.delete(k)
+  if (fresh || rows.length === 0) return
+  // keeping up is judged on tiles that have played at full rate long enough to have caught up
+  const settled = rows.filter(({ x, s }) => !x.player.keysOnly && !x.player.afterThin && now - s.since >= THIN_SETTLE_MS && now - s.fullSince >= THIN_SETTLE_MS)
+  const held = settled.map(({ x }) => Number(x.player.stats?.decodeMs) || 0).sort((p, q) => q - p)
   thin = nextBudget(thin, {
-    now: performance.now(),
-    fed: full.reduce((a, x) => a + stat(x, 'arrived'), 0),
-    decoded: full.reduce((a, x) => a + stat(x, 'decoded'), 0),
-    heldMs: full.reduce((a, x) => Math.max(a, stat(x, 'decodeMs')), 0),
-    all: playing.reduce((a, x) => a + stat(x, 'arrived'), 0)
+    now,
+    fed: settled.reduce((n, r) => n + r.s.fps, 0),
+    decoded: settled.reduce((n, r) => n + r.s.dec, 0),
+    heldMs: held[Math.floor(held.length * 0.2)] ?? 0, // (a figure a fifth of them reach: one stalled link is not the device)
+    all: rows.reduce((n, r) => n + r.s.fps, 0)
   })
-  const keep = fullRateTiles(playing.map((x) => ({ key: camKey(x), fps: stat(x, 'arrived'), kbps: stat(x, 'kbps'), full: !x.player.keysOnly })), thin.budget)
-  for (const x of playing) x.player.setKeysOnly(!keep.has(camKey(x)))
+  // never thinned: a camera whose keyframes are far apart (or not yet known) would look frozen
+  const fixed = (x) => !(x.player.keyEveryMs > 0) || x.player.keyEveryMs > THIN_MAX_KEY_MS
+  const left = thin.budget - rows.filter((r) => fixed(r.x)).reduce((n, r) => n + r.s.fps, 0)
+  const keep = fullRateTiles(rows.filter((r) => !fixed(r.x)).map(({ x, key, s }) => ({ key, fps: s.fps, kbps: s.kbps ?? 0, full: !x.player.keysOnly })), left)
+  for (const { x, key, s } of rows) {
+    const full = fixed(x) || keep.has(key)
+    if (full && x.player.keysOnly) s.fullSince = now
+    x.player.setKeysOnly(!full)
+  }
 }
 setInterval(() => { try { updateWallThin() } catch {} }, 2000)
 
