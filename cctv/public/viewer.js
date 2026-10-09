@@ -275,6 +275,7 @@ function render({ keepSingle = false } = {}) {
     singleTiles = []
     overlay = null
     stopAhead()
+    stopAheadMain()
   }
   grid.classList.toggle('show-stats', showStats)
   // the kept view stays in place (moving it would close an open dialog)
@@ -762,6 +763,63 @@ function stopAhead() {
   ahead.clear()
 }
 
+// ...and its full quality at once too. The cameras either side are started ahead on their sub-streams
+// only, so a step showed the next camera at once but in SD: its main stream was asked for a second
+// later (UPGRADE_DELAY_MS) and then had to start on the NVR. Once the view has settled on a camera
+// whose own main stream is showing, the main stream of the camera a step further on -- the way the
+// viewer last stepped -- is started as well, connected but not decoded, and a step to it borrows it.
+// One at most, and only where it costs nothing but a second stream on the local network: a PC there
+// whose browser plays H.265, a camera on a local NVR. A phone's or a remote viewer's main streams,
+// and any for a browser without H.265, are converted by the server, which converts few at once; a
+// P2P or VPN camera's main stream rides the same slow link as the one being watched.
+const AHEAD_MAIN_MS = 1500 // on a camera this long at full quality before the next one's is started
+let aheadMain = null // { key, tile }: the one main stream started ahead
+let aheadMainTimer = null
+let stepDir = 1 // the way the viewer last stepped (stepCamera): which neighbour is "the next"
+let onLan = false // this browser reaches the server on the local network (/api/me), not by tunnel or VPN
+window.cctvAheadMain = () => (aheadMain ? { k: aheadMain.key, ws: aheadMain.tile.ws?.readyState ?? null, gopKB: Math.round(aheadMain.tile.gopBytes / 1024), lendable: aheadMain.tile.lendable } : null)
+const mayStartMainAhead = (c) => onLan && !isPhone() && !cannotPlayH265() && c.online !== false && c.hd !== false && c.remote !== true && !noMain.has(camKey(c))
+/** Starts the main stream of the camera a step on from this one (see above), and lets any other go. */
+function startAheadMain(cam) {
+  const list = shownCameras(gridCameras(), gridView())
+  const i = list.findIndex((c) => camKey(c) === camKey(cam))
+  const next = i >= 0 && list.length > 1 ? list[(i + stepDir + list.length) % list.length] : null
+  const k = next ? camKey(next) : null
+  if (aheadMain && aheadMain.key === k && !aheadMain.tile.closed) return
+  stopAheadMain()
+  if (!next || k === camKey(cam) || !mayStartMainAhead(next)) return
+  const el = document.createElement('div')
+  el.className = 'tile'
+  el.innerHTML = TILE_HTML
+  // Refused, dropped, or not the camera's own stream after all: it is let go, not asked for again
+  // and again behind the viewer's back. The next view to settle asks afresh. (After this turn: the
+  // tile is still inside its own close handler.)
+  const drop = () => queueMicrotask(() => { if (aheadMain?.tile === t) stopAheadMain() })
+  const t = new LiveTile(el, next, MAIN_STREAM, 0, {
+    ...tileOptions(next),
+    noStill: true,
+    onDisconnect: drop,
+    onUnsupported: drop,
+    onHdRefused: () => (drop(), true),
+    onMainNotConverted: () => (drop(), true)
+  })
+  t.suspend()
+  aheadMain = { key: k, tile: t }
+}
+function stopAheadMain() {
+  clearTimeout(aheadMainTimer)
+  aheadMainTimer = null
+  aheadMain?.tile.close()
+  aheadMain = null
+}
+/** The main stream started ahead for this camera, handed over to its view; any other is let go. */
+function takeAheadMain(cam) {
+  const t = aheadMain?.key === camKey(cam) && !aheadMain.tile.closed ? aheadMain.tile : null
+  if (t) aheadMain = null
+  stopAheadMain()
+  return t
+}
+
 function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   // the camera being left (a step with ‹ ›): the connection that carries its stream is kept, started
   // ahead as the new camera's neighbour, rather than closed and opened again a moment later
@@ -848,15 +906,21 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   // internet (since 2026-10-08, at the owner's wish: it used not to be, because that stream rides the
   // camera's relay and then the tunnel, and can take a long while to come). The sub-stream stays on
   // screen until the main one has a picture, so asking costs the viewer nothing but the wait.
+  const warm = takeAheadMain(cam) // its main stream, when it was started ahead (aheadMain)
   if (cam.hd !== false && !noMain.has(single)) {
     // the sub-stream shows at once; the HD is asked for almost immediately on a direct open, but only
     // once the view settles while stepping (UPGRADE_DELAY_MS), so stepping does not churn main streams.
+    // One started ahead is here already: shown now, with nothing to churn.
     const o = overlay
-    upgradeTimer = setTimeout(() => {
+    if (warm) upgradeToMain(overlay, cam, sub, opts, warm)
+    else upgradeTimer = setTimeout(() => {
       upgradeTimer = null
       if (overlay === o && !sub.closed) upgradeToMain(overlay, cam, sub, opts)
     }, stepping ? UPGRADE_DELAY_MS : QUICK_UPGRADE_MS)
-  } else if (cam.hd === false) overlay.querySelector('.name').after(sdBadge())
+  } else {
+    warm?.close()
+    if (cam.hd === false) overlay.querySelector('.name').after(sdBadge())
+  }
   syncTiles()
   updatePager()
 }
@@ -866,6 +930,10 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   const returnKey = single
   const restoreFocus = Boolean(overlay?.contains(document.activeElement))
   if (upgradeTimer) { clearTimeout(upgradeTimer); upgradeTimer = null } // a pending HD upgrade is cancelled
+  // ...and so is starting the next camera's main stream ahead; one started already stays for the
+  // camera being stepped to (openSingle takes it, or lets it go)
+  clearTimeout(aheadMainTimer)
+  aheadMainTimer = null
   overlayZoom = null
   for (const t of singleTiles) if (t !== keep) t.close()
   singleTiles = []
@@ -874,6 +942,7 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   for (const slot of gridSlots) slot.el.inert = false
   if (!resumeGrid) return
   stopAhead()
+  stopAheadMain()
   leavePhoneFull()
   single = null
   singleCam = null
@@ -915,7 +984,8 @@ function sdBadge() {
   return b
 }
 
-function upgradeToMain(tile, cam, sub, opts) {
+/** warm: this camera's main stream, started ahead (aheadMain): the layer shows that instead of its own. */
+function upgradeToMain(tile, cam, sub, opts, warm = null) {
   const layer = document.createElement('div')
   // full size but invisible until its first frame (a hidden element would give the canvas no size)
   layer.className = 'tile-upgrade pending'
@@ -925,6 +995,7 @@ function upgradeToMain(tile, cam, sub, opts) {
   const main = new LiveTile(layer, cam, MAIN_STREAM, 0, {
     ...opts,
     noStill: true, // the sub-stream below it already shows the still
+    borrowFrom: warm,
     onFirstFrame: () => {
       layer.classList.remove('pending')
       for (const b of tile.querySelectorAll('.hd-busy')) b.remove()
@@ -936,6 +1007,19 @@ function upgradeToMain(tile, cam, sub, opts) {
       tile.querySelector(':scope > .status')?.remove()
       sub.close()
       if (sub.tile !== tile) sub.tile.remove() // an earlier layer that had gone over to the sub-stream
+      // one started ahead that had nothing kept to lend (too long a stretch since its keyframe) only
+      // kept the stream running on the server until this layer's own connection had it: done
+      if (warm && main.source !== warm) {
+        warm.close()
+        singleTiles = singleTiles.filter((t) => t !== warm)
+      }
+      // settled here at full quality, and it is the camera's own stream, not a conversion: the main
+      // stream of the camera a step on is started ahead (aheadMain)
+      clearTimeout(aheadMainTimer)
+      aheadMainTimer = setTimeout(() => {
+        aheadMainTimer = null
+        if (overlay === tile && !main.closed && main.converted !== true) startAheadMain(cam)
+      }, AHEAD_MAIN_MS)
     },
     onUnsupported: () => {
       rememberNoMain(camKey(cam))
@@ -975,6 +1059,7 @@ function upgradeToMain(tile, cam, sub, opts) {
     }
   })
   singleTiles.push(main)
+  if (warm) singleTiles.push(warm) // the view's own now: closed with it
 }
 
 // ---- this user's camera order ------------------------------------------------------------------
@@ -1504,6 +1589,7 @@ addEventListener('pagehide', () => {
   // cleanup runs. Do not retain sockets or decoders across that frozen document.
   for (const t of tiles) t.close()
   tiles = []
+  stopAheadMain()
 })
 addEventListener('pageshow', (event) => {
   if (event.persisted) {
@@ -1533,6 +1619,7 @@ document.addEventListener('visibilitychange', () => {
     hiddenTimer = setTimeout(() => {
       for (const t of tiles) t.close()
       tiles = []
+      stopAheadMain() // (a whole main stream nobody is looking at)
     }, 3000)
     return
   }
@@ -1584,6 +1671,9 @@ if (me) document.getElementById('whoami').textContent = me.user
 if (me?.admin) { const st = document.getElementById('sitesTab'); if (st) st.hidden = false; const se = document.getElementById('settingsTab'); if (se) se.hidden = false }
 isAdmin = Boolean(me?.admin)
 user = me?.user ?? null
+// where the server sees this browser coming from: the name in the address bar is the same on the
+// office network and through the tunnel, so it cannot say (security.mjs routeOf). For aheadMain.
+onLan = typeof me?.address === 'string' && me.address !== '' && isLocalHost(me.address)
 setInterval(checkSession, 60_000)
 
 function multiSite() {
@@ -1686,6 +1776,7 @@ function stepCamera(dir) {
   if (list.length < 2 || single === null) return
   const i = list.findIndex((c) => camKey(c) === single)
   const next = list[(i + dir + list.length) % list.length]
+  stepDir = dir < 0 ? -1 : 1
   openSingle(next, { stepping: true })
 }
 
