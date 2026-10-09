@@ -2,6 +2,7 @@
 // Used by the live grid (viewer.js) and the map's live popup (map.js).
 import { clearStill, maybeKeepStill, showStill } from './stills.js'
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { sicexOn } from './sicex.js'
 import { liveSocket } from './live-mux.js'
 import { activeTrace } from './frame-trace.js'
 
@@ -258,7 +259,7 @@ export class LiveTile {
       // each frame timed as it arrives, and the burst after a hiccup decoded, not dropped to the next
       // keyframe as if the decoder could not keep up (player.js; stutter report 2.2, 29 Sep)
       arrivalClock: true,
-      countDecoderHold: decoderHoldCounted(),
+      countDecoderHold: decoderHoldCounted() && sicexOn('decoderHold'),
       clock: opts.clock,
       maxQueuedFrames: opts.maxQueuedFrames,
       noRewindMs: opts.noRewindMs,

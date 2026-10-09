@@ -168,7 +168,8 @@ import { loopWorstMs } from './loop-lag.mjs'
 import { processErrors } from './process-guard.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder, UI_PREFS_PATH, handleUiPreferences } from './user-prefs.mjs'
-import { handleTelemetry, makeTelemetry } from './telemetry.mjs'
+import { cohortOf, handleTelemetry, makeTelemetry } from './telemetry.mjs'
+import { handleSicex, makeSicex } from './sicex.mjs'
 import { handleHold, makeHolds } from './stream-holds.mjs'
 import { handleTolerance, makeTolerance } from './wall-tolerance.mjs'
 import { xmlOnline } from './xml-session.mjs'
@@ -304,6 +305,10 @@ if (LIVE_WORKER) {
 
 const DATA_DIR = auth.DATA_DIR
 const telemetry = makeTelemetry()
+// SICE-X: the optional speed-ups, switched from one place, and switched off by itself when the screens
+// running it measurably fare worse than the ones kept without it (sicex.mjs; looked at once an hour)
+const sicex = makeSicex({ dir: auth.DATA_DIR, log: console.log })
+setInterval(() => { try { sicex.autoCheck(telemetry.summary()) } catch (e) { console.warn(`[sicex] check failed: ${e?.message ?? e}`) } }, 3_600_000).unref()
 // Only on an NVR reached on the local network that is refusing nothing: a P2P or VPN NVR's main
 // stream rides the same slow link as the one being watched, and one that refuses streams has none
 // to spare (warm-streams.mjs keeps away from it for the same reason).
@@ -750,6 +755,10 @@ const handleRequest = async (req, res) => {
   // what viewers actually got, as their pages measured it, and the score made from it (telemetry.mjs)
   const telemetryRoute = await handleTelemetry(req, pathname, who, telemetry)
   if (telemetryRoute) return sendJson(res, ...telemetryRoute)
+  const sicexRoute = await handleSicex(req, pathname, { user, admin: who.admin === true, store: sicex, cohortOf, device: url.searchParams.get('device') ?? '', log: console.log })
+  if (sicexRoute) return sendJson(res, ...sicexRoute)
+  // (the hold is one of the engine's modules: with it switched off nothing is held, whatever a page asks)
+  if (pathname === '/api/live/hold' && user && (() => { const s = sicex.get(); return !s.enabled || s.modules.hold === false })()) return sendJson(res, 200, { held: false, why: 'switched off' })
   // the main stream of the camera this viewer is expected to open next, kept running (stream-holds.mjs)
   const holdRoute = await handleHold(req, pathname, {
     user,

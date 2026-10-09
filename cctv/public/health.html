@@ -76,6 +76,20 @@
       </table>
       <p class="hp-note">By screen and number of cameras shown at once, since the server last started: the share of the frames that arrived which that screen drew. A screen reports only while its Live page is the visible window. "Screen" is that browser's own random name.</p>
     </details>
+    <!-- Admins only: SICE-X, the optional things that make Argus faster to use, switched from one
+         place (sicex.mjs). The platform works the same with all of it off. -->
+    <details id="sicex" class="hp-history" open hidden>
+      <summary><h2>SICE-X engine <span id="sicexState" class="hp-count"></span></h2></summary>
+      <p id="sicexAuto" class="hp-note" hidden></p>
+      <p><label><input id="sicexEnabled" type="checkbox" /> Engine on</label></p>
+      <table class="hp-table">
+        <thead><tr><th>Module</th><th>What it does</th><th>On</th></tr></thead>
+        <tbody id="sicexRows"></tbody>
+      </table>
+      <p><label>Sites left out (their cameras are not pre-started, held or linked): <input id="sicexSites" type="text" placeholder="Site name, another site" size="40" /></label></p>
+      <p><button id="sicexSave" type="button">Save</button> <span id="sicexSaid" role="status"></span></p>
+      <p class="hp-note">Everything here is optional: with the engine off, live view, playback, exports and recording work exactly as before. One screen in ten always runs without it, so the table above can say whether it helps; if the screens with it measurably fare worse, the engine switches itself off and says so here. A change reaches each screen when its page is next opened.</p>
+    </details>
     <h2>This server</h2>
     <div id="system" class="cards"></div>
 

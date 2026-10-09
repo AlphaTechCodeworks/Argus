@@ -14,7 +14,8 @@ import { H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML, mainNotCon
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
-import { startTelemetry } from './telemetry.js'
+import { deviceId, startTelemetry } from './telemetry.js'
+import { loadSicex, sicexOn } from './sicex.js'
 import { TOLERANCE, knownCapacity, layoutNote as profileNote, noteCapacity, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
 import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
@@ -722,7 +723,7 @@ const THIN_START_FPS = 25 // what a tile is taken to cost before it has been mea
 let thin = thinStart()
 const thinSeen = new Map() // camera -> { player, since, fullSince, arrived, decoded, bytes, fps, dec, kbps }
 let thinAt = 0
-const wallThinOn = () => { try { return localStorage.getItem('argus.wallThin') !== 'off' } catch { return true } }
+const wallThinOn = () => { try { return sicexOn('wallThin') && localStorage.getItem('argus.wallThin') !== 'off' } catch { return true } }
 function updateWallThin() {
   if (document.hidden) return
   const now = performance.now()
@@ -1018,6 +1019,8 @@ function startAheadMain(cam, { onServer = false } = {}) {
   if (aheadMain && aheadMain.key === k && !aheadMain.tile.closed) return
   stopAheadMain()
   if (!next || k === camKey(cam)) return
+  // (SICE-X: started ahead by this browser, or kept running by the server, each its own switch)
+  if (!sicexOn('ahead', next.site)) return holdAhead(next)
   // Everyone else (a phone, a viewer through the tunnel or the VPN, a browser without H.265) has the
   // server keep that stream running instead, sent to nobody (stream-holds.mjs): when they step to it
   // the NVR does not have to start it, and it costs their link and the server's conversions nothing.
@@ -1057,6 +1060,7 @@ function stopAheadMain() {
 const HOLD_AGAIN_MS = 12_000
 let holdTimer = null
 function holdAhead(c) {
+  if (!sicexOn('hold', c.site)) return
   if (c.online === false || c.hd === false || c.remote === true || noMain.has(camKey(c))) return
   const ask = () => fetch('/api/live/hold', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nvr: c.nvr, ch: c.ch }) })
     .then((r) => (r.ok ? r.json() : null))
@@ -1087,6 +1091,7 @@ async function cameraLinks() {
   return camLinks
 }
 function linkedCameras(cam, host) {
+  if (!sicexOn('linked', cam.site)) return
   const key = `${cam.nvr}/${cam.ch}`
   cameraLinks().then((d) => {
     if (!d || !host.isConnected) return // (the view was closed or moved on while the links were read)
@@ -1600,7 +1605,7 @@ function markLayouts() {
   for (const o of layoutSelect.querySelectorAll('option')) {
     if (!LAYOUTS[o.value] || LAYOUTS[o.value].list || o.value === 'auto') continue
     o.dataset.base ??= o.textContent
-    const note = profileNote(wallProfile, layoutCells(o.value).cells.length, { tol: wallTol })
+    const note = sicexOn('wallProfile') ? profileNote(wallProfile, layoutCells(o.value).cells.length, { tol: wallTol }) : null
     const text = note ? `${o.dataset.base} · ${note.short}` : o.dataset.base
     if (o.textContent !== text) o.textContent = text
     o.title = note ? note.long : ''
@@ -1609,6 +1614,7 @@ function markLayouts() {
 /** Choosing a layout this screen handled badly says so, once a visit for each. It never stops anyone. */
 const layoutWarned = new Set()
 function warnLayout() {
+  if (!sicexOn('wallProfile')) return
   const note = profileNote(wallProfile ?? readProfile(storageOrNull()), layoutCells(layoutSelect.value).cells.length, { tol: wallTol })
   if (!note || note.status === 'ok' || layoutWarned.has(layoutSelect.value)) return
   layoutWarned.add(layoutSelect.value)
@@ -1621,6 +1627,8 @@ function warnLayout() {
   setTimeout(() => el.remove(), 7000)
 }
 try { markLayouts() } catch {}
+// what SICE-X allows here (sicex.js): asked once; until it answers, what it said last time
+loadSicex(deviceId()).then(() => { try { markLayouts() } catch {} })
 
 // ---- the administrator's tolerance for a wall (wall-tolerance.mjs) ----
 // Read once for everyone; an administrator can change it in View options. A server without it
