@@ -1060,6 +1060,9 @@ function upgradeToMain(tile, cam, sub, opts, warm = null) {
   })
   singleTiles.push(main)
   if (warm) singleTiles.push(warm) // the view's own now: closed with it
+  // among the page's tiles from now on: a tab hidden for a while closes them, and this one was left
+  // out (added after the list was made), so a main stream nobody could see kept running
+  syncTiles()
 }
 
 // ---- this user's camera order ------------------------------------------------------------------
