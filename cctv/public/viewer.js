@@ -16,6 +16,7 @@ import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.j
 import { REMOTE_CLOCK } from './playout.js'
 import { deviceId, startTelemetry } from './telemetry.js'
 import { loadSicex, sicexOn } from './sicex.js'
+import { checkBookmark } from './bookmarks-view.js'
 import { TOLERANCE, knownCapacity, layoutNote as profileNote, noteCapacity, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
 import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
@@ -1077,6 +1078,85 @@ function takeAheadMain(cam) {
   return t
 }
 
+// ---- Mark: what is on screen now, bookmarked under a case title (bookmarks.mjs) ----
+// A bookmark is the platform's own record of a stretch that matters: one or more cameras, a time,
+// a title, notes, kept by the core and found again on the Playback page. Following someone from
+// camera to camera (the linked-camera buttons) and pressing Mark on each builds the case as it
+// happens: every mark carries the same title until it is changed. The last MARK_BACK_MS are marked,
+// since what made someone press it has just happened.
+const MARK_BACK_MS = 30_000
+const MARK_TITLE_KEY = 'argus.markTitle'
+function markButton(cam) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.className = 'cam-link cam-mark'
+  b.textContent = 'Mark'
+  b.title = 'Bookmark the last 30 seconds of this camera under a case title'
+  b.addEventListener('click', (e) => { e.stopPropagation(); openMark(cam) })
+  return b
+}
+function openMark(cam) {
+  let dlg = document.getElementById('markDlg')
+  if (!dlg) {
+    dlg = document.createElement('dialog')
+    dlg.id = 'markDlg'
+    dlg.className = 'wall-pick offline-dlg mark-dlg'
+    dlg.addEventListener('click', (e) => e.stopPropagation())
+    document.body.append(dlg)
+  }
+  const at = Date.now()
+  const h = document.createElement('h3')
+  h.textContent = `Mark ${cam.name}`
+  const when = document.createElement('p')
+  when.className = 'mark-when'
+  when.textContent = `The 30 seconds up to ${new Date(at).toLocaleTimeString()}`
+  const title = document.createElement('input')
+  title.type = 'text'
+  title.maxLength = 120
+  title.placeholder = 'Case or incident, e.g. Pallet missing from Bay 3'
+  try { title.value = localStorage.getItem(MARK_TITLE_KEY) ?? '' } catch {}
+  const note = document.createElement('textarea')
+  note.rows = 2
+  note.placeholder = 'What you saw (optional)'
+  const said = document.createElement('p')
+  said.setAttribute('role', 'status')
+  said.className = 'mark-said'
+  const save = document.createElement('button')
+  save.type = 'button'
+  save.textContent = 'Save mark'
+  const cancel = document.createElement('button')
+  cancel.type = 'button'
+  cancel.textContent = 'Cancel'
+  cancel.addEventListener('click', () => dlg.close())
+  const label = (text, field) => { const l = document.createElement('label'); l.append(text, field); return l }
+  const row = document.createElement('p')
+  row.append(save, ' ', cancel)
+  save.addEventListener('click', async () => {
+    const checked = checkBookmark({ cameras: [camKey(cam)], startMs: at - MARK_BACK_MS, endMs: at, title: title.value, description: note.value })
+    if (!checked.ok) { said.textContent = checked.error; return }
+    save.disabled = true
+    said.textContent = 'Saving…'
+    try {
+      const r = await fetch('/api/bookmarks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(checked.value) })
+      const j = await r.json().catch(() => null)
+      if (!r.ok) { said.textContent = j?.error ?? 'Not saved'; save.disabled = false; return }
+      try { localStorage.setItem(MARK_TITLE_KEY, checked.value.title) } catch {}
+      const open = document.createElement('a')
+      open.href = `/playback.html?nvr=${encodeURIComponent(cam.nvr)}&ch=${cam.ch}&t=${at - MARK_BACK_MS}`
+      open.textContent = 'Open in Recordings'
+      said.replaceChildren('Marked. ', open)
+      row.replaceChildren(cancel)
+      cancel.textContent = 'Close'
+    } catch {
+      said.textContent = 'Not saved: the server did not answer'
+      save.disabled = false
+    }
+  })
+  dlg.replaceChildren(h, when, label('Case ', title), label('Note ', note), said, row)
+  if (!dlg.open) dlg.showModal()
+  ;(title.value ? note : title).focus()
+}
+
 // ---- linked cameras: one click to the camera a person walks to next (camera-links.mjs) ----
 // The links an administrator drew on the map; where none were drawn for this camera, the two
 // nearest on its map, marked as a guess. Read once and kept five minutes.
@@ -1153,6 +1233,7 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
     link.addEventListener('click', (e) => e.stopPropagation())
     links.append(link)
   }
+  links.append(markButton(cam))
   linkedCameras(cam, links)
   overlay.querySelector('.name').after(links)
   if (isPhone()) overlay.append(nativeFullButton(overlay))
