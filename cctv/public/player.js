@@ -236,7 +236,7 @@ export class VideoPlayer {
     this.closed = false
     // older: frames decoded and not shown for being at or before one already shown (noRewindMs)
     this.stats = { fps: 0, jitterMs: 0, delayMs: 0, dropped: 0, late: 0, resyncs: 0, older: 0, kbps: 0, width: 0, height: 0, codec: '', hw: '', coded: '', visible: '' }
-    this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0, arrived: 0, decoded: 0, gap: 0, lastIn: 0 }
+    this.win = { frames: 0, bytes: 0, intervals: [], lastShown: 0, arrived: 0, decoded: 0, gap: 0, lastIn: 0, decMax: 0, skip: 0, over: 0 }
     this.grabs = [] // callers waiting for the next frame shown, at full size (grab())
     this.onChunk = null // (chunk) => void: sees every encoded frame as it arrives (set while the picture panel is open)
     this.keyTs = [] // timestamps (µs) of the last keyframes received, oldest first
@@ -458,6 +458,11 @@ export class VideoPlayer {
       const f = this.fed.shift()
       if (f.ts === frame.timestamp) fedAt = f.at
     }
+    // (how long the decoder held this frame, the longest this second: telemetry, why frames are skipped)
+    if (fedAt !== null) {
+      const held = performance.now() - fedAt
+      if (held > this.win.decMax) this.win.decMax = held
+    }
     // position in the keyframe interval (the decoder keeps timestamps; there are no B-frames)
     if (this.keyTsSet.has(frame.timestamp)) {
       this.sinceKey = 0
@@ -529,6 +534,7 @@ export class VideoPlayer {
     while (this.queue.length > queueLimit) {
       this.queue.shift().frame.close()
       this.stats.dropped++
+      this.win.over++
     }
   }
 
@@ -549,6 +555,7 @@ export class VideoPlayer {
     for (let i = 0; i < due; i++) {
       this.queue[i].frame.close()
       this.stats.dropped++
+      this.win.skip++ // (decoded, but another frame was due by the time the page drew)
     }
     const { frame, ts } = this.queue[due]
     this.queue.splice(0, due + 1)
@@ -868,6 +875,9 @@ export class VideoPlayer {
       arrived: w.arrived,
       decoded: w.decoded,
       arriveGapMs: Math.round(w.gap),
+      decodeMs: Math.round(w.decMax),
+      skipped: w.skip,
+      overflowed: w.over,
       jitterMs: Math.round(Math.sqrt(variance) * 10) / 10,
       kbps: Math.round((w.bytes * 8) / 1000),
       delayMs: this.pacing ? this.clock.delay : 0,
@@ -883,6 +893,9 @@ export class VideoPlayer {
     w.arrived = 0
     w.decoded = 0
     w.gap = 0
+    w.decMax = 0
+    w.skip = 0
+    w.over = 0
     w.bytes = 0
     w.intervals = []
   }

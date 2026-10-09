@@ -76,7 +76,7 @@ export function createCollector({ now, send, device, page }) {
         fps: round(tile.fps), fpsSrc: round(s.fpsMax), jitterMs: round(tile.jitterMs, 10), bufMs: round(tile.bufMs),
         dropped: round(tile.dropped), late: round(tile.late), resync: round(tile.resync), decQueue: round(tile.decQueue),
         // frames that came in, came out of the decoder, the longest wait between arrivals, and the page's redraws
-        in: round(tile.arrived), dec: round(tile.decoded), gapMs: round(tile.gapMs), rafHz: round(tile.rafHz), rafGapMs: round(tile.rafGapMs),
+        in: round(tile.arrived), dec: round(tile.decoded), gapMs: round(tile.gapMs), decMs: round(tile.decMs), skip: round(tile.skip), over: round(tile.over), rafHz: round(tile.rafHz), rafGapMs: round(tile.rafGapMs),
         kbps: round(tile.kbps), w: round(tile.w), h: round(tile.h), stalled: tile.stalled === true, visible: tile.visible !== false
       })
     }
