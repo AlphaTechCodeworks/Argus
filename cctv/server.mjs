@@ -231,11 +231,12 @@ function thinAndRetain(roundStart = Date.now()) {
   })
 }
 
+// The Android app's releases come from GitHub by themselves once a token has been placed (app-fetch.mjs).
+startAppFetch()
+
 // server recording (CCTV_LIVE_WORKER=on only): retention, each location's space limit and low-space
 // deletion every 5 minutes. Its file calls go to each location's helper (housekeeping.mjs); it keeps
 // bookmarked and exported stretches and checks each location's marker, as the switch's jobs do.
-// The Android app's releases come from GitHub by themselves once a token has been placed (app-fetch.mjs).
-startAppFetch()
 if (LIVE_WORKER) {
   // the time-lapse pace's ceiling read at start, so Settings > Storage says it before the first round (5 minutes)
   usePaceFile(join(auth.DATA_DIR, 'thin-pace.json')).catch(() => {})
