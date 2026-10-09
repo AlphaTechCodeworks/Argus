@@ -163,6 +163,7 @@ import { processErrors } from './process-guard.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder, UI_PREFS_PATH, handleUiPreferences } from './user-prefs.mjs'
 import { handleTelemetry, makeTelemetry } from './telemetry.mjs'
+import { handleHold, makeHolds } from './stream-holds.mjs'
 import { xmlOnline } from './xml-session.mjs'
 
 const {
@@ -293,6 +294,16 @@ if (LIVE_WORKER) {
 
 const DATA_DIR = auth.DATA_DIR
 const telemetry = makeTelemetry()
+// Only on an NVR reached on the local network that is refusing nothing: a P2P or VPN NVR's main
+// stream rides the same slow link as the one being watched, and one that refuses streams has none
+// to spare (warm-streams.mjs keeps away from it for the same reason).
+const holds = makeHolds({
+  streamOf: (id, ch) => {
+    const n = nvrs.get(id)
+    return n?.liveOnline && !(n.cfg?.sn || n.cfg?.remote) && refusalsOf(n) === 0 ? n.getStream(ch, 0) : null
+  },
+  log: console.log
+})
 const STARTED_MS = Date.now()
 
 // Only a hang from just before this start is worth reporting as "the server restarted": an older
@@ -728,6 +739,14 @@ const handleRequest = async (req, res) => {
   // what viewers actually got, as their pages measured it, and the score made from it (telemetry.mjs)
   const telemetryRoute = await handleTelemetry(req, pathname, who, telemetry)
   if (telemetryRoute) return sendJson(res, ...telemetryRoute)
+  // the main stream of the camera this viewer is expected to open next, kept running (stream-holds.mjs)
+  const holdRoute = await handleHold(req, pathname, {
+    user,
+    viewer: viewerOf(req, currentUser),
+    holds,
+    mayHd: (nvr, ch) => can(who, 'live', { nvr, ch }) === true && can(who, 'live-hd', { nvr, ch }) === true
+  })
+  if (holdRoute) return sendJson(res, ...holdRoute)
 
   // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
   // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own.

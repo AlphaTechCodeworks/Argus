@@ -795,14 +795,18 @@ let onLan = false // this browser reaches the server on the local network (/api/
 window.cctvAheadMain = () => (aheadMain ? { k: aheadMain.key, ws: aheadMain.tile.ws?.readyState ?? null, gopKB: Math.round(aheadMain.tile.gopBytes / 1024), lendable: aheadMain.tile.lendable } : null)
 const mayStartMainAhead = (c) => onLan && !isPhone() && !cannotPlayH265() && c.online !== false && c.hd !== false && c.remote !== true && !noMain.has(camKey(c))
 /** Starts the main stream of the camera a step on from this one (see above), and lets any other go. */
-function startAheadMain(cam) {
+function startAheadMain(cam, { onServer = false } = {}) {
   const list = shownCameras(gridCameras(), gridView())
   const i = list.findIndex((c) => camKey(c) === camKey(cam))
   const next = i >= 0 && list.length > 1 ? list[(i + stepDir + list.length) % list.length] : null
   const k = next ? camKey(next) : null
   if (aheadMain && aheadMain.key === k && !aheadMain.tile.closed) return
   stopAheadMain()
-  if (!next || k === camKey(cam) || !mayStartMainAhead(next)) return
+  if (!next || k === camKey(cam)) return
+  // Everyone else (a phone, a viewer through the tunnel or the VPN, a browser without H.265) has the
+  // server keep that stream running instead, sent to nobody (stream-holds.mjs): when they step to it
+  // the NVR does not have to start it, and it costs their link and the server's conversions nothing.
+  if (onServer || !mayStartMainAhead(next)) return holdAhead(next)
   const el = document.createElement('div')
   el.className = 'tile'
   el.innerHTML = TILE_HTML
@@ -827,8 +831,24 @@ function startAheadMain(cam) {
 function stopAheadMain() {
   clearTimeout(aheadMainTimer)
   aheadMainTimer = null
+  clearInterval(holdTimer)
+  holdTimer = null
   aheadMain?.tile.close()
   aheadMain = null
+}
+// A hold lasts 20 s on the server and is asked for again while this camera is still the one expected
+// (stream-holds.mjs HOLD_MS); stopAheadMain ends the asking, and the hold then ends by itself. A
+// server that will not hold it (too many held, the NVR busy, an older server) is not asked again.
+const HOLD_AGAIN_MS = 12_000
+let holdTimer = null
+function holdAhead(c) {
+  if (c.online === false || c.hd === false || c.remote === true || noMain.has(camKey(c))) return
+  const ask = () => fetch('/api/live/hold', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nvr: c.nvr, ch: c.ch }) })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((a) => { if (a?.held !== true) { clearInterval(holdTimer); holdTimer = null } })
+    .catch(() => {})
+  ask()
+  holdTimer = setInterval(() => { if (!document.hidden) ask() }, HOLD_AGAIN_MS)
 }
 /** The main stream started ahead for this camera, handed over to its view; any other is let go. */
 function takeAheadMain(cam) {
@@ -1046,7 +1066,8 @@ function upgradeToMain(tile, cam, sub, opts, warm = null) {
       aheadMainTimer = setTimeout(() => {
         aheadMainTimer = null
         // (not in a hidden tab: the first picture is painted there too, and nothing would close it)
-        if (overlay === tile && !main.closed && main.converted !== true && !document.hidden) startAheadMain(cam)
+        // (a conversion on screen: the next one would be another, so the server holds it instead)
+        if (overlay === tile && !main.closed && !document.hidden) startAheadMain(cam, { onServer: main.converted === true })
       }, AHEAD_MAIN_MS)
     },
     onUnsupported: () => {
