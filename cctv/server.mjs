@@ -113,6 +113,7 @@ import { makePresence } from './presence.mjs'
 import { handleViewers, liveKind, trackingOpen } from './viewers.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
+import { pagesFrom } from './page-reload.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
 import { allGridOrders } from './user-prefs.mjs'
 import { pool as playbackTranscodes } from './transcode.mjs'
@@ -172,7 +173,7 @@ const {
   CERT_HOSTS = '' // extra names/IPs for the certificate, e.g. this PC's LAN address
 } = process.env
 
-const PUBLIC_DIR = join(import.meta.dirname, 'public')
+let PUBLIC_DIR = join(import.meta.dirname, 'public') // (let: a pages-only release is taken up without a restart, see SIGHUP)
 
 startWatchdog()
 // an error that ends this process leaves DATA_DIR/last-crash.json behind (the watchdog covers hangs, not these)
@@ -524,7 +525,7 @@ const read = (name, fallback) => {
   }
 }
 const VERSION = read('VERSION', '0.0')
-const RELEASE = read('RELEASE', 'dev')
+let RELEASE = read('RELEASE', 'dev')
 const BUILD = { version: `v${VERSION}`, release: RELEASE }
 if (AUTH_OFF) console.warn('WARNING: CCTV_AUTH=off, sign-in is disabled. Development use only.')
 
@@ -1483,3 +1484,21 @@ const shutdown = async () => {
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
+// A release that changes only pages is taken up without a restart (page-reload.mjs): the installer
+// switches the `current` link and sends this process SIGHUP. Anything else in it: said, and left for
+// a restart. Never throws: a failed reload leaves the pages being served as they were.
+process.on('SIGHUP', () => {
+  try {
+    const r = pagesFrom({ running: join(import.meta.dirname, '..'), link: process.env.CCTV_CURRENT_LINK ?? join(import.meta.dirname, '..', '..', '..', 'current') })
+    if (!r.ok) return console.warn(`[pages] not taken up without a restart: ${r.why}`)
+    if (r.release === RELEASE) return console.log(`[pages] already serving ${RELEASE}`)
+    PUBLIC_DIR = r.publicDir
+    RELEASE = r.release
+    BUILD.release = r.release
+    setAssetStamp(RELEASE)
+    warmFiles(PUBLIC_DIR, MIME)
+    console.log(`[pages] now serving the pages of ${RELEASE} (no restart)`)
+  } catch (e) {
+    console.warn(`[pages] reload failed, pages unchanged: ${e?.message ?? e}`)
+  }
+})
