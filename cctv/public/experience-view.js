@@ -24,10 +24,20 @@ export function experienceView(d) {
   const note = seen === 0
     ? 'Nothing measured yet in this period.'
     : `Out of 100, over the last ${d?.hours ?? 24} hours, since the server last started. Each score is made only from the parts that were seen${missing.length ? `; not seen yet: ${missing.join(', ')}` : ''}.${lost}`
-  return { heads, rows, note, ...nvrView(d) }
+  return { heads, rows, note, ...nvrView(d), ...wallView(d) }
 }
 
 const secs = (ms) => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)} s` : '–')
+
+/** Each screen at each number of cameras at once: the share of arriving frames it drew. Biggest walls first. */
+export function wallView(d) {
+  const wallHeads = ['Person', 'Screen', 'Cameras at once', 'Frames shown', 'Readings', 'Last seen (UTC)']
+  const wallRows = (d?.walls ?? []).slice(0, 40).map((w) => [
+    String(w.user), String(w.device).slice(0, 6), String(w.tiles), `${Math.round(w.share * 100)}%`, String(w.moments),
+    Number.isFinite(w.at) ? new Date(w.at).toISOString().slice(0, 16).replace('T', ' ') : '–'
+  ])
+  return { wallHeads, wallRows }
+}
 
 /** The same answer by NVR, slowest to a first picture first: where the waiting actually is. */
 export function nvrView(d) {

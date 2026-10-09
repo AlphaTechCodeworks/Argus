@@ -90,6 +90,8 @@ export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = 
   // per NVR, since this start (and what was read back): the last RING waits, and its tiles' seconds
   const RING = 400
   const byNvr = new Map()
+  // by screen and number of cameras at once: frames arrived and drawn (the Live page's own figure, seen from here)
+  const walls = new Map() // "user\ndevice\ntiles" -> { arrived, drawn, moments, at }
   const nvrOf = (id) => byNvr.get(id) ?? byNvr.set(id, { first: [], hd: [], seconds: 0, frozen: 0, reconnects: 0, smoothness: null }).get(id)
   const keep = (ring, x) => { ring.push(x); if (ring.length > RING) ring.shift() }
   const counts = { batches: 0, written: 0, notWritten: 0, bytes: null }
@@ -145,6 +147,20 @@ export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = 
       const mine = sumsFor(at, cohort)
       mine.batches++
       mine.sessions.add(`${user}\n${batch.device}`)
+      const moments = new Map() // sample time -> the tiles sampled then
+      for (const s of batch.samples) if (s.visible !== false) (moments.get(s.t) ?? moments.set(s.t, []).get(s.t)).push(s)
+      for (const list of moments.values()) {
+        if (list.length < 4) continue
+        const k = `${user}\n${batch.device}\n${list.length}`
+        const w = walls.get(k) ?? walls.set(k, { arrived: 0, drawn: 0, moments: 0, at: 0 }).get(k)
+        for (const s of list) {
+          w.arrived += s.in ?? 0
+          w.drawn += s.fps ?? 0
+        }
+        w.moments++
+        w.at = at
+        if (walls.size > 300) walls.delete(walls.keys().next().value)
+      }
       for (const s of batch.samples) {
         const a = attention(s)
         if (!(a > 0)) continue
@@ -223,7 +239,15 @@ export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = 
         nvr, opens: n.first.length, firstMs: at(n.first, 0.5), firstMs90: at(n.first, 0.9), hdMs: at(n.hd, 0.5), hdMs90: at(n.hd, 0.9),
         smoothness: mean.of(n.smoothness), frozenShare: n.seconds ? n.frozen / n.seconds : null, reconnects: n.reconnects, tileSeconds: n.seconds
       })).sort((a, b) => (b.firstMs ?? -1) - (a.firstMs ?? -1))
-      return { hours: lastHours, cohorts: out, nvrs, kept: { ...counts } }
+      // each screen at each number of cameras: the share of arriving frames it drew, the biggest walls first
+      const wallRows = [...walls]
+        .map(([k, w]) => {
+          const [who, device, tiles] = k.split('\n')
+          return { user: who, device, tiles: Number(tiles), share: w.arrived > 0 ? Math.min(1, w.drawn / w.arrived) : null, moments: w.moments, at: w.at }
+        })
+        .filter((w) => w.share !== null)
+        .sort((a, b) => b.tiles - a.tiles || b.at - a.at)
+      return { hours: lastHours, cohorts: out, nvrs, walls: wallRows, kept: { ...counts } }
     }
   }
 }

@@ -252,6 +252,20 @@ test('by NVR: the slowest to a first picture comes first, with its frozen share'
   assert.deepEqual(nvrView({ nvrs }).nvrRows[1].slice(0, 5), ['quick', '1', '0.4 s', '0.4 s', '–'])
 })
 
+test('by screen and cameras at once: the share of arriving frames drawn, biggest walls first', async () => {
+  const t = Date.parse('2026-10-20T12:00:00Z')
+  const store = makeTelemetry({ dir: mkdtempSync(join(tmpdir(), 'argus-tel-wall-')), now: () => t })
+  const at = (when, n, o) => Array.from({ length: n }, (_, ch) => sample({ t: when, ch, in: 25, ...o }))
+  store.add('mike', cleanBatch(batch({ samples: [...at(t, 36, { fps: 20 }), ...at(t + 2000, 36, { fps: 20 }), ...at(t + 4000, 3, { fps: 25 })] }), t))
+  store.add('mike', cleanBatch(batch({ samples: at(t, 9, { fps: 25 }) }), t))
+  store.add('mike', cleanBatch(batch({ device: 'otherscreen01', samples: at(t, 9, { fps: 5, visible: false }) }), t)) // (a hidden page: not this)
+  const { walls } = store.summary()
+  assert.deepEqual(walls.map((w) => [w.user, w.device, w.tiles, w.share, w.moments]), [['mike', 'abc123abc123', 36, 0.8, 2], ['mike', 'abc123abc123', 9, 1, 1]])
+  const { wallView } = await import('../public/experience-view.js')
+  assert.deepEqual(wallView({ walls }).wallRows[0], ['mike', 'abc123', '36', '80%', '2', '2026-10-20 12:00'])
+  assert.deepEqual(wallView(null).wallRows, [])
+})
+
 test('a page of many tiles is sampled less often, so its batch stays under what the server reads', () => {
   const sent = []
   const c = createCollector({ now: () => 5_000_000, send: (b) => sent.push(b), device: 'd', page: 'live' })

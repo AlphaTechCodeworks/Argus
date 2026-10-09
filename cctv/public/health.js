@@ -790,6 +790,8 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     const rowsOf = (rows) => rows.map((r) => { const tr = el('tr'); for (const c of r) tr.append(el('td', { textContent: c })); return tr })
     document.getElementById('experienceNvrHeads')?.replaceChildren(...v.nvrHeads.map((h) => el('th', { textContent: h })))
     document.getElementById('experienceNvrRows')?.replaceChildren(...rowsOf(v.nvrRows))
+    document.getElementById('experienceWallHeads')?.replaceChildren(...v.wallHeads.map((h) => el('th', { textContent: h })))
+    document.getElementById('experienceWallRows')?.replaceChildren(...rowsOf(v.wallRows))
   }
   const loadWatching = () => {
     if (!isAdmin) return
