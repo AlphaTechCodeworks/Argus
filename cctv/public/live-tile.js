@@ -188,6 +188,19 @@ export function tileDot({ hasVideo = false, recording = undefined, stale = false
   return { className: 'dot dot-live', title: 'Video is arriving' }
 }
 
+/**
+ * Whether a frame the decoder kept past its display time grows the playout buffer (player.js
+ * countDecoderHold). On unless this browser was told otherwise: localStorage 'argus.decoderHold' =
+ * 'off' puts the player back as it was, for comparing the two on the same screen.
+ */
+export function decoderHoldCounted(storage = globalThis.localStorage) {
+  try {
+    return storage?.getItem('argus.decoderHold') !== 'off'
+  } catch {
+    return true
+  }
+}
+
 export class LiveTile {
   /**
    * @param {HTMLElement} tile element with TILE_HTML inside
@@ -244,6 +257,7 @@ export class LiveTile {
       // each frame timed as it arrives, and the burst after a hiccup decoded, not dropped to the next
       // keyframe as if the decoder could not keep up (player.js; stutter report 2.2, 29 Sep)
       arrivalClock: true,
+      countDecoderHold: decoderHoldCounted(),
       clock: opts.clock,
       maxQueuedFrames: opts.maxQueuedFrames,
       noRewindMs: opts.noRewindMs,

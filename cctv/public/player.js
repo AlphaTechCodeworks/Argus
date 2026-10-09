@@ -53,6 +53,7 @@ const MAX_DECODE_QUEUE = 12
 // keyframe froze the picture until it came, 2 s on a camera and more on a converted stream (stutter
 // report 2.2, 29 Sep).
 const BEHIND_MS = 250
+const OVERLOAD_QUIET_MS = 10_000 // a decoder that skipped to a keyframe this recently is overloaded, not just holding frames
 const HARD_DECODE_QUEUE = 150 // ... and at most this many wait whatever the clock says (memory)
 // Live: a frame is timed as if it came this much later, about what decoding it takes, so one that comes
 // just before its display time, too late to be decoded for it, counts as late (and the buffer grows)
@@ -212,6 +213,13 @@ export class VideoPlayer {
     // a tighter image budget in operator views. Defaults retain existing frames.
     this.maxQueuedImageBytes = options.maxQueuedImageBytes ?? Infinity
     this.arrivalClock = options.arrivalClock === true && this.pacing // (without pacing there is no clock)
+    // Live on the local network: a frame the decoder handed back after its display time is told to the
+    // clock, as it already is through the tunnel (#onDecoded). A decoder that keeps about ten frames
+    // back (H.264 at 1280x720 on the viewing PC, 2026-10-09: 0.33 s at 30 fps, 0.83 s at 12) releases
+    // them past a 350 ms buffer whenever the frames come in clumps, and the page drew four in five; the
+    // clock never knew, so the buffer never grew. false: as before.
+    this.countDecoderHold = options.countDecoderHold !== false
+    this.overloadedAt = -Infinity // when the decoder last fell so far behind that frames were skipped to a keyframe
     // noRewindMs: capture times (ms) of the newest frame timed as it arrived, and of the newest queued
     // to be shown (or drawn); kept across reset(), as a reconnect's replay starts before what was shown
     this.noRewindMs = options.noRewindMs > 0 ? options.noRewindMs : 0
@@ -384,6 +392,7 @@ export class VideoPlayer {
     const limit = this.skipTs !== null ? MAX_PREROLL_FRAMES : MAX_DECODE_QUEUE + (backlog ? MAX_HELD : 0)
     if (this.decoder.decodeQueueSize > limit && !isKey && this.#behind()) {
       this.needKey = true
+      this.overloadedAt = performance.now() // (the decoder cannot keep up: see #onDecoded)
       this.stats.dropped++
       return
     }
@@ -510,10 +519,14 @@ export class VideoPlayer {
       return
     }
     if (!this.paused && !this.arrivalClock) this.clock.schedule(ts, performance.now()) // (live: timed as it arrived, push)
-    else if (!this.paused && this.remote) {
+    else if (!this.paused && (this.remote || this.countDecoderHold)) {
       const now = performance.now()
       if (this.clock.anchor === null) this.clock.schedule(ts, now)
-      else if (fedAt !== null && this.clock.presentAt(ts) >= fedAt) this.clock.decodedLate(ts, now)
+      // (local live: only a hold the buffer could grow to cover, and not while the decoder is
+      // overloaded: it has had to skip to a keyframe lately (#decode), or keeps frames longer than the
+      // buffer may grow, 2-7 s on a wall of 100. A bigger buffer then only shows the same few frames
+      // later: replayed, 58% shown became 52% and the longest still picture 1.0 s -> 1.6 s)
+      else if (fedAt !== null && this.clock.presentAt(ts) >= fedAt && (this.remote || (now - fedAt <= this.clock.opts.maxDelayMs && now - this.overloadedAt > OVERLOAD_QUIET_MS))) this.clock.decodedLate(ts, now)
     }
     // The first picture after a (re)start is painted the moment it is decoded rather than after
     // the playout delay (350 ms, more with Smooth): the camera appears at once, and the frames
