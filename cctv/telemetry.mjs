@@ -86,6 +86,11 @@ const blank = () => ({ smoothness: null, startup: null, scrubbing: null, switchi
  */
 export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = MAX_BYTES, keepDays = KEEP_DAYS, keepHours = 24 * 7 } = {}) {
   const hours = new Map() // hour -> { apsi: sums, holdout: sums }
+  // per NVR, since this start (and what was read back): the last RING waits, and its tiles' seconds
+  const RING = 400
+  const byNvr = new Map()
+  const nvrOf = (id) => byNvr.get(id) ?? byNvr.set(id, { first: [], hd: [], seconds: 0, frozen: 0, reconnects: 0, smoothness: null }).get(id)
+  const keep = (ring, x) => { ring.push(x); if (ring.length > RING) ring.shift() }
   const counts = { batches: 0, written: 0, notWritten: 0, bytes: null }
   let lastPrune = -Infinity
 
@@ -144,8 +149,15 @@ export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = 
         if (!(a > 0)) continue
         mine.smoothness = mean.add(mine.smoothness, smoothness(s), a)
         mine.seconds++
+        const n = nvrOf(s.nvr)
+        n.seconds++
+        if (s.stalled || !(s.fps > 0)) n.frozen++
+        n.smoothness = mean.add(n.smoothness, smoothness(s))
       }
       for (const e of batch.events) {
+        // (by NVR as well: which recorder is slow to start a stream is the first thing to act on)
+        if (e.nvr && e.ms !== undefined && (e.kind === 'first-picture' || e.kind === 'hd')) keep(nvrOf(e.nvr)[e.kind === 'hd' ? 'hd' : 'first'], e.ms)
+        if (e.nvr && e.kind === 'reconnect') nvrOf(e.nvr).reconnects++
         if (e.kind === 'first-picture' && e.ms !== undefined) mine.startup = mean.add(mine.startup, startupScore(e.ms))
         else if (e.kind === 'hd' && e.ms !== undefined) mine.switching = mean.add(mine.switching, switchScore(e.ms))
         else if (e.kind === 'seek-picture' && e.ms !== undefined) mine.scrubbing = mean.add(mine.scrubbing, scrubScore(e.ms))
@@ -204,7 +216,13 @@ export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = 
         }
         out[cohort] = { ...score(parts), sessions: all.sessions.size, tileSeconds: all.seconds, batches: all.batches, opens: all.startup?.n ?? 0, switches: all.switching?.n ?? 0 }
       }
-      return { hours: lastHours, cohorts: out, kept: { ...counts } }
+      // each NVR, slowest to a first picture first: the middle wait and the wait 9 in 10 were inside
+      const at = (ring, q) => (ring.length ? [...ring].sort((a, b) => a - b)[Math.min(ring.length - 1, Math.floor(q * ring.length))] : null)
+      const nvrs = [...byNvr].map(([nvr, n]) => ({
+        nvr, opens: n.first.length, firstMs: at(n.first, 0.5), firstMs90: at(n.first, 0.9), hdMs: at(n.hd, 0.5), hdMs90: at(n.hd, 0.9),
+        smoothness: mean.of(n.smoothness), frozenShare: n.seconds ? n.frozen / n.seconds : null, reconnects: n.reconnects, tileSeconds: n.seconds
+      })).sort((a, b) => (b.firstMs ?? -1) - (a.firstMs ?? -1))
+      return { hours: lastHours, cohorts: out, nvrs, kept: { ...counts } }
     }
   }
 }

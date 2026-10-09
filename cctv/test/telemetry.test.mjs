@@ -235,3 +235,19 @@ test('a decoder that had to be set up again is reported once each time', () => {
   c.flush()
   assert.deepEqual(sent[0].events.map((e) => e.kind), ['first-picture', 'decoder-reset'])
 })
+
+test('by NVR: the slowest to a first picture comes first, with its frozen share', async () => {
+  const t = Date.parse('2026-10-20T12:00:00Z')
+  const store = makeTelemetry({ dir: mkdtempSync(join(tmpdir(), 'argus-tel-nvr-')), now: () => t })
+  const first = (nvr, ms) => ({ t, kind: 'first-picture', nvr, ch: 0, ms })
+  store.add('u', cleanBatch(batch({
+    samples: [sample({ t, nvr: 'slow' }), sample({ t, nvr: 'slow', stalled: true, fps: 0 }), sample({ t, nvr: 'quick' })],
+    events: [first('quick', 400), first('slow', 2000), first('slow', 6000), first('slow', 4000), { t, kind: 'hd', nvr: 'slow', ch: 0, ms: 3000 }]
+  }), t))
+  const { nvrs } = store.summary()
+  assert.deepEqual(nvrs.map((n) => n.nvr), ['slow', 'quick'])
+  assert.deepEqual([nvrs[0].opens, nvrs[0].firstMs, nvrs[0].firstMs90, nvrs[0].hdMs, nvrs[0].tileSeconds], [3, 4000, 6000, 3000, 2])
+  assert.ok(near(nvrs[0].frozenShare, 0.5))
+  const { nvrView } = await import('../public/experience-view.js')
+  assert.deepEqual(nvrView({ nvrs }).nvrRows[1].slice(0, 5), ['quick', '1', '0.4 s', '0.4 s', '–'])
+})

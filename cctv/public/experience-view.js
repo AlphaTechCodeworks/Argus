@@ -24,5 +24,17 @@ export function experienceView(d) {
   const note = seen === 0
     ? 'Nothing measured yet in this period.'
     : `Out of 100, over the last ${d?.hours ?? 24} hours, since the server last started. Each score is made only from the parts that were seen${missing.length ? `; not seen yet: ${missing.join(', ')}` : ''}.${lost}`
-  return { heads, rows, note }
+  return { heads, rows, note, ...nvrView(d) }
+}
+
+const secs = (ms) => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)} s` : '–')
+
+/** The same answer by NVR, slowest to a first picture first: where the waiting actually is. */
+export function nvrView(d) {
+  const nvrHeads = ['NVR', 'Opens', 'First picture', '9 in 10 within', 'Full quality', 'Smoothness', 'Frozen', 'Reconnects']
+  const nvrRows = (d?.nvrs ?? []).filter((n) => n.opens > 0 || n.tileSeconds > 0).slice(0, 30).map((n) => [
+    String(n.nvr), String(n.opens), secs(n.firstMs), secs(n.firstMs90), secs(n.hdMs), pct(n.smoothness),
+    Number.isFinite(n.frozenShare) ? `${(n.frozenShare * 100).toFixed(1)}%` : '–', String(n.reconnects ?? 0)
+  ])
+  return { nvrHeads, nvrRows }
 }

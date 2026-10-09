@@ -149,3 +149,15 @@
   font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: .02em;
   pointer-events: none;
 }
+/* The header's count of offline cameras: a button that lists them (viewer.js showOffline). Red, as
+   an offline tile's badge is: it is the number that needs someone. */
+.live-page .offline-count {
+  font: inherit; font-weight: 600; color: #fff; background: rgba(200, 30, 30, .92);
+  border: 0; border-radius: 999px; padding: 1px 9px; cursor: pointer;
+}
+.live-page .offline-count:hover, .live-page .offline-count:focus-visible { background: rgb(220, 38, 38); }
+.offline-dlg { max-width: min(92vw, 460px); padding: 14px 16px; }
+.offline-dlg h3 { font-size: 15px; color: var(--text); margin: 0 0 8px; }
+.offline-dlg h4 { margin: 10px 0 2px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.offline-dlg ul { margin: 0; padding-left: 18px; }
+.offline-list { max-height: 60vh; overflow: auto; margin-bottom: 12px; }

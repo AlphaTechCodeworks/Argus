@@ -787,6 +787,9 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     document.getElementById('experienceHeads').replaceChildren(...v.heads.map((h) => el('th', { textContent: h })))
     document.getElementById('experienceRows').replaceChildren(...v.rows.map((r) => { const tr = el('tr'); for (const c of r) tr.append(el('td', { textContent: c })); return tr }))
     document.getElementById('experienceNote').textContent = v.note
+    const rowsOf = (rows) => rows.map((r) => { const tr = el('tr'); for (const c of r) tr.append(el('td', { textContent: c })); return tr })
+    document.getElementById('experienceNvrHeads')?.replaceChildren(...v.nvrHeads.map((h) => el('th', { textContent: h })))
+    document.getElementById('experienceNvrRows')?.replaceChildren(...rowsOf(v.nvrRows))
   }
   const loadWatching = () => {
     if (!isAdmin) return

@@ -577,11 +577,70 @@ function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
   const onPage = visibleCameras(gridCameras(), gridView()).visible.length
   grid.dataset.empty = String(onPage === 0)
   const context = activeView?.name || siteSelect.selectedOptions[0]?.textContent.trim() || 'All sites'
-  if (summary) summary.textContent = `${context} · ${shown.length} camera${shown.length === 1 ? '' : 's'} · ${onPage} on this page`
+  if (summary) {
+    // how many are online and which are not, counted over this site or view whatever "Hide offline"
+    // says (it hides them from the grid: the more reason to name them here)
+    const all = shownCameras(gridCameras(), { ...gridView(), hideOffline: false })
+    const off = all.filter((c) => c.online === false)
+    const count = off.length ? `${all.length - off.length} of ${all.length} cameras online` : `${all.length} camera${all.length === 1 ? '' : 's'} online`
+    // the number offline is a button: it lists them (showOffline)
+    const key = `${context}|${all.length}|${off.map(camKey).join(',')}|${onPage}`
+    if (summary.dataset.key !== key) {
+      summary.dataset.key = key
+      const parts = [`${context} · ${count}`]
+      if (off.length) {
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.className = 'offline-count'
+        b.textContent = `${off.length} offline`
+        b.title = 'Show which cameras are offline'
+        b.addEventListener('click', () => showOffline(shownCameras(gridCameras(), { ...gridView(), hideOffline: false }).filter((c) => c.online === false), context))
+        parts.push(' · ', b)
+      }
+      parts.push(` · ${onPage} on this page`)
+      summary.replaceChildren(...parts)
+    }
+  }
   const note = document.getElementById('filterNote')
   note.hidden = shown.length > 0 || !cameraQuery
   note.textContent = `No cameras match “${cameraQuery}” in this view. Clear the search or select another site.`
   updateLiveState()
+}
+
+/** The cameras that are offline, by site, in a small dialog: what the header's "N offline" opens. */
+function showOffline(off, context) {
+  let dlg = document.getElementById('offlineDlg')
+  if (!dlg) {
+    dlg = document.createElement('dialog')
+    dlg.id = 'offlineDlg'
+    dlg.className = 'wall-pick offline-dlg'
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close() }) // (a click on the backdrop)
+    document.body.append(dlg)
+  }
+  const head = document.createElement('h3')
+  head.textContent = `${off.length} camera${off.length === 1 ? '' : 's'} offline · ${context}`
+  const bySite = new Map()
+  for (const c of off) (bySite.get(c.site || c.nvrName || '') ?? bySite.set(c.site || c.nvrName || '', []).get(c.site || c.nvrName || '')).push(c)
+  const body = document.createElement('div')
+  body.className = 'offline-list'
+  for (const [site, cams] of [...bySite].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const h = document.createElement('h4')
+    h.textContent = `${site} (${cams.length})`
+    const ul = document.createElement('ul')
+    for (const c of cams) {
+      const li = document.createElement('li')
+      li.textContent = `${c.ch + 1} · ${c.name}${c.nvrName && c.nvrName !== site ? ` — ${c.nvrName}` : ''}`
+      ul.append(li)
+    }
+    body.append(h, ul)
+  }
+  if (!off.length) body.textContent = 'Every camera is online.'
+  const close = document.createElement('button')
+  close.type = 'button'
+  close.textContent = 'Close'
+  close.addEventListener('click', () => dlg.close())
+  dlg.replaceChildren(head, body, close)
+  if (!dlg.open) dlg.showModal()
 }
 
 function updateLiveState() {

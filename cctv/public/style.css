@@ -570,15 +570,18 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
    colour on purpose: at this site that is a real failure, and painting it the same green as a
    recording camera is how it goes unnoticed. Grey is "we have not been told", never "fine". */
 .map-overlay .cone { fill: rgba(59, 163, 255, 0.2); stroke: rgba(59, 163, 255, 0.85); stroke-width: 1.5; }
-.map-overlay .cone.st-offline, .map-overlay .cone.st-unknown { fill: rgba(138, 147, 160, 0.16); stroke: rgba(138, 147, 160, 0.7); }
+.map-overlay .cone.st-unknown { fill: rgba(138, 147, 160, 0.16); stroke: rgba(138, 147, 160, 0.7); }
+/* Green while it is live, red when it is offline (the owner, 2026-10-09): what is down shows at a glance. */
+.map-overlay .cone.st-live, .map-overlay .cone.st-recording { fill: rgba(63, 185, 80, 0.18); stroke: rgba(63, 185, 80, 0.85); }
+.map-overlay .cone.st-offline { fill: rgba(229, 72, 77, 0.16); stroke: rgba(229, 72, 77, 0.8); }
 .map-overlay .cone.st-idle { fill: rgba(224, 160, 48, 0.18); stroke: rgba(224, 160, 48, 0.8); }
 .map-overlay .cone.st-alert { fill: rgba(229, 72, 77, 0.18); stroke: rgba(229, 72, 77, 0.85); }
 .map-overlay .cone.sel { fill: rgba(59, 163, 255, 0.3); stroke-width: 2.5; }
 .map-overlay .cam-dot { fill: var(--accent); stroke: #fff; stroke-width: 2; }
-.map-overlay .cam.st-recording .cam-dot { fill: var(--rec-ok); }
+.map-overlay .cam.st-recording .cam-dot, .map-overlay .cam.st-live .cam-dot { fill: var(--rec-ok); }
 .map-overlay .cam.st-idle .cam-dot { fill: var(--rec-idle); }
 .map-overlay .cam.st-alert .cam-dot { fill: var(--rec-alert); }
-.map-overlay .cam.st-offline .cam-dot { fill: var(--offline); }
+.map-overlay .cam.st-offline .cam-dot { fill: var(--rec-alert); }
 /* Dashed edge: unknown must not be mistaken for a state we actually checked. */
 .map-overlay .cam.st-unknown .cam-dot { fill: var(--rec-unknown); stroke-dasharray: 3 3; }
 .map-overlay .cam.cluster .cam-dot { stroke-width: 3; }
@@ -615,7 +618,7 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-overlay .site-badge-text { font: 600 12px system-ui, sans-serif; }
 .map-overlay .site-badge-off { fill: var(--rec-alert); }
 .map-overlay .site-badge-dot { fill: var(--rec-unknown); }
-.map-overlay .site-badge.st-recording .site-badge-dot { fill: var(--rec-ok); }
+.map-overlay .site-badge.st-recording .site-badge-dot, .map-overlay .site-badge.st-live .site-badge-dot { fill: var(--rec-ok); }
 .map-overlay .site-badge.st-idle .site-badge-dot { fill: var(--rec-idle); }
 .map-overlay .site-badge.st-alert .site-badge-dot, .map-overlay .site-badge.st-offline .site-badge-dot { fill: var(--rec-alert); }
 .map-overlay .site-badge.st-offline .site-badge-pill { stroke: var(--rec-alert); }
@@ -734,8 +737,8 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-cams li.unplaced .map-cam-name { color: var(--muted); }
 .map-cam-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .map-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--rec-unknown); }
-.map-dot.off, .map-dot.st-offline { background: var(--offline); }
-.map-dot.st-recording { background: var(--rec-ok); }
+.map-dot.off, .map-dot.st-offline { background: var(--rec-alert); }
+.map-dot.st-recording, .map-dot.st-live { background: var(--rec-ok); }
 .map-dot.st-idle { background: var(--rec-idle); }
 .map-dot.st-alert { background: var(--rec-alert); }
 /* A ring rather than a solid dot: unknown should not read as one of the states we did check. */
@@ -770,7 +773,7 @@ label input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 .map-hover .tile { aspect-ratio: 16 / 9; border-radius: 0; cursor: default; }
 .map-legend li { display: flex; align-items: center; gap: 6px; }
 .map-live-state { font-size: 12px; color: var(--muted); }
-.map-live-state.st-recording { color: var(--rec-ok); }
+.map-live-state.st-recording, .map-live-state.st-live { color: var(--rec-ok); }
 .map-live-state.st-idle { color: var(--rec-idle); }
 .map-live-state.st-alert { color: var(--rec-alert); }
 .map-selected { padding-top: 10px; border-top: 1px solid var(--border); }
