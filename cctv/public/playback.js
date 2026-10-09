@@ -30,6 +30,7 @@ import { searchCameras } from './grid-view.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
 import { preferencesReady } from './user-settings.js'
 import { PLAYBACK_CLOCK, REMOTE_PLAYBACK_CLOCK } from './playout.js'
+import { startTelemetry } from './telemetry.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
   MESSAGE_STICKY_MS,
@@ -216,6 +217,8 @@ let stepHold = false // a frame step's seek is playing: its first picture pauses
 let knownFps = { cam: null, fps: 0 } // the camera's frame rate as last measured while it played (it reads 0 while paused)
 let seekAt = null // performance.now() of the last seek, until its first picture (D overlay)
 let startMs = null // seek to first picture, ms
+// seeks only: this page has no live tiles to sample (telemetry.js)
+const telemetry = startTelemetry({ page: 'playback', tiles: () => [] })
 let lastEndSkip = -Infinity // the last stretch jumped to at an end (never the same one twice)
 let hoverX = null // where the pointer is over the timeline, in px from its left edge
 let drag = null // { x, startMs, moved, box } while the timeline is being panned
@@ -258,6 +261,8 @@ function noteStart() {
   spinnerEl.hidden = true // the first picture is here: whatever we were waiting for has arrived
   if (seekAt === null) return
   startMs = Math.round(performance.now() - seekAt)
+  // (how long a seek takes, for the baseline nobody had: telemetry.mjs 'seek-picture')
+  telemetry.event('seek-picture', { nvr: state.nvr, ch: state.ch, ms: startMs })
   seekAt = null
 }
 

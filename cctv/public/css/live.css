@@ -175,3 +175,11 @@ body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-ins
    stays for the keyboard, shown only while it has the keyboard's focus. */
 .live-page .tile .tile-move { opacity: 0 !important; pointer-events: none; }
 .live-page .tile .tile-move:focus-visible { opacity: 1 !important; pointer-events: auto; }
+/* One click to a linked camera, beside the name in the full-size view (viewer.js linkedCameras). */
+.live-page .single-overlay .links .cam-link {
+  font: inherit; font-size: var(--fs-meta, 12px); font-weight: 600; color: #fff; cursor: pointer;
+  background: rgba(20, 22, 26, .6); border: 1px solid rgba(255, 255, 255, .35); border-radius: 999px;
+  padding: 3px 10px; margin-inline-start: 6px; min-height: 0; white-space: nowrap; max-width: 22ch; overflow: hidden; text-overflow: ellipsis;
+}
+.live-page .single-overlay .links .cam-link:hover, .live-page .single-overlay .links .cam-link:focus-visible { background: rgba(40, 44, 52, .85); }
+.live-page .single-overlay .links .cam-link.suggested { border-style: dashed; font-weight: 400; }

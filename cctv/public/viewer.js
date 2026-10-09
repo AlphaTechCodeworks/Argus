@@ -925,6 +925,43 @@ function takeAheadMain(cam) {
   return t
 }
 
+// ---- linked cameras: one click to the camera a person walks to next (camera-links.mjs) ----
+// The links an administrator drew on the map; where none were drawn for this camera, the two
+// nearest on its map, marked as a guess. Read once and kept five minutes.
+let camLinks = null
+let camLinksAt = 0
+async function cameraLinks() {
+  if (camLinks && Date.now() - camLinksAt < 5 * 60_000) return camLinks
+  try {
+    const r = await fetch('/api/camera-links')
+    if (r.ok) { camLinks = await r.json(); camLinksAt = Date.now() }
+  } catch {}
+  return camLinks
+}
+function linkedCameras(cam, host) {
+  const key = `${cam.nvr}/${cam.ch}`
+  cameraLinks().then((d) => {
+    if (!d || !host.isConnected) return // (the view was closed or moved on while the links were read)
+    const drawn = d.links?.[key] ?? []
+    const list = drawn.length ? drawn : (d.suggestions?.[key] ?? []).slice(0, 2)
+    const byKey = new Map(cameras.map((c) => [`${c.nvr}/${c.ch}`, c]))
+    for (const n of list.slice(0, 4)) {
+      const to = byKey.get(n.to)
+      if (!to || to.online === false || to.configured === false) continue
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = drawn.length ? 'cam-link' : 'cam-link suggested'
+      b.textContent = `→ ${n.label || to.name}`
+      b.title = drawn.length ? `Go to ${to.name}` : `Nearest on the map: ${to.name}`
+      b.addEventListener('click', (e) => {
+        e.stopPropagation()
+        openSingle(to, { stepping: true })
+      })
+      host.append(b)
+    }
+  })
+}
+
 function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   // the camera being left (a step with ‹ ›): the connection that carries its stream is kept, started
   // ahead as the new camera's neighbour, rather than closed and opened again a moment later
@@ -963,6 +1000,7 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
     link.addEventListener('click', (e) => e.stopPropagation())
     links.append(link)
   }
+  linkedCameras(cam, links)
   overlay.querySelector('.name').after(links)
   if (isPhone()) overlay.append(nativeFullButton(overlay))
   overlay.append(...stepArrows()) // ‹ › on every screen (keys: ← →)
