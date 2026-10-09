@@ -411,6 +411,7 @@ export class VideoPlayer {
       output: (frame) => this.#onDecoded(frame),
       error: (err) => {
         console.warn('decoder error', err)
+        this.stats.decoderErrors = (this.stats.decoderErrors ?? 0) + 1 // (telemetry.js: the score's stability part)
         this.#closeDecoder()
         this.needKey = true
         // A positive capability probe does not guarantee that this camera's HEVC

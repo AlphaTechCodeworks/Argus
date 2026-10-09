@@ -210,3 +210,28 @@ test('the Health card: two rows, the parts not seen said so, an empty period sai
   assert.match(v.note, /not seen yet: scrubbing, switching, stability, efficiency/)
   assert.match(v.note, /2 batches were not kept/)
 })
+
+test('a restart does not empty the score: what was kept is read back, old and broken lines passed over', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'argus-tel-reload-'))
+  let t = Date.parse('2026-10-20T12:00:00Z')
+  const first = makeTelemetry({ dir, now: () => t })
+  first.add('u', cleanBatch(batch({ samples: Array.from({ length: 30 }, () => sample({ t })), events: [{ t, kind: 'first-picture', nvr: 'nvr1', ch: 0, ms: 0 }] }), t))
+  const file = join(dir, '2026-10-20.jsonl')
+  const old = JSON.stringify({ at: t - 30 * 86_400_000, user: 'old', cohort: 'apsi', samples: [sample()], events: [] })
+  writeFileSync(file, `${readFileSync(file, 'utf8')}not json\n${old}\n`)
+  t += 60_000
+  const again = makeTelemetry({ dir, now: () => t })
+  const c = again.summary().cohorts[cohortOf('u', 'abc123abc123')]
+  assert.deepEqual([c.tileSeconds, c.opens, again.counts.reloaded], [30, 1, 1])
+  assert.ok(near(c.score, 1))
+})
+
+test('a decoder that had to be set up again is reported once each time', () => {
+  const sent = []
+  const c = createCollector({ now: () => 9_000_000, send: (b) => sent.push(b), device: 'd', page: 'live' })
+  c.watch([tile({ decoderErrors: 2 })]) // (already there when the tile was first seen: not news)
+  c.watch([tile({ decoderErrors: 3 })])
+  c.watch([tile({ decoderErrors: 3 })])
+  c.flush()
+  assert.deepEqual(sent[0].events.map((e) => e.kind), ['first-picture', 'decoder-reset'])
+})

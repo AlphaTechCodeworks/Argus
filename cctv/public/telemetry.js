@@ -42,7 +42,7 @@ export function createCollector({ now, send, device, page }) {
       const k = keyOf(tile)
       here.add(k)
       let s = seen.get(k)
-      if (!s) seen.set(k, (s = { since: t, shown: false, fpsMax: 0, attempts: tile.attempts ?? 0 }))
+      if (!s) seen.set(k, (s = { since: t, shown: false, fpsMax: 0, attempts: tile.attempts ?? 0, resets: tile.decoderErrors ?? 0 }))
       if (!s.shown && tile.playing) {
         s.shown = true
         // (the main stream of the one camera open: how long until full quality; anything else: a first picture)
@@ -50,6 +50,9 @@ export function createCollector({ now, send, device, page }) {
       }
       if ((tile.attempts ?? 0) > s.attempts) event('reconnect', { nvr: tile.nvr, ch: tile.ch, stream: tile.stream })
       s.attempts = tile.attempts ?? 0
+      // (the player counts each time its decoder failed and had to be set up again: player.js)
+      if ((tile.decoderErrors ?? 0) > s.resets) event('decoder-reset', { nvr: tile.nvr, ch: tile.ch, stream: tile.stream })
+      s.resets = tile.decoderErrors ?? 0
     }
     for (const k of seen.keys()) if (!here.has(k)) seen.delete(k)
   }

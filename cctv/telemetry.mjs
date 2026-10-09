@@ -18,7 +18,7 @@
 //
 // The user is always the session's (server.mjs passes it in); nothing a page says about who it is
 // is believed. Every number is clamped and every name checked: a page is not trusted.
-import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
@@ -32,6 +32,7 @@ export const MAX_SAMPLES = 600
 export const MAX_EVENTS = 200
 export const MAX_BYTES = 100 * 1024 * 1024
 export const KEEP_DAYS = 14
+export const RELOAD_MAX_BYTES = 32 * 1024 * 1024 // a day's file bigger than this is not read back at start
 export const HOLDOUT_OF = 10 // one in this many
 export const KINDS = Object.freeze(['first-picture', 'hd', 'reconnect', 'open', 'step', 'page', 'close', 'seek', 'seek-picture', 'quality-drop', 'decoder-reset'])
 const ID_RE = /^[A-Za-z0-9._-]{1,64}$/
@@ -133,14 +134,9 @@ export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = 
     return slot[cohort]
   }
 
-  return {
-    counts,
-    /** Takes one cleaned batch in: to disk, and into the hour's sums. */
-    add(user, batch) {
-      const cohort = cohortOf(user, batch.device)
-      counts.batches++
-      write(`${JSON.stringify({ at: now(), user, cohort, ...batch })}\n`)
-      const mine = sumsFor(now(), cohort)
+  /** One batch into its hour's sums. at: when it was taken in. */
+  const tally = (user, batch, cohort, at) => {
+      const mine = sumsFor(at, cohort)
       mine.batches++
       mine.sessions.add(`${user}\n${batch.device}`)
       for (const s of batch.samples) {
@@ -155,6 +151,35 @@ export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = 
         else if (e.kind === 'seek-picture' && e.ms !== undefined) mine.scrubbing = mean.add(mine.scrubbing, scrubScore(e.ms))
         else if (e.kind === 'reconnect' || e.kind === 'quality-drop' || e.kind === 'decoder-reset') mine.trouble++
       }
+  }
+
+  // What was kept before this start goes back into the sums: a restart (every deploy is one) would
+  // otherwise empty the score. Only as far back as the sums reach; a line that cannot be read is
+  // passed over, and so is a day's file too big to read at once.
+  try {
+    const since = now() - keepHours * 3_600_000
+    for (const f of readdirSync(dir).filter((x) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(x)).sort()) {
+      if (Date.parse(`${f.slice(0, 10)}T23:59:59Z`) < since || statSync(join(dir, f)).size > RELOAD_MAX_BYTES) continue
+      for (const line of readFileSync(join(dir, f), 'utf8').split('\n')) {
+        if (!line) continue
+        try {
+          const b = JSON.parse(line)
+          if (typeof b.at !== 'number' || b.at < since || typeof b.user !== 'string' || !Array.isArray(b.samples) || !Array.isArray(b.events)) continue
+          tally(b.user, b, b.cohort === 'holdout' ? 'holdout' : 'apsi', b.at)
+          counts.reloaded = (counts.reloaded ?? 0) + 1
+        } catch {}
+      }
+    }
+  } catch {} // (no folder yet)
+
+  return {
+    counts,
+    /** Takes one cleaned batch in: to disk, and into the hour's sums. */
+    add(user, batch) {
+      const cohort = cohortOf(user, batch.device)
+      counts.batches++
+      write(`${JSON.stringify({ at: now(), user, cohort, ...batch })}\n`)
+      tally(user, batch, cohort, now())
       return cohort
     },
     /** The score of each cohort over the last `lastHours`, and what it was made from. */

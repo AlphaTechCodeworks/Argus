@@ -141,7 +141,7 @@ const telemetry = startTelemetry({
     const s = t.player.stats
     const shown = t.player.firstPainted === true
     return {
-      nvr: t.nvr, ch: t.ch, stream: t.streamType, role: singleTiles.includes(t) ? 'focus' : 'grid', playing: shown, attempts: t.attempts,
+      nvr: t.nvr, ch: t.ch, stream: t.streamType, role: singleTiles.includes(t) ? 'focus' : 'grid', playing: shown, attempts: t.attempts, decoderErrors: s.decoderErrors ?? 0,
       fps: s.fps, jitterMs: s.jitterMs, bufMs: s.delayMs, dropped: s.dropped, late: s.late, resync: s.resyncs, decQueue: s.decodeQueue ?? 0, kbps: s.kbps,
       w: t.player.canvas.clientWidth, h: t.player.canvas.clientHeight, stalled: shown && s.fps === 0, visible: !document.hidden
     }
