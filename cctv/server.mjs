@@ -18,7 +18,7 @@
 //   GET  /api/admin/vpn        -> VPN hub status and the remote sites (admins), see vpn.mjs
 //   GET  /api/app/android[/download] -> the Android app's installer: its version and checksum, and
 //                                 the file, for the app to update itself (any signed-in user), see
-//                                 app-download.mjs
+//                                 app-download.mjs; app-fetch.mjs brings each new release from GitHub
 //   GET  /api/admin/connector[/installer] -> the NVR site-server installer: its status, and the
 //                                 download (admins), see connector-download.mjs
 //   /api/admin/nvrs/:id/substreams -> sub-stream codec per channel, switch to H.264 (admins), see substreams.mjs
@@ -133,6 +133,7 @@ import { accessWatch } from './access-watch.mjs'
 import { vpnView } from './vpn.mjs'
 import { sendInstaller, statusOf } from './connector-download.mjs'
 import { describeApp, sendApp } from './app-download.mjs'
+import { startAppFetch } from './app-fetch.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
 import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
 import { recentRefusals } from './nvr-health.mjs'
@@ -233,6 +234,8 @@ function thinAndRetain(roundStart = Date.now()) {
 // server recording (CCTV_LIVE_WORKER=on only): retention, each location's space limit and low-space
 // deletion every 5 minutes. Its file calls go to each location's helper (housekeeping.mjs); it keeps
 // bookmarked and exported stretches and checks each location's marker, as the switch's jobs do.
+// The Android app's releases come from GitHub by themselves once a token has been placed (app-fetch.mjs).
+startAppFetch()
 if (LIVE_WORKER) {
   // the time-lapse pace's ceiling read at start, so Settings > Storage says it before the first round (5 minutes)
   usePaceFile(join(auth.DATA_DIR, 'thin-pace.json')).catch(() => {})
