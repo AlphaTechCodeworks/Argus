@@ -44,5 +44,19 @@ check('no inline or eval scripts allowed', /script-src 'self'(;|$)/.test(CSP) &&
 check('not framable, no plugins, no base tag tricks', /frame-ancestors 'none'/.test(CSP) && /object-src 'none'/.test(CSP) && /base-uri 'none'/.test(CSP))
 check('map tiles and blob pictures allowed', /img-src [^;]*tile\.openstreetmap\.org/.test(CSP) && /img-src [^;]*blob:/.test(CSP))
 
+{
+  // The sign-in page is shown before anyone is signed in, so everything it loads must be on the
+  // short list of paths served without a session (server.mjs PUBLIC_PATHS). A file left off is
+  // answered with a redirect to the sign-in page, and that script or stylesheet silently never runs.
+  const { readFileSync } = await import('node:fs')
+  const page = readFileSync(new URL('../public/login.html', import.meta.url), 'utf8')
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
+  const list = /const PUBLIC_PATHS = new Set\(\[([^\]]*)\]\)/.exec(server)?.[1] ?? ''
+  const allowed = new Set([...list.matchAll(/'([^']+)'/g)].map((m) => m[1]))
+  const wanted = [...page.matchAll(/(?:src|href)="([^"]+)"/g)].map((m) => (m[1].startsWith('/') ? m[1] : `/${m[1]}`))
+  const missing = wanted.filter((p) => !allowed.has(p))
+  check('everything the sign-in page loads is served before sign-in', wanted.length >= 8 && missing.length === 0, missing.join(' '))
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exit(failures ? 1 : 0)

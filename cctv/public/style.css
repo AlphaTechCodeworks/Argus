@@ -94,7 +94,9 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
   pointer-events: none;
 }
 .tile .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* the state badge, top left of every picture: a red LIVE while frames arrive, otherwise what it is doing */
+/* the state badge, top left of every picture: a green LIVE while frames arrive, red when the camera
+   is offline, otherwise (dark) what it is doing. Green and red at the owner's wish (2026-10-08): on
+   a wall of tiles, which cameras are down should show at a glance. The word is always there too. */
 .tile .status {
   position: absolute; top: 8px; left: 8px; z-index: 3; pointer-events: none;
   padding: 3px 8px; border-radius: 999px; white-space: nowrap;
@@ -102,7 +104,7 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
   background: rgba(20, 22, 26, .55); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
 }
 .tile .status:empty { display: none; }
-.tile .status.live { background: rgba(220, 38, 38, .88); }
+.tile .status.live { background: rgba(21, 128, 61, .92); }
 .single-overlay > .status { z-index: 4; }
 .tile .status.live::before {
   content: ""; background: #fff !important;
@@ -114,9 +116,8 @@ label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
   vertical-align: 1px;
 }
 .tile.offline { cursor: default; }
-/* readable muted grey, not the faint --offline (~3:1 on the dark pill, under AA for this small text);
-   the offline state still reads from the word itself, the dimmed tile and the dot. */
-.tile.offline .status { color: var(--muted); }
+/* white on red, as LIVE is white on green; the state also reads from the word itself and the dot */
+.tile.offline .status { color: #fff; background: rgba(200, 30, 30, .92); text-transform: uppercase; }
 .tile.single { cursor: zoom-out; }
 
 #notice {
@@ -1206,15 +1207,16 @@ body.phone-full #grid > .lines-panel, body.phone-full #grid > .osd-panel { z-ind
 .nvr-facts dd.bad { color: #e5484d; }
 .nvr-disks { background: transparent; }
 
-/* Live tile state dot (live-tile.js tileDot): green video arriving, red also being recorded,
-   grey nothing arriving. Colour is never the only clue: the state is written out in the dot's
-   title, and the recording dot also pulses. */
+/* Live tile state dot (live-tile.js tileDot): green video arriving (ringed and pulsing when it is
+   also being recorded), grey nothing arriving yet, red the camera is offline. Colour is never the
+   only clue: the state is written out in the dot's title. */
 .tile .dot { flex: 0 0 auto; align-self: center; width: 9px; height: 9px; border-radius: 50%; background: var(--muted, #7a8290); box-shadow: 0 0 0 1px rgb(0 0 0 / 45%); pointer-events: auto; }
 /* the label is a space-between row: let the name take the slack so the dot sits beside it */
 .tile .label .name { flex: 1 1 auto; }
-.tile .dot-live { background: #3fb27f; }
-.tile .dot-rec { background: #e5484d; border-radius: 50%; box-shadow: 0 0 0 1px rgb(0 0 0 / 45%), 0 0 5px rgb(229 72 77 / 70%); }
+.tile .dot-live { background: #22c55e; }
+.tile .dot-rec { background: #22c55e; border-radius: 50%; box-shadow: 0 0 0 1px rgb(0 0 0 / 45%), 0 0 0 3px rgb(34 197 94 / 35%); }
 .tile .dot-off { background: #7a8290; opacity: 0.75; }
+.tile.offline .dot-off { background: #ef4444; opacity: 1; }
 @media (prefers-reduced-motion: no-preference) {
   .tile .dot-rec { animation: dot-rec-pulse 2s ease-in-out infinite; }
 }
@@ -1959,7 +1961,7 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .cam-sheet-row:active { background: var(--surface-hover); }
 .cam-sheet-row .cam-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); flex: none; }
 .cam-sheet-row.off { opacity: .45; }
-.cam-sheet-row.off .cam-dot { background: var(--text-faint); box-shadow: none; }
+.cam-sheet-row.off .cam-dot { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
 .cam-sheet-row .cam-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cam-sheet-row .cam-ch { color: var(--text-muted); font-size: 13px; }
 @media (max-width: 699px), (pointer: coarse) and (max-height: 500px) { .phone-list-btn { display: inline-flex; align-items: center; font-weight: 600; } }
@@ -1974,7 +1976,7 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
   body.phone-list .tile .label .name { font-weight: 600; }
   body.phone-list .tile:has(.dot-live, .dot-rec)::before {
     content: 'LIVE'; position: absolute; top: 10px; left: 10px; z-index: 3; padding: 3px 8px; border-radius: 6px;
-    font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #fff; background: rgba(229, 72, 77, .92);
+    font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #fff; background: rgba(21, 128, 61, .92);
   }
   body.phone-list .tile.offline { opacity: .5; }
 }
