@@ -34,7 +34,7 @@ export const MAX_BYTES = 100 * 1024 * 1024
 export const KEEP_DAYS = 14
 export const RELOAD_MAX_BYTES = 32 * 1024 * 1024 // a day's file bigger than this is not read back at start
 export const HOLDOUT_OF = 10 // one in this many
-export const KINDS = Object.freeze(['first-picture', 'hd', 'reconnect', 'open', 'step', 'page', 'close', 'seek', 'seek-picture', 'quality-drop', 'decoder-reset'])
+export const KINDS = Object.freeze(['first-picture', 'hd', 'reconnect', 'open', 'step', 'page', 'close', 'seek', 'seek-picture', 'quality-drop', 'decoder-reset', 'page-first'])
 const ID_RE = /^[A-Za-z0-9._-]{1,64}$/
 const NO_STORE = { 'cache-control': 'no-store' }
 

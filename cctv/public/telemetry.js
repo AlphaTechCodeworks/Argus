@@ -123,7 +123,16 @@ export function startTelemetry({ page, tiles }) {
   }
   const c = createCollector({ now: () => Date.now(), send: post, device: deviceId(), page })
   const safe = (fn) => { try { return fn() } catch { return undefined } }
-  setInterval(() => safe(() => c.watch(tiles())), WATCH_MS)
+  // page opened -> its first camera picture, once (not for a page opened in a tab nobody was looking at)
+  let pageFirst = document.hidden
+  setInterval(() => safe(() => {
+    const now = tiles()
+    c.watch(now)
+    if (!pageFirst && now.some((t) => t.playing)) {
+      pageFirst = true
+      c.event('page-first', { ms: Math.round(performance.now()) })
+    }
+  }), WATCH_MS)
   setInterval(() => safe(() => { if (!document.hidden) c.sample(tiles()) }), SAMPLE_MS)
   setInterval(() => safe(() => c.flush()), FLUSH_MS)
   addEventListener('pagehide', () => safe(() => c.flush()))
