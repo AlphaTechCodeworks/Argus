@@ -14,6 +14,7 @@ import { H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML, mainNotCon
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES } from './player.js'
 import { REMOTE_CLOCK } from './playout.js'
+import { startTelemetry } from './telemetry.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
 // This page is set up from the account's preferences (picture fit, layout, hide offline, the view
@@ -132,6 +133,20 @@ if (!('VideoDecoder' in window)) {
     : 'Video needs a secure connection. Open this page with https:// (port 8443) instead.'
 }
 
+// What the viewer actually gets, measured and sent to the server (telemetry.js): each playing tile
+// once a second, and how long a first picture and full quality took. It decides nothing.
+const telemetry = startTelemetry({
+  page: 'live',
+  tiles: () => tiles.filter((t) => !t.closed && !t.suspended).map((t) => {
+    const s = t.player.stats
+    const shown = t.player.firstPainted === true
+    return {
+      nvr: t.nvr, ch: t.ch, stream: t.streamType, role: singleTiles.includes(t) ? 'focus' : 'grid', playing: shown, attempts: t.attempts,
+      fps: s.fps, jitterMs: s.jitterMs, bufMs: s.delayMs, dropped: s.dropped, late: s.late, resync: s.resyncs, decQueue: s.decodeQueue ?? 0, kbps: s.kbps,
+      w: t.player.canvas.clientWidth, h: t.player.canvas.clientHeight, stalled: shown && s.fps === 0, visible: !document.hidden
+    }
+  })
+})
 // for diagnostics from the console: stats of every visible tile
 window.cctvStats = () => tiles.map((t) => ({ nvr: t.nvr, ch: t.ch + 1, stream: t.streamType, ...t.player.stats }))
 // the cameras started ahead of a full-size view (‹ ›): whether each could be shown at once
@@ -837,6 +852,7 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   }
   single = camKey(cam)
   singleCam = cam
+  telemetry.event(stepping ? 'step' : 'open', { nvr: cam.nvr, ch: cam.ch, dir: stepping ? stepDir : undefined })
   // free the grid's streams while watching one camera: suspend alone leaves them flowing (frames only
   // dropped at the client), so on a tunnel 25-64 grid streams kept competing with the full-size view.
   // Keep the one it borrows (the lender, lenderFor); release the rest, which reconnect on return.
@@ -1501,6 +1517,7 @@ function stepPage(dir) {
   const pages = Number(pageLabel.dataset.pages ?? 1)
   if (single !== null || !(pages > 1)) return
   page = (page + dir + pages) % pages
+  telemetry.event('page', { dir })
   freshenForPageChange()
   render()
   notePage()

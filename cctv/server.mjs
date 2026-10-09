@@ -162,6 +162,7 @@ import { loopWorstMs } from './loop-lag.mjs'
 import { processErrors } from './process-guard.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder, UI_PREFS_PATH, handleUiPreferences } from './user-prefs.mjs'
+import { handleTelemetry, makeTelemetry } from './telemetry.mjs'
 import { xmlOnline } from './xml-session.mjs'
 
 const {
@@ -291,6 +292,7 @@ if (LIVE_WORKER) {
 // ---- health alerts and nightly settings backups ---------------------------
 
 const DATA_DIR = auth.DATA_DIR
+const telemetry = makeTelemetry()
 const STARTED_MS = Date.now()
 
 // Only a hang from just before this start is worth reporting as "the server restarted": an older
@@ -723,6 +725,9 @@ const handleRequest = async (req, res) => {
   if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
   if (pathname === UI_PREFS_PATH) return sendJson(res, ...(await handleUiPreferences(req, user)))
+  // what viewers actually got, as their pages measured it, and the score made from it (telemetry.mjs)
+  const telemetryRoute = await handleTelemetry(req, pathname, who, telemetry)
+  if (telemetryRoute) return sendJson(res, ...telemetryRoute)
 
   // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
   // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own.
