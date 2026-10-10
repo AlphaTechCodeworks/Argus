@@ -134,6 +134,7 @@ import { vpnView } from './vpn.mjs'
 import { sendInstaller, statusOf } from './connector-download.mjs'
 import { describeApp, sendApp } from './app-download.mjs'
 import { startAppFetch } from './app-fetch.mjs'
+import { startDiscovery } from './app-discovery.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
 import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
 import { recentRefusals } from './nvr-health.mjs'
@@ -233,6 +234,9 @@ function thinAndRetain(roundStart = Date.now()) {
 
 // The Android app's releases come from GitHub by themselves once a token has been placed (app-fetch.mjs).
 startAppFetch()
+// The Android app finds this server on the local network by itself (app-discovery.mjs); the address it is
+// told to use is the public one from Settings, so it connects by the name the certificate is for.
+startDiscovery({ about: () => ({ port: Number(HTTPS_PORT), url: getSettings().publicUrl ?? '' }) })
 
 // server recording (CCTV_LIVE_WORKER=on only): retention, each location's space limit and low-space
 // deletion every 5 minutes. Its file calls go to each location's helper (housekeeping.mjs); it keeps
