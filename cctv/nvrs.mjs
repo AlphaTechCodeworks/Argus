@@ -120,6 +120,13 @@ export const jittered = (ms, rnd = Math.random) => Math.round(ms * (0.8 + 0.4 * 
 const MAX_LIVE_FAILURES = 6 // consecutive LivePlay failures -> log in again
 const RETRY_MIN_MS = 5000
 const RETRY_MAX_MS = 60_000
+// An NVR that does not answer its login at all (not one that refuses it) holds the one login lane for
+// about 80 s each time it is tried, whatever our timeout says: the SDK call only returns then. Tried
+// every minute, JFL Wharf Alan (hung on 2026-10-12) had the lane more than half of the time, and after
+// a restart the other NVRs' settings logins took four minutes ("Lawrence is connecting", with its
+// video up). From its third silence on such an NVR is tried less and less often, up to this.
+const SILENT_RETRY_MAX_MS = 10 * 60_000
+export const silentRetryMs = (silences, delay) => (silences >= 3 ? Math.min(RETRY_MAX_MS * 2 ** (silences - 3), SILENT_RETRY_MAX_MS) : delay)
 
 // ---- config file ----------------------------------------------------------
 
@@ -673,14 +680,17 @@ export class Nvr {
           this.status = 'online'
           this.error = ''
           this.controlFailed = false
+          this.loginSilences = 0
           console.log(`[${this.id}] logged in to ${where} (${this.model || 'NVR'}) in ${Date.now() - t0} ms, ${this.channels.length} cameras`)
           return
         }
         this.error = why
         this.status = 'offline'
         this.controlFailed = true
-        console.log(`[${this.id}] login to ${where} failed: ${this.error}; retrying in ${delay / 1000}s`)
-        await sleep(delay)
+        this.loginSilences = /did not answer/i.test(String(why ?? '')) ? (this.loginSilences ?? 0) + 1 : 0
+        const wait = silentRetryMs(this.loginSilences, delay)
+        console.log(`[${this.id}] login to ${where} failed: ${this.error}; retrying in ${Math.round(wait / 1000)}s`)
+        await sleep(wait)
       }
     } finally {
       this.connecting = false

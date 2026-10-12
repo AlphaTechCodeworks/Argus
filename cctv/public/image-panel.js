@@ -415,6 +415,8 @@ export class ImagePanel {
     this.position = null
     this.streamInfo = null
     this.streamError = null
+    this.subInfo = null // the camera's sub (grid) stream, as the NVR's Sub-streams list has it
+    this.subError = null
     this.streamItems = []
     this.streamNotes = []
     this.lensInfo = null
@@ -623,6 +625,16 @@ export class ImagePanel {
     this.streamInfo = stream.ok ? stream.data.stream : null
     this.streamError = stream.ok ? null : stream.data?.error
     this.renderStream()
+    // ...and the sub (grid) stream beside it, read only: one line, so both are seen in one place (the
+    // owner, 2026-10-12). Not waited for: the rest of the panel loads meanwhile. Changed from Sites,
+    // the recorder's Sub-streams button (substreams.mjs).
+    get(`/api/admin/nvrs/${encodeURIComponent(this.cam.nvr)}/substreams`).then((r) => {
+      if (!r) return
+      const row = r.ok ? (r.data.channels ?? []).find((c) => c.ch === this.cam.ch + 1) : null
+      this.subInfo = row?.res ? row : null
+      this.subError = this.subInfo ? null : r.ok ? 'the recorder lists no sub-stream for this camera' : (r.data?.error ?? 'no answer')
+      this.renderStream()
+    })
     const lens = await get(this.url('lens'))
     if (!lens) return
     this.lensInfo = lens.ok ? lens.data.lens : null
@@ -1448,7 +1460,11 @@ export class ImagePanel {
       box.replaceChildren(...kids)
       return
     }
-    kids.push(el('p', {}, `${String(c.enct ?? '').toUpperCase()} ${c.res} at ${c.fps} fps, bitrate cap ${c.QoI} kbit/s (${c.bitType}), quality ${c.level}.`))
+    kids.push(el('p', {}, `Main (recording) stream: ${String(c.enct ?? '').toUpperCase()} ${c.res} at ${c.fps} fps, bitrate cap ${c.QoI} kbit/s (${c.bitType}), quality ${c.level}.`))
+    const s = this.subInfo
+    kids.push(el('p', { className: s ? '' : 'ip-muted' }, s
+      ? `Sub (grid) stream: ${s.codec ?? ''} ${s.res}${s.fps ? ` at ${s.fps} fps` : ''}${s.kbps ? `, bitrate ${s.kbps} kbit/s` : ''}${s.bitType ? ` (${s.bitType})` : ''}.`
+      : this.subError ? `Sub (grid) stream: not read (${this.subError}).` : 'Sub (grid) stream: reading…'))
     kids.push(el('p', { className: 'ip-stream-line ip-muted' }, ''))
     if (!si.candidate) kids.push(el('p', { className: 'ip-muted' }, `Changes are not offered here: ${si.why}.`))
     for (const n of this.streamNotes ?? []) kids.push(el('p', { className: 'ip-muted' }, n))
