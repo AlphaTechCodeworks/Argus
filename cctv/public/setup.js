@@ -32,6 +32,7 @@ if (!/^[A-Za-z0-9_-]{32}$/.test(code)) {
       const j = await res.json().catch(() => ({}))
       if (!res.ok) return fail(j.error || 'The set-up code was not accepted. Ask for a new one.')
       say.textContent = `Signed in as ${j.user}.`
+      try { document.getElementById('authenticated')?.beginElement(); await new Promise((r) => setTimeout(r, 320)) } catch {}
       location.replace('/')
     } catch {
       here.disabled = false

@@ -23,6 +23,8 @@ form.addEventListener('submit', async (e) => {
     })
     if (res.ok) {
       const signedIn = await res.json()
+      // the mark's ring pulses once to say so (the wordmark's #authenticated), then the app opens
+      try { document.getElementById('authenticated')?.beginElement(); await new Promise((r) => setTimeout(r, 320)) } catch {}
       if (signedIn.mustChangePassword) { location.href = '/change-password.html'; return }
       // Signed out when a phone alert's link was tapped: the server sent the browser here from
       // /alarms.html#event=<id>, and the browser kept the # across that redirect (the Fetch
