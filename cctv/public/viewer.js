@@ -1110,14 +1110,16 @@ function soundButton(cam) {
     e.stopPropagation()
     if (listening) { stopListening(); off(); return }
     show(true, 'Sound…', 'Connecting to the camera\'s microphone')
-    const mine = listenTo({ nvr: cam.nvr, ch: cam.ch }, (state, why) => {
-      if (listening !== mine && state !== 'unsupported') return
+    // (listenTo reports 'connecting', or that it cannot play at all, before it returns)
+    let mine = null
+    let over = false
+    mine = listenTo({ nvr: cam.nvr, ch: cam.ch }, (state, why) => {
+      if (mine && listening !== mine) return // another camera's, or switched off since
       if (state === 'playing') show(true, 'Sound on', 'Listening to this camera. Click to stop.')
       else if (state === 'silent') show(true, 'No sound yet', why)
-      else if (state === 'unsupported') { listening = null; off(why) }
-      else if (state === 'closed' && why) { listening = null; off(why) }
+      else if (state === 'unsupported' || (state === 'closed' && why)) { over = true; listening = null; off(why) }
     })
-    listening = mine
+    listening = over ? null : mine
   })
   return b
 }
