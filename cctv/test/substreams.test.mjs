@@ -71,5 +71,25 @@ check('an unoffered resolution is refused', !ok({ ...match17.sub, res: '3840x216
 check('too high a frame rate is refused', !ok({ ...match17.sub, fps: '60' }))
 check('an unoffered codec is refused', !ok({ ...match17.sub, enct: 'h264s' }))
 
+// A picture size (action 'res', the Picture tab's "Grid size"): its cases are in
+// substreams-res.test.mjs, which needs no captures. Here, against the real answers: every other
+// size every camera offers plans to settings that pass the checks on what is sent.
+{
+  const { planRes } = _test
+  const sendable = (c, sub) => {
+    try {
+      validate(c, sub)
+      return true
+    } catch {
+      return false
+    }
+  }
+  const sized = [...nvr1.channels, ...nvr2.channels]
+    .filter((c) => c.chlType !== 'recorder' && c.sub && c.resolutions.some((r) => r.value === c.sub.res))
+    .flatMap((c) => c.resolutions.filter((r) => r.value !== c.sub.res).map((r) => ({ c, to: r, plan: planRes(c, r.value) })))
+  const wrong = sized.filter(({ c, to, plan }) => !(plan.ok && plan.sub.res === to.value && plan.sub.enct === c.sub.enct && (!to.fps || Number(plan.sub.fps) <= to.fps) && sendable(c, plan.sub)))
+  check('a size: every other size each real camera offers plans to something that may be sent, codec kept', sized.length > 0 && wrong.length === 0, `${sized.length} sizes; ${wrong.slice(0, 3).map(({ c, to, plan }) => `ch${chNumber(c.id)} ${to.value}: ${plan.reason ?? JSON.stringify(plan.sub)}`).join(' | ')}`)
+}
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED')
 process.exit(failures ? 1 : 0)
