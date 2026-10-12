@@ -353,13 +353,11 @@ const changed = (n, got, base, from, to) => checkDoc(n, got, base.replace(from, 
 
 // ---- the write gate ----------------------------------------------------------------------------
 {
-  check('nothing is proven yet', same(PROVEN, { 'motion:param': false, 'motion:trigger': false, perimeter: false, osc: false, avd: false }))
+  check('every kind was proven on a real recorder (Value4U camera 2, 2026-10-12)', same(PROVEN, { 'motion:param': true, 'motion:trigger': true, perimeter: true, osc: true, avd: true }))
   check('gate keys', gateKey('motion', 'param') === 'motion:param' && gateKey('motion', 'trigger') === 'motion:trigger' && gateKey('osc') === 'osc')
-  check('gate: motion param may not be saved yet', same(writeGate('motion', 'param', ''), { key: 'motion:param', allowed: false, why: NOT_PROVEN }))
-  check('gate: nothing else may, with the sentence the page shows', ['perimeter', 'osc', 'avd'].every((k) => same(writeGate(k, null, undefined), { key: k, allowed: false, why: NOT_PROVEN })) &&
-    writeGate('motion', 'trigger').allowed === false && NOT_PROVEN === 'Saving this is not switched on yet: it has not been proven on a real recorder.')
-  check('gate: the environment switches on what it names, and only that', writeGate('osc', null, 'osc, avd').allowed && writeGate('avd', null, 'osc, avd').allowed && !writeGate('perimeter', null, 'osc, avd').allowed &&
-    writeGate('motion', 'trigger', 'motion:trigger').allowed && !writeGate('motion', 'trigger', 'motion').allowed)
+  check('gate: motion param may be saved', same(writeGate('motion', 'param', ''), { key: 'motion:param', allowed: true, why: null }))
+  check('gate: so may the others, and the sentence for one that is not is unchanged', ['perimeter', 'osc', 'avd'].every((k) => writeGate(k, null, undefined).allowed) && writeGate('motion', 'trigger').allowed === true && NOT_PROVEN === 'Saving this is not switched on yet: it has not been proven on a real recorder.')
+  check('gate: naming kinds in the environment takes nothing away from the proven', writeGate('osc', null, 'osc, avd').allowed && writeGate('perimeter', null, 'osc, avd').allowed && writeGate('motion', 'trigger', 'motion').allowed)
   check('gate: all switches every one on', KINDS.filter((k) => k !== 'motion').every((k) => writeGate(k, null, 'ALL').allowed) && writeGate('motion', 'trigger', 'all').allowed)
   check('gate: off switches every one off, the proven too', !writeGate('motion', 'param', 'off').allowed && !writeGate('osc', null, 'all,off').allowed)
   check('gate: motion with no half, or a kind that does not exist, is never allowed', !writeGate('motion', null, 'all').allowed && !writeGate('cdd', null, 'all').allowed && !writeGate('motion', 'area', 'all').allowed)

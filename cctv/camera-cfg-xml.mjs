@@ -77,9 +77,11 @@ const kindOk = (kind) => {
 /**
  * Which edits have been proven on a real recorder. Nothing else is ever sent: an edit that has
  * never been tried may be refused, may be half applied, or may hang the recorder.
- * 'motion:param' is on because motion-tune.mjs already writes editMotion's param block.
+ * All five were proven on 2026-10-12 on Value4U camera 2 (an AI model on an NVR-63432): each was changed,
+ * read back and put back with nothing else moving (hold time, a trigger switch, zones drawn and cleared,
+ * on and off, sensitivity, the item-monitoring type). Other camera models have not been tried.
  */
-export const PROVEN = { 'motion:param': false, 'motion:trigger': false, perimeter: false, osc: false, avd: false }
+export const PROVEN = { 'motion:param': true, 'motion:trigger': true, perimeter: true, osc: true, avd: true }
 export const NOT_PROVEN = 'Saving this is not switched on yet: it has not been proven on a real recorder.'
 
 /** The PROVEN key of a write: 'motion:param', 'motion:trigger', or the kind. */
