@@ -87,8 +87,18 @@
         <tbody id="sicexRows"></tbody>
       </table>
       <p><label>Sites left out (their cameras are not pre-started, held or linked): <input id="sicexSites" type="text" placeholder="Site name, another site" size="40" /></label></p>
+      <p><label>Control group: 1 in
+        <select id="sicexHoldout" aria-label="Control group: one screen in this many">
+          <option value="2">2 — half</option>
+          <option value="3">3 — a third</option>
+          <option value="4">4 — a quarter</option>
+          <option value="5">5 — a fifth</option>
+          <option value="10">10 — a tenth</option>
+          <option value="20">20 — a twentieth</option>
+        </select>
+        screens runs without the engine, to measure whether it helps. A bigger group measures faster but leaves fewer screens on the engine.</label></p>
       <p><button id="sicexSave" type="button">Save</button> <span id="sicexSaid" role="status"></span></p>
-      <p class="hp-note">Everything here is optional: with the engine off, live view, playback, exports and recording work exactly as before. One screen in ten always runs without it, so the table above can say whether it helps; if the screens with it measurably fare worse, the engine switches itself off and says so here. A change reaches each screen when its page is next opened.</p>
+      <p class="hp-note">Everything here is optional: with the engine off, live view, playback, exports and recording work exactly as before. The control group set above always runs without it, so the table above can say whether it helps; if the screens with it measurably fare worse, the engine switches itself off and says so here. A change reaches each screen when its page is next opened.</p>
     </details>
     <h2>This server</h2>
     <div id="system" class="cards"></div>

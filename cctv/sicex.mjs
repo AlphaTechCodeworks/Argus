@@ -9,17 +9,19 @@
 // page does what it did before any of it was built: that is the rule (core ownership), and it is
 // why the modules are only ever asked "may I", never relied on.
 //
-//   data/sicex.json   { enabled, modules: { id: boolean }, sitesOff: [site], auto: { at, why } | null, by, at }
+//   data/sicex.json   { enabled, modules: { id: boolean }, sitesOff: [site], holdoutOf, auto: { at, why } | null, by, at }
 //
-//   GET /api/sicex?device=<id>   -> { enabled, modules, sitesOff, cohort, list, auto }   (anyone signed in)
+//   GET /api/sicex?device=<id>   -> { enabled, modules, sitesOff, holdoutOf, cohort, list, auto }   (anyone signed in)
 //       modules: what is in effect for THIS browser: all false with the engine off, and all false
-//       for the one browser in ten kept as the comparison (telemetry.mjs cohortOf): without screens
-//       that really run without it, nothing could say whether it helps
-//   PUT /api/admin/sicex { enabled?, modules?, sitesOff? } -> the settings as kept   (administrators)
-//       turning the engine on again clears an automatic switch-off
+//       for the browsers kept as the comparison (one in holdoutOf, telemetry.mjs cohortOf): without
+//       screens that really run without it, nothing could say whether it helps
+//   PUT /api/admin/sicex { enabled?, modules?, sitesOff?, holdoutOf? } -> the settings as kept   (administrators)
+//       turning the engine on again clears an automatic switch-off; holdoutOf (2..100) widens or
+//       narrows the comparison group — a bigger one measures faster but leaves fewer on the engine
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { writeFileAtomicSync } from './atomic-write.mjs'
+import { HOLDOUT_OF } from './telemetry.mjs'
 
 export const SICEX_PATH = '/api/sicex'
 export const SICEX_ADMIN_PATH = '/api/admin/sicex'
@@ -37,14 +39,16 @@ const IDS = MODULES.map((m) => m.id)
 const BODY_LIMIT = 8192
 const NO_STORE = { 'cache-control': 'no-store' }
 const SITE_RE = /^[^\u0000-\u001f]{1,80}$/
+export const HOLDOUT_MIN = 2
+export const HOLDOUT_MAX = 100
 
-/** The engine's settings as kept, or the start: everything on. */
-export const sicexDefaults = () => ({ enabled: true, modules: Object.fromEntries(IDS.map((id) => [id, true])), sitesOff: [], auto: null })
+/** The engine's settings as kept, or the start: everything on, the holdout at the built-in fraction. */
+export const sicexDefaults = () => ({ enabled: true, modules: Object.fromEntries(IDS.map((id) => [id, true])), sitesOff: [], holdoutOf: HOLDOUT_OF, auto: null })
 
 /** Settings from a file or a request, made whole and safe. Unknown modules are dropped, missing ones are on. */
 export function cleanSicex(b, base = sicexDefaults()) {
   if (!b || typeof b !== 'object') return null
-  const out = { enabled: base.enabled, modules: { ...base.modules }, sitesOff: [...base.sitesOff], auto: base.auto ?? null }
+  const out = { enabled: base.enabled, modules: { ...base.modules }, sitesOff: [...base.sitesOff], holdoutOf: base.holdoutOf ?? HOLDOUT_OF, auto: base.auto ?? null }
   if ('enabled' in b) { if (typeof b.enabled !== 'boolean') return null; out.enabled = b.enabled }
   if ('modules' in b) {
     if (!b.modules || typeof b.modules !== 'object') return null
@@ -53,6 +57,10 @@ export function cleanSicex(b, base = sicexDefaults()) {
   if ('sitesOff' in b) {
     if (!Array.isArray(b.sitesOff) || b.sitesOff.length > 200 || !b.sitesOff.every((s) => typeof s === 'string' && SITE_RE.test(s.trim()))) return null
     out.sitesOff = [...new Set(b.sitesOff.map((s) => s.trim()))].sort()
+  }
+  if ('holdoutOf' in b) {
+    if (!Number.isInteger(b.holdoutOf) || b.holdoutOf < HOLDOUT_MIN || b.holdoutOf > HOLDOUT_MAX) return null
+    out.holdoutOf = b.holdoutOf
   }
   if (b.auto && typeof b.auto === 'object' && typeof b.auto.why === 'string') out.auto = { at: String(b.auto.at ?? ''), why: b.auto.why.slice(0, 300) }
   return out
@@ -143,12 +151,13 @@ async function bodyOf(req) {
 
 /** The two routes; null when the path is neither. cohortOf: telemetry.mjs's (user, device) -> 'apsi' | 'holdout'. */
 export async function handleSicex(req, pathname, { user, admin, store, cohortOf, device = '', log = () => {} }) {
-  const view = (s, cohort) => ({ enabled: s.enabled, modules: effective(s, cohort), set: s.modules, sitesOff: s.sitesOff, cohort, auto: s.auto, list: MODULES })
+  const view = (s, cohort) => ({ enabled: s.enabled, modules: effective(s, cohort), set: s.modules, sitesOff: s.sitesOff, holdoutOf: s.holdoutOf, cohort, auto: s.auto, list: MODULES })
   if (pathname === SICEX_PATH) {
     if (!user) return [401, { error: 'Sign in' }, NO_STORE]
     if (req.method !== 'GET') return [405, { error: 'Method not allowed' }, { ...NO_STORE, allow: 'GET' }]
     const dev = /^[a-z0-9]{6,32}$/i.test(device) ? device : ''
-    return [200, view(store.get(), dev ? cohortOf(user, dev) : 'apsi'), NO_STORE]
+    const s = store.get()
+    return [200, view(s, dev ? cohortOf(user, dev, s.holdoutOf) : 'apsi'), NO_STORE]
   }
   if (pathname !== SICEX_ADMIN_PATH) return null
   if (!user) return [401, { error: 'Sign in' }, NO_STORE]

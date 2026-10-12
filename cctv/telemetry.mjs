@@ -38,9 +38,13 @@ export const KINDS = Object.freeze(['first-picture', 'hd', 'reconnect', 'open', 
 const ID_RE = /^[A-Za-z0-9._-]{1,64}$/
 const NO_STORE = { 'cache-control': 'no-store' }
 
-/** Which side of the holdout test this user on this browser is on, for good. */
-export function cohortOf(user, device) {
-  return createHash('sha256').update(`${user}\n${device}`).digest()[0] % HOLDOUT_OF === 0 ? 'holdout' : 'apsi'
+/**
+ * Which side of the holdout test this user on this browser is on, for good at a given fraction.
+ * holdoutOf: one browser in this many is the holdout; an invalid value falls back to the default.
+ */
+export function cohortOf(user, device, holdoutOf = HOLDOUT_OF) {
+  const n = Number.isInteger(holdoutOf) && holdoutOf >= 2 ? holdoutOf : HOLDOUT_OF
+  return createHash('sha256').update(`${user}\n${device}`).digest()[0] % n === 0 ? 'holdout' : 'apsi'
 }
 
 const num = (x, lo, hi) => (typeof x === 'number' && Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : 0)
@@ -83,9 +87,10 @@ const blank = () => ({ smoothness: null, startup: null, scrubbing: null, switchi
 
 /**
  * The store: batches to disk, and the sums the score is made from, by hour and cohort, in memory.
- * @param {{ dir?: string, now?: () => number, maxBytes?: number, keepDays?: number, keepHours?: number }} [o]
+ * @param {{ dir?: string, now?: () => number, maxBytes?: number, keepDays?: number, keepHours?: number, holdoutOf?: () => number }} [o]
+ *   holdoutOf: read each batch's time for the current holdout fraction (one browser in this many)
  */
-export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = MAX_BYTES, keepDays = KEEP_DAYS, keepHours = 24 * 7 } = {}) {
+export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = MAX_BYTES, keepDays = KEEP_DAYS, keepHours = 24 * 7, holdoutOf = () => HOLDOUT_OF } = {}) {
   const hours = new Map() // hour -> { apsi: sums, holdout: sums }
   // per NVR, since this start (and what was read back): the last RING waits, and its tiles' seconds
   const RING = 400
@@ -205,7 +210,7 @@ export function makeTelemetry({ dir = TELEMETRY_DIR, now = Date.now, maxBytes = 
     counts,
     /** Takes one cleaned batch in: to disk, and into the hour's sums. */
     add(user, batch) {
-      const cohort = cohortOf(user, batch.device)
+      const cohort = cohortOf(user, batch.device, holdoutOf())
       counts.batches++
       write(`${JSON.stringify({ at: now(), user, cohort, ...batch })}\n`)
       tally(user, batch, cohort, now())

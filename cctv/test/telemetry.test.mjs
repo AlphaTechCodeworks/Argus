@@ -277,3 +277,22 @@ test('a page of many tiles is sampled less often, so its batch stays under what 
   assert.ok(JSON.stringify(sent[0]).length < BODY_LIMIT, `${JSON.stringify(sent[0]).length} bytes`)
   assert.deepEqual([sent[0].samples[0].in, sent[0].samples[0].rafHz], [25, 60])
 })
+
+test('the holdout fraction widens the comparison group, and is fixed for a browser', () => {
+  const share = (n) => { let h = 0; for (let i = 0; i < 4000; i++) if (cohortOf(`u${i}`, 'd', n) === 'holdout') h++; return h / 4000 }
+  assert.ok(Math.abs(share(10) - 0.1) < 0.03, `1/10 ${share(10)}`)
+  assert.ok(Math.abs(share(2) - 0.5) < 0.05, `1/2 ${share(2)}`)
+  assert.ok(Math.abs(share(3) - 1 / 3) < 0.05, `1/3 ${share(3)}`)
+  assert.equal(cohortOf('mike', 'dev1', 2), cohortOf('mike', 'dev1', 2))
+  for (const bad of [1, 0, 1.5, -2, '2', null, NaN]) assert.equal(cohortOf('mike', 'dev1', bad), cohortOf('mike', 'dev1'), String(bad)) // bad fraction -> the default one in ten
+})
+
+test('a new batch is bucketed by the current holdout fraction', () => {
+  let u = null
+  for (let i = 0; i < 20000 && !u; i++) { const k = `z${i}`; if (cohortOf(k, 'abc123abc123', 10) === 'apsi' && cohortOf(k, 'abc123abc123', 2) === 'holdout') u = k }
+  assert.ok(u, 'a user that differs between the two fractions')
+  const wide = makeTelemetry({ dir: mkdtempSync(join(tmpdir(), 'argus-tel-frac-')), holdoutOf: () => 2 })
+  assert.equal(wide.add(u, { device: 'abc123abc123', samples: [], events: [] }), 'holdout')
+  const deflt = makeTelemetry({ dir: mkdtempSync(join(tmpdir(), 'argus-tel-frac2-')) })
+  assert.equal(deflt.add(u, { device: 'abc123abc123', samples: [], events: [] }), 'apsi') // default one in ten
+})

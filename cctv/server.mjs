@@ -311,10 +311,11 @@ if (LIVE_WORKER) {
 // ---- health alerts and nightly settings backups ---------------------------
 
 const DATA_DIR = auth.DATA_DIR
-const telemetry = makeTelemetry()
 // SICE-X: the optional speed-ups, switched from one place, and switched off by itself when the screens
 // running it measurably fare worse than the ones kept without it (sicex.mjs; looked at once an hour)
 const sicex = makeSicex({ dir: auth.DATA_DIR, log: console.log })
+// built after sicex so each batch is bucketed by the current holdout fraction the admins set there
+const telemetry = makeTelemetry({ holdoutOf: () => sicex.get().holdoutOf })
 setInterval(() => { try { sicex.autoCheck(telemetry.summary()) } catch (e) { console.warn(`[sicex] check failed: ${e?.message ?? e}`) } }, 3_600_000).unref()
 // Only on an NVR reached on the local network that is refusing nothing: a P2P or VPN NVR's main
 // stream rides the same slow link as the one being watched, and one that refuses streams has none

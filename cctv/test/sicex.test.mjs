@@ -93,3 +93,23 @@ test('anyone signed in may read what applies to their browser; only an administr
   assert.deepEqual([ok[0], ok[1].modules.wallThin, ok[1].sitesOff], [200, false, ['Shad']])
   assert.match(lines.at(-1), /mike set the engine on, modules off: wallThin, sites left out: Shad/)
 })
+
+test('the holdout fraction: a default, kept within bounds', () => {
+  assert.equal(sicexDefaults().holdoutOf, 10)
+  assert.equal(cleanSicex({ holdoutOf: 2 }).holdoutOf, 2)
+  assert.equal(cleanSicex({ holdoutOf: 100 }).holdoutOf, 100)
+  assert.equal(cleanSicex({ enabled: false }, { ...sicexDefaults(), holdoutOf: 3 }).holdoutOf, 3) // a change that does not name it keeps it
+  for (const bad of [1, 0, -2, 1.5, 101, '3', null, NaN]) assert.equal(cleanSicex({ holdoutOf: bad }), null, String(bad))
+})
+
+test('the fraction is stored, read back, served, and used to place a browser', async () => {
+  const d = dir()
+  const store = makeSicex({ dir: d })
+  assert.equal(store.set({ holdoutOf: 2 }, 'mike').holdoutOf, 2)
+  assert.equal(makeSicex({ dir: d }).get().holdoutOf, 2) // a new process reads it back
+  let passed = null
+  const ctx = { user: 'viewer', admin: false, store, device: 'abc123abc123', cohortOf: (u, dev, n) => { passed = n; return 'apsi' }, log: () => {} }
+  const body = (await handleSicex(req('GET'), SICEX_PATH, ctx))[1]
+  assert.equal(body.holdoutOf, 2)
+  assert.equal(passed, 2) // the browser's side is decided with the stored fraction
+})

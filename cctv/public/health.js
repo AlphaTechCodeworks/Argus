@@ -845,6 +845,11 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     auto.textContent = s.auto ? `It switched itself off at ${String(s.auto.at).slice(0, 16).replace('T', ' ')} UTC: ${s.auto.why}. Turn it on again here once that has been looked into.` : ''
     document.getElementById('sicexEnabled').checked = s.enabled === true
     document.getElementById('sicexSites').value = (s.sitesOff ?? []).join(', ')
+    const hsel = document.getElementById('sicexHoldout')
+    if (hsel && Number.isInteger(s.holdoutOf)) {
+      if (![...hsel.options].some((o) => o.value === String(s.holdoutOf))) hsel.add(new Option(String(s.holdoutOf), String(s.holdoutOf)))
+      hsel.value = String(s.holdoutOf)
+    }
     document.getElementById('sicexRows').replaceChildren(...s.list.map((m) => {
       const on = el('input', { type: 'checkbox', checked: s.set?.[m.id] !== false })
       on.dataset.module = m.id
@@ -860,8 +865,9 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     const modules = {}
     for (const b of document.querySelectorAll('#sicexRows input[data-module]')) modules[b.dataset.module] = b.checked
     const sitesOff = document.getElementById('sicexSites').value.split(',').map((x) => x.trim()).filter(Boolean)
+    const holdoutOf = Number(document.getElementById('sicexHoldout')?.value) || undefined
     try {
-      const r = await fetch('/api/admin/sicex', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: document.getElementById('sicexEnabled').checked, modules, sitesOff }) })
+      const r = await fetch('/api/admin/sicex', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: document.getElementById('sicexEnabled').checked, modules, sitesOff, holdoutOf }) })
       const j = await r.json().catch(() => null)
       if (!r.ok) { said.textContent = j?.error ?? 'Not saved'; return }
       paintSicex(j)
