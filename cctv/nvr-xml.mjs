@@ -181,7 +181,10 @@ let capMs = XML_CAP_MS // (tests shorten it: _test.setCap)
 // behind the same calls; only one XML call per NVR gets that far (the per-NVR queue above), so the
 // turns ahead of it are at most one call per other NVR.
 const XML_GAP_MS = 250
-const XML_MAX_WAITING = 10
+// (30: the Sites page alone asks more than 10 things of the NVRs as it opens, and the owner was shown
+// "Too many NVR settings requests" for a camera opened straight after; a read that waits a few
+// seconds is better than one refused. 2026-10-12)
+let XML_MAX_WAITING = 30 // (let: the tests written for 10 set it back, _test.setMaxWaiting)
 const XML_READ_FAILS = 2 // timeouts in a row ...
 const XML_READ_BREAKER_MS = 60_000 // ... and that NVR's reads are refused this long
 const BUSY_RETRY_S = 5 // "try again" hint for a full queue
@@ -767,6 +770,9 @@ export const _test = {
     readFails.clear()
   },
   /** The gap between XML calls (null: 250 ms), for tests that shorten the flows' own timings. */
+  setMaxWaiting(n) {
+    XML_MAX_WAITING = n
+  },
   setGap(ms) {
     gapMs = ms ?? XML_GAP_MS
   }

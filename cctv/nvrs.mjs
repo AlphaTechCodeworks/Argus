@@ -127,6 +127,28 @@ const RETRY_MAX_MS = 60_000
 // video up). From its third silence on such an NVR is tried less and less often, up to this.
 const SILENT_RETRY_MAX_MS = 10 * 60_000
 export const silentRetryMs = (silences, delay) => (silences >= 3 ? Math.min(RETRY_MAX_MS * 2 ** (silences - 3), SILENT_RETRY_MAX_MS) : delay)
+// ...and it is remembered across a restart (DATA_DIR/silent-nvrs.json: { id: silences }): a silent NVR's
+// first login of a new process waits SILENT_START_HOLD_MS, so every NVR that does answer is in before it
+// takes the lane. Without this each restart began with the silent one's 80 s, three times over.
+const SILENT_FILE = join(DATA_DIR, 'silent-nvrs.json')
+const SILENT_START_HOLD_MS = 4 * 60_000
+const readSilent = () => {
+  try {
+    const o = JSON.parse(readFileSync(SILENT_FILE, 'utf8'))
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : {}
+  } catch {
+    return {}
+  }
+}
+const noteSilent = (id, silences) => {
+  try {
+    const o = readSilent()
+    if (silences >= 3) o[id] = silences
+    else if (Object.hasOwn(o, id)) delete o[id]
+    else return
+    writeFileSync(SILENT_FILE, JSON.stringify(o), { mode: 0o600 })
+  } catch {} // a note that cannot be kept only costs the wait it would have saved
+}
 
 // ---- config file ----------------------------------------------------------
 
@@ -638,6 +660,16 @@ export class Nvr {
     this.connecting = true
     try {
       await initSdk()
+      // silent before this process started (see SILENT_FILE): the others log in first
+      if (this.loginSilences === undefined && !process.env.CCTV_WORKER_NVR) {
+        this.loginSilences = Number(readSilent()[this.id]) || 0
+        if (this.loginSilences >= 3) {
+          this.status = 'offline'
+          this.error = 'The NVR did not answer in time'
+          console.log(`[${this.id}] was not answering before the restart: its login waits ${SILENT_START_HOLD_MS / 60_000} min for the others`)
+          await sleep(SILENT_START_HOLD_MS)
+        }
+      }
       for (let delay = RETRY_MIN_MS; !this.stopped; delay = Math.min(delay * 2, RETRY_MAX_MS)) {
         this.status = this.status === 'offline' ? 'offline' : 'connecting'
         const { host, port, user, password, sn, nat } = this.cfg
@@ -680,6 +712,7 @@ export class Nvr {
           this.status = 'online'
           this.error = ''
           this.controlFailed = false
+          if (this.loginSilences) noteSilent(this.id, 0)
           this.loginSilences = 0
           console.log(`[${this.id}] logged in to ${where} (${this.model || 'NVR'}) in ${Date.now() - t0} ms, ${this.channels.length} cameras`)
           return
@@ -688,6 +721,7 @@ export class Nvr {
         this.status = 'offline'
         this.controlFailed = true
         this.loginSilences = /did not answer/i.test(String(why ?? '')) ? (this.loginSilences ?? 0) + 1 : 0
+        if (!process.env.CCTV_WORKER_NVR && (this.loginSilences === 3 || (this.loginSilences > 3 && this.loginSilences % 5 === 0) || this.loginSilences === 0)) noteSilent(this.id, this.loginSilences)
         const wait = silentRetryMs(this.loginSilences, delay)
         console.log(`[${this.id}] login to ${where} failed: ${this.error}; retrying in ${Math.round(wait / 1000)}s`)
         await sleep(wait)
