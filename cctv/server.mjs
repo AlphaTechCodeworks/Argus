@@ -94,6 +94,7 @@ import { handleImaging } from './imaging.mjs'
 import { handleLens } from './lens.mjs'
 import { handleStreamCapResolution, handleStreamOptimise, handleStreams } from './streams.mjs'
 import { handleLines } from './tripwire.mjs'
+import { handleCameraCfg } from './camera-cfg.mjs'
 import { ADMIN_OSD_PATH, OSD_PATH, handleCameraNotes, handleOsd as handleCameraOsd, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
@@ -589,9 +590,10 @@ const CAMERA_METHODS = {
   'stream/estimate': ['POST'], // read only, but takes a body
   notes: ['GET', 'POST'],
   figures: ['GET', 'POST'],
-  lines: ['GET', 'POST'] // read / change, undo
+  lines: ['GET', 'POST'], // read / change, undo
+  cfg: ['GET', 'POST'] // motion, sterile area, item monitoring, fault: read / change (camera-cfg.mjs)
 }
-const CAMERA_ROUTE = /^\/api\/admin\/nvrs\/([^/]+)\/channels\/(\d{1,3})\/(image|image\/profiles|image\/schedule|lens|stream|stream\/estimate|notes|figures|lines)$/
+const CAMERA_ROUTE = /^\/api\/admin\/nvrs\/([^/]+)\/channels\/(\d{1,3})\/(image|image\/profiles|image\/schedule|lens|stream|stream\/estimate|notes|figures|lines|cfg\/(?:motion|perimeter|osc|avd))$/
 
 const sendJson = (res, status, data, headers = {}) => {
   res.writeHead(status, { 'content-type': 'application/json', ...SECURITY_HEADERS, ...headers })
@@ -1081,7 +1083,7 @@ const handleRequest = async (req, res) => {
       } catch {
         return sendJson(res, 400, { error: 'Bad NVR id' })
       }
-      const what = cam[3]
+      const what = cam[3].startsWith('cfg/') ? 'cfg' : cam[3]
       if (!CAMERA_METHODS[what].includes(req.method)) return sendJson(res, 405, { error: 'Method not allowed' }, { allow: CAMERA_METHODS[what].join(', ') })
       const ch = Number(cam[2])
       const readJson = () => readJsonObject(req, 8192)
@@ -1093,7 +1095,9 @@ const handleRequest = async (req, res) => {
             ? await handleStreams(what === 'stream' ? 'stream' : 'estimate', req.method, id, ch, url.searchParams, readJson, user)
             : what === 'lines'
               ? await handleLines(req.method, id, ch, url.searchParams, readJson, user)
-              : await handleCameraNotes(what, req.method, id, ch, readJson, user)
+              : what === 'cfg'
+                ? await handleCameraCfg(req.method, id, ch, cam[3].slice('cfg/'.length), readJson, who)
+                : await handleCameraNotes(what, req.method, id, ch, readJson, user)
       return sendJson(res, status, body)
     }
     const siteNotes = /^\/api\/admin\/sites\/([^/]+)\/notes$/.exec(pathname)

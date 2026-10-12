@@ -1,7 +1,8 @@
 // The camera settings editor on the Sites page: a live preview beside the
-// Picture / OSD / Lines panels, for one camera at a time. It re-hosts the panels
+// Picture / OSD / Lines panels and the camera's detections (Motion, Sterile area,
+// Item monitoring, Fault: camera-cfg-panel.js), for one camera at a time. It re-hosts the panels
 // the live full-size view used to show (image-panel.js, osd-panel.js,
-// lines-panel.js). Only one of the three is active at once — OSD and Lines both
+// lines-panel.js). Only one panel is active at once — OSD and Lines both
 // draw on the live picture — exactly as the full-size view enforced. The preview
 // is one main-stream LiveTile (live-tile.js); on a camera the NVR will not give
 // HD (or a browser without H.265), the tile drops to its sub stream on its own
@@ -9,6 +10,7 @@
 import { ImagePanel } from './image-panel.js'
 import { OsdPanel } from './osd-panel.js'
 import { LinesPanel, linesSupportAsker } from './lines-panel.js'
+import { CameraCfgPanel, KIND_LABEL } from './camera-cfg-panel.js'
 import { LiveTile, MAIN_STREAM, TILE_HTML } from './live-tile.js'
 import { isLocalHost } from './device.js'
 import { cameraLabel } from './camera-choice.js'
@@ -58,15 +60,20 @@ export function openCameraEditor(mountEl, cam, { onClose = null } = {}) {
   const linesBody = el('div', { className: 'ce-body', hidden: true })
   const image = new ImagePanel({ getPlayer, waitForMain })
 
-  let active = null // 'pic' | 'osd' | 'lines'
+  // the camera's own detections: one tab each, all the same panel (camera-cfg-panel.js)
+  const cfgBodies = Object.fromEntries(Object.keys(KIND_LABEL).map((kind) => [kind, el('div', { className: 'ce-body', hidden: true })]))
+
+  let active = null // 'pic' | 'osd' | 'lines' | a detection kind
   let osd = null
   let lines = null
+  let cfg = null
 
   // close whatever is active (its DOM goes). Never prompts — guard with confirmDiscard first.
   function closeActive() {
     if (active === 'pic') image.close()
     else if (active === 'osd') { osd?.close(); osd = null }
     else if (active === 'lines') { lines?.close(); lines = null }
+    else if (cfg) { cfg.close(); cfg = null }
     active = null
   }
 
@@ -74,6 +81,7 @@ export function openCameraEditor(mountEl, cam, { onClose = null } = {}) {
     if (key === 'pic') { image.open(cam); picBody.append(image.el) }
     else if (key === 'osd') { osd = new OsdPanel(osdBody, cam, { liveEl, onClose: () => { osd = null } }); osd.open() }
     else if (key === 'lines') { lines = new LinesPanel(linesBody, cam, { liveEl, onClose: () => { lines = null } }); lines.open() }
+    else { cfg = new CameraCfgPanel(cfgBodies[key], cam, { kind: key, liveEl, onClose: () => { cfg = null } }); cfg.open() }
     active = key
   }
 
@@ -82,13 +90,14 @@ export function openCameraEditor(mountEl, cam, { onClose = null } = {}) {
     if (active === 'pic') return image.confirmDiscard()
     if (active === 'osd') return osd ? osd.confirmDiscard() : true
     if (active === 'lines') return lines ? lines.confirmDiscard() : true
-    return true
+    return cfg ? cfg.confirmDiscard() : true
   }
 
   const tabs = [
     { key: 'pic', label: 'Picture', body: picBody },
     { key: 'osd', label: 'OSD', body: osdBody },
-    { key: 'lines', label: 'Lines', body: linesBody }
+    { key: 'lines', label: 'Lines', body: linesBody },
+    ...Object.entries(KIND_LABEL).map(([key, label]) => ({ key, label, body: cfgBodies[key] }))
   ]
   const tabBar = el('div', { className: 'ce-tabs' })
   tabBar.setAttribute('role', 'tablist')
@@ -117,7 +126,7 @@ export function openCameraEditor(mountEl, cam, { onClose = null } = {}) {
 
   const root = el('div', { className: 'ce-editor' },
     el('div', { className: 'ce-preview' }, tileEl),
-    el('div', { className: 'ce-panels' }, tabBar, picBody, osdBody, linesBody))
+    el('div', { className: 'ce-panels' }, tabBar, picBody, osdBody, linesBody, ...Object.values(cfgBodies)))
   mountEl.append(root)
 
   // start on Picture

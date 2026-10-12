@@ -1094,6 +1094,24 @@ body.phone-full #grid > .lines-panel, body.phone-full #grid > .osd-panel { z-ind
 .ce-body .img-panel { position: static; inset: auto; width: auto; height: auto; max-height: 70vh; z-index: auto; background: var(--surface-2); }
 @media (max-width: 640px) { .ce-editor { flex-direction: column; } }
 
+/* ---- a camera's own detections (admins): camera-cfg-panel.js, the editor's Motion, Sterile area,
+   Item monitoring and Fault tabs ---- */
+/* the panel reuses the line-crossing box (.img-panel, .ln-box rows, the .ip- result and buttons) */
+.ce-tabs { flex-wrap: wrap; } /* seven tabs do not fit one row on a narrow page */
+.cc-form { display: flex; flex-direction: column; gap: 10px; }
+.cc-none { margin: 0; color: var(--muted); font-size: 12.5px; }
+.cc-num { color: var(--muted); font-variant-numeric: tabular-nums; }
+.cc-zone { grid-template-columns: auto 1fr auto; }
+.cc-zone .ln-pick[aria-pressed="true"] { border-color: var(--accent); font-weight: 600; }
+.cc-panel label:has(input:disabled, select:disabled) { opacity: 0.55; }
+.cc-result ul { list-style: none; padding-left: 0; margin: 4px 0 0; }
+/* the zone drawing sits exactly on the picture, placed by the script (as .ln-overlay does in the
+   full-size view); the shield keeps a press on the picture from reaching the tile under it */
+.tile > .cc-shield { position: absolute; inset: 0; z-index: 3; }
+.tile canvas.cc-overlay { position: absolute; z-index: 3; display: block; transform: none; object-fit: fill; touch-action: none; cursor: crosshair; }
+.tile canvas.cc-overlay.ln-locked { cursor: default; }
+.tile canvas.cc-overlay[hidden], .tile > .cc-shield[hidden] { display: none; }
+
 /* Settings page (settings.html) */
 .se-section { background: var(--panel); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 .se-section[hidden] { display: none; }

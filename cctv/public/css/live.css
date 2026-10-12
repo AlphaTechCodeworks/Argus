@@ -199,3 +199,8 @@ body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-ins
 .mark-dlg input[type="text"], .mark-dlg textarea { display: block; width: min(80vw, 420px); margin-top: 3px; font: inherit; color: var(--text); }
 .mark-dlg .mark-when { margin: 0; font-size: 12px; color: var(--muted); }
 .mark-dlg .mark-said { min-height: 1.2em; margin: 8px 0 0; font-size: 13px; }
+
+/* One camera enlarged: it covers the whole grid, and the grid's own tiles (stopped while it is open)
+   are not drawn at all, so nothing of them shows round its edges or behind it. */
+.live-page #grid > .tile.single-overlay { inset: 0; background: #000; }
+.live-page #grid:has(> .single-overlay) > :not(.single-overlay) { visibility: hidden; }

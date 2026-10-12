@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response cmdId="" cmdUrl="queryOsc">
+	<status>success</status>
+	<types>
+		<oscType>
+			<enum>abandum</enum>
+			<enum>objstolen</enum>
+		</oscType>
+		<mutexObjectType></mutexObjectType>
+	</types>
+	<content>
+		<chl id="{00000001-0000-0000-0000-000000000000}" scheduleGuid="{ED0F2AE8-6E54-4D89-BE10-E85445FAC8FB}">
+			<param>
+				<mutexList type="list" itemType="mutexObjectType"></mutexList>
+				<switch>false</switch>
+				<oscType>abandum</oscType>
+				<holdTimeNote>3,5,10,20,30,60,120</holdTimeNote>
+				<holdTime uint="s">20</holdTime>
+				<boundary type="list" count="1" maxCount="1" regulation="0">
+					<itemType>
+						<point type="list"></point>
+					</itemType>
+					<item>
+						<sensitivity min="1" max="100">1</sensitivity>
+						<name maxLen="15"><![CDATA[]]></name>
+						<minTime max="100">0</minTime>
+						<point type="list" maxCount="6" count="0"></point>
+					</item>
+				</boundary>
+			</param>
+			<trigger>
+				<sysRec>
+					<switch>true</switch>
+					<chls type="list">
+						<item id="{00000001-0000-0000-0000-000000000000}">JP Wharf South</item>
+					</chls>
+				</sysRec>
+				<alarmOut>
+					<switch>false</switch>
+					<alarmOuts type="list"></alarmOuts>
+				</alarmOut>
+				<preset>
+					<switch>false</switch>
+					<presets type="list"></presets>
+				</preset>
+				<sysSnap>
+					<switch>false</switch>
+					<chls type="list"></chls>
+				</sysSnap>
+				<msgPushSwitch>true</msgPushSwitch>
+				<snapSwitch>false</snapSwitch>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<sysAudio id="{00000000-0000-0000-0000-000000000000}"></sysAudio>
+				<manualAudioSwitch>false</manualAudioSwitch>
+				<manualLightSwitch>false</manualLightSwitch>
+			</trigger>
+		</chl>
+	</content>
+</response>
