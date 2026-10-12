@@ -2232,3 +2232,6 @@ body.playback-page.is-fullscreen .pb-bar { --pb-head-ink: #14171c; }
   .pb-live-switch { order: -1; }
   .pb-pill { font-size: 11px; }
 }
+
+/* Motion search on the playback bar: gone (not just greyed) where the footage cannot be searched */
+#searchToggle[hidden] { display: none; }
