@@ -169,3 +169,8 @@ html.shell-pending body { padding-left: var(--shell-w); }
 html.shell-pending body header .brand h1, html.shell-pending body header nav.tabs, html.shell-pending body header .account { display: none; }
 @media (max-width: 1199px) { html.shell-pending body { padding-left: var(--rail-w); } }
 @media (max-width: 699px), (pointer: coarse) and (max-height: 500px) { html.shell-pending body { padding-left: 0; padding-bottom: calc(var(--bar-h) + env(safe-area-inset-bottom)); } }
+
+/* the drawn ARGUS lettering, in place of the word set in the text font */
+.shell-wordmark { display: block; height: 19px; width: auto; }
+.shell-top .shell-wordmark { height: 15px; }
+.shell-brand-type strong, .shell-top strong { display: inline-flex; align-items: center; }

@@ -7,6 +7,10 @@
 import { PHONE_BAR, currentId, navFor } from './nav-model.js'
 import { icon } from './icons.js'
 import { nextTheme, readTheme, saveTheme } from './theme.js'
+
+// ARGUS as the brand draws it (the app repository's docs/brand, concept A): five stroked letters in the
+// colour of the text around them, so it reads in the light theme and the dark.
+const WORDMARK = `<svg class="shell-wordmark" viewBox="-2 -1 194 38" role="img" aria-label="Argus" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"><path d="M1 34L14 2L27 34M7 23H21" transform="translate(0,0)"/><path d="M2 34V2H15Q27 2 27 12Q27 22 15 22H2M15 22L28 34" transform="translate(40,0)"/><path d="M28 7Q22 2 15 2Q2 2 2 18Q2 34 15 34Q23 34 28 29V19H17" transform="translate(80,0)"/><path d="M2 2V22Q2 34 15 34Q28 34 28 22V2" transform="translate(120,0)"/><path d="M27 6Q22 2 15 2Q3 2 3 10Q3 18 15 18Q27 18 27 26Q27 34 15 34Q7 34 2 29" transform="translate(160,0)"/></svg>`
 import { preferenceStorage, preferencesReady, savePendingSettings } from './user-settings.js'
 
 const store = preferenceStorage
@@ -40,7 +44,7 @@ function render(parts, me) {
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
   const version = me.build?.version ? esc(me.build.version) : ''
   side.innerHTML = `
-    <a class="shell-brand" href="/" aria-label="Argus home"><img class="shell-logo" src="/logo.svg" alt="" /><span class="shell-brand-type"><strong>Argus</strong><small>Security everywhere</small></span></a>
+    <a class="shell-brand" href="/" aria-label="Argus home"><img class="shell-logo" src="/logo.svg" alt="" /><span class="shell-brand-type"><strong>${WORDMARK}</strong><small>Security everywhere</small></span></a>
     <button type="button" class="shell-pin" data-sidebar-pin aria-label="Keep sidebar expanded" aria-pressed="${document.body.classList.contains('sidebar-pinned')}" title="Keep sidebar expanded">${icon('pin')}<span class="shell-pin-label">Keep sidebar open</span></button>
     <nav class="shell-nav">
       ${groups.map((g) => `<div class="shell-group"><div class="shell-group-label">${esc(g.label)}</div>${g.items.map((i) => link(i, here)).join('')}</div>`).join('')}
@@ -91,7 +95,7 @@ export function mountShell() {
   const top = document.createElement('div')
   top.className = 'shell-top'
   const label = navFor({ admin: true }).flatMap((g) => g.items).find((i) => i.id === (/wall.html$/.test(location.pathname) ? 'playback' : currentId(location.pathname)))?.label ?? ''
-  top.innerHTML = `<img src="/logo.svg" alt="" /><strong>Argus</strong><span>${esc(label)}</span>`
+  top.innerHTML = `<img src="/logo.svg" alt="" /><strong>${WORDMARK}</strong><span>${esc(label)}</span>`
   main.prepend(top)
 
   document.body.prepend(side)
