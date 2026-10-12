@@ -209,3 +209,8 @@ body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-ins
 
 /* the speaker button of the full-size view: lit while the camera is being listened to */
 .live-page .single-overlay .links .cam-sound.on { border-color: rgba(0, 174, 239, .9); background: rgba(0, 174, 239, .28); }
+
+/* Once the full-quality picture has taken over the full-size view, its own name bar carries the
+   buttons (viewer.js upgradeToMain moves them there). The bar of the picture underneath sat on top
+   of it, so Recordings, Sound and Mark vanished about two seconds after a camera opened. */
+.single-overlay:has(> .tile-upgrade:not(.pending)) > .label { display: none; }
