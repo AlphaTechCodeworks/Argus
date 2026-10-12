@@ -21,6 +21,7 @@ import { TOLERANCE, knownCapacity, layoutNote as profileNote, noteCapacity, note
 import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
+import { listenTo } from './live-audio.js'
 // This page is set up from the account's preferences (picture fit, layout, hide offline, the view
 // and site last chosen), from its first lines on: it waits here until they are known. It is this
 // page's own script, which nothing imports, so it may wait at the top level; user-settings.js, which
@@ -1086,6 +1087,40 @@ function takeAheadMain(cam) {
 // since what made someone press it has just happened.
 const MARK_BACK_MS = 30_000
 const MARK_TITLE_KEY = 'argus.markTitle'
+// Sound: the camera's microphone, while this button is on (live-audio.js; the server sends it only
+// then). One camera at a time: it stops when the view closes or steps to another camera.
+let listening = null // { stop } of the camera being listened to
+function stopListening() {
+  listening?.stop()
+  listening = null
+}
+function soundButton(cam) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.className = 'cam-link cam-sound'
+  const show = (on, text, title) => {
+    b.textContent = text
+    b.title = title
+    b.setAttribute('aria-pressed', String(on))
+    b.classList.toggle('on', on)
+  }
+  const off = (why) => show(false, why ? 'No sound' : 'Sound', why ?? 'Listen to this camera\'s microphone')
+  off()
+  b.addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (listening) { stopListening(); off(); return }
+    show(true, 'Sound…', 'Connecting to the camera\'s microphone')
+    const mine = listenTo({ nvr: cam.nvr, ch: cam.ch }, (state, why) => {
+      if (listening !== mine && state !== 'unsupported') return
+      if (state === 'playing') show(true, 'Sound on', 'Listening to this camera. Click to stop.')
+      else if (state === 'silent') show(true, 'No sound yet', why)
+      else if (state === 'unsupported') { listening = null; off(why) }
+      else if (state === 'closed' && why) { listening = null; off(why) }
+    })
+    listening = mine
+  })
+  return b
+}
 function markButton(cam) {
   const b = document.createElement('button')
   b.type = 'button'
@@ -1233,6 +1268,7 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
     link.addEventListener('click', (e) => e.stopPropagation())
     links.append(link)
   }
+  links.append(soundButton(cam))
   links.append(markButton(cam))
   linkedCameras(cam, links)
   overlay.querySelector('.name').after(links)
@@ -1306,6 +1342,7 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
 
 /** Back to the grid: the grid tiles pick up again straight away. */
 function closeSingle({ resumeGrid = true, keep = null } = {}) {
+  stopListening() // the sound belongs to the camera that was open
   const returnKey = single
   const restoreFocus = Boolean(overlay?.contains(document.activeElement))
   if (upgradeTimer) { clearTimeout(upgradeTimer); upgradeTimer = null } // a pending HD upgrade is cancelled

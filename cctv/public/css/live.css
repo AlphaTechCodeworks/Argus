@@ -204,3 +204,6 @@ body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-ins
    are not drawn at all, so nothing of them shows round its edges or behind it. */
 .live-page #grid > .tile.single-overlay { inset: 0; background: #000; }
 .live-page #grid:has(> .single-overlay) > :not(.single-overlay) { visibility: hidden; }
+
+/* the speaker button of the full-size view: lit while the camera is being listened to */
+.live-page .single-overlay .links .cam-sound.on { border-color: rgba(0, 174, 239, .9); background: rgba(0, 174, 239, .28); }

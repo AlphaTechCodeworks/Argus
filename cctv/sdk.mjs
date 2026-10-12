@@ -671,6 +671,9 @@ export const HEADER_SIZE = 16
 /** View of a frame's bytes: native memory (only valid inside the callback) or an already copied Buffer. */
 const bytesOf = (buf, len) => (Buffer.isBuffer(buf) ? buf : Buffer.from(koffi.view(buf, len)))
 
+/** A frame's bytes as a Buffer of their own: what is kept after the callback returns must be a copy. */
+export const copyBytes = (buf, len) => (Buffer.isBuffer(buf) ? Buffer.from(buf.subarray(0, len)) : Buffer.from(new Uint8Array(koffi.view(buf, len))))
+
 /** Codec announced by a VIDEO_FORMAT frame (BITMAPINFOHEADER, FOURCC at offset 16). */
 export const codecOf = (info, buf) =>
   /265|hevc/i.test(bytesOf(buf, info.length).toString('latin1', 16, 20)) ? CODEC_H265 : CODEC_H264

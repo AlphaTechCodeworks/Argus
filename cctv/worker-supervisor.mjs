@@ -1,6 +1,7 @@
 // Starts and watches one live worker (nvr-worker.mjs) per NVR, CCTV_LIVE_WORKER=on. The hub
 // (stream-hub.mjs) keeps viewers connected across worker restarts: they wait for a keyframe.
 import { fork } from 'node:child_process'
+import { audioHub } from './audio-hub.mjs'
 import { StreamHub } from './stream-hub.mjs'
 import { MSG, want } from './worker-ipc.mjs'
 import { makeRequests } from './worker-requests.mjs'
@@ -106,6 +107,13 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
     }
   })
 
+  // the way for audio-hub.mjs to tell this NVR's worker which cameras are being listened to
+  audioHub.setWorker(nvrId, (m) => {
+    if (state !== 'ready' || !child?.connected) return false
+    child.send(m)
+    return true
+  })
+
   const spawn = () => {
     const childEnv = { ...process.env, ...env, CCTV_WORKER_NVR: nvrId }
     delete childEnv.CCTV_LIVE_WORKER // the worker itself plays the streams
@@ -127,6 +135,7 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
     c.on('message', (m) => {
       if (c !== child) return
       if (m?.t === MSG.FRAME) return hub.onMessage(m)
+      if (m?.t === MSG.AUDIO) return audioHub.onFrame(nvrId, m) // a listened-to camera's sound (audio-hub.mjs)
       if (m?.t === MSG.RES) return void requests.onReply(m)
       if (m?.t === MSG.SEGOPEN || m?.t === MSG.SEGMENT || m?.t === MSG.RECGAP) {
         try {
@@ -141,6 +150,7 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
         state = 'ready'
         readyAt = Date.now()
         if (recSettings) c.send(recSettings)
+        audioHub.workerReady(nvrId) // a new worker is told again which cameras are being listened to
         try {
           onReady?.({ again, spawnedAt: c.spawnedAt })
         } catch (e) {

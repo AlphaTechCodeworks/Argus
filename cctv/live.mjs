@@ -16,9 +16,17 @@ import { replayGop } from './gop-replay.mjs'
 import { idleStopQueue } from './idle-stops.mjs'
 import { PRIORITY, RANK, connectLane } from './lanes.mjs'
 import { PACE, livePacer } from './live-pacer.mjs'
-import { CODEC_H264, FRAME_TYPE_VIDEO, FRAME_TYPE_VIDEO_FORMAT, NET_SDK, codecOf, encodeFrame, errorText, lastErrorCode, lastLateReturnAt, lateCalls, liveCallsInFlight, liveFrames, nvrCooling, onCallSettled, sdkCallT } from './sdk.mjs'
+import { CODEC_H264, FRAME_TYPE_AUDIO, FRAME_TYPE_AUDIO_FORMAT, FRAME_TYPE_VIDEO, FRAME_TYPE_VIDEO_FORMAT, NET_SDK, codecOf, copyBytes, encodeFrame, errorText, lastErrorCode, lastLateReturnAt, lateCalls, liveCallsInFlight, liveFrames, nvrCooling, onCallSettled, sdkCallT } from './sdk.mjs'
 
 const MAX_GOP_FRAMES = 400 // frames kept since the last keyframe, so new viewers start instantly
+
+// A camera's sound (audio-hub.mjs): the NVR sends it with the picture, and it is dropped here unless
+// somebody listens. The one who does (the NVR's worker, for the main process) sets a sink; it is
+// handed (stream, bytes, format) for every sound frame of every stream and keeps what it wants. The
+// bytes are a copy. Sound is never put among a stream's video frames.
+let audioSink = null
+export const setAudioSink = (fn) => { audioSink = typeof fn === 'function' ? fn : null }
+const MAX_AUDIO_FRAME = 8192
 // slow sockets: nothing is sent over the cap (1 MB sub, 4 MB main), see backpressure.mjs
 // keep a stream open a while after the last viewer leaves, so switching between grid and
 // full screen does not stop and restart dozens of streams
@@ -316,6 +324,19 @@ export class LiveStream {
     if (this.stopped) return
     if (info.frameType === FRAME_TYPE_VIDEO_FORMAT) {
       this.codec = codecOf(info, buf)
+      return
+    }
+    if (info.frameType === FRAME_TYPE_AUDIO_FORMAT) {
+      // a WAVEFORMATEX: tag (6 = G.711 A-law), channels, sample rate
+      if (info.length >= 8 && info.length <= 64) this.audioFormat = copyBytes(buf, info.length)
+      return
+    }
+    if (info.frameType === FRAME_TYPE_AUDIO) {
+      if (audioSink && this.audioFormat && info.length > 0 && info.length <= MAX_AUDIO_FRAME) {
+        try {
+          audioSink(this, copyBytes(buf, info.length), this.audioFormat)
+        } catch {} // sound must never disturb the picture
+      }
       return
     }
     if (info.frameType !== FRAME_TYPE_VIDEO || info.length === 0) return

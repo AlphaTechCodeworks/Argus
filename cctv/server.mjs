@@ -115,6 +115,7 @@ import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher, viewerOf } from './live-attach.mjs'
 import { makePresence } from './presence.mjs'
 import { handleViewers, liveKind, trackingOpen } from './viewers.mjs'
+import { audioHub } from './audio-hub.mjs'
 import { deviceOf, hostNameOf } from './device-name.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
@@ -1395,6 +1396,20 @@ const onConnection = (ws, req) => {
   const user = currentUser(req)
   const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
   const target = { nvr: nvr.id, ch: Number(url.searchParams.get('ch')) }
+  // /audio: the camera's microphone, for someone who may watch it live (audio-hub.mjs). Its own socket,
+  // only while the speaker button is on; watched for its right like a video socket, so a right taken
+  // away or a sign-out ends the sound too.
+  if (url.pathname === '/audio') {
+    if (!Number.isInteger(target.ch) || target.ch < 0 || !(who.admin || can(who, 'live', target) === true)) return ws.close(1008, 'not allowed')
+    const stop = audioHub.listen(nvr.id, target.ch, ws)
+    if (!stop) return ws.close(1013, 'too many listeners')
+    ws.on('close', stop)
+    ws.on('error', stop)
+    ws.on('message', () => {}) // nothing is taken from the listener
+    watch.track(ws, req, { actions: ['live'], nvr: nvr.id, ch: target.ch })
+    console.log(`[audio] ${user} listens to ${nvr.id}/${target.ch + 1}`)
+    return
+  }
   if (url.pathname === '/playback') {
     // server recordings (src=auto) or the NVR as before; the "NVR offline" refusal is for NVR
     // sessions only (server playback runs without the NVR), see rec-playback.mjs. Either playback
@@ -1500,7 +1515,7 @@ const upgrade = (req, socket, head) => {
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
     return
   }
-  if (!['/live', '/live-mux', '/playback', '/motion'].includes(url.pathname) || !sameOrigin || !currentUser(req)) {
+  if (!['/live', '/live-mux', '/playback', '/motion', '/audio'].includes(url.pathname) || !sameOrigin || !currentUser(req)) {
     socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n')
     return
   }
