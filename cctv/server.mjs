@@ -151,6 +151,7 @@ import { can, canPlayAnyOn, handleRights, liveCameras, mayHd, onRightsSaved, pla
 import { streamParam } from './stream-param.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
+import { DEVICE_SESSION_MS, makeSetupCodes } from './setup-codes.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
 import { audit, handleAudit, pruneAudit } from './audit.mjs'
 import { handleViews } from './views.mjs'
@@ -531,8 +532,8 @@ const MIME = {
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
 // the pages a watch-only account may open (auth.mjs isWatchOnly): Live, Playback (and its wall and the
 // player of an exported pack), Map, and its own password
-const WATCH_PAGES = new Set(['/index.html', '/playback.html', '/wall.html', '/pack-player.html', '/map.html', '/change-password.html', '/login.html'])
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/show-password.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
+const WATCH_PAGES = new Set(['/index.html', '/playback.html', '/wall.html', '/pack-player.html', '/map.html', '/change-password.html', '/login.html', '/setup.html'])
+const PUBLIC_PATHS = new Set(['/setup.html', '/setup.js', '/login.html', '/login.js', '/show-password.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
 const SECURITY_HEADERS = securityHeaders()
 
 // CCTV_AUTH=off is for local development only: never publish such an instance beyond 127.0.0.1
@@ -646,6 +647,33 @@ const handleLogin = async (req, res) => {
   sendJson(res, 200, { user, mustChangePassword: auth.mustChangePassword(user) }, { 'set-cookie': cookie })
 }
 
+// A scanned set-up code signs the device in as the account it was made for (setup-codes.mjs): once,
+// within its time, and never for an account removed or signed out since. Counted with the failed
+// sign-ins of its address, so codes cannot be guessed at any faster than passwords.
+const setupCodes = makeSetupCodes(join(auth.DATA_DIR, 'setup-codes.json'))
+const handleSetupRedeem = async (req, res) => {
+  const ip = clientIp(req)
+  if (auth.loginBlocked(ip)) return sendJson(res, 429, { error: 'Too many attempts, try again later' })
+  let body
+  try {
+    body = JSON.parse(await readBody(req))
+  } catch {
+    return sendJson(res, 400, { error: 'Bad request' })
+  }
+  const made = setupCodes.redeem(body?.code)
+  const account = made ? auth.loadUsers()[made.user] : null
+  if (!made || !account || (account.since || 0) > made.at) {
+    auth.recordFailure(ip)
+    audit(auth.DATA_DIR, { user: made?.user ?? '', action: 'setup-code-refused', ip, ok: false })
+    return sendJson(res, 401, { error: 'This set-up code has been used already or is too old. Ask for a new one.' })
+  }
+  console.log(`set-up code used for "${made.user}" from ${ip} (made by ${made.by})`)
+  audit(auth.DATA_DIR, { user: made.user, action: 'setup-code-used', ip, detail: `made by ${made.by}` })
+  const secure = Boolean(req.socket.encrypted) || req.headers['x-forwarded-proto'] === 'https'
+  const cookie = auth.sessionCookie(auth.createSession(made.user, DEVICE_SESSION_MS), secure, DEVICE_SESSION_MS)
+  sendJson(res, 200, { user: made.user }, { 'set-cookie': cookie, 'cache-control': 'no-store' })
+}
+
 const handleRequest = async (req, res) => {
   const url = new URL(req.url, 'http://localhost')
   const { pathname } = url
@@ -703,6 +731,7 @@ const handleRequest = async (req, res) => {
     return sendJson(res, 200, { at: new Date().toISOString(), nvrs: await cameraExport(nvrs) })
   }
   if (pathname === '/api/login' && req.method === 'POST') return handleLogin(req, res)
+  if (pathname === '/api/setup/redeem' && req.method === 'POST') return handleSetupRedeem(req, res)
   if (pathname === '/api/logout' && req.method === 'POST') {
     // Read before the cookie is cleared, or there is nobody to name in the entry.
     const leaving = currentUser(req)
@@ -923,7 +952,7 @@ const handleRequest = async (req, res) => {
     // reached the page as a bare 500 with nothing to show.
     let usersRoute
     try {
-      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who, { disconnectUser: name => presence.disconnectUser(name) })
+      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who, { disconnectUser: name => presence.disconnectUser(name), setupCodes, baseUrl: getSettings().publicUrl || `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host ?? ''}` })
     } catch (e) {
       if (!Number.isInteger(e?.status)) throw e
       usersRoute = [e.status, { error: e.message }]

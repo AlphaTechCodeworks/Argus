@@ -6,6 +6,8 @@
 //   POST   /api/admin/users              { name, password?, role } -> { user: { name, role } }
 //                                         (password required for a new user, at least 8 characters)
 //   DELETE /api/admin/users/:name        -> { removed: name }
+//   POST   /api/admin/users/:name/setup-code -> { user, link, expires }  a one-use link, shown as a QR
+//                                         code, that signs a phone in as that account (setup-codes.mjs)
 //
 // The same rules as adduser.mjs, and two of its own: the last admin cannot be removed or made a
 // viewer (nobody could administer the system after), and an admin cannot remove themselves. The
@@ -20,6 +22,7 @@ import { DATA_DIR, hashPassword, loadUsers, saveUsers, signOutUser } from './aut
 import { userSessions } from './user-sessions.mjs'
 import { HttpError } from './nvr-xml.mjs'
 import { forgetRights } from './rights.mjs'
+import { setupLink } from './setup-codes.mjs'
 
 const NAME_RE = /^[\w.@-]{1,64}$/
 const ROLES = ['viewer', 'watch', 'admin'] // 'watch': a viewer shown only Live, Playback and Map (auth.mjs isWatchOnly)
@@ -31,7 +34,7 @@ const admins = (users) => Object.entries(users).filter(([, u]) => u.role === 'ad
  * @returns {Promise<[number, object]|null>} null when the path is not ours
  * @param {{ user: string, admin: boolean }} who from the signed session, never the request body
  */
-export async function handleUsers(method, pathname, readJson, who, { disconnectUser = () => {} } = {}) {
+export async function handleUsers(method, pathname, readJson, who, { disconnectUser = () => {}, setupCodes = null, baseUrl = '' } = {}) {
   if (pathname !== '/api/admin/users' && !pathname.startsWith('/api/admin/users/')) return null
   if (!who?.admin) throw new HttpError(403, 'Only an admin can manage accounts')
   let users = loadUsers()
@@ -53,8 +56,22 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     if (!signOutUser(name)) throw new HttpError(404, 'No such user')
     disconnectUser(name)
     userSessions.forget(name)
+    setupCodes?.forget(name) // a code not yet scanned must not let them straight back in
     audit(DATA_DIR, { user: who.user, action: 'user-sign-out', target: name, ok: true })
     return [200, { signedOut: name }]
+  }
+
+  // a set-up code for a phone: the link is given once, here, and only its hash is kept
+  const setup = /^\/api\/admin\/users\/([^/]+)\/setup-code$/.exec(pathname)
+  if (method === 'POST' && setup) {
+    const name = decodeURIComponent(setup[1])
+    if (!Object.hasOwn(users, name)) throw new HttpError(404, 'No such user')
+    if (!setupCodes) throw new HttpError(503, 'Set-up codes are not available on this server')
+    if (!/^https?:\/\//.test(baseUrl)) throw new HttpError(409, 'Set the address people use to reach Argus first (Settings, public address)')
+    const { code, expires } = setupCodes.create(name, who.user)
+    audit(DATA_DIR, { user: who.user, action: 'setup-code-made', target: name, ok: true })
+    console.log(`[users] ${who.user} made a set-up code for ${name}`)
+    return [200, { user: name, link: setupLink(baseUrl, code), expires }, { 'cache-control': 'no-store' }]
   }
 
   if (method === 'POST' && pathname === '/api/admin/users') {
@@ -93,6 +110,7 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     delete users[name]
     saveUsers(users)
     userSessions.forget(name)
+    setupCodes?.forget(name)
     forgetRights(name)
     audit(DATA_DIR, { user: who.user, action: 'user-remove', target: name, ok: true })
     console.log(`[users] ${who.user} removed ${name}`)

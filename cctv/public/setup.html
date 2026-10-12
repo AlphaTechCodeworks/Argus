@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="referrer" content="no-referrer" />
+  <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon-180.png" />
+  <meta name="theme-color" content="#0e1012" />
+  <title>Argus · Set up this device</title>
+  <script src="theme-boot.js"></script>
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<!-- Where a scanned set-up code lands (setup-codes.mjs). The code is after the # of the address, so it
+     is never sent until the person presses a button here: it works once, and they choose where. -->
+<body class="login-page">
+  <div class="login-card setup-card">
+    <h1 class="login-brand"><img src="/logo.svg" alt="" width="44" height="44" /> Argus</h1>
+    <p id="setupSay">Set up Argus on this device. You will be signed in without typing a password.</p>
+    <button type="button" id="setupHere">Use Argus in this browser</button>
+    <p id="setupNote" class="setup-note" hidden>Using the Argus app? Do not press the button: open the app, press Scan on its first screen and scan the same code. The code works once.</p>
+    <p id="error" role="alert" hidden></p>
+    <a id="setupSignIn" class="setup-app" href="/login.html" hidden>Sign in with a user name and password</a>
+  </div>
+  <script type="module" src="setup.js"></script>
+</body>
+</html>

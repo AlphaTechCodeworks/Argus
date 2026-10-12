@@ -130,6 +130,23 @@
     </form>
   </dialog>
 
+  <!-- A set-up code for a phone (setup-codes.mjs): scanned, it signs the phone in as this account. -->
+  <dialog id="setupCodeDialog" aria-labelledby="setupCodeTitle">
+    <div class="se-grid setup-code">
+      <h2 id="setupCodeTitle">Set up a phone</h2>
+      <p id="setupCodeAccount" class="st-help"></p>
+      <canvas id="setupCodeQr" width="264" height="264" role="img" aria-label="Set-up QR code"></canvas>
+      <ol class="st-help setup-code-steps">
+        <li>Open the phone's camera (or the Argus app's Scan) and point it at this code.</li>
+        <li>Camera: tap the link, then <b>Use Argus in this browser</b>. Argus app: it connects by itself.</li>
+        <li>The phone is signed in as this account, with what this account may see. No password is typed.</li>
+      </ol>
+      <p id="setupCodeNote" class="st-help"></p>
+      <p id="setupCodeError" role="alert" class="st-error"></p>
+      <div class="se-actions"><button id="setupCodeCopy" type="button">Copy the link instead</button><button id="setupCodeClose" type="button" class="st-primary">Done</button></div>
+    </div>
+  </dialog>
+
   <dialog id="resetPasswordDialog" aria-labelledby="resetPasswordTitle">
     <form id="resetPasswordForm" class="se-grid">
       <h2 id="resetPasswordTitle">Reset password</h2>

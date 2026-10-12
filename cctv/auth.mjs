@@ -111,9 +111,10 @@ export const checkLogin = async (user, password) => {
 const secret = loadSecret()
 const sign = (payload) => createHmac('sha256', secret).update(payload).digest('base64url')
 
-export const createSession = (user) => {
+/** ttlMs: longer for a device set up by a set-up code, which has no password to fall back on (setup-codes.mjs). */
+export const createSession = (user, ttlMs = SESSION_TTL_MS) => {
   const issued = Math.max(Date.now(), loadUsers()[user]?.since || 0)
-  const payload = `${Buffer.from(user).toString('base64url')}.${issued + SESSION_TTL_MS}`
+  const payload = `${Buffer.from(user).toString('base64url')}.${issued + ttlMs}`
   return `${payload}.${sign(payload)}`
 }
 
@@ -233,8 +234,8 @@ export const parseCookies = (header = '') =>
       .map(([k, v]) => [k, decodeCookie(v)])
   )
 
-export const sessionCookie = (token, secure) =>
-  `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure ? '; Secure' : ''}`
+export const sessionCookie = (token, secure, ttlMs = SESSION_TTL_MS) =>
+  `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.round(ttlMs / 1000)}${secure ? '; Secure' : ''}`
 
 export const clearCookie = () => `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`
 

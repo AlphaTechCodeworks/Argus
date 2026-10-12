@@ -2132,3 +2132,11 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 /* a camera name with no room beside its neighbours: only under the pointer, or for the camera chosen */
 .map-overlay .cam .cam-name.quiet { display: none; }
 .map-overlay .cam:hover .cam-name.quiet, .map-overlay .cam.sel .cam-name.quiet { display: inline; }
+
+/* the set-up code dialog (Users & access) and the page a phone lands on (setup.html) */
+.setup-code { justify-items: center; max-width: 380px; }
+.setup-code canvas { background: #fff; border-radius: 8px; max-width: 100%; height: auto; image-rendering: pixelated; }
+.setup-code-steps { margin: 0; padding-left: 18px; justify-self: stretch; }
+.setup-card p { margin: 0 0 12px; }
+.setup-card .setup-app { display: block; margin-top: 12px; text-align: center; }
+.setup-card .setup-note { margin-top: 10px; font-size: 12px; opacity: .75; }
