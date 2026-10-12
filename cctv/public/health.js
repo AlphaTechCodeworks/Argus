@@ -771,9 +771,26 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
       }
       if (p.more) what.append(el('div', { className: 'hp-sub', textContent: p.more }))
       const tr = el('tr')
-      for (const text of [p.name, p.where, p.address, p.connected]) tr.append(el('td', { textContent: text }))
+      for (const text of [p.name, p.device, p.where, p.address, p.connected]) tr.append(el('td', { textContent: text }))
       // nothing to unfold: the words alone
+      if (p.streams) what.append(el('div', { className: 'hp-sub', textContent: p.streams }))
       tr.append(p.groups.length ? el('td', {}, what) : el('td', { textContent: p.watching }))
+      // Kick: signs that account out everywhere and closes its video (users-api.mjs sign-out)
+      const kick = el('button', { type: 'button', className: 'hp-kick', textContent: 'Kick', title: `Sign ${p.name} out and close their video` })
+      kick.addEventListener('click', async () => {
+        if (!confirm(`Sign ${p.name} out? Their video closes on every device and they have to sign in again.`)) return
+        kick.disabled = true
+        try {
+          const res = await fetch(`/api/admin/users/${encodeURIComponent(p.name)}/sign-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+          const j = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error(j.error || `status ${res.status}`)
+          tr.remove()
+        } catch (e) {
+          kick.disabled = false
+          alert(`Could not sign ${p.name} out: ${e.message}`)
+        }
+      })
+      tr.append(el('td', {}, ...(p.canKick ? [kick] : [])))
       return tr
     }))
     document.getElementById('watchingNote').textContent = [r.rows.length ? r.summary : r.empty, r.more].filter(Boolean).join(' ')

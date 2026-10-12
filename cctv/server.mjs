@@ -114,6 +114,7 @@ import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher, viewerOf } from './live-attach.mjs'
 import { makePresence } from './presence.mjs'
 import { handleViewers, liveKind, trackingOpen } from './viewers.mjs'
+import { deviceOf, hostNameOf } from './device-name.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
 import { pagesFrom } from './page-reload.mjs'
@@ -824,7 +825,7 @@ const handleRequest = async (req, res) => {
     return sendJson(res, 200, { at: new Date().toISOString(), nvrs: nvrRegister(nvrs) })
   }
   // GET /api/admin/viewers — who is connected and what each has open now (admins; viewers.mjs)
-  const viewersRoute = handleViewers(req.method, pathname, who, presence, { nameOf: cameraNames })
+  const viewersRoute = handleViewers(req.method, pathname, who, presence, { nameOf: cameraNames, hostOf: hostNameOf })
   if (viewersRoute) return sendJson(res, ...viewersRoute)
   if (pathname === '/api/admin/register.xlsx') {
     if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
@@ -1314,7 +1315,7 @@ const onConnection = (ws, req) => {
   // count this browser among the people connected now; its other tiles/tabs share the one key
   const vkey = viewerOf(req, currentUser)
   // (the name and the visitor's own address, not cloudflared's, are for the admins' list of who is watching)
-  presence.join(vkey, ws, { remote: isRemoteAddress(req.socket.remoteAddress), user: currentUser(req), address: clientIp(req) })
+  presence.join(vkey, ws, { remote: isRemoteAddress(req.socket.remoteAddress), user: currentUser(req), address: clientIp(req), device: deviceOf(req.headers['user-agent']) })
   ws.on('close', () => presence.leave(vkey, ws))
   // every live tile of a page on this one socket (live-mux.mjs)
   if (url.pathname === '/live-mux') {

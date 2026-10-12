@@ -22,12 +22,13 @@ export function makePresence() {
      * A socket for `key` opened. remote: it reached the server over the internet (live-attach's rule);
      * user and address: who is signed in on it and where it came from, for list().
      */
-    join(key, ws, { remote = false, now = Date.now(), user = null, address = '' } = {}) {
+    join(key, ws, { remote = false, now = Date.now(), user = null, address = '', device = '' } = {}) {
       let v = viewers.get(key)
-      if (!v) viewers.set(key, (v = { remote: Boolean(remote), sockets: new Set(), since: now, user: null, address: '', open: new Map() }))
+      if (!v) viewers.set(key, (v = { remote: Boolean(remote), sockets: new Set(), since: now, user: null, address: '', device: '', open: new Map() }))
       v.remote = Boolean(remote) // a session that moved onto the tunnel (or off it) counts as it is now
       if (user) v.user = text(user, 64)
       if (address) v.address = text(address, 45)
+      if (device) v.device = text(device, 80)
       v.sockets.add(ws)
       return v
     },
@@ -80,9 +81,10 @@ export function makePresence() {
      * @param {{ maxViewers?: number, maxEach?: number,
      *   nameOf?: (nvr: string, ch: number) => { site?: string, nvrName?: string, camera?: string }|null }} [o]
      *   nameOf: the names to show for a camera (server.mjs knows them), asked only for what is given
+     *   hostOf: the computer's name for an address, '' when not known (device-name.mjs)
      * @returns {{ viewers: object[], total: number }} total: every viewer connected, also those left out
      */
-    list({ maxViewers = MAX_VIEWERS, maxEach = MAX_OPEN_EACH, nameOf = () => null } = {}) {
+    list({ maxViewers = MAX_VIEWERS, maxEach = MAX_OPEN_EACH, nameOf = () => null, hostOf = () => '' } = {}) {
       const named = (o) => {
         let n = null
         try {
@@ -104,6 +106,8 @@ export function makePresence() {
         out.push({
           user: v.user,
           address: v.address,
+          device: v.device,
+          host: (() => { try { return text(hostOf(v.address), 40) } catch { return '' } })(),
           remote: v.remote,
           since: v.since,
           live: some(seen.live).map((o) => ({ ...named(o), stream: o.stream ?? 'sub', kind: o.kind ?? 'unknown' })),

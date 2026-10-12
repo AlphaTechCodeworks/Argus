@@ -62,12 +62,13 @@ export function openOf(pathname, actions) {
  * @param {{ now?: () => number, nameOf?: Function }} [o] nameOf: presence.mjs list's
  * @returns {[number, object, object]|null} null: not this route
  */
-export function handleViewers(method, pathname, who, presence, { now = Date.now, nameOf } = {}) {
+export function handleViewers(method, pathname, who, presence, { now = Date.now, nameOf, hostOf } = {}) {
   if (pathname !== VIEWERS_PATH) return null
   if (who?.admin !== true) return [403, { error: 'Admins only' }, NO_STORE]
   if (method !== 'GET') return [405, { error: 'Method not allowed' }, { ...NO_STORE, allow: 'GET' }]
-  const { viewers, total } = presence.list({ nameOf })
-  return [200, { now: now(), viewers, total, people: presence.summary() }, NO_STORE]
+  const { viewers, total } = presence.list({ nameOf, hostOf })
+  // self: the admin asking, who cannot be signed out from this list (users-api.mjs refuses it)
+  return [200, { now: now(), self: who.user, viewers, total, people: presence.summary() }, NO_STORE]
 }
 
 /**
