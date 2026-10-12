@@ -65,7 +65,8 @@ import {
   waitingText,
   watchesStart
 } from './pb-sources.js'
-import { MAX_BOXES, boxSeekMs, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
+import { MAX_BOXES, boxSeekMs, follow as followView, fmtClock, laneBoxes, makeView, panBy, ticks, zoomAt } from './pb-view.js'
+import { SEQUENCE_TOLERANCE_MS, canReverse, liveHref, pillText, recordingEnd, recordingStart, sequenceTarget, sliderIndex, sliderSpeed, sliderSpeeds, spanWords, speedText } from './pb-bar.js'
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
 import { allowedSpeeds, clampSpeed, frameStep, ignoredRepeat, shuttleLabel, shuttleRate, stepNotBefore } from './pb-transport.js'
 import { DEFAULT_OSD, drawOsd, osdFont, osdIsOff, osdLayout } from './osd-overlay.js'
@@ -122,6 +123,12 @@ const laneRec = $('laneRec')
 const laneMotion = $('laneMotion')
 const ticksEl = $('ticks')
 const playheadEl = $('playhead')
+const rulerHeadEl = $('rulerHead') // the playhead's line carried up through the ruler, to the pill
+const pillEl = $('pill') // the day and time under the playhead
+const liveLink = $('liveLink')
+const playBackBtn = $('playBack')
+const speedSlider = $('speedSlider')
+const speedTextEl = $('speedText')
 const nowEl = $('tlNow')
 const hoverLine = $('hoverLine')
 const hoverLabel = $('hoverLabel')
@@ -631,17 +638,50 @@ function renderSpeeds() {
     speedsEl.dataset.kind = state.mode
   }
   for (const b of speedsEl.children) b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === state.speed))
-  speedCycleBtn.querySelector('.pb-glyph').textContent = speedLabel(state.speed)
+  // the slider on the bar: one stop for each forward speed this source plays (pb-bar.js
+  // sliderSpeeds), so it cannot be left between two, and the speed chosen in words beside it
+  const allowed = allowedSpeeds(state.mode)
+  speedSlider.max = String(Math.max(0, sliderSpeeds(allowed).length - 1))
+  speedSlider.value = String(sliderIndex(state.speed, allowed))
+  speedSlider.setAttribute('aria-valuetext', speedText(state.speed))
+  speedTextEl.textContent = speedText(state.speed)
+  updatePlayButton()
 }
 
-// The one speed button on the bar: each click goes to the next faster forward speed, and from the
-// fastest back to normal. Slow motion and reverse are under More, with the full ladder.
-const speedCycleBtn = $('speedCycle')
-speedCycleBtn.addEventListener('click', () => {
-  const ladder = allowedSpeeds(state.mode).filter((x) => x >= 1)
-  const next = ladder.find((x) => x > state.speed) ?? 1
-  setSpeed(next)
+// The speed slider says how fast; the two play buttons say which way. So a speed picked while the
+// footage runs backwards stays backwards.
+speedSlider.addEventListener('input', () => {
+  setSpeed(sliderSpeed(Number(speedSlider.value), allowedSpeeds(state.mode), state.speed < 0 ? -1 : 1))
 })
+
+/** One stop slower (-1) or faster (+1) on the slider; nothing at either end. */
+function stepSpeed(by) {
+  const allowed = allowedSpeeds(state.mode)
+  setSpeed(sliderSpeed(sliderIndex(state.speed, allowed) + by, allowed, state.speed < 0 ? -1 : 1))
+}
+
+/**
+ * Whether Play backwards is offered. Only the server's own recordings can be played backwards
+ * (rec-playback.mjs sends them keyframe by keyframe, shown as a run of stills); the NVR's playback
+ * has no reverse at all, in NVR mode or over a stretch of the day only the NVR has. The button is
+ * hidden there rather than left to do something else.
+ */
+const reverseOffered = () => canReverse(allowedSpeeds(state.mode)) && !(state.mode === 'server' && state.src === 'nvr')
+
+/**
+ * Play in `direction` (1 forwards, -1 backwards) at the speed the slider shows; pressed while it
+ * already plays that way, pause. Changing direction while it plays carries straight on the other way.
+ */
+function playToward(direction) {
+  const playing = !state.paused && Boolean(ws)
+  const sameWay = (state.speed < 0 ? -1 : 1) === direction
+  if (playing && sameWay) return togglePause()
+  if (!sameWay) {
+    const allowed = allowedSpeeds(state.mode)
+    setSpeed(sliderSpeed(sliderIndex(state.speed, allowed), allowed, direction))
+  }
+  if (!playing) togglePause()
+}
 
 // More: the controls used now and then, one click away
 const moreBtn = $('moreBtn')
@@ -695,6 +735,7 @@ function updateModeUi() {
 function setSource(src) {
   state.src = src ?? 'server'
   badgeEl.hidden = !(state.mode === 'server' && state.src === 'nvr')
+  updatePlayButton() // (a stretch from the NVR cannot be played backwards: the button goes with it)
 }
 
 // ---- streaming ------------------------------------------------------------
@@ -1132,10 +1173,21 @@ function togglePause() {
   updatePlayButton()
 }
 
+/**
+ * The two play buttons. The one for the way the footage is running shows Pause while it runs; the
+ * other always offers its own direction. Play backwards is there only when the source can do it.
+ */
 function updatePlayButton() {
-  playBtn.querySelector('.pb-glyph').textContent = state.paused ? '▶' : '⏸'
-  playBtn.querySelector('.pb-cap').textContent = state.paused ? 'Play' : 'Pause'
-  playBtn.setAttribute('aria-label', state.paused ? 'Play' : 'Pause')
+  const back = state.speed < 0
+  const fwdOn = !state.paused && !back
+  const backOn = !state.paused && back
+  playBtn.dataset.state = fwdOn ? 'playing' : 'paused'
+  playBtn.setAttribute('aria-label', fwdOn ? 'Pause' : 'Play')
+  playBtn.title = fwdOn ? 'Pause (Space)' : 'Play (Space)'
+  playBackBtn.hidden = !reverseOffered()
+  playBackBtn.dataset.state = backOn ? 'playing' : 'paused'
+  playBackBtn.setAttribute('aria-label', backOn ? 'Pause' : 'Play backwards')
+  playBackBtn.title = backOn ? 'Pause (Space)' : 'Play backwards, as a run of still pictures (R)'
 }
 
 // The mode we have already explained a clamp for: an NVR leg refuses reverse and anything above 8x,
@@ -1214,14 +1266,48 @@ function stepFrame(direction) {
   player.stepTo(stepNotBefore(from, direction, fps))
 }
 
+/** What the top lane shows as recorded, for the day on screen: in server mode the NVR-only stretches too. */
+const recordedNow = () => (state.mode === 'server' ? state.stretches : state.ranges)
+
+/**
+ * Previous (-1) or next (+1) sequence: the start of the nearest recorded stretch or motion mark
+ * (a search hit too) that way from the playhead (pb-bar.js sequenceTarget). Going against the way
+ * the footage runs, the mark just jumped to is already behind the playhead by the time of a second
+ * press, the more so the faster it plays: the tolerance grows with the speed, so two presses walk
+ * two marks instead of landing on the same one twice. At the first or the last one the page says
+ * so and stays where it is.
+ */
 function jumpEvent(direction) {
   const pos = state.position ?? state.view.startMs
-  const list = state.events.map(([s]) => s)
-  const target = direction > 0 ? list.find((s) => s > pos + 2000) : list.filter((s) => s < pos - 2000).at(-1)
-  if (target !== undefined) {
-    ensureVisible(target)
-    seek(target)
+  const against = !state.paused && (state.speed < 0 ? 1 : -1) === direction
+  const target = sequenceTarget({
+    spans: recordedNow(),
+    marks: [...state.events, ...state.hits.map((h) => h.start)],
+    atMs: pos,
+    direction,
+    toleranceMs: SEQUENCE_TOLERANCE_MS * (against ? Math.abs(state.speed) : 1)
+  })
+  if (target === null) {
+    showNotice(direction < 0 ? 'Nothing earlier on this day: this is the first recording or motion.' : 'Nothing later on this day: this is the last recording or motion.')
+    return
   }
+  ensureVisible(target)
+  seek(target)
+}
+
+/** How far before the end of today's newest recording "go to the newest" starts, as the page does when it opens. */
+const endBackMs = () => (state.date !== fmtDate(state.nvrNow) ? 10_000 : state.mode === 'server' ? START_BACK_SERVER_MS : START_BACK_MS)
+
+/** The first recording of the day shown (-1), or its newest (+1): a little before its end, so it plays. */
+function jumpToEdge(direction) {
+  if (state.mode === 'server' && state.live) rebuildStretches() // the live edge as it is now
+  const target = direction < 0 ? recordingStart(recordedNow()) : recordingEnd(recordedNow(), { backMs: endBackMs() })
+  if (target === null) {
+    showNotice('Nothing is recorded on this day.')
+    return
+  }
+  ensureVisible(target)
+  seek(target)
 }
 
 // ---- timeline -------------------------------------------------------------
@@ -1327,6 +1413,7 @@ function drawTimeline() {
 
   playheadEl.hidden = state.position === null || !inView(state.position)
   if (!playheadEl.hidden) playheadEl.style.left = `${pct(state.position)}%`
+  drawPill(playheadEl.hidden ? null : pct(state.position))
   nowEl.hidden = !inView(state.nvrNow)
   if (!nowEl.hidden) nowEl.style.left = `${pct(state.nvrNow)}%`
 
@@ -1338,13 +1425,38 @@ function drawTimeline() {
       return s
     })
   )
-  spanEl.textContent = spanLabel(v.spanMs)
+  spanEl.textContent = spanWords(v.spanMs)
+  // Playback | Live: Live opens this same camera, full-size (pb-bar.js liveHref, read by viewer.js)
+  const live = liveHref({ nvr: state.nvr, ch: state.ch })
+  if (liveLink.getAttribute('href') !== live) liveLink.setAttribute('href', live)
   for (const b of zoomBtns) b.setAttribute('aria-pressed', String(Number(b.dataset.span) === Math.round(v.spanMs)))
   followBtn.setAttribute('aria-pressed', String(state.follow))
   drawClip()
   drawBookmarks()
   drawOverview()
   drawHover()
+}
+
+/**
+ * The pill on the playhead, and the line that joins it to the tracks: the day and the time under
+ * the playhead, on the site's own clock (state.tz, as every other time on this page). `at` is the
+ * playhead's place across the view in percent, or null when it is out of sight. The pill is kept
+ * inside the ruler by the style sheet (it stops at either end while its line goes on to the edge).
+ *
+ * Milliseconds are shown only where the time is a frame's own timestamp and can be read: paused on
+ * a frame, or zoomed in under two minutes as the clock does. Never while the playhead is dragged,
+ * when the time is the pointer's and not a frame's.
+ */
+function drawPill(at) {
+  pillEl.hidden = at === null
+  rulerHeadEl.hidden = at === null
+  if (at === null) return
+  const millis = !scrub && (state.paused || state.view.spanMs < 120_000)
+  const text = pillText(state.position, { tzOffsetMs: state.tz, millis })
+  if (pillEl.textContent !== text) pillEl.textContent = text
+  pillEl.classList.toggle('pb-pill-ms', millis)
+  pillEl.style.setProperty('--at', `${at}%`)
+  rulerHeadEl.style.left = `${at}%`
 }
 
 /** The whole day, with the zoomed part marked. Its own view is the day itself, so laneBoxes clips to it. */
@@ -1551,11 +1663,14 @@ new ResizeObserver(() => drawTimeline()).observe(timeline)
 
 // ---- controls -------------------------------------------------------------
 
-playBtn.addEventListener('click', togglePause)
+playBtn.addEventListener('click', () => playToward(1))
+playBackBtn.addEventListener('click', () => playToward(-1))
 $('back').addEventListener('click', () => seek((state.position ?? state.view.startMs) - SEEK_STEP))
 $('fwd').addEventListener('click', () => seek((state.position ?? state.view.startMs) + SEEK_STEP))
-$('prevEvent').addEventListener('click', () => jumpEvent(-1))
-$('nextEvent').addEventListener('click', () => jumpEvent(1))
+$('toStart').addEventListener('click', () => jumpToEdge(-1))
+$('toEnd').addEventListener('click', () => jumpToEdge(1))
+$('seqPrev').addEventListener('click', () => jumpEvent(-1))
+$('seqNext').addEventListener('click', () => jumpEvent(1))
 $('framePrev').addEventListener('click', () => stepFrame(-1))
 $('frameNext').addEventListener('click', () => stepFrame(1))
 
@@ -2187,6 +2302,15 @@ document.addEventListener('keydown', (e) => {
     stepFrame(-1)
   } else if (e.key === '.') {
     stepFrame(1)
+  } else if (e.key === 'Home' || e.key === 'End') {
+    // the first or the newest recording of the day (the page has nothing to scroll in their place)
+    e.preventDefault()
+    if (!e.repeat) jumpToEdge(e.key === 'Home' ? -1 : 1)
+  } else if (e.key === 'r' || e.key === 'R') {
+    // play backwards, where the footage can be (the button is hidden where it cannot)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && reverseOffered()) playToward(-1)
+  } else if (e.key === '<' || e.key === '>') {
+    stepSpeed(e.key === '<' ? -1 : 1)
   } else if (e.key === '+' || e.key === '=') {
     zoom(1 / 2)
   } else if (e.key === '-' || e.key === '_') {

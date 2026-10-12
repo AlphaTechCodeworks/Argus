@@ -22,6 +22,7 @@ import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBud
 import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
 import { listenTo } from './live-audio.js'
+import { readLiveLink } from './pb-bar.js'
 // This page is set up from the account's preferences (picture fit, layout, hide offline, the view
 // and site last chosen), from its first lines on: it waits here until they are known. It is this
 // page's own script, which nothing imports, so it may wait at the top level; user-settings.js, which
@@ -1935,7 +1936,7 @@ async function loadViews() {
 function renderViewSel() {
   viewSel.replaceChildren(new Option('(not saved)', ''), ...views.map((v) => new Option(v.name, v.id)))
   viewSel.value = activeView?.id ?? ''
-  deleteViewBtn.hidden = !activeView
+  deleteViewBtn.hidden = !activeView?.id // (cameras that came with a link are no saved view: nothing to delete)
 }
 
 /** Saves the views as they now are, telling the viewer when another screen got there first. */
@@ -2452,4 +2453,37 @@ function stepArrows() {
   })
   search.addEventListener('input', draw)
   sheet.querySelector('.cam-sheet-close').addEventListener('click', () => (sheet.hidden = true))
+}
+
+// ---- a link from Playback's "Playback | Live" switch (pb-bar.js liveHref) ----
+// /?nvr=ID&ch=N opens that camera full-size; /?view=ID shows that saved view; /?cameras=a,b shows
+// just those cameras (the ones on the Many cameras page) as a set that is not saved, until a site
+// or a view is chosen. Whatever the link names that this viewer cannot watch live is left out.
+// Last in the file, so everything the full-size view uses is set up by now; and inside a try,
+// because a link gone wrong must never be what stops the Live page.
+try {
+  const link = readLiveLink(location.search)
+  if (link.view && views.some((v) => v.id === link.view)) selectView(link.view)
+  else if (link.cameras) {
+    const mine = new Set(cameras.map(camKey))
+    const keys = link.cameras.filter((k) => mine.has(k))
+    if (keys.length > 0) {
+      activeView = { id: '', name: '', cameras: keys, layout: layoutSelect.value }
+      page = 0
+      renderViewSel()
+      freshenForPageChange() // (a different set of cameras, as when a saved view is chosen)
+      render()
+    }
+  }
+  const cam = link.camera ? cameras.find((c) => c.nvr === link.camera.nvr && String(c.ch) === link.camera.ch) : null
+  if (cam) {
+    // its site's grid behind it when the grid is showing another site (as picking it from the
+    // camera list does), then the camera full-size
+    const grid = gridView()
+    const onGrid = gridCameras().some((c) => camKey(c) === camKey(cam)) && (!grid.site || grid.site === cam.site) && (!grid.nvr || grid.nvr === cam.nvr)
+    if (!onGrid) { siteSelect.value = cam.site; siteSelect.dispatchEvent(new Event('change')) }
+    openSingle(cam)
+  }
+} catch (e) {
+  console.error('[live] link', e)
 }

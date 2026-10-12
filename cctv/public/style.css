@@ -2152,3 +2152,83 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 /* sign-in and set-up pages: the full Argus wordmark across the card */
 .login-brand.login-wordmark { display: block; margin: 0 0 16px; }
 .login-wordmark svg { display: block; width: 100%; height: auto; border-radius: 12px; }
+
+/* ---- the playback bar (playback.html and wall.html, .pb-xp) ----
+   Top to bottom: the transport row (day and clock left, the playing controls centred, tools right),
+   a ruler with a pill on the playhead saying the exact day and time, the tracks with the playhead's
+   line through ruler and tracks, and under them Follow, the Playback | Live switch and the span.
+   The pill and the line under it take the text colour (white on the dark theme, near black on the
+   light one); on the tracks, which are dark in both themes, the playhead's line is always white. */
+.pb-xp { --pb-head: var(--text); --pb-head-ink: var(--bg); --pb-track-head: #f2f4f7; }
+.pb-xp [hidden] { display: none !important; }
+
+/* 1. the transport row. Three groups that share one line when there is room and wrap when not;
+   the outer two take equal shares, which is what keeps the playing controls in the middle */
+.pb-xrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.pb-xwhen { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 1 1 260px; min-width: 0; }
+.pb-xp .pb-transport { flex: 0 1 auto; flex-wrap: wrap; justify-content: center; gap: 4px; }
+.pb-xp .pb-tools { flex: 1 1 260px; }
+.pb-jumps { display: inline-flex; gap: 2px; }
+.pb-jumps button { padding: 3px 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pb-tbtn { width: 40px; height: 40px; }
+/* (#play is named so this outranks review.css, which gives the old wide Play button a minimum width) */
+.pb-xp .pb-play, .pb-xp #play.pb-play { width: 44px; height: 44px; min-width: 0; border-radius: 50%; }
+.pb-xp #play, .pb-xp .pb-play[data-state="playing"] { background: var(--accent-solid, var(--accent)); border-color: var(--accent-solid, var(--accent)); color: var(--on-accent); }
+/* each play button holds both pictures; the one for what a press would do is the one shown */
+.pb-xp .pb-play .i-pause, .pb-xp .pb-play[data-state="playing"] .i-play { display: none; }
+.pb-xp .pb-play[data-state="playing"] .i-pause { display: block; }
+.pb-speed { display: inline-flex; align-items: center; gap: 6px; padding: 0 4px; }
+.pb-speed-slider { width: 84px; accent-color: var(--accent); }
+.pb-speed-text { min-width: 3.4em; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* 2. the ruler. The pill stops at either end of the ruler (the clamp) while its line carries on to
+   the true place of the playhead; the line runs on past the bottom of the ruler, under the tracks
+   below it, so it meets the playhead's own line whatever gap the bar leaves between the two */
+.pb-ruler { position: relative; height: 38px; flex: 0 0 auto; }
+.pb-ruler .pb-ticks { position: absolute; left: 0; right: 0; bottom: 0; }
+.pb-ruler-head { position: absolute; top: 18px; bottom: -16px; width: 2px; margin-left: -1px; background: var(--pb-head); pointer-events: none; }
+.pb-pill {
+  --pill-half: 6.6em;
+  position: absolute; top: 0; z-index: 2;
+  left: clamp(var(--pill-half), var(--at, 50%), calc(100% - var(--pill-half)));
+  width: calc(var(--pill-half) * 2); transform: translateX(-50%);
+  padding: 2px 0; border-radius: 999px; text-align: center; white-space: nowrap;
+  background: var(--pb-head); color: var(--pb-head-ink);
+  font-size: 12px; font-weight: 600; line-height: 16px; font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.pb-pill.pb-pill-ms { --pill-half: 7.9em; }
+.wall-ticks-row .pb-ruler { flex: 1; min-width: 0; }
+
+/* 3. the tracks: the playhead is a plain white line, drawn over everything else */
+.pb-xp .pb-playhead { background: var(--pb-track-head); z-index: 2; }
+.pb-xp .pb-playhead::before { display: none; }
+
+/* 4. under the tracks */
+.pb-under { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px 12px; }
+.pb-under-left { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.pb-under-right { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.pb-under-right .pb-span { min-width: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Playback | Live: two halves of one switch. Playback is where you are; Live is a link */
+.pb-live-switch { display: inline-flex; padding: 3px; gap: 2px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border); }
+.pb-live-switch > * { padding: 5px 16px; border-radius: 7px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; text-decoration: none; color: var(--text-muted, var(--muted)); }
+.pb-live-switch .pb-live-on { background: var(--surface-3); color: var(--text); box-shadow: var(--shadow); }
+.pb-live-switch a:hover, .pb-live-switch a:focus-visible { color: var(--text); background: var(--surface-hover, var(--surface-3)); }
+
+/* full screen: the bar is dark glass in either theme, so the pill's lettering is dark in both */
+body.playback-page.is-fullscreen .pb-bar { --pb-head-ink: #14171c; }
+
+/* phones: each group on a line of its own, centred. The eight transport buttons fit one line of a
+   375 px screen; the speed slider takes the line under them */
+@media (max-width: 640px) {
+  .pb-xwhen { flex: 0 0 auto; justify-content: center; }
+  .pb-xp .pb-tools { flex: 0 0 auto; }
+  .pb-xp .pb-transport { gap: 3px; }
+  .pb-tbtn { width: 36px; }
+  .pb-speed { order: 9; flex: 1 0 100%; justify-content: center; }
+  .pb-speed-slider { width: min(200px, 55%); }
+  .pb-under { grid-template-columns: 1fr; justify-items: center; }
+  .pb-under-left, .pb-under-right { justify-content: center; }
+  .pb-live-switch { order: -1; }
+  .pb-pill { font-size: 11px; }
+}
