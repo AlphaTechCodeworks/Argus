@@ -2146,3 +2146,7 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .hp-who .hp-kick { margin-left: 10px; }
 .hp-watching tr.hp-idle td { opacity: .75; }
 .hp-watching tr.hp-idle td.hp-who { opacity: 1; }
+
+/* sign-in and set-up pages: the full Argus wordmark across the card */
+.login-brand.login-wordmark { display: block; margin: 0 0 16px; }
+.login-wordmark svg { display: block; width: 100%; height: auto; border-radius: 12px; }
