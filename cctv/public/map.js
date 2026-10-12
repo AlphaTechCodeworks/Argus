@@ -80,6 +80,9 @@ const DEFAULT_GEO = { lat: 30, lng: -40, zoom: 2, layer: 'street' }
 const MAX_RANGE = { geo: 5000, plan: 20_000 }
 /** Marker centres closer together than this are one illegible smudge, so they are clustered. */
 const CLUSTER_GAP = 26
+// With one site chosen there is room to spare and its cameras are what is being looked for: only
+// markers that all but sit on each other are piled (the owner, 2026-10-12: "make it easier to understand").
+const CLUSTER_GAP_SITE = 15
 const CONES_IN_CLUSTER = 8 // a cluster of up to this many cameras still draws each one's cone
 
 // ---- map engine -------------------------------------------------------------
@@ -811,6 +814,10 @@ function scene() {
   // the site of the camera being watched or worked on stays open under the person's hands
   const open = [selected, popup?.key].filter(Boolean).map((k) => siteOf[k])
   const shut = collapsedSites(badges, view.zoom, { open, editing: editing || linkMode })
+  // One site chosen: its cameras alone are drawn. Its neighbours' made a site with none of its own
+  // placed look full (Bounty Stabroek, 2026-10-12); they stay as their badges, a click away. Not while
+  // editing or linking, where a camera of any site may be what is being placed or joined.
+  if (site && !editing && !linkMode) for (const name of new Set(Object.values(siteOf))) if (name !== site && !open.includes(name)) shut.add(name)
   return {
     markers: visibleMarkers(all, siteOf, shut),
     badges: badges.filter((b) => shut.has(b.name)).map((b) => {
@@ -838,7 +845,7 @@ view.onDraw = () => {
     // While editing, every camera stays its own marker: an admin is moving and aiming individual
     // cameras, and one that merged into a pile under the pointer could not be worked with at all.
     const pinned = [selected, popup?.key].filter(Boolean)
-    const clusters = editing ? markers.map((x) => ({ x: x.x, y: x.y, members: [x], state: x.state, count: 1, key: x.key })) : clusterMarkers(markers, CLUSTER_GAP, pinned)
+    const clusters = editing ? markers.map((x) => ({ x: x.x, y: x.y, members: [x], state: x.state, count: 1, key: x.key })) : clusterMarkers(markers, site ? CLUSTER_GAP_SITE : CLUSTER_GAP, pinned)
     const alone = new Set(clusters.filter((c) => c.count === 1).map((c) => c.key))
     // A few cameras under one count still show where each looks (the owner, 2026-10-09: "I can't see
     // the 3 cameras' coverage"); the cones of a big pile would be a smear saying nothing, so past
@@ -1538,6 +1545,12 @@ function viewPanel() {
     if (acts.childElementCount) parts.push(acts)
   } else {
     parts.push(el('p', { className: 'map-help', textContent: mapListQuery ? `${total} matching camera${total === 1 ? '' : 's'} · ${on} placed. Search filters this list only.` : `${on} of ${total} on the ${planSite ? 'plan' : 'map'}. Select a camera for live video.` }))
+    // cameras nobody has placed: say it in so many words, and what to do, instead of an empty map
+    if (!mapListQuery && !planSite && name && total > 0 && on < total) {
+      parts.push(el('p', { className: 'map-help map-unplaced', textContent: on === 0
+        ? `None of ${name}'s cameras have been placed on the map yet${isAdmin ? ': press Edit map, pick a camera in this list, then click where it is.' : '. An administrator can place them.'}`
+        : `${total - on} of ${name}'s cameras are not on the map yet${isAdmin ? ': press Edit map to place them.' : '.'}` }))
+    }
   }
   parts.push(legend(), coneLegend(), list)
   if (!total) parts.push(el('p', { className: 'map-help', textContent: 'No cameras match. Try another name, site or recorder.' }))

@@ -74,3 +74,6 @@
   .playback-page .pb-controls { flex-wrap: wrap; }
   .playback-page .pb-tools { flex-wrap: wrap; }
 }
+
+/* a site whose cameras nobody has placed: said plainly, with what to do */
+.map-page .map-help.map-unplaced { margin-top: 6px; padding: 8px 10px; border-left: 3px solid #d9a441; background: rgba(217, 164, 65, .10); color: var(--text); border-radius: 4px; }
