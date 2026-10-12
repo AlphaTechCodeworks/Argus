@@ -752,6 +752,33 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
   // and under each what it has open, by site and NVR. Asked on the page's own refresh; the rows are
   // rebuilt each time, so which of them were open is kept across it, as for the NVR panels. Every
   // name and address is set as text.
+  // Kick: signs that account out everywhere and closes its video (users-api.mjs sign-out). Beside the
+  // name, where it cannot be pushed off the edge of a narrow screen (the owner could not find it in a
+  // last column, 2026-10-12).
+  const kickButton = (name, tr) => {
+    const kick = el('button', { type: 'button', className: 'hp-kick', textContent: 'Kick', title: `Sign ${name} out and close their video` })
+    kick.addEventListener('click', async () => {
+      if (!confirm(`Sign ${name} out? Their video closes on every device and they have to sign in again.`)) return
+      kick.disabled = true
+      try {
+        const res = await fetch(`/api/admin/users/${encodeURIComponent(name)}/sign-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+        const j = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(j.error || `status ${res.status}`)
+        for (const row of [...tr.parentElement.children]) if (row.dataset.user === name) row.remove()
+      } catch (e) {
+        kick.disabled = false
+        alert(`Could not sign ${name} out: ${e.message}`)
+      }
+    })
+    return kick
+  }
+  const nameCell = (name, canKick, tr) => {
+    tr.dataset.user = name
+    const td = el('td', { className: 'hp-who' }, el('span', { textContent: name }))
+    if (canKick) td.append(kickButton(name, tr))
+    return td
+  }
+  let signedIn = [] // accounts with a session open (users-api.mjs), for those with no video open
   const paintWatching = (d) => {
     const box = document.getElementById('watching')
     if (!box) return
@@ -771,28 +798,23 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
       }
       if (p.more) what.append(el('div', { className: 'hp-sub', textContent: p.more }))
       const tr = el('tr')
-      for (const text of [p.name, p.device, p.where, p.address, p.connected]) tr.append(el('td', { textContent: text }))
+      tr.append(nameCell(p.name, p.canKick, tr))
+      for (const text of [p.device, p.where, p.address, p.connected]) tr.append(el('td', { textContent: text }))
       // nothing to unfold: the words alone
       if (p.streams) what.append(el('div', { className: 'hp-sub', textContent: p.streams }))
       tr.append(p.groups.length ? el('td', {}, what) : el('td', { textContent: p.watching }))
-      // Kick: signs that account out everywhere and closes its video (users-api.mjs sign-out)
-      const kick = el('button', { type: 'button', className: 'hp-kick', textContent: 'Kick', title: `Sign ${p.name} out and close their video` })
-      kick.addEventListener('click', async () => {
-        if (!confirm(`Sign ${p.name} out? Their video closes on every device and they have to sign in again.`)) return
-        kick.disabled = true
-        try {
-          const res = await fetch(`/api/admin/users/${encodeURIComponent(p.name)}/sign-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
-          const j = await res.json().catch(() => ({}))
-          if (!res.ok) throw new Error(j.error || `status ${res.status}`)
-          tr.remove()
-        } catch (e) {
-          kick.disabled = false
-          alert(`Could not sign ${p.name} out: ${e.message}`)
-        }
-      })
-      tr.append(el('td', {}, ...(p.canKick ? [kick] : [])))
       return tr
     }))
+    // ...and everyone signed in with no video open just now: they can be signed out as well
+    const watching = new Set(r.rows.map((p) => p.name))
+    for (const u of signedIn) {
+      if (watching.has(u.name) || !u.sessions?.length) continue
+      const tr = el('tr', { className: 'hp-idle' })
+      tr.append(nameCell(u.name, u.self !== true, tr))
+      const from = [...new Set(u.sessions.map((s) => s.connection === 'LAN' ? 'on the network' : 'outside'))].join(', ')
+      for (const text of ['', from, [...new Set(u.sessions.map((s) => s.address))].slice(0, 3).join(', '), '', 'signed in, no video open']) tr.append(el('td', { textContent: text }))
+      body.append(tr)
+    }
     document.getElementById('watchingNote').textContent = [r.rows.length ? r.summary : r.empty, r.more].filter(Boolean).join(' ')
   }
   // Viewing experience (admins only; experience-view.js shapes it): the score viewers' pages measured.
@@ -856,7 +878,10 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
       fetch('/api/sicex').then((x) => (x.ok ? x.json() : null)).then(paintSicex).catch(() => {})
     }
     fetch('/api/admin/telemetry').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))).then(paintExperience).catch(() => {})
-    fetch('/api/admin/viewers').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))).then(paintWatching).catch(() => {})
+    Promise.all([
+      fetch('/api/admin/viewers').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))),
+      fetch('/api/admin/users').then((x) => (x.ok ? x.json() : null)).catch(() => null)
+    ]).then(([d, u]) => { signedIn = Array.isArray(u?.users) ? u.users : []; paintWatching(d) }).catch(() => {})
   }
 
   // The same account wiring every page does: who is signed in, and the admin-only tabs.

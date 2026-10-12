@@ -2140,3 +2140,9 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 .setup-card p { margin: 0 0 12px; }
 .setup-card .setup-app { display: block; margin-top: 12px; text-align: center; }
 .setup-card .setup-note { margin-top: 10px; font-size: 12px; opacity: .75; }
+
+/* Who is watching: Kick sits beside the name; people signed in with no video are quieter rows */
+.hp-who { white-space: nowrap; }
+.hp-who .hp-kick { margin-left: 10px; }
+.hp-watching tr.hp-idle td { opacity: .75; }
+.hp-watching tr.hp-idle td.hp-who { opacity: 1; }
