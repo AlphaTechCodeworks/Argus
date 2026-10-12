@@ -272,7 +272,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       setupLinkNow = j.link
       drawQr(canvas, j.link)
       document.getElementById('setupCodeAccount').textContent = `For ${name}. Anyone who scans this is signed in as ${name}: show it only to them.`
-      document.getElementById('setupCodeNote').textContent = `Works once, until ${new Date(j.expires).toLocaleString()}. The phone then stays signed in for 90 days; Sign out user ends it sooner.`
+      document.getElementById('setupCodeNote').textContent = `Works once, until ${new Date(j.expires).toLocaleString()}. The phone then stays signed in until you press Sign out user.`
     } catch (e) {
       document.getElementById('setupCodeAccount').textContent = `For ${name}.`
       say.textContent = e.message

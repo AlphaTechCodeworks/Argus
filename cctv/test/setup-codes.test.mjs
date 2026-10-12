@@ -2,7 +2,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CODE_TTL_MS, makeSetupCodes, setupLink } from '../setup-codes.mjs'
+import { CODE_TTL_MS, DEVICE_SESSION_MARK_MS, DEVICE_SESSION_MS, makeSetupCodes, sessionLeftMs, setupLink } from '../setup-codes.mjs'
 
 let failed = 0
 const check = (name, ok, extra = '') => {
@@ -45,6 +45,8 @@ const again = makeSetupCodes(file, { now: () => t })
 check('kept across a restart', again.redeem(e1.code)?.user === 'erin')
 
 check('the link: the set-up page, the code after the #', setupLink('https://cctv.example.com/', 'abc') === 'https://cctv.example.com/setup.html#c=abc')
+
+check('a device session is told from a sign-in by what is left of it', sessionLeftMs(`dXNlcg.${5000 + DEVICE_SESSION_MS}.sig`, 5000) === DEVICE_SESSION_MS && DEVICE_SESSION_MS > DEVICE_SESSION_MARK_MS && sessionLeftMs(`dXNlcg.${5000 + 7 * 86_400_000}.sig`, 5000) < DEVICE_SESSION_MARK_MS && sessionLeftMs('junk') === 0 && sessionLeftMs(undefined) === 0)
 
 rmSync(dir, { recursive: true, force: true })
 console.log(failed ? `${failed} FAILED` : 'all passed')

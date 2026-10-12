@@ -151,7 +151,7 @@ import { can, canPlayAnyOn, handleRights, liveCameras, mayHd, onRightsSaved, pla
 import { streamParam } from './stream-param.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
-import { DEVICE_SESSION_MS, makeSetupCodes } from './setup-codes.mjs'
+import { DEVICE_SESSION_MARK_MS, DEVICE_SESSION_MS, makeSetupCodes, sessionLeftMs } from './setup-codes.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
 import { audit, handleAudit, pruneAudit } from './audit.mjs'
 import { handleViews } from './views.mjs'
@@ -791,7 +791,14 @@ const handleRequest = async (req, res) => {
   // a watch-only account has Live, Playback and Map: any other page of the app sends it to Live
   const watchOnly = !AUTH_OFF && !who.admin && auth.isWatchOnly(user)
   if (watchOnly && req.method === 'GET' && pathname.endsWith('.html') && !WATCH_PAGES.has(pathname)) return res.writeHead(302, { location: '/', ...SECURITY_HEADERS }).end()
-  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, watchOnly, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
+  // a device set up from a set-up code never signs itself out: its browser is handed the same cookie
+  // again, so the 400 days a browser will keep one start over each time the app is opened
+  const deviceCookie = (() => {
+    if (AUTH_OFF || pathname !== '/api/me') return {}
+    const token = auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME]
+    return sessionLeftMs(token) > DEVICE_SESSION_MARK_MS ? { 'set-cookie': auth.sessionCookie(token, Boolean(req.socket.encrypted) || req.headers['x-forwarded-proto'] === 'https', 400 * 24 * 60 * 60_000) } : {}
+  })()
+  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, watchOnly, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() }, deviceCookie)
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
   if (pathname === UI_PREFS_PATH) return sendJson(res, ...(await handleUiPreferences(req, user)))
   // what viewers actually got, as their pages measured it, and the score made from it (telemetry.mjs)

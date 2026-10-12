@@ -14,8 +14,20 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 
 export const CODE_TTL_MS = 48 * 60 * 60_000 // long enough to hand a phone over the next day
-/** How long a device set up this way stays signed in: it never typed a password to fall back on. */
-export const DEVICE_SESSION_MS = 90 * 24 * 60 * 60_000
+/**
+ * A device set up this way stays signed in until an admin signs it out (the owner, 2026-10-12: "do not
+ * log user out after 90 days"): it never typed a password to fall back on. Ten years stands for that.
+ * A browser keeps a cookie 400 days at most, so the server hands the same cookie back while the
+ * device is in use (server.mjs, /api/me) and its 400 days start again.
+ */
+export const DEVICE_SESSION_MS = 10 * 365 * 24 * 60 * 60_000
+/** A session with longer than this left is a device's (an ordinary sign-in has 7 days). */
+export const DEVICE_SESSION_MARK_MS = 365 * 24 * 60 * 60_000
+/** What is left of a session token, in ms (its expiry is its second part); 0 for anything else. */
+export const sessionLeftMs = (token, now = Date.now()) => {
+  const expiry = Number(String(token ?? '').split('.')[1])
+  return Number.isFinite(expiry) ? Math.max(0, expiry - now) : 0
+}
 const MAX_CODES = 200
 const CODE_RE = /^[A-Za-z0-9_-]{32}$/
 
