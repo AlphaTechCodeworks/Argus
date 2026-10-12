@@ -2128,3 +2128,7 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
 }
 .hp-kick { padding: 2px 10px; font-size: 12px; border: 1px solid #b3261e; color: #b3261e; background: transparent; border-radius: 6px; cursor: pointer; }
 .hp-kick:hover { background: #b3261e; color: #fff; }
+
+/* a camera name with no room beside its neighbours: only under the pointer, or for the camera chosen */
+.map-overlay .cam .cam-name.quiet { display: none; }
+.map-overlay .cam:hover .cam-name.quiet, .map-overlay .cam.sel .cam-name.quiet { display: inline; }

@@ -733,7 +733,7 @@ function currentMarkers() {
 }
 
 /** One camera's marker: the dot, its channel number, and its name when names are on. */
-function markerNode(marker, sel, showNames) {
+function markerNode(marker, sel, showNames, quiet = false) {
   const motion = lighting.motion.has(marker.key)
   const alarm = lighting.alarm.has(marker.key)
   const lit = `${alarm ? ' alarm' : ''}${motion ? ' motion' : ''}`
@@ -748,7 +748,8 @@ function markerNode(marker, sel, showNames) {
   if (motion) g.append(svgEl('circle', { r: 12, class: 'cam-pulse' }))
   g.append(svgEl('circle', { r: 12, class: 'cam-dot' }), num)
   if (showNames && marker.cam) {
-    const name = svgEl('text', { x: 17, class: 'cam-name' })
+    // quiet: no room for it beside its neighbours, so it shows only under the pointer or when chosen
+    const name = svgEl('text', { x: 17, class: quiet ? 'cam-name quiet' : 'cam-name' })
     name.textContent = marker.cam.name
     g.append(name)
   }
@@ -851,6 +852,21 @@ view.onDraw = () => {
     // the 3 cameras' coverage"); the cones of a big pile would be a smear saying nothing, so past
     // CONES_IN_CLUSTER its cameras keep their positions and lose their cones, as before.
     const coned = new Set(clusters.filter((c) => c.count > 1 && c.count <= CONES_IN_CLUSTER).flatMap((c) => c.members.map((x) => x.key)))
+    // Names that would be written over a neighbour's dot or over another name are left off (they show
+    // under the pointer, and for the camera chosen): a few names that can be read, not a heap that cannot.
+    const crowded = new Set()
+    if (showNames && !editing) {
+      const dots = clusters.map((c) => ({ key: c.count === 1 ? c.key : null, x: c.x, y: c.y }))
+      const kept = []
+      for (const marker of markers) {
+        if (!alone.has(marker.key) || !marker.cam) continue
+        const box = { x0: marker.x + 14, x1: marker.x + 19 + String(marker.cam.name).length * 6.8, y0: marker.y - 9, y1: marker.y + 9 }
+        const hitsDot = dots.some((d) => d.key !== marker.key && d.x + 13 > box.x0 && d.x - 13 < box.x1 && d.y + 13 > box.y0 && d.y - 13 < box.y1)
+        const hitsName = kept.some((k) => k.x1 > box.x0 && k.x0 < box.x1 && k.y1 > box.y0 && k.y0 < box.y1)
+        if (hitsDot || hitsName) crowded.add(marker.key)
+        else kept.push(box)
+      }
+    }
     for (const marker of markers) {
       if (!alone.has(marker.key) && !coned.has(marker.key)) continue
       const sel = marker.key === selected || marker.key === popup?.key ? ' sel' : ''
@@ -869,7 +885,7 @@ view.onDraw = () => {
       }
       cones.append(cone)
       if (!alone.has(marker.key)) continue // (in a cluster: its cone only, the count is its marker)
-      marks.append(markerNode(marker, sel, showNames))
+      marks.append(markerNode(marker, sel, showNames, crowded.has(marker.key)))
       if (editing && marker.key === selected) {
         const p = [marker.x, marker.y]
         const tip = polar(p, marker.dir, marker.r)
