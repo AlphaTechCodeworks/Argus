@@ -22,9 +22,9 @@ import { HttpError } from './nvr-xml.mjs'
 import { forgetRights } from './rights.mjs'
 
 const NAME_RE = /^[\w.@-]{1,64}$/
-const ROLES = ['viewer', 'admin']
+const ROLES = ['viewer', 'watch', 'admin'] // 'watch': a viewer shown only Live, Playback and Map (auth.mjs isWatchOnly)
 
-const list = (users) => Object.entries(users).map(([name, u]) => ({ name, role: u.role === 'admin' ? 'admin' : 'viewer' })).sort((a, b) => a.name.localeCompare(b.name))
+const list = (users) => Object.entries(users).map(([name, u]) => ({ name, role: u.role === 'admin' ? 'admin' : u.role === 'watch' ? 'watch' : 'viewer' })).sort((a, b) => a.name.localeCompare(b.name))
 const admins = (users) => Object.entries(users).filter(([, u]) => u.role === 'admin').map(([n]) => n)
 
 /**
@@ -63,7 +63,7 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     const role = String(body?.role ?? 'viewer')
     const password = body?.password === undefined || body?.password === '' ? null : String(body.password)
     if (!NAME_RE.test(name)) throw new HttpError(400, 'A user name is letters, digits and . _ @ - (up to 64)')
-    if (!ROLES.includes(role)) throw new HttpError(400, 'role must be viewer or admin')
+    if (!ROLES.includes(role)) throw new HttpError(400, 'role must be viewer, watch or admin')
     const existed = Object.hasOwn(users, name)
     if (!existed && !password) throw new HttpError(400, 'A new user needs a password')
     if (password !== null && password.length < 8) throw new HttpError(400, 'A password is at least 8 characters')

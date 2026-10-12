@@ -45,6 +45,15 @@ const readUsers = () => {
   )
 }
 
+/**
+ * A "watch only" account (role 'watch'): a viewer in every check of rights, shown only Live, Playback
+ * and Map; the Alarms and Health pages send it back to Live (server.mjs, nav-model.js).
+ */
+export const isWatchOnly = (user) => {
+  const users = loadUsers()
+  return Object.hasOwn(users, user) && users[user]?.role === 'watch'
+}
+
 /** Admins can manage NVRs and sites; viewers can only watch. */
 export const isAdmin = (user) => {
   const users = loadUsers()

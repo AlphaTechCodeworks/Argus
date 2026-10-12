@@ -289,7 +289,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
         try { await usersApi('DELETE', `/${encodeURIComponent(u.name)}`); uSay(`Removed ${u.name}`); loadUsers(); loadRights() } catch (e) { uSay(e.message, true) }
       })
       const name = document.createElement('td'); name.textContent = u.name
-      const role = document.createElement('td'); role.textContent = u.role === 'admin' ? 'Admin' : 'Viewer'
+      const role = document.createElement('td'); role.textContent = u.role === 'admin' ? 'Admin' : u.role === 'watch' ? 'Watch only' : 'Viewer'
       const connections = el('td')
       const sessions = Array.isArray(u.sessions) ? u.sessions : []
       if (!sessions.length) connections.textContent = 'Not connected'
@@ -328,7 +328,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       loadRights()
       // A new viewer can see nothing yet (users-api.mjs starts them with no rights), so the next
       // thing the admin needs is to say what they may see.
-      if (isNew && role === 'viewer') openAccess(name)
+      if (isNew && role !== 'admin') openAccess(name)
     } catch (err) { uSay(err.message, true) }
   })
   loadUsers()

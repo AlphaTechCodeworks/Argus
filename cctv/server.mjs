@@ -528,6 +528,9 @@ const MIME = {
   '.webmanifest': 'application/manifest+json'
 }
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
+// the pages a watch-only account may open (auth.mjs isWatchOnly): Live, Playback (and its wall and the
+// player of an exported pack), Map, and its own password
+const WATCH_PAGES = new Set(['/index.html', '/playback.html', '/wall.html', '/pack-player.html', '/map.html', '/change-password.html', '/login.html'])
 const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/show-password.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
 const SECURITY_HEADERS = securityHeaders()
 
@@ -754,7 +757,10 @@ const handleRequest = async (req, res) => {
   // links, overlays) keep every other camera out of their answers with it.
   const canSee = (nvr, ch) => who.admin || ['live', 'playback-server', 'playback-nvr'].some((a) => can(who, a, { nvr, ch }))
 
-  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
+  // a watch-only account has Live, Playback and Map: any other page of the app sends it to Live
+  const watchOnly = !AUTH_OFF && !who.admin && auth.isWatchOnly(user)
+  if (watchOnly && req.method === 'GET' && pathname.endsWith('.html') && !WATCH_PAGES.has(pathname)) return res.writeHead(302, { location: '/', ...SECURITY_HEADERS }).end()
+  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, watchOnly, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
   if (pathname === UI_PREFS_PATH) return sendJson(res, ...(await handleUiPreferences(req, user)))
   // what viewers actually got, as their pages measured it, and the score made from it (telemetry.mjs)

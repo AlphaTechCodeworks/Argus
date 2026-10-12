@@ -33,7 +33,7 @@ const themeButton = (t, cls) => `<button type="button" class="${cls}" data-theme
 /** Fills the sidebar, phone bar and More sheet for this user. Safe to call again. */
 function render(parts, me) {
   const { side, bar, sheet } = parts
-  const groups = navFor({ admin: me.admin === true })
+  const groups = navFor({ admin: me.admin === true, watchOnly: me.watchOnly === true })
   // Storage is a tab of Settings (settings.html#storage), but has its own place in the menu
   // Many cameras (wall.html) is a view of Playback, not a page of its own in the menu
   const here = /wall.html$/.test(location.pathname) ? 'playback' : location.hash === '#storage' && /settings.html$/.test(location.pathname) ? 'storage' : currentId(location.pathname)
@@ -49,7 +49,7 @@ function render(parts, me) {
       <button type="button" class="shell-settings-status" data-settings-retry hidden aria-live="polite"></button>
       ${themeButton(theme, 'shell-theme btn-ghost')}
       <div class="shell-user"><span class="shell-avatar">${esc((me.user ?? '?').slice(0, 1).toUpperCase())}</span>
-        <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small>${me.address ? `<small class="shell-route" title="${me.direct ? 'You are connected straight to the server on the local network' : 'You are connected over the internet (through Cloudflare)'}">${esc(me.address)} · ${me.direct ? 'local' : 'internet'}</small>` : ''}</span>
+        <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : me.watchOnly ? 'Watch only' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small>${me.address ? `<small class="shell-route" title="${me.direct ? 'You are connected straight to the server on the local network' : 'You are connected over the internet (through Cloudflare)'}">${esc(me.address)} · ${me.direct ? 'local' : 'internet'}</small>` : ''}</span>
         <button type="button" class="btn-ghost btn-icon" data-sign-out title="Sign out" aria-label="Sign out">${icon('out')}</button></div>
     </div>`
   // the phone bar: the four used most, then More for everything else
@@ -139,8 +139,8 @@ export function mountShell() {
     .then((r) => (r.ok ? r.json() : null))
     .then((fresh) => {
       if (!fresh) return
-      try { session?.setItem(ME_KEY, JSON.stringify({ user: fresh.user, admin: fresh.admin, build: fresh.build, address: fresh.address, direct: fresh.direct })) } catch {}
-      const changed = fresh.user !== me.user || fresh.admin !== me.admin || fresh.build?.version !== me.build?.version || fresh.address !== me.address || fresh.direct !== me.direct
+      try { session?.setItem(ME_KEY, JSON.stringify({ user: fresh.user, admin: fresh.admin, watchOnly: fresh.watchOnly, build: fresh.build, address: fresh.address, direct: fresh.direct })) } catch {}
+      const changed = fresh.user !== me.user || fresh.admin !== me.admin || fresh.watchOnly !== me.watchOnly || fresh.build?.version !== me.build?.version || fresh.address !== me.address || fresh.direct !== me.direct
       me = fresh
       if (changed) render(parts, me)
     })
