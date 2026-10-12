@@ -214,3 +214,9 @@ body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-ins
    buttons (viewer.js upgradeToMain moves them there). The bar of the picture underneath sat on top
    of it, so Recordings, Sound and Mark vanished about two seconds after a camera opened. */
 .single-overlay:has(> .tile-upgrade:not(.pending)) > .label { display: none; }
+
+/* sound: the volume and the background filter beside the speaker button, while it is on */
+.cam-sound-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.cam-sound-vol { width: 90px; accent-color: #00aeef; }
+.cam-sound-vol[hidden], .cam-sound-filter[hidden] { display: none; }
+.live-page .single-overlay .links .cam-sound-filter.on { border-color: rgba(0, 174, 239, .9); background: rgba(0, 174, 239, .28); }

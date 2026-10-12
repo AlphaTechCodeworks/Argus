@@ -54,6 +54,37 @@ export function decode(bytes, format, { rate, channels = 1, outRate, last = 0 })
   return { samples: out, last: n ? table[bytes[(n - 1) * channels]] : last }
 }
 
+/**
+ * The background filter's gate: how much of a packet is let through, from how loud it is against
+ * the quietest the camera has lately been (its hum and hiss). Speech and bangs stand well above
+ * that floor and pass whole; what sits on the floor is turned down to FLOOR_GAIN, never to nothing
+ * (silence that cuts in and out is worse to listen to than a little hiss).
+ * @param {number} rms the packet's level @param {number} floor the noise floor
+ * @returns {number} FLOOR_GAIN..1
+ */
+export const FLOOR_GAIN = 0.12
+export function gateGain(rms, floor) {
+  if (!(floor > 0)) return 1
+  const over = rms / floor
+  if (over >= 3) return 1
+  if (over <= 1.4) return FLOOR_GAIN
+  return FLOOR_GAIN + ((over - 1.4) / 1.6) * (1 - FLOOR_GAIN)
+}
+
+/** The level of a packet of samples (root mean square). */
+export function levelOf(samples) {
+  let sum = 0
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i]
+  return samples.length ? Math.sqrt(sum / samples.length) : 0
+}
+
+/**
+ * The noise floor as packets come: it falls at once to a quieter packet and creeps up slowly
+ * otherwise (about 1.5 % a packet, 25 packets a second), so talk does not raise it but a fan that
+ * starts is learnt in a few seconds.
+ */
+export const nextFloor = (floor, rms) => (floor === null ? rms : rms < floor ? rms : floor * 1.015 + 1e-6)
+
 const LEAD_S = 0.15 // sound is played this far behind its arrival
 const MAX_AHEAD_S = 0.8 // further ahead than this (a burst after a stall): it is dropped to catch up
 
@@ -61,16 +92,40 @@ const MAX_AHEAD_S = 0.8 // further ahead than this (a burst after a stall): it i
  * Plays one camera's sound until stop(). Must be made from a click (browsers only start sound then).
  * @param {{ nvr: string, ch: number }} cam
  * @param {(state: 'connecting'|'playing'|'silent'|'unsupported'|'closed', why?: string) => void} onState
- * @returns {{ stop: () => void }}
+ * @param {{ volume?: number, filter?: boolean }} [o] volume 0..2 (1 is as the camera sends it); filter:
+ *   the background filter (below)
+ * @returns {{ stop: () => void, setVolume: (v: number) => void, setFilter: (on: boolean) => void }}
  */
-export function listenTo(cam, onState = () => {}) {
+export function listenTo(cam, onState = () => {}, { volume = 1, filter = false } = {}) {
   const Ctx = window.AudioContext ?? window.webkitAudioContext
   if (!Ctx) {
     onState('unsupported', 'This browser cannot play sound here.')
-    return { stop() {} }
+    return { stop() {}, setVolume() {}, setFilter() {} }
   }
   const ctx = new Ctx()
   ctx.resume?.().catch(() => {})
+  // every packet goes through: a filter that keeps the band a voice is in (hum and rumble below it,
+  // hiss above it), then the volume. With the background filter off the band is wide open.
+  const high = ctx.createBiquadFilter()
+  high.type = 'highpass'
+  const low = ctx.createBiquadFilter()
+  low.type = 'lowpass'
+  const gain = ctx.createGain()
+  high.connect(low)
+  low.connect(gain)
+  gain.connect(ctx.destination)
+  let filtering = false
+  let floor = null // the background's level, learnt while the filter is on
+  let gate = 1
+  const setVolume = (v) => { gain.gain.value = Math.min(2, Math.max(0, Number(v) || 0)) }
+  const setFilter = (on) => {
+    filtering = on === true
+    high.frequency.value = filtering ? 250 : 20
+    low.frequency.value = filtering ? 3400 : 20000
+    if (!filtering) { floor = null; gate = 1 }
+  }
+  setVolume(volume)
+  setFilter(filter)
   let format = null
   let next = 0
   let last = 0
@@ -97,11 +152,19 @@ export function listenTo(cam, onState = () => {}) {
     const now = ctx.currentTime
     if (next < now + 0.02) next = now + LEAD_S // the first packet, or the output ran dry
     if (next > now + MAX_AHEAD_S) return
+    if (filtering) {
+      // the gate: quiet packets (the background alone) are turned down, moving a little at a time
+      const rms = levelOf(d.samples)
+      floor = nextFloor(floor, rms)
+      const want = gateGain(rms, floor)
+      gate += (want - gate) * (want > gate ? 0.6 : 0.2) // opens fast, closes gently
+      if (gate < 0.999) for (let i = 0; i < d.samples.length; i++) d.samples[i] *= gate
+    }
     const buffer = ctx.createBuffer(1, d.samples.length, ctx.sampleRate)
     buffer.getChannelData(0).set(d.samples)
     const src = ctx.createBufferSource()
     src.buffer = buffer
-    src.connect(ctx.destination)
+    src.connect(high)
     src.start(next)
     next += buffer.duration
     if (!heard) {
@@ -123,5 +186,5 @@ export function listenTo(cam, onState = () => {}) {
     stop()
     onState('closed', why)
   }
-  return { stop }
+  return { stop, setVolume, setFilter }
 }

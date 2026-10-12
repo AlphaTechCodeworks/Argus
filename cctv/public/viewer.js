@@ -1089,20 +1089,56 @@ const MARK_BACK_MS = 30_000
 const MARK_TITLE_KEY = 'argus.markTitle'
 // Sound: the camera's microphone, while this button is on (live-audio.js; the server sends it only
 // then). One camera at a time: it stops when the view closes or steps to another camera.
-let listening = null // { stop } of the camera being listened to
+let listening = null // { stop, setVolume, setFilter } of the camera being listened to
+// How this person likes to listen, kept in this browser: how loud, and the background filter.
+const SOUND_PREFS_KEY = 'argus.sound'
+const soundPrefs = (() => {
+  try {
+    const p = JSON.parse(localStorage.getItem(SOUND_PREFS_KEY) ?? '{}')
+    return { volume: Number.isFinite(p.volume) ? Math.min(2, Math.max(0, p.volume)) : 1, filter: p.filter === true }
+  } catch {
+    return { volume: 1, filter: false }
+  }
+})()
+const saveSoundPrefs = () => { try { localStorage.setItem(SOUND_PREFS_KEY, JSON.stringify(soundPrefs)) } catch {} }
 function stopListening() {
   listening?.stop()
   listening = null
 }
 function soundButton(cam) {
+  const wrap = document.createElement('span')
+  wrap.className = 'cam-sound-wrap'
+  wrap.addEventListener('click', (e) => e.stopPropagation())
   const b = document.createElement('button')
   b.type = 'button'
   b.className = 'cam-link cam-sound'
+  // shown while the sound is on: how loud, and the background filter (kept for next time)
+  const vol = document.createElement('input')
+  vol.type = 'range'
+  vol.min = '0'
+  vol.max = '2'
+  vol.step = '0.05'
+  vol.value = String(soundPrefs.volume)
+  vol.className = 'cam-sound-vol'
+  vol.title = 'Volume'
+  vol.setAttribute('aria-label', 'Sound volume')
+  vol.addEventListener('input', () => { soundPrefs.volume = Number(vol.value); listening?.setVolume(soundPrefs.volume); saveSoundPrefs() })
+  const filt = document.createElement('button')
+  filt.type = 'button'
+  filt.className = 'cam-link cam-sound-filter'
+  filt.textContent = 'Filter'
+  filt.title = 'Reduce background noise: turns down hum, hiss and the quiet between sounds'
+  const showFilter = () => { filt.classList.toggle('on', soundPrefs.filter); filt.setAttribute('aria-pressed', String(soundPrefs.filter)) }
+  showFilter()
+  filt.addEventListener('click', (e) => { e.stopPropagation(); soundPrefs.filter = !soundPrefs.filter; listening?.setFilter(soundPrefs.filter); showFilter(); saveSoundPrefs() })
+  const extras = (on) => { vol.hidden = !on; filt.hidden = !on }
+  extras(false)
   const show = (on, text, title) => {
     b.textContent = text
     b.title = title
     b.setAttribute('aria-pressed', String(on))
     b.classList.toggle('on', on)
+    extras(on)
   }
   const off = (why) => show(false, why ? 'No sound' : 'Sound', why ?? 'Listen to this camera\'s microphone')
   off()
@@ -1118,10 +1154,11 @@ function soundButton(cam) {
       if (state === 'playing') show(true, 'Sound on', 'Listening to this camera. Click to stop.')
       else if (state === 'silent') show(true, 'No sound yet', why)
       else if (state === 'unsupported' || (state === 'closed' && why)) { over = true; listening = null; off(why) }
-    })
+    }, { volume: soundPrefs.volume, filter: soundPrefs.filter })
     listening = over ? null : mine
   })
-  return b
+  wrap.append(b, vol, filt)
+  return wrap
 }
 function markButton(cam) {
   const b = document.createElement('button')
