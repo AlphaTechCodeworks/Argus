@@ -157,6 +157,29 @@ function planH264(ch, bitrate = 'match') {
   return { ok: true, sub: next }
 }
 
+/**
+ * A sub-stream at a named frame rate (the owner, 2026-10-12: 20 frames a second everywhere), or why
+ * not. Everything else is kept, but the keyframe spacing is kept in SECONDS (GOP scaled with the
+ * rate), so a tile opens as quickly as before.
+ */
+function planFps(ch, fps) {
+  const no = (reason) => ({ ok: false, reason })
+  if (ch.chlType === 'recorder') return no('comes from another recorder')
+  if (!ch.sub) return no('the NVR reports no sub-stream')
+  if (ch.resolutions.length === 0) return no('camera offline or has no sub-stream')
+  const cur = ch.sub
+  const now = Number(cur.fps)
+  if (now === fps) return no(`already ${fps} frames a second`)
+  const res = ch.resolutions.find((r) => r.value === cur.res)
+  if (!res) return no(`its resolution ${cur.res} is not offered any more`)
+  if (res.fps && fps > res.fps) return no(`this size goes no faster than ${res.fps} frames a second`)
+  const next = { ...cur, fps: String(fps) }
+  const gop = Number(cur.GOP)
+  next.GOP = String(gop > 0 && now > 0 ? Math.max(fps, Math.round((gop * fps) / now)) : 2 * fps)
+  if (!next.bitType) next.bitType = 'CBR'
+  return { ok: true, sub: next }
+}
+
 /** The editNetworkNodeEncodeInfo document for one channel, as the web client writes it. */
 function buildEdit(id, s) {
   const level = s.level === undefined ? '' : ` level="${esc(s.level)}"`
@@ -278,8 +301,8 @@ async function runJob(nvr, job) {
       if (!ch) throw new Error('the NVR no longer lists this channel')
       step.name = ch.name
       let target
-      if (job.action === 'h264') {
-        const plan = planH264(ch, job.bitrate)
+      if (job.action === 'h264' || job.action === 'fps') {
+        const plan = job.action === 'fps' ? planFps(ch, job.fps) : planH264(ch, job.bitrate)
         if (!plan.ok) {
           Object.assign(step, { status: 'skipped', reason: plan.reason })
           continue
@@ -324,12 +347,12 @@ async function runJob(nvr, job) {
       } catch (e) {
         step.reason = `could not read it back (${e.message})`
       }
-      const applied = Boolean(after) && normEnct(after.enct) === normEnct(target.enct)
+      const applied = Boolean(after) && normEnct(after.enct) === normEnct(target.enct) && (job.action !== 'fps' || Number(after.fps) === Number(target.fps))
       step.status = applied ? 'done' : after ? 'failed' : 'unknown'
       if (after && !applied) {
         step.reason =
           answer.status === 'success'
-            ? `the NVR accepted it but the camera still reports ${label(after.enct)}`
+            ? `the NVR accepted it but the camera still reports ${label(after.enct)}, ${after.fps} frames a second`
             : `the NVR refused it (${answer.errorCode || answer.status})`
       }
       step.now = after ? `${label(after.enct)}, ${after.QoI} kbps` : null
@@ -338,7 +361,7 @@ async function runJob(nvr, job) {
       } catch (e) {
         step.reason = `${step.reason ? `${step.reason}; ` : ''}the result could not be logged (${e.message})`
       }
-      if (applied) {
+      if (applied && job.action !== 'fps') {
         // viewers pick up the new codec at the next keyframe; restarting makes that immediate
         const sdkCh = chNumber(ch.id) - 1
         nvr.codecSeen.delete(`${sdkCh}:1`)
@@ -449,5 +472,33 @@ export async function handleSubstreams(method, nvrId, jobOnly, readJson, user) {
   }
 }
 
+/**
+ * A named frame rate on every sub-stream of an NVR. { fps, confirm?: true }: without confirm a dry
+ * run (nothing written); with it, one camera at a time under the NVR lock, logged like any other
+ * sub-stream change. Not on a route: called by name from a maintenance run, at the owner's word.
+ * @returns {Promise<[number, any]>}
+ */
+export async function handleSubstreamFps(nvrId, body, user) {
+  try {
+    const nvr = nvrs.get(nvrId)
+    if (!nvr) throw new HttpError(404, 'No such NVR')
+    const fps = body?.fps
+    if (!Number.isInteger(fps) || fps < 1 || fps > 60) throw new HttpError(400, 'fps must be a whole number of frames a second')
+    if (!xmlOnline(nvr)) throw new HttpError(409, `${nvr.name} is ${nvr.status}; try again when it is online`)
+    const info = await readChannels(nvr, { fresh: true })
+    const rows = info.channels.map((c) => ({ c, plan: planFps(c, fps) })).sort((a, b) => (chNumber(a.c.id) ?? 0) - (chNumber(b.c.id) ?? 0))
+    if (body.confirm !== true) {
+      return [200, { nvr: nvr.id, name: nvr.name, dryRun: true, cameras: rows.map(({ c, plan }) => ({ ch: chNumber(c.id), name: c.name, from: c.sub ? pick(c.sub) : null, to: plan.ok ? pick(plan.sub) : null, skip: plan.ok ? null : plan.reason })) }]
+    }
+    const steps = rows.filter((r) => chNumber(r.c.id)).map(({ c }) => ({ id: c.id, ch: chNumber(c.id), name: c.name, status: 'waiting', reason: null, now: null }))
+    const job = { action: 'fps', fps, user, running: true, cancelled: false, startedAt: Date.now(), finishedAt: null, nvr: nvr.id, steps }
+    await withNvrLock(nvr, 'A sub-stream change', () => runJob(nvr, job))
+    return [200, { nvr: nvr.id, name: nvr.name, applied: true, results: steps }]
+  } catch (e) {
+    if (e instanceof HttpError) return [e.status, { error: e.message }]
+    return [502, { error: e.message }]
+  }
+}
+
 // for the offline tests (cctv/test/substreams.test.mjs)
-export const _test = { parseEncodeInfo, planH264, buildEdit, undoable, chNumber, validate }
+export const _test = { parseEncodeInfo, planH264, planFps, buildEdit, undoable, chNumber, validate }
