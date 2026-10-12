@@ -204,7 +204,7 @@ body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-ins
 
 /* One camera enlarged: it covers the whole grid, and the grid's own tiles (stopped while it is open)
    are not drawn at all, so nothing of them shows round its edges or behind it. */
-.live-page #grid > .tile.single-overlay { inset: 0; background: #000; }
+.live-page #grid > .tile.single-overlay { inset: 0; background-color: #000; } /* (the colour alone: "background" would also undo how a still is sized, and tile it) */
 .live-page #grid:has(> .single-overlay) > :not(.single-overlay) { visibility: hidden; }
 
 /* the speaker button of the full-size view: lit while the camera is being listened to */
