@@ -124,8 +124,10 @@
 .live-page #grid[data-picture-fit="stretch"] { --camera-fit: fill; }
 .live-page #grid .tile canvas:not(.ln-overlay):not(.ln-loupe) { object-fit: var(--camera-fit); }
 .live-page #grid:fullscreen { padding: 0; gap: 2px; }
-.live-page #grid:fullscreen .tile[data-live="1"] > .label,
-.live-page.phone-full #grid .tile[data-live="1"] > .label {
+/* (not the one camera shown full size: its label carries Recordings, Sound and Mark, and on a phone
+   there is no hover to bring it back: the owner, 2026-10-12, "the buttons only appear for 2 seconds") */
+.live-page #grid:fullscreen .tile[data-live="1"]:not(.single-overlay) > .label,
+.live-page.phone-full #grid .tile[data-live="1"]:not(.single-overlay) > .label {
   opacity: 0; visibility: hidden; transform: translateY(6px);
   transition: opacity 180ms ease, transform 180ms ease, visibility 0s linear 180ms;
 }
