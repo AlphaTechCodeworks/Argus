@@ -1,7 +1,7 @@
 # Wall sizing: decoder budget + best-size recommendation — design
 
 - Date: 2026-10-12
-- Status: DRAFT — for Mike's review (two decisions flagged, see "Decisions to confirm")
+- Status: DRAFT (revised after review 2026-10-12) — build gated on a memory-breakdown probe (Phase 1); decisions flagged in "Decisions to confirm"
 - Area: Argus live wall (`cctv/public/viewer.js`, `wall-thin.js`, `wall-profile.js`, `player.js`, `cctv/wall-tolerance.mjs`, `sicex.mjs`, `telemetry.mjs`)
 - Author: Claude (Opus 4.8) with Mike
 
@@ -17,7 +17,7 @@ Measured on the test PC against prod on 2026-10-12 (apsi cohort, engine on):
 
 Two problems surfaced, both about the *viewing PC's* limits, not the server:
 
-1. **Crash on open.** A 10×10 spins up ~100 video decoders at once; the startup surge (decoders + buffers, ~5 GB Chrome in older readings) can blow the tab before `wallThin` has anything to thin. A crash shows nothing — strictly worse than a smaller or degraded wall.
+1. **Crash on open.** A 10×10 spins up ~100 video decoders at once; the startup surge (decoders + buffers, ~5 GB Chrome in older readings) can blow the tab before `wallThin` has anything to thin. A crash shows nothing — strictly worse than a smaller or degraded wall. **Caveat (unverified):** *what* exactly consumes that memory — the decoders, the ~100 canvases, socket buffers, or the page — has not been measured. Confirming it is Phase 1 below; the design assumes decoders dominate and must be checked before building.
 2. **No steer to the right size.** The operator can pick a layout the screen can't handle. The app already *measures* per-screen performance (`wallProfile`) and *warns*, but never recommends a size, and nothing bounds resource use at open.
 
 What already works and is NOT changing: `wallThin` gracefully degrades a running wall under load by showing the quiet tiles as stills while the busy ones stay live — **every camera stays on screen**. That behaviour stays.
@@ -34,6 +34,7 @@ What already works and is NOT changing: `wallThin` gracefully degrades a running
 - **Auto-shrinking a working wall / removing cameras automatically.** On a security wall, silently dropping cameras risks an operator missing an incident on a camera that vanished. We degrade frame *rate* (stills), never remove cameras.
 - **Fixing the NVR/SDK frame-clumping tail** (the ~2 s p90 at 6×6). That originates upstream (see `frame-gaps.mjs`); separate work.
 - **A standalone "decoder-teardown-for-stills" feature.** Subsumed here: the decoder budget covers it.
+- **Server-side ingress reduction for thinned tiles** — having the server send keyframes-only for stills, cutting the ~45 Mbps / ~2,000 fps a big wall receives. Worthwhile but a separate server-side change; this spec is a client-decode fix and leaves ingress unchanged.
 
 ## The core idea: a per-screen decoder budget
 
@@ -41,24 +42,27 @@ Today every tile — live or still — holds its own persistent `VideoDecoder`, 
 
 The budget inverts this: **a screen keeps full decoders only for the tiles it can decode (its live set); every other tile is a still backed by a cheap shared path, not a persistent per-tile decoder.**
 
-- The live budget = the screen's learned decode capacity (already tracked by `wallThin`/`wallProfile`; roughly "tiles it can draw at rate", e.g. ~5 on the weak test PC, more on the control-room PC).
-- Live tiles: full decoder, as now. Chosen by the existing `wallThin` governor (busiest by bitrate/motion).
-- Still tiles: show a **frozen snapshot** of their last frame; a small **shared decoder pool** cycles through them decoding one keyframe every few seconds to keep the picture current. No persistent per-tile decoder.
-- Promotion (still → live): build a full decoder for that tile (reusing the existing `player.js` reset+reconfigure path used for seeks), wait for the next keyframe, resume motion. Small delay (≤ ~1 s) on promotion — acceptable, and bounded by hysteresis.
+- The live budget = the largest live-tile count at which the screen's decoder keeps up — derived from telemetry by raising/lowering the count until the decoder hold (`decMs`) stays under a target (e.g. p90 ≤ ~400 ms), **not** a vague "capacity". On the measurements so far that is ~5 on the weak test PC, more on the control-room PC. The existing per-screen figures feed this but need this sharper definition: today's governor parks at counts that are still 2–4 s behind (see "Why"), so "what it currently keeps live" is not itself a safe budget.
+- This **extends the existing `wallThin` governor rather than adding a second one.** `wallThin` already chooses *which* tiles are live (busiest by bitrate/motion); the budget is the *cap* on how many it keeps live, and the new part is that a non-live tile loses its **decoder**, not just its frame rate. One governor, one live set — no two systems fighting over selection.
+- Still tiles: no persistent per-tile decoder (how their picture is produced is the freshness decision below).
+- Promotion (still → live): build a full decoder for that tile (reusing the existing `player.js` reset+reconfigure path used for seeks), wait for the next keyframe, resume motion. The delay is **a GOP interval** (could be 2–4 s where keyframes are sparse), not instant; hysteresis bounds how *often* promotions happen, not how long each takes. Acceptable for a tile the operator did not single out.
 
 Consequences, from this one mechanism:
 
 - **Crash-safe open (Feature A):** peak decoders during open is bounded to ~budget + pool, never 100. Tiles open in waves — the live set first, the rest come up as stills. Every camera still appears, over a few seconds.
-- **RAM reduction (Feature B):** steady state holds ~budget full decoders instead of N. On a 10×10 with a budget of ~8, that is ~8 decoders + a small pool instead of 100.
+- **RAM reduction (Feature B):** steady state holds ~budget full decoders instead of N. On a 10×10 with a budget of ~8, that is ~8 decoders instead of 100. (How much total RAM that actually saves depends on the Phase-1 breakdown — if canvases/sockets dominate, the saving is smaller than the decoder count suggests.)
+
+**What this does NOT reduce:** network and server load. A still keeps its socket open (to stay ready and, if refreshed, to catch keyframes), so the server still pushes all ~N substreams and the client still receives frames it mostly discards (~45 Mbps / ~2,000 fps arriving on a 10×10, unchanged). The larger efficiency win — having the *server* send keyframes-only for thinned tiles — is a separate server-side change (see Non-goals); this is a client-decode fix only.
 
 ### Still-tile picture freshness — decision
 
-Two ways to keep a still current, trading RAM for staleness:
+A still tile has no persistent decoder, so its picture has to come from somewhere. Options, simplest first:
 
-- **Shared pool refresh (recommended):** a pool of M transient decoders (M small, e.g. 2–4) round-robins the still tiles, decoding one keyframe each, so every still refreshes every few seconds. Bounded decoders, pictures stay reasonably current.
-- **Frozen snapshot only:** close the decoder, keep the last frame as a static image, never refresh until promoted. Lowest RAM, but a still goes stale (a camera that changes won't update). Worse for a security wall.
+- **Frozen snapshot (proposed default):** on demotion, grab the last frame to a static image, close the decoder, show the image; no refresh until promoted. Lowest RAM, simplest, robust. Cost: the picture is stale until the tile goes live again — acceptable because thinned tiles are, by definition, the quiet ones, and any tile the operator cares about is promoted.
+- **Per-tile timed refresh:** keep the still frozen, but every few seconds briefly re-open *that tile's own* decoder, decode one keyframe, snapshot, close. Fresher pictures, more open/close churn, still bounded decoders.
+- **Shared decoder pool (NOT recommended):** a pool of 2–4 decoders round-robins all stills. Rejected on review: a `VideoDecoder` is bound to one stream's config, so each refresh needs a `reset()`+`configure()` for that tile's SPS/PPS/resolution — dozens of reconfigures per cycle across a few decoders is heavy and can stall. The earlier draft proposed this; it is the riskiest option, not the simplest.
 
-Proposed: shared pool refresh, with refresh interval following the screen's spare capacity (fewer live tiles → faster still refresh). Fall back to frozen snapshot only if even the pool is over budget.
+Proposed: **frozen snapshot** to start (prove the budget + crash fix with the fewest moving parts), add **per-tile timed refresh** only if stale stills prove a problem in use.
 
 ### Staggered open
 
@@ -93,7 +97,8 @@ Both participate in the holdout A/B: the apsi cohort gets them, the holdout runs
 ## Measurement / how we'll know it helped
 
 - `telemetry.mjs` already carries per-tile `in`/`fps`/`decMs`/`skip` and the walls table. Add, per big-wall session: peak concurrent full decoders, open-to-first-frame for the live set, and promotion latency.
-- Success looks like: **no crash on open at 10×10 on a weak PC**; peak decoders ≈ budget; a 10×10's resident RAM materially lower (measured in the browser task manager, since RAM is not in telemetry); the recommendation's chosen size scoring ≥ tolerance; and the apsi cohort's experience score ≥ holdout.
+- **The two benefits are measured differently — this matters.** Crash-prevention and RAM are **not** visible to the holdout A/B: a crashed browser sends no telemetry, and RAM is not in telemetry. They are judged by the **Phase-1 probe repeated after the build** — open a 10×10 on the weak test PC and confirm no crash, peak decoders ≈ budget, and resident RAM materially lower (browser task manager, before/after). The holdout cohort score (`qoe.js`) only tells us the *rest* of the experience (smoothness/startup) did not regress — apsi should stay ≥ holdout.
+- For `sizeAdvice`: the recommended size scores ≥ tolerance on the screens that accept it.
 
 ## Edge cases
 
@@ -111,17 +116,19 @@ Both participate in the holdout A/B: the apsi cohort gets them, the holdout runs
 
 ## Rollout / deploy
 
-- Same surgical overlay as the holdout-fraction deploy: prod diverges from this branch (Codex branding lives only on prod), so **never** a blanket `push.sh`; copy current release → new, overlay only the changed files (rebasing any `public/` file onto the current release first), switch symlink, restart. One restart. Rollback = flip the symlink back.
+- As of 2026-10-12 **prod == branch HEAD** (the Codex branding is now on the branch too), so a **normal full deploy from the branch is clean and preferred**. The surgical overlay (copy current release → new, overlay only changed files, switch symlink, restart; rollback = flip the symlink back) is the **fallback for when branch and prod have diverged again** — this repo has concurrent sessions committing to the branch, so check `git diff` of the changed files against the running release before deploying.
 - Ship `decoderBudget` and `sizeAdvice` behind their switches, default on for apsi, and watch the holdout comparison before calling it proven.
 
 ## Phasing (recommendation)
 
-1. **First, let the holdout gather.** The core measure-first question — is the engine helping at all? — is still unanswered because the holdout is data-starved. Set it to 1-in-2 and leave a representative wall open for a few days before building either feature.
-2. Then **Feature A+B (`decoderBudget`)** — it removes a hard failure (the crash) and cuts RAM; highest value.
-3. Then **Feature C (`sizeAdvice`)** — advisory, cheap, reuses existing data.
+1. **Let the holdout gather** (in flight). The measure-first question — is the engine helping at all? — is unanswered until the 1-in-2 holdout accrues data on a representative wall left open. Nothing below is built before there is a read on that.
+2. **Phase 1 — memory-breakdown probe (spike, no feature code).** Open a 10×10 on the weak test PC and measure what actually consumes memory (decoders vs the ~100 canvases vs socket buffers vs the page) and what precedes the crash. This **confirms or redirects the design's premise** that decoders are the culprit. Output is an answer, not code. **Do not build Feature A+B until this confirms it.**
+3. **If the probe confirms it: Feature A+B (`decoderBudget`)** — removes the crash and cuts RAM; highest value.
+4. Then **Feature C (`sizeAdvice`)** — advisory, cheap, reuses existing data.
 
 ## Decisions to confirm (Mike)
 
+0. **Build is gated on Phase 1.** Feature A+B is not built until the memory-breakdown probe confirms decoders are what crashes the wall / holds the RAM. If the probe says otherwise, this spec is redirected first.
 1. **Crash guard mechanism** — proposed: **staggered/budgeted open** (keeps every camera, bounds peak decoders). Alternative was a hard size cap that removes cameras (rejected here as unsafe for a security wall). Confirm staggered, or ask for the cap/both.
 2. **Recommendation application** — proposed: **mark it always + default only screens with no saved choice** to the recommended size. Alternative: mark only, never change any default. Confirm which.
-3. **Still freshness** — proposed: shared decoder pool refresh (current pictures, bounded decoders) over frozen-snapshot-only (lowest RAM, stale). Confirm.
+3. **Still freshness** — proposed (revised): **frozen snapshot** to start; add per-tile timed refresh later only if stale stills bite. The earlier shared-pool idea is rejected as too complex (see that section). Confirm.
