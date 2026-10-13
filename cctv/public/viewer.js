@@ -318,6 +318,7 @@ function render({ keepSingle = false } = {}) {
   const visible = v.visible
 
   gridSlots = []
+  autoMainPage = visible.slice(0, perPage).filter((c) => c?.online).length <= AUTO_MAIN_UP_TO
   // Tiles open staggered so a big grid does not ask one NVR for everything at once -- but the
   // stagger is counted per NVR, because cameras on different recorders are not competing for
   // anything. Counted across the whole grid, an 8x8 made its last tile wait 63 x 60 = nearly four
@@ -381,6 +382,14 @@ function siteOptions(sites) {
   return out
 }
 
+// Auto shows a camera's own full-quality stream only on a page of this many cameras or fewer. It used
+// to ask for the main stream of EVERY tile: on 2026-10-13 a page of Site 3 (reached over a slow relay)
+// asked for seven at once, the NVR stopped answering and dropped its links, again and again (233
+// failed starts in 12 h), and a page of Lawrence did the same to 23 (244). A bigger page gets the
+// sub-streams, as every other layout does; one camera opened full size still gets its main stream.
+const AUTO_MAIN_UP_TO = 4
+let autoMainPage = false // whether the page being drawn is that small (set by the draw, read by fillSlot)
+
 /** A new tile element for slot.cam (offline tile, or a LiveTile started after startDelayMs). */
 function fillSlot(slot, gridArea, startDelayMs = 0) {
   const { cam } = slot
@@ -397,9 +406,9 @@ function fillSlot(slot, gridArea, startDelayMs = 0) {
   tile.addEventListener('click', () => openSingle(slot.cam, { fromTap: true }))
   // the phone list: a camera streams only while it is on screen (48 at once would swamp a phone)
   if (LAYOUTS[layoutSelect.value]?.list) return watchInView(slot, tile)
-  // Auto prioritises camera quality; LiveTile falls back to SD if HD is refused
-  // or the browser/server cannot play the main stream. Only visible tiles connect.
-  const stream = layoutSelect.value === 'auto' ? MAIN_STREAM : SUB_STREAM
+  // Auto prioritises camera quality on a small page (AUTO_MAIN_UP_TO); LiveTile falls back to SD if
+  // HD is refused or the browser/server cannot play the main stream. Only visible tiles connect.
+  const stream = layoutSelect.value === 'auto' && autoMainPage ? MAIN_STREAM : SUB_STREAM
   slot.live = new LiveTile(tile, cam, stream, startDelayMs, tileOptions(cam))
   gridTiles.push(slot.live)
 }
