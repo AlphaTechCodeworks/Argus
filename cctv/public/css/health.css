@@ -20,6 +20,28 @@
 .health-pager { display: flex; gap: 16px; align-items: center; justify-content: flex-end; }
 .health-page .nvr-sum { padding: 18px; }
 .health-page .hp-history { overflow: auto; }
+/* "Last 24 hours" (metrics-view.js): small line charts drawn as SVG by health.js. Colours are the
+   tokens, so both themes are covered; each line also has its own dash, and its name and figures
+   are in the legend under the chart, so nothing is told by colour alone. */
+.mv-switch { display: flex; gap: 8px; margin: 12px 0; }
+.mv-switch button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.mv-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.mv-chart { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px; min-width: 0; }
+.mv-chart h3 { margin: 0 0 4px; font-size: var(--fs-body); }
+.mv-chart svg { display: block; width: 100%; height: auto; }
+.mv-chart .mv-grid { stroke: var(--border); stroke-width: 1; }
+.mv-chart text { fill: var(--text-muted); font-size: 10px; font-family: var(--font); }
+.mv-line { fill: none; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.mv-dot { stroke: none; }
+.mv-a { stroke: var(--accent); } .mv-dot.mv-a, .mv-key.mv-a { fill: var(--accent); background: var(--accent); }
+.mv-b { stroke: var(--ok); stroke-dasharray: 6 3; } .mv-dot.mv-b, .mv-key.mv-b { fill: var(--ok); background: var(--ok); }
+.mv-c { stroke: var(--warn); stroke-dasharray: 2 3; } .mv-dot.mv-c, .mv-key.mv-c { fill: var(--warn); background: var(--warn); }
+.mv-d { stroke: var(--bad); } .mv-dot.mv-d, .mv-key.mv-d { fill: var(--bad); background: var(--bad); }
+.mv-limit { stroke: var(--text-muted); stroke-dasharray: 8 4; stroke-width: 1.2; } .mv-dot.mv-limit, .mv-key.mv-limit { fill: var(--text-muted); background: var(--text-muted); }
+.mv-legend { list-style: none; margin: 8px 0 6px; padding: 0; display: grid; gap: 4px; font-size: var(--fs-dense); color: var(--text); }
+.mv-key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 8px; vertical-align: middle; }
+.mv-top-head { margin: 16px 0 6px; font-size: var(--fs-body); }
+.mv-top { margin: 0 0 8px; padding-left: 20px; font-size: var(--fs-dense); line-height: 1.7; }
 @media (max-width: 700px) {
   .health-page main.health { padding: 16px; }
   .health-heading { align-items: flex-start; flex-direction: column; }

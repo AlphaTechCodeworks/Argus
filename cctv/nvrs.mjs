@@ -519,6 +519,7 @@ export class Nvr {
     this.loginHeld = false // that login is being left untried: said once in the journal, and once when it ends
     this.gen = 0 // session generation: results from an older session are ignored
     this.controlFailed = false // this login has failed since it was last up (or since the start): see borrowing
+    this.borrowingSaid = false // what the journal was last told about borrowing (#logBorrowing)
     this.lane = new Lane(cfg.id, LANE_CONCURRENCY, { holdAt: LANE_HOLD_AT })
     this.sessions = new SessionPool(this)
     this.playback = createPlayback(this)
@@ -952,7 +953,24 @@ export class Nvr {
     this.listTurns = { since: now, read: 0, failed: 0, quiet: 0, frozen: 0, busy: 0 }
   }
 
+  /**
+   * Says in the journal, once each way, when the XML settings start going out on the worker's login
+   * and when they stop (see borrowing). Asked at every camera-list turn (~30 s), not in the getter,
+   * which every settings request reads.
+   */
+  #logBorrowing() {
+    const now = this.borrowing
+    if (now === this.borrowingSaid) return
+    this.borrowingSaid = now
+    if (now) console.log(`[${this.id}] settings now go through the video connection (this login is down: ${this.error || 'no reason given'})`)
+    else if (this.online) console.log(`[${this.id}] settings are back on their own login`)
+    else console.log(`[${this.id}] settings no longer go through the video connection (it is not logged in either, or CCTV_XML_VIA_WORKER=off)`)
+  }
+
   async #refresh() {
+    try {
+      this.#logBorrowing()
+    } catch {} // (a line for the journal: never in the way of the turn)
     this.#logListTurns()
     const turns = this.listTurns
     // one at a time, and not while this NVR cools down after a late call (it would only add another and renew the cool-down),

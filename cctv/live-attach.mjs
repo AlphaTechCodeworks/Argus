@@ -15,6 +15,7 @@
 // NVRs); server.mjs hands in what it owns.
 import { createHash } from 'node:crypto'
 import { isRemoteAddress } from './adaptive-live.mjs'
+import { deviceOf } from './device-name.mjs'
 import { waitForSub } from './live-wait.mjs'
 import { isPhoneRequest } from './phone-live.mjs'
 import { HD_NOT_ALLOWED } from './stream-param.mjs'
@@ -28,6 +29,34 @@ export const PHONE_SPARE = 4
 // for as long as the owner's page was open (review of 29 Sep). Its line is said once in this long for
 // the same camera and viewer, with how many were left out.
 export const H265_QUIET_MS = 10 * 60_000
+// Who asked for a camera in full quality (its main stream) is said in the journal: a main stream is
+// several times a sub-stream's load on the NVR and the server, and on 2026-10-13 nothing said who
+// had opened the ones that were running. Once in this long for the same viewer and camera: a
+// full-size view that reconnects, or a wall asking again, is one line.
+export const FULL_QUALITY_QUIET_MS = 60_000
+
+/**
+ * Whether to say now that this viewer opened this camera in full quality: true the first time, and
+ * again once everyMs has passed since it was last said.
+ * @param {{ everyMs?: number, now?: () => number }} [o]
+ * @returns {(viewer: string, camera: string) => boolean}
+ */
+export function fullQualityGate({ everyMs = FULL_QUALITY_QUIET_MS, now = Date.now } = {}) {
+  const said = new Map() // viewer and camera -> when it was last said
+  return (viewer, camera) => {
+    const t = now()
+    const key = `${viewer}|${camera}`
+    const at = said.get(key)
+    if (at !== undefined && t - at < everyMs) return false
+    for (const [k, v] of said) if (t - v >= everyMs) said.delete(k) // (past their quiet: of no more use)
+    said.set(key, t)
+    return true
+  }
+}
+
+/** The line itself: "[live] ann (Windows PC · Chrome 141, local 192.168.1.20) opened full quality nvr1/4". */
+export const fullQualityLine = ({ user, device, remote, address, camera }) =>
+  `[live] ${user || 'someone'} (${device || 'unknown device'}, ${remote ? 'remote' : 'local'} ${address || 'address unknown'}) opened full quality ${camera}`
 
 /** One key per browser, from the upgrade request: a page's /live and /live-mux sockets are one viewer. */
 export const viewerOf = (req, currentUser) => createHash('sha1').update(`${currentUser(req) ?? '?'}|${req.headers['user-agent'] ?? ''}|${req.headers.cookie ?? ''}`).digest('hex')
@@ -76,13 +105,15 @@ const standInHandle = (ws, bridge, wait) => ({
  *   (without it, the `who` a socket was let in with, for the same user); track: access-watch.mjs's,
  *   which asks the rights again while the socket or channel is open; waitTimers: live-wait.mjs's timers
  *   (tests); log: the stand-ins' lines; now: the clock (tests); h264Fallback: the conversions for local
- *   PCs without H.265 (h264-fallback.mjs), none without it
+ *   PCs without H.265 (h264-fallback.mjs), none without it; clientAddress (in o): the visitor's own
+ *   address for a request (server.mjs clientIp), for the line that says who opened full quality
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
  *   clientH265: boolean, noH265?: boolean, phone15: boolean }) => void} attachLive
  *   clientH265: the page said its browser plays H.265 (h265=1); noH265: it said it does not (h265=0).
  *   Neither: it did not say (an older page, or one that does not know yet), which is not "cannot"
  */
-export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, h264Fallback = null, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now }) {
+export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, h264Fallback = null, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now, clientAddress = (req) => req.socket?.remoteAddress }) {
+  const sayFullQuality = fullQualityGate({ now })
   const quiet = new Map() // camera and viewer -> { at, left }: its H.265 stand-in line last said, and those left out since
   /** The H.265 stand-in line for a camera and viewer, or null when it was said less than H265_QUIET_MS ago. */
   const h265Line = (line, key) => {
@@ -115,6 +146,17 @@ export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, p
     // Every path below (sub-bridge, adaptive, phone, the stream itself) ends with this socket or
     // channel closing, which is how it leaves the watch.
     track(ws, req, { actions: streamType === 1 ? ['live'] : ['live', 'live-hd'], nvr: nvr.id, ch })
+    // The main stream asked for and let in: who, from what and where (FULL_QUALITY_QUIET_MS). Only a
+    // viewer's own request comes this way: the recorder's streams, the warm-ups and a main standing
+    // in for a cold sub-stream (below) never do. The line is for people; it must not cost the video
+    if (streamType === 0) {
+      try {
+        const camera = `${nvr.id}/${ch + 1}`
+        if (sayFullQuality(viewerOf(req, currentUser), camera)) {
+          log(fullQualityLine({ user: who?.user ?? currentUser(req), device: deviceOf(req.headers?.['user-agent']), remote: isRemoteAddress(req.socket?.remoteAddress), address: clientAddress(req), camera }))
+        }
+      } catch {}
+    }
     const stream = nvr.getStream(ch, streamType)
     const remote = isRemoteAddress(req.socket.remoteAddress)
     const phone = !remote && phone15 && isPhoneRequest(req.headers)

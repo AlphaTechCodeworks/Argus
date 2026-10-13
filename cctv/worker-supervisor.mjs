@@ -2,6 +2,8 @@
 // (stream-hub.mjs) keeps viewers connected across worker restarts: they wait for a keyframe.
 import { fork } from 'node:child_process'
 import { audioHub } from './audio-hub.mjs'
+import { makeSdkLogFilter } from './log-filter.mjs'
+import { workerLineCounts } from './metrics-history.mjs'
 import { StreamHub } from './stream-hub.mjs'
 import { MSG, want } from './worker-ipc.mjs'
 import { makeRequests } from './worker-requests.mjs'
@@ -33,9 +35,10 @@ const NAT_NTOA_NOISE_RE = /NatCommon\.cpp\(\d+\): INFO: NAT_inet_ntoa /
 /**
  * Copies a child's output to `out`, each line prefixed, except the SDK's login-state noise (above)
  * and the blank line after it, and its NAT_inet_ntoa line; onLine (optional) is shown every line,
- * those included.
+ * those included. filter (optional, log-filter.mjs makeSdkLogFilter): the rest of the SDK's chatter
+ * is left out too, with a line a minute saying how much; without one, every other line is written.
  */
-export function prefixLines(from, out, prefix, onLine = null) {
+export function prefixLines(from, out, prefix, onLine = null, filter = null) {
   if (!from) return
   let rest = ''
   let afterNoise = false // the last line was the SDK's noise: a blank line now is its second half
@@ -45,16 +48,30 @@ export function prefixLines(from, out, prefix, onLine = null) {
     afterNoise = noise
     return !drop
   }
+  // what the filter writes for a line: the line, nothing, or the line and its summary. A filter that
+  // throws must never cost a line of the worker's output: the line is written as it is
+  const pass = (l) => {
+    if (!filter) return [l]
+    try {
+      return filter.lines(l)
+    } catch {
+      return [l]
+    }
+  }
   from.setEncoding('utf8')
   from.on('data', (d) => {
     const lines = (rest + d).split('\n')
     rest = lines.pop()
-    const kept = lines.filter(keep)
+    const kept = lines.filter(keep).flatMap(pass)
     if (kept.length) out.write(kept.map((l) => `${prefix}${l}\n`).join(''))
     if (onLine) for (const l of lines) onLine(l)
   })
   from.on('end', () => {
-    if (rest && keep(rest)) out.write(`${prefix}${rest}\n`)
+    const last = rest && keep(rest) ? pass(rest) : []
+    try {
+      if (filter) last.push(...filter.end()) // the part-minute's count of what was left out
+    } catch {}
+    if (last.length) out.write(last.map((l) => `${prefix}${l}\n`).join(''))
     if (rest && onLine) onLine(rest)
     rest = ''
   })
@@ -123,13 +140,25 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
     child = c
     if (!stdio) {
       // (the SDK prints from inside the worker: only its output shows that the NVR dropped the links)
-      const onLine = linkResetWatch((at) => {
+      const linkWatch = linkResetWatch((at) => {
         try {
           if (c === child && c.connected) c.send({ t: MSG.LINKRESET, at })
         } catch {} // (the worker is going: nothing to hold)
       })
-      prefixLines(c.stdout, process.stdout, `[worker ${nvrId}] `, onLine)
-      prefixLines(c.stderr, process.stderr, `[worker ${nvrId}] `, onLine)
+      // every line also goes to the history of the key numbers (metrics-history.mjs), which counts
+      // this NVR's failed starts, stalls, re-logins and dropped links from the worker's own lines.
+      // Counting must never stop the link watch or the output
+      const onLine = (line) => {
+        linkWatch(line)
+        try {
+          workerLineCounts.line(nvrId, line)
+        } catch {}
+      }
+      // the SDK's chatter stays out of the journal (log-filter.mjs; CCTV_LOG_SDK=all writes it all);
+      // onLine still gets every line. One filter for both outputs: one summary a minute per worker
+      const filter = makeSdkLogFilter()
+      prefixLines(c.stdout, process.stdout, `[worker ${nvrId}] `, onLine, filter)
+      prefixLines(c.stderr, process.stderr, `[worker ${nvrId}] `, onLine, filter)
     }
     c.on('error', (e) => console.warn(`[worker ${nvrId}] ${e.message}`))
     c.on('message', (m) => {

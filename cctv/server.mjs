@@ -41,6 +41,8 @@
 //   POST /api/admin/alerts/test { method: 'ntfy'|'email' } -> sends a test message (admins)
 //   POST /api/admin/lines/alert { nvr, ch, on } -> a camera's line-crossing phone alert on or off
 //                                 (admins): the "Line crossing" alarm rule, see line-actions.mjs
+//   GET  /api/admin/metrics?hours=24 -> the key numbers minute by minute, up to 14 days back
+//                                 (admins; Health's "Last 24 hours"), see metrics-history.mjs
 //   GET  /healthz              -> used by the Docker healthcheck and the watchers on this machine;
 //                                 { ok } only for anyone else who is not an admin (security.mjs localProbe)
 //   WS   /live?nvr=ID&ch=N&stream=S -> binary frames, S: 0 = main, 1 = sub
@@ -178,6 +180,8 @@ import { handleSicex, makeSicex } from './sicex.mjs'
 import { handleHold, makeHolds } from './stream-holds.mjs'
 import { handleTolerance, makeTolerance } from './wall-tolerance.mjs'
 import { xmlOnline } from './xml-session.mjs'
+import { METRICS_PATH, handleMetrics, makeMetricsHistory } from './metrics-history.mjs'
+import { availableParallelism, loadavg } from 'node:os'
 
 const {
   HTTP_PORT = '8080',
@@ -877,6 +881,12 @@ const handleRequest = async (req, res) => {
   // GET /api/admin/viewers — who is connected and what each has open now (admins; viewers.mjs)
   const viewersRoute = handleViewers(req.method, pathname, who, presence, { nameOf: cameraNames, hostOf: hostNameOf })
   if (viewersRoute) return sendJson(res, ...viewersRoute)
+  // GET /api/admin/metrics?hours=24 — the history of the key numbers, for Health's "Last 24 hours"
+  // (admins; metrics-history.mjs)
+  if (pathname === METRICS_PATH) {
+    const metricsRoute = await handleMetrics(req.method, pathname, who, url.searchParams, metricsHistory)
+    if (metricsRoute) return sendJson(res, ...metricsRoute)
+  }
   if (pathname === '/api/admin/register.xlsx') {
     if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
@@ -1486,7 +1496,38 @@ const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on co
 // H.265 sub-streams converted to H.264 for PCs on the local network whose browsers cannot play them,
 // on a budget of their own (h264-fallback.mjs): never from the pool phones and remote viewers share
 const h264Fallback = new H264Fallback()
-const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track })
+// clientAddress: the visitor's own address (not cloudflared's), for the line that says who opened a
+// camera in full quality
+const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track, clientAddress: clientIp })
+
+// A history of the key numbers, one line a minute in DATA_DIR/metrics.jsonl, 14 days kept
+// (metrics-history.mjs), for Health's "Last 24 hours". The same sources as /healthz above; with live
+// workers the SDK calls are theirs, so those are added, and the event loop's worst pause is the
+// worst of this process and the workers. Each number is asked for on its own there: one that
+// throws is left out of that minute's line. Nothing here can stop the server starting.
+const workerStats = () => [...nvrs.values()].filter((n) => n.worker).map((n) => n.worker.stats())
+const metricsHistory = makeMetricsHistory({
+  file: join(auth.DATA_DIR, 'metrics.jsonl'),
+  providers: {
+    load1: () => loadavg()[0],
+    cpuCount: () => availableParallelism(),
+    nvrs: () => ({ online: [...nvrs.values()].filter((n) => n.online).length, total: nvrs.size }),
+    streams: () => [...nvrs.values()].reduce((n, nvr) => n + (nvr.worker ? nvr.worker.hub.streams.size : nvr.streams.size), 0),
+    viewers: () => presence.summary(),
+    h264: () => h264Fallback.summary(),
+    sdk: () => {
+      const s = sdkStats()
+      const w = workerStats()
+      return { inFlight: s.inFlight + w.reduce((n, x) => n + (x?.sdk?.inFlight ?? 0), 0), late: s.late + w.reduce((n, x) => n + (x?.sdk?.late ?? 0), 0) }
+    },
+    loopWorstMs: () => Math.max(loopWorstMs() ?? 0, ...workerStats().map((x) => x?.loop?.worstMs ?? 0))
+  }
+})
+try {
+  metricsHistory.start()
+} catch (e) {
+  console.warn(`[metrics] the history was not started: ${e?.message ?? e}`)
+}
 
 // This listener is synchronous and nothing above it catches: anything that throws here takes the
 // whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27

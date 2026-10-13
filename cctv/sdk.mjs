@@ -532,7 +532,11 @@ const ERRORS = {
   92: 'unknown user',
   93: 'user name or password empty',
   95: 'NVR busy',
-  97: 'NVR not ready'
+  96: 'the NVR does not support this', // NET_SDK_DEVICE_NOT_SUPPROT
+  97: 'NVR not ready',
+  98: 'the camera is offline at the NVR', // NET_SDK_CHANNEL_OFFLINE
+  99: 'the NVR could not say what it supports', // NET_SDK_GETREADYINFO_FAIL
+  100: 'the SDK has no resources left' // NET_SDK_NORESOURCE (the SDK on this server, not the NVR: that is 31)
 }
 /** An SDK error code as text. */
 export const errorText = (code) => ERRORS[code] ?? `error ${code}`

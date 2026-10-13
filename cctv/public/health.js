@@ -4,6 +4,7 @@
 // which is why the banner wording lives here rather than in the page.
 import { smartRows, smartSummary } from './smart-view.js'
 import { viewersView } from './viewers-view.js'
+import { BOX, figure, metricsView } from './metrics-view.js'
 import { experienceView } from './experience-view.js'
 
 // Absolute times are shown on the site's wall clock, not the viewing PC's zone (a screen set to UTC
@@ -877,8 +878,83 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
     }
   }
   document.getElementById('sicexSave')?.addEventListener('click', saveSicex)
+  // Last 24 hours (admins only; metrics-view.js works out every point and word): small line charts
+  // of the server's key numbers, drawn here as SVG with no library. The server adds a figure a
+  // minute, so this is asked once a minute, not at every refresh, and at once when the span is
+  // changed. Every label is set as text. A failure here leaves the section as it was: it is never
+  // in the way of the rest of the page.
+  const SVG_NS = 'http://www.w3.org/2000/svg'
+  const svg = (tag, attrs = {}, text = '') => {
+    const node = document.createElementNS(SVG_NS, tag)
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v))
+    if (text) node.textContent = text
+    return node
+  }
+  let trendHours = 24
+  let trendsAskedAt = 0
+  let trendsData = null
+  const trendTime = (ms) => (trendHours > 48
+    ? new Date(ms + siteTzMs).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', timeZone: 'UTC' })
+    : hhmm(ms))
+  const drawChart = (c, ticks) => {
+    const g = svg('svg', { viewBox: `0 0 ${BOX.width} ${BOX.height}`, role: 'img', 'aria-label': `${c.title}. ${c.series.map((s) => s.legend).join('. ')}` })
+    const bottom = BOX.height - BOX.bottom
+    for (const y of [BOX.top, (BOX.top + bottom) / 2, bottom]) g.append(svg('line', { class: 'mv-grid', x1: BOX.left, x2: BOX.width - BOX.right, y1: y, y2: y }))
+    g.append(svg('text', { x: BOX.left - 4, y: BOX.top + 4, 'text-anchor': 'end' }, figure(c.yMax)))
+    g.append(svg('text', { x: BOX.left - 4, y: bottom + 3, 'text-anchor': 'end' }, '0'))
+    ticks.forEach((t, i) => g.append(svg('text', { x: t.x, y: BOX.height - 4, 'text-anchor': i === 0 ? 'start' : i === ticks.length - 1 ? 'end' : 'middle' }, trendTime(t.t))))
+    for (const s of c.series) {
+      for (const run of s.runs) {
+        // a single figure on its own is a dot: a line needs two
+        if (!run.includes(' ')) {
+          const [x, y] = run.split(',')
+          g.append(svg('circle', { class: `mv-dot mv-${s.tone}`, cx: x, cy: y, r: 1.6 }))
+        } else g.append(svg('polyline', { class: `mv-line mv-${s.tone}`, points: run }))
+      }
+    }
+    const legend = el('ul', { className: 'mv-legend' })
+    for (const s of c.series) legend.append(el('li', {}, el('span', { className: `mv-key mv-${s.tone}` }), el('span', { textContent: s.legend })))
+    return el('div', { className: 'mv-chart' }, el('h3', { textContent: c.title }), g, legend, el('p', { className: 'hp-note', textContent: c.note }))
+  }
+  const paintTrends = () => {
+    const box = document.getElementById('trends')
+    if (!box) return
+    box.hidden = false
+    const names = Object.fromEntries((latestHealth?.nvrs ?? []).map((n) => [n.id, n.name || n.id]))
+    const v = metricsView(trendsData, { hours: trendHours, names })
+    document.getElementById('trendsTitle').textContent = v.title
+    document.getElementById('trendsSaid').textContent = v.message
+    document.getElementById('trendCharts').replaceChildren(...v.charts.map((c) => drawChart(c, v.ticks)))
+    document.getElementById('trendTopBox').hidden = v.collecting
+    document.getElementById('trendTop').replaceChildren(...v.top.map((line) => el('li', { textContent: line })))
+    document.getElementById('trendTopNote').textContent = v.topNote
+  }
+  const loadTrends = (force = false) => {
+    if (!isAdmin || !document.getElementById('trends')) return
+    if (!force && Date.now() - trendsAskedAt < 60_000) return
+    trendsAskedAt = Date.now()
+    const asked = trendHours
+    fetch(`/api/admin/metrics?hours=${asked}`, { cache: 'no-store' })
+      .then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status)))))
+      .then((d) => {
+        if (asked !== trendHours) return // (the span was changed meanwhile: its own answer is coming)
+        trendsData = d
+        paintTrends()
+      })
+      .catch(() => {})
+  }
+  for (const b of document.querySelectorAll('#trends .mv-switch button')) {
+    b.addEventListener('click', () => {
+      trendHours = Number(b.dataset.hours) || 24
+      for (const o of document.querySelectorAll('#trends .mv-switch button')) o.setAttribute('aria-pressed', String(o === b))
+      loadTrends(true)
+    })
+  }
   const loadWatching = () => {
     if (!isAdmin) return
+    try {
+      loadTrends()
+    } catch {}
     if (!sicexAsked) {
       sicexAsked = true
       fetch('/api/sicex').then((x) => (x.ok ? x.json() : null)).then(paintSicex).catch(() => {})
