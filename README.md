@@ -14,6 +14,9 @@ devices, and has since grown into a complete application: about 77,000 lines of 
 code and 200 test files. The SDK is still here in `source/` ([docs/SDK.md](docs/SDK.md)); the
 application is everything in `cctv/` and `deploy/`.
 
+There is also a native Android app, Argus for Android, with Live and Playback for phones, tablets
+and TV boxes. It is kept in a separate repository, `argus-android`.
+
 ## Contents
 
 - [What it does](#what-it-does)
