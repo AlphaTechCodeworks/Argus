@@ -927,6 +927,22 @@ export class Nvr {
     return 'quiet'
   }
 
+  /**
+   * Whether this process's own streams say the NVR is there: at least one plays, and most of those
+   * that play have had video within SILENT_MS. A camera list that is not answered then is the list
+   * being slow (over the P2P cloud it takes 10 s and more), not the NVR being gone.
+   */
+  #videoFlowing(now = Date.now()) {
+    let playing = 0
+    let fresh = 0
+    for (const s of this.streams.values()) {
+      if (s.stopped || s.state !== 'playing') continue
+      playing++
+      if (now - s.lastFrameAt < SILENT_MS) fresh++
+    }
+    return playing > 0 && fresh >= playing * MASS_STALL_SHARE
+  }
+
   /** Once an hour (this NVR's own streams only: its worker, or the main process without workers): how often the list was read, and why not. */
   #logListTurns(now = Date.now()) {
     const t = this.listTurns
@@ -951,6 +967,11 @@ export class Nvr {
     // replaced after MAX_CHANNEL_FAILURES turns (~2 minutes) as without a worker, where it took
     // that many keepalives (15 to 20 minutes with settings, playback and motion search failing)
     if (this.#workerPolls && Date.now() - this.lastOwnPoll < CONTROL_KEEPALIVE_MS) return
+    // (reads that went unanswered while the video flowed: the next is not tried at every turn; see below)
+    if (Date.now() < (this.listSkipUntil ?? 0)) {
+      turns.busy++
+      return
+    }
     const held = this.#listHeld()
     if (held) {
       turns[held]++
@@ -968,12 +989,26 @@ export class Nvr {
       if (ok) {
         this.lastOwnPoll = Date.now()
         this.health.channelFailures = 0
+        this.listSlowSaid = false
         if (!this.online && !this.relogging) {
           this.status = 'online'
           this.controlFailed = false // up again: see borrowing
         }
       } else if (++this.health.channelFailures >= MAX_CHANNEL_FAILURES) {
-        this.#relogin('NVR not answering').catch((e) => this.#log('relogin', e))
+        // Not while its video is flowing. Logging in again stops every stream of the NVR, and over the
+        // P2P cloud the list alone is often not answered in time: on 2026-10-13 Marine Satety was
+        // logged out and in 79 times in 12 hours, and Bounty Kitty 30, with 10 and 16 streams playing
+        // throughout. The list is asked again, but not at every turn (each unanswered read is one
+        // more slow call to an NVR that is already slow). A stream that really stops is seen by the
+        // stall check, which still logs in again when the NVR does not answer it.
+        if (this.#videoFlowing()) {
+          this.health.channelFailures = MAX_CHANNEL_FAILURES - 1
+          this.listSkipUntil = Date.now() + CHANNEL_QUIET_MS
+          if (!this.listSlowSaid) console.warn(`[${this.id}] the camera list is not being answered, but video is flowing: staying logged in and asking again every ${CHANNEL_QUIET_MS / 60_000} min`)
+          this.listSlowSaid = true
+        } else {
+          this.#relogin('NVR not answering').catch((e) => this.#log('relogin', e))
+        }
       }
     } finally {
       this.refreshing = false
