@@ -75,6 +75,14 @@ export const DEFAULT_MAIN_CORES = 1.6
 export const DEFAULT_MAIN_MAX = 2
 /** A converted main is at most this wide, never wider than the camera's (transcode.mjs ffmpegArgs maxWidth). */
 export const MAIN_MAX_WIDTH = 1920
+/**
+ * ...and a converted sub-stream this wide. The ladder's costs were measured on 704x480 at 15 fps; the
+ * fleet's sub-streams have since become 1280x720 at 20, and each conversion was measured at 24-34 % of
+ * a core on 2026-10-13 (14 to 22 of them: 2 to 4 of the server's 8 cores, a load average over 10, video
+ * stuttering for everybody). A grid tile is rarely drawn wider than this, and a camera opened full size
+ * is the main stream's conversion, not this one.
+ */
+export const SUB_MAX_WIDTH = 704
 /** One encoder thread each: the box is shared with a worker process per NVR, and a sub-stream needs no more. */
 export const ENCODER_THREADS = 1
 /**
@@ -210,7 +218,7 @@ export function stepFor(n, { units = DEFAULT_CORES * 100, current = null, ladder
  */
 const SHARED = { fps: 0, h264Only: true, keySeconds: KEY_SECONDS, bufSeconds: BUF_SECONDS, learnMs: 1000, wholeReplay: true, rejudge: true, maxLagS: MAX_LAG_S }
 export const KINDS = Object.freeze({
-  sub: Object.freeze({ id: 'sub', ladder: LADDER, spare: STEP_UP_SPARE, encThreads: ENCODER_THREADS, lingerMs: LINGER_MS, noRoom: NO_ROOM, stream: Object.freeze({ ...SHARED, type: 1, slowFps: EACH_PICTURE_BELOW_FPS }) }),
+  sub: Object.freeze({ id: 'sub', ladder: LADDER, spare: STEP_UP_SPARE, encThreads: ENCODER_THREADS, lingerMs: LINGER_MS, noRoom: NO_ROOM, stream: Object.freeze({ ...SHARED, type: 1, subMaxWidth: SUB_MAX_WIDTH, slowFps: EACH_PICTURE_BELOW_FPS }) }),
   main: Object.freeze({ id: 'main', ladder: MAIN_LADDER, spare: MAIN_STEP_UP_SPARE, encThreads: MAIN_ENCODER_THREADS, lingerMs: MAIN_LINGER_MS, noRoom: NO_ROOM_MAIN, stream: Object.freeze({ ...SHARED, type: 0, maxWidth: MAIN_MAX_WIDTH, lowDelay: false, slowFps: MAIN_EACH_PICTURE_BELOW_FPS, endEach: true }) })
 })
 

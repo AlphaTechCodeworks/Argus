@@ -304,7 +304,12 @@ export class LiveStream {
     for (const ws of this.clients) ws.waitForKey = true
     this.gotVideo = false
     clearTimeout(this.firstFrameTimer)
-    const firstFrameMs = this.streamType === 0 && this.nvr.cfg?.sn ? FIRST_FRAME_P2P_MAIN_MS : FIRST_FRAME_MS
+    // Every main stream is given the longer wait, not only one over the P2P cloud. On Lawrence's own
+    // network (2026-10-13) the mains of its older H.264 cameras (19, 20, 21, 31) and of camera 17 came
+    // after 2.5 to 5 s on a good try and after more than 8 on a bad one: given up on at 8 s and started
+    // again, such a camera never showed, and the full-size view stood at "connecting". A main that is
+    // truly refused is still seen, 12 s later than before; the sub-stream under it plays meanwhile.
+    const firstFrameMs = this.streamType === 0 ? FIRST_FRAME_P2P_MAIN_MS : FIRST_FRAME_MS
     this.firstFrameTimer = setTimeout(() => {
       if (this.state !== 'playing' || this.handle !== handle || this.gotVideo) return
       this.lastFailure = { at: Date.now(), ms: firstFrameMs, fast: true, silent: true, reason: `no video within ${firstFrameMs / 1000} s of starting (refused by the NVR?)` }

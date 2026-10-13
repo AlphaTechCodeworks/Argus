@@ -213,7 +213,7 @@ const feed = (stream, from, n, make = h265) => { for (let i = from; i < from + n
   check('one ffmpeg for it, niced below the workers (ionice idle, nice 10)', procs.length === 1 && procs[0].bin === 'ionice' && procs[0].args.slice(0, 5).join(' ') === '-c 3 nice -n 10', procs[0]?.args.slice(0, 6).join(' '))
   const args = procs[0].args.join(' ')
   check('... H.265 in, libx264 veryfast crf 21 out, one encoder thread, zerolatency, no B-frames', args.includes('-f hevc -i pipe:0') && args.includes('-c:v libx264 -preset veryfast -threads 1 -crf 21 -tune zerolatency -bf 0'), args)
-  check(`... a keyframe every ${KEY_SECONDS} s of the camera's own rate (15 fps: 30 pictures), nothing dropped or scaled`, / -g 30 /.test(args) && !args.includes('select=') && !args.includes('scale='), args)
+  check(`... a keyframe every ${KEY_SECONDS} s of the camera's own rate (15 fps: 30 pictures), nothing dropped, no wider than 704`, / -g 30 /.test(args) && !args.includes('select=') && args.includes('scale=min(704'), args)
   // (after each, the 7 bytes that end its picture: ffmpeg lets it go without waiting for the next)
   check('... every frame of the camera goes in, each ended as it goes: out without waiting for the next', procs[0].written.length === 40 && procs[0].written.every((b, i) => (i % 2 ? b.length === 7 && b[4] === 0x46 : b.length === 8)) && args.includes('-flags low_delay'))
   check('... its log lines say what it is, with the camera', logs.some((l) => l === '[h264-fallback] n1/5: converting a sub stream at 15.0 fps to H.264, every frame kept, each picture out as it comes'), logs.join(' | '))
@@ -406,7 +406,7 @@ const feed = (stream, from, n, make = h265) => { for (let i = from; i < from + n
     }
   }
   check('whatever the budget: n mains at the step for n are never over it, and more never means a better preset', ok)
-  check('the kinds: a sub-stream as it was, a main scaled to 1920 wide on two decoder threads, each picture ended as it goes in', KINDS.sub.stream.type === 1 && KINDS.sub.stream.maxWidth === undefined && KINDS.sub.stream.lowDelay === undefined && KINDS.sub.stream.endEach === undefined && KINDS.sub.stream.slowFps === 1000
+  check('the kinds: a sub-stream as it was, a main scaled to 1920 wide on two decoder threads, each picture ended as it goes in', KINDS.sub.stream.type === 1 && KINDS.sub.stream.maxWidth === undefined && KINDS.sub.stream.subMaxWidth === 704 && KINDS.sub.stream.lowDelay === undefined && KINDS.sub.stream.endEach === undefined && KINDS.sub.stream.slowFps === 1000
     && KINDS.main.stream.type === 0 && KINDS.main.stream.maxWidth === 1920 && MAIN_MAX_WIDTH === 1920 && KINDS.main.stream.lowDelay === false && KINDS.main.stream.endEach === true && KINDS.main.stream.slowFps === 10)
   check('... both keep every frame, convert only H.265, a keyframe every 2 s, and are reset when 2 s behind', [KINDS.sub, KINDS.main].every((K) => K.stream.fps === 0 && K.stream.h264Only === true && K.stream.keySeconds === KEY_SECONDS && K.stream.maxLagS === 2 && K.stream.bufSeconds === BUF_SECONDS))
   check('... a main lingers 3 s after its last viewer, a sub-stream 10', MAIN_LINGER_MS === 3000 && KINDS.main.lingerMs === 3000 && KINDS.sub.lingerMs === LINGER_MS && LINGER_MS === 10_000)
@@ -497,7 +497,7 @@ const feedMain = (stream, from, n) => { for (let i = from; i < from + n; i++) st
   const subs = []
   const openSub = (ch) => { const w = sock(); subs[ch] = w; const r = fb.attach(`n1/${ch}/1`, hub.getStream(ch, 1), w, { camera: `n1/${ch + 1}` }); if (r === true) feed(hub.getStream(ch, 1), 0, 20); return r }
   check('one main and one sub-stream of the same camera: two conversions, each in its own budget', openMain(0) === true && openSub(0) === true && procs.length === 2 && fb.summary().main.running === 1 && fb.summary().running === 1 && fb.streams.size === 2)
-  check('... the sub-stream is converted as it always was: veryfast crf 21, low_delay, nothing scaled', procs[1].args.join(' ').includes('-preset veryfast -threads 1 -crf 21') && procs[1].args.includes('low_delay') && !procs[1].args.join(' ').includes('scale='))
+  check('... the sub-stream is converted as before but no wider than 704: veryfast crf 21, low_delay', procs[1].args.join(' ').includes('-preset veryfast -threads 1 -crf 21') && procs[1].args.includes('low_delay') && procs[1].args.join(' ').includes('scale=min(704'))
   check('a second main: it starts at superfast (2 x 80 fits 1.6 cores, 2 x 95 does not)', openMain(1) === true && procs.length === 3 && procs[2].args.includes('superfast') && procs[2].args.join(' ').includes('-crf 22') && procs[2].args.join(' ').includes('-maxrate 10000k') && fb.summary().main.step === 'superfast')
   check('... said in the log as the main streams\' step, with the cores it comes to', logs.some((l) => /^\[h264-fallback\] 2 of 2 main-stream conversions running: superfast crf 22 \(was veryfast\), each from its camera's next keyframe; about 1\.60 of 1\.60 cores/.test(l)), logs.filter((l) => l.includes('conversions running')).join(' | '))
   check('... the sub-streams\' step has not moved, nor their conversion', fb.summary().step === 'veryfast' && fb.step === 0 && !killed(procs[1]))
