@@ -57,7 +57,7 @@ const makeTranscoder = (o) => {
   // a phone on the local network keeps the ffmpeg it always had: the remote viewers' settings below
   // (a 1 s buffer, two decoder threads, a keyframe every 2 s) are theirs alone
   const phoneArgs = ffmpegArgs(x.o).join(' ')
-  check('a phone\'s conversion is unchanged: low_delay, a 4 s buffer at 2.5 Mbit/s, a keyframe every 50 pictures', phoneArgs.includes('-flags low_delay') && !phoneArgs.includes('-threads') && phoneArgs.includes('-maxrate 2500k -bufsize 10000k') && / -g 50 /.test(phoneArgs) && phoneArgs.includes('-crf 25'), phoneArgs)
+  check('phone conversion: low_delay, a 1 s buffer, a keyframe every 2 s', phoneArgs.includes('-flags low_delay') && !phoneArgs.includes('-threads') && phoneArgs.includes('-maxrate 2500k -bufsize 2500k') && / -g 30 /.test(phoneArgs) && phoneArgs.includes('-crf 25'), phoneArgs)
   check('both phones get the converted frames', a.got.length > 0 && a.got.length === b.got.length && parseFrame(a.got[0]).codec === 0)
   const c = fakeWs()
   check('the cap reached for another camera: false, so it gets the normal stream', !live.attach('n1/1/0', fakeSource(), 0, c))

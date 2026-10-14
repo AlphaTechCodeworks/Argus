@@ -62,6 +62,26 @@ let now = 1_000_000
 const t = new LiveTile(tileEl, { nvr: 'n1', ch: 2 }, 1, 0, { now: () => now })
 clearInterval(t.statusTimer) // driven by hand below
 clearTimeout(t.retry)
+{
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const socketCount = sockets.length
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgentData: { mobile: true } } })
+  try {
+    const phoneTile = new LiveTile(tileEl, { nvr: 'n1', ch: 20 }, SUB_STREAM, 0, { now: () => now })
+    clearTimeout(phoneTile.retry)
+    phoneTile.connect()
+    check('phone tile without viewer options requests the light stream', /[?&]fps=15(?:&|$)/.test(sockets.at(-1).url))
+    check('phone tile also limits its renderer', phoneTile.player.minDrawStepMs > 0)
+    phoneTile.close()
+    const uncapped = new LiveTile(tileEl, { nvr: 'n1', ch: 20 }, SUB_STREAM, 0, { maxFps: null })
+    check('explicit uncapped tile remains uncapped', uncapped.maxFps === null && uncapped.player.minDrawStepMs === 0)
+    uncapped.close()
+  } finally {
+    sockets.splice(socketCount)
+    if (original) Object.defineProperty(globalThis, 'navigator', original)
+    else delete globalThis.navigator
+  }
+}
 // the player times each frame as it arrives, and a long decode queue is not a slow decoder unless it is
 // really behind (player.js arrivalClock; test/player-burst.test.mjs)
 check('a live tile\'s player times frames as they arrive (arrivalClock)', t.player.arrivalClock === true)
@@ -211,11 +231,11 @@ check('... reconnect shows as reconnecting', /reconnecting/.test(status.textCont
   send(true)
   send(false)
   send(false)
-  check('suspended: frames are not decoded', pushed.join('') === 'K', pushed.join(''))
+  check('suspended: decoder released and new frames are not decoded', pushed.join('') === 'Kreset', pushed.join(''))
   const socketsBefore = sockets.length
   t4.resume()
   check('resume: no new socket', sockets.length === socketsBefore && !w4.closed)
-  check('resume: the kept keyframe and the frames after it are decoded at once', pushed.slice(1).join(',') === 'reset,K,d,d', pushed.join(','))
+  check('resume: the kept keyframe and the frames after it are decoded at once', pushed.slice(1).join(',') === 'reset,reset,K,d,d', pushed.join(','))
   send(false)
   check('resume: and the stream carries on', pushed.at(-1) === 'd')
   // hidden for less than a keyframe interval: the stretch from before still counts (it was a

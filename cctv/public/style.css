@@ -1902,6 +1902,7 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
 /* a phone's 2 x 2: two cameras across, the page scrolling to the second row */
 @media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   body.phone-g2 #grid { grid-template-columns: 1fr 1fr !important; }
+  body.phone-g3 #grid { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
   body.phone-g2 .tile .name { font-size: 11px; }
 }
 /* the ‹ › on the full-size camera: every screen (a PC had no way to step; ← → keys as well) */
@@ -2102,4 +2103,11 @@ body.phone-full .single-overlay .label { padding-left: calc(8px + env(safe-area-
   .rights-table tr { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 8px; }
   .rights-table td { display: grid; grid-template-columns: 8.5em 1fr; gap: 8px; padding: 4px 10px; white-space: normal; border-bottom: 0; }
   .rights-table td::before { content: attr(data-label); color: var(--text-muted); }
+}
+@media (max-width:700px), (pointer:coarse) and (max-height:500px) {
+  .single-overlay .phone-step, .phone-fs-note, .cam-sheet, .ease-chip {
+    -webkit-backdrop-filter:none; backdrop-filter:none;
+  }
+  .cam-sheet { background:var(--bg); }
+  body.phone-list #grid > .tile { box-shadow:none; }
 }

@@ -3,10 +3,11 @@
 // Sessions are stateless signed cookies: base64url(user).expiry.hmac. A signed-out one is remembered
 // (revokeSession) until it would have run out anyway, so the token is refused wherever it still is.
 import { createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileCache } from './file-cache.mjs'
+import { writeFileAtomicSync } from './atomic-write.mjs'
 
 const scrypt = promisify(scryptCb)
 
@@ -72,7 +73,7 @@ const usersChanged = () => {
 
 export const saveUsers = (users) => {
   ensureDir(USERS_FILE)
-  writeFileSync(USERS_FILE, `${JSON.stringify(users, null, 2)}\n`, { mode: 0o600 })
+  writeFileAtomicSync(USERS_FILE, `${JSON.stringify(users, null, 2)}\n`)
   usersCache.forget()
   usersChanged()
 }
@@ -127,7 +128,7 @@ export const verifySession = (token, { allowPasswordChange = false } = {}) => {
   const expected = Buffer.from(sign(payload))
   if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) return null
   if (Number(parts[1]) < Date.now()) return null
-  if (revokedSessions().has(parts[2])) return null // signed out (revokeSession)
+  if (revokedSessions().has(parts[2]) || !revocationReadable) return null
   const user = Buffer.from(parts[0], 'base64url').toString()
   const users = loadUsers()
   // hasOwn, not `in`: `'constructor' in {}` is true, and a name that resolves through
@@ -166,15 +167,18 @@ export async function changePassword(user, currentPassword, newPassword) {
 // by temp-file-and-rename, read once: only this process signs sessions out.
 const REVOKED_FILE = join(DATA_DIR, 'revoked-sessions.json')
 let revoked = null // signature -> expiry (ms)
+let revocationReadable = true
 const revokedSessions = () => {
   if (revoked) return revoked
   revoked = new Map()
   if (!existsSync(REVOKED_FILE)) return revoked
   try {
     const raw = JSON.parse(readFileSync(REVOKED_FILE, 'utf8'))
-    for (const [sig, exp] of Object.entries(raw && typeof raw === 'object' ? raw : {})) if (Number.isFinite(exp) && exp >= Date.now()) revoked.set(sig, exp)
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.values(raw).some(exp => !Number.isFinite(exp))) throw new Error('invalid revocation store')
+    for (const [sig, exp] of Object.entries(raw)) if (exp >= Date.now()) revoked.set(sig, exp)
   } catch (e) {
-    console.error(`[auth] ${REVOKED_FILE} is unreadable (${e.message}); sessions signed out before now are good again until they run out`)
+    revocationReadable = false
+    console.error(`[auth] ${REVOKED_FILE} is unreadable (${e.message}); sessions are refused until the store is repaired and the server restarted`)
   }
   return revoked
 }
@@ -193,9 +197,7 @@ export const revokeSession = (token) => {
   list.set(sig, Number(expiry))
   try {
     ensureDir(REVOKED_FILE)
-    const tmp = `${REVOKED_FILE}.tmp-${process.pid}`
-    writeFileSync(tmp, `${JSON.stringify(Object.fromEntries(list))}\n`, { mode: 0o600 })
-    renameSync(tmp, REVOKED_FILE)
+    writeFileAtomicSync(REVOKED_FILE, `${JSON.stringify(Object.fromEntries(list))}\n`)
   } catch (e) {
     console.error(`[auth] could not write ${REVOKED_FILE} (${e.message}); that session is signed out until the server restarts`)
   }

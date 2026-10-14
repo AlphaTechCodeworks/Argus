@@ -18,6 +18,7 @@
 // for the speed ladder and the shuttle, pb-sources.js for merging and skew, player.js for decoding.
 // playback.js itself is deliberately not touched or imported: its state is the single-camera page's.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { deviceVideoBudget } from './video-budget.js'
 import { PLAYBACK_CLOCK } from './playout.js'
 import { describeSkew, mergeSources, pbRights, recordedFrom, refusedMessage, wallQualities, wallTileMode } from './pb-sources.js'
 import { follow as followView, fmtClock, makeView, spanLabel, ticks, zoomAt } from './pb-view.js'
@@ -237,6 +238,14 @@ class Tile {
       // the playback page's clock: recordings arrive in bursts, not at frame rate, and after a
       // server stall they arrive late for good (playout.js PLAYBACK_CLOCK)
       clock: PLAYBACK_CLOCK,
+      onResourceLimit: () => {
+        this.resourceBlocked = true
+        this.undecodable = true
+        this.error = 'Device video limit. Select fewer cameras or a lighter recording source.'
+        this.close()
+        this.player.reset()
+      },
+      onError: () => { this.error = 'Video restarted. Seek to retry.'; this.close() },
       onFrame: (ts) => {
         // ts is in whatever clock this tile's source stamps: the server's own recordings are
         // already server time (skew 0 below), the NVR's playback is the NVR's clock.
@@ -343,6 +352,12 @@ class Tile {
    */
   wantsStream(atMs) {
     if (document.hidden || !pageAwake) return false
+    const budget = deviceVideoBudget()
+    if (this.resourceBlocked && (!budget || budget.active < budget.limit)) {
+      this.resourceBlocked = false
+      this.undecodable = false
+      this.error = null
+    }
     if (state.maximised && state.maximised !== this.key) return false
     return this.status(atMs).kind === 'playing'
   }
@@ -515,6 +530,7 @@ class Tile {
   }
 
   close() {
+    this.player.reset()
     if (!this.ws) return
     this.ws.onclose = null
     this.ws.close()

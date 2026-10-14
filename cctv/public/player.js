@@ -20,6 +20,8 @@
 //    needs no isConfigSupported round trip.
 import { PlayoutClock, REMOTE_CLOCK } from './playout.js'
 import { pictureSize, videoInfo } from './sps.js'
+import { canvasSize, isPhone, maxLiveFps } from './device.js'
+import { deviceVideoBudget } from './video-budget.js'
 
 const MAX_QUEUED_FRAMES = 45
 /**
@@ -97,6 +99,16 @@ function h264Codec(data) {
 
 // browsers differ in which H.265 codec strings they accept; try the common forms
 const H265_CODECS = ['hev1.1.6.L153.B0', 'hvc1.1.6.L153.B0', 'hev1.1.6.L120.90', 'hvc1.1.6.L120.90', 'hev1.1.6.L93.B0', 'hvc1.1.6.L93.B0']
+const configChecks = new Map()
+export function clearDecoderConfigCache() { configChecks.clear() }
+function supportedConfig(config) {
+  const key = JSON.stringify(config)
+  if (!configChecks.has(key)) {
+    if (configChecks.size >= 64) configChecks.delete(configChecks.keys().next().value)
+    configChecks.set(key, VideoDecoder.isConfigSupported(config).catch(() => ({ supported: false })))
+  }
+  return configChecks.get(key)
+}
 
 async function pickDecoderConfig(codecId, data, size, info, rangeFix = RANGE_FIX) {
   if (typeof VideoDecoder === 'undefined' || typeof VideoDecoder.isConfigSupported !== 'function') return null
@@ -109,7 +121,7 @@ async function pickDecoderConfig(codecId, data, size, info, rangeFix = RANGE_FIX
     for (const hardwareAcceleration of ['prefer-hardware', 'no-preference']) {
       for (const codec of codecs) {
         const config = { codec, optimizeForLatency: true, hardwareAcceleration, ...dims, ...colour }
-        const { supported } = await VideoDecoder.isConfigSupported(config).catch(() => ({ supported: false }))
+        const { supported } = await supportedConfig(config)
         if (supported) return config
       }
     }
@@ -139,13 +151,18 @@ const active = new Set()
 let rafId = 0
 
 function tick(now) {
-  for (const player of active) player.present(now)
-  rafId = active.size > 0 ? requestAnimationFrame(tick) : 0
+  rafId = 0
+  let pending = false
+  for (const player of active) {
+    try { player.present(now) } catch (error) { player.presentationFailed(error) }
+    pending ||= !player.closed && !player.paused && !player.stills && player.queue.length > 0
+  }
+  if (pending) wakeRender()
 }
+function wakeRender() { if (!rafId) rafId = requestAnimationFrame(tick) }
 
 function track(player) {
   active.add(player)
-  if (!rafId) rafId = requestAnimationFrame(tick)
 }
 
 // ---- player ---------------------------------------------------------------
@@ -179,6 +196,10 @@ export class VideoPlayer {
     this.onUnsupported = options.onUnsupported
     this.onFrame = options.onFrame
     this.onPoster = options.onPoster
+    this.onResourceLimit = options.onResourceLimit
+    this.onError = options.onError
+    this.resources = options.resources === undefined ? deviceVideoBudget() : options.resources
+    this.decoderGeneration = 0
     this.paintFirst = options.paintFirst === true // live: the first picture at once (see #onDecoded)
     this.firstPainted = false
     // maxFps: a frame is drawn only if it was captured at least 3/4 of a 1/maxFps interval after the
@@ -187,15 +208,15 @@ export class VideoPlayer {
     // apart; 30 fps every 2nd, 67 ms apart. Held in wall time (one draw every 62.7 ms at most), a
     // 20 fps camera drew 15 a second on a 60 Hz phone, stepping 50, 50 and 100 ms through the video:
     // movement at 1x, 1x, 2x, several times a second (stutter report 2.8, 29 Sep)
-    this.minDrawStepMs = options.maxFps > 0 ? (0.75 * 1000) / options.maxFps - 4 : 0
+    const maxFps = options.maxFps === undefined ? maxLiveFps() : options.maxFps
+    this.minDrawStepMs = maxFps > 0 ? (0.75 * 1000) / maxFps - 4 : 0
     this.lastDrawnTs = null // capture time (ms) of the last frame present() drew
     this.clockOptions = options.clock
     this.clock = new PlayoutClock(options.clock)
     this.remote = null
     this.maxQueued = options.maxQueuedFrames ?? MAX_QUEUED_FRAMES
-    // Experimental opt-in: exact pause/resume must be measured before enabling
-    // a tighter image budget in operator views. Defaults retain existing frames.
-    this.maxQueuedImageBytes = options.maxQueuedImageBytes ?? Infinity
+    // Phone image queues have a byte ceiling as well as a frame ceiling.
+    this.maxQueuedImageBytes = options.maxQueuedImageBytes ?? (isPhone() ? 32 * 1024 ** 2 : Infinity)
     this.arrivalClock = options.arrivalClock === true && this.pacing // (without pacing there is no clock)
     // noRewindMs: capture times (ms) of the newest frame timed as it arrived, and of the newest queued
     // to be shown (or drawn); kept across reset(), as a reconnect's replay starts before what was shown
@@ -333,12 +354,13 @@ export class VideoPlayer {
           this.configuring = true
           this.held ??= []
           const seq = this.seekSeq
+          const generation = this.decoderGeneration
           ok = await this.#configure(codecId, data, size).catch((e) => {
             console.warn('decoder set-up failed', e)
             this.#closeDecoder()
             return false
           })
-          if (!ok) this.held.length = 0
+          if (!ok && generation === this.decoderGeneration) this.held.length = 0
           // a seek came meanwhile (seekReset): this frame is from before it; the decoder stays set up
           else if (seq !== this.seekSeq) ok = false
         }
@@ -393,9 +415,10 @@ export class VideoPlayer {
 
   async #configure(codecId, data, size) {
     this.#closeDecoder()
+    const generation = this.decoderGeneration
     const info = videoInfo(codecId, data)
     const config = await pickDecoderConfig(codecId, data, size, info)
-    if (this.closed) return false
+    if (this.closed || generation !== this.decoderGeneration) return false
     if (!config) {
       this.onUnsupported?.(codecId)
       return false
@@ -407,12 +430,21 @@ export class VideoPlayer {
     this.stats.codec = config.codec
     // WebCodecs exposes a preference, not proof of the decoder backend in use.
     this.stats.hw = config.hardwareAcceleration === 'prefer-hardware' ? 'hardware preferred' : 'auto'
+    if (this.resources && !this.resources.acquire(this)) {
+      this.onResourceLimit?.('decoder capacity')
+      return false
+    }
     this.decoder = new VideoDecoder({
-      output: (frame) => this.#onDecoded(frame),
+      output: (frame) => {
+        try { this.#onDecoded(frame) }
+        catch (error) { frame.close(); this.presentationFailed(error) }
+      },
       error: (err) => {
+        configChecks.clear()
         console.warn('decoder error', err)
         this.#closeDecoder()
         this.needKey = true
+        this.onResourceLimit?.('decoder error')
         // A positive capability probe does not guarantee that this camera's HEVC
         // stream decodes. Let the caller request its H.264 fallback rather than
         // repeatedly opening the same failing decoder with a black picture.
@@ -498,16 +530,53 @@ export class VideoPlayer {
       this.onFrame?.(ts)
     }
     this.queue.push({ frame, ts })
+    wakeRender()
     // Conservatively allow four bytes per pixel (RGBA/10-bit surface overhead).
     // A frame-count cap alone retains over a gigabyte of paused 4K YUV video.
     const bytesPerFrame = Math.max(1, frame.codedWidth * frame.codedHeight * 4)
-    const imageLimit = Math.max(2, Math.floor(this.maxQueuedImageBytes / bytesPerFrame))
-    // Preserve the running clock's jitter buffer; only paused video uses this cap.
-    const queueLimit = this.paused ? Math.min(MAX_PAUSED_FRAMES, imageLimit) : this.maxQueued
+    const imageLimit = Math.max(1, Math.floor(this.maxQueuedImageBytes / bytesPerFrame))
+    const queueLimit = Math.min(this.paused ? MAX_PAUSED_FRAMES : this.maxQueued, imageLimit)
+    let trimmed = false
     while (this.queue.length > queueLimit) {
       this.queue.shift().frame.close()
       this.stats.dropped++
+      trimmed = true
     }
+    if (trimmed && imageLimit < this.maxQueued) this.fitImageClock()
+    this.resources?.enforce()
+  }
+
+  trimImages(bytes) {
+    let trimmed = false
+    const wasLimited = this.stats.memoryLimited === true
+    let retained = this.queue.reduce((n, item) => n + item.frame.codedWidth * item.frame.codedHeight * 4, 0)
+    while (this.queue.length && retained > bytes) {
+      const { frame } = this.queue.shift()
+      retained -= frame.codedWidth * frame.codedHeight * 4
+      frame.close()
+      this.stats.dropped++
+      trimmed = true
+    }
+    if (trimmed) {
+      this.stats.memoryLimited = true
+      if (!this.queue.length && !this.paused && !wasLimited) this.onResourceLimit?.('image capacity')
+      this.fitImageClock()
+    }
+  }
+
+  fitImageClock() {
+    if (this.paused || !this.pacing || !this.queue.length) return
+    const now = performance.now()
+    // Do not perpetually discard future pictures before their due time when the
+    // image budget is smaller than the selected jitter delay.
+    if (this.clock.presentAt(this.queue[0].ts) > now) this.clock.anchorAt(this.queue[0].ts, now)
+    this.stats.memoryLimited = true
+  }
+
+  presentationFailed(error) {
+    this.reset()
+    this.stats.renderError = String(error?.message ?? error)
+    try { this.onError?.(error) } catch {}
   }
 
   /** Called by the shared render loop on every display refresh. */
@@ -565,6 +634,7 @@ export class VideoPlayer {
 
   resume() {
     this.paused = false
+    if (this.queue.length) wakeRender()
     // continue from the oldest buffered frame instead of skipping what arrived while paused
     if (this.queue.length > 0) this.clock.anchorAt(this.queue[0].ts, performance.now())
     else this.clock.anchor = null
@@ -578,9 +648,10 @@ export class VideoPlayer {
   }
 
   #draw(frame, now) {
-    this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height)
-    if (this.grabs.length) this.#grabFrame(frame)
-    frame.close()
+    try {
+      this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height)
+      if (this.grabs.length) this.#grabFrame(frame)
+    } finally { frame.close() }
     const w = this.win
     if (w.lastShown) w.intervals.push(now - w.lastShown)
     w.lastShown = now
@@ -826,9 +897,7 @@ export class VideoPlayer {
     if (!this.videoWidth) return
     const box = this.canvas.getBoundingClientRect()
     const dpr = window.devicePixelRatio || 1
-    const scale = Math.min(1, (box.width * dpr) / this.videoWidth, (box.height * dpr) / this.videoHeight)
-    const w = Math.max(2, Math.round(this.videoWidth * scale))
-    const h = Math.max(2, Math.round(this.videoHeight * scale))
+    const { width: w, height: h } = canvasSize(this.videoWidth, this.videoHeight, box, dpr)
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w
       this.canvas.height = h
@@ -852,6 +921,8 @@ export class VideoPlayer {
       height: this.videoHeight,
       queuedFrames: this.queue.length,
       decodeQueue: this.decoder?.decodeQueueSize ?? 0,
+      activeDecoders: this.resources?.active ?? null,
+      decoderLimit: this.resources?.limit ?? null,
       queuedImageMiB: Math.round(this.queue.reduce((bytes, { frame }) => bytes + frame.codedWidth * frame.codedHeight * 4, 0) / 1024 / 1024)
     })
     w.frames = 0
@@ -861,6 +932,9 @@ export class VideoPlayer {
 
   /** Clears buffered video, e.g. before a seek or after a reconnect. */
   reset() {
+    this.decoderGeneration++
+    delete this.stats.renderError
+    delete this.stats.memoryLimited
     for (const { frame } of this.queue) frame.close()
     this.queue = []
     this.clock.reset()
@@ -958,6 +1032,7 @@ export class VideoPlayer {
   }
 
   #closeDecoder() {
+    this.resources?.release(this)
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.decoder = null
     this.fed = [] // (a closed decoder hands nothing back)

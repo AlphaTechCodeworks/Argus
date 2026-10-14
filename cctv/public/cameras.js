@@ -40,6 +40,8 @@ function flatten(report) {
   return rows
 }
 
+const PAGE_SIZE = 50
+let cameraPage = 0, filterTimer
 function render(rows, filter) {
   const q = filter.trim().toLowerCase()
   const shown = q ? rows.filter((r) => r.blob.includes(q)) : rows
@@ -50,7 +52,8 @@ function render(rows, filter) {
   thead.append(htr)
   t.append(thead)
   const tb = el('tbody')
-  for (const r of shown) {
+  cameraPage = Math.min(cameraPage, Math.max(0, Math.ceil(shown.length / PAGE_SIZE) - 1))
+  for (const r of shown.slice(cameraPage * PAGE_SIZE, (cameraPage + 1) * PAGE_SIZE)) {
     const tr = el('tr', r.offline ? 'cm-off' : r.camOffline ? 'cm-camoff' : '')
     r.cells.forEach((cell, i) => {
       const td = el('td', i === 2 || i === 4 || i === 11 || i === 15 ? 'cm-mid' : '')
@@ -61,6 +64,9 @@ function render(rows, filter) {
   }
   t.append(tb)
   $('cmTable').replaceChildren(t)
+  $('cmPage').textContent = `${cameraPage + 1} / ${Math.max(1, Math.ceil(shown.length / PAGE_SIZE))} · ${shown.length} cameras`
+  $('cmPrevious').disabled = cameraPage === 0
+  $('cmNext').disabled = (cameraPage + 1) * PAGE_SIZE >= shown.length
   return shown.length
 }
 
@@ -101,8 +107,16 @@ async function load({ fresh = false } = {}) {
 }
 
 $('cmFilter').addEventListener('input', () => {
-  const shown = render(rows, $('cmFilter').value)
-  if (shown !== lastTotal || $('cmFilter').value) $('cmStatus').hidden = true
+  clearTimeout(filterTimer)
+  filterTimer = setTimeout(() => {
+    cameraPage = 0
+    const shown = render(rows, $('cmFilter').value)
+    if (shown !== lastTotal || $('cmFilter').value) $('cmStatus').hidden = true
+  }, 120)
+})
+for (const [id, direction] of [['cmPrevious', -1], ['cmNext', 1]]) $(id).addEventListener('click', () => {
+  cameraPage += direction
+  render(rows, $('cmFilter').value)
 })
 $('cmRefresh').addEventListener('click', () => load({ fresh: true }))
 $('cmXlsx').addEventListener('click', () => {

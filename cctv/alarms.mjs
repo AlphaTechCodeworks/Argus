@@ -41,7 +41,7 @@
 //   DELETE /api/alarms/rules/:id                       -> { deleted: true } (admins)
 import {
   acknowledge, classify, createRule, deleteRule, getEvent, getRule,
-  listEvents, listRules, noteNotified, unacknowledge, updateRule
+  listEventsAsync, listRules, noteNotified, unacknowledge, updateRule
 } from './events-db.mjs'
 import {
   TYPE_NAMES, alarmMessage, applyRules, cameraKey, checkAck, eventWindow,
@@ -357,7 +357,7 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
       // Not for a word in most camera names (it narrows nothing), nor for letters LIKE cannot fold.
       const words = !hasText || /[^ -~]/.test(needle)
         ? []
-        : needle.split(/s+/).map((word) => ({
+        : needle.split(/\s+/).map((word) => ({
             word,
             types: TYPE_NAMES.filter((t) => labelOf(t).toLowerCase().includes(word)),
             cameras: cams.filter((c) => String(c.name ?? '').toLowerCase().includes(word)).map((c) => ({ nvr: c.nvr ?? c.nvrId, ch: c.ch }))
@@ -365,7 +365,7 @@ export async function handleAlarms(method, pathname, readJson, deps = {}) {
       // (a viewer who may see none of the cameras asked for: nothing, without a search)
       const found = camKeys && !camKeys.length
         ? []
-        : listEvents({
+        : await listEventsAsync({
             fromMs,
             toMs,
             limit: num(p.get('limit')) ?? 500,

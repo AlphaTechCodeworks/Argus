@@ -21,7 +21,8 @@
 //
 // Exports live under the data directory (DATA_DIR/exports), never on a recording location: filling
 // the recording drive with exports would stop the recording.
-import { createHash, createCipheriv, createDecipheriv, randomUUID, scryptSync } from 'node:crypto'
+import { createHash, createCipheriv, createDecipheriv, randomUUID, scrypt } from 'node:crypto'
+import { promisify } from 'node:util'
 import { closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
@@ -129,7 +130,8 @@ export function writeHashed(dest, buf) {
   return { bytes: buf.length, sha256: createHash('sha256').update(buf).digest('hex'), crc32: crcEnd(crcUpdate(crcStart(), buf)) }
 }
 
-const keyFor = (password, salt) => scryptSync(String(password), salt, 32, { N: SCRYPT_COST, r: 8, p: 1, maxmem: 64 * 1024 * 1024 })
+const scryptAsync = promisify(scrypt)
+const keyFor = (password, salt) => scryptAsync(String(password), salt, 32, { N: SCRYPT_COST, r: 8, p: 1, maxmem: 64 * 1024 * 1024 })
 const randomBytesOf = (n) => {
   const b = Buffer.allocUnsafe(n)
   globalThis.crypto.getRandomValues(b)
@@ -145,7 +147,7 @@ export async function encryptFileStream(src, dest, password) {
   if (!password) throw new Error('a password is required')
   const salt = randomBytesOf(SALT_BYTES)
   const iv = randomBytesOf(IV_BYTES)
-  const cipher = createCipheriv('aes-256-gcm', keyFor(password, salt), iv)
+  const cipher = createCipheriv('aes-256-gcm', await keyFor(password, salt), iv)
   mkdirSync(dirname(dest), { recursive: true })
   const tmp = `${dest}.tmp-${process.pid}`
   const out = createWriteStream(tmp)
@@ -192,7 +194,7 @@ export async function decryptFileStream(src, dest, password) {
   if (!hdr.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('not an encrypted pack file')
   const salt = hdr.subarray(MAGIC.length, MAGIC.length + SALT_BYTES)
   const iv = hdr.subarray(MAGIC.length + SALT_BYTES, head)
-  const decipher = createDecipheriv('aes-256-gcm', keyFor(password, salt), iv)
+  const decipher = createDecipheriv('aes-256-gcm', await keyFor(password, salt), iv)
   decipher.setAuthTag(tag)
   mkdirSync(dirname(dest), { recursive: true })
   const tmp = `${dest}.tmp-${process.pid}`

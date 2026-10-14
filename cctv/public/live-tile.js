@@ -1,9 +1,10 @@
 // One live camera in a tile: streams it over WebSocket into a VideoPlayer, with reconnects.
 // Used by the live grid (viewer.js) and the map's live popup (map.js).
-import { clearStill, maybeKeepStill, showStill } from './stills.js'
+import { clearStill, disposeStill, maybeKeepStill, showStill } from './stills.js'
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
 import { liveSocket } from './live-mux.js'
 import { activeTrace } from './frame-trace.js'
+import { maxLiveFps } from './device.js'
 
 // Whether this device can play H.265, told to the server with each live stream: a remote viewer
 // who can is sent an H.265 camera as it is (about half the data of H.264 for the same picture)
@@ -228,7 +229,7 @@ export class LiveTile {
     this.attempts = 0 // reconnects since video last arrived
     this.now = opts.now ?? (() => Date.now()) // (tests)
     this.lastDataAt = 0 // the last frame on this socket, or when it opened
-    this.maxFps = opts.maxFps ?? null // a phone asks the server for its 15 fps stream (phone-live.mjs)
+    this.maxFps = opts.maxFps === undefined ? maxLiveFps() : opts.maxFps // also covers map and wall tiles
     this.h264Asks = 0 // H.265 keyframes in a row answered by asking again for H.264 (#askH264)
     this.converted = false // the server converts this camera to H.264 for this browser (its badge)
     this.convMsg = null // the message shown while the server cannot convert it (#noConversion)
@@ -247,7 +248,9 @@ export class LiveTile {
       clock: opts.clock,
       maxQueuedFrames: opts.maxQueuedFrames,
       noRewindMs: opts.noRewindMs,
-      maxFps: opts.maxFps,
+      maxFps: this.maxFps,
+      onResourceLimit: reason => { this.setStatus('Device video limit'); opts.onResourceLimit?.(reason) },
+      onError: () => { this.setStatus('Video restarted'); this.reconnectNow() },
       onUnsupported: (codecId) => {
         // this browser cannot play H.265, whatever the check said: every tile from now on says so.
         // The tile asks again, for H.264 (the server converts it, a main stream as well as a sub);
@@ -719,6 +722,7 @@ export class LiveTile {
    */
   suspend() {
     this.suspended = true
+    this.player.reset()
     activeTrace()?.event(this, 'suspend')
   }
 
@@ -735,6 +739,9 @@ export class LiveTile {
     this.released = true
     clearTimeout(this.retry)
     this.retry = null
+    this.player.reset()
+    this.gop = null
+    this.gopBytes = 0
     if (this.ws) {
       this.ws.onclose = null // resume() does the reconnect, not the socket's own close handler
       this.ws.onmessage = null
@@ -803,5 +810,6 @@ export class LiveTile {
     clearTimeout(this.retry)
     this.ws?.close()
     this.player.close()
+    if (typeof document !== 'undefined') disposeStill(this.tile)
   }
 }

@@ -179,7 +179,7 @@ export class PhoneStream {
    *   now: the clock (LAG_HOLD_MS, emptyAt), for tests
    *   tag: what its log lines begin with, in brackets (h264-fallback.mjs: its conversions are not a phone's)
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds, lowDelay, keySeconds = 0, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, rejudge = false, acquire = null, maxLagS = 0, endEach = false, now = () => Date.now(), background = false, camera = '?', tag = 'phone-live' }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, bufSeconds = 1, lowDelay, keySeconds = 2, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, rejudge = false, acquire = null, maxLagS = 0, endEach = false, now = () => Date.now(), background = false, camera = '?', tag = 'phone-live' }) {
     // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
     // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps / fromNextKey / srcFps / rejudge /
     // maxLagS: how its conversion runs and starts (a phone on the local network gives none: the

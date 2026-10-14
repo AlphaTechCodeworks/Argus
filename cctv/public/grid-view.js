@@ -132,14 +132,20 @@ const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
  * @param {Array<{nvr?:string, ch?:number, name?:string, nvrName?:string, site?:string}>} cameras
  * @param {string} query
  */
+const searchText = new WeakMap()
 export function searchCameras(cameras, query) {
   const words = oneLine(query).toLowerCase().split(' ').filter(Boolean)
-  const list = (cameras ?? []).filter(Boolean)
-  if (words.length === 0) return list
-  return list.filter((c) => {
-    const hay = [c.name, c.nvrName, c.site, c.nvr, String(num(c.ch, 0) + 1), String(num(c.ch, 0))]
+  if (words.length === 0) return (cameras ?? []).filter(Boolean)
+  return (cameras ?? []).filter((c) => {
+    if (!c) return false
+    const cached = searchText.get(c)
+    let hay = cached?.text
+    if (!cached || cached.name !== c.name || cached.nvrName !== c.nvrName || cached.site !== c.site || cached.nvr !== c.nvr || cached.ch !== c.ch) {
+      hay = [c.name, c.nvrName, c.site, c.nvr, String(num(c.ch, 0) + 1), String(num(c.ch, 0))]
       .map((x) => String(x ?? '').toLowerCase())
       .join(' ')
+      searchText.set(c, { name: c.name, nvrName: c.nvrName, site: c.site, nvr: c.nvr, ch: c.ch, text: hay })
+    }
     return words.every((w) => hay.includes(w))
   })
 }

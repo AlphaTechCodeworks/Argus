@@ -18,7 +18,8 @@ async function api(method, path, body) {
   const res = await fetch(path, {
     method,
     headers: body !== undefined || method !== 'GET' ? { 'content-type': 'application/json' } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(8000)
   })
   if (res.status === 401) location.href = '/login.html'
   const data = await res.json().catch(() => ({}))
@@ -185,7 +186,14 @@ function renderVpn() {
   )
 }
 
-async function load() {
+let siteLoad = null
+function load() {
+  if (document.hidden) return Promise.resolve()
+  if (siteLoad) return siteLoad
+  siteLoad = loadImpl().finally(() => { siteLoad = null })
+  return siteLoad
+}
+async function loadImpl() {
   try {
     ;[nvrList, vpn] = await Promise.all([api('GET', '/api/admin/nvrs'), api('GET', '/api/admin/vpn').catch(() => ({ available: false, sites: [] }))])
     notice.hidden = true

@@ -10,7 +10,7 @@ import { EVENT_KINDS, PRIORITIES, alarmRows, eventFromHash, filterSummary, label
 import { fillCameraSelect } from './camera-choice.js'
 import { MotionTuner } from './motion-tune.js'
 import { mountCameraBrowser, workspaceSite } from './camera-browser.js'
-import { preferenceStorage } from './user-settings.js'
+import { preferenceStorage, preferencesReady } from './user-settings.js'
 
 const $ = (id) => document.getElementById(id)
 const REFRESH_MS = 30_000
@@ -416,7 +416,8 @@ function fillChoices() {
 }
 
 async function start() {
-  cameras = await fetch('/api/cameras', { headers: { accept: 'application/json' } }).then(jsonOf).catch(() => [])
+  const [roster] = await Promise.all([fetch('/api/cameras', { headers: { accept: 'application/json' } }).then(jsonOf).catch(() => []), preferencesReady])
+  cameras = roster
   if (!Array.isArray(cameras)) cameras = cameras.cameras ?? []
   fillChoices()
   const f = $('filters').elements

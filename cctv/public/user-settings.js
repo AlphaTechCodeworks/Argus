@@ -14,6 +14,7 @@ function cache() {
   } catch {}
 }
 function report(state) { document.dispatchEvent(new CustomEvent('preferences-save', { detail: state })) }
+async function initialisePreferences() {
 try {
   const response = await fetch('/api/me/preferences', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(5000) })
   if (!response.ok) throw new Error('Preferences unavailable')
@@ -32,10 +33,14 @@ try {
   } catch {}
 }
 if (user) {
-  try { pending = JSON.parse(localStorage.getItem(pendingKey()) || '{}') } catch {}
+  try { pending = { ...JSON.parse(localStorage.getItem(pendingKey()) || '{}'), ...pending } } catch {}
   values = { ...values, ...pending }
   cache()
 }
+if (Object.keys(pending).length && !document.hidden) timer = setTimeout(flush, 300)
+}
+export const preferencesReady = initialisePreferences()
+export const preferenceAccount = () => user
 
 async function flush() {
   if (saving || !Object.keys(pending).length) return
@@ -44,7 +49,7 @@ async function flush() {
   saving = true
   const patch = pending; sending = patch; pending = {}; cache()
   try {
-    const response = await fetch('/api/me/preferences', { method: 'PATCH', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ account: user, preferences: patch }), keepalive: true })
+    const response = await fetch('/api/me/preferences', { method: 'PATCH', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ account: user, preferences: patch }), keepalive: true, signal: AbortSignal.timeout(8000) })
     if (response.status === 409) { pending = { ...patch, ...pending }; accountChanged = true; report('accountchanged'); return }
     if (!response.ok) throw new Error('Save failed')
     report('saved')
@@ -52,7 +57,7 @@ async function flush() {
     pending = { ...patch, ...pending }
     report('failed')
   } finally { saving = false; sending = {}; cache() }
-  if (Object.keys(pending).length) timer = setTimeout(flush, 5000)
+  if (Object.keys(pending).length && !document.hidden) timer = setTimeout(flush, 5000)
 }
 export const savePendingSettings = flush
 export const preferenceStorage = {
@@ -63,4 +68,7 @@ export const preferenceStorage = {
   }
 }
 if (typeof window !== 'undefined') addEventListener('pagehide', () => { clearTimeout(timer); flush() })
-if (Object.keys(pending).length) timer = setTimeout(flush, 300)
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') document.addEventListener('visibilitychange', () => {
+  clearTimeout(timer)
+  if (!document.hidden) void flush()
+})

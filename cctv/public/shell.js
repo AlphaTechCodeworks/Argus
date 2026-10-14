@@ -7,7 +7,8 @@
 import { PHONE_BAR, currentId, navFor } from './nav-model.js'
 import { icon } from './icons.js'
 import { nextTheme, readTheme, saveTheme } from './theme.js'
-import { preferenceStorage, savePendingSettings } from './user-settings.js'
+import { preferenceAccount, preferenceStorage, preferencesReady, savePendingSettings } from './user-settings.js'
+import { purgeCameraStills } from './stills.js'
 
 const store = preferenceStorage
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
@@ -150,18 +151,31 @@ export function mountShell() {
 }
 
 mountShell()
+void preferencesReady.then(() => {
+  applyTheme(readTheme(store))
+  document.body.classList.toggle('sidebar-pinned', store.getItem('cctv.sidebarPinned') === '1')
+})
 
 // Presence heartbeat also notices an administrator revoking this browser's cookie.
-setInterval(async () => {
+async function refreshSession() {
+  if (document.hidden) return
   try {
     const response = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(10_000) })
     if (response.status === 401) location.href = '/login.html'
-    else if (response.status === 403) {
+    else if (response.ok) {
+      const fresh = await response.json()
+      if (preferenceAccount() && fresh.user !== preferenceAccount()) {
+        await purgeCameraStills()
+        location.reload()
+      }
+    } else if (response.status === 403) {
       const body = await response.json()
       if (body.mustChangePassword) location.href = '/change-password.html'
     }
   } catch { /* A transient connection loss is not a sign-out. */ }
-}, 30_000)
+}
+setInterval(refreshSession, 30_000)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void refreshSession() })
 
 // keep the app's own files on the device (sw.js): Argus opens at once on a weak signal
 if ('serviceWorker' in navigator && isSecureContext) {
