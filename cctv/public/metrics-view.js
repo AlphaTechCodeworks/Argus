@@ -150,6 +150,12 @@ export function metricsView(data, { hours = 24, names = {} } = {}) {
   const running = of((s) => (finite(s.sub?.running) ? s.sub.running + (finite(s.main?.running) ? s.main.running : 0) : null))
   const refused = samples.reduce((n, s) => n + (finite(s.sub?.refused) ? s.sub.refused : 0) + (finite(s.main?.refused) ? s.main.refused : 0), 0)
   const convMax = niceMax(Math.max(mostOf(used), mostOf(allowed)))
+  // 3b. every conversion, by who it is for, counted as processes (each is one ffmpeg)
+  const allFf = of((s) => s.other?.ffmpeg)
+  const office = of((s) => (finite(s.sub?.running) ? s.sub.running + (finite(s.main?.running) ? s.main.running : 0) : null))
+  const remote = of((s) => s.other?.remote)
+  const playback = of((s) => (finite(s.other?.playback) || finite(s.other?.playbackSd) ? (s.other.playback ?? 0) + (s.other.playbackSd ?? 0) : null))
+  const allMax = niceMax(Math.max(mostOf(allFf), mostOf(office), mostOf(remote), mostOf(playback), 1))
   // 4. failures by the hour, all recorders together
   const hrs = hourly(samples)
   const hourPoints = (k) => hrs.map((h) => ({ t: h.t + HOUR_MS / 2, v: h[k] }))
@@ -182,6 +188,14 @@ export function metricsView(data, { hours = 24, names = {} } = {}) {
         series('Allowed', 'limit', allowed, { yMax: convMax, unit: ' cores', limit: true })
       ]
     },
+    // (only once the history has these figures: lines from before 2026-10-14 do not)
+    ...(allFf.some((p) => finite(p.v)) ? [{
+      id: 'all-conversions',
+      title: 'All video conversions',
+      note: 'Every conversion the server is running, and who it is for: office PCs without H.265, viewers from outside or on phones, and playback. Each one takes processor time.',
+      yMax: allMax,
+      series: [series('All', 'a', allFf, { yMax: allMax }), series('Office PCs', 'b', office, { yMax: allMax }), series('Outside and phones', 'c', remote, { yMax: allMax }), series('Playback', 'd', playback, { yMax: allMax })]
+    }] : []),
     {
       id: 'failures',
       title: 'Failures per hour',

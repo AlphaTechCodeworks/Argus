@@ -73,6 +73,13 @@ const f = (failedStarts = 0, stalls = 0, relogins = 0, linkDrops = 0) => ({ fail
   check('streams and people, each said in words', streams.series[0].legend === 'Streams: now 219, most 219' && streams.series[1].legend === 'People watching: now 7, most 7' && streams.yMax === 500, J(streams.series.map((s) => s.legend)))
   check('conversions: cores in use against those allowed, and who was refused', conv.yMax === 5 && conv.series[0].legend === 'In use: now 3.5 cores, most 3.5 cores; most at once 3; 2 viewers refused' && conv.series[1].legend === 'Allowed: 4 cores', J(conv.series.map((s) => s.legend)))
   check('failures by the hour, three lines with their totals', J(fail.series.map((s) => s.legend)) === J(['Failed starts: 16 in all', 'Stalls: 8 in all', 'Re-logins: 4 in all']) && fail.yMax === 5, J(fail.series.map((s) => s.legend)))
+  {
+    // the conversions that are not for office PCs, once the history has them
+    const withOther = samples.map((s, i) => ({ ...s, other: { remote: 2, playback: i % 2, playbackSd: 0, ffmpeg: 6 } }))
+    const w = metricsView({ now, samples: withOther }, { hours: 24 })
+    const all = w.charts.find((c) => c.id === 'all-conversions')
+    check('every conversion, by who it is for, once the history has them', J(w.charts.map((c) => c.id)) === J(['load', 'streams', 'conversions', 'all-conversions', 'failures']) && J(all?.series.map((s) => s.label)) === J(['All', 'Office PCs', 'Outside and phones', 'Playback']) && all.series[0].legend.startsWith('All: now 6'), J(all?.series.map((s) => s.legend)))
+  }
   check('every line has points, all inside the box and none NaN', v.charts.every((c) => c.series.every((s) => s.runs.length >= 1 && s.runs.every((r) => r.split(' ').every((p) => {
     const [x, y] = p.split(',').map(Number)
     return x >= BOX.left && x <= BOX.width - BOX.right && y >= BOX.top && y <= BOX.height - BOX.bottom

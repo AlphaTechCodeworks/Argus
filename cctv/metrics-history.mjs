@@ -114,6 +114,7 @@ export function buildSample(p, { t, perNvr = {}, last = { sub: null, main: null 
   const viewers = ask(p.viewers)
   const h264 = ask(p.h264)
   const sdk = ask(p.sdk)
+  const other = ask(p.other)
   return {
     t,
     load1: round2(ask(p.load1)),
@@ -124,10 +125,24 @@ export function buildSample(p, { t, perNvr = {}, last = { sub: null, main: null 
     viewers: { people: num(viewers?.people), local: num(viewers?.local), remote: num(viewers?.remote) },
     sub: { running: num(h264?.running), units: num(h264?.units), budgetUnits: num(h264?.budgetUnits), refused: since('sub', h264?.refused) },
     main: { running: num(h264?.main?.running ?? 0), refused: since('main', h264?.main?.refused) },
+    // the conversions that are not for office PCs: remote viewers' and phones' (one pool), playback's
+    // (full and SD), and every ffmpeg on the box whatever started it. On 2026-10-14 a remote viewer's
+    // conversions put the load at 6-7 at night with 'no conversions' in this history.
+    other: { remote: num(other?.remote), playback: num(other?.playback), playbackSd: num(other?.playbackSd), ffmpeg: num(other?.ffmpeg) },
     sdk: { inFlight: num(sdk?.inFlight), late: num(sdk?.late) },
     loopWorstMs: num(ask(p.loopWorstMs)),
     perNvr
   }
+}
+
+/**
+ * How many running processes have this name, from the names of all of them (Linux: /proc/<pid>/comm).
+ * @param {string} name @param {Iterable<string>} comms
+ */
+export function countNamed(name, comms) {
+  let n = 0
+  for (const c of comms) if (String(c).trim() === name) n++
+  return n
 }
 
 // ---- the file ----------------------------------------------------------------------------------
@@ -282,6 +297,10 @@ export function downsample(samples, { spanMs, maxPoints = MAX_POINTS }) {
     return v.length ? round2(v.reduce((a, b) => a + b, 0) / v.length) : null
   }
   const sum = (get) => group.map(get).filter(Number.isFinite).reduce((a, b) => a + b, 0)
+  const most = (get) => {
+    const v = group.map(get).filter(Number.isFinite)
+    return v.length ? Math.max(...v) : null
+  }
   const flush = () => {
     if (!group.length) return
     const perNvr = {}
@@ -299,9 +318,11 @@ export function downsample(samples, { spanMs, maxPoints = MAX_POINTS }) {
       nvrsOnline: mean((s) => s.nvrsOnline),
       nvrsTotal: mean((s) => s.nvrsTotal),
       streams: mean((s) => s.streams),
-      viewers: { people: mean((s) => s.viewers?.people), local: mean((s) => s.viewers?.local), remote: mean((s) => s.viewers?.remote) },
+      // whole people: the most watching within the stretch, not an average of 0.5 of one
+      viewers: { people: most((s) => s.viewers?.people), local: most((s) => s.viewers?.local), remote: most((s) => s.viewers?.remote) },
       sub: { running: mean((s) => s.sub?.running), units: mean((s) => s.sub?.units), budgetUnits: mean((s) => s.sub?.budgetUnits), refused: sum((s) => s.sub?.refused) },
       main: { running: mean((s) => s.main?.running), refused: sum((s) => s.main?.refused) },
+      other: { remote: mean((s) => s.other?.remote), playback: mean((s) => s.other?.playback), playbackSd: mean((s) => s.other?.playbackSd), ffmpeg: mean((s) => s.other?.ffmpeg) },
       sdk: { inFlight: mean((s) => s.sdk?.inFlight), late: mean((s) => s.sdk?.late) },
       loopWorstMs: worst.length ? Math.max(...worst) : null,
       perNvr

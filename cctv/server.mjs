@@ -82,7 +82,7 @@ import { power as nvrPower, transparent } from './nvr-xml.mjs'
 import { readAlerts } from './alert-log.mjs'
 import { PERIODS, composeReport, countInThread, periodWindow, startDailySummary } from './reports.mjs'
 import { commonOffset, siteOffsetMin, useSiteOffset } from './site-time.mjs'
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { extname, join } from 'node:path'
@@ -180,7 +180,8 @@ import { handleSicex, makeSicex } from './sicex.mjs'
 import { handleHold, makeHolds } from './stream-holds.mjs'
 import { handleTolerance, makeTolerance } from './wall-tolerance.mjs'
 import { xmlOnline } from './xml-session.mjs'
-import { METRICS_PATH, handleMetrics, makeMetricsHistory } from './metrics-history.mjs'
+import { METRICS_PATH, countNamed, handleMetrics, makeMetricsHistory } from './metrics-history.mjs'
+import { lightPool as lightTranscodePool, pool as transcodePool } from './transcode.mjs'
 import { availableParallelism, loadavg } from 'node:os'
 
 const {
@@ -1506,6 +1507,21 @@ const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || 
 // worst of this process and the workers. Each number is asked for on its own there: one that
 // throws is left out of that minute's line. Nothing here can stop the server starting.
 const workerStats = () => [...nvrs.values()].filter((n) => n.worker).map((n) => n.worker.stats())
+// every ffmpeg on the box, whoever started it: the processes' names in /proc (Linux; null elsewhere)
+const ffmpegRunning = () => {
+  try {
+    const comms = []
+    for (const d of readdirSync('/proc')) {
+      if (!/^\d+$/.test(d)) continue
+      try {
+        comms.push(readFileSync(`/proc/${d}/comm`, 'utf8'))
+      } catch {} // (a process that ended meanwhile)
+    }
+    return countNamed('ffmpeg', comms)
+  } catch {
+    return null
+  }
+}
 const metricsHistory = makeMetricsHistory({
   file: join(auth.DATA_DIR, 'metrics.jsonl'),
   providers: {
@@ -1520,7 +1536,9 @@ const metricsHistory = makeMetricsHistory({
       const w = workerStats()
       return { inFlight: s.inFlight + w.reduce((n, x) => n + (x?.sdk?.inFlight ?? 0), 0), late: s.late + w.reduce((n, x) => n + (x?.sdk?.late ?? 0), 0) }
     },
-    loopWorstMs: () => Math.max(loopWorstMs() ?? 0, ...workerStats().map((x) => x?.loop?.worstMs ?? 0))
+    loopWorstMs: () => Math.max(loopWorstMs() ?? 0, ...workerStats().map((x) => x?.loop?.worstMs ?? 0)),
+    // remote viewers' and phones' conversions (one pool), playback's, and every ffmpeg on the box
+    other: () => ({ remote: phoneLive.pool.active, playback: transcodePool.active, playbackSd: lightTranscodePool.active, ffmpeg: ffmpegRunning() })
   }
 })
 try {

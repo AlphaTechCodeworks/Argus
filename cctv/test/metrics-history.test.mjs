@@ -62,7 +62,7 @@ const providers = (o = {}) => ({
 {
   const last = { sub: null, main: null }
   const s = buildSample(providers(), { t: 1000, perNvr: { gpri: { failedStarts: 1, stalls: 0, relogins: 0, linkDrops: 0 } }, last })
-  check('the line\'s shape', J(s) === J({ t: 1000, load1: 1.23, cpuCount: 8, nvrsOnline: 9, nvrsTotal: 10, streams: 142, viewers: { people: 5, local: 4, remote: 1 }, sub: { running: 3, units: 12, budgetUnits: 200, refused: 0 }, main: { running: 1, refused: 0 }, sdk: { inFlight: 2, late: 0 }, loopWorstMs: 38, perNvr: { gpri: { failedStarts: 1, stalls: 0, relogins: 0, linkDrops: 0 } } }), J(s))
+  check('the line\'s shape', J(s) === J({ t: 1000, load1: 1.23, cpuCount: 8, nvrsOnline: 9, nvrsTotal: 10, streams: 142, viewers: { people: 5, local: 4, remote: 1 }, sub: { running: 3, units: 12, budgetUnits: 200, refused: 0 }, main: { running: 1, refused: 0 }, other: { remote: null, playback: null, playbackSd: null, ffmpeg: null }, sdk: { inFlight: 2, late: 0 }, loopWorstMs: 38, perNvr: { gpri: { failedStarts: 1, stalls: 0, relogins: 0, linkDrops: 0 } } }), J(s))
   const s2 = buildSample(providers({ h264: () => ({ running: 3, units: 12, budgetUnits: 200, refused: 10, main: { running: 0, refused: 2 } }) }), { t: 2000, last })
   check('refused is this minute\'s, not the total', s2.sub.refused === 3 && s2.main.refused === 0, J([s2.sub, s2.main]))
   const s3 = buildSample(providers({ h264: () => ({ running: 0, units: 0, budgetUnits: 200, refused: 1 }) }), { t: 3000, last })
