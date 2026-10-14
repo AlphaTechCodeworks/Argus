@@ -21,7 +21,8 @@ streams() { curl -fsS -m 5 http://127.0.0.1:8080/healthz 2>/dev/null | grep -oE 
 online() { curl -fsS -m 5 http://127.0.0.1:8080/healthz 2>/dev/null | grep -oE '"online":[0-9]+' | grep -oE '[0-9]+' | head -1; }
 s_before="$(streams || true)"; o_before="$(online || true)"; o_before="${o_before:-0}"
 sudo cp -a "$cur" "$dest"
-for f in $FILES; do sudo install -m 644 -o root -g root "/tmp/pg-rel/$f" "$dest/$f"; done
+# (-D: a file new to the app may sit in a folder the release does not have yet)
+for f in $FILES; do sudo install -D -m 644 -o root -g root "/tmp/pg-rel/$f" "$dest/$f"; done
 echo "$rel" | sudo tee "$dest/RELEASE" >/dev/null
 sudo ln -sfn "$dest" /opt/cctv/current.new && sudo mv -T /opt/cctv/current.new /opt/cctv/current
 stamped() { curl -fsS -m 5 http://127.0.0.1:8080/login.html 2>/dev/null | grep -q "v=$rel"; }
@@ -43,4 +44,20 @@ else
   echo "$(date -u +%H:%M:%S) restarted; online $peak of $o_before"
 fi
 rm -rf /tmp/pg-rel /tmp/pg-rel.tar /tmp/pg-rel.old.sums /tmp/pg-rel.new.sums
+# Old releases go, so the disk does not fill: every install is a whole copy of the app (about 42 MB),
+# and on 2026-10-13 29 of them had left 1.2 GB free on an 11 GB disk. Kept: the KEEP newest (by when
+# they were made: a copy keeps its files' times, so a name or a file time would mislead), the one
+# current points at, the one the running process started from, and the one this install replaced (the
+# way back). Anything else under releases/ that is not a directory is left alone.
+KEEP=${KEEP:-6}
+run_from="$(sudo readlink -f "/proc/$(systemctl show cctv -p MainPID --value)/cwd" 2>/dev/null || true)"
+now_at="$(readlink -f /opt/cctv/current)"
+gone=0
+for d in $(cd /opt/cctv/releases && ls -1tcd -- */ 2>/dev/null | sed 's:/$::' | tail -n +$((KEEP + 1))); do
+  p="/opt/cctv/releases/$d"
+  case "$run_from" in "$p"|"$p"/*) continue ;; esac
+  [ "$p" = "$now_at" ] || [ "$p" = "$cur" ] || [ "$p" = "$dest" ] && continue
+  sudo rm -rf -- "$p" && gone=$((gone + 1))
+done
+[ "$gone" -gt 0 ] && echo "old releases removed: $gone (kept the newest $KEEP, the current, the running and the one before); disk: $(df -h /opt/cctv | awk 'NR==2{print $4" free"}')"
 echo "current -> $(readlink -f /opt/cctv/current), RELEASE=$(cat /opt/cctv/current/RELEASE)"
