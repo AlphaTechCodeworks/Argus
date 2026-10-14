@@ -74,6 +74,10 @@ export const CONVERTED_TITLE = 'This camera sends H.265, which this browser cann
 // The server's reason for refusing a main stream it has no room to convert (NO_ROOM_MAIN): the server
 // converts few of those at once, and the full-size view has the sub-stream to show instead
 export const H264_NO_ROOM_MAIN = 'h265: no room to convert main'
+// The server's reason for refusing a main stream because the recorder already sends as many cameras in
+// full quality as the server allows it (main-limit.mjs MAIN_AT_LIMIT): treated as the one above, the
+// standard picture meanwhile and the full-quality one asked for again later
+export const MAIN_AT_LIMIT = 'main: recorder at its limit'
 // ...and on a converted main stream (the full-size view): what it is, and that it is not the camera's full size
 export const CONVERTED_MAIN_TITLE = 'This camera sends H.265, which this browser cannot play, so the server is converting its full-quality picture to H.264 for this PC, at up to 1920 pixels wide. That costs the server most of a processor core for as long as it is watched; the "HEVC Video Extensions" from the Microsoft Store let Chrome and Edge play the camera’s own picture instead.'
 /**
@@ -81,6 +85,7 @@ export const CONVERTED_MAIN_TITLE = 'This camera sends H.265, which this browser
  * did not convert the main one (viewer.js): no room among the few it converts at once, or it failed.
  */
 export function mainNotConvertedTitle(why) {
+  if (why === MAIN_AT_LIMIT) return 'This recorder is already sending as many cameras in full quality as it safely can. This view shows the standard picture meanwhile and tries the full-quality one again by itself.'
   const what = why === H264_FAILED ? 'the server could not convert its full-quality picture just now' : 'the server is already converting as many full-quality pictures as it is allowed'
   return `This camera sends H.265, which this browser cannot play, and ${what}. This view shows the standard picture meanwhile and tries the full-quality one again by itself.`
 }
@@ -486,9 +491,10 @@ export class LiveTile {
       // the main stream refused for want of Live HD (at once, or taken away while it played): not
       // asked for again from here, the sub-stream instead
       if (e?.code === 1008 && e.reason === HD_REFUSED && this.streamType === MAIN_STREAM) return this.#hdRefused()
-      // a main stream the server did not convert (no room among the few it converts, or it failed):
-      // nothing is said over the picture, the sub-stream is there to show instead
-      if (this.streamType === MAIN_STREAM && (e?.reason === H264_NO_ROOM_MAIN || e?.reason === H264_FAILED)) return this.#mainNotConverted(e.reason)
+      // a main stream the server did not convert (no room among the few it converts, or it failed), or
+      // did not start because the recorder is at its full-quality limit: nothing is said over the
+      // picture, the sub-stream is there to show instead
+      if (this.streamType === MAIN_STREAM && (e?.reason === H264_NO_ROOM_MAIN || e?.reason === H264_FAILED || e?.reason === MAIN_AT_LIMIT)) return this.#mainNotConverted(e.reason)
       // H.265 that this browser cannot play and the server cannot convert just now: said, not black
       if (e?.reason === H264_NO_ROOM || e?.reason === H264_FAILED) return this.#noConversion(e.reason)
       this.opts.onDisconnect?.()

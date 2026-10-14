@@ -17,7 +17,7 @@
 // with none (rights.mjs forgetRights): a new viewer sees nothing until an admin ticks something, and
 // a name that comes back never inherits what its last holder was allowed. A new account records
 // `since`, so the last holder's unexpired cookie does not sign in as the new one (auth.mjs).
-import { audit } from './audit.mjs'
+import { audit, withDevice } from './audit.mjs'
 import { DATA_DIR, hashPassword, loadUsers, saveUsers, signOutUser } from './auth.mjs'
 import { userSessions } from './user-sessions.mjs'
 import { HttpError } from './nvr-xml.mjs'
@@ -33,8 +33,10 @@ const admins = (users) => Object.entries(users).filter(([, u]) => u.role === 'ad
 /**
  * @returns {Promise<[number, object]|null>} null when the path is not ours
  * @param {{ user: string, admin: boolean }} who from the signed session, never the request body
+ * @param {object} [o] ...ip, device: where the admin did it from (server.mjs clientIp, device-name.mjs
+ *   deviceOf), on each audit row: the address in its own field, the device at the end of the detail
  */
-export async function handleUsers(method, pathname, readJson, who, { disconnectUser = () => {}, setupCodes = null, baseUrl = '' } = {}) {
+export async function handleUsers(method, pathname, readJson, who, { disconnectUser = () => {}, setupCodes = null, baseUrl = '', ip = '', device = '' } = {}) {
   if (pathname !== '/api/admin/users' && !pathname.startsWith('/api/admin/users/')) return null
   if (!who?.admin) throw new HttpError(403, 'Only an admin can manage accounts')
   let users = loadUsers()
@@ -57,7 +59,7 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     disconnectUser(name)
     userSessions.forget(name)
     setupCodes?.forget(name) // a code not yet scanned must not let them straight back in
-    audit(DATA_DIR, { user: who.user, action: 'user-sign-out', target: name, ok: true })
+    audit(DATA_DIR, { user: who.user, action: 'user-sign-out', target: name, detail: withDevice('', device), ip, ok: true })
     return [200, { signedOut: name }]
   }
 
@@ -69,7 +71,7 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     if (!setupCodes) throw new HttpError(503, 'Set-up codes are not available on this server')
     if (!/^https?:\/\//.test(baseUrl)) throw new HttpError(409, 'Set the address people use to reach Argus first (Settings, public address)')
     const { code, expires } = setupCodes.create(name, who.user)
-    audit(DATA_DIR, { user: who.user, action: 'setup-code-made', target: name, ok: true })
+    audit(DATA_DIR, { user: who.user, action: 'setup-code-made', target: name, detail: withDevice('', device), ip, ok: true })
     console.log(`[users] ${who.user} made a set-up code for ${name}`)
     return [200, { user: name, link: setupLink(baseUrl, code), expires }, { 'cache-control': 'no-store' }]
   }
@@ -96,7 +98,7 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     saveUsers(users)
     if (hash !== null && existed) userSessions.forget(name)
     if (!existed) forgetRights(name) // a row left behind by an earlier account of this name
-    audit(DATA_DIR, { user: who.user, action: existed ? 'user-change' : 'user-add', target: name, detail: `${role}${password !== null ? ', password set' : ''}`, ok: true })
+    audit(DATA_DIR, { user: who.user, action: existed ? 'user-change' : 'user-add', target: name, detail: withDevice(`${role}${password !== null ? ', password set' : ''}`, device), ip, ok: true })
     console.log(`[users] ${who.user} ${existed ? 'changed' : 'added'} ${name} (${role}${password !== null ? ', password set' : ''})`)
     return [200, { user: { name, role } }]
   }
@@ -112,7 +114,7 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     userSessions.forget(name)
     setupCodes?.forget(name)
     forgetRights(name)
-    audit(DATA_DIR, { user: who.user, action: 'user-remove', target: name, ok: true })
+    audit(DATA_DIR, { user: who.user, action: 'user-remove', target: name, detail: withDevice('', device), ip, ok: true })
     console.log(`[users] ${who.user} removed ${name}`)
     return [200, { removed: name }]
   }

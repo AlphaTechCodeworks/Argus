@@ -12,8 +12,12 @@
 /** Every kind, in the order they are shown. */
 export const KINDS = Object.freeze([
   'server-restart', 'drive-missing', 'drive-full', 'drive-filling', 'retention-short', 'not-recording',
-  'camera-offline', 'nvr-offline', 'nvr-disk', 'nvr-refusing', 'nvr-login', 'nvr-clock'
+  'camera-offline', 'nvr-offline', 'nvr-disk', 'nvr-refusing', 'nvr-login', 'nvr-clock',
+  'server-overloaded', 'server-disk', 'nvr-failing', 'viewers-refused'
 ])
+// The last four (2026-10-14) are made from the history of the server's key numbers by
+// server-health-alerts.mjs and handed in as `extra` candidates. Each has a hold of its own ("10 minutes
+// over", "under for 5 minutes"), worked out there from the samples, so they are SELF_TIMED below.
 // 'drive-filling' is a forecast, and deliberately a different kind from 'drive-full'. A recorder
 // that has reached its retention is permanently full and overwriting, which is the healthy steady
 // state here, so a forecast only speaks up about a drive that is still filling towards its first
@@ -26,13 +30,20 @@ export const KINDS = Object.freeze([
 /** Kinds that open on the first sighting rather than after raiseMs. */
 const IMMEDIATE = new Set(['server-restart', 'nvr-login', 'nvr-refusing'])
 
+/**
+ * Kinds whose raise and clear timing is already decided by the module that makes them
+ * (server-health-alerts.mjs): opened on the first sighting and cleared on the first absence, so
+ * raiseMs and clearMs are not stacked on top of their own holds. Mute and grace apply as to any kind.
+ */
+const SELF_TIMED = new Set(['server-overloaded', 'server-disk', 'nvr-failing', 'viewers-refused'])
+
 /** Kinds reported once with no clear (nothing to recover from). */
 const ONE_SHOT = new Set(['server-restart'])
 
 /** Kinds about an NVR's cameras, keyed "<kind>/<nvr id>": unknown, not cleared, while that NVR is offline. */
 const CAMERA_KINDS = new Set(['camera-offline', 'not-recording'])
 
-const HIGH = new Set(['server-restart', 'drive-missing', 'drive-full', 'nvr-offline', 'nvr-login', 'nvr-disk'])
+const HIGH = new Set(['server-restart', 'drive-missing', 'drive-full', 'nvr-offline', 'nvr-login', 'nvr-disk', 'server-disk'])
 
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 const names = (list, max = 4) =>
@@ -75,7 +86,7 @@ export function alertEngine({ raiseMs, clearMs, graceMs, notRecordingMs, clockSk
         st.lastSeen = nowMs
         state.set(key, st)
         if (st.openedAt !== null || st.doneOneShot) continue
-        const due = IMMEDIATE.has(c.kind) || nowMs - st.firstSeen >= raiseMs
+        const due = IMMEDIATE.has(c.kind) || SELF_TIMED.has(c.kind) || nowMs - st.firstSeen >= raiseMs
         if (!due) continue
         st.openedAt = nowMs
         const alert = { ...c, since: st.firstSeen, severity: HIGH.has(c.kind) ? 'high' : 'medium' }
@@ -94,7 +105,7 @@ export function alertEngine({ raiseMs, clearMs, graceMs, notRecordingMs, clockSk
         if (found.has(key)) continue
         if (st.openedAt === null) { state.delete(key); continue }   // never opened: forget it
         if (CAMERA_KINDS.has(st.alert.kind) && offlineNvrs.has(key.slice(st.alert.kind.length + 1))) { st.lastSeen = nowMs; continue }
-        if (nowMs - st.lastSeen < clearMs) continue
+        if (!SELF_TIMED.has(st.alert.kind) && nowMs - st.lastSeen < clearMs) continue
         cleared.push({ ...st.alert, clearedAt: nowMs })
         state.delete(key)
       }

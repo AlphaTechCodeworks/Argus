@@ -82,7 +82,7 @@ import { power as nvrPower, transparent } from './nvr-xml.mjs'
 import { readAlerts } from './alert-log.mjs'
 import { PERIODS, composeReport, countInThread, periodWindow, startDailySummary } from './reports.mjs'
 import { commonOffset, siteOffsetMin, useSiteOffset } from './site-time.mjs'
-import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { extname, join } from 'node:path'
@@ -156,7 +156,7 @@ import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
 import { DEVICE_SESSION_MARK_MS, DEVICE_SESSION_MS, makeSetupCodes, sessionLeftMs } from './setup-codes.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
-import { audit, handleAudit, pruneAudit } from './audit.mjs'
+import { audit, handleAudit, pruneAudit, withDevice } from './audit.mjs'
 import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
 import { handleSnapshot, sweepSnapshots } from './event-snapshot.mjs'
@@ -181,6 +181,7 @@ import { handleHold, makeHolds } from './stream-holds.mjs'
 import { handleTolerance, makeTolerance } from './wall-tolerance.mjs'
 import { xmlOnline } from './xml-session.mjs'
 import { METRICS_PATH, countNamed, handleMetrics, makeMetricsHistory } from './metrics-history.mjs'
+import { diskFree, makeServerHealth } from './server-health-alerts.mjs'
 import { lightPool as lightTranscodePool, pool as transcodePool } from './transcode.mjs'
 import { availableParallelism, loadavg } from 'node:os'
 
@@ -431,6 +432,11 @@ const clockSync = startClockSync(nvrs, { enabled: () => getSettings().clockSync?
 // silence looked exactly like success.
 detectEncoder().catch((e) => console.warn(`[transcode] could not work out which encoder to use: ${e.message}`))
 
+// The server-health alerts (server-health-alerts.mjs): made from the key numbers' history, which is
+// set up further down (metricsHistory). Null until then; the first checks fall in the start-up grace,
+// when no alert but the restart notice goes out anyway.
+let serverHealth = null
+
 const alerts = startAlerts({
   dataDir: DATA_DIR,
   startedMs: STARTED_MS,
@@ -444,14 +450,25 @@ const alerts = startAlerts({
   // only the newest 24 h or bookmarked footage left, or one where deleting does not free space.
   // And days kept short of the target (retention-target.mjs, 2026-09-30), from the same report: a location
   // recycling at 8 days against 30 is quiet for the forecast above and exactly what this one is for.
+  // And the server's own health (server-health-alerts.mjs, 2026-10-14): overloaded, its own disk nearly
+  // full, a recorder failing again and again, viewers refused. Asked apart from the storage forecast, so
+  // either failing leaves the other's alerts standing (candidates() itself never throws). That matters
+  // more for these: they clear on the first check they are missing from (alerts.mjs SELF_TIMED).
   extraCandidates: () => {
-    const report = buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf })
-    // The samples that forecast is drawn from are taken here, at most one an hour (recordSample's own rule).
-    // They were taken only when an admin opened the Storage page, so a server nobody looked at never had
-    // enough of them to forecast from (audit of 2026-10-07, M11). This check's forecast was drawn before
-    // the sample; the next check has it.
-    recordSample(DATA_DIR, report.locations)
-    return [...driveFullCandidates(report, { days: 7 }), ...retentionCandidates(report), ...housekeepingCandidates()]
+    const health = serverHealth?.candidates() ?? []
+    let storage = []
+    try {
+      const report = buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf })
+      // The samples that forecast is drawn from are taken here, at most one an hour (recordSample's own rule).
+      // They were taken only when an admin opened the Storage page, so a server nobody looked at never had
+      // enough of them to forecast from (audit of 2026-10-07, M11). This check's forecast was drawn before
+      // the sample; the next check has it.
+      recordSample(DATA_DIR, report.locations)
+      storage = [...driveFullCandidates(report, { days: 7 }), ...retentionCandidates(report), ...housekeepingCandidates()]
+    } catch (e) {
+      console.warn(`[alerts] the storage forecast could not be read: ${e.message}`)
+    }
+    return [...health, ...storage]
   },
   listNvrs: () =>
     [...nvrs.values()].map((n) => ({
@@ -742,7 +759,7 @@ const handleRequest = async (req, res) => {
   if (pathname === '/api/logout' && req.method === 'POST') {
     // Read before the cookie is cleared, or there is nobody to name in the entry.
     const leaving = currentUser(req)
-    if (leaving) audit(auth.DATA_DIR, { user: leaving, action: 'logout', ip: clientIp(req) })
+    if (leaving) audit(auth.DATA_DIR, { user: leaving, action: 'logout', ip: clientIp(req), detail: withDevice('', deviceOf(req.headers['user-agent'])) })
     // Clearing the cookie signs out this browser only: the token would stay good for its 7 days, and a
     // page still open with it would keep its video and could open more. Revoked, it is refused from
     // now on, and the sockets it opened are closed (auth.mjs revokeSession, access-watch.mjs).
@@ -965,14 +982,15 @@ const handleRequest = async (req, res) => {
     const backfill = await handleBackfill(req.method, pathname, () => readJsonObject(req, 2048), user)
     if (backfill) return sendJson(res, backfill[0], backfill[1])
     // Who may do what, and the record of who did.
-    const rightsRoute = await handleRights(req.method, pathname, () => readJsonObject(req, 8192), who)
+    // (the address and device go on the audit rows of a change to rights or accounts)
+    const rightsRoute = await handleRights(req.method, pathname, () => readJsonObject(req, 8192), who, { ip: clientIp(req), device: deviceOf(req.headers['user-agent']) })
     if (rightsRoute) return sendJson(res, ...rightsRoute)
     // accounts: add a viewer or an admin from the app (users-api.mjs). It refuses by throwing an
     // HttpError (status and message): answered as that, or a short password and every other refusal
     // reached the page as a bare 500 with nothing to show.
     let usersRoute
     try {
-      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who, { disconnectUser: name => presence.disconnectUser(name), setupCodes, baseUrl: getSettings().publicUrl || `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host ?? ''}` })
+      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who, { disconnectUser: name => presence.disconnectUser(name), setupCodes, baseUrl: getSettings().publicUrl || `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host ?? ''}`, ip: clientIp(req), device: deviceOf(req.headers['user-agent']) })
     } catch (e) {
       if (!Number.isInteger(e?.status)) throw e
       usersRoute = [e.status, { error: e.message }]
@@ -981,7 +999,7 @@ const handleRequest = async (req, res) => {
     // Settings > Server: restart. The answer goes out first; systemd (Restart=always) starts it again.
     if (req.method === 'POST' && pathname === '/api/admin/restart') {
       if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can restart the server' })
-      audit(auth.DATA_DIR, { user: who.user, action: 'server-restart', target: 'server', ok: true })
+      audit(auth.DATA_DIR, { user: who.user, action: 'server-restart', target: 'server', detail: withDevice('', deviceOf(req.headers['user-agent'])), ip: clientIp(req), ok: true })
       console.log(`[server] restart asked for by ${who.user}`)
       sendJson(res, 200, { restarting: true })
       setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500)
@@ -1006,7 +1024,7 @@ const handleRequest = async (req, res) => {
       } catch (e) {
         r = { status: 500, body: { error: `Could not ask for the reboot: ${e.message}` } }
       }
-      audit(auth.DATA_DIR, { user: who.user, action: 'machine-reboot', target: 'server', ok: r.status === 200, detail: r.body.error })
+      audit(auth.DATA_DIR, { user: who.user, action: 'machine-reboot', target: 'server', ok: r.status === 200, detail: withDevice(r.body.error, deviceOf(req.headers['user-agent'])), ip: clientIp(req) })
       console.log(`[server] machine reboot asked for by ${who.user}: ${r.status === 200 ? 'rebooting' : r.body.error}`)
       return sendJson(res, r.status, r.body)
     }
@@ -1076,7 +1094,7 @@ const handleRequest = async (req, res) => {
         err = e.message
         if (e?.status === 503) busy = e.extra ?? {}
       }
-      audit(auth.DATA_DIR, { user: who.user, action: `nvr-${action}`, target: id, ok, detail: err ?? undefined })
+      audit(auth.DATA_DIR, { user: who.user, action: `nvr-${action}`, target: id, ok, detail: withDevice(err, deviceOf(req.headers['user-agent'])), ip: clientIp(req) })
       console.log(`[admin] NVR ${action} ${id} (${nvr.name}) by ${who.user}: ${err ? `failed: ${err}` : ok ? 'accepted' : 'refused'}`)
       // Nothing was sent: an earlier call to this NVR is still inside the SDK (nvr-xml.mjs xmlInside).
       // Answered as the other busy refusals are (503 with retryAfterS, see playback.mjs), not as a
@@ -1546,6 +1564,25 @@ try {
 } catch (e) {
   console.warn(`[metrics] the history was not started: ${e?.message ?? e}`)
 }
+// The server-health alerts read the samples above from memory (recent()), the free space of the disk
+// holding the app and of DATA_DIR's (once if they are the same disk, read at most every 30 s: health()
+// polls ask too), and the NVRs' names for the "recorder failing" wording. Used by the alert check
+// (startAlerts above), which asks through serverHealth?. and so never before this line.
+const serverDisks = (() => {
+  let at = -Infinity
+  let last = []
+  return () => {
+    if (Date.now() - at < 30_000) return last
+    at = Date.now()
+    last = diskFree(['/opt/cctv', DATA_DIR], { statSync, statfsSync })
+    return last
+  }
+})()
+serverHealth = makeServerHealth({
+  samples: () => metricsHistory.recent(),
+  disks: serverDisks,
+  nvrNames: () => Object.fromEntries([...nvrs.values()].map((n) => [n.id, n.name || n.id]))
+})
 
 // This listener is synchronous and nothing above it catches: anything that throws here takes the
 // whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27

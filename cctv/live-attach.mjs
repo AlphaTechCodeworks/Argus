@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto'
 import { isRemoteAddress } from './adaptive-live.mjs'
 import { deviceOf } from './device-name.mjs'
 import { waitForSub } from './live-wait.mjs'
+import { makeMainLimit } from './main-limit.mjs'
 import { isPhoneRequest } from './phone-live.mjs'
 import { HD_NOT_ALLOWED } from './stream-param.mjs'
 import { bridgeSub } from './sub-bridge.mjs'
@@ -106,13 +107,14 @@ const standInHandle = (ws, bridge, wait) => ({
  *   which asks the rights again while the socket or channel is open; waitTimers: live-wait.mjs's timers
  *   (tests); log: the stand-ins' lines; now: the clock (tests); h264Fallback: the conversions for local
  *   PCs without H.265 (h264-fallback.mjs), none without it; clientAddress (in o): the visitor's own
- *   address for a request (server.mjs clientIp), for the line that says who opened full quality
+ *   address for a request (server.mjs clientIp), for the line that says who opened full quality;
+ *   mainLimit (in o): the per-recorder limit on cameras in full quality (main-limit.mjs; tests hand one in)
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
  *   clientH265: boolean, noH265?: boolean, phone15: boolean }) => void} attachLive
  *   clientH265: the page said its browser plays H.265 (h265=1); noH265: it said it does not (h265=0).
  *   Neither: it did not say (an older page, or one that does not know yet), which is not "cannot"
  */
-export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, h264Fallback = null, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now, clientAddress = (req) => req.socket?.remoteAddress }) {
+export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, h264Fallback = null, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now, clientAddress = (req) => req.socket?.remoteAddress, mainLimit = makeMainLimit({ now, log }) }) {
   const sayFullQuality = fullQualityGate({ now })
   const quiet = new Map() // camera and viewer -> { at, left }: its H.265 stand-in line last said, and those left out since
   /** The H.265 stand-in line for a camera and viewer, or null when it was said less than H265_QUIET_MS ago. */
@@ -142,6 +144,23 @@ export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, p
     // own reason, so the page drops to the sub-stream instead of asking again.
     const hd = () => can(who, 'live-hd', { nvr: nvr.id, ch })
     if (streamType !== 1 && !hd()) return ws.close(1008, HD_NOT_ALLOWED)
+    // Full quality is limited per recorder (main-limit.mjs): seven main streams asked of a P2P recorder
+    // at once (2026-10-13) had it drop its links again and again. A new camera past the limit is refused
+    // with MAIN_AT_LIMIT, which the page takes as "the standard picture for now" (live-tile.js), never
+    // as an error; a camera already in full quality for someone is always joined. Counted until this
+    // socket or channel closes. The bookkeeping must not cost the video: if it fails, the main is let in.
+    if (streamType === 0) {
+      let got = true
+      try {
+        got = mainLimit.ask(nvr, ch, ws)
+      } catch {}
+      if (got !== true) return ws.close(1013, got)
+      ws.on?.('close', () => {
+        try {
+          mainLimit.leave(ws)
+        } catch {}
+      })
+    }
     // let in: the same question again for as long as it is open, from the session as it is then.
     // Every path below (sub-bridge, adaptive, phone, the stream itself) ends with this socket or
     // channel closing, which is how it leaves the watch.

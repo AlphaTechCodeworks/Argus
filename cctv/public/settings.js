@@ -721,7 +721,11 @@ const KIND_TEXT = {
   'nvr-disk': "an NVR's own disk fails or goes missing",
   'nvr-refusing': 'an NVR refuses streams',
   'nvr-login': 'an NVR refuses the login',
-  'nvr-clock': "an NVR's clock drifts"
+  'nvr-clock': "an NVR's clock drifts",
+  'server-overloaded': 'the server is overloaded for 10 minutes',
+  'server-disk': "the server's own disk is nearly full",
+  'nvr-failing': 'an NVR keeps failing to stream or logging in again',
+  'viewers-refused': 'viewers are turned away (no room to convert video)'
 }
 
 function renderAlerts() {

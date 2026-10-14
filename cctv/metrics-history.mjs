@@ -24,6 +24,9 @@ export const TRIM_EVERY_MS = 3_600_000 // old lines are dropped, and a failed wr
 export const MAX_POINTS = 720 // what one answer holds: 24 hours at 2 minutes, 7 days at 14
 export const MAX_HOURS = 336
 export const METRICS_PATH = '/api/admin/metrics'
+// the newest samples also kept in memory, for the alerts made from them (server-health-alerts.mjs):
+// an hour, so they never re-read the file
+export const RECENT_KEEP = 60
 const NO_STORE = { 'cache-control': 'no-store' }
 const TAIL_CHUNK = 256 * 1024
 
@@ -201,6 +204,7 @@ async function readSince(file, sinceMs, io) {
  */
 export function makeMetricsHistory({ file, providers, counts = workerLineCounts, now = Date.now, log = (line) => console.warn(line), io = fsp }) {
   const last = { sub: null, main: null }
+  const kept = [] // the last RECENT_KEEP samples, oldest first (recent())
   let queue = Promise.resolve() // one write at a time: a trim never runs across an append
   let trimmedAt = now() // (the first trim an hour after the start: nothing to do at a restart)
   let saidAt = -Infinity
@@ -239,6 +243,9 @@ export function makeMetricsHistory({ file, providers, counts = workerLineCounts,
         failed('could not take a sample', e)
         return Promise.resolve(null)
       }
+      // kept whether or not the disk takes it: a full disk is one of the things the alerts are for
+      kept.push(s)
+      if (kept.length > RECENT_KEEP) kept.splice(0, kept.length - RECENT_KEEP)
       queue = queue
         .then(() => io.appendFile(file, `${JSON.stringify(s)}\n`, { mode: 0o600 }))
         .then(() => {
@@ -258,6 +265,8 @@ export function makeMetricsHistory({ file, providers, counts = workerLineCounts,
         return []
       }
     },
+    /** The samples taken since the start, the last RECENT_KEEP of them, oldest first (a copy). */
+    recent: () => kept.slice(),
     start(everyMs = SAMPLE_MS) {
       if (timer) return api
       timer = setInterval(() => {

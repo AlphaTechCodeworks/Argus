@@ -53,7 +53,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from 'node:path'
 import { DATA_DIR, loadUsers, saveUsers } from './auth.mjs'
 import { fileCache } from './file-cache.mjs'
-import { audit, useRights } from './audit.mjs'
+import { audit, useRights, withDevice } from './audit.mjs'
 
 export const RIGHTS_FILE = join(DATA_DIR, 'rights.json')
 /** The version 1 file an upgrade replaced, byte for byte: a manual rollback is a copy back. */
@@ -799,9 +799,11 @@ export function rightsChangeDetail(before, after) {
  * @param {string} pathname
  * @param {() => Promise<object>} readJson the request's JSON object body
  * @param {{user?:string, admin?:boolean}|null} who the session user, from server.mjs
+ * @param {{ip?:string, device?:string}} [from] where the change was made from, for its audit row
+ *   (server.mjs clientIp, device-name.mjs deviceOf)
  * @returns {Promise<[number, any, object?] | null>} null when the path is not one of these routes
  */
-export async function handleRights(method, pathname, readJson, who) {
+export async function handleRights(method, pathname, readJson, who, { ip = '', device = '' } = {}) {
   const methods = ROUTES[pathname]
   if (!methods) return null
   if (!methods.includes(method)) return [405, { error: 'Method not allowed' }, { allow: methods.join(', ') }]
@@ -837,7 +839,7 @@ export async function handleRights(method, pathname, readJson, who) {
     const rights = saveRights(user, body?.rights)
     // "Who gave them permission" is the first question after "who did it", so a rights change is
     // itself an audited event: the stored row (not what was posted), the change first.
-    audit(DATA_DIR, { user: name ?? 'dev', action: 'rights-change', target: user, detail: rightsChangeDetail(before, rights) })
+    audit(DATA_DIR, { user: name ?? 'dev', action: 'rights-change', target: user, detail: withDevice(rightsChangeDetail(before, rights), device), ip })
     return [200, { user, rights }]
   } catch (e) {
     // Everything that can go wrong here is the caller's fault (unknown account, bad name, bad
