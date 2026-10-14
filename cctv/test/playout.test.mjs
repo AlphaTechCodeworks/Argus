@@ -2,7 +2,7 @@
 // real cameras through the real PlayoutClock, with a stand-in for the player's display loop
 // (60 Hz refresh, newest due frame shown, older due frames skipped, at most 45 frames queued).
 //   node cctv/test/playout.test.mjs
-import { PLAYBACK_CLOCK, PLAYOUT_DEFAULTS, PlayoutClock, REMOTE_CLOCK, REMOTE_PLAYBACK_CLOCK } from '../public/playout.js'
+import { LOW_LATENCY_CLOCK, PLAYBACK_CLOCK, PLAYOUT_DEFAULTS, PlayoutClock, REMOTE_CLOCK, REMOTE_PLAYBACK_CLOCK } from '../public/playout.js'
 
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -707,15 +707,15 @@ const stalled = ({ durMs = 120_000, stalls = [], stallMs = 1200 } = {}) => {
   const lines = viewer.match(/\nconst SMOOTH_CLOCK = [\s\S]*?\nconst clockOptions = [^\n]*\n/)?.[0] ?? ''
   const choose = (host, smooth) => {
     try {
-      return new Function('isLocalHost', 'smoothBox', 'REMOTE_CLOCK', `${lines}\nreturn clockOptions()`)(() => isLocalHost(host), { checked: smooth }, REMOTE_CLOCK)
+      return new Function('isLocalHost', 'smoothBox', 'REMOTE_CLOCK', 'LOW_LATENCY_CLOCK', `${lines}\nreturn clockOptions()`)(() => isLocalHost(host), { checked: smooth }, REMOTE_CLOCK, LOW_LATENCY_CLOCK)
     } catch (e) {
       return e.message
     }
   }
-  check('Live page on a local address: live\'s own clock, or Smooth, as before', choose('192.168.1.232', false) === undefined && JSON.stringify(choose('192.168.1.232', true)) === '{"startDelayMs":400,"minDelayMs":300,"maxDelayMs":1200}', `${JSON.stringify(choose('192.168.1.232', false))} ${JSON.stringify(choose('192.168.1.232', true))}`)
+  check('Live page: low latency by default; Smooth preserves its local buffer', choose('192.168.1.232', false) === LOW_LATENCY_CLOCK && JSON.stringify(choose('192.168.1.232', true)) === '{"startDelayMs":400,"minDelayMs":300,"maxDelayMs":1200}', `${JSON.stringify(choose('192.168.1.232', false))} ${JSON.stringify(choose('192.168.1.232', true))}`)
   const far = choose('cctv.jfl.gripe', false)
   const farSmooth = choose('cctv.jfl.gripe', true)
-  check('... through the tunnel: the remote clock', far === REMOTE_CLOCK, JSON.stringify(far))
+  check('... through the tunnel: low latency is also the default', far === LOW_LATENCY_CLOCK, JSON.stringify(far))
   check('... with Smooth: the remote clock, starting and staying at least as big as Smooth (400, 300)', farSmooth?.stretchLate === true && farSmooth.maxDelayMs === 2000 && farSmooth.shrinkWindowMs === REMOTE_CLOCK.shrinkWindowMs && farSmooth.startDelayMs === 400 && farSmooth.minDelayMs === 300, JSON.stringify(farSmooth))
   const tileOptions = viewer.match(/\nconst tileOptions = \(cam\) => \(\{[\s\S]*?\n\}\)\n/)?.[0] ?? ''
   check('... and its tiles keep up to 2 s of decoded frames (player.js REMOTE_QUEUED_FRAMES); a local page\'s the player\'s own', /\n {2}clock: clockOptions\(\),\n/.test(tileOptions) && /\n {2}maxQueuedFrames: REMOTE_PAGE \? REMOTE_QUEUED_FRAMES : undefined,?\n/.test(tileOptions) && /\nconst REMOTE_PAGE = !isLocalHost\(\)\n/.test(viewer))

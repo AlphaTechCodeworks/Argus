@@ -238,6 +238,12 @@ const boxSeek = new WeakMap()
 
 const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   clock: PLAYBACK_CLOCK,
+  onResourceLimit: () => {
+    showMessage('Device video limit. Select a lighter recording source.')
+    if (ws) { ws.onclose = null; ws.close(); ws = null }
+    player.reset()
+  },
+  onError: () => showMessage('Video restarted. Seek to retry.'),
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
     sound.shown = { ts, at: performance.now() } // the picture's clock, which the sound keeps to

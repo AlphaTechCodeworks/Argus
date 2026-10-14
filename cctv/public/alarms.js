@@ -416,7 +416,8 @@ function fillChoices() {
 }
 
 async function start() {
-  cameras = await fetch('/api/cameras', { headers: { accept: 'application/json' } }).then(jsonOf).catch(() => [])
+  const [roster] = await Promise.all([fetch('/api/cameras', { headers: { accept: 'application/json' } }).then(jsonOf).catch(() => []), preferencesReady])
+  cameras = roster
   if (!Array.isArray(cameras)) cameras = cameras.cameras ?? []
   fillChoices()
   const f = $('filters').elements

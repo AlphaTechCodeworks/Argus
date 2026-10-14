@@ -58,7 +58,7 @@ async function flush() {
   saving = true
   const patch = pending; sending = patch; pending = {}; cache()
   try {
-    const response = await fetch('/api/me/preferences', { method: 'PATCH', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ account: user, preferences: patch }), keepalive: true })
+    const response = await fetch('/api/me/preferences', { method: 'PATCH', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ account: user, preferences: patch }), keepalive: true, signal: AbortSignal.timeout(8000) })
     if (response.status === 409) { pending = { ...patch, ...pending }; accountChanged = true; report('accountchanged'); return }
     if (!response.ok) throw new Error('Save failed')
     report('saved')
@@ -66,7 +66,8 @@ async function flush() {
     pending = { ...patch, ...pending }
     report('failed')
   } finally { saving = false; sending = {}; cache() }
-  if (Object.keys(pending).length) timer = setTimeout(flush, 5000)
+  // (retries wait while the page is hidden: it tries again when it is shown, below)
+  if (Object.keys(pending).length && !document.hidden) timer = setTimeout(flush, 5000)
 }
 export const savePendingSettings = flush
 export const preferenceStorage = {
@@ -77,6 +78,12 @@ export const preferenceStorage = {
   }
 }
 if (typeof window !== 'undefined') addEventListener('pagehide', () => { clearTimeout(timer); flush() })
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') document.addEventListener('visibilitychange', () => {
+  clearTimeout(timer)
+  if (!document.hidden) void flush()
+})
+/** The account the values belong to (null until known): a page that keeps pictures per account clears them on a change. */
+export const preferenceAccount = () => user
 /**
  * Settles once the values are known: the account's own, or after a failed or unanswered request (5 s
  * each) this browser's copy of them for whoever is signed in, or none. It never rejects. Until then
@@ -85,5 +92,5 @@ if (typeof window !== 'undefined') addEventListener('pagehide', () => { clearTim
 export const preferencesReady = load().catch(() => {}).then(() => {
   loaded = true
   clearTimeout(timer)
-  if (Object.keys(pending).length) timer = setTimeout(flush, 300)
+  if (Object.keys(pending).length && !document.hidden) timer = setTimeout(flush, 300)
 })

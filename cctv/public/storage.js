@@ -529,14 +529,20 @@ if (typeof document !== 'undefined') {
     }
   })
 
-  const load = () =>
-    fetch('/api/storage')
+  let loading = null
+  const load = () => {
+    if (document.hidden) return Promise.resolve()
+    if (loading) return loading
+    loading = fetch('/api/storage', { signal: AbortSignal.timeout(8000) })
       .then((x) => x.json())
       .then((data) => {
         paint(data)
         paintJobs(data)
       })
       .catch(() => {})
+      .finally(() => { loading = null })
+    return loading
+  }
   load()
   setInterval(load, 60_000)
 }

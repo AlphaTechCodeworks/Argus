@@ -28,6 +28,13 @@ export function attachZoom(el, { apply, rect = () => el.getBoundingClientRect(),
   let drag = null // { x, y, ox, oy }
   let moved = false
   let lastTap = 0
+  let paintRaf = 0
+  const paint = () => { paintRaf = 0; apply(st.z, st.x, st.y) }
+  const listeners = []
+  const listen = (type, fn, options) => {
+    el.addEventListener(type, fn, options)
+    listeners.push([type, fn, options])
+  }
 
   /** Keeps the picture covering its box: never panned to an empty edge. */
   const clamp = () => {
@@ -35,17 +42,19 @@ export function attachZoom(el, { apply, rect = () => el.getBoundingClientRect(),
     st.x = Math.min(0, Math.max(-(st.z - 1) * w, st.x))
     st.y = Math.min(0, Math.max(-(st.z - 1) * h, st.y))
   }
-  const commit = () => {
+  const commit = (defer = false) => {
     if (st.z <= 1.001) {
       st.z = 1
       st.x = 0
       st.y = 0
     }
     clamp()
-    apply(st.z, st.x, st.y)
+    if (defer && typeof requestAnimationFrame === 'function') {
+      if (!paintRaf) paintRaf = requestAnimationFrame(paint)
+    } else paint()
   }
   /** Zooms to z about a point on screen, so what is under it stays under it. */
-  const zoomTo = (z, cx, cy) => {
+  const zoomTo = (z, cx, cy, defer = false) => {
     const r = rect()
     const next = Math.min(max, Math.max(1, z))
     const px = (cx - r.left - st.x) / st.z
@@ -53,23 +62,25 @@ export function attachZoom(el, { apply, rect = () => el.getBoundingClientRect(),
     st.z = next
     st.x = cx - r.left - px * next
     st.y = cy - r.top - py * next
-    commit()
+    commit(defer)
   }
   const reset = () => {
+    if (paintRaf) { cancelAnimationFrame(paintRaf); paintRaf = 0 }
     st.z = 1
     st.x = 0
     st.y = 0
     apply(1, 0, 0)
   }
 
-  el.addEventListener('wheel', (e) => {
+  listen('wheel', (e) => {
     if (busy()) return
     e.preventDefault()
     zoomTo(st.z * (e.deltaY > 0 ? 1 / 1.25 : 1.25), e.clientX, e.clientY)
   }, { passive: false })
 
-  el.addEventListener('pointerdown', (e) => {
+  listen('pointerdown', (e) => {
     if (busy() || e.target.closest?.('button, a, input, select, textarea')) return
+    try { el.setPointerCapture?.(e.pointerId) } catch {}
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
     moved = false
     if (pointers.size === 2) {
@@ -80,7 +91,7 @@ export function attachZoom(el, { apply, rect = () => el.getBoundingClientRect(),
       drag = { x: e.clientX, y: e.clientY, ox: st.x, oy: st.y }
     }
   })
-  el.addEventListener('pointermove', (e) => {
+  listen('pointermove', (e) => {
     const p = pointers.get(e.pointerId)
     if (!p) return
     p.x = e.clientX
@@ -88,19 +99,20 @@ export function attachZoom(el, { apply, rect = () => el.getBoundingClientRect(),
     if (pinch && pointers.size >= 2) {
       const [a, b] = [...pointers.values()]
       moved = true
-      zoomTo(pinch.z0 * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0), (a.x + b.x) / 2, (a.y + b.y) / 2)
+      zoomTo(pinch.z0 * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0), (a.x + b.x) / 2, (a.y + b.y) / 2, true)
     } else if (drag) {
       const dx = e.clientX - drag.x
       const dy = e.clientY - drag.y
       if (Math.abs(dx) + Math.abs(dy) > MOVE_PX) moved = true
       st.x = drag.ox + dx
       st.y = drag.oy + dy
-      commit()
+      commit(true)
     }
   })
   const up = (e) => {
     if (!pointers.has(e.pointerId)) return
     pointers.delete(e.pointerId)
+    try { if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId) } catch {}
     if (pointers.size < 2) pinch = null
     if (pointers.size === 0) drag = null
     // a double-tap on a touch screen: back to the whole picture (a double-click does it on a PC)
@@ -112,16 +124,17 @@ export function attachZoom(el, { apply, rect = () => el.getBoundingClientRect(),
       } else lastTap = now
     }
   }
-  el.addEventListener('pointerup', up)
-  el.addEventListener('pointercancel', up)
-  el.addEventListener('dblclick', (e) => {
+  listen('pointerup', up)
+  listen('pointercancel', up)
+  listen('lostpointercapture', up)
+  listen('dblclick', (e) => {
     if (busy() || st.z === 1 || e.target.closest?.('button, a, input, select, textarea')) return
     e.preventDefault()
     e.stopPropagation()
     reset()
   })
   // the click that ends a drag or a pinch, and a tap on a zoomed picture, do nothing else
-  el.addEventListener('click', (e) => {
+  listen('click', (e) => {
     if (e.target.closest?.('button, a, input, select, textarea')) return
     if (moved || st.z > 1) {
       e.stopPropagation()
@@ -132,8 +145,13 @@ export function attachZoom(el, { apply, rect = () => el.getBoundingClientRect(),
 
   return {
     reset,
+    dispose() {
+      if (paintRaf) { cancelAnimationFrame(paintRaf); paintRaf = 0 }
+      for (const [type, fn, options] of listeners) el.removeEventListener?.(type, fn, options)
+      pointers.clear(); pinch = drag = null
+    },
     /** Paints the current zoom again (the box changed size: the pan limits did too). */
-    reapply: commit,
+    reapply: () => commit(),
     get zoom() {
       return st.z
     }

@@ -625,10 +625,10 @@ export async function handleEvents(method, pathname, readJson, deps = {}) {
     if (method !== 'GET') return [405, { error: 'Method not allowed' }]
     if (!user) return [401, { error: 'Not signed in' }, NO_STORE]
     const p = new URLSearchParams(search)
-    const { listEvents } = await import('./events-db.mjs')
+    const { listEventsAsync } = await import('./events-db.mjs')
     return [200, {
       // only cameras this user may see (rights.mjs, via server.mjs)
-      events: listEvents({ fromMs: num(p.get('from')), toMs: num(p.get('to')), limit: num(p.get('limit')) ?? 500, keep: (e) => canSee(e.nvr, e.ch) }),
+      events: await listEventsAsync({ fromMs: num(p.get('from')), toMs: num(p.get('to')), limit: num(p.get('limit')) ?? 500, keep: (e) => canSee(e.nvr, e.ch) }),
       sources: sourceReport()
     }, NO_STORE]
   }

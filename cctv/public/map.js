@@ -621,7 +621,8 @@ async function api(method, path, body) {
   const res = await fetch(path, {
     method,
     headers: body !== undefined ? { 'content-type': 'application/json' } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(8000)
   })
   if (res.status === 401) location.href = '/login.html'
   const data = await res.json().catch(() => ({}))
@@ -1170,7 +1171,15 @@ const EVENT_LOOKBACK_MS = 90_000 // long enough to still be lighting a lingering
  * was given, so nothing lights or reveals a camera the viewer may not see. A failed poll leaves the
  * last lighting alone: a dropped request is not evidence that nothing is happening.
  */
-async function loadEvents() {
+let eventLoad = null
+function loadEvents() {
+  if (document.hidden) return Promise.resolve()
+  if (eventLoad) return eventLoad
+  eventLoad = loadEventsImpl().finally(() => { eventLoad = null })
+  return eventLoad
+}
+async function loadEventsImpl() {
+  if (document.hidden) return
   try {
     const from = Date.now() - EVENT_LOOKBACK_MS
     const data = await api('GET', `/api/events?from=${from}&limit=300`)
@@ -2341,6 +2350,14 @@ mapBrowser = mountCameraBrowser({
 applyView(false)
 renderSites()
 renderSide()
+void preferencesReady.then(() => {
+  namesBox.checked = preferenceStorage.getItem('cctv.mapNames') !== '0'
+  const savedLayer = preferenceStorage.getItem('cctv.mapLayer')
+  if (LAYERS[savedLayer]) { layer = savedLayer; satBox.checked = layer === 'satellite'; applyView(false) }
+  const savedSite = workspaceSite() ?? preferenceStorage.getItem('cctv.mapSite') ?? ''
+  if (siteNames.includes(savedSite) && savedSite !== site) goSite(savedSite)
+  stale()
+})
 {
   // arrive already looking at the chosen site (or every site): no flight on opening the page
   const land = () => {
@@ -2355,6 +2372,7 @@ renderSide()
 
 // camera colours every 30 s: the roster for names and new cameras, the health poll for the states
 setInterval(async () => {
+  if (document.hidden) return
   try {
     setCameras(await api('GET', '/api/cameras'))
   } catch {}

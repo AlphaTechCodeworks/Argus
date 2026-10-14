@@ -1927,6 +1927,7 @@ body.has-shell .app-main > header, .app-main > .shell-top, .app-main > .alert-ba
 /* a phone's 2 x 2: two cameras across, the page scrolling to the second row */
 @media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   body.phone-g2 #grid { grid-template-columns: 1fr 1fr !important; }
+  body.phone-g3 #grid { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
   body.phone-g2 .tile .name { font-size: 11px; }
 }
 /* the ‹ › on the full-size camera: every screen (a PC had no way to step; ← → keys as well) */
@@ -2239,3 +2240,10 @@ body.playback-page.is-fullscreen .pb-bar { --pb-head-ink: #14171c; }
 
 /* Motion search on the playback bar: gone (not just greyed) where the footage cannot be searched */
 #searchToggle[hidden] { display: none; }
+@media (max-width:700px), (pointer:coarse) and (max-height:500px) {
+  .single-overlay .phone-step, .phone-fs-note, .cam-sheet, .ease-chip {
+    -webkit-backdrop-filter:none; backdrop-filter:none;
+  }
+  .cam-sheet { background:var(--bg); }
+  body.phone-list #grid > .tile { box-shadow:none; }
+}

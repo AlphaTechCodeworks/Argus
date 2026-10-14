@@ -43,6 +43,30 @@ application is everything in `cctv/` and `deploy/`.
   saves bandwidth and disk space. A converted sub-stream costs about 3 to 4 % of one CPU core.
 - **Phones and remote viewers** get a lighter stream sized to the link, with a total bandwidth
   budget for everything leaving the building.
+- Phone live tiles request the lighter 15 fps stream in Live and Map; Wall playback also limits
+  phone drawing to 15 fps. Video display canvases
+  use at most 1.5 times the CSS pixel density and 720p worth of pixels (540p on phones reporting
+  2 GB of memory or less). Full-resolution frame captures remain available. The scrolling live
+  list waits 180 ms before opening a visible camera and releases it 500 ms after it leaves the
+  screen, so flicking through cameras does not leave a trail of active decoders.
+
+### Android performance
+
+Live offers Auto, one camera, 2×2 and 3×3 (nine maximum). Grid tiles use sub-streams; a selected
+camera upgrades to main quality after its first picture. Phones share a decoder admission limit
+(nine, or four when the browser reports at most 2 GB of memory) and a decoded-image queue budget
+(96 MiB, or 48 MiB on those smaller devices). These are application queue limits, not total
+process/GPU memory guarantees. Sustained processing or image-memory pressure reduces the Live
+layout, with a visible explanation. Auto starts conservatively with at most four phone cameras.
+
+Live starts in low-latency mode (120 ms initial buffer, capped at 300 ms). Select Smooth for the
+larger jitter buffer on an uneven connection; network/NVR delay is additional. Camera previews
+are session-only, expire after 15 minutes and are bounded to 64 entries / 1 MiB; they are not
+stored on disk. Map tiles with opaque responses are not cached, because their quota cost is
+unknown. Settings and large event searches no longer block the startup/video loop.
+
+See [audit/IMPLEMENTATION.md](audit/IMPLEMENTATION.md) for changes, test evidence and the Android
+release checklist. Real-device latency, RAM, power and thermal measurements are still required.
 - **It protects the recorder.** An NVR shares one bandwidth budget between serving viewers and
   recording to its own disks. Argus opens streams one at a time, stops a stream the moment its tile
   is off the page or the tab is hidden, shares one stream between every viewer of a camera, and

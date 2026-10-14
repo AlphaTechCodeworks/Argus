@@ -110,7 +110,7 @@ function validUiValue(key, value) {
   if (key === 'cctv.theme') return ['dark', 'light'].includes(value)
   if (key === 'cctv.mapLayer') return ['street', 'satellite'].includes(value)
   if (['cctv.sidebarPinned', 'cctv.smooth', 'cctv.hideOffline', 'cctv.mapNames'].includes(key)) return ['0', '1'].includes(value)
-  if (key.startsWith('cctv.layout')) return layouts.has(value) && (key !== 'cctv.layout.phone' || ['auto', 'list', 'g1', 'g2'].includes(value))
+  if (key.startsWith('cctv.layout')) return layouts.has(value) && (key !== 'cctv.layout.phone' || ['auto', 'list', 'g1', 'g2', 'g3'].includes(value))
   if (key === 'cctv.alarmFilters') {
     try {
       const data = JSON.parse(value)

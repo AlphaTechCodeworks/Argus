@@ -161,6 +161,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_start ON events (start_ms);
 CREATE INDEX IF NOT EXISTS events_cam ON events (nvr, ch, start_ms);
 CREATE INDEX IF NOT EXISTS events_ack ON events (ack_ms);
+CREATE INDEX IF NOT EXISTS events_priority_start ON events (priority, start_ms DESC);
+CREATE INDEX IF NOT EXISTS events_type_start ON events (type, start_ms DESC);
 CREATE TABLE IF NOT EXISTS alarm_rules (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
   cameras TEXT NOT NULL DEFAULT '[]', types TEXT NOT NULL DEFAULT '[]',

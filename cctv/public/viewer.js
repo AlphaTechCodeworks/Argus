@@ -13,7 +13,7 @@ import { freshenForPageChange, muxState, useMux } from './live-mux.js'
 import { H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, TILE_HTML, mainNotConvertedTitle } from './live-tile.js'
 import { DEFAULT_OSD, clockOffsetFrom } from './osd-overlay.js'
 import { REMOTE_NO_REWIND_MS, REMOTE_QUEUED_FRAMES, loopStats } from './player.js'
-import { REMOTE_CLOCK } from './playout.js'
+import { LOW_LATENCY_CLOCK, REMOTE_CLOCK } from './playout.js'
 import { deviceId, startTelemetry } from './telemetry.js'
 import { loadSicex, sicexOn } from './sicex.js'
 import { checkBookmark } from './bookmarks-view.js'
@@ -104,7 +104,7 @@ const SMOOTH_CLOCK = { startDelayMs: 400, minDelayMs: 300, maxDelayMs: 1200 }
 // network keeps live's own clock, or Smooth, exactly as before.
 const REMOTE_PAGE = !isLocalHost()
 const REMOTE_SMOOTH_CLOCK = { ...REMOTE_CLOCK, startDelayMs: SMOOTH_CLOCK.startDelayMs, minDelayMs: SMOOTH_CLOCK.minDelayMs }
-const clockOptions = () => (REMOTE_PAGE ? (smoothBox.checked ? REMOTE_SMOOTH_CLOCK : REMOTE_CLOCK) : smoothBox.checked ? SMOOTH_CLOCK : undefined)
+const clockOptions = () => smoothBox.checked ? (REMOTE_PAGE ? REMOTE_SMOOTH_CLOCK : SMOOTH_CLOCK) : LOW_LATENCY_CLOCK
 // an unobtrusive mark when this Live page was loaded through the tunnel, not the local address: the
 // video is heavier on the link, so on site the local address is faster (playback hunt F1)
 if (REMOTE_PAGE) {
@@ -434,18 +434,22 @@ function fillSlot(slot, gridArea, startDelayMs = 0) {
   gridTiles.push(slot.live)
 }
 
-// Phone list: start a tile's stream when it scrolls into view, stop it a few seconds after it
-// leaves (a quick flick past does not start and stop a stream for nothing).
-const LEAVE_MS = 3000
+// Let a flick pass before opening a decoder; release off-screen streams promptly.
+const ENTER_MS = 180
+const LEAVE_MS = 500
 const inView = typeof IntersectionObserver === 'function' ? new IntersectionObserver((entries) => {
   for (const e of entries) {
     const slot = e.target._slot
     if (!slot || !slot.el?.isConnected) continue
     clearTimeout(slot.leaveTimer)
+    clearTimeout(slot.enterTimer)
     if (e.isIntersecting) {
       if (!slot.live) {
-        slot.live = new LiveTile(slot.el, slot.cam, SUB_STREAM, 0, tileOptions(slot.cam))
-        gridTiles.push(slot.live)
+        slot.enterTimer = setTimeout(() => {
+          if (document.hidden || slot.live || slot.el !== e.target || !e.target.isConnected) return
+          slot.live = new LiveTile(slot.el, slot.cam, SUB_STREAM, 0, tileOptions(slot.cam))
+          gridTiles.push(slot.live)
+        }, ENTER_MS)
       }
     } else if (slot.live) {
       slot.leaveTimer = setTimeout(() => {
@@ -457,7 +461,7 @@ const inView = typeof IntersectionObserver === 'function' ? new IntersectionObse
       }, LEAVE_MS)
     }
   }
-}, { rootMargin: '150px 0px' }) : null
+}, { rootMargin: '0px', threshold: 0.01 }) : null
 function watchInView(slot, tile) {
   tile._slot = slot
   if (inView) inView.observe(tile)
@@ -600,8 +604,30 @@ const tileOptions = (cam) => ({
     listSoon() // the server may be restarting: its cameras come back one NVR at a time
   },
   osd: () => osdForTile(cam),
-  maxFps: maxLiveFps()
+  maxFps: maxLiveFps(),
+  onResourceLimit: () => downgradeLive('This device reached its video limit.')
 })
+
+let pressureTicks = 0
+function downgradeLive(reason) {
+  const smaller = layoutSelect.value === 'g3' ? 'g2' : layoutSelect.value === 'g2' || layoutSelect.value === 'auto' ? 'g1' : null
+  if (!smaller || document.hidden || single !== null) return
+  queueMicrotask(() => {
+    if (document.hidden || single !== null || layoutSelect.value === smaller) return
+    layoutSelect.value = smaller
+    markPhoneLayout()
+    page = 0
+    render()
+    notice.hidden = false
+    notice.textContent = `${reason} Showing ${smaller === 'g2' ? 'four cameras' : 'one camera'} to keep video responsive.`
+  })
+}
+setInterval(() => {
+  if (!isPhone() || document.hidden || single !== null) { pressureTicks = 0; return }
+  const stressed = gridTiles.some(t => t.player?.stats.decodeQueue > 24 || t.player?.stats.renderError || t.player?.stats.memoryLimited)
+  pressureTicks = stressed ? pressureTicks + 1 : 0
+  if (pressureTicks >= 5) { pressureTicks = 0; downgradeLive('Video processing is overloaded.') }
+}, 1000)
 
 function updatePager(pages = Number(pageLabel.dataset.pages ?? 1)) {
   pageLabel.dataset.pages = String(pages)
@@ -998,6 +1024,7 @@ function lenderFor(cam) {
 }
 /** Starts the cameras either side of this one (not already on the grid page), and lets others go. */
 function startAhead(cam) {
+  if (isPhone() && (navigator.connection?.saveData || navigator.deviceMemory <= 2 || navigator.connection?.effectiveType === '2g')) { stopAhead(); return }
   const list = shownCameras(gridCameras(), gridView())
   const i = list.findIndex((c) => camKey(c) === camKey(cam))
   const want = new Map()
@@ -1420,6 +1447,7 @@ function closeSingle({ resumeGrid = true, keep = null } = {}) {
   // camera being stepped to (openSingle takes it, or lets it go)
   clearTimeout(aheadMainTimer)
   aheadMainTimer = null
+  overlayZoom?.dispose()
   overlayZoom = null
   for (const t of singleTiles) if (t !== keep) t.close()
   singleTiles = []
@@ -1764,11 +1792,13 @@ smoothBox.addEventListener('change', () => {
   render()
 })
 
-// A phone has room for one camera, or four: the other layouts are taken off its menu, and it keeps
-// its own choice (a PC's 4 x 4 must not follow the same user onto a phone). Not Auto: its tiles ask
-// for the main stream, and each main stream a phone watches is converted by the server.
-const PHONE_LAYOUTS = ['list', 'g1', 'g2']
+// A phone has room for one camera, four or nine (video-budget.js keeps nine within what it can
+// decode): the other layouts are taken off its menu, and it keeps its own choice (a PC's 4 x 4 must
+// not follow the same user onto a phone). Not Auto: its tiles ask for the main stream, and each main
+// stream a phone watches is converted by the server.
+const PHONE_LAYOUTS = ['list', 'g1', 'g2', 'g3']
 const LAYOUT_KEY = isPhone() ? 'cctv.layout.phone' : 'cctv.layout'
+for (const o of [...layoutSelect.querySelectorAll('option')]) if (!LAYOUTS[o.value]) o.remove()
 if (isPhone()) {
   for (const o of [...layoutSelect.querySelectorAll('option')]) if (!PHONE_LAYOUTS.includes(o.value)) o.remove()
   for (const g of [...layoutSelect.querySelectorAll('optgroup')]) if (!g.children.length) g.remove()
@@ -1780,6 +1810,7 @@ if (isPhone()) {
 }
 const markPhoneLayout = () => {
   document.body.classList.toggle('phone-g2', isPhone() && layoutSelect.value === 'g2')
+  document.body.classList.toggle('phone-g3', isPhone() && layoutSelect.value === 'g3')
   document.body.classList.toggle('phone-list', isPhone() && layoutSelect.value === 'list')
 }
 try {
@@ -1894,7 +1925,7 @@ function layoutOnThisPc(wanted) {
     layoutNote.textContent = NO_H265_NOTE
     layoutNote.hidden = false
   }
-  return layout
+  return LAYOUTS[layout] ? layout : 'g3'
 }
 function limitForNoH265({ draw = true } = {}) {
   if (noH265Limit || !cannotPlayH265()) return
@@ -1912,7 +1943,7 @@ function limitForNoH265({ draw = true } = {}) {
   freshenForPageChange()
   render({ keepSingle: true })
 }
-const noH265Timer = isPhone() ? null : setInterval(limitForNoH265, 1000)
+const noH265Timer = isPhone() ? null : setInterval(() => { if (!document.hidden) limitForNoH265() }, 1000)
 if (!isPhone()) limitForNoH265({ draw: false }) // (?h265=0 is known already; the first drawing is still to come)
 try {
   hideOffline.checked = preferenceStorage.getItem('cctv.hideOffline') !== '0'
@@ -2449,7 +2480,13 @@ function multiSite() {
 }
 
 /** Loads cameras from every NVR; keeps the grid as is unless the list changed. */
-async function loadCameras(pre = null) {
+let cameraLoad = null
+function loadCameras(pre = null) {
+  if (cameraLoad) return cameraLoad
+  cameraLoad = loadCamerasImpl(pre).finally(() => { cameraLoad = null })
+  return cameraLoad
+}
+async function loadCamerasImpl(pre = null) {
   const [fresh, sites] = await (pre ?? fetchLists())
   serverList = fresh
   const list = applyOrder(fresh, sync.order) // this user's order (the grid, the diff and the pages all use it)
@@ -2509,8 +2546,20 @@ async function loadCameras(pre = null) {
 // (Cloudflare holding them on a connection to the old process) and the grid never appeared. The page
 // goes on after a few seconds; the order and the overlay settings arrive with their own refreshes.
 const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(r, ms))])
-await within(early.catch(() => {}), 6000)
+void early.catch(() => {})
 await within(loadCameras(prefetched).catch(() => listSoon()), 8000)
+void preferencesReady.then(() => {
+  smoothBox.checked = preferenceStorage.getItem('cctv.smooth') === '1'
+  hideOffline.checked = preferenceStorage.getItem('cctv.hideOffline') !== '0'
+  const saved = preferenceStorage.getItem(LAYOUT_KEY)
+  if (saved && LAYOUTS[saved] && (!isPhone() || PHONE_LAYOUTS.includes(saved))) layoutSelect.value = saved
+  const fit = preferenceStorage.getItem('cctv.pictureFit')
+  if (PICTURE_MODES.includes(fit)) { pictureFit.value = fit; grid.dataset.pictureFit = fit }
+  markPhoneLayout()
+  viewsRestored = false
+  void loadViews().then(() => loadCameras()).catch(() => {})
+  if (!document.hidden) render({ keepSingle: true })
+})
 liveBrowser = mountCameraBrowser({
   host: document.querySelector('.live-scope'), cameras: () => cameras,
   selectedSite: () => siteSelect.value.startsWith('@nvr:') ? cameras.find((c) => `@nvr:${c.nvr}` === siteSelect.value)?.site || '' : siteSelect.value,
@@ -2521,7 +2570,8 @@ listSoon() // (whatever happened above, the list is re-read every 5 s for the ne
 if (sync.unsaved) sync.refresh()
 // the camera list, and this user's order (another screen may have changed it)
 setInterval(() => {
-  loadCameras().catch(() => {})
+  if (document.hidden) return
+  if (Date.now() >= fastUntil) loadCameras().catch(() => {})
   loadOsd().catch(() => {}) // an overlay changed in Settings reaches every screen within half a minute
   loadViews().catch(() => {}) // a view saved or deleted on another screen reaches this one too
   sync.refresh()

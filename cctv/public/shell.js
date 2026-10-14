@@ -12,7 +12,8 @@ import { nextTheme, readTheme, saveTheme } from './theme.js'
 // ARGUS as the brand draws it (the app repository's docs/brand, concept A): five stroked letters in the
 // colour of the text around them, so it reads in the light theme and the dark.
 const WORDMARK = `<svg class="shell-wordmark" viewBox="-2 -1 194 38" role="img" aria-label="Argus" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"><path d="M1 34L14 2L27 34M7 23H21" transform="translate(0,0)"/><path d="M2 34V2H15Q27 2 27 12Q27 22 15 22H2M15 22L28 34" transform="translate(40,0)"/><path d="M28 7Q22 2 15 2Q2 2 2 18Q2 34 15 34Q23 34 28 29V19H17" transform="translate(80,0)"/><path d="M2 2V22Q2 34 15 34Q28 34 28 22V2" transform="translate(120,0)"/><path d="M27 6Q22 2 15 2Q3 2 3 10Q3 18 15 18Q27 18 27 26Q27 34 15 34Q7 34 2 29" transform="translate(160,0)"/></svg>`
-import { preferenceStorage, preferencesReady, savePendingSettings } from './user-settings.js'
+import { preferenceAccount, preferenceStorage, preferencesReady, savePendingSettings } from './user-settings.js'
+import { purgeCameraStills } from './stills.js'
 
 const store = preferenceStorage
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
@@ -156,24 +157,32 @@ export function mountShell() {
     })
 }
 
-// The theme and the pinned sidebar come with the account, so the shell is drawn when its preferences
-// are known (user-settings.js: it always says so, within seconds even when the server does not
-// answer). Asked for with then(), not a top-level await: this file is the first script of every page
-// and stays one that never waits. It asks first, so it is still drawn before a page script that
-// waits for the same preferences goes on.
-preferencesReady.then(() => mountShell())
+mountShell()
+void preferencesReady.then(() => {
+  applyTheme(readTheme(store))
+  document.body.classList.toggle('sidebar-pinned', store.getItem('cctv.sidebarPinned') === '1')
+})
 
 // Presence heartbeat also notices an administrator revoking this browser's cookie.
-setInterval(async () => {
+async function refreshSession() {
+  if (document.hidden) return
   try {
     const response = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(10_000) })
     if (response.status === 401) location.href = '/login.html'
-    else if (response.status === 403) {
+    else if (response.ok) {
+      const fresh = await response.json()
+      if (preferenceAccount() && fresh.user !== preferenceAccount()) {
+        await purgeCameraStills()
+        location.reload()
+      }
+    } else if (response.status === 403) {
       const body = await response.json()
       if (body.mustChangePassword) location.href = '/change-password.html'
     }
   } catch { /* A transient connection loss is not a sign-out. */ }
-}, 30_000)
+}
+setInterval(refreshSession, 30_000)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void refreshSession() })
 
 // keep the app's own files on the device (sw.js): Argus opens at once on a weak signal
 if ('serviceWorker' in navigator && isSecureContext) {
