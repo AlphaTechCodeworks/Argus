@@ -178,13 +178,15 @@ export class PhoneStream {
    *   the second one ffmpeg's parser holds until the next begins); not given: only as slowFps says
    *   now: the clock (LAG_HOLD_MS, emptyAt), for tests
    *   tag: what its log lines begin with, in brackets (h264-fallback.mjs: its conversions are not a phone's)
+   *   convertAll: every stream is converted, H.264 too, and never sent as it is (steady.mjs: the
+   *   conversion is what steadies the picture); not given: as fps and h264Only say
    */
-  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, subMaxWidth = 0, bufSeconds = 1, lowDelay, keySeconds = 2, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, rejudge = false, acquire = null, maxLagS = 0, endEach = false, now = () => Date.now(), background = false, camera = '?', tag = 'phone-live' }) {
+  constructor({ source, type, slot, makeTranscoder = (o) => new Transcoder(o), onEmpty = () => {}, log = (l) => console.log(l), stopDelayMs = STOP_DELAY_MS, fps = PHONE_FPS, crf = PHONE_CRF, subKbps = PHONE_SUB_KBPS, mainKbps = PHONE_MAIN_KBPS, maxWidth = PHONE_MAX_WIDTH, subMaxWidth = 0, bufSeconds = 1, lowDelay, keySeconds = 2, h264Only = false, learnMs = 0, slowFps = 0, fromNextKey = false, srcFps = 0, wholeReplay = false, onRate = () => {}, rejudge = false, acquire = null, maxLagS = 0, endEach = false, convertAll = false, now = () => Date.now(), background = false, camera = '?', tag = 'phone-live' }) {
     // fps / crf / kbps / maxWidth: the level this stream is thinned to (adaptive-live.mjs picks one per
     // viewer); bufSeconds / lowDelay / keySeconds / learnMs / slowFps / fromNextKey / srcFps / rejudge /
     // maxLagS: how its conversion runs and starts (a phone on the local network gives none: the
     // converter's own, as always)
-    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, subMaxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs, slowFps, fromNextKey, srcFps, onRate, rejudge, acquire, maxLagS, endEach, now })
+    Object.assign(this, { source, type, slot, makeTranscoder, onEmpty, log, stopDelayMs, fps, crf, subKbps, mainKbps, maxWidth, subMaxWidth, bufSeconds, lowDelay, keySeconds, h264Only, learnMs, slowFps, fromNextKey, srcFps, onRate, rejudge, acquire, maxLagS, endEach, convertAll, now })
     // Every line names its camera. On 29 Sep they named none, and the 15-24 conversions a remote
     // viewer's level change started at once could only be matched to cameras by their timing
     // (stutter report 2.10).
@@ -355,7 +357,7 @@ export class PhoneStream {
 
   /** Whether a stream at this rate is sent as it is: nothing to thin, a sub-stream, and a codec its viewers play. */
   #passes(keepEvery, f) {
-    return keepEvery === 1 && this.type !== 0 && !(this.h264Only && f.codec === CODEC_H265)
+    return !this.convertAll && keepEvery === 1 && this.type !== 0 && !(this.h264Only && f.codec === CODEC_H265)
   }
 
   /** Its converter, for this rate and the frames kept of it (`f`: the frame it starts at, for its codec). */

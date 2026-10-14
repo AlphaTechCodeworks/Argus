@@ -37,6 +37,7 @@
 .mv-b { stroke: var(--ok); stroke-dasharray: 6 3; } .mv-dot.mv-b, .mv-key.mv-b { fill: var(--ok); background: var(--ok); }
 .mv-c { stroke: var(--warn); stroke-dasharray: 2 3; } .mv-dot.mv-c, .mv-key.mv-c { fill: var(--warn); background: var(--warn); }
 .mv-d { stroke: var(--bad); } .mv-dot.mv-d, .mv-key.mv-d { fill: var(--bad); background: var(--bad); }
+.mv-e { stroke: var(--text); stroke-dasharray: 10 3 2 3; } .mv-dot.mv-e, .mv-key.mv-e { fill: var(--text); background: var(--text); }
 .mv-limit { stroke: var(--text-muted); stroke-dasharray: 8 4; stroke-width: 1.2; } .mv-dot.mv-limit, .mv-key.mv-limit { fill: var(--text-muted); background: var(--text-muted); }
 .mv-legend { list-style: none; margin: 8px 0 6px; padding: 0; display: grid; gap: 4px; font-size: var(--fs-dense); color: var(--text); }
 .mv-key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 8px; vertical-align: middle; }

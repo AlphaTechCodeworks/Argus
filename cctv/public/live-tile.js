@@ -81,6 +81,28 @@ export const H264_NO_ROOM_MAIN = 'h265: no room to convert main'
 export const MAIN_AT_LIMIT = 'main: recorder at its limit'
 // ...and on a converted main stream (the full-size view): what it is, and that it is not the camera's full size
 export const CONVERTED_MAIN_TITLE = 'This camera sends H.265, which this browser cannot play, so the server is converting its full-quality picture to H.264 for this PC, at up to 1920 pixels wide. That costs the server most of a processor core for as long as it is watched; the "HEVC Video Extensions" from the Microsoft Store let Chrome and Edge play the camera’s own picture instead.'
+// "Steady picture" (steady.mjs): an admin has switched it on for this camera, and the server steadies
+// its picture for every viewer. The server says so on each connection ({"op":"steady","on":true}), or
+// that it plays the camera's own picture for now ({"op":"steady","on":false,"why":"busy"|"failed"}).
+export const STEADY_TITLE = 'Steady picture is on for this camera: the server steadies its picture, so it does not shake. Full quality is not available while it is on.'
+export const STEADY_BUSY_TEXT = 'Steady picture paused: the server is busy'
+export const STEADY_FAILED_TEXT = 'Steady picture paused: the server could not steady this camera just now'
+
+/**
+ * The tile's small mark for its steadiness, beside its name: null for none (the camera is not
+ * steadied). state: 'on', 'busy' or 'failed'. In full size (the main stream asked for) the words in
+ * full; on a grid tile, short, with the words in its title.
+ * @returns {{ text: string, title: string, paused: boolean }|null}
+ */
+export function steadyBadge(state, streamType) {
+  const full = streamType === MAIN_STREAM
+  if (state === 'on') return { text: full ? 'Steady picture' : 'STEADY', title: STEADY_TITLE, paused: false }
+  if (state !== 'busy' && state !== 'failed') return null
+  const words = state === 'failed' ? STEADY_FAILED_TEXT : STEADY_BUSY_TEXT
+  const title = `${words}. The camera's own picture is shown meanwhile; Steady picture comes back by itself.`
+  return { text: full ? words : 'STEADY PAUSED', title, paused: true }
+}
+
 /**
  * The title of the full-size view's small mark while it stays on the sub-stream because the server
  * did not convert the main one (viewer.js): no room among the few it converts at once, or it failed.
@@ -252,6 +274,7 @@ export class LiveTile {
     this.maxFps = opts.maxFps === undefined ? maxLiveFps() : opts.maxFps // also covers map and wall tiles
     this.h264Asks = 0 // H.265 keyframes in a row answered by asking again for H.264 (#askH264)
     this.converted = false // the server converts this camera to H.264 for this browser (its badge)
+    this.steady = null // 'on', 'busy', 'failed': what the server said of Steady picture on this connection (its badge)
     this.convMsg = null // the message shown while the server cannot convert it (#noConversion)
     this.taps = new Set() // tiles borrowing this one's stream (#borrow)
     this.gop = null // the stream since its last keyframe (#keep)
@@ -470,6 +493,7 @@ export class LiveTile {
     // On the Live page a channel on the page's one shared connection (live-mux.js), which behaves
     // like a socket here; elsewhere a socket of its own to /live, as always
     this.#setConverted(false) // (said again by the server if this connection is converted too)
+    this.#setSteady(null) // (the same for Steady picture)
     this.ws = liveSocket({ nvr: this.nvr, ch: this.ch, stream: this.streamType, fps: this.maxFps, h265: h265Answer({ device: deviceH265, forced: forcedNoH265, learned: learnedNoH265 }) })
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
@@ -520,6 +544,7 @@ export class LiveTile {
    *  - {"op":"wait","why":…}  while the sub-stream has no picture yet
    *  - {"op":"ease","on":bool} quality is (no longer) being eased for bandwidth (adaptive-live.mjs)
    *  - {"op":"convert","on":true} this H.265 camera is converted to H.264 for this browser (h264-fallback.mjs)
+   *  - {"op":"steady","on":bool,"why"?} this camera is steadied on the server, or paused (steady.mjs)
    */
   #note(text) {
     let m
@@ -534,6 +559,7 @@ export class LiveTile {
       return updateEaseChip()
     }
     if (m?.op === 'convert') return this.#setConverted(m.on === true)
+    if (m?.op === 'steady') return this.#setSteady(m.on === true ? 'on' : m.why === 'failed' ? 'failed' : 'busy')
     if (m?.op !== 'wait') return
     this.waiting = true
     this.setStatus(waitText(m.why))
@@ -582,6 +608,24 @@ export class LiveTile {
     b.title = this.streamType === MAIN_STREAM ? CONVERTED_MAIN_TITLE : CONVERTED_TITLE
     this.tile.querySelector('.label')?.append(b)
     this.convBadge = b
+  }
+
+  /** The Steady picture mark beside its name (steadyBadge), as the server last said; null takes it away. */
+  #setSteady(state) {
+    if (this.steady === state) return
+    this.steady = state
+    if (typeof document === 'undefined') return
+    this.steadyBadge?.remove()
+    this.steadyBadge = null
+    const s = steadyBadge(state, this.streamType)
+    if (!s) return
+    const b = document.createElement('span')
+    b.className = `sd-badge steady-badge${s.paused ? ' paused' : ''}`
+    b.textContent = s.text
+    b.title = s.title
+    b.setAttribute('aria-label', s.title)
+    this.tile.querySelector('.label')?.append(b)
+    this.steadyBadge = b
   }
 
   /**
@@ -697,6 +741,7 @@ export class LiveTile {
     if (!src?.lendable || src.streamType !== this.streamType || src.nvr !== this.nvr || src.ch !== this.ch) return false
     this.source = src
     this.#setConverted(src.converted === true) // (its stream is this one's now)
+    this.#setSteady(src.steady ?? null)
     this.lastDataAt = this.now()
     activeTrace()?.event(this, 'borrow', src) // its frames are the source's, traced there
     for (const m of src.gop) this.onMessage(m)

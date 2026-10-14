@@ -155,7 +155,10 @@ export function metricsView(data, { hours = 24, names = {} } = {}) {
   const office = of((s) => (finite(s.sub?.running) ? s.sub.running + (finite(s.main?.running) ? s.main.running : 0) : null))
   const remote = of((s) => s.other?.remote)
   const playback = of((s) => (finite(s.other?.playback) || finite(s.other?.playbackSd) ? (s.other.playback ?? 0) + (s.other.playbackSd ?? 0) : null))
-  const allMax = niceMax(Math.max(mostOf(allFf), mostOf(office), mostOf(remote), mostOf(playback), 1))
+  // cameras steadied on the server (steady.mjs): a line of its own once the history has the figure
+  const steady = of((s) => s.other?.steady)
+  const hasSteady = steady.some((p) => finite(p.v))
+  const allMax = niceMax(Math.max(mostOf(allFf), mostOf(office), mostOf(remote), mostOf(playback), hasSteady ? mostOf(steady) : 0, 1))
   // 4. failures by the hour, all recorders together
   const hrs = hourly(samples)
   const hourPoints = (k) => hrs.map((h) => ({ t: h.t + HOUR_MS / 2, v: h[k] }))
@@ -192,9 +195,9 @@ export function metricsView(data, { hours = 24, names = {} } = {}) {
     ...(allFf.some((p) => finite(p.v)) ? [{
       id: 'all-conversions',
       title: 'All video conversions',
-      note: 'Every conversion the server is running, and who it is for: office PCs without H.265, viewers from outside or on phones, and playback. Each one takes processor time.',
+      note: `Every conversion the server is running, and who it is for: office PCs without H.265, viewers from outside or on phones${hasSteady ? ', cameras with Steady picture on' : ''}, and playback. Each one takes processor time.`,
       yMax: allMax,
-      series: [series('All', 'a', allFf, { yMax: allMax }), series('Office PCs', 'b', office, { yMax: allMax }), series('Outside and phones', 'c', remote, { yMax: allMax }), series('Playback', 'd', playback, { yMax: allMax })]
+      series: [series('All', 'a', allFf, { yMax: allMax }), series('Office PCs', 'b', office, { yMax: allMax }), series('Outside and phones', 'c', remote, { yMax: allMax }), series('Playback', 'd', playback, { yMax: allMax }), ...(hasSteady ? [series('Steady picture', 'e', steady, { yMax: allMax })] : [])]
     }] : []),
     {
       id: 'failures',

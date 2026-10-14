@@ -78,3 +78,8 @@
 
 /* ---- empty state ---- */
 .empty { display: grid; place-items: center; gap: var(--s2); padding: var(--s6); color: var(--text-faint); text-align: center; }
+/* Steady picture: the switch at the top of the camera editor's Picture tab (steady-switch.js) */
+.steady-switch { padding: 0 0 12px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.steady-row { display: flex; gap: 8px; align-items: center; font-weight: 600; color: var(--text); cursor: pointer; }
+.steady-help, .steady-note { margin: 4px 0 0; font-size: var(--fs-meta); color: var(--text-muted); }
+.steady-note.steady-error { color: var(--bad); }

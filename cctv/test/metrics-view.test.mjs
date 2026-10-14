@@ -79,6 +79,10 @@ const f = (failedStarts = 0, stalls = 0, relogins = 0, linkDrops = 0) => ({ fail
     const w = metricsView({ now, samples: withOther }, { hours: 24 })
     const all = w.charts.find((c) => c.id === 'all-conversions')
     check('every conversion, by who it is for, once the history has them', J(w.charts.map((c) => c.id)) === J(['load', 'streams', 'conversions', 'all-conversions', 'failures']) && J(all?.series.map((s) => s.label)) === J(['All', 'Office PCs', 'Outside and phones', 'Playback']) && all.series[0].legend.startsWith('All: now 6'), J(all?.series.map((s) => s.legend)))
+    // the cameras steadied on the server (steady.mjs), once the history has them: a line of its own
+    const withSteady = samples.map((s) => ({ ...s, other: { remote: 2, playback: 0, playbackSd: 0, steady: 3, ffmpeg: 9 } }))
+    const st = metricsView({ now, samples: withSteady }, { hours: 24 }).charts.find((c) => c.id === 'all-conversions')
+    check('steadied cameras: a line of their own, in words', J(st?.series.map((s) => s.label)) === J(['All', 'Office PCs', 'Outside and phones', 'Playback', 'Steady picture']) && st.series[4].tone === 'e' && st.series[4].legend.startsWith('Steady picture: now 3') && /Steady picture/.test(st.note), J(st?.series.map((s) => s.legend)))
   }
   check('every line has points, all inside the box and none NaN', v.charts.every((c) => c.series.every((s) => s.runs.length >= 1 && s.runs.every((r) => r.split(' ').every((p) => {
     const [x, y] = p.split(',').map(Number)

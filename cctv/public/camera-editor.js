@@ -7,6 +7,8 @@
 // is one main-stream LiveTile (live-tile.js); on a camera the NVR will not give
 // HD (or a browser without H.265), the tile drops to its sub stream on its own
 // and the panels measure that instead.
+// The Picture tab starts with the camera's "Steady picture" switch (steady-switch.js): the server
+// steadies a shaking camera for everyone watching it live.
 import { ImagePanel } from './image-panel.js'
 import { OsdPanel } from './osd-panel.js'
 import { LinesPanel, linesSupportAsker } from './lines-panel.js'
@@ -14,6 +16,7 @@ import { CameraCfgPanel, KIND_LABEL } from './camera-cfg-panel.js'
 import { LiveTile, MAIN_STREAM, TILE_HTML } from './live-tile.js'
 import { isLocalHost } from './device.js'
 import { cameraLabel } from './camera-choice.js'
+import { steadySwitch } from './steady-switch.js'
 
 const REMOTE_PAGE = !isLocalHost()
 const linesSupported = linesSupportAsker()
@@ -59,6 +62,9 @@ export function openCameraEditor(mountEl, cam, { onClose = null } = {}) {
   const osdBody = el('div', { className: 'ce-body', hidden: true })
   const linesBody = el('div', { className: 'ce-body', hidden: true })
   const image = new ImagePanel({ getPlayer, waitForMain })
+  // Steady picture: above the Picture panel, for as long as the editor is open (the panel itself
+  // is appended after it each time the tab opens)
+  picBody.append(steadySwitch(cam).el)
 
   // the camera's own detections: one tab each, all the same panel (camera-cfg-panel.js)
   const cfgBodies = Object.fromEntries(Object.keys(KIND_LABEL).map((kind) => [kind, el('div', { className: 'ce-body', hidden: true })]))

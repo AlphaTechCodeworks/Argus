@@ -7,6 +7,8 @@
 // with the code a /live socket has always had; on a channel that is an "end" message, and the page's
 // other tiles carry on. One that is let in is tracked (access-watch.mjs) for as long as it is open, so
 // losing the live right to that camera, the account or the session ends it too.
+// A camera an admin set to "Steady picture" (steady.mjs) goes another way before all of those: every
+// viewer of it, whatever it asked for, gets the camera's one shared steadied stream, while there is room.
 // Live HD (rights.mjs) decides every main-stream picture here: the main stream asked for directly
 // (refused 1008 'hd not allowed' without it), and the main stream standing in for a sub-stream that
 // has no picture yet (none without it: the viewer is told why it waits instead, live-wait.mjs).
@@ -20,6 +22,7 @@ import { waitForSub } from './live-wait.mjs'
 import { makeMainLimit } from './main-limit.mjs'
 import { isPhoneRequest } from './phone-live.mjs'
 import { HD_NOT_ALLOWED } from './stream-param.mjs'
+import { noteNotSteady } from './steady.mjs'
 import { bridgeSub } from './sub-bridge.mjs'
 import { CODEC_H265 } from './transcode.mjs'
 
@@ -109,12 +112,13 @@ const standInHandle = (ws, bridge, wait) => ({
  *   PCs without H.265 (h264-fallback.mjs), none without it; clientAddress (in o): the visitor's own
  *   address for a request (server.mjs clientIp), for the line that says who opened full quality;
  *   mainLimit (in o): the per-recorder limit on cameras in full quality (main-limit.mjs; tests hand one in)
+ *   steady (in o): the steadied cameras' shared streams (steady.mjs SteadyLive), none without it
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
  *   clientH265: boolean, noH265?: boolean, phone15: boolean }) => void} attachLive
  *   clientH265: the page said its browser plays H.265 (h265=1); noH265: it said it does not (h265=0).
  *   Neither: it did not say (an older page, or one that does not know yet), which is not "cannot"
  */
-export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, h264Fallback = null, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now, clientAddress = (req) => req.socket?.remoteAddress, mainLimit = makeMainLimit({ now, log }) }) {
+export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, h264Fallback = null, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now, clientAddress = (req) => req.socket?.remoteAddress, mainLimit = makeMainLimit({ now, log }), steady = null }) {
   const sayFullQuality = fullQualityGate({ now })
   const quiet = new Map() // camera and viewer -> { at, left }: its H.265 stand-in line last said, and those left out since
   /** The H.265 stand-in line for a camera and viewer, or null when it was said less than H265_QUIET_MS ago. */
@@ -144,6 +148,31 @@ export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, p
     // own reason, so the page drops to the sub-stream instead of asking again.
     const hd = () => can(who, 'live-hd', { nvr: nvr.id, ch })
     if (streamType !== 1 && !hd()) return ws.close(1008, HD_NOT_ALLOWED)
+    // Steady picture (steady.mjs): a camera an admin switched it on for is steadied on the server, for
+    // every viewer -- local or remote, PC or phone, a grid tile or the full-size view. A main stream
+    // asked for gets it too (full quality is not offered while it is on; the tile says "Steady picture"),
+    // so none of the main stream's own path below applies: no recorder limit, no full-quality line. Its
+    // pictures come from the sub-stream, so only the live right is watched for as it plays. Not for a
+    // sub-stream the NVR holds back at its limit (nothing to steady until there is room: as it was).
+    // Past the cap, or a conversion that failed: the camera's own stream as below, its tile told why
+    // first (before anything else is sent). Every socket is noted (watch) so that switching the setting
+    // moves it at once. None of this may cost the video: if it throws, the normal path.
+    if (steady?.enabled) {
+      const key = `${nvr.id}/${ch}`
+      try {
+        steady.watch(key, ws)
+        if (steady.wants(key) && nvr.subHeld?.(ch) !== true) {
+          const got = steady.attach(key, nvr.getStream(ch, 1), ws, { camera: `${nvr.id}/${ch + 1}` })
+          if (got === true) {
+            track(ws, req, { actions: ['live'], nvr: nvr.id, ch })
+            return
+          }
+          noteNotSteady(ws, got)
+        }
+      } catch (e) {
+        log(`[steady] ${nvr.id}/${ch + 1}: ${e?.message ?? e}; the camera's own stream`)
+      }
+    }
     // Full quality is limited per recorder (main-limit.mjs): seven main streams asked of a P2P recorder
     // at once (2026-10-13) had it drop its links again and again. A new camera past the limit is refused
     // with MAIN_AT_LIMIT, which the page takes as "the standard picture for now" (live-tile.js), never

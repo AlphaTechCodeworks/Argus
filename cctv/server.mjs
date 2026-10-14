@@ -41,6 +41,8 @@
 //   POST /api/admin/alerts/test { method: 'ntfy'|'email' } -> sends a test message (admins)
 //   POST /api/admin/lines/alert { nvr, ch, on } -> a camera's line-crossing phone alert on or off
 //                                 (admins): the "Line crossing" alarm rule, see line-actions.mjs
+//   GET/POST /api/admin/steady { nvr, ch, on } -> "Steady picture" for a camera: the server steadies
+//                                 its live picture for everyone (admins change it), see steady.mjs
 //   GET  /api/admin/metrics?hours=24 -> the key numbers minute by minute, up to 14 days back
 //                                 (admins; Health's "Last 24 hours"), see metrics-history.mjs
 //   GET  /healthz              -> used by the Docker healthcheck and the watchers on this machine;
@@ -112,6 +114,7 @@ import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
 import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
 import { H264Fallback } from './h264-fallback.mjs'
+import { STEADY_PATH, SteadyLive, handleSteady, steadyStore } from './steady.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher, viewerOf } from './live-attach.mjs'
@@ -728,7 +731,9 @@ const handleRequest = async (req, res) => {
       // (h264-fallback.mjs): how many of how many, the encoder step they are on, and the CPU they
       // are counted as against their budget, in units of 1 % of a core; under `main` the same for
       // the main streams of their full-size views, which have a budget of their own
-      h264: h264Fallback.summary()
+      h264: h264Fallback.summary(),
+      // cameras steadied on the server (steady.mjs): how many now, of how many at most
+      steady: steadyLive.summary()
     }
     // CCTV_LIVE_WORKER=on: each NVR's live worker (its own SDK calls are counted there, not above)
     if (list.some((n) => n.worker)) {
@@ -1184,6 +1189,16 @@ const handleRequest = async (req, res) => {
       const [status, body] = await handleSiteNotes(req.method, site, () => readJsonObject(req, 4096))
       return sendJson(res, status, body)
     }
+    // "Steady picture" for one camera (steady.mjs): the camera editor's Picture tab switches it; a
+    // change is audited and moves the camera's live viewers onto what they should have now
+    if (pathname === STEADY_PATH) {
+      const known = (id, ch) => Boolean(nvrs.get(id)?.channels.some((c) => c.ch === ch && c.configured !== false))
+      const [status, body] = await handleSteady(req.method, () => readJsonObject(req, 1024), {
+        user, store: steadyCameras, live: steadyLive, knownCamera: known,
+        audit: (row) => audit(auth.DATA_DIR, { ...row, ip: clientIp(req), detail: withDevice(row.detail, deviceOf(req.headers['user-agent'])) })
+      })
+      return sendJson(res, status, body, status === 405 ? { allow: 'GET, POST' } : {})
+    }
     // The Lines panel's "Alert my phone for this camera": the camera joins or leaves the "Line
     // crossing" alarm rule, and the ntfy topic is made the first time one is switched on.
     if (pathname === '/api/admin/lines/alert') {
@@ -1253,6 +1268,8 @@ const handleRequest = async (req, res) => {
           // for local PCs without H.265, on their own budget (h264-fallback.mjs): { running, cap, step, units, budgetUnits, ...,
           // main: the same for their full-size views' main streams, unless those are off }
           h264: h264Fallback.summary(),
+          // cameras an admin set to "Steady picture", steadied now (steady.mjs)
+          steady: steadyLive.summary(),
           cpu: ffmpegCpuPercent()
         }
       }
@@ -1520,9 +1537,13 @@ const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on co
 // H.265 sub-streams converted to H.264 for PCs on the local network whose browsers cannot play them,
 // on a budget of their own (h264-fallback.mjs): never from the pool phones and remote viewers share
 const h264Fallback = new H264Fallback()
+// "Steady picture" (steady.mjs): the cameras an admin switched it on for, in DATA_DIR/steady.json, and
+// their shared steadied streams, on a cap of their own (CCTV_STEADY_MAX, 4)
+const steadyCameras = steadyStore({ file: join(auth.DATA_DIR, 'steady.json') })
+const steadyLive = new SteadyLive({ isOn: (key) => steadyCameras.has(key) })
 // clientAddress: the visitor's own address (not cloudflared's), for the line that says who opened a
 // camera in full quality
-const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track, clientAddress: clientIp })
+const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track, clientAddress: clientIp, steady: steadyLive })
 
 // A history of the key numbers, one line a minute in DATA_DIR/metrics.jsonl, 14 days kept
 // (metrics-history.mjs), for Health's "Last 24 hours". The same sources as /healthz above; with live
@@ -1560,8 +1581,8 @@ const metricsHistory = makeMetricsHistory({
       return { inFlight: s.inFlight + w.reduce((n, x) => n + (x?.sdk?.inFlight ?? 0), 0), late: s.late + w.reduce((n, x) => n + (x?.sdk?.late ?? 0), 0) }
     },
     loopWorstMs: () => Math.max(loopWorstMs() ?? 0, ...workerStats().map((x) => x?.loop?.worstMs ?? 0)),
-    // remote viewers' and phones' conversions (one pool), playback's, and every ffmpeg on the box
-    other: () => ({ remote: phoneLive.pool.active, playback: transcodePool.active, playbackSd: lightTranscodePool.active, ffmpeg: ffmpegRunning() })
+    // remote viewers' and phones' conversions (one pool), playback's, the steadied cameras', and every ffmpeg on the box
+    other: () => ({ remote: phoneLive.pool.active, playback: transcodePool.active, playbackSd: lightTranscodePool.active, steady: steadyLive.pool.active, ffmpeg: ffmpegRunning() })
   }
 })
 try {
