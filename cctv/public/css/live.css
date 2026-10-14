@@ -44,6 +44,10 @@
 .tile-placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--s2); padding: 48px 16px; background: radial-gradient(ellipse at center, var(--accent-soft), var(--surface-1) 75%); color: var(--text-muted); text-align: center; pointer-events: none; }
 .tile-placeholder .icon { width: 32px; height: 32px; margin-bottom: var(--s2); color: var(--text-muted); }
 .tile-placeholder strong { font-size: var(--fs-body); font-weight: 550; color: var(--text); }
+/* a camera on its way: three dots that fill in one by one and start again; they keep their room, so the words do not move */
+.tile-placeholder strong.waiting::after { content: '...'; display: inline-block; clip-path: inset(0 100% 0 0); animation: tile-dots 1.6s steps(4, jump-none) infinite; }
+@keyframes tile-dots { to { clip-path: inset(0 0 0 0); } }
+@media (prefers-reduced-motion: reduce) { .tile-placeholder strong.waiting::after { animation: none; clip-path: none; } }
 .tile-placeholder > span { font-size: var(--fs-meta); }
 .tile[data-live="1"] > .tile-placeholder, .tile.has-still > .tile-placeholder { display: none; }
 .tile:not([data-live="1"]):not(.has-still) > .status { visibility: hidden; }

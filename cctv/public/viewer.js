@@ -233,6 +233,7 @@ function makeTile(cam, { controls = true } = {}) {
     placeholder.setAttribute('aria-hidden', 'true')
     placeholder.innerHTML = `${icon('live')}<strong></strong><span></span>`
     placeholder.querySelector('strong').textContent = cam.online ? 'Connecting to camera' : 'Camera offline'
+    placeholder.querySelector('strong').classList.toggle('waiting', cam.online === true) // (moving dots: live.css)
     placeholder.querySelector('span').textContent = cam.online ? 'The picture will appear automatically' : 'Waiting for the camera to come back online'
     tile.append(placeholder)
     const source = document.createElement('span')

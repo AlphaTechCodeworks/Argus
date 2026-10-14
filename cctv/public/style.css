@@ -1894,7 +1894,7 @@ body.phone-full #grid > .tile.single-overlay { position: fixed; inset: 0; border
     -webkit-backdrop-filter: blur(18px) saturate(160%); backdrop-filter: blur(18px) saturate(160%);
     border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   }
-  .shell-top img { width: 32px; height: 32px; border-radius: 8px; }
+  .shell-top img, .shell-top .shell-top-logo { width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0; }
   .shell-top strong { font-size: 17px; letter-spacing: 0.01em; }
   .shell-top span { margin-left: auto; color: var(--text-muted); font-size: 14px; }
   /* the alert: one line, tap for the rest */

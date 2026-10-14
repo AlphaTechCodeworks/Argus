@@ -311,7 +311,13 @@ export class LiveTile {
     if (this.status.textContent !== text) this.status.textContent = text
     this.status.classList.toggle('live', live)
     const placeholder = this.tile?.querySelector('.tile-placeholder strong')
-    if (placeholder && placeholder.textContent !== text) placeholder.textContent = text === 'LIVE' ? 'Live video' : text
+    if (placeholder) {
+      // words for a wait ("connecting…") end in dots that move instead (live.css)
+      const waiting = text !== 'LIVE' && text.endsWith('…')
+      const words = text === 'LIVE' ? 'Live video' : waiting ? text.slice(0, -1) : text
+      if (placeholder.textContent !== words) placeholder.textContent = words
+      placeholder.classList.toggle('waiting', waiting)
+    }
   }
 
   /** Paints the state dot (only when it changes: a big grid would otherwise rewrite every tile every second). */

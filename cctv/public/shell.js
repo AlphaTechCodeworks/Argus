@@ -6,6 +6,7 @@
 // the ten hand-copied header links and admin-tabs.js.
 import { PHONE_BAR, currentId, navFor } from './nav-model.js'
 import { icon } from './icons.js'
+import { markSvg, replayMarks } from './logo-mark.js'
 import { nextTheme, readTheme, saveTheme } from './theme.js'
 
 // ARGUS as the brand draws it (the app repository's docs/brand, concept A): five stroked letters in the
@@ -44,7 +45,7 @@ function render(parts, me) {
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
   const version = me.build?.version ? esc(me.build.version) : ''
   side.innerHTML = `
-    <a class="shell-brand" href="/" aria-label="Argus home"><img class="shell-logo" src="/logo.svg" alt="" /><span class="shell-brand-type"><strong>${WORDMARK}</strong><small>Security everywhere</small></span></a>
+    <a class="shell-brand" href="/" aria-label="Argus home">${markSvg('shell-logo mark-anim')}<span class="shell-brand-type"><strong>${WORDMARK}</strong><small>Security everywhere</small></span></a>
     <button type="button" class="shell-pin" data-sidebar-pin aria-label="Keep sidebar expanded" aria-pressed="${document.body.classList.contains('sidebar-pinned')}" title="Keep sidebar expanded">${icon('pin')}<span class="shell-pin-label">Keep sidebar open</span></button>
     <nav class="shell-nav">
       ${groups.map((g) => `<div class="shell-group"><div class="shell-group-label">${esc(g.label)}</div>${g.items.map((i) => link(i, here)).join('')}</div>`).join('')}
@@ -95,8 +96,10 @@ export function mountShell() {
   const top = document.createElement('div')
   top.className = 'shell-top'
   const label = navFor({ admin: true }).flatMap((g) => g.items).find((i) => i.id === (/wall.html$/.test(location.pathname) ? 'playback' : currentId(location.pathname)))?.label ?? ''
-  top.innerHTML = `<img src="/logo.svg" alt="" /><strong>${WORDMARK}</strong><span>${esc(label)}</span>`
+  top.innerHTML = `${markSvg('shell-top-logo mark-anim')}<strong>${WORDMARK}</strong><span>${esc(label)}</span>`
   main.prepend(top)
+  // the eye plays when the page opens and again every minute (logo-mark.js)
+  replayMarks(document)
 
   document.body.prepend(side)
   side.after(main)
