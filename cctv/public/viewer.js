@@ -2546,20 +2546,12 @@ async function loadCamerasImpl(pre = null) {
 // (Cloudflare holding them on a connection to the old process) and the grid never appeared. The page
 // goes on after a few seconds; the order and the overlay settings arrive with their own refreshes.
 const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(r, ms))])
-void early.catch(() => {})
+// The order, overlay settings and views were asked for alongside the camera list (above), so this
+// wait costs little; without it the first grid could be drawn in the default order and only moved
+// into the user's at the 30 s refresh (sync.load() does not redraw). The preferences are already
+// known here: this page waits for them at its top (preferencesReady), so nothing is re-applied later.
+await within(early.catch(() => {}), 6000)
 await within(loadCameras(prefetched).catch(() => listSoon()), 8000)
-void preferencesReady.then(() => {
-  smoothBox.checked = preferenceStorage.getItem('cctv.smooth') === '1'
-  hideOffline.checked = preferenceStorage.getItem('cctv.hideOffline') !== '0'
-  const saved = preferenceStorage.getItem(LAYOUT_KEY)
-  if (saved && LAYOUTS[saved] && (!isPhone() || PHONE_LAYOUTS.includes(saved))) layoutSelect.value = saved
-  const fit = preferenceStorage.getItem('cctv.pictureFit')
-  if (PICTURE_MODES.includes(fit)) { pictureFit.value = fit; grid.dataset.pictureFit = fit }
-  markPhoneLayout()
-  viewsRestored = false
-  void loadViews().then(() => loadCameras()).catch(() => {})
-  if (!document.hidden) render({ keepSingle: true })
-})
 liveBrowser = mountCameraBrowser({
   host: document.querySelector('.live-scope'), cameras: () => cameras,
   selectedSite: () => siteSelect.value.startsWith('@nvr:') ? cameras.find((c) => `@nvr:${c.nvr}` === siteSelect.value)?.site || '' : siteSelect.value,

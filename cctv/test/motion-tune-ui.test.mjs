@@ -22,7 +22,7 @@ globalThis.WebSocket = class {
 WebSocket.OPEN = 1
 const ctx2d = { clearRect() {}, fillRect() {}, strokeRect() {}, drawImage() {}, getImageData: () => ({ data: new Uint8Array(0) }) }
 const el = () => ({
-  textContent: '', innerHTML: '', hidden: false, className: '', title: '', width: 0, height: 0,
+  textContent: '', innerHTML: '', hidden: false, className: '', title: '', width: 0, height: 0, dataset: {}, // (dataset: a closed live tile lets its still go, stills.js disposeStill)
   classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
   elements: { threshold: { value: '' } },
   append() {}, replaceChildren() {}, addEventListener() {},

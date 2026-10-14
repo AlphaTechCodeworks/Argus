@@ -16,8 +16,11 @@ export async function showStill(tile, nvr, ch) {
   const url = URL.createObjectURL(entry.blob)
   tile.dataset.stillUrl = url; tile.classList.add('has-still'); tile.style.backgroundImage = `url("${url}")`
 }
+// A tile with no still painted is left untouched (showStill sets the URL, the class and the picture
+// together): the first frame and close() of every tile come here, most with nothing to clear.
 export function disposeStill(tile) {
-  if (tile.dataset.stillUrl) URL.revokeObjectURL(tile.dataset.stillUrl)
+  if (!tile.dataset.stillUrl) return
+  URL.revokeObjectURL(tile.dataset.stillUrl)
   delete tile.dataset.stillUrl; tile.style.backgroundImage = ''; tile.classList.remove('has-still')
 }
 export function clearStill(tile) { tile.dataset.live = '1'; disposeStill(tile) }
