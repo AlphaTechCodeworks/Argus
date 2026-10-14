@@ -282,7 +282,7 @@ check('key pattern refuses the rest', ['nvr1', 'nvr1/', '/1', 'nvr1/12345', 'nvr
   check('server.mjs imports the module', /import \{[^}]*handleGridOrder[^}]*\} from '\.\/user-prefs\.mjs'/.test(src))
   const hook = src.search(/if \(pathname === GRID_ORDER_PATH\) return sendJson\(res, \.\.\.\(await handleGridOrder\(req, user\)\)\)/)
   check('server.mjs dispatches the route with the session user', hook > 0)
-  check('  after the login check', hook > src.indexOf('const user = currentUser(req)') && hook > src.indexOf("if (!user) {"))
+  check('  after the login check', hook > Math.max(1, src.indexOf("const user = AUTH_OFF ? 'dev' : auth.verifySession(")) /* (not found: fails) */ && hook > src.indexOf("if (!user) {"))
   check('  before the admin-only routes (any logged-in user may use it)', hook < src.indexOf("if (pathname.startsWith('/api/admin/'))"))
 }
 

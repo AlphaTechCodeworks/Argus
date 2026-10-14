@@ -577,7 +577,7 @@ const enableAcross = async () => {
 {
   const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8')
   check('server.mjs imports handleLines', /import \{ handleLines \} from '\.\/tripwire\.mjs'/.test(src))
-  check('server.mjs: /lines is a camera route taking GET and POST', src.includes("lines: ['GET', 'POST']") && src.includes('|stream\\/estimate|notes|figures|lines)$/'))
+  check('server.mjs: /lines is a camera route taking GET and POST', src.includes("lines: ['GET', 'POST']") && src.includes('|stream\\/estimate|notes|figures|lines|'))
   const at = src.indexOf('await handleLines(req.method, id, ch, url.searchParams, readJson, user)')
   check('server.mjs dispatches it inside the admin block (admins only, same-origin JSON)', at > 0 && at > src.indexOf("if (pathname.startsWith('/api/admin/'))"))
 }

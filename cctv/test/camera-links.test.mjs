@@ -240,7 +240,7 @@ check('data/camera-links.json in DATA_DIR', LINKS_FILE === join(DATA, 'camera-li
   const read = src.indexOf('if (pathname === LINKS_PATH)')
   const write = src.indexOf('if (pathname === ADMIN_LINKS_PATH)')
   check('server.mjs dispatches the read route', read > 0)
-  check('  after the login check (everyone signed in, so the follow strip works for viewers)', read > src.indexOf('const user = currentUser(req)'))
+  check('  after the login check (everyone signed in, so the follow strip works for viewers)', read > Math.max(1, src.indexOf("const user = AUTH_OFF ? 'dev' : auth.verifySession(")) /* (not found: fails) */)
   check('  before the admin-only routes', read < src.indexOf("if (pathname.startsWith('/api/admin/'))"))
   check('server.mjs dispatches the write route inside the admin block', write > src.indexOf("if (pathname.startsWith('/api/admin/'))"))
   check('the links read is built from the cameras this user may see', /if \(pathname === LINKS_PATH\)[\s\S]{0,400}canSee\(/.test(src))

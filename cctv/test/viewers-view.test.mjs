@@ -78,7 +78,7 @@ const data = {
   const paint = src.slice(src.indexOf('const paintWatching'), src.indexOf('// The same account wiring'))
   check('health.js: asked only by an admin', /const loadWatching = \(\) => \{\n\s*if \(!isAdmin\) return\n[\s\S]*?fetch\('\/api\/admin\/viewers'\)/.test(paint))
   check('health.js: Kick asks first, signs the account out by the users route, and sits beside the name', src.includes('if (!confirm(`Sign ${name} out?') && src.includes('/api/admin/users/${encodeURIComponent(name)}/sign-out') && paint.includes('nameCell(p.name, p.canKick, tr)'))
-  check('health.js: on the page\'s own refresh, and once the account is known', /if \(document\.hidden\) return\n\s*loadWatching\(\)/.test(src) && /isAdmin = me\.admin === true\n\s*loadWatching\(\)/.test(src))
+  check('health.js: on the page\'s own refresh, and once the account is known', /if \(document\.hidden \|\| refreshing\) return\n[\s\S]{0,120}\n\s*loadWatching\(\)/.test(src) && /isAdmin = me\.admin === true\n\s*loadWatching\(\)/.test(src))
   check('health.js: painted as text, never as HTML', paint.length > 0 && !/innerHTML|insertAdjacentHTML|outerHTML/.test(paint) && /textContent: line/.test(paint))
   check('health.js: a row left open stays open across a refresh', /wasOpen\.has\(p\.key\)/.test(paint))
   check('health.html: the section starts hidden (shown to admins by health.js)', /<details id="watching" class="hp-history" open hidden>/.test(html) && /id="watchingRows"/.test(html) && /id="watchingNote"/.test(html))
