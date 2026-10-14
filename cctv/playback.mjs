@@ -17,8 +17,10 @@
 //        Which stream is decided by the caller (rec-playback.mjs connectPlayback, rec-fallback.mjs):
 //        connect(ws, url, { main, allowMain, onMain }); the URL's stream parameter is not read here.
 //        Frames are passed through as the camera encoded them; nothing is transcoded here.
-//        client -> server: {"speed": 1|2|4|8} {"pause": true|false}
+//        client -> server: {"speed": 1|2|4|8} {"pause": true|false} {"sound": true|false}
 //        server -> client: {"type":"started"} {"type":"end"} {"type":"error","message":...}
+//                          {"type":"sound","format":"alaw",...} and sound frames (pb-sound.mjs), only
+//                          after {"sound": true} and only at 1x forwards
 //                          {"type":"stream","stream":0} (switched to HD: this camera records no SD)
 //        A camera found to record no SD goes over to main only for a viewer who may see main
 //        (allowMain, asked then); anyone else gets {"type":"error"} and a 1008 "hd not allowed"
@@ -48,10 +50,11 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
 import { CODEC_H264 as X_H264, CODEC_H265 as X_H265, PLAYBACK_LIMITS, Transcoder, clientCanDecodeH265, lightPool, pool as transcodePool } from './transcode.mjs'
-import { bind, codecOf, coolingLeftMs, encodeFrame, errorText, lateCalls, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
+import { bind, codecOf, coolingLeftMs, copyBytes, encodeFrame, errorText, lateCalls, playFrames, sdkCallT, sdkStuck, sniffCodec } from './sdk.mjs'
 import { lastHang } from './watchdog.mjs'
 import { SdWait, hdOnlyStore, noSdAction } from './hd-only.mjs'
 import { HD_ASK_MESSAGE, HD_NOT_ALLOWED, HD_ONLY_MESSAGE } from './stream-param.mjs'
+import { dropLateSound, encodeSound, queueInOrder, soundFormatOf, soundHello, soundWanted, withoutSound } from './pb-sound.mjs'
 
 // FindNext* result codes continue the SDK error enum: NET_SDK_FILE_SUCCESS is 85 (one more item).
 // A file walk is complete only when it ends with 86 NET_SDK_FILE_NOFIND or 87 NET_SDK_NOMOREFILE;
@@ -493,6 +496,11 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
       this.openedAt = 0
       this.sdWait = new SdWait() // no SD frame in 4 s of the NVR really playing: HD only (hd-only.mjs)
       this.markOnFrames = false // switched to main: marked HD-only when its first frame comes
+      // the camera's sound, for a viewer who asked for it (pb-sound.mjs): its format as the NVR last
+      // announced it, and the last video frame's time, which a sound frame must be near to be queued
+      this.sound = false
+      this.soundFormat = null
+      this.lastVideoTs = null
       this.onFrame = this.#onFrame.bind(this)
       sessions.add(this)
       ws.on('message', (data, isBinary) => {
@@ -603,6 +611,7 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
         this.codec = codecOf(info, buf)
         return
       }
+      if (info.frameType === 6 || info.frameType === 2) return this.#onSound(info, buf)
       if (info.frameType !== 1 || info.length === 0) return
       this.lastFrameAt = Date.now()
       this.nvrStalledSaid = false // a frame came: a later stall may say "not answering" again
@@ -624,7 +633,10 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
       } else if (!this.keySeen) {
         return // a playback can start mid-GOP: the browser can't use anything before a keyframe
       }
-      this.queue.push({ ts: Number(info.time) / 1000, msg: encodeFrame(info, buf, this.codec), codec: this.codec })
+      const ts = Number(info.time) / 1000
+      this.lastVideoTs = ts
+      // (a push, unless sound stamped after this frame is queued: it goes in front of that)
+      queueInOrder(this.queue, { ts, msg: encodeFrame(info, buf, this.codec), codec: this.codec })
       const ahead = this.#bufferedMs()
       if (!this.buffered && ahead > BUFFER_HIGH_MS * this.speed) {
         this.buffered = true
@@ -634,10 +646,30 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
         this.lastRepause = Date.now()
         this.#control(PLAYCTRL.PAUSE)
       }
-      if (this.queue.length > MAX_QUEUE_FRAMES) {
+      // (sound, when it is on, is about as many items again: the backstop is for the video)
+      if (this.queue.length > MAX_QUEUE_FRAMES * (this.sound ? 2 : 1)) {
         this.send({ type: 'error', message: 'The NVR kept sending while paused. Press play to continue.' })
         this.ws.close(1011, 'buffer overflow')
       }
+    }
+
+    /**
+     * The camera's sound (pb-sound.mjs): its format (type 6) is noted whatever the viewer wants, so a
+     * Sound pressed later is answered at once; its frames (type 2) go into the pacing queue by their
+     * time, beside the video, only while soundWanted says so. Nothing else changes for the video.
+     */
+    #onSound(info, buf) {
+      if (info.length === 0) return
+      if (info.frameType === 6) {
+        const format = info.length <= 64 ? soundFormatOf(copyBytes(buf, info.length)) : null
+        const same = JSON.stringify(format) === JSON.stringify(this.soundFormat)
+        this.soundFormat = format
+        if (!same && this.sound) this.send(soundHello(format))
+        return
+      }
+      const ts = Number(info.time) / 1000
+      const want = soundWanted({ sound: this.sound, speed: this.speed, paused: this.paused, format: this.soundFormat, keySeen: this.keySeen, length: info.length, tsMs: ts, lastVideoTs: this.lastVideoTs })
+      if (want) queueInOrder(this.queue, { ts, msg: encodeSound(copyBytes(buf, info.length), info.time), sound: true })
     }
 
     /** Footage (media ms) waiting in the pacing buffer. */
@@ -649,8 +681,11 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
     #pace() {
       if (this.closed || this.paused) return
       if (this.hold) return this.#heldPace()
-      if (this.queue.length === 0) return
       const now = Date.now()
+      // sound already behind the play position is dropped, never followed: only the video moves it
+      // (the check below would take late sound for a jump back)
+      if (this.anchor) dropLateSound(this.queue, this.anchor.media + (now - this.anchor.wall) * this.speed - 1000)
+      if (this.queue.length === 0) return
       const head = this.queue[0].ts
       if (!this.anchor) this.anchor = { wall: now, media: head }
       let mediaNow = this.anchor.media + (now - this.anchor.wall) * this.speed
@@ -679,8 +714,9 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
     #heldPace() {
       const h = this.hold
       while (this.hold === h && h.extra < FIT_HOLDS && this.queue.length) {
-        h.extra++
-        this.#deliver(this.queue.shift())
+        const item = this.queue.shift()
+        if (!item.sound) h.extra++ // (frames for the converter: sound is not one)
+        this.#deliver(item)
       }
       if (this.hold !== h) return
       const now = Date.now()
@@ -811,6 +847,11 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
     #deliver(item) {
       const { msg, codec, ts } = item
       if (this.ws.readyState !== this.ws.OPEN) return
+      // sound goes as it is, never to a converter; and not at all once it is off or the speed changed
+      if (item.sound) {
+        if (this.sound && this.speed === 1) this.ws.send(msg)
+        return
+      }
       if (this.fit && this.mainStream) {
         if (!this.fitAsked && (msg[0] & 1) === 1) this.#fitDecide(codec)
         if (this.fitOn) return this.#fitPush(item)
@@ -890,10 +931,19 @@ export function createPlayback(nvr, { now: datesNow = Date.now, makeTranscoder =
           else this.fitAsked = false
           this.hold = null
         }
+        if (speed !== 1) this.queue = withoutSound(this.queue) // sound plays at 1x only
         this.speed = speed
         // (while the NVR is paused nothing is sent: a speed command there can set it playing behind a
         // session that believes it paused; #updateNvr asks for the speed when it resumes)
         if (this.nvrRunning) await this.#control(speed === 1 ? PLAYCTRL.NORMAL : PLAYCTRL.FF, SPEED_CODE[speed] ?? 0)
+      }
+      if ('sound' in cmd) {
+        // the viewer's Sound button: the same viewer, the same playback, so the same rights. On: the
+        // format at once when it is known (otherwise when the NVR announces it); off: what is queued goes
+        const on = cmd.sound === true
+        if (on && !this.sound && this.soundFormat) this.send(soundHello(this.soundFormat))
+        this.sound = on
+        if (!on) this.queue = withoutSound(this.queue)
       }
       if ('pause' in cmd) {
         this.paused = Boolean(cmd.pause)

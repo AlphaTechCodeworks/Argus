@@ -4,7 +4,11 @@
 // every 40 ms. G.711 is one byte a sample: it is expanded with a table and handed to the browser's
 // audio output a little behind real time (LEAD_S), so a late packet is not a click.
 //
-// decode() and the tables are pure and tested without a browser (test/live-audio.test.mjs).
+// Playback's Sound button uses the same output (soundOut): there the packets come down the playback
+// socket with the picture (cctv/pb-sound.mjs) and each is played when its picture is on screen.
+//
+// decode(), slotFor() and the tables are pure and tested without a browser (test/audio-hub.test.mjs,
+// test/pb-sound.test.mjs).
 
 /** One G.711 A-law byte as a 16-bit sample. */
 export function alawSample(a) {
@@ -87,21 +91,45 @@ export const nextFloor = (floor, rms) => (floor === null ? rms : rms < floor ? r
 
 const LEAD_S = 0.15 // sound is played this far behind its arrival
 const MAX_AHEAD_S = 0.8 // further ahead than this (a burst after a stall): it is dropped to catch up
+// Timed to the picture (Playback): a packet this close to where the one before ended joins on to it, so
+// the small wobble of the clocks is not heard as clicks or overlaps; one due this far ahead or more is
+// not the picture's (a stall, or a clock that jumped) and is dropped.
+const JOIN_S = 0.06
+const MAX_TIMED_AHEAD_S = 3
 
 /**
- * Plays one camera's sound until stop(). Must be made from a click (browsers only start sound then).
- * @param {{ nvr: string, ch: number }} cam
- * @param {(state: 'connecting'|'playing'|'silent'|'unsupported'|'closed', why?: string) => void} onState
+ * When a packet plays on the output's clock (seconds), or null to drop it. Pure.
+ *  - On arrival (Live; wantAt null): straight after the packet before, LEAD_S behind real time when the
+ *    output ran dry, dropped while the output is MAX_AHEAD_S ahead.
+ *  - Timed (Playback; wantAt: when the picture it belongs with is on screen): then, or joined on to the
+ *    packet before when that is within JOIN_S of it; too late to start, or MAX_TIMED_AHEAD_S ahead: dropped.
+ * @param {{ now: number, next: number, wantAt?: number|null }} o now: the output's time; next: where the
+ *   packet before ends
+ */
+export function slotFor({ now, next, wantAt = null }) {
+  if (wantAt === null) {
+    const at = next < now + 0.02 ? now + LEAD_S : next
+    return at > now + MAX_AHEAD_S ? null : at
+  }
+  if (!Number.isFinite(wantAt) || wantAt > now + MAX_TIMED_AHEAD_S) return null
+  if (next >= now + 0.01 && Math.abs(wantAt - next) <= JOIN_S) return next
+  return wantAt < now + 0.01 ? null : wantAt
+}
+
+/**
+ * Where the speaker goes: decoding, the background filter, the volume and the timing of each packet,
+ * shared by Live (listenTo below) and Playback (playback.js, the packets come with the picture). Must be
+ * made from a click (browsers only start sound then). null when this browser cannot play sound.
  * @param {{ volume?: number, filter?: boolean }} [o] volume 0..2 (1 is as the camera sends it); filter:
  *   the background filter (below)
- * @returns {{ stop: () => void, setVolume: (v: number) => void, setFilter: (on: boolean) => void }}
+ * @returns {{ play: (bytes: Uint8Array, format: { format: string, rate: number, channels?: number }, delayS?: number|null) => boolean,
+ *   setVolume: (v: number) => void, setFilter: (on: boolean) => void, silence: () => void, close: () => void }|null}
+ *   play: delayS null plays on arrival, a number plays the packet that long from now (Playback: timed to
+ *   the picture); false when it was dropped. silence: what is already scheduled stops (paused, seeked).
  */
-export function listenTo(cam, onState = () => {}, { volume = 1, filter = false } = {}) {
+export function soundOut({ volume = 1, filter = false } = {}) {
   const Ctx = window.AudioContext ?? window.webkitAudioContext
-  if (!Ctx) {
-    onState('unsupported', 'This browser cannot play sound here.')
-    return { stop() {}, setVolume() {}, setFilter() {} }
-  }
+  if (!Ctx) return null
   const ctx = new Ctx()
   ctx.resume?.().catch(() => {})
   // every packet goes through: a filter that keeps the band a voice is in (hum and rumble below it,
@@ -126,9 +154,65 @@ export function listenTo(cam, onState = () => {}, { volume = 1, filter = false }
   }
   setVolume(volume)
   setFilter(filter)
-  let format = null
   let next = 0
   let last = 0
+  let closed = false
+  const playing = new Set() // scheduled sources, so silence() can stop them
+  const play = (bytes, format, delayS = null) => {
+    if (closed) return false
+    const d = decode(bytes, format.format, { rate: format.rate, channels: format.channels, outRate: ctx.sampleRate, last })
+    if (!d || d.samples.length === 0) return false
+    last = d.last
+    const now = ctx.currentTime
+    const at = slotFor({ now, next, wantAt: delayS === null ? null : now + delayS })
+    if (at === null) return false
+    if (filtering) {
+      // the gate: quiet packets (the background alone) are turned down, moving a little at a time
+      const rms = levelOf(d.samples)
+      floor = nextFloor(floor, rms)
+      const want = gateGain(rms, floor)
+      gate += (want - gate) * (want > gate ? 0.6 : 0.2) // opens fast, closes gently
+      if (gate < 0.999) for (let i = 0; i < d.samples.length; i++) d.samples[i] *= gate
+    }
+    const buffer = ctx.createBuffer(1, d.samples.length, ctx.sampleRate)
+    buffer.getChannelData(0).set(d.samples)
+    const src = ctx.createBufferSource()
+    src.buffer = buffer
+    src.connect(high)
+    src.start(at)
+    playing.add(src)
+    src.onended = () => playing.delete(src)
+    next = at + buffer.duration
+    return true
+  }
+  const silence = () => {
+    for (const src of playing) try { src.stop() } catch {}
+    playing.clear()
+    next = 0
+  }
+  const close = () => {
+    if (closed) return
+    closed = true
+    silence()
+    ctx.close?.().catch(() => {})
+  }
+  return { play, setVolume, setFilter, silence, close }
+}
+
+/**
+ * Plays one camera's sound until stop(). Must be made from a click (browsers only start sound then).
+ * @param {{ nvr: string, ch: number }} cam
+ * @param {(state: 'connecting'|'playing'|'silent'|'unsupported'|'closed', why?: string) => void} onState
+ * @param {{ volume?: number, filter?: boolean }} [o] as soundOut
+ * @returns {{ stop: () => void, setVolume: (v: number) => void, setFilter: (on: boolean) => void }}
+ */
+export function listenTo(cam, onState = () => {}, { volume = 1, filter = false } = {}) {
+  const out = soundOut({ volume, filter })
+  if (!out) {
+    onState('unsupported', 'This browser cannot play sound here.')
+    return { stop() {}, setVolume() {}, setFilter() {} }
+  }
+  let format = null
   let stopped = false
   let heard = false
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/audio?nvr=${encodeURIComponent(cam.nvr)}&ch=${cam.ch}`)
@@ -146,27 +230,7 @@ export function listenTo(cam, onState = () => {}, { volume = 1, filter = false }
       return
     }
     if (!format) return
-    const d = decode(new Uint8Array(e.data), format.format, { rate: format.rate, channels: format.channels, outRate: ctx.sampleRate, last })
-    if (!d || d.samples.length === 0) return
-    last = d.last
-    const now = ctx.currentTime
-    if (next < now + 0.02) next = now + LEAD_S // the first packet, or the output ran dry
-    if (next > now + MAX_AHEAD_S) return
-    if (filtering) {
-      // the gate: quiet packets (the background alone) are turned down, moving a little at a time
-      const rms = levelOf(d.samples)
-      floor = nextFloor(floor, rms)
-      const want = gateGain(rms, floor)
-      gate += (want - gate) * (want > gate ? 0.6 : 0.2) // opens fast, closes gently
-      if (gate < 0.999) for (let i = 0; i < d.samples.length; i++) d.samples[i] *= gate
-    }
-    const buffer = ctx.createBuffer(1, d.samples.length, ctx.sampleRate)
-    buffer.getChannelData(0).set(d.samples)
-    const src = ctx.createBufferSource()
-    src.buffer = buffer
-    src.connect(high)
-    src.start(next)
-    next += buffer.duration
+    if (!out.play(new Uint8Array(e.data), format)) return
     if (!heard) {
       heard = true
       onState('playing')
@@ -177,7 +241,7 @@ export function listenTo(cam, onState = () => {}, { volume = 1, filter = false }
     stopped = true
     clearTimeout(quiet)
     try { ws.close() } catch {}
-    ctx.close?.().catch(() => {})
+    out.close()
     onState('closed')
   }
   ws.onclose = (e) => {
@@ -186,5 +250,5 @@ export function listenTo(cam, onState = () => {}, { volume = 1, filter = false }
     stop()
     onState('closed', why)
   }
-  return { stop, setVolume, setFilter }
+  return { stop, setVolume: out.setVolume, setFilter: out.setFilter }
 }

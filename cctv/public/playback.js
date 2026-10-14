@@ -30,6 +30,8 @@ import { searchCameras } from './grid-view.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
 import { preferencesReady } from './user-settings.js'
 import { PLAYBACK_CLOCK, REMOTE_PLAYBACK_CLOCK } from './playout.js'
+import { soundOut } from './live-audio.js'
+import { SOUND_CODEC, soundDelayS, soundWanted } from './pb-sound.js'
 import { startTelemetry } from './telemetry.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
@@ -238,6 +240,8 @@ const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   clock: PLAYBACK_CLOCK,
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
+    sound.shown = { ts, at: performance.now() } // the picture's clock, which the sound keeps to
+    soundQuietCheck()
     if (ws?.stepGen != null) ws.stepGen = null // a server step's frame is on screen: the next may go
     const fpsNow = Number(player.stats?.fps)
     if (fpsNow > 0) knownFps = { cam: camKey(), fps: fpsNow }
@@ -691,6 +695,118 @@ moreBtn.addEventListener('click', () => {
   moreBtn.setAttribute('aria-expanded', String(!moreEl.hidden))
 })
 
+// ---- Sound: the camera's microphone as it was recorded (NVR playback) ----------------------
+// The server sends it down the playback socket with the picture once asked ({sound: true}), at 1x
+// forwards only (cctv/pb-sound.mjs); it plays through live-audio.js soundOut, with the volume and
+// Filter of Live's Sound button and the same kept choices (argus.sound). Each packet is played when its
+// picture is on screen (pb-sound.js soundDelayS). The button's choice stays through a change of camera
+// or time; pausing or another speed silences it until 1x plays again. Off when the page opens: a
+// browser starts sound only from a click.
+const SOUND_PREFS_KEY = 'argus.sound'
+const soundPrefs = (() => {
+  try {
+    const p = JSON.parse(localStorage.getItem(SOUND_PREFS_KEY) ?? '{}')
+    return { volume: Number.isFinite(p.volume) ? Math.min(2, Math.max(0, p.volume)) : 1, filter: p.filter === true }
+  } catch {
+    return { volume: 1, filter: false }
+  }
+})()
+const saveSoundPrefs = () => { try { localStorage.setItem(SOUND_PREFS_KEY, JSON.stringify(soundPrefs)) } catch {} }
+// on: the button; out: the speaker (soundOut), made at the first click; format: what the socket said
+// its sound is ({type:'sound'}); shown: the picture's clock; heard: a packet played since the sound was
+// last asked for, and since when it was asked (soundQuietCheck)
+const sound = { on: false, out: null, format: null, shown: null, heard: false, askedAt: 0 }
+const soundBtn = $('soundBtn')
+const soundCap = soundBtn.querySelector('.pb-cap')
+const soundExtras = $('soundExtras')
+const soundVol = $('soundVol')
+const soundFilter = $('soundFilter')
+soundVol.value = String(soundPrefs.volume)
+soundVol.addEventListener('input', () => { soundPrefs.volume = Number(soundVol.value); sound.out?.setVolume(soundPrefs.volume); saveSoundPrefs() })
+const showSoundFilter = () => { soundFilter.classList.toggle('on', soundPrefs.filter); soundFilter.setAttribute('aria-pressed', String(soundPrefs.filter)) }
+showSoundFilter()
+soundFilter.addEventListener('click', () => { soundPrefs.filter = !soundPrefs.filter; sound.out?.setFilter(soundPrefs.filter); showSoundFilter(); saveSoundPrefs() })
+
+/** The button's words, as Live's: Sound, Sound…, Sound on, No sound yet, No sound. */
+function showSound(text, title) {
+  soundCap.textContent = text
+  soundBtn.title = title
+  soundBtn.setAttribute('aria-pressed', String(sound.on))
+  soundExtras.hidden = !sound.on
+}
+
+const soundNow = () => soundWanted({ on: sound.on, mode: state.mode, speed: state.speed, paused: state.paused, stepping: stepHold })
+
+/**
+ * Tells the open socket whether to send sound, when that has changed (each socket starts without), and
+ * silences what is scheduled when it is no longer wanted. Called wherever play, pause, speed, a step or
+ * the mode change.
+ */
+function syncSound() {
+  const want = soundNow()
+  if (!want) sound.out?.silence()
+  if (ws?.kind === 'nvr' && ws.readyState === WebSocket.OPEN && Boolean(ws.soundAsked) !== want) {
+    ws.soundAsked = want
+    ws.send(JSON.stringify({ sound: want }))
+    if (want) {
+      sound.heard = false
+      sound.askedAt = performance.now()
+    }
+  }
+  if (!sound.on) return
+  if (state.speed !== 1) showSound('Sound on', 'Sound plays at normal speed (1×) only. Click to stop.')
+  else if (sound.heard) showSound('Sound on', 'Listening to this recording. Click to stop.')
+}
+
+/** Nothing heard 6 s after asking while the picture plays: this camera recorded no sound here. */
+function soundQuietCheck() {
+  if (!sound.on || sound.heard || soundCap.textContent === 'No sound' || !ws?.soundAsked || performance.now() - sound.askedAt < 6000) return
+  if (soundCap.textContent !== 'No sound yet') showSound('No sound yet', 'No sound is coming from this recording.')
+}
+
+/** One sound frame from the socket (codec byte SOUND_CODEC): played with its picture, or dropped. */
+function playSound(buf, view) {
+  if (!sound.on || !sound.out || !sound.format || !soundNow()) return
+  const delay = soundDelayS({ tsMs: Number(view.getBigInt64(8, true)) / 1000, shown: sound.shown, nowMs: performance.now() })
+  if (delay === null) return
+  if (!sound.out.play(buf.subarray(HEADER_SIZE), sound.format, delay) || sound.heard) return
+  sound.heard = true
+  showSound('Sound on', 'Listening to this recording. Click to stop.')
+}
+
+/** A new playback socket (another camera or moment): the old position's sound is not heard over the new one, and the new socket says its own format. */
+function soundNewSocket() {
+  sound.out?.silence()
+  sound.shown = null
+  sound.format = null
+  sound.heard = false
+  if (sound.on) showSound('Sound…', 'Waiting for the recording\'s sound')
+}
+
+/** {type:'sound'}: the format of the sound frames that follow, or why there are none. */
+function onSoundFormat(msg) {
+  sound.format = msg.format ? msg : null
+  if (!msg.format && sound.on) showSound('No sound', msg.why ?? 'This recording has no sound.')
+}
+
+soundBtn.addEventListener('click', () => {
+  sound.on = !sound.on
+  if (sound.on) {
+    // (made here, from the click: a browser starts sound only then)
+    sound.out ??= soundOut({ volume: soundPrefs.volume, filter: soundPrefs.filter })
+    if (!sound.out) {
+      sound.on = false
+      showSound('No sound', 'This browser cannot play sound here.')
+      return
+    }
+    showSound('Sound…', 'Waiting for the recording\'s sound')
+  } else {
+    showSound('Sound', 'Listen to this camera\'s microphone as it was recorded')
+  }
+  syncSound()
+})
+showSound('Sound', 'Listen to this camera\'s microphone as it was recorded')
+
 /** Speeds, quality choices, legend, skew hint and source badge for the mode shown. */
 function updateModeUi() {
   const server = state.mode === 'server'
@@ -722,6 +838,10 @@ function updateModeUi() {
   // motion search reads the NVR's copy: only with Playback SD
   const search = document.getElementById('searchToggle')
   if (search) search.hidden = !r.sd
+  // Sound comes with the NVR's playback only: the server's own recordings keep none
+  soundBtn.hidden = server
+  soundExtras.hidden = server || !sound.on
+  syncSound()
   legendServer.hidden = !server
   const hint = server ? describeSkew(state.skew) : ''
   skewEl.textContent = hint
@@ -776,6 +896,7 @@ function open(start) {
     ws.onclose = null
     ws.close()
   }
+  soundNewSocket()
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=${rightsNow().nvrHd ? state.stream : 1}&start=${start}&h265=${state.h265 ? 1 : 0}`)
   sock.binaryType = 'arraybuffer'
@@ -785,6 +906,7 @@ function open(start) {
     // paused while it was still connecting: send() drops what an unopened socket cannot take, and
     // the NVR went on playing behind a page that said it was paused
     if (state.paused) sock.send(JSON.stringify({ pause: true }))
+    if (ws === sock) syncSound() // (sound, when the button is on and it plays at 1x)
   }
   sock.onmessage = (e) => {
     if (typeof e.data === 'string') return onStatus(JSON.parse(e.data))
@@ -806,6 +928,7 @@ function pushFrame(data) {
   const buf = new Uint8Array(data)
   if (buf.length <= HEADER_SIZE) return
   const view = new DataView(buf.buffer, buf.byteOffset)
+  if (buf[1] === SOUND_CODEC) return playSound(buf, view) // the camera's sound, not a picture
   player.push({
     isKey: (buf[0] & 1) === 1,
     codecId: buf[1],
@@ -825,6 +948,7 @@ function closeSocket() {
 
 function onStatus(msg) {
   if (msg.type === 'error') showMessage(msg.message)
+  if (msg.type === 'sound') onSoundFormat(msg)
   if (msg.type === 'fit') {
     // a remote viewer's HD from the NVR (playback.mjs): converted to fit the link, or the NVR's
     // stream itself for want of a free conversion; said when it changes, not at every seek
@@ -1171,6 +1295,7 @@ function togglePause() {
     stopStallWatch()
   } else player.resume()
   updatePlayButton()
+  syncSound() // (silent while paused)
 }
 
 /**
@@ -1208,6 +1333,7 @@ function setSpeed(speed) {
   send({ speed: allowed })
   player.setRate(rateOf(allowed))
   renderSpeeds()
+  syncSound() // (sound at 1x only)
   scheduleDraw()
   return allowed
 }
@@ -1259,6 +1385,7 @@ function stepFrame(direction) {
   const target = frameStep(from / 1000, direction, fps) * 1000
   seek(target)
   stepHold = true
+  syncSound() // (none on the way to a stepped frame)
   // The NVR starts at the keyframe before the time asked for, up to a GOP earlier. Held at its first
   // picture, a step forward went BACK to that keyframe (2 s, on a camera with a keyframe every 2 s).
   // The frames up to the one wanted are decoded unseen (player.stepTo, after seek()'s reset): the
