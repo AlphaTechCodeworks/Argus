@@ -18,6 +18,15 @@
 // doing read-modify-write on one file is how one of them loses an update. Nothing here needs to be
 // read at the same instant as the grid order, so there is no reason to share.
 //
+// A view its owner ticked "Share with everyone" on (shared: true) is also listed to every other user:
+//
+//   GET /api/views/shared                   -> { views: [ { owner, id, name, cameras, layout, ... } ] }
+//
+// read-only (only the owner's own PUT changes it), and with the cameras the asker may not watch live
+// left out, so sharing a view never tells anyone about a camera they could not open. A view left with
+// none is not listed at all. Each user's views stay in their own entry with their own version: sharing
+// is a flag on the view, not a second copy anybody else could write to.
+//
 // What a view actually is — the name limits, the camera-key rule, how many cameras and how many
 // views — lives in public/grid-view.js, which the page also loads, exactly as bookmarks.mjs shares
 // public/bookmarks-view.js. One definition, so the form on screen and the server agree.
@@ -27,6 +36,7 @@ import { DATA_DIR } from './auth.mjs'
 import { MAX_VIEWS, applyViews, normaliseViews } from './public/grid-view.js'
 
 export const VIEWS_PATH = '/api/me/views'
+export const SHARED_VIEWS_PATH = '/api/views/shared'
 export const VIEWS_FILE = join(DATA_DIR, 'saved-views.json')
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -108,6 +118,30 @@ export function viewsOf(user) {
 }
 
 /**
+ * Everybody else's shared views, as `user` may see them: only the cameras mayWatch allows (the live
+ * right, as GET /api/cameras lists them), and none left means the view is not listed. Ordered by
+ * owner, then name, so the menu reads the same on every screen.
+ * @param {object} all everyone's entries (loadAll)
+ * @param {string} user the asker, whose own views are not repeated here
+ * @param {(nvr: string, ch: number) => boolean} mayWatch
+ */
+export function sharedViews(all, user, mayWatch) {
+  const out = []
+  for (const owner of Object.keys(all)) {
+    if (owner === user) continue
+    for (const v of stateOf(all, owner).views) {
+      if (v.shared !== true) continue
+      const cameras = v.cameras.filter((k) => {
+        const cut = k.lastIndexOf('/')
+        return mayWatch(k.slice(0, cut), Number(k.slice(cut + 1))) === true
+      })
+      if (cameras.length > 0) out.push({ ...v, cameras, owner })
+    }
+  }
+  return out.sort((a, b) => a.owner.localeCompare(b.owner) || a.name.localeCompare(b.name))
+}
+
+/**
  * Saves the views if they were made on the latest version. The read, the check and the write are one
  * synchronous step, so no other request can come between them.
  * @returns {{ saved: boolean, views: Array, version: number }} the new state, or the latest when refused
@@ -138,9 +172,21 @@ function saveViews(user, views, version) {
  * @param {string} pathname
  * @param {() => Promise<object>} readJson the request body as a JSON object
  * @param {string} user the signed-in user
+ * @param {{ mayWatch?: (nvr: string, ch: number) => boolean }} [o] for the shared list: whether this
+ *        user may watch a camera live (default: no camera at all)
  * @returns {Promise<[number, object] | null>}
  */
-export async function handleViews(method, pathname, readJson, user) {
+export async function handleViews(method, pathname, readJson, user, { mayWatch = () => false } = {}) {
+  if (pathname === SHARED_VIEWS_PATH) {
+    if (!user) return [401, { error: 'Not logged in' }]
+    if (method !== 'GET') return [405, { error: 'Method not allowed' }]
+    try {
+      return [200, { views: sharedViews(loadAll().all, user, mayWatch) }]
+    } catch (e) {
+      if (!(e instanceof ViewsUnavailable)) throw e
+      return [500, { error: 'Saved views are unavailable (the views file is damaged or unreadable)' }]
+    }
+  }
   if (pathname !== VIEWS_PATH) return null
   if (!user) return [401, { error: 'Not logged in' }]
 

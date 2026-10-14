@@ -1429,7 +1429,10 @@ $('viewSave').addEventListener('click', async () => {
     id: existing?.id ?? `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
     name,
     cameras: state.cameras,
-    layout: state.layout
+    layout: state.layout,
+    // a view shared from Live stays shared when saved again here (its drawn layout, if it had one,
+    // is replaced by this page's grid: the Wall draws only its own)
+    shared: existing?.shared
   }
   const { ok, error, value } = checkView(candidate)
   if (!ok) return (viewMsgEl.textContent = error)
@@ -1444,7 +1447,9 @@ viewSel.addEventListener('change', () => {
   const view = state.views.find((v) => v.id === viewSel.value)
   state.viewId = view?.id ?? ''
   if (!view) return renderPager()
-  state.layout = view.layout ?? layoutFor(view.cameras.length)
+  // a layout drawn on Live ('custom') is not one this page draws: a grid that fits the cameras instead
+  // (and saving here then saves that grid, which a drawn layout without its drawing could not be)
+  state.layout = view.layout && view.layout !== 'custom' ? view.layout : layoutFor(view.cameras.length)
   layoutSel.value = state.layout
   writeStore(normaliseChoice(view.cameras))
   setCameras(view.cameras)

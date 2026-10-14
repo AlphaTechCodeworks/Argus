@@ -224,3 +224,49 @@ body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-ins
 .cam-sound-vol { width: 90px; accent-color: var(--ov-on); }
 .cam-sound-vol[hidden], .cam-sound-filter[hidden] { display: none; }
 .live-page .single-overlay .links .cam-sound-filter.on { border-color: var(--ov-on-line); background: var(--ov-on-bg); }
+
+/* The view editor (view-editor.js): pick cameras from any sites, choose or draw a layout, place them */
+.wall-pick.view-editor { width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); background: var(--surface-1); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-md); }
+.view-editor form { display: grid; gap: var(--s3); }
+.view-editor h2 { margin: 0; font-size: var(--fs-section); }
+.view-editor .ve-name input { width: 100%; margin-top: var(--s1); }
+.ve-step { display: grid; gap: var(--s2); padding-top: var(--s3); border-top: 1px solid var(--border); }
+.ve-step h3 { margin: 0; font-size: var(--fs-body); color: var(--text); }
+.ve-pick-head { display: flex; gap: var(--s2); }
+.ve-pick-head input { flex: 1; min-width: 0; min-height: 36px; padding: 6px 10px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm); font: inherit; }
+.ve-pick { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2); }
+.ve-site + .ve-site { border-top: 1px solid var(--border); }
+.ve-site summary { display: flex; gap: var(--s2); align-items: center; padding: var(--s2) var(--s3); cursor: pointer; font-weight: 600; }
+.ve-site-count { margin-inline-start: auto; color: var(--accent-strong); font-weight: 400; font-size: var(--fs-dense); }
+.ve-site-body { display: grid; gap: 2px; padding: 0 var(--s3) var(--s3); }
+.ve-site-body .ve-all { justify-self: start; margin-bottom: var(--s1); font-size: var(--fs-dense); }
+.ve-cam { display: flex; gap: var(--s2); align-items: center; padding: 3px 0; font-size: var(--fs-dense); cursor: pointer; }
+.ve-cam.off { color: var(--text-muted); }
+.ve-grid { display: grid; gap: 3px; width: 100%; max-width: 480px; aspect-ratio: 16 / 9; touch-action: none; user-select: none; }
+.ve-draw { display: grid; gap: var(--s2); }
+.ve-draw-grid { position: relative; cursor: crosshair; }
+.ve-draw-tile { background: var(--surface-3); border: 1px solid var(--border); border-radius: 3px; display: grid; place-items: center; font-size: var(--fs-meta); color: var(--text-muted); text-align: center; overflow: hidden; }
+.ve-draw-tile.ve-big { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+.ve-draw-sel { border: 2px dashed var(--accent-strong); background: var(--accent-soft); border-radius: 3px; pointer-events: none; z-index: 1; }
+.ve-draw-sel[hidden] { display: none; }
+.ve-place-tile { background: var(--video-bg); color: var(--on-accent); border: 1px solid var(--border); border-radius: 3px; padding: 2px 4px; font-size: var(--fs-meta); overflow: hidden; display: flex; align-items: flex-end; cursor: grab; min-width: 0; }
+.ve-place-tile.empty { background: var(--surface-2); color: var(--text-faint); cursor: default; border-style: dashed; }
+.ve-place-tile.picked, .ve-chip.picked { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
+.ve-place[data-size="6"] .ve-place-tile, .ve-place[data-size="8"] .ve-place-tile, .ve-place[data-size="10"] .ve-place-tile, .ve-place[data-size="12"] .ve-place-tile { font-size: 9px; padding: 1px 2px; }
+.ve-more { display: flex; flex-wrap: wrap; gap: var(--s1); align-items: center; }
+.ve-chip { padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); font-size: var(--fs-meta); cursor: grab; }
+.ve-share { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; padding-top: var(--s3); border-top: 1px solid var(--border); }
+.ve-share[hidden] { display: none; }
+.ve-share .live-help { flex-basis: 100%; }
+#linkMsg { user-select: all; overflow-wrap: anywhere; }
+#cycleStop { color: var(--accent-strong); }
+
+/* ?view=<id>&screen=1: a TV or second monitor shows the grid and the camera names, nothing else */
+body.screen-mode { grid-template-columns: minmax(0, 1fr); background: var(--video-bg); }
+body.screen-mode .app-shell, body.screen-mode .shell-bar, body.screen-mode .shell-top, body.screen-mode .live-heading,
+body.screen-mode .app-main > header, body.screen-mode .alert-banner, body.screen-mode #filterNote, body.screen-mode #notice,
+body.screen-mode #layoutNote { display: none !important; }
+body.screen-mode #grid { position: fixed; inset: 0; z-index: 80; padding: 2px; gap: 2px; background: var(--video-bg); }
+.screen-exit { position: fixed; top: var(--s2); right: var(--s2); z-index: 85; padding: 6px 10px; border-radius: var(--r-sm); background: var(--ov-bg); color: var(--on-accent); font-size: var(--fs-meta); text-decoration: none; opacity: 0; transition: opacity var(--t-fast); }
+.screen-exit:hover, .screen-exit:focus-visible { opacity: 1; }
+.screen-exit[hidden] { display: none; }

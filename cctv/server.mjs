@@ -775,7 +775,10 @@ const handleRequest = async (req, res) => {
   const user = AUTH_OFF ? 'dev' : auth.verifySession(auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME], { allowPasswordChange: true })
   if (!user) {
     if (pathname.startsWith('/api/')) return sendJson(res, 401, { error: 'Not logged in' })
-    res.writeHead(302, { location: '/login.html', ...SECURITY_HEADERS }).end()
+    // a Live link to a view (a TV's ?view=…&screen=1) comes back to that view after signing in
+    // (public/view-links.js safeNext: only the Live page and a plain query, never another site)
+    const next = (pathname === '/' || pathname === '/index.html') && /^\?[A-Za-z0-9=&,|%._~-]{1,512}$/.test(url.search) ? `?next=${encodeURIComponent(`/${url.search}`)}` : ''
+    res.writeHead(302, { location: `/login.html${next}`, ...SECURITY_HEADERS }).end()
     return
   }
 
@@ -845,10 +848,12 @@ const handleRequest = async (req, res) => {
   if (toleranceRoute) return sendJson(res, ...toleranceRoute)
 
   // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
-  // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own.
+  // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own; one its owner shared
+  // is listed to the others with only the cameras each may watch live (views.mjs sharedViews). 128 KB:
+  // MAX_VIEWS views of MAX_VIEW_CAMERAS camera keys each, now that a view is picked camera by camera.
   const marks = await handleBookmarks(req.method, pathname + url.search, () => readJsonObject(req, 8192), who, { canSee })
   if (marks) return sendJson(res, ...marks)
-  const views = await handleViews(req.method, pathname, () => readJsonObject(req, 32768), user)
+  const views = await handleViews(req.method, pathname, () => readJsonObject(req, 128 * 1024), user, { mayWatch: (nvr, ch) => who.admin || can(who, 'live', { nvr, ch }) === true })
   if (views) return sendJson(res, ...views)
   // An event's picture (event-snapshot.mjs): a JPEG, not JSON, so it is answered here, before the JSON
   // routes; who may see it is decided inside (a playback right for that camera)

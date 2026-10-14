@@ -19,10 +19,13 @@ import { loadSicex, sicexOn } from './sicex.js'
 import { checkBookmark } from './bookmarks-view.js'
 import { TOLERANCE, knownCapacity, layoutNote as profileNote, noteCapacity, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
 import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
-import { NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
+import { CUSTOM_LAYOUT, NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
 import { cannotPlayH265 } from './live-tile.js'
 import { listenTo } from './live-audio.js'
 import { readLiveLink } from './pb-bar.js'
+import { cellsOfGrid } from './custom-layout.js'
+import { createViewEditor } from './view-editor.js'
+import { cycleDue, cycleSeconds, findLinkedView, menuId, nextCycleId, parseMenuId, readCycle, readViewLink, safeNext, viewHref } from './view-links.js'
 // This page is set up from the account's preferences (picture fit, layout, hide offline, the view
 // and site last chosen), from its first lines on: it waits here until they are known. It is this
 // page's own script, which nothing imports, so it may wait at the top level; user-settings.js, which
@@ -72,8 +75,25 @@ const viewSel = document.getElementById('viewSel')
 const saveViewBtn = document.getElementById('saveView')
 const deleteViewBtn = document.getElementById('deleteView')
 const viewDlg = document.getElementById('saveViewDlg')
-const viewNameEl = document.getElementById('viewName')
-const viewMsgEl = document.getElementById('viewMsg')
+const editViewBtn = document.getElementById('editView')
+const copyViewBtn = document.getElementById('copyView')
+const copyLinkBtn = document.getElementById('copyLink')
+const copyScreenLinkBtn = document.getElementById('copyScreenLink')
+const linkMsgEl = document.getElementById('linkMsg')
+// the layouts the page offers, as index.html lists them (read before a phone or a PC without H.265
+// takes some off the menu): the view editor offers them all, since a view follows its owner to any screen
+const LAYOUT_CHOICES = [...layoutSelect.querySelectorAll('option')].map((o) => ({ value: o.value, label: o.textContent.trim() }))
+// ?view=<id>&screen=1: a TV or second monitor, just the grid and the camera names (view-links.js).
+// Set before anything is drawn, so the controls never flash up first.
+const viewLink = readViewLink(location.search)
+if (viewLink.screen) {
+  document.body.classList.add('screen-mode')
+  const exit = document.getElementById('screenExit')
+  if (exit) {
+    exit.hidden = false
+    exit.href = viewLink.view ? viewHref('', { id: viewLink.view, owner: viewLink.from }) : '/'
+  }
+}
 // "Smooth": a bigger playout buffer absorbs uneven delivery (more delay, steadier motion)
 const SMOOTH_CLOCK = { startDelayMs: 400, minDelayMs: 300, maxDelayMs: 1200 }
 // A page opened through the Cloudflare tunnel or the tailnet, not on a local address (device.js): its
@@ -1908,6 +1928,7 @@ siteSelect.addEventListener('change', () => {
   liveBrowser?.refresh()
   page = 0
   activeView = null // browsing by site leaves the saved view; the dropdown goes back to "(not saved)"
+  stopCycle() // ...and going round views, which would otherwise take the site away again
   preferenceStorage.setItem('cctv.activeView', '')
   renderViewSel()
   preferenceStorage.setItem('cctv.site', siteSelect.value)
@@ -1924,18 +1945,24 @@ siteSelect.addEventListener('change', () => {
 // A named set of cameras and a layout, kept with the account and shared with the Wall. Selecting one
 // restricts the grid to its cameras in its order; "(not saved)" shows every camera again. Versioned
 // exactly as the camera order is: a save on a stale version is refused and the list reloaded.
+// Views somebody else shared with everyone (GET /api/views/shared, views.mjs sharedViews) are listed
+// under "Shared" with who shared them, holding only the cameras this user may watch. They can be
+// used and copied; only their owner can change or delete them. Each is named in the menu by its
+// menu id (view-links.js): "s|<owner>|<id>", the user's own by their plain id.
+let sharedList = []
 let viewsRestored = false
 async function loadViews() {
   try {
-    const res = await fetch('/api/me/views')
+    const [res, sharedRes] = await Promise.all([fetch('/api/me/views'), fetch('/api/views/shared').catch(() => null)])
     if (!res.ok) throw new Error(String(res.status))
     const got = await res.json()
     views = normaliseViews(got.views).views
     viewsVersion = Number.isSafeInteger(got.version) ? got.version : 0
+    sharedList = await readShared(sharedRes)
     if (!viewsRestored) {
       viewsRestored = true
-      activeView = views.find((v) => v.id === preferenceStorage.getItem('cctv.activeView')) ?? null
-      if (activeView && LAYOUTS[activeView.layout] && !isPhone()) { layoutSelect.value = layoutOnThisPc(activeView.layout); markPhoneLayout() }
+      activeView = viewByMenuId(preferenceStorage.getItem('cctv.activeView'))
+      if (activeView && !isPhone()) applyViewLayout(activeView)
     }
   } catch {
     views = [] // a page that cannot read its views still shows the grid
@@ -1943,10 +1970,64 @@ async function loadViews() {
   renderViewSel()
 }
 
+/** The shared views from the server's answer, each checked by the same rules as one's own; the last
+ *  good list when the answer is not usable (a blip must not empty the menu under a running cycle). */
+async function readShared(res) {
+  if (!res?.ok) return sharedList
+  const got = await res.json().catch(() => null)
+  if (!Array.isArray(got?.views)) return sharedList
+  return got.views.flatMap((v) => {
+    const { ok, value } = checkView(v)
+    return ok && typeof v.owner === 'string' && v.owner ? [{ ...value, owner: v.owner }] : []
+  })
+}
+
+/** A view by its menu id: the user's own, or a shared one; null when there is no such view now. */
+function viewByMenuId(value) {
+  const m = parseMenuId(value)
+  if (!m) return null
+  return (m.owner ? sharedList.find((v) => v.owner === m.owner && v.id === m.id) : views.find((v) => v.id === m.id)) ?? null
+}
+
+/** A view's drawn layout (custom-layout.js) as this page's 'custom' layout, drawn like the featured ones. */
+function setCustomLayout(drawn) {
+  LAYOUTS[CUSTOM_LAYOUT] = { size: drawn.size, big: drawn.big.map((b) => [...b]) }
+  LAYOUT_TILES[CUSTOM_LAYOUT] = layoutCells(CUSTOM_LAYOUT).cells.length
+  if (isPhone() || layoutSelect.querySelector(`option[value="${CUSTOM_LAYOUT}"]`)) return
+  layoutSelect.append(new Option('Drawn for this view', CUSTOM_LAYOUT))
+}
+
+/**
+ * Puts a view's layout on screen, when this screen can draw it: a Wall layout ('3x3' etc.) the live
+ * grid cannot draw is left as it is (layoutCells falls back anyway), rather than blanking the
+ * dropdown, and a phone keeps to its own short menu. @returns whether the layout was taken.
+ */
+function applyViewLayout(view) {
+  if (view?.layout === CUSTOM_LAYOUT && view.custom) setCustomLayout(view.custom)
+  if (!view || !LAYOUTS[view.layout] || (isPhone() && !PHONE_LAYOUTS.includes(view.layout))) return false
+  layoutSelect.value = layoutOnThisPc(view.layout) // (4 x 4 on a PC without H.265; the view stays as saved)
+  markPhoneLayout()
+  return true
+}
+
 function renderViewSel() {
-  viewSel.replaceChildren(new Option('(not saved)', ''), ...views.map((v) => new Option(v.name, v.id)))
-  viewSel.value = activeView?.id ?? ''
-  deleteViewBtn.hidden = !activeView?.id // (cameras that came with a link are no saved view: nothing to delete)
+  const opts = [new Option('(not saved)', ''), ...views.map((v) => new Option(v.shared ? `${v.name} (shared)` : v.name, v.id))]
+  if (sharedList.length) {
+    const group = document.createElement('optgroup')
+    group.label = 'Shared'
+    group.append(...sharedList.map((v) => new Option(`${v.name} — from ${v.owner}`, menuId(v))))
+    opts.push(group)
+  }
+  viewSel.replaceChildren(...opts)
+  viewSel.value = activeView ? menuId(activeView) : ''
+  // cameras that came with a link are no saved view: nothing to edit, delete or link to
+  const mine = Boolean(activeView?.id) && !activeView.owner
+  const theirs = Boolean(activeView?.id) && Boolean(activeView.owner)
+  editViewBtn.hidden = !mine
+  deleteViewBtn.hidden = !mine
+  copyViewBtn.hidden = !theirs
+  copyLinkBtn.hidden = !(mine || theirs)
+  copyScreenLinkBtn.hidden = !(mine || theirs)
 }
 
 /** Saves the views as they now are, telling the viewer when another screen got there first. */
@@ -1977,17 +2058,13 @@ async function putViews(next) {
  */
 const currentViewCameras = () => shownCameras(gridCameras(), { ...gridView(), hideOffline: false }).slice(0, MAX_VIEW_CAMERAS).map(camKey)
 
-function selectView(id) {
-  activeView = views.find((v) => v.id === id) ?? null
-  preferenceStorage.setItem('cctv.activeView', activeView?.id || '')
-  // a live-page layout rides with the view; a Wall layout ('3x3' etc.) the live grid cannot draw is
-  // left as it is (layoutCells falls back anyway), rather than blanking the dropdown
-  if (activeView && LAYOUTS[activeView.layout] && (!isPhone() || PHONE_LAYOUTS.includes(activeView.layout))) {
-    layoutSelect.value = layoutOnThisPc(activeView.layout) // (4 x 4 on a PC without H.265; the view stays as saved)
-    markPhoneLayout()
-    preferenceStorage.setItem(LAYOUT_KEY, layoutSelect.value)
-  }
+/** Shows a view (by its menu id; '' for none): its cameras, in its order, on its layout. */
+function selectView(value) {
+  activeView = viewByMenuId(value)
+  preferenceStorage.setItem('cctv.activeView', activeView ? menuId(activeView) : '')
+  if (applyViewLayout(activeView)) preferenceStorage.setItem(LAYOUT_KEY, layoutSelect.value)
   page = 0
+  linkMsgEl.hidden = true
   renderViewSel()
   freshenForPageChange() // a view is a different set of cameras; drop the old set's backlog first
   render({ keepSingle: true })
@@ -1995,44 +2072,163 @@ function selectView(id) {
 
 viewSel.addEventListener('change', () => selectView(viewSel.value))
 
-saveViewBtn.addEventListener('click', () => {
-  if (currentViewCameras().length === 0) return
-  viewNameEl.value = activeView?.name ?? ''
-  viewMsgEl.textContent = ''
-  viewDlg.showModal()
-  viewNameEl.focus()
+// ---- making and changing a view (view-editor.js) ----
+// One dialog for a new view, an edit of one's own, and a copy of a shared one: tick cameras from any
+// sites, pick or draw a layout, put each camera on its tile, and (one's own) share it with everyone.
+let editing = null // the user's own view being edited; null for a new view or a copy
+const newViewId = () => `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`
+/** The tiles a layout has, for the editor's picture of it: what render() would draw. */
+function editorCells(layout, drawn, count) {
+  if (layout === CUSTOM_LAYOUT) return drawn ? { size: drawn.size, cells: cellsOfGrid(drawn) } : layoutCells('g3')
+  if (layout === 'auto') {
+    // (the grid's own size decides Auto on screen; the editor has none, so a square that fits the count)
+    const { size, rows } = autoLiveGrid(count)
+    return { size, rows, cells: Array.from({ length: size * rows }, (_, i) => [(i % size) + 1, Math.floor(i / size) + 1, 1, 1]) }
+  }
+  return layoutCells(LAYOUTS[layout] && !LAYOUTS[layout].list ? layout : 'g3')
+}
+const editor = createViewEditor({
+  dialog: viewDlg,
+  cameras: () => cameras,
+  keyOf: camKey,
+  layouts: LAYOUT_CHOICES,
+  cellsOf: editorCells,
+  onSave: async (draft) => {
+    const same = views.find((v) => v.name.trim().toLowerCase() === draft.name.trim().toLowerCase())
+    if (editing && same && same.id !== editing.id) return `You already have a view called “${same.name}”. Choose another name.`
+    // a new view under a name already in use replaces that view, rather than leaving two the menu
+    // cannot tell apart; any other name is a new view
+    const { ok, error, value } = checkView({ ...draft, id: editing?.id ?? same?.id ?? newViewId() })
+    if (!ok) return error
+    const next = views.some((v) => v.id === value.id) ? views.map((v) => (v.id === value.id ? value : v)) : [...views, value]
+    const saved = await putViews(next)
+    if (!saved.ok) return saved.error
+    editing = null
+    selectView(value.id)
+    return null
+  }
 })
 
-document.getElementById('viewSave').addEventListener('click', async () => {
-  // a view saved under a name already in use replaces it, rather than leaving two the menu cannot tell apart;
-  // any other name is a new view (it used to take the selected view's id, and so overwrote that view)
-  const name = viewNameEl.value
-  const existing = views.find((v) => v.name.trim().toLowerCase() === name.trim().toLowerCase())
-  const candidate = {
-    id: existing?.id ?? `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
-    name,
-    cameras: currentViewCameras(),
-    layout: layoutSelect.value
-  }
-  const { ok, error, value } = checkView(candidate)
-  if (!ok) return (viewMsgEl.textContent = error)
-  const saved = await putViews([...views.filter((v) => v.id !== value.id), value])
-  if (!saved.ok) return (viewMsgEl.textContent = saved.error)
-  activeView = views.find((v) => v.id === value.id) ?? value
-  preferenceStorage.setItem('cctv.activeView', activeView.id)
-  renderViewSel()
-  render({ keepSingle: true })
-  viewDlg.close()
+saveViewBtn.addEventListener('click', () => {
+  editing = null
+  // what is on screen to start from when it is already a choice (a view, a site, a search); not every
+  // camera of every site, which nobody wants to untick one by one
+  const narrowed = Boolean(activeView || siteSelect.value || cameraQuery)
+  const layout = LAYOUT_CHOICES.some((l) => l.value === layoutSelect.value) || layoutSelect.value === CUSTOM_LAYOUT ? layoutSelect.value : 'auto'
+  editor.open({ title: 'New view', view: { name: '', cameras: narrowed ? currentViewCameras() : [], layout, custom: LAYOUTS[CUSTOM_LAYOUT] } })
+})
+editViewBtn.addEventListener('click', () => {
+  if (!activeView?.id || activeView.owner) return
+  editing = activeView
+  editor.open({ title: 'Edit view', view: activeView })
+})
+copyViewBtn.addEventListener('click', () => {
+  if (!activeView?.owner) return
+  editing = null
+  editor.open({ title: 'Save a copy', view: { ...activeView, name: `${activeView.name} (copy)`.slice(0, 60), shared: false } })
 })
 
 deleteViewBtn.addEventListener('click', async () => {
-  if (!activeView) return
+  if (!activeView || activeView.owner) return
   const saved = await putViews(views.filter((v) => v.id !== activeView.id))
   if (!saved.ok) return
   activeView = null
   preferenceStorage.setItem('cctv.activeView', '')
   renderViewSel()
   render({ keepSingle: true })
+})
+
+// ---- a view's own link (view-links.js): "Copy link", and the TV screen's ----
+async function copyViewLink(screen) {
+  if (!activeView?.id) return
+  const url = viewHref(location.origin, activeView, { screen })
+  let copied = false
+  try {
+    await navigator.clipboard.writeText(url)
+    copied = true
+  } catch {} // (no clipboard on a plain-http page: the link is shown to copy by hand)
+  linkMsgEl.hidden = false
+  linkMsgEl.textContent = copied
+    ? screen ? 'Link copied. Open it in the TV’s browser: it shows just this view, full window (it asks to sign in the first time).' : 'Link copied.'
+    : `Copy this link: ${url}`
+}
+copyLinkBtn.addEventListener('click', () => copyViewLink(false))
+copyScreenLinkBtn.addEventListener('click', () => copyViewLink(true))
+
+// ---- going round views in turn (view-links.js) ----
+// Each view stays up for its seconds, then the next is shown the same way choosing it from the menu
+// does (selectView). It waits while the full-size view or a dialog is open, the tab is hidden, a tile
+// is being dragged, or for CYCLE_IDLE_MS after the viewer last clicked or pressed a key. The choice
+// is kept in this browser only: a TV cycles, the same user's desk PC need not.
+const CYCLE_KEY = 'cctv.cycle'
+const cycleStopBtn = document.getElementById('cycleStop')
+const cycleDlg = document.getElementById('cycleDlg')
+let cycle = null // { ids, every } while going round
+let cycleShownAt = Date.now()
+let lastInput = 0
+const storedCycle = () => { try { return readCycle(localStorage.getItem(CYCLE_KEY)) } catch { return null } }
+const storeCycle = (c) => { try { localStorage.setItem(CYCLE_KEY, JSON.stringify(c)) } catch {} }
+const cycleAvailable = (id) => viewByMenuId(id) !== null
+function startCycle(ids, every, { remember = true } = {}) {
+  cycle = { ids, every: cycleSeconds(every) }
+  if (remember) storeCycle({ ids, every: cycle.every, on: true })
+  cycleShownAt = Date.now()
+  showCycle()
+  if (!ids.includes(activeView ? menuId(activeView) : '')) {
+    const first = nextCycleId(ids, '', cycleAvailable)
+    if (first) selectView(first)
+  }
+}
+function stopCycle() {
+  if (!cycle) return
+  cycle = null
+  const kept = storedCycle()
+  if (kept) storeCycle({ ...kept, on: false }) // (the views and seconds are offered again next time)
+  showCycle()
+}
+function showCycle() {
+  cycleStopBtn.hidden = !cycle
+  if (cycle) cycleStopBtn.textContent = `Stop cycling (${cycle.ids.length} views, ${cycle.every} s each)`
+}
+for (const type of ['pointerdown', 'keydown', 'wheel']) addEventListener(type, () => { lastInput = Date.now() }, { capture: true, passive: true })
+setInterval(() => {
+  if (!cycle) return
+  const now = Date.now()
+  if (single !== null || document.hidden || document.querySelector('dialog[open]') || drag.dragging()) {
+    cycleShownAt = now // (the view gets its whole time again once nothing holds it)
+    return
+  }
+  if (!cycleDue({ now, shownAt: cycleShownAt, lastInput, everyS: cycle.every })) return
+  cycleShownAt = now
+  const next = nextCycleId(cycle.ids, activeView ? menuId(activeView) : '', cycleAvailable)
+  if (next) selectView(next)
+}, 1000)
+cycleStopBtn.addEventListener('click', stopCycle)
+document.getElementById('cycleViews').addEventListener('click', () => {
+  const kept = cycle ?? storedCycle() ?? { ids: [], every: undefined }
+  const all = [...views, ...sharedList]
+  const list = document.getElementById('cycleList')
+  list.replaceChildren(...all.map((v) => {
+    const row = document.createElement('label')
+    row.className = 'wall-pick-row'
+    const box = document.createElement('input')
+    box.type = 'checkbox'
+    box.value = menuId(v)
+    box.checked = kept.ids.includes(box.value)
+    row.append(box, ` ${v.owner ? `${v.name} — from ${v.owner}` : v.name}`)
+    return row
+  }))
+  if (all.length < 2) list.textContent = 'Save two or more views first (New view…), then come back here.'
+  document.getElementById('cycleEvery').value = String(cycleSeconds(kept.every))
+  document.getElementById('cycleMsg').textContent = ''
+  cycleDlg.showModal()
+})
+document.getElementById('cycleStart').addEventListener('click', () => {
+  const ids = [...document.querySelectorAll('#cycleList input:checked')].map((b) => b.value)
+  if (ids.length < 2) return (document.getElementById('cycleMsg').textContent = 'Tick two or more views to go round.')
+  const every = cycleSeconds(document.getElementById('cycleEvery').value)
+  cycleDlg.close()
+  startCycle(ids, every)
 })
 // drop a big grid's backed-up shared connection before the new page subscribes, so it starts clean
 // (live-mux.js): the old page's video, still draining over a slow link, otherwise held the new page's
@@ -2197,11 +2393,17 @@ document.addEventListener('visibilitychange', () => {
   else if (gridStale) render({ keepSingle: true })
 })
 
+/** The sign-in page, coming back to this address after (a TV left on a view's link keeps its view). */
+function toSignIn() {
+  const next = safeNext(`/${location.search}`)
+  location.href = next ? `/login.html?next=${encodeURIComponent(next)}` : '/login.html'
+}
+
 /** Sends the browser to the sign-in page if the session has expired or been revoked. */
 async function checkSession() {
   const res = await fetchLiveJson('/api/me', true).catch(() => null)
   noteServerClock(res) // this runs every minute, so the overlay's clock never drifts from the server's
-  if (res?.status === 401) location.href = '/login.html'
+  if (res?.status === 401) toSignIn()
   return res?.ok ? res.data : null
 }
 
@@ -2210,7 +2412,7 @@ async function fetchLiveJson(url, withResponse = false) {
   const timer = setTimeout(() => controller.abort(), 8000)
   try {
     const response = await fetch(url, { signal: controller.signal, cache: 'no-store' })
-    if (response.status === 401) { location.href = '/login.html'; throw new Error('Session expired') }
+    if (response.status === 401) { toSignIn(); throw new Error('Session expired') }
     if (!response.ok) throw new Error(`Camera request failed (${response.status})`)
     const data = await response.json()
     return withResponse ? { ok: response.ok, headers: response.headers, data } : data
@@ -2473,7 +2675,10 @@ function stepArrows() {
 // because a link gone wrong must never be what stops the Live page.
 try {
   const link = readLiveLink(location.search)
-  if (link.view && views.some((v) => v.id === link.view)) selectView(link.view)
+  // ?view=<id>: the user's own view, or one shared with everyone (&from=<owner>; view-links.js)
+  const linked = findLinkedView(views, sharedList, viewLink.view, viewLink.from)
+  if (linked) selectView(menuId(linked))
+  else if (viewLink.view) orderNote('That view is not there any more, or it is not shared with you.')
   else if (link.cameras) {
     const mine = new Set(cameras.map(camKey))
     const keys = link.cameras.filter((k) => mine.has(k))
@@ -2493,6 +2698,13 @@ try {
     const onGrid = gridCameras().some((c) => camKey(c) === camKey(cam)) && (!grid.site || grid.site === cam.site) && (!grid.nvr || grid.nvr === cam.nvr)
     if (!onGrid) { siteSelect.value = cam.site; siteSelect.dispatchEvent(new Event('change')) }
     openSingle(cam)
+  }
+  // Going round views: ?cycle=<id>,<id>&every=30 for this page only, else the cycle this browser was
+  // left running (view-links.js readCycle). Not over a link to one view or camera, which asked for that.
+  if (viewLink.cycle) startCycle(viewLink.cycle, viewLink.every, { remember: false })
+  else if (!viewLink.view && !link.cameras && !link.camera) {
+    const kept = storedCycle()
+    if (kept?.on) startCycle(kept.ids, kept.every, { remember: false })
   }
 } catch (e) {
   console.error('[live] link', e)

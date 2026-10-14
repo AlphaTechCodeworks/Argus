@@ -30,7 +30,12 @@ form.addEventListener('submit', async (e) => {
       // /alarms.html#event=<id>, and the browser kept the # across that redirect (the Fetch
       // standard carries a fragment over when the new address has none). Go on to that alarm
       // rather than to the grid.
-      location.href = /^#event=\d{1,15}$/.test(location.hash) ? `/alarms.html${location.hash}` : '/'
+      // A Live link to a view (?view=…, a TV's &screen=1) goes back to it: the server and the Live page
+      // send ?next=/?<query> here. Only the Live page with a plain query (view-links.js safeNext, the
+      // same pattern), so this page can never be made to send anyone to another site.
+      const next = new URLSearchParams(location.search).get('next') ?? ''
+      const back = /^\/(index\.html)?\?[A-Za-z0-9=&,|%._~-]{0,512}$/.test(next) ? next : '/'
+      location.href = /^#event=\d{1,15}$/.test(location.hash) ? `/alarms.html${location.hash}` : back
       return
     }
     const body = await res.json().catch(() => ({}))

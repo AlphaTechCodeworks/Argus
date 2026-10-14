@@ -20,6 +20,7 @@
 // slow. So the arithmetic that paces the opening, stops streams nobody is looking at, and backs off
 // after a refusal lives in one pure module where it can be read and tested, rather than in event
 // handlers where nobody would ever find it.
+import { checkCustomGrid } from './custom-layout.js'
 
 /** A camera key, "<nvr id>/<channel>" — the same rule as wall-clock.js and user-prefs.mjs. */
 export const KEY_RE = /^[A-Za-z0-9._-]{1,64}\/\d{1,4}$/
@@ -28,10 +29,13 @@ export const KEY_RE = /^[A-Za-z0-9._-]{1,64}\/\d{1,4}$/
  *  The rest are NxN; slotsOf/colsOf read the number off the name, so adding one needs no other change. */
 export const LAYOUTS = Object.freeze(['auto', '2x2', '3x3', '4x4', '5x5', '6x6', '8x8', '10x10', '12x12'])
 
+/** A view whose layout its owner drew (custom-layout.js): the drawing rides in the view's `custom`. */
+export const CUSTOM_LAYOUT = 'custom'
+
 /** The live grid's own layout ids (viewer.js): square grids and the "featured" big-tile arrangements.
  *  A view saved on the live page carries one of these; checkView accepts them so the same saved-views
  *  store serves both pages. The Wall falls back to a fitting grid for an id it does not draw. */
-export const LIVE_LAYOUTS = Object.freeze(['auto', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', '1+5', '1+7', '1+12', '2+8'])
+export const LIVE_LAYOUTS = Object.freeze(['auto', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', '1+5', '1+7', '1+12', '2+8', CUSTOM_LAYOUT])
 
 /** Auto uses only as many rows as the filtered cameras need; larger sets are paged. */
 export function autoLiveGrid(count, { noH265 = false, phone = false, width = 0, height = 0, gap = 8, pictureAspect = 16 / 9 } = {}) {
@@ -210,7 +214,8 @@ export function layoutFor(count) {
  * so a view edited on one screen stays the same view on another rather than becoming a second copy.
  *
  * @returns {{ ok: boolean, error: string|null,
- *             value: { id: string, name: string, cameras: string[], layout: string }|null }}
+ *             value: { id: string, name: string, cameras: string[], layout: string,
+ *                      custom?: { size: number, big: number[][] }, shared?: true }|null }}
  */
 export function checkView(raw, { known = null } = {}) {
   const bad = (error) => ({ ok: false, error, value: null })
@@ -235,7 +240,18 @@ export function checkView(raw, { known = null } = {}) {
   const layout = LAYOUTS.includes(raw.layout) || LIVE_LAYOUTS.includes(raw.layout) ? raw.layout : layoutFor(cameras.length)
   const id = typeof raw.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(raw.id) ? raw.id : null
   if (!id) return bad('A view needs an id')
-  return { ok: true, error: null, value: { id, name, cameras, layout } }
+  const value = { id, name, cameras, layout }
+  // A drawn layout that is wrong is refused, not dropped: the view would otherwise open on a layout
+  // its owner never chose. Any other layout's leftover drawing is simply not kept.
+  if (layout === CUSTOM_LAYOUT) {
+    const drawn = checkCustomGrid(raw.custom)
+    if (!drawn.ok) return bad(drawn.error)
+    value.custom = drawn.value
+  }
+  // Shared with everyone (views.mjs sharedViews): kept only when it is exactly true, so a view saved
+  // before sharing existed, or by a page that does not know of it, stays its owner's alone.
+  if (raw.shared === true) value.shared = true
+  return { ok: true, error: null, value }
 }
 
 /**

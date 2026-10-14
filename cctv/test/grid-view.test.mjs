@@ -124,6 +124,18 @@ const names = (list) => list.map((c) => c.name).join(', ')
   check('  but a view left with no cameras at all is then refused', !checkView(good, { known: new Set() }).ok)
   check('  rubbish in gives a refusal rather than an error', !checkView(null).ok && !checkView([]).ok && !checkView('x').ok)
 
+  // a layout its owner drew (custom-layout.js), and sharing with everyone
+  const drawn = { ...good, layout: 'custom', custom: { size: 4, big: [[1, 1, 2, 2], [3, 3, 2, 2]] } }
+  check('checkView: a drawn layout is kept with the view', checkView(drawn).ok && JSON.stringify(checkView(drawn).value.custom) === JSON.stringify(drawn.custom) && checkView(drawn).value.layout === 'custom')
+  check('  a drawn layout without its drawing is refused, not opened as something else', !checkView({ ...good, layout: 'custom' }).ok)
+  check('  so is one with overlapping tiles', !checkView({ ...drawn, custom: { size: 4, big: [[1, 1, 3, 3], [2, 2, 2, 2]] } }).ok)
+  check('  or a tile outside the grid', !checkView({ ...drawn, custom: { size: 3, big: [[3, 2, 2, 2]] } }).ok)
+  check('  or a grid too big to draw', !checkView({ ...drawn, custom: { size: 12, big: [] } }).ok)
+  check('  another layout\'s leftover drawing is not kept', !('custom' in checkView({ ...drawn, layout: 'g4' }).value))
+  check('  the server\'s own fields only: nothing else rides along', Object.keys(checkView({ ...drawn, extra: 1, owner: 'x' }).value).sort().join() === 'cameras,custom,id,layout,name')
+  check('  shared: kept only when exactly true', checkView({ ...good, shared: true }).value.shared === true && !('shared' in checkView({ ...good, shared: 'yes' }).value) && !('shared' in checkView(good).value))
+  check('  an old view (no custom, no shared) comes out exactly as it went in', JSON.stringify(checkView(good).value) === JSON.stringify(good))
+
   const list = normaliseViews([good, { ...good, id: 'v2', name: 'Bay' }, { id: 'v3', name: '', cameras: ['nvr-1/0'] }])
   check('normaliseViews: the bad ones are dropped and counted, the good ones kept', list.views.length === 2 && list.dropped === 1)
   check('  a repeated id is one view, the later one winning (that is what an edit looks like)',
@@ -253,7 +265,7 @@ const names = (list) => list.map((c) => c.name).join(', ')
   check('viewer.js: a larger layout falls back, and Auto redraws when the codec limit arrives', block.includes("shown === wanted && wanted !== 'auto'") && /page = 0\n\s*freshenForPageChange\(\)\n\s*render\(\{ keepSingle: true \}\)/.test(block))
   check('viewer.js: the limit itself stores nothing (the PC\'s own choice and the saved views stay)', !/localStorage|putViews/.test(block))
   check('viewer.js: the note is set as text, when a layout was cut', /if \(limited && layoutNote\) \{\n\s*layoutNote\.textContent = NO_H265_NOTE\n\s*layoutNote\.hidden = false/.test(block) && !/innerHTML/.test(block))
-  check('viewer.js: a saved view opens through the same limit', /layoutSelect\.value = layoutOnThisPc\(activeView\.layout\)/.test(src))
+  check('viewer.js: a saved view opens through the same limit', /layoutSelect\.value = layoutOnThisPc\(view\.layout\)/.test(src) && /function applyViewLayout\(view\)/.test(src))
   check('index.html: the note has a place of its own, hidden until needed', /<p id="layoutNote" class="page-note" role="status" hidden><\/p>/.test(read('index.html')))
   const tile = read('live-tile.js')
   check('live-tile.js: cannotPlayH265 is the answer the streams are opened with', /export function cannotPlayH265\(\) \{\n\s*return h265Answer\(\{ device: deviceH265, forced: forcedNoH265, learned: learnedNoH265 \}\) === false\n\}/.test(tile))
