@@ -28,8 +28,10 @@
 //
 // Viewers on the same level share one conversion per camera, so the cost follows the number of
 // cameras being watched remotely, not the number of people watching. Conversions have their own cap
-// (phone-live.mjs maxPhoneStreams); a viewer who cannot get a slot gets the camera's own stream. Level
-// full's of main streams, playback's size and cost, one of their own (FULL_MAX): past it, level 15's.
+// (phone-live.mjs maxPhoneStreams); a viewer who cannot get a slot gets the camera's own stream --
+// unless that is H.265 and its browser did not say it plays it: its tile is then closed NO_ROOM
+// (#noRoom), which the page shows as "server busy" and asks again (live-tile.js). Level full's of main
+// streams, playback's size and cost, one of their own (FULL_MAX): past it, level 15's.
 //
 // A level change moves a tile without a freeze or a jump back (#retarget): it keeps its picture until
 // the new stream has one, and goes over at the camera's next keyframe, where the new level's stream
@@ -46,6 +48,7 @@
 // type): not asked.
 import { FIRM_INTERVALS, PhoneStream, RATE_SAMPLES, ended, keepEveryFor, maxPhoneStreams, steadyRate } from './phone-live.mjs'
 import { HD_NOT_ALLOWED } from './stream-param.mjs'
+import { NO_ROOM, NO_ROOM_MAIN } from './h264-fallback.mjs'
 import { CODEC_H265, PLAYBACK_LIMITS, TranscodePool } from './transcode.mjs'
 
 export const LEVELS = Object.freeze([
@@ -281,6 +284,7 @@ class Viewer {
 
 export class AdaptiveLive {
   #made = null // the stream #streamFor made last, if it made one
+  #noRoomSaid = new Map() // camera stream -> when #noRoom last said it in the log
 
   constructor({ pool = new TranscodePool(maxPhoneStreams()), makeTranscoder, log = (l) => console.log(l), budgetBps = wanBudgetBps(), now = () => Date.now() } = {}) {
     Object.assign(this, { pool, makeTranscoder, log, budgetBps, now })
@@ -306,12 +310,23 @@ export class AdaptiveLive {
     return key ? key[1] === 1 : entry.codec === 'h265'
   }
 
+  /**
+   * Whether the camera's own stream may go to this socket as it is: anything but H.265 to a browser
+   * that did not say it plays it (clientH265). Sent raw, its keyframe was refused by the tile's decoder,
+   * which asked again for H.264 twice at once, met the same, and gave up on the camera for good ("This
+   * camera sends H.265, which this browser cannot play"): a remote PC paging through H.265 cameras with
+   * every conversion slot taken, 15 Oct (value4u/2; a refresh, slots free again, played it converted).
+   */
+  #rawOk(entry) {
+    return !(this.#h265(entry) && !entry.clientH265)
+  }
+
   /** Whether a socket's frames go through a conversion on this level. */
   #converts(entry, level) {
     // the camera's own stream where this device can play it: H.264 always; H.265 only for a device
     // that said it can (&h265=1) -- half the data of H.264 for the same picture. Otherwise an H.265
     // camera is converted at full too (every frame kept), never sent raw to a laptop that would show black.
-    if (level === 0) return this.#h265(entry) && !entry.clientH265
+    if (level === 0) return !this.#rawOk(entry)
     return !this.#passes(entry, level)
   }
 
@@ -326,6 +341,10 @@ export class AdaptiveLive {
    */
   #passes(entry, level) {
     if (entry.type === 0) return false // a main: a level always scales it down
+    // H.265 for a browser that did not say it plays it: never as it is, at any level (a 20 fps H.265
+    // sub at level 15 has nothing to thin, and went out raw to a PC without HEVC). Asked before the
+    // decision kept for the level: the camera may be found to be H.265 after that was made
+    if (!this.#rawOk(entry)) return false
     if (entry.passAt?.level === level) return entry.passAt.passes
     const fps = this.#rateOf(entry)
     if (!(fps > 0)) return false
@@ -354,13 +373,22 @@ export class AdaptiveLive {
     return this.rates.get(key) ?? 0
   }
 
-  /** A level's shared stream of a socket's camera stream, as this.streams holds it. */
+  /**
+   * A level's shared stream of a socket's camera stream, as this.streams holds it. Below full, a level's
+   * stream passes a sub-stream it has nothing to thin on as it is (phone-live.mjs): right for H.264, and
+   * for H.265 to browsers that play it. For browsers that do not, an H.265 one has a stream of its own
+   * that converts it all the same (h264Only, as level full's always does): '+h264' on its key. (Not a
+   * main: a level always converts those, for every browser alike.)
+   */
   #keyFor(entry, level) {
-    return `${entry.nvrId}/${entry.ch}/${entry.type}@${LEVELS[level].id}`
+    const h264 = level > 0 && entry.type !== 0 && !this.#rawOk(entry) ? '+h264' : ''
+    return `${entry.nvrId}/${entry.ch}/${entry.type}@${LEVELS[level].id}${h264}`
   }
 
   /**
    * Where a socket's frames come from at this level: a shared converted stream, or the camera's own.
+   * null: no conversion slot, and the camera's own stream is H.265 its browser cannot play (#rawOk): the
+   * callers tell its page so (#noRoom) instead of sending it.
    * One it had to make is left in #made (null: none), for #retarget.
    * @param {{ fps?: number }} [o] fps: the camera stream's rate, for a stream made at its keyframe that
    *   converts from there (#handOver: PhoneStream srcFps); 0, not given: the stream learns it
@@ -384,7 +412,8 @@ export class AdaptiveLive {
         return this.#streamFor(entry, 1, { fps })
       }
       const slot = this.pool.acquire()
-      if (!slot) return entry.source // no room for another conversion: the camera's own stream
+      // no room for another conversion: the camera's own stream, where its browser can play it
+      if (!slot) return this.#rawOk(entry) ? entry.source : null
       // level full is only ever for browsers that cannot play H.265 (#converts), so an H.265 stream
       // there is converted even with nothing to thin (h264Only); the other levels are shared with
       // browsers that can. Made for a socket with a picture, it starts at the camera's next keyframe,
@@ -394,7 +423,7 @@ export class AdaptiveLive {
       // bigger than it went in (nvr-2/6 0.37 -> 0.47 Mbit/s; the stutter report: do not convert grid
       // sub-streams at level 15), and at full nothing is thinned.
       const onRate = (fps) => this.rates.set(`${entry.nvrId}/${entry.ch}/${entry.type}`, fps)
-      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0, fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, now: this.now, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
+      s = new PhoneStream({ source: entry.source, type: entry.type, slot, camera: `${entry.nvrId}/${entry.ch + 1}`, makeTranscoder: this.makeTranscoder, log: this.log, fps: L.fps, crf: L.crf, subKbps: L.subKbps, mainKbps: L.mainKbps, ...(L.maxWidth ? { maxWidth: L.maxWidth } : {}), ...REMOTE_CONVERSION, h264Only: level === 0 || !this.#rawOk(entry), fromNextKey: entry.lastTs !== null, ...(fps > 0 ? { srcFps: fps } : {}), ...(level === 0 ? { stopDelayMs: FULL_STOP_MS } : {}), ...(level > 1 ? { acquire: () => this.pool.acquire() } : {}), onRate, now: this.now, onEmpty: () => this.streams.get(key) === s && this.streams.delete(key) })
       this.streams.set(key, s)
       this.#made = s
     }
@@ -455,7 +484,8 @@ export class AdaptiveLive {
    */
   #retarget(e, level, { down = false } = {}) {
     // (parked: its page has stopped reading; it is put where it belongs when the page writes again)
-    if (e.refused || e.parked) return
+    // (noRoom: closed for want of a slot, #noRoom; on its way out)
+    if (e.refused || e.parked || e.noRoom) return
     let want = this.#streamFor(e, level)
     let made = this.#made
     // a main about to be put on another stream (or made one, for a switch): only while its viewer may
@@ -470,7 +500,7 @@ export class AdaptiveLive {
     const converted = e.stream && e.stream !== e.source && !e.stream.passthrough && !e.stream.closed
     const own = converted && e.stream.clients.size === 1 && !this.#awaited(e.stream)
     e.slotless = false
-    if (want === e.source && own && this.#converts(e, level)) {
+    if ((want === e.source || want === null) && own && this.#converts(e, level)) {
       // with a picture: at the camera's next keyframe, the rate it has now handed to the new stream
       if (e.lastTs !== null) {
         if (e.switch?.to === null && e.switch.level === level) return
@@ -493,10 +523,18 @@ export class AdaptiveLive {
     // (#mayMove, above), so one whose Live HD went is closed at the next look, not kept on a conversion --
     // another viewer's, maybe -- until the access watch's sweep; here too when it waited to switch to the
     // camera's own stream (decided before the camera was known to be H.265) and was not asked above.
-    if (want === e.source && converted && this.#converts(e, level) && this.#h265(e) && !e.clientH265) {
+    if (want === null && converted) {
       if (!due && !this.#mayMove(e)) return
       e.slotless = true
       return this.#cancelSwitch(e)
+    }
+    // No slot, and no conversion to stay on (on the camera's own H.265, found to be H.265 after it
+    // joined, or taken off its stream by a level change): never the camera's own H.265, which its tile's
+    // decoder refuses (#rawOk). Its page is told there is no room, and asks again (#noRoom).
+    if (want === null) {
+      this.#cancelSwitch(e)
+      this.#leaveStream(e)
+      return this.#noRoom(e)
     }
     if (want === e.stream) return this.#cancelSwitch(e)
     if (e.switch?.to === want) return
@@ -655,11 +693,35 @@ export class AdaptiveLive {
     return false
   }
 
-  /** Onto a stream now, with its replay; nothing older than what it had goes out (#guard). */
+  /** Onto a stream now, with its replay; nothing older than what it had goes out (#guard). null: no room (#streamFor). */
   #join(e, to) {
+    if (!to) return this.#noRoom(e)
     e.stream = to
     this.#guard(e)
     to.add(e.ws)
+  }
+
+  /**
+   * No conversion slot for an H.265 camera whose browser cannot play it (#streamFor null): the socket is
+   * on no stream, sent nothing, and closed with h264-fallback.mjs's reason, as a local PC's conversion
+   * with no room is: the tile says the server is busy and asks again by itself (live-tile.js
+   * #noConversion); a main's full-size view stays on its sub-stream meanwhile (NO_ROOM_MAIN). Said in
+   * the log once a minute a camera stream.
+   */
+  #noRoom(e) {
+    if (e.refused || e.noRoom) return
+    e.noRoom = true
+    e.stream = null
+    const key = `${e.nvrId}/${e.ch}/${e.type}`
+    const now = this.now()
+    if (!(now - (this.#noRoomSaid.get(key) ?? -Infinity) < 60_000)) {
+      this.#noRoomSaid.set(key, now)
+      for (const [k, at] of this.#noRoomSaid) if (now - at >= 60_000) this.#noRoomSaid.delete(k)
+      this.log(`[adaptive] ${e.nvrId}/${e.ch + 1}: no conversion slot for its H.265 ${e.type === 0 ? 'main' : 'sub'} stream (${this.pool.active} of ${this.pool.max} in use), and its browser cannot play H.265: its tile is told the server is busy, not sent H.265`)
+    }
+    try {
+      e.ws.close(1013, e.type === 0 ? NO_ROOM_MAIN : NO_ROOM)
+    } catch {}
   }
 
   /** From now on nothing older than the last frame the socket had, up to a keyframe at or past it (#pass). */
@@ -749,7 +811,7 @@ export class AdaptiveLive {
     const send = ws.send.bind(ws)
     ws.send = (data, ...rest) => {
       const f = header(data)
-      if (f && (entry.refused || !this.#pass(entry, f))) return
+      if (f && (entry.refused || entry.noRoom || !this.#pass(entry, f))) return
       const n = data?.length ?? data?.byteLength ?? 0
       v.sentBytes += n
       entry.sent += n
@@ -785,6 +847,9 @@ export class AdaptiveLive {
       if (s && s !== source && s.clients.size === 0) v.left.add(s)
       if (v.sockets.size === 0) this.#leave(v)
     })
+    // no slot for the conversion an H.265 camera needs here: told, not sent H.265 (#noRoom; its close
+    // handler, above, takes it out again)
+    if (!entry.parked && entry.stream === null) this.#noRoom(entry)
     this.#start()
   }
 

@@ -131,10 +131,11 @@ const isRaw = (e) => e.stream === e.source && !e.switch
   clearInterval(live.timer)
 }
 {
-  // no room for a conversion: the camera's own stream, never nothing
+  // no room for a conversion: the camera's own stream, never nothing -- where its browser can play it
+  // (an H.265 one for a browser that cannot: adaptive-h265-no-room.test.mjs)
   const live = new AdaptiveLive({ pool: new TranscodePool(0), makeTranscoder: () => ({ push() {}, close() {} }), log: () => {}, budgetBps: 1e9 })
   const src = fakeSource('cam')
-  src.gop = [Buffer.from([1, 1])]
+  src.gop = [Buffer.from([1, 0])]
   const ws = fakeWs()
   live.attach('s', { ws, nvrId: 'n1', ch: 0, type: 1, source: src })
   check('no conversion slot left: gets the camera own stream', src.viewers.has(ws))

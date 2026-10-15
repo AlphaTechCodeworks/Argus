@@ -38,10 +38,10 @@ WebSocket.OPEN = 1
 const el = () => ({ textContent: '', className: '', title: '', removed: false, classList: { set: new Set(), toggle(c, on) { on ? this.set.add(c) : this.set.delete(c) }, contains(c) { return this.set.has(c) } }, append(...k) { (this.kids ??= []).push(...k) }, remove() { this.removed = true } })
 const mkTileEl = () => {
   const parts = { '.status': el(), '.stats': el(), '.name': el(), '.label': el(), '.dot': { className: '', title: '' }, canvas: { width: 0, height: 0, getContext: () => ({}) } }
-  return { parts, appended: [], dataset: {}, classList: { contains: () => false }, querySelector(s) { return parts[s] }, append(...k) { this.appended.push(...k) } }
+  return { parts, appended: [], dataset: {}, classList: { set: new Set(), toggle(c, on) { on ? this.set.add(c) : this.set.delete(c) }, contains(c) { return this.set.has(c) } }, querySelector(s) { return parts[s] }, append(...k) { this.appended.push(...k) } }
 }
 
-const { CONVERTED_MAIN_TITLE, CONVERTED_TITLE, H264_ASKS, H264_FAILED, H264_NO_ROOM, H264_NO_ROOM_MAIN, H264_RETRY_MS, LiveTile, MAIN_STREAM, SUB_STREAM, h265Answer, h265Forced, h265Text, mainNotConvertedTitle } = await import('../public/live-tile.js')
+const { CONVERTED_MAIN_TITLE, CONVERTED_TITLE, H264_ASKS, H264_FAILED, H264_NO_ROOM, H264_NO_ROOM_MAIN, H264_RETRY_FIRST_MS, H264_RETRY_MS, LiveTile, h264RetryDelay, MAIN_STREAM, SUB_STREAM, h265Answer, h265Forced, h265Text, mainNotConvertedTitle } = await import('../public/live-tile.js')
 const { FAILED, NO_ROOM, NO_ROOM_MAIN } = await import('../h264-fallback.mjs')
 await sleep(5) // the page's check has answered: this browser says it plays H.265
 
@@ -131,7 +131,8 @@ check('a new connection starts unmarked (the server says it again if it still co
   ws.onclose({ code: 1013, reason: H264_NO_ROOM })
   check('closed for want of room: the tile says so, plainly, and stays', a.status.textContent === 'H.265 — server busy' && /no room to convert another H\.265 camera right now/.test(a.t.convMsg?.textContent ?? '') && !a.t.closed, `${a.status.textContent} / ${a.t.convMsg?.textContent}`)
   check('... not "reconnecting…", and no socket opened at once', sockets.length === n && Boolean(a.t.retry))
-  check('... it asks again by itself, about every 30 s', H264_RETRY_MS === 30_000)
+  check('... it asks again by itself, backing off: 5, 10, 20 s, then every 30 s', H264_RETRY_FIRST_MS === 5000 && H264_RETRY_MS === 30_000 && [0, 1, 2, 3, 4, 9].map(h264RetryDelay).join() === '5000,10000,20000,30000,30000,30000', [0, 1, 2, 3, 4, 9].map(h264RetryDelay).join())
+  check('... the tile is marked as showing its message (live.css hides the placeholder\'s words under it)', a.tileEl.classList.contains('has-msg'))
   clearTimeout(a.t.retry)
   now += 20_000
   a.t.updateStatus()
@@ -143,6 +144,7 @@ check('a new connection starts unmarked (the server says it again if it still co
   frame(again)
   a.t.player.onFrame(2)
   check('... and when a picture comes the message goes', a.t.convMsg === null && a.t.converted === true && sockets.length === n + 1)
+  check('... the mark with it, and the back-off starts again', !a.tileEl.classList.contains('has-msg') && a.t.convRetries === 0)
   again.readyState = 3
   again.onclose({ code: 1013, reason: H264_FAILED })
   check('closed because the conversion failed: said too', a.status.textContent === 'H.265 — not converted' && /could not convert it/.test(a.t.convMsg?.textContent ?? ''))
@@ -168,7 +170,8 @@ check('a new connection starts unmarked (the server says it again if it still co
   c.t.player.onUnsupported(1)
   delete globalThis.document
   await sleep(5)
-  check('... H.265 again: the tile gives up and shows the message it always showed, for good', c.t.closed && c.status.textContent === 'H.265 — set sub-stream to H.264' && c.tileEl.appended.length === 1 && c.tileEl.appended[0].textContent === h265Text().text && sockets.length === n + H264_ASKS && sockets.at(-1).closed)
+  check('... H.265 again, on a page on the local network: the tile gives up and shows the message it always showed, for good', c.t.closed && c.status.textContent === 'H.265 — set sub-stream to H.264' && c.tileEl.appended.length === 1 && c.tileEl.appended[0].textContent === h265Text().text && sockets.length === n + H264_ASKS && sockets.at(-1).closed)
+  check('... marked as showing its message, one text on the tile', c.tileEl.classList.contains('has-msg'))
   // a picture in between starts the count again
   const d = mk(4)
   d.t.player.onUnsupported(1)
@@ -181,6 +184,78 @@ check('a new connection starts unmarked (the server says it again if it still co
   await sleep(5)
   check('a picture shown in between starts the count again (a camera switched to H.265 hours later)', !d.t.closed && sockets.length === n + 1)
   d.t.close()
+}
+
+// A page through the tunnel, where the server converts: never given up for good (15 Oct: a remote PC
+// paging through H.265 cameras was sent value4u/2's own H.265 with every conversion slot taken, asked
+// twice within that moment, and showed the message until a refresh)
+{
+  const delays = []
+  const realSetTimeout = globalThis.setTimeout
+  const watchDelays = () => { globalThis.setTimeout = (fn, ms, ...rest) => { if (ms > 0) delays.push(ms); return realSetTimeout(fn, ms, ...rest) } }
+  const unwatch = () => { globalThis.setTimeout = realSetTimeout }
+  // by default from the page's address: one not on the local network (device.js isLocalHost)
+  globalThis.location = { protocol: 'https:', host: 'cctv.jfl.gripe', hostname: 'cctv.jfl.gripe', search: '' }
+  const r = mk(16)
+  n = sockets.length
+  for (let i = 0; i < H264_ASKS; i++) {
+    r.t.player.onUnsupported(1)
+    await sleep(5)
+    sockets.at(-1).readyState = 1
+  }
+  check(`a page through the tunnel: asked ${H264_ASKS} times in a row, as anywhere`, sockets.length === n + H264_ASKS && !r.t.closed)
+  const last = sockets.at(-1)
+  globalThis.document = { createElement: () => el() }
+  watchDelays()
+  r.t.player.onUnsupported(1) // H.265 a third time: the moment had no conversion to be had
+  unwatch()
+  delete globalThis.document
+  check('... H.265 all the same: the tile does not give up for good', !r.t.closed && r.status.textContent === h265Text(H264_FAILED).status, r.status.textContent)
+  check('... it says so (the advice kept), as its one message: it will try again by itself', r.tileEl.appended.length === 1 && r.tileEl.appended[0] === r.t.convMsg && r.t.convMsg.textContent === h265Text(H264_FAILED).text && /try again by itself/.test(r.t.convMsg.textContent) && /HEVC Video Extensions/.test(r.t.convMsg.textContent) && r.tileEl.classList.contains('has-msg'))
+  check('... its socket dropped, nothing asked again at once', last.closed && sockets.length === n + H264_ASKS)
+  check(`... and it asks again after about ${H264_RETRY_FIRST_MS / 1000} s`, delays.length === 1 && delays[0] >= 0.8 * H264_RETRY_FIRST_MS && delays[0] <= 1.2 * H264_RETRY_FIRST_MS, delays.join())
+  await sleep(5)
+  now += 20_000
+  r.t.updateStatus()
+  check('... the watchdog leaves it alone meanwhile', sockets.length === n + H264_ASKS && !r.t.closed)
+  // its timer: asked again (as H.264); H.265 again at once backs off further
+  clearTimeout(r.t.retry)
+  r.t.connect()
+  sockets.at(-1).readyState = 1
+  check('... asking again for H.264', /[?&]h265=0(&|$)/.test(sockets.at(-1).url))
+  watchDelays()
+  r.t.player.onUnsupported(1)
+  unwatch()
+  check('... H.265 again: the message stays, the next ask twice as late', !r.t.closed && delays.length === 2 && delays[1] >= 0.8 * 2 * H264_RETRY_FIRST_MS && delays[1] <= 1.2 * 2 * H264_RETRY_FIRST_MS, delays.join())
+  // ...the next ask is converted: the picture takes the message away
+  clearTimeout(r.t.retry)
+  await sleep(5)
+  r.t.connect()
+  const ok = sockets.at(-1)
+  ok.readyState = 1
+  frame(ok)
+  r.t.player.onFrame(3)
+  check('... a picture at last: the message and its mark go, the counts start again', r.t.convMsg === null && !r.tileEl.classList.contains('has-msg') && r.t.h264Asks === 0 && r.t.convRetries === 0 && !r.t.closed)
+  r.t.close()
+  // the page can say it as well (serverConverts), whatever its address
+  globalThis.location = { protocol: 'http:', host: 'x', search: '' }
+  const s = mk(17, SUB_STREAM, { serverConverts: true })
+  for (let i = 0; i < H264_ASKS; i++) {
+    s.t.player.onUnsupported(1)
+    await sleep(5)
+    sockets.at(-1).readyState = 1
+  }
+  s.t.player.onUnsupported(1)
+  check('serverConverts: true on a local page: the same, never for good', !s.t.closed && s.t.convMsg?.textContent === h265Text(H264_FAILED).text)
+  s.t.close()
+}
+
+// the message is the tile's one text: the placeholder's words and its waiting dots are hidden under it
+{
+  const { readFileSync } = await import('node:fs')
+  const css = readFileSync(new URL('../public/css/live.css', import.meta.url), 'utf8')
+  check('live.css: a tile with a message hides the placeholder\'s words and dots (they were drawn over each other)', /\.tile\.has-msg\s*>\s*\.tile-placeholder\s*>\s*\*\s*\{[^}]*visibility:\s*hidden/.test(css))
+  check('... over the camera\'s last picture, on a scrim, in tokens', /\.tile\.has-msg\.has-still\s*>\s*\.tile-msg\s*\{[^}]*background:\s*var\(--scrim\)/.test(css))
 }
 
 // other codecs and the main stream: as before

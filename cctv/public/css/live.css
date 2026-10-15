@@ -50,6 +50,9 @@
 @media (prefers-reduced-motion: reduce) { .tile-placeholder strong.waiting::after { animation: none; clip-path: none; } }
 .tile-placeholder > span { font-size: var(--fs-meta); }
 .tile[data-live="1"] > .tile-placeholder, .tile.has-still > .tile-placeholder { display: none; }
+/* a tile saying why it shows nothing (live-tile.js .tile-msg: H.265 it cannot play, the server busy): that message alone, not the placeholder's words and dots under it (they were drawn over each other); over the camera's last picture, on a scrim */
+.tile.has-msg > .tile-placeholder > * { visibility: hidden; }
+.tile.has-msg.has-still > .tile-msg { background: var(--scrim); color: var(--ov-text); }
 .tile:not([data-live="1"]):not(.has-still) > .status { visibility: hidden; }
 .tile.offline .tile-placeholder { background: var(--surface-1); }
 #grid[data-size="5"] .tile-placeholder > span, #grid[data-size="6"] .tile-placeholder > span, #grid[data-size="8"] .tile-placeholder > span, #grid[data-size="10"] .tile-placeholder > span, #grid[data-size="12"] .tile-placeholder > span { display: none; }
