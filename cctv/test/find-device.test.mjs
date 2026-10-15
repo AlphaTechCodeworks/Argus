@@ -4,7 +4,7 @@
 // P2P sites whose cameras sit in the server's own 192.168.0.0/22, and /proc/net/arp as Linux writes it.
 // SDK-free, no network; runs anywhere.
 //   node cctv/test/find-device.test.mjs
-import { buildIndex, classifyQuery, findDevice, localNets, makeFindDevice, normaliseMac, onLocalNet, parseArp } from '../find-device.mjs'
+import { buildIndex, classifyQuery, findDevice, localNets, makeFindDevice, normaliseMac, onLocalNet, parseArp, sweepNets } from '../find-device.mjs'
 import { foundByText, lookedText, openTarget, rowText } from '../public/find-device.js'
 
 let failures = 0
@@ -213,6 +213,30 @@ check('recorder row: connected, MAC shown', /MAC 58:5b:69:00:d6:d7/.test(rowText
 check('camera opens full size in Live', openTarget(camRow).href === '/?nvr=nvr1&ch=12')
 check('recorder shows on the Sites page', openTarget(recRow).nvr === 'nvr1' && !openTarget(recRow).href)
 check('a loose device has nothing to open', openTarget(find('192.168.2.31').results[0]) === null)
+
+// ---- discovery: the owner's own network only, every address knocked on first ----
+{
+  check('"*" is the whole list', classifyQuery('*').kind === 'all')
+  const all = findDevice('*', {
+    recorders: [
+      { id: 'nvr1', name: 'Lawrence', site: 'Lawrence', host: '192.168.0.228', via: 'lan', online: true, channels: [{ ch: 12, name: 'North Gate', ip: '192.168.35.114', online: true }] },
+      { id: 'shad', name: 'Shad', site: 'Shad', sn: 'N123', via: 'p2p', online: true, channels: [{ ch: 0, name: 'Gate', ip: '10.0.0.5', online: true }] }
+    ],
+    arp: [{ ip: '192.168.2.31', mac: 'aa:bb:cc:dd:ee:ff', dev: 'ens34' }],
+    nets: [{ net: (192 * 16777216 + 168 * 65536) >>> 0, mask: 0xfffffc00, address: '192.168.1.232' }]
+  }, { max: 2000 })
+  const sites = new Set(all.results.map((r) => r.site ?? r.kind))
+  check('the discovery list leaves out P2P sites', !all.results.some((r) => r.nvr === 'shad') && all.results.some((r) => r.nvr === 'nvr1'), JSON.stringify([...sites]))
+  check('... and lists the network\'s own devices', all.results.some((r) => r.kind === 'device' && r.ip === '192.168.2.31'))
+  const seen = []
+  const fake = (o) => {
+    seen.push(o.host)
+    return { on: (ev, f) => ev === 'error' && setTimeout(f, 1), setTimeout() {}, destroy() {} }
+  }
+  const n = await sweepNets([{ net: (192 * 16777216 + 168 * 65536) >>> 0, mask: 0xfffffc00, address: '192.168.1.232' }], { open: fake })
+  check('the sweep knocks on every address of a /22 but the server\'s own', n === 1021 && seen[0] === '192.168.0.1' && seen.at(-1) === '192.168.3.254' && !seen.includes('192.168.1.232'), `${n}`)
+  check('... and never on a network too big to sweep', (await sweepNets([{ net: 0x0a000000, mask: 0xff000000, address: '10.0.0.1' }], { open: fake })) === 0)
+}
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed')
 process.exitCode = failures ? 1 : 0

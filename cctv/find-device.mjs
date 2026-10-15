@@ -20,6 +20,7 @@
 //
 // The matching (findDevice and its helpers) is pure: no SDK, no network, testable anywhere.
 import { readFileSync } from 'node:fs'
+import { connect } from 'node:net'
 import { networkInterfaces } from 'node:os'
 
 export const MAX_QUERY = 64
@@ -38,6 +39,7 @@ const RATE_MAX = 20 // lookups per window, for the whole server (admins only, a 
 const IP_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 export const isIp = (s) => typeof s === 'string' && IP_RE.test(s) && s.split('.').every((x) => Number(x) <= 255)
 const toInt = (ip) => ip.split('.').reduce((n, x) => n * 256 + Number(x), 0) >>> 0
+const toIp = (n) => [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.')
 /** Plain printable text from data that came off the network or a file; '' for anything else. */
 const clean = (v, max = 64) => (typeof v === 'string' ? v.replace(/[^\x20-\x7e]/g, '').trim().slice(0, max) : '')
 
@@ -88,6 +90,47 @@ export function parseArp(text) {
     if (mac) out.push({ ip, mac, dev: clean(dev, 16) })
   }
   return out
+}
+
+/**
+ * Knocks once on every address of the server's own networks (TCP to port 80, given up after
+ * timeoutMs), so that every device that is switched on answers the server's address lookup and lands
+ * in its network table (/proc/net/arp), whether or not it has port 80 open: the table only holds devices
+ * the server has talked to lately. Nothing is sent but the opening of a connection, closed at once.
+ * Networks of more than maxHosts addresses are left out. Returns how many addresses were knocked on.
+ * @param {{ net: number, mask: number, address: string }[]} nets
+ */
+export async function sweepNets(nets, { maxHosts = 1024, concurrency = 64, timeoutMs = 400, open = connect } = {}) {
+  const hosts = []
+  for (const n of nets ?? []) {
+    const size = (~n.mask >>> 0) + 1
+    if (size > maxHosts + 2) continue
+    for (let i = 1; i < size - 1; i++) {
+      const ip = toIp((n.net + i) >>> 0)
+      if (ip !== n.address) hosts.push(ip)
+    }
+  }
+  let next = 0
+  const knock = (host) => new Promise((done) => {
+    let sock
+    const end = () => {
+      try { sock?.destroy() } catch {}
+      done()
+    }
+    try {
+      sock = open({ host, port: 80 })
+      sock.setTimeout?.(timeoutMs, end)
+      sock.on?.('connect', end)
+      sock.on?.('error', end)
+    } catch {
+      done()
+    }
+  })
+  const worker = async () => {
+    while (next < hosts.length) await knock(hosts[next++])
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, hosts.length) }, worker))
+  return hosts.length
 }
 
 /** The server's own IPv4 networks, from os.networkInterfaces() (cidr like "192.168.1.232/22"). */
@@ -229,7 +272,7 @@ const ownName = (e) => (e.kind === 'recorder' ? e.nvrName : e.name) || ''
 /** How well an entry matches (lower is better); null when it does not. */
 function score(e, q) {
   switch (q.kind) {
-    case 'all': return 0
+    case 'all': return e.via === 'p2p' ? null : 0 // (the discovery list: the owner's own network only, no P2P site)
     case 'mac': return e.mac === q.value ? 0 : null
     case 'mac-part': return e.mac?.includes(q.value) ? 1 : null
     case 'ip': return e.ip === q.value ? 0 : null
@@ -356,6 +399,8 @@ export function makeFindDevice(ctx) {
     if (!pending) {
       pending = (async () => {
         try {
+          // every address of the network knocked on first, so the network table lists everything switched on
+          try { await ctx.sweep?.() } catch {}
           const r = (await ctx.search?.()) ?? { ran: false, why: 'not available here' }
           last = { at: now(), ran: Boolean(r.ran), devices: Array.isArray(r.devices) ? r.devices.slice(0, MAX_SEARCH_DEVICES) : [], why: r.why ? clean(r.why, 200) : null }
         } catch (e) {

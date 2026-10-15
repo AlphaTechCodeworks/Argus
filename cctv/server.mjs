@@ -97,7 +97,7 @@ import * as auth from './auth.mjs'
 import { motionScan } from './motion.mjs'
 import { handleAdmin } from './admin.mjs'
 import { handleDiscovery, networkSearch } from './discovery.mjs'
-import { makeFindDevice, readArpTable } from './find-device.mjs'
+import { localNets, makeFindDevice, readArpTable, sweepNets } from './find-device.mjs'
 import { handleImaging } from './imaging.mjs'
 import { handleLens } from './lens.mjs'
 import { handleStreamCapResolution, handleStreamOptimise, handleStreams } from './streams.mjs'
@@ -1572,7 +1572,9 @@ const findDevice = makeFindDevice({
   })),
   report: cameraSnapshot,
   arp: () => readArpTable(),
-  search: networkSearch
+  search: networkSearch,
+  // every address of the office network knocked on before a scan (find-device.mjs sweepNets)
+  sweep: () => sweepNets(localNets())
 })
 
 // clientAddress: the visitor's own address (not cloudflared's), for the line that says who opened a
