@@ -1,6 +1,7 @@
 // Sites page: add, edit and remove NVRs (admins only).
 import { openCameraEditor } from './camera-editor.js'
 import { camerasForNvr, cameraLabel } from './camera-choice.js'
+import { setupFindDevice } from './find-device.js'
 
 const $ = (id) => document.getElementById(id)
 const sitesEl = $('sites')
@@ -14,12 +15,12 @@ let nvrList = []
 let vpn = { available: false, sites: [] } // the WireGuard hub's status (deploy/vpn)
 let editing = null // id of the NVR being edited, or null when adding
 
-async function api(method, path, body) {
+async function api(method, path, body, timeoutMs = 8000) {
   const res = await fetch(path, {
     method,
     headers: body !== undefined || method !== 'GET' ? { 'content-type': 'application/json' } : {},
     body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(8000)
+    signal: AbortSignal.timeout(timeoutMs)
   })
   if (res.status === 401) location.href = '/login.html'
   const data = await res.json().catch(() => ({}))
@@ -144,6 +145,7 @@ function render() {
           online ? el('span', { className: 'st-bar' }, el('span', { style: `width:${pct}%` })) : null),
         el('div', { className: 'st-nvr-actions' }, subs, edit, remove)
       )
+      row.dataset.nvr = n.id // Find device's "Show" scrolls to it
       return [row, camerasPanel(n)]
     })
     return el(
@@ -406,6 +408,15 @@ function foundItem(d) {
   )
 }
 
+/** Find device's "Show": scrolls to that recorder's row and marks it for a moment. */
+function showRecorder(id) {
+  const row = [...sitesEl.querySelectorAll('.st-nvr')].find((r) => r.dataset.nvr === id)
+  if (!row) return
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  row.classList.add('fd-flash')
+  setTimeout(() => row.classList.remove('fd-flash'), 2500)
+}
+
 async function removeNvr(n) {
   if (!confirm(`Remove ${n.name} (${whereText(n)}) from site "${n.site}"?\n\nIts cameras disappear from the app. Nothing on the NVR itself is changed.`)) return
   try {
@@ -650,10 +661,12 @@ $('f-via-p2p').disabled = !me.p2p
 if (!me.admin) {
   $('add').hidden = true
   $('find').hidden = true
+  $('findDevice').hidden = true
   notice.textContent = 'Only admins can manage NVRs and sites. Ask the owner to make your account an admin.'
   notice.hidden = false
 } else {
   const se = $('settingsTab'); if (se) se.hidden = false
+  setupFindDevice({ api, el, showRecorder })
   await load()
   // show connection status as new NVRs log in
   setInterval(load, 5000)

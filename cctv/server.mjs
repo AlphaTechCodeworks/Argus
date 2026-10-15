@@ -15,6 +15,7 @@
 //   /api/maps, /api/admin/maps -> camera maps per site, see maps.mjs
 //   /api/camera-links, /api/admin/camera-links -> which camera adjoins which, see camera-links.mjs
 //   /api/admin/discovery       -> find TVT NVRs on the network (admins), see discovery.mjs
+//   GET  /api/admin/find-device?q=…[&search=1] -> which site/recorder/camera a MAC, address or name is (admins), see find-device.mjs
 //   GET  /api/admin/vpn        -> VPN hub status and the remote sites (admins), see vpn.mjs
 //   GET  /api/app/android[/download] -> the Android app's installer: its version and checksum, and
 //                                 the file, for the app to update itself (any signed-in user), see
@@ -95,7 +96,8 @@ import { keepAlive } from './backpressure.mjs'
 import * as auth from './auth.mjs'
 import { motionScan } from './motion.mjs'
 import { handleAdmin } from './admin.mjs'
-import { handleDiscovery } from './discovery.mjs'
+import { handleDiscovery, networkSearch } from './discovery.mjs'
+import { makeFindDevice, readArpTable } from './find-device.mjs'
 import { handleImaging } from './imaging.mjs'
 import { handleLens } from './lens.mjs'
 import { handleStreamCapResolution, handleStreamOptimise, handleStreams } from './streams.mjs'
@@ -104,7 +106,7 @@ import { handleCameraCfg } from './camera-cfg.mjs'
 import { ADMIN_OSD_PATH, OSD_PATH, handleCameraNotes, handleOsd as handleCameraOsd, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
-import { cameraExport, camerasReport, camerasXlsx, startCameraReportSchedule } from './camera-export.mjs'
+import { cameraExport, cameraSnapshot, camerasReport, camerasXlsx, startCameraReportSchedule } from './camera-export.mjs'
 import { nvrRegister, registerXlsx } from './register.mjs'
 import { handleClockWrite, measuredDrift, startClockSync, zoneOffsets } from './nvr-clock.mjs'
 import { handleSettings } from './settings-api.mjs'
@@ -1240,6 +1242,13 @@ const handleRequest = async (req, res) => {
       const [status, body] = await handleDiscovery(req.method, async () => JSON.parse((await readBody(req, 4096)) || '{}'))
       return sendJson(res, status, body)
     }
+    // Find device (Sites page): which site, recorder and camera a MAC, an address or a name is, from
+    // what the server already has (Cameras report, recorders, its network table); &search=1 also runs
+    // the TVT network search (the same one as Find NVRs, under its lock)
+    if (pathname === '/api/admin/find-device') {
+      const [status, body] = await findDevice(req.method, url.searchParams)
+      return sendJson(res, status, body, status === 405 ? { allow: 'GET' } : {})
+    }
     if (pathname.startsWith('/api/admin/maps/')) {
       const limit = pathname.endsWith('/plan') ? UPLOAD_LIMIT : SAVE_LIMIT
       const [status, body] = await handleMapsAdmin(req.method, pathname, async () => JSON.parse((await readBody(req, limit)) || '{}'))
@@ -1554,6 +1563,18 @@ const h264Fallback = new H264Fallback()
 // their shared steadied streams, on a cap of their own (CCTV_STEADY_MAX, 4)
 const steadyCameras = steadyStore({ file: join(auth.DATA_DIR, 'steady.json') })
 const steadyLive = new SteadyLive({ isOn: (key) => steadyCameras.has(key) })
+// Find device (find-device.mjs): reads only what the server already has; a recorder is never asked
+const findDevice = makeFindDevice({
+  recorders: () => [...nvrs.values()].map((n) => ({
+    id: n.id, name: n.name, site: n.site, host: n.cfg?.host ?? null, port: n.cfg?.port ?? null, sn: n.cfg?.sn || null,
+    via: n.cfg?.sn ? 'p2p' : 'lan', online: n.online, model: n.model || null,
+    channels: (n.channels ?? []).filter((c) => c.configured !== false).map((c) => ({ ch: c.ch, name: c.name, online: c.online, ip: c.ip || null, model: c.model || null, maker: c.maker || null, httpPort: c.httpPort ?? null }))
+  })),
+  report: cameraSnapshot,
+  arp: () => readArpTable(),
+  search: networkSearch
+})
+
 // clientAddress: the visitor's own address (not cloudflared's), for the line that says who opened a
 // camera in full quality
 // One count of the cameras in full quality per recorder, for viewers and camera links alike (main-limit.mjs)
