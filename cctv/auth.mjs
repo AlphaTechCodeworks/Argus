@@ -37,6 +37,19 @@ const loadSecret = () => {
 const usersCache = fileCache(USERS_FILE, () => readUsers())
 /** A fresh copy: callers change it and saveUsers() it. */
 export const loadUsers = () => ({ ...usersCache.get() })
+/**
+ * The account a typed user name means: the account of exactly that name, or else the one whose name
+ * differs from it only in capitals ("Mike" signs in as mike; the owner's wish, 2026-10-15). Names that
+ * differ only in capitals cannot be created (users-api.mjs), so there is never more than one. A name
+ * with no account is given back as typed (the sign-in then fails as before). Passwords stay exact.
+ * @param {string} typed @param {Record<string, object>} [users]
+ */
+export function accountName(typed, users = loadUsers()) {
+  const name = String(typed ?? '').trim()
+  if (Object.hasOwn(users, name)) return name
+  const lower = name.toLowerCase()
+  return Object.keys(users).find((u) => u.toLowerCase() === lower) ?? name
+}
 
 const readUsers = () => {
   if (!existsSync(USERS_FILE)) return {}

@@ -658,7 +658,8 @@ const handleLogin = async (req, res) => {
   } catch {
     return sendJson(res, 400, { error: 'Bad request' })
   }
-  const user = String(creds.user ?? '')
+  // (the user name in any capitals: auth.accountName; the password exactly as set)
+  const user = auth.accountName(String(creds.user ?? ''))
   if (!(await auth.checkLogin(user, creds.password ?? ''))) {
     auth.recordFailure(ip)
     console.log(`login failed for "${user}" from ${ip}`)

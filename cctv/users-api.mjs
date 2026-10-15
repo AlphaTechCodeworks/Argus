@@ -84,6 +84,9 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     if (!NAME_RE.test(name)) throw new HttpError(400, 'A user name is letters, digits and . _ @ - (up to 64)')
     if (!ROLES.includes(role)) throw new HttpError(400, 'role must be viewer, watch or admin')
     const existed = Object.hasOwn(users, name)
+    // sign-in ignores capitals (auth.accountName), so two names that differ only in them would be one
+    const twin = existed ? null : Object.keys(users).find((u) => u.toLowerCase() === name.toLowerCase())
+    if (twin) throw new HttpError(409, `There is already an account called ${twin}: user names do not depend on capitals`)
     if (!existed && !password) throw new HttpError(400, 'A new user needs a password')
     if (password !== null && password.length < 8) throw new HttpError(400, 'A password is at least 8 characters')
     if (existed && users[name].role === 'admin' && role !== 'admin' && admins(users).length <= 1) {
