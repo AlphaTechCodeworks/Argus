@@ -98,6 +98,7 @@ import { motionScan } from './motion.mjs'
 import { handleAdmin } from './admin.mjs'
 import { handleDiscovery, networkSearch } from './discovery.mjs'
 import { makeFindDevice, readArpTable } from './find-device.mjs'
+import { wsDiscover } from './onvif-discovery.mjs'
 import { handleImaging } from './imaging.mjs'
 import { handleLens } from './lens.mjs'
 import { handleStreamCapResolution, handleStreamOptimise, handleStreams } from './streams.mjs'
@@ -1572,7 +1573,14 @@ const findDevice = makeFindDevice({
   })),
   report: cameraSnapshot,
   arp: () => readArpTable(),
-  search: networkSearch
+  // TVT's own search (its recorders answer it) and the standard ONVIF one (its IP cameras answer that),
+  // side by side; a device's MAC from the server's network table, which the answers have just filled
+  search: async () => {
+    const [tvt, onvif] = await Promise.all([networkSearch(), wsDiscover()])
+    const macs = new Map((readArpTable().rows ?? []).map((a) => [a.ip, a.mac]))
+    const devices = [...(tvt.devices ?? []), ...(onvif.devices ?? [])].map((d) => ({ ...d, mac: d.mac || macs.get(d.ip) || null }))
+    return { ran: Boolean(tvt.ran || onvif.ran), devices, why: tvt.ran || onvif.ran ? null : tvt.why || onvif.why }
+  }
 })
 
 // clientAddress: the visitor's own address (not cloudflared's), for the line that says who opened a

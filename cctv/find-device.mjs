@@ -239,6 +239,12 @@ export function buildIndex({ recorders = [], report = null, arp = [], search = [
         tied = true
       }
     }
+    for (const rec of recs.values()) {
+      if (!tied && rec.via === 'p2p' && obs.name && (rec.nvrName ?? '').toLowerCase() === obs.name.toLowerCase()) {
+        rec.sources.add(source)
+        tied = true
+      }
+    }
     for (const cam of cams.values()) {
       if (cam.ip === obs.ip && reachable(cam)) {
         cam.mac ??= obs.mac
@@ -272,10 +278,10 @@ const ownName = (e) => (e.kind === 'recorder' ? e.nvrName : e.name) || ''
 /** How well an entry matches (lower is better); null when it does not. */
 function score(e, q) {
   switch (q.kind) {
-    // The discovery list (2026-10-15: "only what's on my network", "only the TVT related things, not
-    // everything"): the recorders reached over the office network and their cameras, and the TVT devices
-    // that answered TVT's own network search; no P2P site, and no other device of the network
-    case 'all': return e.via === 'p2p' || (e.kind === 'device' && !e.sources.has('search')) ? null : 0
+    // The discovery list (2026-10-15: "only what's on my network", "only the TVT related things", "only
+    // show things that are not added in the system"): the TVT devices that answered TVT's own network
+    // search and are not a recorder or camera Argus already has (those are tied to it, never 'device')
+    case 'all': return e.kind === 'device' && e.sources.has('search') ? 0 : null
     case 'mac': return e.mac === q.value ? 0 : null
     case 'mac-part': return e.mac?.includes(q.value) ? 1 : null
     case 'ip': return e.ip === q.value ? 0 : null

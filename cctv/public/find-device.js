@@ -122,9 +122,11 @@ export function setupFindDevice({ api, el, showRecorder }) {
     const cams = r.results.filter((x) => x.kind === 'camera').length
     const recs = r.results.filter((x) => x.kind === 'recorder').length
     const other = total - cams - recs
-    status.textContent = rows.length === total
-      ? `Found ${recs} recorder${recs === 1 ? '' : 's'}, ${cams} camera${cams === 1 ? '' : 's'} and ${other} other device${other === 1 ? '' : 's'}.`
-      : `${rows.length} of ${total} shown.`
+    status.textContent = total === 0
+      ? 'Nothing new: every TVT device on your network is already in Argus.'
+      : rows.length === total
+        ? `${total} TVT device${total === 1 ? '' : 's'} on your network ${total === 1 ? 'is' : 'are'} not in Argus yet.`
+        : `${rows.length} of ${total} shown.`
     const lines = [...r.notes]
     const search = r.looked?.search
     if (search?.now && !search.ran) lines.unshift(`The network search did not run: ${search.why || 'unknown reason'}.`)

@@ -227,7 +227,7 @@ check('a loose device has nothing to open', openTarget(find('192.168.2.31').resu
     nets: [{ net: (192 * 16777216 + 168 * 65536) >>> 0, mask: 0xfffffc00, address: '192.168.1.232' }]
   }, { max: 2000 })
   const sites = new Set(all.results.map((r) => r.site ?? r.kind))
-  check('the discovery list leaves out P2P sites', !all.results.some((r) => r.nvr === 'shad') && all.results.some((r) => r.nvr === 'nvr1'), JSON.stringify([...sites]))
+  check('the discovery list leaves out what Argus has already (recorders, cameras, P2P sites)', !all.results.some((r) => r.kind === 'recorder' || r.kind === 'camera'), JSON.stringify([...sites]))
   check('... lists a TVT device that answered the network search', all.results.some((r) => r.kind === 'device' && r.ip === '192.168.2.40'))
   check('... but not another device of the network (only in its network table)', !all.results.some((r) => r.ip === '192.168.2.31'))
   const seen = []
