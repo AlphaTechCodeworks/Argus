@@ -26,7 +26,7 @@
       <h1>CCTV</h1>
     </div>
     <div class="controls">
-      <button id="findDevice" type="button" title="Which site, recorder and camera a MAC, an address or a name is">Find device</button>
+      <button id="findDevice" type="button" title="Scan for every recorder, camera and device: which site, recorder and camera each is, its address and MAC">Discover devices</button>
       <button id="find" type="button">Find NVRs</button>
       <button id="add" type="button" class="st-primary">+ Add NVR</button>
     </div>
@@ -122,17 +122,16 @@
 
   <dialog id="fd" class="st-dialog st-discover" aria-labelledby="fd-title">
     <form id="fd-form" method="dialog" autocomplete="off">
-      <h2 id="fd-title">Find a device</h2>
-      <p class="st-help">Type a MAC, an address or a name to see which site, recorder and camera it is. This looks at what the server already knows: the Cameras report, the recorders’ camera lists and the server’s own network table. Nothing is sent to the recorders or cameras.</p>
-      <label>MAC, address or name
-        <input id="fd-q" required minlength="2" maxlength="64" placeholder="e.g. 58:5b:69:00:d6:d7, 192.168.35.114 or North Gate" spellcheck="false" autocapitalize="off" />
+      <h2 id="fd-title">Discover devices</h2>
+      <p class="st-help">Every recorder, every camera at every site and every device on the server’s own network, with its address and MAC where known. The scan starts as this opens; type to narrow the list.</p>
+      <label>Narrow the list (optional)
+        <input id="fd-q" maxlength="64" placeholder="e.g. North Gate, 192.168.35. or 58:5b:69" spellcheck="false" autocapitalize="off" />
       </label>
       <div class="st-actions st-actions-start">
-        <button type="submit" id="fd-go" class="st-primary">Find</button>
-        <button type="button" id="fd-search" title="Asks the TVT recorders and cameras on the server’s own network to answer (the same search as Find NVRs)">Search the network too</button>
+        <button type="button" id="fd-search" class="st-primary" title="Asks the TVT recorders and cameras on the server’s own network to answer again (the same search as Find NVRs)">Scan again</button>
+        <button type="submit" id="fd-go" hidden>Find</button>
         <span id="fd-status" class="st-meta" role="status"></span>
       </div>
-      <small>“Search the network too” asks the TVT recorders and cameras on the server’s own network to answer, the same way TVT’s own tools do. It takes a few seconds.</small>
       <div id="fd-notes"></div>
       <ul id="fd-results" class="st-found fd-results"></ul>
       <div class="st-actions">

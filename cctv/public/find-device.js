@@ -83,18 +83,17 @@ export function setupFindDevice({ api, el, showRecorder }) {
   const buttons = [$('fd-go'), $('fd-search')]
   let seq = 0
 
+  // Discovery: opening the box lists everything at once (every recorder, camera and device the server
+  // can see, after a fresh network search); typing only narrows the list down, here on the page.
+  let all = null // the last scan's answer
   async function run(search) {
-    const q = input.value.trim()
-    if (q.length < 2) {
-      input.reportValidity()
-      return
-    }
     const mine = ++seq
     for (const b of buttons) b.disabled = true
-    status.textContent = search ? 'Searching the network… a few seconds.' : 'Looking…'
+    status.textContent = search ? 'Scanning: asking the network and gathering every site’s cameras… a few seconds.' : 'Looking…'
     try {
-      const r = await api('GET', `/api/admin/find-device?q=${encodeURIComponent(q)}${search ? '&search=1' : ''}`, undefined, search ? 30_000 : 8000)
+      const r = await api('GET', `/api/admin/find-device?q=*${search ? '&search=1' : ''}`, undefined, search ? 30_000 : 8000)
       if (mine !== seq) return
+      all = r
       show(r)
     } catch (e) {
       if (mine !== seq) return
@@ -106,9 +105,26 @@ export function setupFindDevice({ api, el, showRecorder }) {
     }
   }
 
+  /** The scan's rows that contain every word typed (any order; a MAC with - or : alike), or all of them. */
+  function filtered(r) {
+    const words = input.value.toLowerCase().replace(/-/g, ':').split(/\s+/).filter(Boolean)
+    if (words.length === 0) return r.results
+    return r.results.filter((row) => {
+      const t = rowText(row)
+      const hay = [t.title, t.place, t.facts, row.note, row.ip, row.mac].filter(Boolean).join(' ').toLowerCase().replace(/-/g, ':')
+      return words.every((w) => hay.includes(w))
+    })
+  }
+
   function show(r) {
-    const n = r.results.length
-    status.textContent = n === 0 ? `Nothing matches “${r.query}”.` : `${n + r.more} match${n + r.more === 1 ? '' : 'es'}${r.more ? `, the first ${n} shown: type more to narrow it down` : ''}.`
+    const rows = filtered(r)
+    const total = r.results.length
+    const cams = r.results.filter((x) => x.kind === 'camera').length
+    const recs = r.results.filter((x) => x.kind === 'recorder').length
+    const other = total - cams - recs
+    status.textContent = rows.length === total
+      ? `Found ${recs} recorder${recs === 1 ? '' : 's'}, ${cams} camera${cams === 1 ? '' : 's'} and ${other} other device${other === 1 ? '' : 's'}.`
+      : `${rows.length} of ${total} shown.`
     const lines = [...r.notes]
     const search = r.looked?.search
     if (search?.now && !search.ran) lines.unshift(`The network search did not run: ${search.why || 'unknown reason'}.`)
@@ -116,7 +132,18 @@ export function setupFindDevice({ api, el, showRecorder }) {
       ...lines.map((t) => el('p', { className: 'st-warn-text', textContent: t })),
       el('p', { className: 'st-meta', textContent: lookedText(r.looked) })
     )
-    list.replaceChildren(...r.results.map((row) => item(row, r.looked)))
+    // grouped by site (the server sorts by site), each site under its own heading
+    const out = []
+    let site
+    for (const row of rows) {
+      const s = row.kind === 'device' ? 'On the server’s own network' : row.site || 'No site'
+      if (s !== site) {
+        site = s
+        out.push(el('li', { className: 'fd-site', textContent: s }))
+      }
+      out.push(item(row, r.looked))
+    }
+    list.replaceChildren(...out)
   }
 
   function item(r, looked) {
@@ -146,9 +173,9 @@ export function setupFindDevice({ api, el, showRecorder }) {
     )
   }
 
-  $('fd-form').addEventListener('submit', (e) => {
-    e.preventDefault()
-    run(false)
+  $('fd-form').addEventListener('submit', (e) => e.preventDefault())
+  input.addEventListener('input', () => {
+    if (all) show(all)
   })
   $('fd-search').addEventListener('click', () => run(true))
   $('fd-close').addEventListener('click', () => dialog.close())
@@ -156,5 +183,6 @@ export function setupFindDevice({ api, el, showRecorder }) {
     dialog.showModal()
     input.focus()
     input.select()
+    run(true) // the scan starts as the box opens
   })
 }

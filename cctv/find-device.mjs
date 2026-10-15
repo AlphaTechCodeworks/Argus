@@ -24,6 +24,8 @@ import { networkInterfaces } from 'node:os'
 
 export const MAX_QUERY = 64
 export const MAX_RESULTS = 60
+/** Rows in the full discovery list (every recorder, camera and network device: 311 cameras on prod) */
+export const MAX_ALL = 2000
 const MAX_ARP_ROWS = 4096
 const MAX_SEARCH_DEVICES = 256
 const SEARCH_REUSE_MS = 15_000 // a second "search the network" within this reuses the last answer
@@ -58,6 +60,8 @@ export function normaliseMac(s) {
  */
 export function classifyQuery(q) {
   const t = String(q ?? '').trim()
+  // everything the server knows, for the discovery list the page opens with (2026-10-15: "it's a discovery tool")
+  if (t === '*') return { kind: 'all', value: '' }
   if (t.length < 2) return { error: 'Type at least 2 characters: a MAC, an address or a name.' }
   if (t.length > MAX_QUERY) return { error: `Type at most ${MAX_QUERY} characters.` }
   const mac = normaliseMac(t)
@@ -225,6 +229,7 @@ const ownName = (e) => (e.kind === 'recorder' ? e.nvrName : e.name) || ''
 /** How well an entry matches (lower is better); null when it does not. */
 function score(e, q) {
   switch (q.kind) {
+    case 'all': return 0
     case 'mac': return e.mac === q.value ? 0 : null
     case 'mac-part': return e.mac?.includes(q.value) ? 1 : null
     case 'ip': return e.ip === q.value ? 0 : null
@@ -384,7 +389,7 @@ export function makeFindDevice(ctx) {
       arp: arp.rows,
       search: search?.ran ? search.devices : [],
       nets: ctx.nets?.() ?? localNets()
-    })
+    }, { max: checked.kind === 'all' ? MAX_ALL : MAX_RESULTS })
     const reportCams = (report?.nvrs ?? []).reduce((n, x) => n + (Array.isArray(x?.cameras) ? x.cameras.length : 0), 0)
     // where it looked, so "Nothing matches" can say so (the page puts it in words)
     answer.looked = {

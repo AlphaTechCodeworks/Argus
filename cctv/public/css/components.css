@@ -90,3 +90,5 @@
 .fd-note { color: var(--text-muted); font-size: var(--fs-meta); }
 .fd-off strong { color: var(--text-muted); }
 .st-nvr.fd-flash { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Discover devices: each site's heading in the list */
+.fd-results li.fd-site { list-style: none; margin: 14px 0 4px; font-weight: 600; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 4px; }
