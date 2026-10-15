@@ -38,6 +38,8 @@ export const ACTION_LABELS = Object.freeze({
   'playback-view': 'Played back',
   'live-view': 'Watched live',
   'audit-prune': 'Old entries removed',
+  'camera-link': 'Camera link (RTSP) changed',
+  'camera-link-use': 'Camera link (RTSP) used',
   other: 'Other'
 })
 

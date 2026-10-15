@@ -33,6 +33,9 @@ export const ACTIONS = Object.freeze([
   'playback-view',
   'live-view',
   'audit-prune',
+  // Camera links (RTSP, rtsp.mjs): a key made or revoked, the service switched; a key's first use each day
+  'camera-link',
+  'camera-link-use',
   'other'
 ])
 

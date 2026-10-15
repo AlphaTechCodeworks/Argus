@@ -248,6 +248,29 @@
       </form>
       </details>
     </section>
+    <section class="se-section" data-tab="links" aria-labelledby="rl-title-s">
+      <h2 id="rl-title-s">Camera links (RTSP)</h2>
+      <p class="st-help">Lets programs on this network — VLC, another recorder, a number-plate reader — take any camera Argus sees, P2P sites included, as an RTSP address. Each program gets a key of its own, which you can revoke here at any time. The quickest way to one camera's address is its <strong>Stream link</strong> button (Live, full-size view; or the camera under Sites).</p>
+      <p id="rl-status" class="st-help" role="status">Checking…</p>
+      <p><button type="button" id="rl-toggle" class="st-primary" hidden>Turn on camera links</button> <span id="rl-toggle-msg" class="st-meta" role="status"></span></p>
+      <details class="rl-new" id="rl-new">
+        <summary>Make a key for a program</summary>
+        <form id="rl-form" class="rl-form" autocomplete="off">
+          <label>Name (who or what will use it) <input id="rl-name" maxlength="60" required placeholder="e.g. Gate plate reader" /></label>
+          <fieldset class="rl-which"><legend>Cameras</legend>
+            <label><input type="radio" name="rl-which" value="all" checked /> Every camera, now and later</label>
+            <label><input type="radio" name="rl-which" value="some" /> Only the cameras I choose</label>
+            <div id="rl-cams" class="rl-cams" hidden></div>
+          </fieldset>
+          <label><input type="checkbox" id="rl-main" /> Full quality too (the main stream: heavier on the recorder; P2P recorders allow only a few cameras at once)</label>
+          <div class="se-actions"><button type="submit" class="st-primary">Make the key</button><span id="rl-msg" class="st-meta" role="status"></span></div>
+        </form>
+      </details>
+      <div id="rl-made" class="rl-made" hidden></div>
+      <h3>Keys</h3>
+      <div id="rl-keys"></div>
+      <p class="hp-note">In VLC: Media → Open Network Stream, paste the address, Play. Addresses work on this network only (port 8554, TCP and UDP), not through the internet address. A program reading a camera keeps that camera's stream running on the server; the picture is passed on as the camera sends it, never converted.</p>
+    </section>
     <section class="se-section" data-tab="connector" aria-labelledby="conn-title">
       <h2 id="conn-title">Remote site connector</h2>
       <p class="st-help">Connects a server at an NVR site to this app over Tailscale, so the app reaches that site's NVRs by their LAN IP — no port forwarding, no fixed IP. Install it once on a Windows server that sits on the NVRs' network; it finds the LAN and joins your tailnet by itself.</p>
@@ -314,6 +337,7 @@
   <script type="module" src="settings.js"></script>
   <script type="module" src="settings-tabs.js"></script>
   <script type="module" src="connector.js"></script>
+  <script type="module" src="rtsp-links.js"></script>
   <script type="module" src="storage.js"></script>
   <script type="module" src="alert-banner.js"></script>
   <script type="module" src="build-badge.js"></script>

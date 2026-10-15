@@ -7,6 +7,7 @@ const TABS = [
   { id: 'storage', label: 'Storage', help: 'How full each place is and how long it will last; your drives and shares; when old footage is cleared.' },
   { id: 'overlay', label: 'On-screen text', help: 'The camera name and the time drawn over the picture.' },
   { id: 'alerts', label: 'Alerts', help: 'Who is told when something goes wrong, and how.' },
+  { id: 'links', label: 'Camera links', help: 'RTSP addresses of the cameras for VLC, another recorder or an OCR engine, and the keys that let them in.' },
   { id: 'connector', label: 'Remote sites', help: 'The installer that connects a site server, and its NVRs, to this app over Tailscale.' },
   { id: 'server', label: 'Server', help: 'Restart the server.' }
 ]

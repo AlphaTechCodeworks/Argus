@@ -18,6 +18,7 @@ import { LOW_LATENCY_CLOCK, REMOTE_CLOCK } from './playout.js'
 import { deviceId, startTelemetry } from './telemetry.js'
 import { loadSicex, sicexOn } from './sicex.js'
 import { checkBookmark } from './bookmarks-view.js'
+import { streamLinkButton } from './rtsp-link.js'
 import { TOLERANCE, knownCapacity, layoutNote as profileNote, noteCapacity, noteSecond, readProfile, saveProfile, statusOf } from './wall-profile.js'
 import { THIN_MAX_KEY_MS, THIN_MIN_TILES, THIN_SETTLE_MS, fullRateTiles, nextBudget, thinStart } from './wall-thin.js'
 import { CUSTOM_LAYOUT, NO_H265_NOTE, layoutShown, layoutsOffered } from './grid-view.js'
@@ -1374,6 +1375,8 @@ function openSingle(cam, { fromTap = false, stepping = false } = {}) {
   }
   links.append(soundButton(cam))
   links.append(markButton(cam))
+  // an RTSP address for this camera, for VLC or another program (admins: rtsp-link.js)
+  if (isAdmin) links.append(streamLinkButton(cam))
   linkedCameras(cam, links)
   overlay.querySelector('.name').after(links)
   if (isPhone()) overlay.append(nativeFullButton(overlay))

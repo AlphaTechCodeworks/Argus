@@ -10,6 +10,7 @@
 // The Picture tab starts with the camera's "Steady picture" switch (steady-switch.js): the server
 // steadies a shaking camera for everyone watching it live.
 import { ImagePanel } from './image-panel.js'
+import { streamLinkButton } from './rtsp-link.js'
 import { OsdPanel } from './osd-panel.js'
 import { LinesPanel, linesSupportAsker } from './lines-panel.js'
 import { CameraCfgPanel, KIND_LABEL } from './camera-cfg-panel.js'
@@ -65,6 +66,8 @@ export function openCameraEditor(mountEl, cam, { onClose = null } = {}) {
   // Steady picture: above the Picture panel, for as long as the editor is open (the panel itself
   // is appended after it each time the tab opens)
   picBody.append(steadySwitch(cam).el)
+  // ...and the camera's RTSP address for VLC or another program, in one click (rtsp-link.js; this page is admins')
+  picBody.append(el('p', { className: 'ce-rtsp' }, streamLinkButton(cam, 'btn-ghost')))
 
   // the camera's own detections: one tab each, all the same panel (camera-cfg-panel.js)
   const cfgBodies = Object.fromEntries(Object.keys(KIND_LABEL).map((kind) => [kind, el('div', { className: 'ce-body', hidden: true })]))

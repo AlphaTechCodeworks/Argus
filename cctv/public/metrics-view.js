@@ -158,7 +158,10 @@ export function metricsView(data, { hours = 24, names = {} } = {}) {
   // cameras steadied on the server (steady.mjs): a line of its own once the history has the figure
   const steady = of((s) => s.other?.steady)
   const hasSteady = steady.some((p) => finite(p.v))
-  const allMax = niceMax(Math.max(mostOf(allFf), mostOf(office), mostOf(remote), mostOf(playback), hasSteady ? mostOf(steady) : 0, 1))
+  // cameras fed to camera links (RTSP, rtsp.mjs): one ffmpeg each, copying (cheap); a line once any ran
+  const rtsp = of((s) => s.other?.rtsp)
+  const hasRtsp = rtsp.some((p) => finite(p.v) && p.v > 0)
+  const allMax = niceMax(Math.max(mostOf(allFf), mostOf(office), mostOf(remote), mostOf(playback), hasSteady ? mostOf(steady) : 0, hasRtsp ? mostOf(rtsp) : 0, 1))
   // 4. failures by the hour, all recorders together
   const hrs = hourly(samples)
   const hourPoints = (k) => hrs.map((h) => ({ t: h.t + HOUR_MS / 2, v: h[k] }))
@@ -195,9 +198,9 @@ export function metricsView(data, { hours = 24, names = {} } = {}) {
     ...(allFf.some((p) => finite(p.v)) ? [{
       id: 'all-conversions',
       title: 'All video conversions',
-      note: `Every conversion the server is running, and who it is for: office PCs without H.265, viewers from outside or on phones${hasSteady ? ', cameras with Steady picture on' : ''}, and playback. Each one takes processor time.`,
+      note: `Every conversion the server is running, and who it is for: office PCs without H.265, viewers from outside or on phones${hasSteady ? ', cameras with Steady picture on' : ''}${hasRtsp ? ', camera links (RTSP: copied, not converted)' : ''}, and playback. Each one takes processor time.`,
       yMax: allMax,
-      series: [series('All', 'a', allFf, { yMax: allMax }), series('Office PCs', 'b', office, { yMax: allMax }), series('Outside and phones', 'c', remote, { yMax: allMax }), series('Playback', 'd', playback, { yMax: allMax }), ...(hasSteady ? [series('Steady picture', 'e', steady, { yMax: allMax })] : [])]
+      series: [series('All', 'a', allFf, { yMax: allMax }), series('Office PCs', 'b', office, { yMax: allMax }), series('Outside and phones', 'c', remote, { yMax: allMax }), series('Playback', 'd', playback, { yMax: allMax }), ...(hasSteady ? [series('Steady picture', 'e', steady, { yMax: allMax })] : []), ...(hasRtsp ? [series('Camera links (RTSP)', 'f', rtsp, { yMax: allMax })] : [])]
     }] : []),
     {
       id: 'failures',

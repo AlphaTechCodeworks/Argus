@@ -2247,3 +2247,19 @@ body.playback-page.is-fullscreen .pb-bar { --pb-head-ink: #14171c; }
   .cam-sheet { background:var(--bg); }
   body.phone-list #grid > .tile { box-shadow:none; }
 }
+
+/* Camera links (RTSP): the Stream link dialog (rtsp-link.js) and Settings > Camera links (rtsp-links.js) */
+.rl-dialog { max-width: min(720px, calc(100vw - 32px)); }
+.rl-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
+.rl-label { min-width: 9em; font-size: 13px; color: var(--text-muted); }
+.rl-url { flex: 1 1 320px; min-width: 0; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.rl-host-label { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; }
+.rl-form { display: flex; flex-direction: column; gap: 10px; max-width: 720px; margin: 8px 0; }
+.rl-which label { display: block; margin: 4px 0; }
+.rl-cams { max-height: 320px; overflow: auto; margin-top: 6px; }
+.rl-cam-group label { display: inline-block; min-width: 14em; margin: 2px 8px 2px 0; font-size: 13px; }
+.rl-made { border: 1px solid var(--accent); border-radius: 8px; padding: 12px; margin: 12px 0; }
+.rl-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rl-table th, .rl-table td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.rl-path code { font-size: 12px; word-break: break-all; }
+.ce-rtsp { margin: 8px 0; }

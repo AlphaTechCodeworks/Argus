@@ -45,6 +45,8 @@
 //                                 its live picture for everyone (admins change it), see steady.mjs
 //   GET  /api/admin/metrics?hours=24 -> the key numbers minute by minute, up to 14 days back
 //                                 (admins; Health's "Last 24 hours"), see metrics-history.mjs
+//   /api/admin/rtsp            -> Camera links (RTSP): keys and the switch (admins), see rtsp.mjs; its
+//                                 RTSP server (MediaMTX, a child process) asks /internal/rtsp-* (this machine only)
 //   GET  /healthz              -> used by the Docker healthcheck and the watchers on this machine;
 //                                 { ok } only for anyone else who is not an admin (security.mjs localProbe)
 //   WS   /live?nvr=ID&ch=N&stream=S -> binary frames, S: 0 = main, 1 = sub
@@ -118,6 +120,8 @@ import { STEADY_PATH, SteadyLive, handleSteady, steadyStore } from './steady.mjs
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher, viewerOf } from './live-attach.mjs'
+import { makeMainLimit } from './main-limit.mjs'
+import { hostAddresses, makeRtsp } from './rtsp.mjs'
 import { makePresence } from './presence.mjs'
 import { handleViewers, liveKind, trackingOpen } from './viewers.mjs'
 import { audioHub } from './audio-hub.mjs'
@@ -734,7 +738,9 @@ const handleRequest = async (req, res) => {
       // the main streams of their full-size views, which have a budget of their own
       h264: h264Fallback.summary(),
       // cameras steadied on the server (steady.mjs): how many now, of how many at most
-      steady: steadyLive.summary()
+      steady: steadyLive.summary(),
+      // Camera links (RTSP, rtsp.mjs): switched on, its server running, cameras fed into it and programs reading them
+      rtsp: rtsp.summary()
     }
     // CCTV_LIVE_WORKER=on: each NVR's live worker (its own SDK calls are counted there, not above)
     if (list.some((n) => n.worker)) {
@@ -756,6 +762,9 @@ const handleRequest = async (req, res) => {
   }
   // Per-camera export (camera-export.mjs): a read-only inventory report. Localhost only -- like the
   // full /healthz body, it is for the box itself, never reachable off it, so it needs no sign-in.
+  // Camera links (RTSP): the RTSP server's questions, its feeds and its readers (rtsp.mjs). This
+  // machine only, with this boot's secret; never a session.
+  if (pathname.startsWith('/internal/') && (await rtsp.handleInternal(req, res, url, { local: localProbe(req.socket.remoteAddress, req.headers['cf-connecting-ip']) }))) return
   if (pathname === '/api/cameras-export') {
     if (!localProbe(req.socket.remoteAddress, req.headers['cf-connecting-ip'])) return sendJson(res, 403, { error: 'This report is only available on the server itself.' })
     return sendJson(res, 200, { at: new Date().toISOString(), nvrs: await cameraExport(nvrs) })
@@ -1240,6 +1249,9 @@ const handleRequest = async (req, res) => {
       const answer = await handleCameraLinks(req.method, pathname, () => readJsonObject(req, LINKS_BODY_LIMIT), { admin: true, cameras: allCameras, maps: readMaps })
       if (answer) return sendJson(res, answer[0], answer[1], answer[2])
     }
+    // Camera links (RTSP): keys, the switch, and the one-click link of a camera (rtsp.mjs)
+    const rtspRoute = await rtsp.handleAdmin(req.method, pathname, () => readJsonObject(req, 64 * 1024), who, { ip: clientIp(req), device: deviceOf(req.headers['user-agent']) })
+    if (rtspRoute) return sendJson(res, ...rtspRoute)
     // (the RAM estimate: the NVRs' cameras, not a scan of the whole index; one small query per camera)
     const ramEstimate = () => estimateRecentRam({ index: recIndex(), settings: getSettings(), list: allCameras() })
     const settingsAnswer = await handleSettings(req.method, pathname, () => readJsonObject(req, 16384), user, AUTH_OFF || auth.isAdmin(user), { ramEstimate, params: url.searchParams })
@@ -1544,7 +1556,25 @@ const steadyCameras = steadyStore({ file: join(auth.DATA_DIR, 'steady.json') })
 const steadyLive = new SteadyLive({ isOn: (key) => steadyCameras.has(key) })
 // clientAddress: the visitor's own address (not cloudflared's), for the line that says who opened a
 // camera in full quality
-const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track, clientAddress: clientIp, steady: steadyLive })
+// One count of the cameras in full quality per recorder, for viewers and camera links alike (main-limit.mjs)
+const mainLimit = makeMainLimit()
+const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track, clientAddress: clientIp, steady: steadyLive, mainLimit })
+// Camera links (RTSP, rtsp.mjs): outside programs pull a camera as rtsp://<server>:8554/<nvr>/<camera>[/main]
+// with an admin's key. Off unless switched on in Settings (and never with CCTV_RTSP=off); its RTSP
+// server is a child process, and nothing else depends on it being there.
+const publicHost = () => {
+  try {
+    return new URL(getSettings().publicUrl).hostname
+  } catch {
+    return null
+  }
+}
+const rtsp = makeRtsp({ dataDir: auth.DATA_DIR, appDir: join(import.meta.dirname, '..'), httpPort: HTTP_PORT, nvrs, mainLimit, audit: (row) => audit(auth.DATA_DIR, row), hosts: () => hostAddresses(undefined, [publicHost()]) })
+try {
+  rtsp.start()
+} catch (e) {
+  console.warn(`[rtsp] not started: ${e?.message ?? e}`)
+}
 
 // A history of the key numbers, one line a minute in DATA_DIR/metrics.jsonl, 14 days kept
 // (metrics-history.mjs), for Health's "Last 24 hours". The same sources as /healthz above; with live
@@ -1583,7 +1613,7 @@ const metricsHistory = makeMetricsHistory({
     },
     loopWorstMs: () => Math.max(loopWorstMs() ?? 0, ...workerStats().map((x) => x?.loop?.worstMs ?? 0)),
     // remote viewers' and phones' conversions (one pool), playback's, the steadied cameras', and every ffmpeg on the box
-    other: () => ({ remote: phoneLive.pool.active, playback: transcodePool.active, playbackSd: lightTranscodePool.active, steady: steadyLive.pool.active, ffmpeg: ffmpegRunning() })
+    other: () => ({ remote: phoneLive.pool.active, playback: transcodePool.active, playbackSd: lightTranscodePool.active, steady: steadyLive.pool.active, ffmpeg: ffmpegRunning(), rtsp: rtsp.summary().feeds, rtspReaders: rtsp.summary().readers })
   }
 })
 try {
@@ -1689,6 +1719,9 @@ if (Object.keys(auth.loadUsers()).length === 0) {
 }
 
 const shutdown = async () => {
+  try {
+    rtsp.stop() // (its RTSP server: KillMode=mixed would end it too)
+  } catch {}
   try {
     // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
     // (9 s: the NVR workers get 8 s to close their segments and log out; the unit allows 15)
