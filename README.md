@@ -4,6 +4,10 @@
 every camera on every NVR at every site, in an ordinary browser, with no plugin and no vendor cloud
 account.
 
+![Argus Live page: a 3 × 3 wall of cameras from three sites, with the navigation on the left](docs/screenshots/live-wall.png)
+
+<sub>The Live page. The camera pictures are illustrations, not real footage.</sub>
+
 Argus is for people who run TVT-made NVRs (sold under many names, among them TVT, Provision-ISR and
 Eye in Cloud) and have outgrown the recorder's own web page and the vendor's Windows client: more
 than one recorder, more than one site, staff who need different levels of access, and a need to
