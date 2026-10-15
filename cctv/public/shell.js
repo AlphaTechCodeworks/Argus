@@ -158,6 +158,9 @@ export function mountShell() {
 }
 
 mountShell()
+// the bell turns red while there are open problems, on every page (alert-banner.js); only once the
+// shell is drawn, and never in the way of it
+void import('./alert-banner.js').catch(() => {})
 void preferencesReady.then(() => {
   applyTheme(readTheme(store))
   document.body.classList.toggle('sidebar-pinned', store.getItem('cctv.sidebarPinned') === '1')
