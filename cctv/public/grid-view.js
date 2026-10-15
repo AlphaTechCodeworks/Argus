@@ -257,7 +257,126 @@ export function checkView(raw, { known = null } = {}) {
   // Shared with everyone (views.mjs sharedViews): kept only when it is exactly true, so a view saved
   // before sharing existed, or by a page that does not know of it, stays its owner's alone.
   if (raw.shared === true) value.shared = true
+  // The cameras to start first (startPlan). Absent on a view saved before it existed, and left off
+  // when empty, so such a view is stored exactly as before.
+  if (raw.startOrder !== undefined && raw.startOrder !== null) {
+    const order = checkStartOrder(raw.startOrder, { within: new Set(cameras) })
+    if (!order.ok) return bad(order.error)
+    if (order.value.length) value.startOrder = order.value
+  }
   return { ok: true, error: null, value }
+}
+
+// ---- the start order ---------------------------------------------------------------------------
+//
+// Which cameras of a page are asked for first. The tiles stay where they are; only the order their
+// streams are requested in changes. The server queues its calls to each NVR, so the order the page
+// asks in is the order a recorder starts them: on a slow (P2P) recorder the camera somebody actually
+// watches the gate on can be first, not whichever one happens to sit top left.
+
+/** The most cameras a start order may name: as many as a view holds, and as a page can show. */
+export const MAX_START_ORDER = MAX_VIEW_CAMERAS
+/** The spacing between two tiles opened on the same NVR (the reason it is 15 ms is in viewer.js render). */
+export const START_STEP_MS = 15
+/**
+ * The head start the numbered cameras get: the others on the page begin this much later. The NVR's
+ * own queue already keeps them in order on each recorder, but the page's link (one shared socket
+ * through the tunnel) and the server's login lane are shared by every recorder; 100 ms lets the
+ * numbered streams be asked for and under way before the rest of the page competes with them, and is
+ * short enough that nobody waits for it on a fast recorder. A page with no numbered camera on it gets
+ * no lead at all, so it opens exactly as it did before the start order existed.
+ */
+export const START_LEAD_MS = 100
+
+/**
+ * A start order, checked: a list of camera keys, each once (a repeat is dropped), at most
+ * MAX_START_ORDER. `within` (a Set of keys): keys not in it are dropped rather than refused, as
+ * checkView drops a camera that no longer exists, so a camera taken out of a view does not make the
+ * view unsaveable.
+ * @returns {{ ok: boolean, error: string|null, value: string[]|null }}
+ */
+export function checkStartOrder(raw, { within = null } = {}) {
+  const bad = (error) => ({ ok: false, error, value: null })
+  if (!Array.isArray(raw)) return bad('A start order must be a list of camera keys')
+  if (raw.length > MAX_START_ORDER) return bad(`A start order names at most ${MAX_START_ORDER} cameras`)
+  const seen = new Set()
+  const value = []
+  for (const k of raw) {
+    if (typeof k !== 'string' || !KEY_RE.test(k)) return bad(`"${String(k).slice(0, 40)}" is not a camera key ("<nvr>/<channel>")`)
+    if (seen.has(k) || (within && !within.has(k))) continue
+    seen.add(k)
+    value.push(k)
+  }
+  return { ok: true, error: null, value }
+}
+
+/** A start order kept as a preference (JSON text), read leniently: [] for anything unusable. */
+export function parseStartOrder(text) {
+  try {
+    const { ok, value } = checkStartOrder(JSON.parse(String(text ?? '')))
+    return ok ? value : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Each tile's number in the start order: 1 for the first named camera on this page, 2 for the next…
+ * and 0 for a tile not named (or empty). Counted over the page only, so a camera named on another
+ * page takes no number here.
+ * @param {Array<string|null>} keys the page's tiles in reading order (null: no camera)
+ * @param {string[]} startOrder
+ * @returns {number[]}
+ */
+export function startRanks(keys, startOrder) {
+  const list = keys ?? []
+  const at = new Map()
+  list.forEach((k, i) => { if (typeof k === 'string' && !at.has(k)) at.set(k, i) })
+  const ranks = list.map(() => 0)
+  let n = 0
+  for (const k of Array.isArray(startOrder) ? startOrder : []) {
+    const i = at.get(k)
+    if (i === undefined || ranks[i]) continue
+    ranks[i] = ++n
+  }
+  return ranks
+}
+
+/**
+ * When each tile of a page opens: the numbered cameras first, in their order, then the rest in reading
+ * order. The stagger is still counted per NVR (viewer.js render explains why), but in that order, so
+ * on each recorder its first numbered camera is asked for first. The un-numbered tiles start
+ * START_LEAD_MS later, when the page has any numbered camera at all.
+ *
+ * @param {Array<{key:string, nvr:string}|null>} slots the page's tiles in reading order; null for a
+ *        tile that opens no stream (empty, or offline), which neither waits nor counts
+ * @param {string[]} startOrder
+ * @returns {{ order: number[], delays: number[] }} order: slot indices, first opened first;
+ *          delays: per slot index, ms before it asks for its stream (0 for a null slot)
+ */
+export function startPlan(slots, startOrder = [], { stepMs = START_STEP_MS, leadMs = START_LEAD_MS } = {}) {
+  const list = slots ?? []
+  const ranks = startRanks(list.map((s) => (s && typeof s.key === 'string' ? s.key : null)), startOrder)
+  const idx = list.map((_, i) => i).filter((i) => list[i])
+  const first = idx.filter((i) => ranks[i]).sort((a, b) => ranks[a] - ranks[b])
+  const rest = idx.filter((i) => !ranks[i])
+  const order = [...first, ...rest]
+  const lead = first.length ? Math.max(0, leadMs) : 0
+  const delays = list.map(() => 0)
+  const perNvr = new Map()
+  for (const i of order) {
+    const nvr = String(list[i].nvr ?? '')
+    const n = perNvr.get(nvr) ?? 0
+    perNvr.set(nvr, n + 1)
+    delays[i] = n * stepMs + (ranks[i] ? 0 : lead)
+  }
+  return { order, delays }
+}
+
+/** A view with its start order replaced ([] takes it off). */
+export function withStartOrder(view, order) {
+  const { startOrder: _old, ...rest } = view ?? {}
+  return Array.isArray(order) && order.length ? { ...rest, startOrder: [...order] } : rest
 }
 
 /**

@@ -6,6 +6,7 @@ import { enableGridDrag } from './grid-drag.js'
 import { activeTrace, downloadTrace, startTrace, stopTrace } from './frame-trace.js'
 import { applyOrder, createOrderSync, moveOp, reuseSlots, swapOp } from './grid-order.js'
 import { MAX_VIEW_CAMERAS, applyViews, autoLiveGrid, checkView, normaliseViews, searchCameras } from './grid-view.js'
+import { MAX_START_ORDER, parseStartOrder, startPlan, startRanks, withStartOrder } from './grid-view.js'
 import { icon } from './icons.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
 import { preferenceStorage, preferencesReady } from './user-settings.js'
@@ -138,6 +139,9 @@ let page = 0
 let views = []
 let viewsVersion = 0
 let activeView = null
+// the start order being set (startOrder* below): { draft: [keys], context, readOnly } while the tiles are
+// being numbered; null otherwise
+let startMode = null
 let fastUntil = Date.now() + 60_000 // the camera list is re-read every 5 s until then (listSoon)
 let overlayZoom = null // the full-size view's zoom (pinch-zoom.js), while it is open
 let single = null // key (nvr/ch) of the camera shown full-size, or null for the grid
@@ -346,21 +350,23 @@ function render({ keepSingle = false } = {}) {
   // seconds before it even began connecting, most of it queued behind cameras on other sites
   // entirely. Per NVR, the same grid spread over four of them waits under a second, and each
   // recorder sees exactly the same rate of requests as before.
-  const openedPerNvr = new Map()
+  // 15 ms (START_STEP_MS), not 60: the server queues its own calls to each NVR (and a stream it
+  // already has costs the NVR nothing), so the page's spacing mostly held back pictures that were ready.
+  // The count runs in the start order (grid-view.js startPlan): the cameras the user numbered first,
+  // then the rest in reading order, so each recorder is asked for its numbered cameras first. The
+  // tiles themselves stay in their cells. Only tiles that will stream count (not empty or offline ones).
+  const { delays } = startPlan(visible.slice(0, perPage).map((c) => (c?.online ? { key: camKey(c), nvr: c.nvr } : null)), startOrderNow())
   for (let i = 0; i < perPage; i++) {
     const cam = visible[i]
     const slot = { cam, el: null, live: null }
     gridSlots.push(slot)
-    const n = openedPerNvr.get(cam?.nvr) ?? 0
-    openedPerNvr.set(cam?.nvr, n + 1)
-    // 15 ms, not 60: the server queues its own calls to each NVR (and a stream it already has costs
-    // the NVR nothing), so the page's spacing mostly held back pictures that were ready
-    fillSlot(slot, gridArea(cells[i]), n * 15)
+    fillSlot(slot, gridArea(cells[i]), delays[i] ?? 0)
     grid.insertBefore(slot.el, before)
   }
   syncTiles()
   updatePager(pages)
   syncSingle(keep)
+  paintStartOrder()
 }
 
 /** A layout cell [column, row, width, height] as a CSS grid-area. */
@@ -499,6 +505,7 @@ function updateTiles(changed) {
   syncTiles()
   const keep = single !== null && overlay !== null && singleTiles.some((t) => !t.closed)
   syncSingle(keep)
+  paintStartOrder() // (a tile built again has lost its number)
 }
 
 /** The full-size view after a grid rebuild or a camera-list refresh. */
@@ -1709,6 +1716,7 @@ function relayout() {
   for (const s of gridSlots) grid.insertBefore(s.el, before)
   syncTiles()
   updatePager(v.pages)
+  paintStartOrder()
 }
 
 let cameraToMove = null
@@ -1750,7 +1758,7 @@ function dropTile(dragged, target) {
 const drag = enableGridDrag(grid, {
   // the grid's tiles with a camera (offline ones too); not while the full-size view is open, and not
   // while a saved view is shown (the view fixes its own order — change it by re-saving the view)
-  tileOf: (el) => (single === null && !activeView ? (gridSlots.find((s) => s.cam && s.el.contains(el))?.el ?? null) : null),
+  tileOf: (el) => (single === null && !activeView && !startMode ?(gridSlots.find((s) => s.cam && s.el.contains(el))?.el ?? null) : null),
   // another camera's tile, or a pager arrow that can be used
   targetOf: (el, dragged) => {
     const arrow = el.closest?.('#prev, #next')
@@ -2107,6 +2115,8 @@ viewSel.addEventListener('change', () => selectView(viewSel.value))
 // One dialog for a new view, an edit of one's own, and a copy of a shared one: tick cameras from any
 // sites, pick or draw a layout, put each camera on its tile, and (one's own) share it with everyone.
 let editing = null // the user's own view being edited; null for a new view or a copy
+// the start order the view being edited or copied had: kept through the dialog, which does not show it
+let editingStartOrder = []
 const newViewId = () => `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`
 /** The tiles a layout has, for the editor's picture of it: what render() would draw. */
 function editorCells(layout, drawn, count) {
@@ -2129,7 +2139,7 @@ const editor = createViewEditor({
     if (editing && same && same.id !== editing.id) return `You already have a view called “${same.name}”. Choose another name.`
     // a new view under a name already in use replaces that view, rather than leaving two the menu
     // cannot tell apart; any other name is a new view
-    const { ok, error, value } = checkView({ ...draft, id: editing?.id ?? same?.id ?? newViewId() })
+    const { ok, error, value } = checkView({ ...draft, startOrder: editingStartOrder, id: editing?.id ?? same?.id ?? newViewId() })
     if (!ok) return error
     const next = views.some((v) => v.id === value.id) ? views.map((v) => (v.id === value.id ? value : v)) : [...views, value]
     const saved = await putViews(next)
@@ -2142,6 +2152,7 @@ const editor = createViewEditor({
 
 saveViewBtn.addEventListener('click', () => {
   editing = null
+  editingStartOrder = []
   // what is on screen to start from when it is already a choice (a view, a site, a search); not every
   // camera of every site, which nobody wants to untick one by one
   const narrowed = Boolean(activeView || siteSelect.value || cameraQuery)
@@ -2151,11 +2162,13 @@ saveViewBtn.addEventListener('click', () => {
 editViewBtn.addEventListener('click', () => {
   if (!activeView?.id || activeView.owner) return
   editing = activeView
+  editingStartOrder = activeView.startOrder ?? []
   editor.open({ title: 'Edit view', view: activeView })
 })
 copyViewBtn.addEventListener('click', () => {
   if (!activeView?.owner) return
   editing = null
+  editingStartOrder = activeView.startOrder ?? [] // the owner's order comes with the copy
   editor.open({ title: 'Save a copy', view: { ...activeView, name: `${activeView.name} (copy)`.slice(0, 60), shared: false } })
 })
 
@@ -2167,6 +2180,136 @@ deleteViewBtn.addEventListener('click', async () => {
   preferenceStorage.setItem('cctv.activeView', '')
   renderViewSel()
   render({ keepSingle: true })
+})
+
+// ---- the start order (grid-view.js startPlan): which cameras are asked for first ----
+// "Start order…" numbers the tiles of the page: the numbered cameras are asked for first, in that
+// order, and the rest after them in reading order (render). The tiles stay where they are. Kept on
+// the user's own view (its startOrder), or with no view as the preference cctv.startOrder. A shared
+// view carries its owner's order, which only the owner can change; cameras from a link are no saved
+// view, so they have none. Not offered on a phone: its list streams only the tiles in view, and its
+// grids are small (a saved order still applies to them).
+const startOrderBtn = document.getElementById('startOrderBtn')
+const startBar = document.getElementById('startOrderBar')
+const startText = document.getElementById('startOrderText')
+const startMsg = document.getElementById('startOrderMsg')
+const startSaveBtn = document.getElementById('startOrderSave')
+const startClearBtn = document.getElementById('startOrderClear')
+const startCancelBtn = document.getElementById('startOrderCancel')
+const START_HELP = startText.textContent
+if (isPhone()) startOrderBtn.hidden = true
+
+/** The start order in force: the view's, or with no view this user's preference. (Read by the
+ *  first render, before the consts above exist: so nothing here but what is hoisted.) */
+function startOrderNow() {
+  if (activeView) return activeView.startOrder ?? []
+  return parseStartOrder(preferenceStorage.getItem('cctv.startOrder'))
+}
+/** What the order being set belongs to: the mode ends when the view changes under it. */
+const startContext = () => (activeView ? `view:${menuId(activeView)}` : 'all')
+
+function startOrderBegin() {
+  viewOptions.open = false
+  if (single !== null) closeSingle()
+  const readOnly = !activeView ? '' : activeView.owner ? 'shared' : !activeView.id ? 'link' : ''
+  startMode = { draft: [...startOrderNow()], context: startContext(), readOnly }
+  startText.textContent = readOnly === 'shared'
+    ? `This view is shared by ${activeView.owner}, so only they can change its start order. The numbers show their order. To set your own, use “Save a copy…”.`
+    : readOnly === 'link'
+      ? 'These cameras came from a link and are not a saved view. Save them as a view first (New view…) to give them a start order.'
+      : START_HELP
+  startSaveBtn.hidden = Boolean(readOnly)
+  startClearBtn.hidden = Boolean(readOnly)
+  startCancelBtn.textContent = readOnly ? 'Close' : 'Cancel'
+  startMsg.textContent = ''
+  startBar.hidden = false
+  paintStartOrder()
+  startBar.querySelector('button:not([hidden])')?.focus()
+}
+
+function startOrderEnd() {
+  startMode = null
+  startBar.hidden = true
+  paintStartOrder()
+}
+
+/** The numbers on the tiles while the order is being set (none otherwise). After every draw. */
+function paintStartOrder() {
+  if (startMode && startMode.context !== startContext()) return startOrderEnd() // another view or set chosen
+  const on = Boolean(startMode)
+  grid.classList.toggle('start-order-mode', on)
+  grid.classList.toggle('start-order-readonly', on && Boolean(startMode.readOnly))
+  const ranks = on ? startRanks(gridSlots.map((s) => (s.cam ? camKey(s.cam) : null)), startMode.draft) : []
+  gridSlots.forEach((s, i) => {
+    if (!s.el) return
+    const n = ranks[i] || 0
+    let badge = s.el.querySelector(':scope > .start-badge')
+    s.el.classList.toggle('start-numbered', n > 0)
+    if (!n) return badge?.remove()
+    if (!badge) {
+      badge = document.createElement('span')
+      badge.className = 'start-badge'
+      badge.setAttribute('aria-hidden', 'true') // (said in startMsg instead)
+      s.el.append(badge)
+    }
+    badge.textContent = String(n)
+  })
+}
+
+// In the mode a click on a tile numbers it, or takes its number off (the others close up). It never
+// reaches the tile: nothing opens full size and nothing is dragged (drag's tileOf says no as well).
+grid.addEventListener('click', (e) => {
+  if (!startMode) return
+  e.stopPropagation()
+  e.preventDefault()
+  if (startMode.readOnly) return
+  const slot = gridSlots.find((s) => s.cam && s.el?.contains(e.target))
+  if (!slot) return
+  const key = camKey(slot.cam)
+  const draft = startMode.draft
+  const at = draft.indexOf(key)
+  if (at >= 0) draft.splice(at, 1)
+  else if (draft.length >= MAX_START_ORDER) return void (startMsg.textContent = `At most ${MAX_START_ORDER} cameras can be numbered.`)
+  else draft.push(key)
+  paintStartOrder()
+  const n = startRanks(gridSlots.map((s) => (s.cam ? camKey(s.cam) : null)), draft)[gridSlots.indexOf(slot)]
+  startMsg.textContent = n ? `${tileLabel(slot.cam)} starts ${ordinal(n)}.` : `${tileLabel(slot.cam)} no longer has a number.`
+}, true)
+const ordinal = (n) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`
+
+startOrderBtn.addEventListener('click', startOrderBegin)
+startCancelBtn.addEventListener('click', startOrderEnd)
+startClearBtn.addEventListener('click', () => {
+  if (!startMode || startMode.readOnly) return
+  startMode.draft = []
+  paintStartOrder()
+  startMsg.textContent = 'Numbers cleared. Save to start every camera in reading order.'
+})
+startSaveBtn.addEventListener('click', async () => {
+  if (!startMode || startMode.readOnly) return
+  const order = startMode.draft.slice(0, MAX_START_ORDER)
+  startSaveBtn.disabled = true
+  try {
+    if (activeView) {
+      const id = activeView.id
+      if (!views.some((v) => v.id === id)) return void (startMsg.textContent = 'This view is not there any more.')
+      const saved = await putViews(views.map((v) => (v.id === id ? withStartOrder(v, order) : v)))
+      if (!saved.ok) return void (startMsg.textContent = saved.error)
+      activeView = views.find((v) => v.id === id) ?? null
+    } else {
+      preferenceStorage.setItem('cctv.startOrder', JSON.stringify(order))
+    }
+  } finally {
+    startSaveBtn.disabled = false
+  }
+  startOrderEnd()
+  orderNote(order.length ? 'Start order saved. The cameras are starting again in that order.' : 'Start order cleared. The cameras start in reading order.')
+  // started again so the order is seen at once (what was asked for: "now load like that")
+  freshenForPageChange()
+  render({ keepSingle: true })
+})
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && startMode && single === null && !document.querySelector('dialog[open]') && !viewOptions.open) startOrderEnd()
 })
 
 // ---- a view's own link (view-links.js): "Copy link", and the TV screen's ----

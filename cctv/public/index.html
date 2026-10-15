@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="colour-check.css" />
   <link rel="stylesheet" href="grid-order.css" />
   <link rel="stylesheet" href="css/live.css" />
+  <link rel="stylesheet" href="css/start-order.css" />
 </head>
 <body class="live-page">
   <section class="live-heading" aria-label="Live view overview">
@@ -76,6 +77,7 @@
       <button id="copyLink" type="button" title="A link that opens Live on this view" hidden>Copy link</button>
       <button id="copyScreenLink" type="button" title="A link for a TV or second monitor: just this view's cameras, full window" hidden>Copy TV screen link</button>
       <button id="cycleViews" type="button" title="Show your views in turn">Cycle views…</button>
+      <button id="startOrderBtn" type="button" title="Choose which cameras start first. The tiles stay where they are.">Start order…</button>
       <p id="linkMsg" class="live-help" role="status" hidden></p>
       <label title="Leave offline cameras out of the layout"><input id="hideOffline" type="checkbox" checked /> Hide offline</label>
       <label title="Steadier motion: holds about 0.4 s more video (a little more delay)"><input id="smooth" type="checkbox" /> Smooth</label>
@@ -107,6 +109,15 @@
     </div>
   </header>
   <p id="filterNote" class="filter-note" role="status" hidden></p>
+  <div id="startOrderBar" class="start-order-bar" role="region" aria-label="Start order" hidden>
+    <p id="startOrderText">Click cameras in the order you want them to start. The rest follow in reading order.</p>
+    <p id="startOrderMsg" class="start-order-msg" role="status"></p>
+    <div class="start-order-actions">
+      <button id="startOrderSave" type="button" class="btn-primary">Save</button>
+      <button id="startOrderClear" type="button">Clear</button>
+      <button id="startOrderCancel" type="button">Cancel</button>
+    </div>
+  </div>
   <main id="grid" aria-label="Live camera grid"></main>
   <p id="notice" hidden></p>
   <p id="layoutNote" class="page-note" role="status" hidden></p>

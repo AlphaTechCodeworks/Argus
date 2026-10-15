@@ -1,7 +1,7 @@
 // Saved views: the named sets of cameras a user watches together on the multi-camera playback page
 // ("Yard and gates", "Loading bay"), each user their own.
 //
-//   data/saved-views.json   { "<user>": { views: [ { id, name, cameras: ["<nvr>/<ch>"], layout } ],
+//   data/saved-views.json   { "<user>": { views: [ { id, name, cameras: ["<nvr>/<ch>"], layout, startOrder? } ],
 //                                         viewsVersion: n } }
 //
 //   GET /api/me/views                       -> { views: [...], version }
@@ -33,7 +33,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
-import { MAX_VIEWS, applyViews, normaliseViews } from './public/grid-view.js'
+import { MAX_VIEWS, applyViews, normaliseViews, withStartOrder } from './public/grid-view.js'
 
 export const VIEWS_PATH = '/api/me/views'
 export const SHARED_VIEWS_PATH = '/api/views/shared'
@@ -135,7 +135,11 @@ export function sharedViews(all, user, mayWatch) {
         const cut = k.lastIndexOf('/')
         return mayWatch(k.slice(0, cut), Number(k.slice(cut + 1))) === true
       })
-      if (cameras.length > 0) out.push({ ...v, cameras, owner })
+      if (cameras.length === 0) continue
+      // the owner's start order too (read-only), but only over the cameras left: it must not name a
+      // camera the asker may not watch
+      const kept = new Set(cameras)
+      out.push({ ...withStartOrder(v, (v.startOrder ?? []).filter((k) => kept.has(k))), cameras, owner })
     }
   }
   return out.sort((a, b) => a.owner.localeCompare(b.owner) || a.name.localeCompare(b.name))

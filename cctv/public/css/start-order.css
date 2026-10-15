@@ -1,0 +1,19 @@
+/* ---- the Live page's start order (viewer.js startOrder*): numbering the tiles to start first ---- */
+
+.start-order-bar { margin: 0 var(--workspace-gutter) var(--s3); padding: var(--s3) var(--s4); display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); background: var(--surface-1); border: 1px solid var(--accent); border-radius: var(--r-sm); }
+.start-order-bar[hidden] { display: none; }
+.start-order-bar p { margin: 0; }
+.start-order-msg { color: var(--text-muted); font-size: var(--fs-dense); }
+.start-order-msg:empty { display: none; }
+.start-order-actions { display: flex; gap: var(--s2); margin-inline-start: auto; }
+.start-order-actions button[hidden] { display: none; }
+
+/* in the mode: a tile is a button to number, not a camera to open or drag */
+#grid.start-order-mode .tile:not(.tile-empty) { cursor: pointer; }
+#grid.start-order-mode .tile:not(.tile-empty):hover { outline: 2px solid var(--accent); outline-offset: -2px; }
+#grid.start-order-mode .tile-move { display: none; }
+#grid.start-order-mode.start-order-readonly .tile { cursor: default; }
+#grid.start-order-mode.start-order-readonly .tile:hover { outline: none; }
+
+.start-badge { position: absolute; top: var(--s2); left: var(--s2); z-index: 6; min-width: 2em; height: 2em; padding: 0 var(--s2); display: grid; place-items: center; border-radius: 1em; background: var(--accent-solid); color: var(--on-accent); font: 700 1.1rem/1 var(--font); pointer-events: none; }
+#grid .tile.start-numbered { outline: 3px solid var(--accent); outline-offset: -3px; }
