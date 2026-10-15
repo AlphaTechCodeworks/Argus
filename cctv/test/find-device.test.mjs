@@ -223,11 +223,13 @@ check('a loose device has nothing to open', openTarget(find('192.168.2.31').resu
       { id: 'shad', name: 'Shad', site: 'Shad', sn: 'N123', via: 'p2p', online: true, channels: [{ ch: 0, name: 'Gate', ip: '10.0.0.5', online: true }] }
     ],
     arp: [{ ip: '192.168.2.31', mac: 'aa:bb:cc:dd:ee:ff', dev: 'ens34' }],
+    search: [{ ip: '192.168.2.40', mac: '58:5b:69:11:22:33', model: 'TD-9864', name: 'NVR new' }],
     nets: [{ net: (192 * 16777216 + 168 * 65536) >>> 0, mask: 0xfffffc00, address: '192.168.1.232' }]
   }, { max: 2000 })
   const sites = new Set(all.results.map((r) => r.site ?? r.kind))
   check('the discovery list leaves out P2P sites', !all.results.some((r) => r.nvr === 'shad') && all.results.some((r) => r.nvr === 'nvr1'), JSON.stringify([...sites]))
-  check('... and lists the network\'s own devices', all.results.some((r) => r.kind === 'device' && r.ip === '192.168.2.31'))
+  check('... lists a TVT device that answered the network search', all.results.some((r) => r.kind === 'device' && r.ip === '192.168.2.40'))
+  check('... but not another device of the network (only in its network table)', !all.results.some((r) => r.ip === '192.168.2.31'))
   const seen = []
   const fake = (o) => {
     seen.push(o.host)

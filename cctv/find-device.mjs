@@ -272,7 +272,10 @@ const ownName = (e) => (e.kind === 'recorder' ? e.nvrName : e.name) || ''
 /** How well an entry matches (lower is better); null when it does not. */
 function score(e, q) {
   switch (q.kind) {
-    case 'all': return e.via === 'p2p' ? null : 0 // (the discovery list: the owner's own network only, no P2P site)
+    // The discovery list (2026-10-15: "only what's on my network", "only the TVT related things, not
+    // everything"): the recorders reached over the office network and their cameras, and the TVT devices
+    // that answered TVT's own network search; no P2P site, and no other device of the network
+    case 'all': return e.via === 'p2p' || (e.kind === 'device' && !e.sources.has('search')) ? null : 0
     case 'mac': return e.mac === q.value ? 0 : null
     case 'mac-part': return e.mac?.includes(q.value) ? 1 : null
     case 'ip': return e.ip === q.value ? 0 : null
