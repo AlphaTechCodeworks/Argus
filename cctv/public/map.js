@@ -2353,7 +2353,9 @@ renderSide()
 void preferencesReady.then(() => {
   namesBox.checked = preferenceStorage.getItem('cctv.mapNames') !== '0'
   const savedLayer = preferenceStorage.getItem('cctv.mapLayer')
-  if (LAYERS[savedLayer]) { layer = savedLayer; satBox.checked = layer === 'satellite'; applyView(false) }
+  // (keeping the view: applyView(false) put the map back to the whole world just after it had landed
+  // on the sites, every time a layer had been saved -- 2026-10-16 "the map is showing the whole world")
+  if (LAYERS[savedLayer] && savedLayer !== layer) { layer = savedLayer; satBox.checked = layer === 'satellite'; applyView(true) }
   const savedSite = workspaceSite() ?? preferenceStorage.getItem('cctv.mapSite') ?? ''
   if (siteNames.includes(savedSite) && savedSite !== site) goSite(savedSite)
   stale()
