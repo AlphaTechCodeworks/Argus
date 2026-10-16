@@ -9,6 +9,10 @@
 //
 // Paths (rtsp-core.mjs): <nvr id>/<camera number> is the sub-stream, <nvr id>/<camera number>/main the
 // main stream. A main counts against the recorder's full-quality limit like a viewer's (main-limit.mjs).
+// <nvr id>/<camera number>/1080 is the main stream converted to H.264 at most 1920x1080 (for old PCs
+// and OCR tools that cannot decode 4K H.265 fast enough): the same right and limit as /main, its ffmpeg
+// re-encodes (rtsp-core.mjs convertCommand, one per camera however many read it), and at most
+// CCTV_RTSP_1080_MAX (default 2, 0 = none) run at once, as each costs a core or two.
 //
 // The /internal/* routes answer only this machine (no Cloudflare header) carrying this boot's random
 // secret, which only Argus and its children know. Publishing into MediaMTX is the same: loopback and
@@ -28,7 +32,7 @@ import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import { writeFileAtomicSync } from './atomic-write.mjs'
 import { mayOpenMain, maxViewerMains } from './main-limit.mjs'
-import { DEFAULT_PORT, buildConfig, cameraKey, camerasOfKey, checkNewKey, dayOf, decide, failureLimit, feedCommand, hookCommand, makeKey, parsePath, pathOf, publicKey } from './rtsp-core.mjs'
+import { DEFAULT_PORT, buildConfig, cameraKey, camerasOfKey, checkNewKey, convertCommand, convertMaxOf, dayOf, decide, failureLimit, feedCommand, hookCommand, makeKey, parsePath, pathOf, publicKey } from './rtsp-core.mjs'
 import { MEDIAMTX_VERSION, findBinary, makeRtspServer } from './rtsp-server.mjs'
 import { TsMuxer } from './ts-mux.mjs'
 
@@ -80,9 +84,10 @@ export function makeRtsp({ dataDir, appDir, httpPort, nvrs, mainLimit, audit = (
   // asking for UDP is told so (461) and asks again over TCP by itself (ffmpeg, VLC and OpenCV do).
   const udp = env.CCTV_RTSP_UDP === 'on'
   const ffmpeg = env.CCTV_FFMPEG || 'ffmpeg'
+  const convertMax = convertMaxOf(env)
   let store = readStore(file)
   let lastSaved = 0
-  const feeds = new Map() // path -> { path, nvr, ch, main, since, frames, bytes }
+  const feeds = new Map() // path -> { path, nvr, ch, main, variant, since, frames, bytes }
   const readers = new Map() // path -> Set(reader id)
   const failures = failureLimit({ now })
   const base = `http://127.0.0.1:${httpPort}`
@@ -100,6 +105,7 @@ export function makeRtsp({ dataDir, appDir, httpPort, nvrs, mainLimit, audit = (
       udp,
       authUrl: `${base}${AUTH_PATH}?s=${secret}`,
       feedCommand: feedCommand({ ffmpeg, feedUrl: `${base}${FEED_PATH}`, rtspPort: port, secret }),
+      convertCommand: convertMax > 0 ? convertCommand({ ffmpeg, feedUrl: `${base}${FEED_PATH}`, rtspPort: port, secret }) : '',
       onRead: hookCommand({ node: nodePath, script: join(appDir, 'cctv', 'rtsp-hook.mjs'), url: `${base}${EVENT_PATH}`, secret, event: 'read' }),
       onUnread: hookCommand({ node: nodePath, script: join(appDir, 'cctv', 'rtsp-hook.mjs'), url: `${base}${EVENT_PATH}`, secret, event: 'unread' })
     })
@@ -112,15 +118,23 @@ export function makeRtsp({ dataDir, appDir, httpPort, nvrs, mainLimit, audit = (
   const camera = (nvrId, ch) => nvrs.get(nvrId)?.channels?.find((c) => c.ch === ch && c.configured !== false) ?? null
   const known = (nvrId, ch) => Boolean(camera(nvrId, ch))
   const mainRoom = (nvrId, ch) => {
-    if (feeds.has(pathOf(nvrId, ch, true))) return true
+    if (feeds.has(pathOf(nvrId, ch, true)) || feeds.has(pathOf(nvrId, ch, '1080'))) return true
     const nvr = nvrs.get(nvrId)
     return mayOpenMain(mainLimit.cameras(nvrId), `${nvrId}/${ch + 1}`, maxViewerMains(nvr))
   }
-  const allCameras = () => [...nvrs.values()].flatMap((n) => (n.channels ?? []).filter((c) => c.configured !== false).map((c) => ({ nvr: n.id, ch: c.ch, name: c.name, site: n.site, nvrName: n.name, p2p: Boolean(n.cfg?.sn), path: pathOf(n.id, c.ch), mainPath: pathOf(n.id, c.ch, true) })))
+  const converting = () => [...feeds.values()].filter((f) => f.variant === '1080').length
+  /** Whether a 1080p conversion of this camera may start now: true, or why not (said to the program's log line). */
+  const convertRoom = (nvrId, ch) => {
+    if (convertMax === 0) return '1080p is switched off on this server (CCTV_RTSP_1080_MAX=0)'
+    if (feeds.has(pathOf(nvrId, ch, '1080'))) return true // (already converted: one more reader costs nothing)
+    const n = converting()
+    return n < convertMax ? true : `1080p not available now: ${n} of ${convertMax} conversions already running`
+  }
+  const allCameras = () => [...nvrs.values()].flatMap((n) => (n.channels ?? []).filter((c) => c.configured !== false).map((c) => ({ nvr: n.id, ch: c.ch, name: c.name, site: n.site, nvrName: n.name, p2p: Boolean(n.cfg?.sn), path: pathOf(n.id, c.ch), mainPath: pathOf(n.id, c.ch, true), path1080: convertMax > 0 ? pathOf(n.id, c.ch, '1080') : null })))
 
   const readerCount = () => [...readers.values()].reduce((n, s) => n + s.size, 0)
   const status = () => ({ ...rtspServer.status(), version: MEDIAMTX_VERSION })
-  const view = () => ({ enabled: store.enabled, envOff, status: status(), port, udp, hosts: hosts(), feeds: feeds.size, readers: readerCount(), keys: store.keys.map(publicKey), cameras: allCameras() })
+  const view = () => ({ enabled: store.enabled, envOff, status: status(), port, udp, hosts: hosts(), feeds: feeds.size, converting: converting(), convertMax, readers: readerCount(), keys: store.keys.map(publicKey), cameras: allCameras() })
 
   const sync = () => {
     if (store.enabled && !envOff) rtspServer.start()
@@ -168,7 +182,7 @@ export function makeRtsp({ dataDir, appDir, httpPort, nvrs, mainLimit, audit = (
     if (ask.action === 'read' && ask.user && failures.blocked(ip)) {
       return res.writeHead(401).end()
     }
-    const d = decide(ask, { secret, keys: store.keys, known, mainRoom })
+    const d = decide(ask, { secret, keys: store.keys, known, mainRoom, convertRoom })
     if (d.ok) {
       if (d.key) used(d.key, ask)
       return res.writeHead(200).end()
@@ -201,7 +215,15 @@ export function makeRtsp({ dataDir, appDir, httpPort, nvrs, mainLimit, audit = (
     if (!nvr || !known(p.nvr, p.ch)) return res.writeHead(404).end('no such camera')
     if (!nvr.liveOnline) return res.writeHead(503).end('NVR offline')
     if (feeds.has(path)) log(`[rtsp] ${path}: a second feed asked for while one runs; the RTSP server replaces the first`)
-    const feed = { path, nvr: p.nvr, ch: p.ch, main: p.main, since: now(), frames: 0, bytes: 0 }
+    if (p.variant === '1080') {
+      // (asked again here: two cameras let in at once by the RTSP server could both start)
+      const room = convertRoom(p.nvr, p.ch)
+      if (room !== true) {
+        log(`[rtsp] ${path}: ${room}`)
+        return res.writeHead(503).end(room)
+      }
+    }
+    const feed = { path, nvr: p.nvr, ch: p.ch, main: p.main, variant: p.variant, since: now(), frames: 0, bytes: 0 }
     if (p.main) {
       let got = true
       try {
@@ -246,7 +268,7 @@ export function makeRtsp({ dataDir, appDir, httpPort, nvrs, mainLimit, audit = (
     // one stuck there for 30 s: backpressure.mjs gateSend, with terminate above)
     res.writeHead(200, { 'content-type': 'video/mp2t', 'cache-control': 'no-store' })
     feeds.set(path, feed)
-    log(`[rtsp] feeding ${path} (${p.main ? 'main' : 'sub'} stream)`)
+    log(`[rtsp] feeding ${path} (${p.variant === '1080' ? 'main stream, converted to 1080p H.264' : p.main ? 'main stream' : 'sub-stream'})`)
     const end = () => {
       if (ended) return
       ended = true
@@ -346,7 +368,7 @@ export function makeRtsp({ dataDir, appDir, httpPort, nvrs, mainLimit, audit = (
         const name = `${cam.name || `Camera ${ch + 1}`} (${n?.name || nvrId})`.slice(0, 60)
         const made = makeOne({ name, cameras: [cameraKey(nvrId, ch)], main: true, camera: cameraKey(nvrId, ch) }, who, meta)
         const earlier = store.keys.filter((k) => k.camera === cameraKey(nvrId, ch) && k.id !== made.key.id).length
-        return [200, { ready: true, ...made, path: pathOf(nvrId, ch), mainPath: pathOf(nvrId, ch, true), p2p: Boolean(n?.cfg?.sn), earlier }]
+        return [200, { ready: true, ...made, path: pathOf(nvrId, ch), mainPath: pathOf(nvrId, ch, true), path1080: convertMax > 0 ? pathOf(nvrId, ch, '1080') : null, p2p: Boolean(n?.cfg?.sn), earlier }]
       }
       if (b.action === 'revoke') {
         const k = store.keys.find((x) => x.id === b.id)
@@ -375,7 +397,7 @@ export function makeRtsp({ dataDir, appDir, httpPort, nvrs, mainLimit, audit = (
     /** For /healthz and the metrics minute line. */
     summary: () => {
       const st = rtspServer.status()
-      return { enabled: store.enabled && !envOff, installed: st.installed, running: st.running, feeds: feeds.size, readers: readerCount() }
+      return { enabled: store.enabled && !envOff, installed: st.installed, running: st.running, feeds: feeds.size, converting: converting(), readers: readerCount() }
     },
     // (tests)
     secret,

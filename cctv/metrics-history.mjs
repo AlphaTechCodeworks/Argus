@@ -11,11 +11,12 @@
 // One line, about 350 to 500 bytes (more with many recorders failing in the same minute):
 //   { t, load1, cpuCount, nvrsOnline, nvrsTotal, streams, viewers: { people, local, remote },
 //     sub: { running, units, budgetUnits, refused }, main: { running, refused },
-//     other: { remote, playback, playbackSd, steady, ffmpeg, rtsp, rtspReaders }, sdk: { inFlight, late }, loopWorstMs,
+//     other: { remote, playback, playbackSd, steady, ffmpeg, rtsp, rtspConverting, rtspReaders }, sdk: { inFlight, late }, loopWorstMs,
 //     perNvr: { <id>: { failedStarts, stalls, relogins, linkDrops } } }
 // sub and main are the H.264 conversions for local PCs (h264-fallback.mjs); other.steady, the cameras
 // steadied on the server (steady.mjs); other.rtsp, the cameras fed to camera links (RTSP, rtsp.mjs: one
-// ffmpeg each, copying) and rtspReaders, the programs reading them. refused and everything
+// ffmpeg each, copying), rtspConverting, those of them converted to 1080p H.264 (the /1080 links: a core
+// or two each), and rtspReaders, the programs reading them. refused and everything
 // under perNvr are counts for that minute, not totals; a recorder with nothing to count is left out.
 // sdk adds the workers' calls to this process's, and loopWorstMs is the worst of them all.
 import { promises as fsp } from 'node:fs'
@@ -134,7 +135,7 @@ export function buildSample(p, { t, perNvr = {}, last = { sub: null, main: null 
     // (full and SD), and every ffmpeg on the box whatever started it. On 2026-10-14 a remote viewer's
     // conversions put the load at 6-7 at night with 'no conversions' in this history. steady: the cameras
     // steadied on the server (steady.mjs), on a cap of their own.
-    other: { remote: num(other?.remote), playback: num(other?.playback), playbackSd: num(other?.playbackSd), steady: num(other?.steady), ffmpeg: num(other?.ffmpeg), rtsp: num(other?.rtsp), rtspReaders: num(other?.rtspReaders) },
+    other: { remote: num(other?.remote), playback: num(other?.playback), playbackSd: num(other?.playbackSd), steady: num(other?.steady), ffmpeg: num(other?.ffmpeg), rtsp: num(other?.rtsp), rtspConverting: num(other?.rtspConverting), rtspReaders: num(other?.rtspReaders) },
     sdk: { inFlight: num(sdk?.inFlight), late: num(sdk?.late) },
     loopWorstMs: num(ask(p.loopWorstMs)),
     perNvr
@@ -334,7 +335,7 @@ export function downsample(samples, { spanMs, maxPoints = MAX_POINTS }) {
       viewers: { people: most((s) => s.viewers?.people), local: most((s) => s.viewers?.local), remote: most((s) => s.viewers?.remote) },
       sub: { running: mean((s) => s.sub?.running), units: mean((s) => s.sub?.units), budgetUnits: mean((s) => s.sub?.budgetUnits), refused: sum((s) => s.sub?.refused) },
       main: { running: mean((s) => s.main?.running), refused: sum((s) => s.main?.refused) },
-      other: { remote: mean((s) => s.other?.remote), playback: mean((s) => s.other?.playback), playbackSd: mean((s) => s.other?.playbackSd), steady: mean((s) => s.other?.steady), ffmpeg: mean((s) => s.other?.ffmpeg), rtsp: mean((s) => s.other?.rtsp), rtspReaders: most((s) => s.other?.rtspReaders) },
+      other: { remote: mean((s) => s.other?.remote), playback: mean((s) => s.other?.playback), playbackSd: mean((s) => s.other?.playbackSd), steady: mean((s) => s.other?.steady), ffmpeg: mean((s) => s.other?.ffmpeg), rtsp: mean((s) => s.other?.rtsp), rtspConverting: mean((s) => s.other?.rtspConverting), rtspReaders: most((s) => s.other?.rtspReaders) },
       sdk: { inFlight: mean((s) => s.sdk?.inFlight), late: mean((s) => s.sdk?.late) },
       loopWorstMs: worst.length ? Math.max(...worst) : null,
       perNvr

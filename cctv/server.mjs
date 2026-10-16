@@ -1642,7 +1642,7 @@ const metricsHistory = makeMetricsHistory({
     },
     loopWorstMs: () => Math.max(loopWorstMs() ?? 0, ...workerStats().map((x) => x?.loop?.worstMs ?? 0)),
     // remote viewers' and phones' conversions (one pool), playback's, the steadied cameras', and every ffmpeg on the box
-    other: () => ({ remote: phoneLive.pool.active, playback: transcodePool.active, playbackSd: lightTranscodePool.active, steady: steadyLive.pool.active, ffmpeg: ffmpegRunning(), rtsp: rtsp.summary().feeds, rtspReaders: rtsp.summary().readers })
+    other: () => ({ remote: phoneLive.pool.active, playback: transcodePool.active, playbackSd: lightTranscodePool.active, steady: steadyLive.pool.active, ffmpeg: ffmpegRunning(), rtsp: rtsp.summary().feeds, rtspConverting: rtsp.summary().converting, rtspReaders: rtsp.summary().readers })
   }
 })
 try {

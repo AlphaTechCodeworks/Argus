@@ -262,14 +262,14 @@
             <label><input type="radio" name="rl-which" value="some" /> Only the cameras I choose</label>
             <div id="rl-cams" class="rl-cams" hidden></div>
           </fieldset>
-          <label><input type="checkbox" id="rl-main" /> Full quality too (the main stream: heavier on the recorder; P2P recorders allow only a few cameras at once)</label>
+          <label><input type="checkbox" id="rl-main" /> Full quality too (the main stream: heavier on the recorder; P2P recorders allow only a few cameras at once). It also gives a lighter 1080p H.264 link for older PCs and OCR tools.</label>
           <div class="se-actions"><button type="submit" class="st-primary">Make the key</button><span id="rl-msg" class="st-meta" role="status"></span></div>
         </form>
       </details>
       <div id="rl-made" class="rl-made" hidden></div>
       <h3>Keys</h3>
       <div id="rl-keys"></div>
-      <p class="hp-note">In VLC: Media → Open Network Stream, paste the address, Play. Addresses work on this network only (port 8554, TCP and UDP), not through the internet address. A program reading a camera keeps that camera's stream running on the server; the picture is passed on as the camera sends it, never converted.</p>
+      <p class="hp-note">In VLC: Media → Open Network Stream, paste the address, Play. Addresses work on this network only (port 8554), not through the internet address. A program reading a camera keeps that camera's stream running on the server; the picture is passed on as the camera sends it, except the 1080p links (…/1080), which the server converts to H.264 at most 1920×1080 while they are read: only a couple of cameras at once.</p>
     </section>
     <section class="se-section" data-tab="connector" aria-labelledby="conn-title">
       <h2 id="conn-title">Remote site connector</h2>

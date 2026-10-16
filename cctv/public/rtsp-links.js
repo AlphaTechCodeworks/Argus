@@ -37,7 +37,7 @@ function renderStatus() {
   } else if (!view.enabled) {
     status.textContent = 'Camera links are off: no program can connect.'
   } else if (s.running) {
-    status.textContent = `On: rtsp://<this server>:${view.port}/… — ${view.feeds} camera${view.feeds === 1 ? '' : 's'} being sent, ${view.readers} program${view.readers === 1 ? '' : 's'} reading.`
+    status.textContent = `On: rtsp://<this server>:${view.port}/… — ${view.feeds} camera${view.feeds === 1 ? '' : 's'} being sent${view.converting ? ` (${view.converting} converted to 1080p)` : ''}, ${view.readers} program${view.readers === 1 ? '' : 's'} reading.`
   } else {
     status.textContent = `On, but the RTSP server is not running${s.lastError ? `: ${s.lastError}` : ''}. It is tried again by itself.`
   }
@@ -75,6 +75,7 @@ function showMade(r) {
     for (const c of r.linkCameras.slice(0, 200)) {
       list.append(urlRow(camName(c), rtspUrl({ host: host.value, port: r.port, user: r.key.user, password: r.password, path: c.path })).row)
       if (r.key.main) list.append(urlRow(`${camName(c)} — full quality`, rtspUrl({ host: host.value, port: r.port, user: r.key.user, password: r.password, path: c.mainPath })).row)
+      if (r.key.main && c.path1080) list.append(urlRow(`${camName(c)} — 1080p H.264, lighter (older PCs, OCR tools)`, rtspUrl({ host: host.value, port: r.port, user: r.key.user, password: r.password, path: c.path1080 })).row)
     }
   }
   host.addEventListener('change', fill)
@@ -118,7 +119,7 @@ function renderKeys() {
       }
     })
     const paths = (k.cameras === 'all' ? view.cameras : k.cameras.map((x) => byKey.get(x)).filter(Boolean)).slice(0, 50)
-    const addresses = el('details', { className: 'rl-addr' }, el('summary', { textContent: 'Addresses' }), ...paths.map((c) => el('div', { className: 'rl-path' }, el('code', { textContent: rtspUrl({ host: view.hosts[0] ?? location.hostname, port: view.port, user: k.user, password: '<password>', path: c.path }).replace('%3Cpassword%3E', '<password>') }), k.main ? el('code', { textContent: ` …/${c.mainPath.split('/').pop()}` }) : null)))
+    const addresses = el('details', { className: 'rl-addr' }, el('summary', { textContent: 'Addresses' }), ...paths.map((c) => el('div', { className: 'rl-path' }, el('code', { textContent: rtspUrl({ host: view.hosts[0] ?? location.hostname, port: view.port, user: k.user, password: '<password>', path: c.path }).replace('%3Cpassword%3E', '<password>') }), k.main ? el('code', { textContent: ` …/${c.mainPath.split('/').pop()}` }) : null, k.main && c.path1080 ? el('code', { textContent: ` …/${c.path1080.split('/').pop()}` }) : null)))
     return el('tr', {},
       el('td', {}, el('strong', { textContent: k.name }), el('br'), el('code', { textContent: k.user })),
       el('td', { textContent: `${covers}${k.main ? ', full quality too' : ''}` }),

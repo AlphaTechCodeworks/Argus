@@ -5,6 +5,9 @@
 // Paths, as outside programs see them (rtsp://<server>:8554/<path>):
 //   <nvr id>/<camera number>        the camera's sub-stream (light: what a grid shows)
 //   <nvr id>/<camera number>/main   its main stream (full quality), where the key allows it
+//   <nvr id>/<camera number>/1080   its main stream converted to H.264, at most 1920x1080 and 20 fps:
+//                                   lighter to decode (an old PC without H.265 hardware, an OCR tool),
+//                                   still sharp enough to read text. Needs the same right as /main.
 // The camera number counts from 1, as the pages show it ("nvr-2/5" is the 5th camera of nvr-2);
 // inside the app a camera is "<nvr id>/<ch>" with ch from 0 (steady.mjs, user-prefs.mjs).
 //
@@ -18,24 +21,40 @@ export const DEFAULT_PORT = 8554
 /** The RTSP server's own user for the feeds Argus publishes into it (loopback only, per-boot password). */
 export const FEED_USER = 'argus-feed'
 const NVR_ID = '[A-Za-z0-9._-]{1,64}'
-const PATH_RE = new RegExp(`^(${NVR_ID})/([1-9][0-9]{0,3})(/main)?$`)
-/** The RTSP server's pattern for every camera path (a regular expression path, MediaMTX's "~" form). */
+const PATH_RE = new RegExp(`^(${NVR_ID})/([1-9][0-9]{0,3})(/main|/1080)?$`)
+/** The RTSP server's pattern for the copied camera paths (a regular expression path, MediaMTX's "~" form). */
 export const PATH_PATTERN = `~^${NVR_ID}/[1-9][0-9]{0,3}(/main)?$`
+/** ...and for the converted ones (<nvr>/<camera>/1080), fed by convertCommand. */
+export const PATH_PATTERN_1080 = `~^${NVR_ID}/[1-9][0-9]{0,3}/1080$`
+/** How many 1080p conversions may run at once unless CCTV_RTSP_1080_MAX says otherwise (0: none). */
+export const CONVERT_MAX_DEFAULT = 2
 export const MAX_KEYS = 200
 export const MAX_NAME = 60
 export const MAX_KEY_CAMERAS = 512
 const CAMERA_KEY_RE = /^[A-Za-z0-9._-]{1,64}\/\d{1,4}$/
 
-/** "nvr-2/5/main" -> { nvr: 'nvr-2', ch: 4, main: true }, or null for anything else. */
+/**
+ * "nvr-2/5/main" -> { nvr: 'nvr-2', ch: 4, main: true, variant: 'main' }, or null for anything else.
+ * variant: 'sub', 'main' or '1080'; main is true for '1080' too (it is made from the main stream, so
+ * it needs the key's full-quality right and counts against the recorder's main-stream limit).
+ */
 export function parsePath(path) {
   const m = PATH_RE.exec(String(path ?? ''))
   if (!m) return null
   const n = Number(m[2])
-  return { nvr: m[1], ch: n - 1, main: Boolean(m[3]) }
+  const variant = m[3] ? m[3].slice(1) : 'sub'
+  return { nvr: m[1], ch: n - 1, main: variant !== 'sub', variant }
 }
 
-/** The path of a camera (ch from 0). */
-export const pathOf = (nvr, ch, main = false) => `${nvr}/${ch + 1}${main ? '/main' : ''}`
+/** The path of a camera (ch from 0); variant: false or 'sub', true or 'main', or '1080'. */
+export const pathOf = (nvr, ch, variant = false) => `${nvr}/${ch + 1}${variant === true || variant === 'main' ? '/main' : variant === '1080' ? '/1080' : ''}`
+
+/** How many 1080p conversions may run at once: CCTV_RTSP_1080_MAX (a whole number, 0 = none), else the default. */
+export function convertMaxOf(env = {}) {
+  const v = env.CCTV_RTSP_1080_MAX
+  const n = Number(v)
+  return v !== undefined && v !== '' && Number.isInteger(n) && n >= 0 ? n : CONVERT_MAX_DEFAULT
+}
 
 /** The URL a program connects to; the password only when it is known (at creation). */
 export function rtspUrl({ host, port = DEFAULT_PORT, user, password = null, path }) {
@@ -53,12 +72,14 @@ const q = (s) => JSON.stringify(String(s)) // a YAML double-quoted string is a J
 /**
  * MediaMTX's config, as YAML. Only RTSP is on (TCP, and UDP unless udp is false); RTMP, HLS, WebRTC,
  * SRT, MoQ, the API, metrics, pprof and playback are all off. Every connection is put to Argus
- * (authHTTPAddress). Only the camera paths exist, each fed on demand by feedCommand and stopped
- * closeAfterS after its last reader; readers are told to Argus by the hooks.
+ * (authHTTPAddress). Only the camera paths exist, each fed on demand by feedCommand (the /1080 ones by
+ * convertCommand, when given: without it they do not exist) and stopped closeAfterS after its last
+ * reader; readers are told to Argus by the hooks.
  * @param {{ port?: number, udp?: boolean, rtpPort?: number, authUrl: string, feedCommand: string,
- *   onRead?: string, onUnread?: string, closeAfterS?: number, startTimeoutS?: number, logLevel?: string }} o
+ *   convertCommand?: string, onRead?: string, onUnread?: string, closeAfterS?: number,
+ *   startTimeoutS?: number, logLevel?: string }} o
  */
-export function buildConfig({ port = DEFAULT_PORT, udp = true, rtpPort = 8000, authUrl, feedCommand, onRead = '', onUnread = '', closeAfterS = 10, startTimeoutS = 20, logLevel = 'info' }) {
+export function buildConfig({ port = DEFAULT_PORT, udp = true, rtpPort = 8000, authUrl, feedCommand, convertCommand = '', onRead = '', onUnread = '', closeAfterS = 10, startTimeoutS = 20, logLevel = 'info' }) {
   if (!authUrl || !feedCommand) throw new Error('authUrl and feedCommand are needed')
   const lines = [
     '# Written by Argus (rtsp.mjs) at every start: edits here are lost.',
@@ -86,17 +107,21 @@ export function buildConfig({ port = DEFAULT_PORT, udp = true, rtpPort = 8000, a
     'webrtc: false',
     'srt: false',
     'moq: false',
-    'paths:',
-    `  ${q(PATH_PATTERN)}:`,
+    'paths:'
+  ]
+  const path = (pattern, command) => [
+    `  ${q(pattern)}:`,
     '    source: publisher',
     '    overridePublisher: true',
-    `    runOnDemand: ${q(feedCommand)}`,
+    `    runOnDemand: ${q(command)}`,
     '    runOnDemandRestart: true',
     `    runOnDemandStartTimeout: ${startTimeoutS}s`,
     `    runOnDemandCloseAfter: ${closeAfterS}s`,
     `    runOnRead: ${q(onRead)}`,
     `    runOnUnread: ${q(onUnread)}`
   ]
+  lines.push(...path(PATH_PATTERN, feedCommand))
+  if (convertCommand) lines.push(...path(PATH_PATTERN_1080, convertCommand))
   return `${lines.join('\n')}\n`
 }
 
@@ -116,6 +141,50 @@ export function feedCommand({ ffmpeg = 'ffmpeg', feedUrl, rtspPort = DEFAULT_POR
     '-probesize', '5000000', '-analyzeduration', '3000000',
     '-f', 'mpegts', '-i', arg(`${feedUrl}?path=$MTX_PATH&s=${secret}`),
     '-map', '0:v:0', '-c', 'copy',
+    '-f', 'rtsp', '-rtsp_transport', 'tcp', arg(`rtsp://${FEED_USER}:${secret}@127.0.0.1:${rtspPort}/$MTX_PATH`)
+  ].join(' ')
+}
+
+/**
+ * The /1080 paths' settings. superfast rather than veryfast: on an i7-3770 with a 3840x2160 H.265
+ * 20 fps source, the whole conversion took 12-19 % less CPU and only superfast kept up with real time
+ * on these threads; at CRF 23 a 1080p picture is still plainly sharp for text. maxrate caps a busy or
+ * noisy (night) picture. Exported for the tests.
+ */
+export const CONVERT = Object.freeze({
+  maxWidth: 1920,
+  maxHeight: 1080,
+  maxFps: 20,
+  preset: 'superfast',
+  crf: 23,
+  maxrate: '6M',
+  bufsize: '12M', // two seconds at maxrate
+  keyEveryS: 1,
+  decodeThreads: 2,
+  encodeThreads: 2
+})
+
+/**
+ * The command that feeds one /1080 path: like feedCommand (Argus serves the camera's main stream for
+ * it), but decoded, scaled down to fit 1920x1080 (aspect kept, never enlarged), held to at most 20 fps
+ * (a slower camera keeps its own rate: no repeated frames), and encoded as H.264 (8-bit 4:2:0, no
+ * B-frames, a keyframe every second) on few threads, so one conversion cannot take the whole machine.
+ * Most of its cost is decoding the 4K H.265 (the server has no GPU).
+ */
+export function convertCommand({ ffmpeg = 'ffmpeg', feedUrl, rtspPort = DEFAULT_PORT, secret }) {
+  const c = CONVERT
+  const scale = `scale='min(${c.maxWidth},iw)':'min(${c.maxHeight},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2`
+  return [
+    arg(ffmpeg), '-hide_banner', '-loglevel', 'error', '-nostdin',
+    '-probesize', '5000000', '-analyzeduration', '3000000',
+    '-threads', String(c.decodeThreads),
+    '-f', 'mpegts', '-i', arg(`${feedUrl}?path=$MTX_PATH&s=${secret}`),
+    '-map', '0:v:0',
+    '-filter_threads', '1', '-vf', arg(scale), '-fpsmax', String(c.maxFps),
+    '-c:v', 'libx264', '-preset', c.preset, '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
+    '-crf', String(c.crf), '-maxrate', c.maxrate, '-bufsize', c.bufsize,
+    '-force_key_frames', arg(`expr:gte(t,n_forced*${c.keyEveryS})`),
+    '-threads', String(c.encodeThreads),
     '-f', 'rtsp', '-rtsp_transport', 'tcp', arg(`rtsp://${FEED_USER}:${secret}@127.0.0.1:${rtspPort}/$MTX_PATH`)
   ].join(' ')
 }
@@ -199,12 +268,13 @@ export const dayOf = (ms) => new Date(ms).toISOString().slice(0, 10)
  * The answer to one of MediaMTX's auth calls ({ user, password, ip, action, path, protocol, ... }).
  * @param {object} ask the call's JSON body
  * @param {{ secret: string, keys: object[], known: (nvr: string, ch: number) => boolean,
- *   mainRoom?: (nvr: string, ch: number) => boolean }} o
+ *   mainRoom?: (nvr: string, ch: number) => boolean, convertRoom?: (nvr: string, ch: number) => true|string }} o
  *   known: the camera exists (its NVR is configured, the channel holds a camera)
  *   mainRoom: a main stream for this camera may be opened now (main-limit.mjs), or already runs
+ *   convertRoom: a 1080p conversion of this camera may start now, or already runs: true, else why not
  * @returns {{ ok: boolean, why: string, key?: object, path?: object, feed?: boolean }}
  */
-export function decide(ask, { secret, keys, known, mainRoom = () => true }) {
+export function decide(ask, { secret, keys, known, mainRoom = () => true, convertRoom = () => true }) {
   const action = String(ask?.action ?? '')
   const user = typeof ask?.user === 'string' ? ask.user : ''
   const password = typeof ask?.password === 'string' ? ask.password : ''
@@ -226,6 +296,10 @@ export function decide(ask, { secret, keys, known, mainRoom = () => true }) {
   if (!key || !passwordMatches(key, password)) return { ok: false, why: 'wrong user name or password', failed: true }
   if (!keyAllows(key, path.nvr, path.ch, path.main)) return { ok: false, why: path.main && key.main !== true ? 'this key is for the standard picture only' : 'this key does not cover that camera', key }
   if (!known(path.nvr, path.ch)) return { ok: false, why: 'no such camera', key }
+  if (path.variant === '1080') {
+    const room = convertRoom(path.nvr, path.ch)
+    if (room !== true) return { ok: false, why: typeof room === 'string' && room ? room : '1080p not available now', key }
+  }
   if (path.main && !mainRoom(path.nvr, path.ch)) return { ok: false, why: 'full quality not available now: the recorder is at its limit', key }
   return { ok: true, why: 'read', key, path }
 }

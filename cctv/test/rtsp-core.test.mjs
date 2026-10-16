@@ -2,7 +2,7 @@
 // commands, new keys, password checks, what a key covers, and every answer to the RTSP server's
 // "may this connection do this?". No server, no files.
 // Run:  node cctv/test/rtsp-core.test.mjs
-import { DEFAULT_PORT, FEED_USER, PATH_PATTERN, arg, buildConfig, camerasOfKey, checkNewKey, decide, failureLimit, feedCommand, hookCommand, isLoopback, keyAllows, makeKey, parsePath, passwordMatches, pathOf, publicKey, rtspUrl, sha256 } from '../rtsp-core.mjs'
+import { CONVERT, CONVERT_MAX_DEFAULT, DEFAULT_PORT, FEED_USER, PATH_PATTERN, PATH_PATTERN_1080, arg, buildConfig, convertCommand, convertMaxOf, camerasOfKey, checkNewKey, decide, failureLimit, feedCommand, hookCommand, isLoopback, keyAllows, makeKey, parsePath, passwordMatches, pathOf, publicKey, rtspUrl, sha256 } from '../rtsp-core.mjs'
 
 let failed = 0
 const check = (name, ok, extra = '') => {
@@ -12,13 +12,20 @@ const check = (name, ok, extra = '') => {
 const J = (v) => JSON.stringify(v)
 
 // ---- paths and addresses ----
-check('a sub-stream path: camera numbers count from 1', J(parsePath('nvr-2/5')) === J({ nvr: 'nvr-2', ch: 4, main: false }))
-check('a main path', J(parsePath('shad/12/main')) === J({ nvr: 'shad', ch: 11, main: true }))
-for (const bad of ['', 'nvr', 'nvr/0', 'nvr/05', 'nvr/1/sub', 'nvr/1/main/x', '../x/1', 'a b/1', 'nvr/12345', '/nvr/1', 'nvr/1/', null, undefined, `${'x'.repeat(65)}/1`]) {
+check('a sub-stream path: camera numbers count from 1', J(parsePath('nvr-2/5')) === J({ nvr: 'nvr-2', ch: 4, main: false, variant: 'sub' }))
+check('a main path', J(parsePath('shad/12/main')) === J({ nvr: 'shad', ch: 11, main: true, variant: 'main' }))
+check('a 1080p path: made from the main stream, so main too', J(parsePath('lawrence/14/1080')) === J({ nvr: 'lawrence', ch: 13, main: true, variant: '1080' }))
+for (const bad of ['', 'nvr', 'nvr/0', 'nvr/05', 'nvr/1/sub', 'nvr/1/main/x', 'nvr/1/720', 'nvr/1/1080/main', 'nvr/1/main/1080', 'nvr/1/1080/', '../x/1', 'a b/1', 'nvr/12345', '/nvr/1', 'nvr/1/', null, undefined, `${'x'.repeat(65)}/1`]) {
   check(`not a path: ${J(bad)}`, parsePath(bad) === null)
 }
-check('pathOf and parsePath agree', pathOf('nvr-2', 4) === 'nvr-2/5' && pathOf('nvr-2', 4, true) === 'nvr-2/5/main' && J(parsePath(pathOf('a.b_c', 0, true))) === J({ nvr: 'a.b_c', ch: 0, main: true }))
-check('the RTSP server pattern matches what parsePath takes', new RegExp(PATH_PATTERN.slice(1)).test('nvr-2/5/main') && !new RegExp(PATH_PATTERN.slice(1)).test('nvr-2/0'))
+check('pathOf and parsePath agree', pathOf('nvr-2', 4) === 'nvr-2/5' && pathOf('nvr-2', 4, true) === 'nvr-2/5/main' && pathOf('nvr-2', 4, 'main') === 'nvr-2/5/main' && pathOf('nvr-2', 4, '1080') === 'nvr-2/5/1080' && pathOf('nvr-2', 4, 'sub') === 'nvr-2/5' && J(parsePath(pathOf('a.b_c', 0, true))) === J({ nvr: 'a.b_c', ch: 0, main: true, variant: 'main' }) && parsePath(pathOf('a', 3, '1080')).variant === '1080')
+{
+  const copy = new RegExp(PATH_PATTERN.slice(1))
+  const conv = new RegExp(PATH_PATTERN_1080.slice(1))
+  check('the RTSP server patterns match what parsePath takes', copy.test('nvr-2/5/main') && copy.test('nvr-2/5') && !copy.test('nvr-2/0') && conv.test('nvr-2/5/1080') && !conv.test('nvr-2/0/1080'))
+  check('...and never the same path (each path has one feed command)', !copy.test('nvr-2/5/1080') && !conv.test('nvr-2/5/main') && !conv.test('nvr-2/5'))
+}
+check('the 1080p limit: CCTV_RTSP_1080_MAX, 0 allowed, nonsense ignored', CONVERT_MAX_DEFAULT === 2 && convertMaxOf({}) === 2 && convertMaxOf({ CCTV_RTSP_1080_MAX: '0' }) === 0 && convertMaxOf({ CCTV_RTSP_1080_MAX: '5' }) === 5 && convertMaxOf({ CCTV_RTSP_1080_MAX: '-1' }) === 2 && convertMaxOf({ CCTV_RTSP_1080_MAX: '1.5' }) === 2 && convertMaxOf({ CCTV_RTSP_1080_MAX: 'x' }) === 2 && convertMaxOf({ CCTV_RTSP_1080_MAX: '' }) === 2)
 check('an address with the password', rtspUrl({ host: '192.168.1.232', user: 'cam-ab12cd34', password: 'p-_x', path: 'shad/3' }) === 'rtsp://cam-ab12cd34:p-_x@192.168.1.232:8554/shad/3')
 check('...without it, an IPv6 host in brackets, another port', rtspUrl({ host: 'fe80::1', port: 9554, user: 'u', path: 'a/1/main' }) === 'rtsp://u@[fe80::1]:9554/a/1/main')
 check('loopback addresses', isLoopback('127.0.0.1') && isLoopback('::1') && isLoopback('::ffff:127.0.0.1') && !isLoopback('192.168.1.5') && !isLoopback('') && !isLoopback(undefined))
@@ -37,6 +44,25 @@ check('loopback addresses', isLoopback('127.0.0.1') && isLoopback('::1') && isLo
   check('everything else off: RTMP, HLS, WebRTC, SRT, MoQ, API, metrics, pprof, playback', ['rtmp', 'hls', 'webrtc', 'srt', 'moq', 'api', 'metrics', 'pprof', 'playback'].every((k) => has(`${k}: false`)))
   check('one path pattern, fed on demand, closed 10 s after the last reader', has(`  ${J(PATH_PATTERN)}:`) && has(`    runOnDemand: ${J(feed)}`) && has('    runOnDemandCloseAfter: 10s') && has('    runOnDemandRestart: true') && !/all_others/.test(y))
   check('the hooks tell Argus of readers', has(`    runOnRead: ${J(hook)}`) && y.includes('runOnUnread: "/usr/local/bin/node /opt/cctv/current/cctv/rtsp-hook.mjs unread'))
+  check('no convert command: no 1080p paths', !y.includes(J(PATH_PATTERN_1080)))
+  {
+    const conv = convertCommand({ feedUrl: 'http://127.0.0.1:8080/internal/rtsp-feed', secret: 'abc123', rtspPort: 8554 })
+    const argv = conv.match(/"(?:[^"\\]|\\.)*"|\S+/g).map((a) => (a.startsWith('"') ? a.slice(1, -1) : a))
+    const after = (flag, from = 0) => argv[argv.indexOf(flag, from) + 1]
+    const iAt = argv.indexOf('-i')
+    check('1080p: reads the same loopback feed (Argus serves the main stream for the path)', after('-i') === 'http://127.0.0.1:8080/internal/rtsp-feed?path=$MTX_PATH&s=abc123' && after('-f') === 'mpegts' && argv.includes('0:v:0'), conv)
+    check('1080p: decoded on 2 threads (set before the input), encoded on 2, filters on 1', argv.indexOf('-threads') < iAt && after('-threads') === '2' && argv.lastIndexOf('-threads') > iAt && argv[argv.lastIndexOf('-threads') + 1] === '2' && after('-filter_threads') === '1')
+    const vf = after('-vf')
+    check('1080p: scaled to fit 1920x1080, aspect kept, never enlarged, even sizes', vf === "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2", vf)
+    check('1080p: at most 20 fps (no repeated frames for a slower camera)', after('-fpsmax') === '20' && !argv.includes('-r') && !/fps=/.test(vf))
+    check('1080p: H.264, superfast, zero latency, 8-bit 4:2:0, CRF 23 capped at 6 Mbit/s', after('-c:v') === 'libx264' && after('-preset') === CONVERT.preset && CONVERT.preset === 'superfast' && after('-tune') === 'zerolatency' && after('-pix_fmt') === 'yuv420p' && after('-crf') === '23' && after('-maxrate') === '6M' && after('-bufsize') === '12M')
+    check('1080p: a keyframe every second', after('-force_key_frames') === 'expr:gte(t,n_forced*1)')
+    check('1080p: published like the copied feeds, never copied itself', /-f rtsp -rtsp_transport tcp rtsp:\/\/argus-feed:abc123@127\.0\.0\.1:8554\/\$MTX_PATH$/.test(conv) && !conv.includes('-c copy'))
+    const y2 = buildConfig({ authUrl: 'http://x', feedCommand: feed, convertCommand: conv, onRead: hook })
+    const l2 = y2.split('\n')
+    const at = l2.indexOf(`  ${J(PATH_PATTERN_1080)}:`)
+    check('with a convert command: a second path pattern, fed by it, on demand, closed 10 s after the last reader, readers told', at > l2.indexOf(`  ${J(PATH_PATTERN)}:`) && l2[at + 3] === `    runOnDemand: ${J(conv)}` && l2[at + 6] === '    runOnDemandCloseAfter: 10s' && l2[at + 7] === `    runOnRead: ${J(hook)}` && l2.filter((x) => x === `    runOnDemand: ${J(feed)}`).length === 1, l2.slice(at, at + 10).join(' | '))
+  }
   check('UDP can be left out', buildConfig({ authUrl: 'x', feedCommand: 'y', udp: false }).includes('rtspTransports: [tcp]'))
   let threw = false
   try { buildConfig({}) } catch { threw = true }
@@ -86,6 +112,16 @@ const known = (nvr, ch) => cams.has(`${nvr}/${ch}`)
   check('read: every camera with an all-cameras key, main too', ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/5/main' }).ok)
   check('read: a camera that does not exist (any more)', ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/9' }).why === 'no such camera')
   check('read: main refused while the recorder is at its limit; the sub still fine', !ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/5/main' }, { mainRoom: () => false }).ok && ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/5' }, { mainRoom: () => false }).ok)
+  check('read: 1080p with a full-quality key', ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/5/1080' }).ok)
+  check('read: 1080p needs full quality: a standard-only key is refused', /standard picture only/.test(ask({ action: 'read', user: key.user, password, path: 'shad/2/1080' }).why))
+  check('read: 1080p refused while the recorder is at its main limit', !ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/5/1080' }, { mainRoom: () => false }).ok)
+  {
+    const d = ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/5/1080' }, { convertRoom: () => '1080p not available now: 2 of 2 conversions already running' })
+    check('read: 1080p refused at the conversion limit, with the reason; main and sub still fine', !d.ok && /2 of 2/.test(d.why) && !d.failed && ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/5/main' }, { convertRoom: () => 'no' }).ok && ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/5' }, { convertRoom: () => 'no' }).ok)
+    let asked = null
+    ask({ action: 'read', user: allHd.key.user, password: allHd.password, path: 'site3/5/1080' }, { convertRoom: (n, c) => ((asked = `${n}/${c}`), true) })
+    check('...the conversion limit is asked for that camera (ch from 0)', asked === 'site3/4')
+  }
   check('read: a revoked key (gone from the list) is refused', decide({ action: 'read', user: key.user, password, path: 'shad/2', ip: 'x' }, { secret, keys: [allHd.key], known }).ok === false)
 }
 

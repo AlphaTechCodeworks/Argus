@@ -107,9 +107,12 @@ export async function openStreamLink(cam, { turnOn = false } = {}) {
   for (const h of r.hosts?.length ? r.hosts : [location.hostname]) host.append(el('option', { value: h, textContent: h }))
   const sub = urlRow('Standard picture', '')
   const main = urlRow('Full quality', '')
+  // (the server leaves path1080 out when 1080p conversions are switched off there)
+  const hd = r.path1080 ? urlRow('1080p H.264 — lighter, for older PCs and OCR tools', '') : null
   const fill = () => {
     sub.input.value = rtspUrl({ host: host.value, port: r.port, user: r.key.user, password: r.password, path: r.path })
     main.input.value = rtspUrl({ host: host.value, port: r.port, user: r.key.user, password: r.password, path: r.mainPath })
+    if (hd) hd.input.value = rtspUrl({ host: host.value, port: r.port, user: r.key.user, password: r.password, path: r.path1080 })
   }
   host.addEventListener('change', fill)
   fill()
@@ -117,6 +120,8 @@ export async function openStreamLink(cam, { turnOn = false } = {}) {
     el('p', { className: 'st-help', textContent: 'Paste this into VLC: Media → Open Network Stream. Any program that plays RTSP takes it the same way.' }),
     sub.row,
     main.row,
+    hd?.row ?? null,
+    hd ? el('p', { className: 'st-meta', textContent: 'The 1080p link is the full-quality picture made smaller (at most 1920×1080, 20 frames a second) and in H.264, which any PC can play. The server converts it while a program reads it, so only a couple of cameras can have it at once.' }) : null,
     r.p2p ? el('p', { className: 'st-meta', textContent: 'This recorder is reached over the internet (P2P): full quality is limited to a few cameras at once and may be refused. The standard picture always works.' }) : null,
     el('label', { className: 'rl-host-label' }, 'Server address ', host),
     el('p', { className: 'st-meta', textContent: 'The password is in the link and is shown only now: copy it before closing. Lost it? Click Stream link again for a new one.' }),

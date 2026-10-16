@@ -44,7 +44,7 @@ try {
   check('a viewer: refused', (await rtsp.handleAdmin('GET', ADMIN_PATH, null, { user: 'ann', admin: false }))[0] === 403)
   {
     const [s, v] = await rtsp.handleAdmin('GET', ADMIN_PATH, null, admin)
-    check('the view: off, installed, port, hosts, no keys, the configured cameras with their paths', s === 200 && v.enabled === false && v.status.installed === true && v.port === 8554 && v.hosts[0] === '192.168.1.232' && v.keys.length === 0 && v.cameras.length === 10 && v.cameras[0].path === 'shad/1' && v.cameras[0].mainPath === 'shad/1/main', JSON.stringify(v).slice(0, 200))
+    check('the view: off, installed, port, hosts, no keys, the configured cameras with their paths', s === 200 && v.enabled === false && v.status.installed === true && v.port === 8554 && v.hosts[0] === '192.168.1.232' && v.keys.length === 0 && v.cameras.length === 10 && v.cameras[0].path === 'shad/1' && v.cameras[0].mainPath === 'shad/1/main' && v.cameras[0].path1080 === 'shad/1/1080' && v.convertMax === 2 && v.converting === 0, JSON.stringify(v).slice(0, 200))
   }
   rtsp.start()
   check('off at start: the RTSP server is not started', server.started === 0)
@@ -52,7 +52,7 @@ try {
   const [ls, link0] = await call({ action: 'link', nvr: 'shad', ch: 2 })
   check('one-click link while off: says so, offers to turn on, makes nothing', ls === 200 && link0.ready === false && link0.why === 'off' && readStore(join(dir, 'rtsp.json')).keys.length === 0)
   const [, link] = await call({ action: 'link', nvr: 'shad', ch: 2, turnOn: true })
-  check('...with turnOn: switched on, started, a key for that camera alone with main, its password and paths', link.ready === true && server.started === 1 && link.password.length === 43 && link.key.cameras.join() === 'shad/2' && link.key.main === true && link.path === 'shad/3' && link.mainPath === 'shad/3/main' && link.earlier === 0 && link.key.name === 'Cam 3 (SHAD)', JSON.stringify(link).slice(0, 300))
+  check('...with turnOn: switched on, started, a key for that camera alone with main, its password and paths', link.ready === true && server.started === 1 && link.password.length === 43 && link.key.cameras.join() === 'shad/2' && link.key.main === true && link.path === 'shad/3' && link.mainPath === 'shad/3/main' && link.path1080 === 'shad/3/1080' && link.earlier === 0 && link.key.name === 'Cam 3 (SHAD)', JSON.stringify(link).slice(0, 300))
   check('switching on and the key are audited (who, address, device)', audits.some((a) => a.action === 'camera-link' && a.target === 'service' && /switched on/.test(a.detail)) && audits.some((a) => a.action === 'camera-link' && a.target === 'Cam 3 (SHAD)' && a.user === 'mike' && a.ip === '192.168.1.20' && /device: Windows PC/.test(a.detail)))
   const [, link2] = await call({ action: 'link', nvr: 'shad', ch: 2 })
   check('a second click: a new key, the earlier one counted', link2.ready && link2.key.id !== link.key.id && link2.earlier === 1)
@@ -149,6 +149,55 @@ try {
     open[0].destroy()
     check('a feed ending leaves the stream and the limit', streams.get('p2p/0/0').taps.size === 0 && mainLimit.cameras('p2p').length === 2)
     for (const r of open) r.destroy()
+  }
+
+  // ---- 1080p conversions ----
+  {
+    check('auth: the link\'s 1080p path too', (await auth({ action: 'read', user: link.key.user, password: link.password, path: 'shad/3/1080' })) === 200)
+    check('auth: not with a standard-only key', (await auth({ action: 'read', user: made.key.user, password: made.password, path: 'p2p/1/1080' })) === 401)
+    const open = []
+    const feed = async (path) => {
+      const r = res()
+      rtsp.handleInternal(req('GET'), r, url(FEED_PATH, { path }), { local: true })
+      await new Promise((ok) => setImmediate(ok))
+      open.push(r)
+      return r
+    }
+    const a = await feed('shad/1/1080')
+    check('a 1080p feed: 200, the camera\'s MAIN stream tapped, counted as converting and against the main limit', a.status === 200 && streams.get('shad/0/0')?.taps.size === 1 && rtsp.feeds.get('shad/1/1080')?.variant === '1080' && rtsp.summary().converting === 1 && rtsp.summary().feeds === 1 && mainLimit.cameras('shad').join() === 'shad/1')
+    check('...said in the journal as a conversion', lines.some((l) => /feeding shad\/1\/1080 \(main stream, converted to 1080p H\.264\)/.test(l)))
+    const m = await feed('shad/1/main')
+    check('its /main beside it: the same camera counted once against the recorder\'s limit, not as a conversion', m.status === 200 && mainLimit.cameras('shad').length === 1 && rtsp.summary().converting === 1 && rtsp.summary().feeds === 2)
+    const b = await feed('shad/2/1080')
+    check('a second camera in 1080p: let in (the default limit is 2)', b.status === 200 && rtsp.summary().converting === 2)
+    const c = await feed('shad/4/1080')
+    check('a third: its feed refused (503) with the reason in the journal', c.status === 503 && rtsp.summary().converting === 2 && lines.some((l) => /shad\/4\/1080: 1080p not available now: 2 of 2 conversions already running/.test(l)) && !rtsp.feeds.has('shad/4/1080'))
+    check('...and the RTSP server told no for a third camera, yes for one already converted (one conversion, many readers)', (await auth({ action: 'read', user: all.key.user, password: all.password, path: 'shad/5/1080' })) === 401 && (await auth({ action: 'read', user: all.key.user, password: all.password, path: 'shad/2/1080' })) === 200)
+    check('...the refusal said in the journal', lines.some((l) => /refused read shad\/5\/1080 .*2 of 2 conversions/.test(l)))
+    check('the view counts them', (await rtsp.handleAdmin('GET', ADMIN_PATH, null, admin))[1].converting === 2)
+    b.destroy()
+    check('a conversion ending frees its place', rtsp.summary().converting === 1 && (await auth({ action: 'read', user: all.key.user, password: all.password, path: 'shad/5/1080' })) === 200)
+    a.destroy()
+    check('...and the main stays counted while its /main feed runs', mainLimit.cameras('shad').join() === 'shad/1' && rtsp.summary().converting === 0)
+    for (const r of open) r.destroy()
+    check('all ended: nothing counted', mainLimit.cameras('shad').length === 0 && rtsp.feeds.size === 0 && streams.get('shad/0/0').taps.size === 0)
+  }
+  {
+    const s3 = { start() {}, stop() {}, restart() {}, status: () => ({ installed: true, running: true }) }
+    const dir3 = mkdtempSync(join(tmpdir(), 'rtsp-'))
+    try {
+      const r3 = makeRtsp({ dataDir: dir3, appDir: '/x', httpPort: 8080, nvrs, mainLimit, env: { CCTV_RTSP_1080_MAX: '0' }, server: s3, log: () => {}, hosts: () => [] })
+      const [, l3] = await r3.handleAdmin('POST', ADMIN_PATH, async () => ({ action: 'link', nvr: 'shad', ch: 0, turnOn: true }), admin)
+      check('CCTV_RTSP_1080_MAX=0: no 1080p address offered', l3.ready === true && l3.path1080 === null && l3.linkCameras.every((c) => c.path1080 === null))
+      const r = res()
+      await r3.handleInternal(req('POST', { action: 'read', user: l3.key.user, password: l3.password, path: 'shad/1/1080', ip: '192.168.1.77', protocol: 'rtsp' }), r, new URL(`http://127.0.0.1:8080${AUTH_PATH}?s=${r3.secret}`), { local: true })
+      const f = res()
+      r3.handleInternal(req('GET'), f, new URL(`http://127.0.0.1:8080${FEED_PATH}?s=${r3.secret}&path=shad/1/1080`), { local: true })
+      await new Promise((ok) => setImmediate(ok))
+      check('...a 1080p reader and feed refused', r.status === 401 && f.status === 503 && r3.summary().converting === 0)
+    } finally {
+      rmSync(dir3, { recursive: true, force: true })
+    }
   }
 
   // ---- readers ----
