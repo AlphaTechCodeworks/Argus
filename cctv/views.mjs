@@ -107,6 +107,22 @@ function stateOf(all, user) {
   }
 }
 
+/**
+ * Moves one user's saved views to a new name (an AD account renamed in AD, ad.mjs). Throws when the
+ * file cannot be read or written. @returns {() => void} undoes it
+ */
+export function renameUserViews(from, to) {
+  const move = (a, b) => {
+    const { all, text } = loadAll()
+    if (!Object.hasOwn(all, a)) return false
+    all[b] = all[a]
+    delete all[a]
+    saveAll(all, text)
+    return true
+  }
+  return move(from, to) ? () => move(to, from) : () => {}
+}
+
 /** A user's saved views ([] when none, or when the file cannot be read). */
 export function viewsOf(user) {
   try {

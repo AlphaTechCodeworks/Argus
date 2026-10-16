@@ -32,6 +32,9 @@ import { checkHealth, listLocations, onChange as onStorageChange, startHealthChe
 import { SPOOL_ID, drainSpool, spoolLocation, trimSpool, writableLocations } from './ram-spool.mjs'
 import { noteRecorderGap, noteRecorderQueues } from './thin-pace.mjs'
 import { HOLD_CHECK_MS, holdControlLogin } from './login-hold.mjs'
+// Hikvision devices (brand 'hikvision' in nvrs.json): their own class and child process, no TVT SDK
+import { isHik } from './hik-config.mjs'
+import { HikNvr } from './hik-nvr.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
 
@@ -1422,6 +1425,9 @@ function startRecording() {
 
 /** A new Nvr, with its live worker when CCTV_LIVE_WORKER=on. */
 const makeNvr = (cfg) => {
+  // a Hikvision device always has its own worker (hik-nvr.mjs), whatever CCTV_LIVE_WORKER says; it
+  // does no server recording yet, so it gets no recording settings
+  if (isHik(cfg)) return new HikNvr(cfg)
   const nvr = new Nvr(cfg)
   if (LIVE_WORKER) {
     // (each worker's recorders' write queues, every 5 s: writes waiting make time-lapse stand back before a gap, thin-pace.mjs)
@@ -1473,7 +1479,8 @@ async function syncNow() {
     if (!existing) {
       await workerGone(id)
       nvrs.set(id, makeNvr(c))
-    } else if (existing.apply(c)) {
+    } else if ((existing.brand === 'hikvision') !== isHik(c) || existing.apply(c)) {
+      // (a record switched between TVT and Hikvision is a new device: new class, new worker)
       console.log(`[${id}] connection settings changed, reconnecting`)
       nvrs.delete(id)
       await retire(existing)
@@ -1560,7 +1567,8 @@ async function startEvents() {
   }
 
   eventIntake = makeEventIntake({
-    listNvrs: () => [...nvrs.values()],
+    // (TVT NVRs only: the intake reads a TVT NVR's recorded-file index; a Hikvision device has none here yet)
+    listNvrs: () => [...nvrs.values()].filter((n) => n.brand !== 'hikvision'),
     camerasOf: (nvr) => nvr.channels.filter((c) => c.configured !== false),
     // background work: nobody waits on these, so one that comes back late does not hold the NVR's
     // playback and searches (sdk.mjs); the clock is the NVR's last read while it is under a minute old
@@ -1597,7 +1605,7 @@ async function startEvents() {
     if (!LIVE_WORKER) return
     const recording = getSettings().recording
     for (const nvr of nvrs.values()) {
-      if (!nvr.worker) continue
+      if (!nvr.worker || nvr.brand === 'hikvision') continue
       nvr.worker.setEventWindows(buildWindowMessage({
         nvrId: nvr.id,
         cameras: nvr.channels,
@@ -1679,15 +1687,17 @@ export const allCameras = ({ live = false, anyLogin = false } = {}) =>
         nvrName: nvr.name,
         ch: c.ch,
         name: c.name,
-        // live: the video login (Live waited for the control login, one NVR at a time, up to ~31 s)
-        online: c.online && (anyLogin ? nvr.online || nvr.liveOnline : live ? nvr.liveOnline : nvr.online),
+        // live: the video login (Live waited for the control login, one NVR at a time, up to ~31 s).
+        // A Hikvision device has only its worker's login, so that one counts everywhere
+        online: c.online && (nvr.brand === 'hikvision' ? nvr.liveOnline : anyLogin ? nvr.online || nvr.liveOnline : live ? nvr.liveOnline : nvr.online),
         // false for an empty channel slot on the NVR: there is no camera there to be offline
         configured: c.configured !== false,
         model: c.model || null,
         maker: c.maker || null,
         // whether the server is set to record this camera, so a live tile can show the red dot
         // that tells a viewer at a glance this one is being kept
-        recording: cameraRecording(nvr.id, c.ch).mode !== 'off',
+        // (a Hikvision device's cameras are not recorded by the server yet, whatever the setting says)
+        recording: nvr.brand !== 'hikvision' && cameraRecording(nvr.id, c.ch).mode !== 'off',
         // another site (VPN, TVT P2P): little bandwidth, so the full-size view stays on the sub stream
         remote: Boolean(nvr.cfg.sn || nvr.cfg.remote)
       }))

@@ -164,6 +164,12 @@ import { can, canPlayAnyOn, handleRights, liveCameras, mayHd, onRightsSaved, pla
 import { streamParam } from './stream-param.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
+import { makeAd } from './ad.mjs'
+import { handleAd } from './ad-api.mjs'
+import { forgetRights, renameRights } from './rights.mjs'
+import { renameUserViews } from './views.mjs'
+import { renameUserPrefs } from './user-prefs.mjs'
+import { renameBookmarkUser } from './bookmarks.mjs'
 import { DEVICE_SESSION_MARK_MS, DEVICE_SESSION_MS, makeSetupCodes, sessionLeftMs } from './setup-codes.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
 import { audit, handleAudit, pruneAudit, withDevice } from './audit.mjs'
@@ -667,6 +673,17 @@ const handleLogin = async (req, res) => {
   }
   // (the user name in any capitals: auth.accountName; the password exactly as set)
   const user = auth.accountName(String(creds.user ?? ''))
+  // Windows (Active Directory) sign-in, ad.mjs: only for a name with no local account, while it is
+  // switched on (null otherwise: on as before). It audits its own sign-ins and refusals.
+  const viaAd = await ad.login(String(creds.user ?? ''), creds.password ?? '', { ip })
+  if (viaAd && !viaAd.ok) {
+    if (viaAd.count) auth.recordFailure(ip)
+    return sendJson(res, viaAd.status, { error: viaAd.message })
+  }
+  if (viaAd) {
+    auth.clearFailures(ip)
+    return sendJson(res, 200, { user: viaAd.user, mustChangePassword: false }, { 'set-cookie': auth.sessionCookie(auth.createSession(viaAd.user), Boolean(req.socket.encrypted)) })
+  }
   if (!(await auth.checkLogin(user, creds.password ?? ''))) {
     auth.recordFailure(ip)
     console.log(`login failed for "${user}" from ${ip}`)
@@ -686,6 +703,32 @@ const handleLogin = async (req, res) => {
 // within its time, and never for an account removed or signed out since. Counted with the failed
 // sign-ins of its address, so codes cannot be guessed at any faster than passwords.
 const setupCodes = makeSetupCodes(join(auth.DATA_DIR, 'setup-codes.json'))
+// Windows (Active Directory) sign-in and its re-checks (ad.mjs, Settings > Active Directory). A user
+// a re-check finds gone from the CCTV groups has their sessions ended (auth.mjs refuses them); here
+// their open pages, listed sessions and unused set-up codes go too.
+// An AD account renamed in AD keeps what was kept under its old name: each of these moves one kind
+// (and gives back how to undo it, so the move is all or nothing).
+const ad = makeAd({ audit: (row) => audit(auth.DATA_DIR, row), forgetRights, renamers: [renameRights, renameUserViews, renameUserPrefs, (from, to) => setupCodes.rename(from, to), renameBookmarkUser] })
+// The sign-in page's "Change your Windows password", when AD says it has expired or must be changed:
+// counted with the failed sign-ins; on success the person is signed in with the new password.
+const handleWindowsPassword = async (req, res) => {
+  const ip = clientIp(req)
+  if (auth.loginBlocked(ip)) return sendJson(res, 429, { error: 'Too many attempts, try again later' })
+  let body
+  try {
+    body = JSON.parse(await readBody(req))
+  } catch {
+    return sendJson(res, 400, { error: 'Bad request' })
+  }
+  const r = await ad.changeExpired(String(body?.user ?? ''), String(body?.currentPassword ?? ''), String(body?.newPassword ?? ''), { ip })
+  if (!r.ok) {
+    if (r.count) auth.recordFailure(ip)
+    return sendJson(res, r.status, { error: r.message, changed: r.changed === true })
+  }
+  auth.clearFailures(ip)
+  sendJson(res, 200, { user: r.user, changed: true, message: r.message }, { 'set-cookie': auth.sessionCookie(auth.createSession(r.user), Boolean(req.socket.encrypted)), 'cache-control': 'no-store' })
+}
+ad.start({ ended: (name) => { presence.disconnectUser(name); userSessions.forget(name); setupCodes.forget(name) } })
 const handleSetupRedeem = async (req, res) => {
   const ip = clientIp(req)
   if (auth.loginBlocked(ip)) return sendJson(res, 429, { error: 'Too many attempts, try again later' })
@@ -773,6 +816,7 @@ const handleRequest = async (req, res) => {
     return sendJson(res, 200, { at: new Date().toISOString(), nvrs: await cameraExport(nvrs) })
   }
   if (pathname === '/api/login' && req.method === 'POST') return handleLogin(req, res)
+  if (pathname === '/api/login/windows-password' && req.method === 'POST') return handleWindowsPassword(req, res)
   if (pathname === '/api/setup/redeem' && req.method === 'POST') return handleSetupRedeem(req, res)
   if (pathname === '/api/logout' && req.method === 'POST') {
     // Read before the cookie is cleared, or there is nobody to name in the entry.
@@ -811,8 +855,8 @@ const handleRequest = async (req, res) => {
     const result = await auth.changePassword(user, body.currentPassword, body.newPassword)
     if (!result.ok) { auth.recordFailure(clientIp(req)); return sendJson(res, 400, result) }
     auth.clearFailures(clientIp(req))
-    audit(auth.DATA_DIR, { user, action: 'password-change', ip: clientIp(req), ok: true })
-    return sendJson(res, 200, { ok: true }, { 'set-cookie': auth.sessionCookie(auth.createSession(user), Boolean(req.socket.encrypted)) })
+    audit(auth.DATA_DIR, { user, action: 'password-change', ip: clientIp(req), ok: true, ...(result.message ? { detail: 'changed Windows password (Active Directory)' } : {}) })
+    return sendJson(res, 200, { ok: true, ...(result.message ? { message: result.message } : {}) }, { 'set-cookie': auth.sessionCookie(auth.createSession(user), Boolean(req.socket.encrypted)) })
   }
   if (!AUTH_OFF && auth.mustChangePassword(user)) {
     if (pathname.startsWith('/api/')) return sendJson(res, 403, { error: 'Choose a new password before continuing.', mustChangePassword: true })
@@ -843,7 +887,7 @@ const handleRequest = async (req, res) => {
     const token = auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME]
     return sessionLeftMs(token) > DEVICE_SESSION_MARK_MS ? { 'set-cookie': auth.sessionCookie(token, Boolean(req.socket.encrypted) || req.headers['x-forwarded-proto'] === 'https', 400 * 24 * 60 * 60_000) } : {}
   })()
-  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, watchOnly, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() }, deviceCookie)
+  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, watchOnly, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable(), ...(auth.loadUsers()[user]?.source === 'ad' ? { windows: true } : {}) }, deviceCookie)
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
   if (pathname === UI_PREFS_PATH) return sendJson(res, ...(await handleUiPreferences(req, user)))
   // what viewers actually got, as their pages measured it, and the score made from it (telemetry.mjs)
@@ -1019,6 +1063,9 @@ const handleRequest = async (req, res) => {
       usersRoute = [e.status, { error: e.message }]
     }
     if (usersRoute) return sendJson(res, ...usersRoute)
+    // Settings > Active Directory (ad-api.mjs): admins only; answers its own refusals
+    const adRoute = await handleAd(ad, req.method, pathname, () => readJsonObject(req, 65536), who, { ip: clientIp(req), device: deviceOf(req.headers['user-agent']) })
+    if (adRoute) return sendJson(res, ...adRoute)
     // Settings > Server: restart. The answer goes out first; systemd (Restart=always) starts it again.
     if (req.method === 'POST' && pathname === '/api/admin/restart') {
       if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can restart the server' })
@@ -1267,7 +1314,9 @@ const handleRequest = async (req, res) => {
     const settingsAnswer = await handleSettings(req.method, pathname, () => readJsonObject(req, 16384), user, AUTH_OFF || auth.isAdmin(user), { ramEstimate, params: url.searchParams })
     if (settingsAnswer) return sendJson(res, settingsAnswer[0], settingsAnswer[1], settingsAnswer[2])
     const readJson = async () => JSON.parse((await readBody(req, 8192)) || '{}')
-    const [status, body] = await handleAdmin(req.method, pathname, readJson)
+    // NVRs and Hikvision devices added, changed, removed and tested go in the audit trail
+    const nvrAudit = (row) => audit(auth.DATA_DIR, { user, ...row, ip: clientIp(req), detail: withDevice(row.detail, deviceOf(req.headers['user-agent'])) })
+    const [status, body] = await handleAdmin(req.method, pathname, readJson, { audit: nvrAudit })
     return sendJson(res, status, body)
   }
   // The Health page: how the server is doing, for anyone signed in (see alert-checks.mjs health()).

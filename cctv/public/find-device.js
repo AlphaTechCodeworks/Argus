@@ -70,10 +70,22 @@ export function openTarget(r) {
 }
 
 /**
- * Wires the dialog. `api(method, path, body, timeoutMs)` and `el(tag, props, ...children)` come from
- * sites.js; `showRecorder(id)` scrolls the page to that recorder.
+ * What "Add" on a found device prefills on the Sites page's Add dialog, or null when the device is not
+ * one Argus can add from here. Only Hikvision devices (found by ONVIF, find-device.mjs brand): a TVT
+ * recorder is added from "Find NVRs", and a lone TVT camera through its recorder.
  */
-export function setupFindDevice({ api, el, showRecorder }) {
+export function addTarget(r) {
+  if (r?.kind !== 'device' || r.brand !== 'hikvision' || !r.ip) return null
+  const name = String(r.label && r.label !== 'Device' && r.label !== r.type ? r.label : r.model || `Hikvision ${r.ip}`).slice(0, 64)
+  return { brand: 'hikvision', host: r.ip, port: 8000, name }
+}
+
+/**
+ * Wires the dialog. `api(method, path, body, timeoutMs)` and `el(tag, props, ...children)` come from
+ * sites.js; `showRecorder(id)` scrolls the page to that recorder; `addDevice(prefill)` opens the Add
+ * dialog filled in from addTarget (a Hikvision device).
+ */
+export function setupFindDevice({ api, el, showRecorder, addDevice }) {
   const $ = (id) => document.getElementById(id)
   const dialog = $('fd')
   const input = $('fd-q')
@@ -123,9 +135,9 @@ export function setupFindDevice({ api, el, showRecorder }) {
     const recs = r.results.filter((x) => x.kind === 'recorder').length
     const other = total - cams - recs
     status.textContent = total === 0
-      ? 'Nothing new: every TVT device on your network is already in Argus.'
+      ? 'Nothing new: every TVT or Hikvision device found on your network is already in Argus.'
       : rows.length === total
-        ? `${total} TVT device${total === 1 ? '' : 's'} on your network ${total === 1 ? 'is' : 'are'} not in Argus yet.`
+        ? `${total} device${total === 1 ? '' : 's'} on your network ${total === 1 ? 'is' : 'are'} not in Argus yet.`
         : `${rows.length} of ${total} shown.`
     const lines = [...r.notes]
     const search = r.looked?.search
@@ -161,6 +173,15 @@ export function setupFindDevice({ api, el, showRecorder }) {
       })
     }
     if (action) action.setAttribute('aria-label', `${target.text}: ${t.title}`)
+    const add = addDevice ? addTarget(r) : null
+    if (add) {
+      action = el('button', { type: 'button', className: 'st-primary', textContent: 'Add' })
+      action.setAttribute('aria-label', `Add ${add.name} (Hikvision, ${add.host})`)
+      action.addEventListener('click', () => {
+        dialog.close()
+        addDevice(add)
+      })
+    }
     const by = foundByText(r.sources, looked)
     return el(
       'li',

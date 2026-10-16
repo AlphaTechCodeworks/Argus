@@ -511,6 +511,8 @@ export function saveRights(name, raw) {
   const store = loadRights()
   if (store.newer) throw bad(409, `rights.json was written by a newer version of Argus (version ${store.newer}); this version will not change it`)
   const row = cleanRights(raw)
+  // a Windows (Active Directory) user's role is their AD group's (ad.mjs): not switched from here
+  if (accounts[name]?.source === 'ad' && row.admin !== (accounts[name]?.role === 'admin')) throw bad(409, `${name} signs in with Windows: make them an admin or not through their AD group`)
   // Count admins as they will be: every account's role, with this one's as it is being saved.
   const admins = Object.keys(accounts).filter((u) => (u === name ? row.admin : accounts[u]?.role === 'admin'))
   if (admins.length === 0) throw bad(400, 'there must be at least one admin; make someone else an admin first')
@@ -539,6 +541,28 @@ export function forgetRights(name) {
   store.users = users
   writeStore(store, before)
   return true
+}
+
+/**
+ * Moves one user's stored row to a new name: a Windows (AD) account renamed in AD keeps what it was
+ * allowed (ad.mjs). Throws when rights.json cannot be rewritten. @returns {() => void} undoes it
+ */
+export function renameRights(from, to) {
+  for (const n of [from, to]) if (!isString(n) || !n || n === '__proto__') throw new Error('rights: bad user name')
+  const store = loadRights()
+  if (!Object.hasOwn(store.users, from)) return () => {}
+  if (store.newer) throw new Error(`rights.json is version ${store.newer}, from a newer release: this one does not rewrite it`)
+  const move = (a, b) => {
+    const s = loadRights()
+    const before = s.users
+    const users = Object.assign(Object.create(null), s.users) // never change the cached object
+    users[b] = users[a]
+    delete users[a]
+    s.users = users
+    writeStore(s, before)
+  }
+  move(from, to)
+  return () => move(to, from)
 }
 
 /** Every account that is an admin right now (its role in users.json), sorted. The Health page shows this. */

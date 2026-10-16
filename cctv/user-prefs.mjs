@@ -103,6 +103,22 @@ function saveAll(all, previousText) {
 
 const isVersion = (v) => Number.isSafeInteger(v) && v >= 0
 
+/**
+ * Moves one user's camera order and preferences to a new name (an AD account renamed in AD, ad.mjs).
+ * Throws when the file cannot be read or written. @returns {() => void} undoes it
+ */
+export function renameUserPrefs(from, to) {
+  const move = (a, b) => {
+    const { all, text } = loadAll()
+    if (!Object.hasOwn(all, a)) return false
+    all[b] = all[a]
+    delete all[a]
+    saveAll(all, text)
+    return true
+  }
+  return move(from, to) ? () => move(to, from) : () => {}
+}
+
 const UI_KEYS = new Set(['cctv.theme', 'cctv.sidebarPinned', 'cctv.layout', 'cctv.layout.phone', 'cctv.activeView', 'cctv.smooth', 'cctv.hideOffline', 'cctv.site', 'cctv.workspaceSite', 'cctv.favoriteSites', 'cctv.recentSites', 'cctv.mapSite', 'cctv.mapNames', 'cctv.mapLayer', 'cctv.alarmFilters', 'cctv.startOrder'])
 const layouts = new Set(['auto', 'list', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', '1+5', '1+7', '1+12', '2+8'])
 function validUiValue(key, value) {

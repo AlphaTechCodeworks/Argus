@@ -56,7 +56,7 @@ function render(parts, me) {
       ${themeButton(theme, 'shell-theme btn-ghost')}
       <div class="shell-user"><span class="shell-avatar">${esc((me.user ?? '?').slice(0, 1).toUpperCase())}</span>
         <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : me.watchOnly ? 'Watch only' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small>${me.address ? `<small class="shell-route" title="${me.direct ? 'You are connected straight to the server on the local network' : 'You are connected over the internet (through Cloudflare)'}">${esc(me.address)} · ${me.direct ? 'local' : 'internet'}</small>` : ''}</span>
-        <button type="button" class="btn-ghost btn-icon" data-sign-out title="Sign out" aria-label="Sign out">${icon('out')}</button></div>
+        ${me.windows ? '<a class="btn-ghost btn-icon" href="/change-password.html" title="Change your Windows password" aria-label="Change your Windows password">' + icon('cog') + '</a>' : ''}<button type="button" class="btn-ghost btn-icon" data-sign-out title="Sign out" aria-label="Sign out">${icon('out')}</button></div>
     </div>`
   // the phone bar: the four used most, then More for everything else
   const all = groups.flatMap((g) => g.items)

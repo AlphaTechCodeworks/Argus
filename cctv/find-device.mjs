@@ -255,8 +255,9 @@ export function buildIndex({ recorders = [], report = null, arp = [], search = [
     }
     if (tied) return
     const key = `${obs.ip}|${obs.mac ?? ''}`
-    const dev = loose.get(key) ?? { kind: 'device', ip: obs.ip, mac: obs.mac ?? null, name: '', model: null, type: null, sources: new Set() }
+    const dev = loose.get(key) ?? { kind: 'device', ip: obs.ip, mac: obs.mac ?? null, name: '', model: null, type: null, maker: null, sources: new Set() }
     if (obs.name && !dev.name) dev.name = obs.name
+    if (obs.maker && !dev.maker) dev.maker = obs.maker
     if (obs.model && !dev.model) dev.model = obs.model
     if (obs.type && !dev.type) dev.type = obs.type
     dev.sources.add(source)
@@ -266,7 +267,7 @@ export function buildIndex({ recorders = [], report = null, arp = [], search = [
   for (const d of (search ?? []).slice(0, MAX_SEARCH_DEVICES)) {
     const ip = clean(d?.ip, 15)
     if (!isIp(ip)) continue
-    observe({ ip, mac: normaliseMac(d.mac), name: clean(d.name, 32), model: clean(d.model, 40), type: clean(d.type, 16) }, 'search')
+    observe({ ip, mac: normaliseMac(d.mac), name: clean(d.name, 32), model: clean(d.model, 40), type: clean(d.type, 16), maker: clean(d.maker, 32) || null }, 'search')
   }
   return [...recs.values(), ...cams.values(), ...loose.values()]
 }
@@ -303,6 +304,7 @@ const KIND_ORDER = { recorder: 0, camera: 1, device: 2 }
 /** Why a found camera's (or device's) MAC is missing, in plain words; null when nothing needs saying. */
 function noteFor(e, nets) {
   if (e.kind === 'device') {
+    if (e.maker === 'Hikvision') return `A Hikvision ${e.type === 'NVR' ? 'recorder' : 'camera'} on the server’s own network that is not in Argus yet: Add logs in to it with the Hikvision SDK (port 8000).`
     return e.type === 'IP camera'
       ? 'A TVT camera on the server’s own network that none of the recorders lists (or lists at another address).'
       : 'A device on the server’s own network. None of the recorders lists a camera at this address on this network.'
@@ -353,6 +355,8 @@ export function findDevice(query, data = {}, { max = MAX_RESULTS } = {}) {
     mac: e.mac ?? null,
     model: [e.maker && e.model && !e.model.toLowerCase().startsWith(e.maker.toLowerCase()) ? e.maker : null, e.model].filter(Boolean).join(' ') || null,
     type: e.kind === 'device' ? e.type : null,
+    // a Hikvision device found on the network (ONVIF, onvif-discovery.mjs makerOf): the page offers to add it
+    brand: e.kind === 'device' && e.maker === 'Hikvision' ? 'hikvision' : null,
     online: typeof e.online === 'boolean' ? e.online : null,
     poe: e.kind === 'camera' ? e.poe : null,
     via: e.via ?? null,

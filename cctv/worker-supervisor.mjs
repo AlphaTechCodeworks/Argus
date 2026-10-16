@@ -101,8 +101,10 @@ export function linkResetWatch(send, now = Date.now) {
  *   stdio: for tests; onRecording: the worker's segopen / segment / recgap messages (recorder.mjs);
  *   onReady: each worker process that has started (the first and every restart);
  *   p2p: the NVR is reached by serial number (stream-hub.mjs freeIdleSubs)
+ *   script: the worker's module, next to this file (default nvr-worker.mjs, a TVT NVR's; a Hikvision
+ *   device's is hik-worker.mjs, see hik-nvr.mjs). Both speak worker-ipc.mjs, so all the rest is the same.
  */
-export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onReady, p2p = false } = {}) {
+export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onReady, p2p = false, script = './nvr-worker.mjs' } = {}) {
   let recSettings = null // the last settings message: sent again to every new worker
   let child = null
   let state = 'starting' // starting | ready | restarting
@@ -135,7 +137,7 @@ export function startWorker(nvrId, { env = {}, stdio, onStats, onRecording, onRe
     const childEnv = { ...process.env, ...env, CCTV_WORKER_NVR: nvrId }
     delete childEnv.CCTV_LIVE_WORKER // the worker itself plays the streams
     // by default the worker's output goes to ours line by line, prefixed "[worker <id>] "
-    const c = fork(new URL('./nvr-worker.mjs', import.meta.url), [], { serialization: 'advanced', env: childEnv, stdio: stdio ?? ['ignore', 'pipe', 'pipe', 'ipc'] })
+    const c = fork(new URL(script, import.meta.url), [], { serialization: 'advanced', env: childEnv, stdio: stdio ?? ['ignore', 'pipe', 'pipe', 'ipc'] })
     c.spawnedAt = Date.now()
     child = c
     if (!stdio) {

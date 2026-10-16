@@ -121,7 +121,8 @@ function render() {
       const remove = el('button', { type: 'button', className: 'btn-ghost st-row-remove', textContent: 'Remove', title: `Remove ${n.name}` })
       remove.addEventListener('click', () => removeNvr(n))
       let subs = null
-      if (n.status === 'online') {
+      // (the sub-stream switch speaks the TVT NVR's own settings: not for a Hikvision device)
+      if (n.status === 'online' && n.brand !== 'hikvision') {
         subs = el('button', { type: 'button', textContent: 'Sub-streams' })
         subs.addEventListener('click', () => openSubstreams(n))
       }
@@ -210,12 +211,69 @@ async function loadImpl() {
 
 /** How an NVR is reached, for cards and messages. */
 const whereText = (n) =>
-  n.via === 'p2p' ? `P2P cloud · serial ${n.sn}` : n.vpnSite ? `${n.host} via VPN site ${n.vpnSite.name}` : `${n.host}:${n.port}`
+  (n.brand === 'hikvision' ? 'Hikvision · ' : '') +
+  (n.via === 'p2p' ? `P2P cloud · serial ${n.sn}` : n.vpnSite ? `${n.host} via VPN site ${n.vpnSite.name}` : `${n.host}:${n.port}`)
 
 /** "12 s", "4 min", "3 h", "2 days" */
 const agoS = (s) => (s < 90 ? `${s} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days`)
 const tunnelText = (t) => (t.connected ? `connected (${agoS(t.lastHandshakeAgoS)} ago)` : t.lastHandshakeAgoS === null ? 'never connected' : `not connected — last seen ${agoS(t.lastHandshakeAgoS)} ago`)
-const byP2p = () => $('f-via-p2p').checked
+const isHikForm = () => $('f-brand-hik').checked
+const byP2p = () => !isHikForm() && $('f-via-p2p').checked
+const TVT_PORT = 6036
+const HIK_PORT = 8000
+
+// ---- Hikvision: Hik-Connect (P2P) ----
+// The account sign-in goes through the SDK's NET_SDK_P2P_LOGIN_2C (hik-config.mjs). It stays off until
+// the four values Hikvision gives with developer access are known (typed here, already stored, or set for
+// the whole server); the server refuses it otherwise. Secrets are never sent back: only "set" or "not set".
+const HP_DEV = [['appId', 'f-hp-appid'], ['authAddr', 'f-hp-auth'], ['platformAddr', 'f-hp-platform'], ['platformType', 'f-hp-ptype']]
+let hpStored = null // the edited device's public p2p (publicP2p), or null
+const hpHas = (key, input) => $(input).value.trim() !== '' || Boolean(hpStored?.[`${key}Set`] || hpStored?.fromServer?.[key])
+const hpAccess = () => HP_DEV.every(([k, i]) => hpHas(k, i))
+const hpTouched = () => Boolean(hpStored) || $('f-hp-on').checked || ['f-hp-account', 'f-hp-password', ...HP_DEV.map(([, i]) => i)].some((i) => $(i).value.trim() !== '')
+
+/** The Hik-Connect switch is usable only once the developer values are there; its line says why not. */
+function showHikP2p() {
+  const access = hpAccess()
+  const on = $('f-hp-on')
+  on.disabled = !access
+  if (!access) on.checked = false
+  for (const [k, i] of HP_DEV) {
+    const hint = $(`${i}-hint`)
+    if (hint) hint.textContent = $(i).value.trim() ? 'will be saved' : hpStored?.[`${k}Set`] ? 'set (leave empty to keep it)' : hpStored?.fromServer?.[k] ? 'set for the whole server' : 'not set'
+  }
+  $('f-hp-password-hint').textContent = hpStored?.passwordSet ? 'Set (leave empty to keep it). Kept on the server, never shown again.' : 'Kept on the server like the device password, never shown again.'
+  $('f-hp-state').textContent = !access
+    ? 'Off — needs Hik-Connect developer access (AppID and server addresses from Hikvision).'
+    : on.checked ? 'On — signs in to Hik-Connect when the device connects (unverified).' : 'Off — tick the box to sign in to Hik-Connect for this device.'
+}
+for (const id of ['f-hp-on', 'f-hp-account', ...HP_DEV.map(([, i]) => i)]) $(id).addEventListener('input', showHikP2p)
+
+/** The body's p2p block for a Hikvision device, or undefined when nothing about it was touched. */
+function hikP2pBody() {
+  if (!hpTouched()) return undefined
+  const b = { enabled: $('f-hp-on').checked && !$('f-hp-on').disabled, account: $('f-hp-account').value.trim() }
+  if ($('f-hp-password').value) b.password = $('f-hp-password').value
+  for (const [k, i] of HP_DEV) if ($(i).value.trim() !== '') b[k] = k === 'platformType' ? Number($(i).value) : $(i).value.trim()
+  return b
+}
+
+/** TVT or Hikvision: which fields the dialog shows. A Hikvision device is reached by its address only. */
+function showBrand() {
+  const hik = isHikForm()
+  $('f-via-set').hidden = hik
+  $('f-hik-help').hidden = !hik
+  $('f-hikp2p').hidden = !hik
+  $('test').hidden = !hik
+  // the other make's usual port is swapped for this one's; a port typed by hand stays
+  const port = Number($('f-port').value)
+  if (hik && port === TVT_PORT) $('f-port').value = HIK_PORT
+  if (!hik && port === HIK_PORT) $('f-port').value = TVT_PORT
+  $('f-password-hint').textContent = hik ? 'The device’s own login (the one its web page uses). It is tested before saving and never shown again.' : 'The NVR\'s own login. It is tested before saving and never shown again.'
+  showHikP2p()
+  showVia()
+}
+for (const id of ['f-brand-tvt', 'f-brand-hik']) $(id).addEventListener('change', showBrand)
 
 /** Shows the address fields or the serial number field. */
 function showVia() {
@@ -235,20 +293,30 @@ $('f-host').addEventListener('change', () => {
   if (!editing && /^10\.78\./.test($('f-host').value.trim())) $('f-remote').checked = true
 })
 
-/** @param {object} [prefill] { host, port, name } from Find NVRs */
+/** @param {object} [prefill] { host, port, name } from Find NVRs, or { brand: 'hikvision', host, port, name } from Discover devices */
 function openForm(nvr = null, prefill = {}) {
   editing = nvr?.id ?? null
-  $('formTitle').textContent = nvr ? `Edit ${nvr.name}` : 'Add NVR'
+  const hik = (nvr?.brand ?? prefill.brand) === 'hikvision'
+  $('formTitle').textContent = nvr ? `Edit ${nvr.name}` : hik ? 'Add Hikvision device' : 'Add NVR'
+  $(hik ? 'f-brand-hik' : 'f-brand-tvt').checked = true
+  // the make of a saved recorder cannot change (remove it and add it again)
+  for (const id of ['f-brand-tvt', 'f-brand-hik']) $(id).disabled = Boolean(nvr)
+  hpStored = hik ? nvr?.p2p ?? null : null
+  $('f-hp-on').checked = Boolean(hpStored?.enabled)
+  $('f-hp-account').value = hpStored?.account ?? ''
+  for (const id of ['f-hp-password', ...HP_DEV.map(([, i]) => i)]) $(id).value = ''
+  $('f-hikp2p').open = Boolean(hpStored?.enabled)
+  $('formResult').hidden = true
   $('f-site').value = nvr?.site ?? prefill.site ?? nvrList[0]?.site ?? ''
   $('f-name').value = nvr?.name ?? prefill.name ?? `NVR ${nvrList.length + 1}`
   const p2p = nvr?.via === 'p2p'
   $(p2p ? 'f-via-p2p' : 'f-via-lan').checked = true
   $('f-host').value = p2p ? '' : nvr?.host ?? prefill.host ?? ''
-  $('f-port').value = p2p ? 6036 : nvr?.port ?? prefill.port ?? 6036
+  $('f-port').value = p2p ? TVT_PORT : nvr?.port ?? prefill.port ?? (hik ? HIK_PORT : TVT_PORT)
   $('f-sn').value = nvr?.sn ?? ''
   $('f-nat').value = String(nvr?.nat === 1 ? 1 : 2) // default NAT 2.0
   $('f-remote').checked = nvr ? Boolean(nvr.remote) : Boolean(prefill.remote)
-  showVia()
+  showBrand()
   $('f-user').value = nvr?.user ?? 'admin'
   $('f-password').value = ''
   $('f-password').required = !nvr
@@ -263,8 +331,9 @@ function openForm(nvr = null, prefill = {}) {
   ;(nvr ? $('f-name') : prefill.host && !prefill.host.endsWith('.') ? $('f-password') : $('f-host')).focus()
 }
 
-form.addEventListener('submit', async (e) => {
-  e.preventDefault()
+/** The form as a request body (Hikvision: brand, address and the Hik-Connect block). */
+function formBody() {
+  const hik = isHikForm()
   const p2p = byP2p()
   const body = {
     site: $('f-site').value,
@@ -273,23 +342,71 @@ form.addEventListener('submit', async (e) => {
     remote: $('f-remote').checked,
     skipTest: $('f-skip').checked
   }
-  // by serial number no address or port is sent (the server uses its P2P server); sn '' switches an
-  // NVR back to its address
-  if (p2p) Object.assign(body, { sn: $('f-sn').value.trim().toUpperCase(), nat: Number($('f-nat').value) === 1 ? 1 : 2 })
-  else Object.assign(body, { sn: '', host: $('f-host').value, port: Number($('f-port').value) })
+  if (hik) {
+    Object.assign(body, { brand: 'hikvision', host: $('f-host').value, port: Number($('f-port').value) })
+    const hp = hikP2pBody()
+    if (hp) body.p2p = hp
+  } else if (p2p) {
+    // by serial number no address or port is sent (the server uses its P2P server)
+    Object.assign(body, { sn: $('f-sn').value.trim().toUpperCase(), nat: Number($('f-nat').value) === 1 ? 1 : 2 })
+  } else {
+    // sn '' switches an NVR back to its address
+    Object.assign(body, { sn: '', host: $('f-host').value, port: Number($('f-port').value) })
+  }
   if ($('f-password').value) body.password = $('f-password').value
+  return body
+}
+
+/** One line from a Hikvision test login's answer: model, serial, cameras (and Hik-Connect's word). */
+function hikTestText(r) {
+  const parts = [`Logged in: ${r.model || 'Hikvision device'}${r.name ? ` “${r.name}”` : ''}`]
+  if (r.serial) parts.push(`serial ${r.serial}`)
+  parts.push(`${r.cameras} camera${r.cameras === 1 ? '' : 's'}${r.channels && r.channels !== r.cameras ? ` (${r.channels} channels)` : ''}`)
+  if (r.note) parts.push(r.note)
+  if (r.p2p?.state === 'ready' && r.p2p.message) parts.push(r.p2p.message)
+  return parts.join(' · ')
+}
+
+// "Test" (Hikvision): one login, nothing saved
+$('test').addEventListener('click', async () => {
+  if (!$('f-host').reportValidity() || !$('f-port').reportValidity() || !$('f-user').reportValidity()) return
+  const body = { ...formBody(), id: editing ?? undefined }
+  formError.hidden = true
+  $('formResult').hidden = true
+  const btn = $('test')
+  btn.disabled = true
+  btn.textContent = 'Testing (up to 60 s)…'
+  try {
+    $('formResult').textContent = hikTestText(await api('POST', '/api/admin/nvr-test', body, 75_000))
+    $('formResult').hidden = false
+  } catch (err) {
+    formError.textContent = `Could not log in: ${err.message}`
+    formError.hidden = false
+  } finally {
+    btn.disabled = false
+    btn.textContent = 'Test'
+  }
+})
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const hik = isHikForm()
+  const p2p = byP2p()
+  const body = formBody()
   formError.hidden = true
   saveBtn.disabled = true
-  // an unreachable address takes the SDK ~20 s (3 tries x 5 s) to give up on
-  saveBtn.textContent = body.skipTest ? 'Saving…' : p2p ? 'Testing login through the P2P cloud (up to 40 s)…' : 'Testing login (up to 20 s)…'
+  // an unreachable address takes the SDK ~20 s (3 tries x 5 s) to give up on; a Hikvision device's test
+  // runs in a process of its own and takes up to a minute
+  saveBtn.textContent = body.skipTest ? 'Saving…' : p2p ? 'Testing login through the P2P cloud (up to 40 s)…' : hik ? 'Testing login (up to 60 s)…' : 'Testing login (up to 20 s)…'
+  const wait = hik && !body.skipTest ? 75_000 : undefined // (a TVT NVR's as before)
   try {
-    if (editing) await api('PUT', `/api/admin/nvrs/${encodeURIComponent(editing)}`, body)
-    else await api('POST', '/api/admin/nvrs', body)
+    if (editing) await api('PUT', `/api/admin/nvrs/${encodeURIComponent(editing)}`, body, wait)
+    else await api('POST', '/api/admin/nvrs', body, wait)
     dialog.close()
     await load()
   } catch (err) {
     formError.textContent = err.testFailed
-      ? `${err.message}. Check ${p2p ? 'the serial number and login, and that P2P is on in the NVR’s network settings' : 'the address, port and login'}, or tick “Save even if…” to save anyway.`
+      ? `${err.message}. Check ${p2p ? 'the serial number and login, and that P2P is on in the NVR’s network settings' : hik ? 'the address, the SDK port (8000 unless changed on the device) and the login' : 'the address, port and login'}, or tick “Save even if…” to save anyway.`
       : err.message
     formError.hidden = false
   } finally {
@@ -666,7 +783,8 @@ if (!me.admin) {
   notice.hidden = false
 } else {
   const se = $('settingsTab'); if (se) se.hidden = false
-  setupFindDevice({ api, el, showRecorder })
+  // a Hikvision device found by Discover devices: "Add" opens this page's dialog, filled in
+  setupFindDevice({ api, el, showRecorder, addDevice: (prefill) => openForm(null, prefill) })
   await load()
   // show connection status as new NVRs log in
   setInterval(load, 5000)

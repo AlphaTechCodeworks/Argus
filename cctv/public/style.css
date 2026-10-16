@@ -2263,3 +2263,12 @@ body.playback-page.is-fullscreen .pb-bar { --pb-head-ink: #14171c; }
 .rl-table th, .rl-table td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .rl-path code { font-size: 12px; word-break: break-all; }
 .ce-rtsp { margin: 8px 0; }
+
+/* Users & access: a Windows (Active Directory) account; Settings > Active Directory: a DC's certificate */
+.ac-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); color: var(--accent-strong); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.ad-trust { margin: 8px 0; }
+.login-card[hidden] { display: none; } /* the sign-in page's two forms: one shown at a time */
+.ad-cert { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0; font-size: 13px; }
+.ad-cert dt { color: var(--text-muted); }
+.ad-cert dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+#ad-ca { width: 100%; font-family: ui-monospace, monospace; font-size: 12px; }

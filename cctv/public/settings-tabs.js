@@ -9,6 +9,7 @@ const TABS = [
   { id: 'alerts', label: 'Alerts', help: 'Who is told when something goes wrong, and how.' },
   { id: 'links', label: 'Camera links', help: 'RTSP addresses of the cameras for VLC, another recorder or an OCR engine, and the keys that let them in.' },
   { id: 'connector', label: 'Remote sites', help: 'The installer that connects a site server, and its NVRs, to this app over Tailscale.' },
+  { id: 'directory', label: 'Active Directory', help: 'Staff sign in with their Windows account; their AD group decides what they may do.' },
   { id: 'server', label: 'Server', help: 'Restart the server.' }
 ]
 

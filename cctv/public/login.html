@@ -30,6 +30,20 @@
     <p id="error" role="alert" hidden></p>
     <button type="submit">Sign in</button>
   </form>
+  <!-- Windows (Active Directory) accounts whose password AD says must be changed (expired, or "change at next logon"): changed here, then signed in -->
+  <form id="winPassword" class="login-card" autocomplete="off" hidden>
+    <h1>Change your Windows password</h1>
+    <p>Windows wants a new password for <b id="winUser"></b>. It changes on your PC too.</p>
+    <label for="winCurrent">Current Windows password</label>
+    <input id="winCurrent" type="password" autocomplete="current-password" required />
+    <label for="winNew">New password</label>
+    <input id="winNew" type="password" autocomplete="new-password" required maxlength="256" />
+    <label for="winConfirm">New password again</label>
+    <input id="winConfirm" type="password" autocomplete="new-password" required maxlength="256" />
+    <p id="winError" role="alert" hidden></p>
+    <button type="submit">Change password and sign in</button>
+    <button id="winCancel" type="button">Back</button>
+  </form>
   <script type="module" src="login.js"></script>
   <script type="module" src="show-password.js"></script>
 </body>

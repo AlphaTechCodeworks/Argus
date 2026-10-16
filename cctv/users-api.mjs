@@ -27,8 +27,12 @@ import { setupLink } from './setup-codes.mjs'
 const NAME_RE = /^[\w.@-]{1,64}$/
 const ROLES = ['viewer', 'watch', 'admin'] // 'watch': a viewer shown only Live, Playback and Map (auth.mjs isWatchOnly)
 
-const list = (users) => Object.entries(users).map(([name, u]) => ({ name, role: u.role === 'admin' ? 'admin' : u.role === 'watch' ? 'watch' : 'viewer' })).sort((a, b) => a.name.localeCompare(b.name))
-const admins = (users) => Object.entries(users).filter(([, u]) => u.role === 'admin').map(([n]) => n)
+// An Active Directory user (ad.mjs, source 'ad') is listed with where it came from; its role is AD's
+const list = (users) => Object.entries(users).map(([name, u]) => ({ name, role: u.role === 'admin' ? 'admin' : u.role === 'watch' ? 'watch' : 'viewer', ...(u.source === 'ad' ? { source: 'ad', displayName: u.displayName ?? '', lastSignIn: u.lastSignIn ?? null } : {}) })).sort((a, b) => a.name.localeCompare(b.name))
+// Only local admins count for "the last admin": an AD admin cannot sign in when the DCs are down, and
+// a local admin is then the only way in.
+const admins = (users) => Object.entries(users).filter(([, u]) => u.role === 'admin' && u.source !== 'ad').map(([n]) => n)
+const isLastAdmin = (users, name) => users[name]?.source !== 'ad' && users[name]?.role === 'admin' && admins(users).length <= 1
 
 /**
  * @returns {Promise<[number, object]|null>} null when the path is not ours
@@ -84,6 +88,8 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     if (!NAME_RE.test(name)) throw new HttpError(400, 'A user name is letters, digits and . _ @ - (up to 64)')
     if (!ROLES.includes(role)) throw new HttpError(400, 'role must be viewer, watch or admin')
     const existed = Object.hasOwn(users, name)
+    const adTwin = Object.entries(users).find(([u, v]) => v.source === 'ad' && u.toLowerCase() === name.toLowerCase())
+    if (adTwin) throw new HttpError(409, `${adTwin[0]} signs in with Windows (Active Directory): their role comes from their AD group, and they have no Argus password`)
     // sign-in ignores capitals (auth.accountName), so two names that differ only in them would be one
     const twin = existed ? null : Object.keys(users).find((u) => u.toLowerCase() === name.toLowerCase())
     if (twin) throw new HttpError(409, `There is already an account called ${twin}: user names do not depend on capitals`)
@@ -111,7 +117,7 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     const name = decodeURIComponent(m[1])
     if (!Object.hasOwn(users, name)) throw new HttpError(404, 'No such user')
     if (name === who.user) throw new HttpError(409, 'You cannot remove your own account')
-    if (users[name].role === 'admin' && admins(users).length <= 1) throw new HttpError(409, `${name} is the only admin`)
+    if (isLastAdmin(users, name)) throw new HttpError(409, `${name} is the only admin`)
     delete users[name]
     saveUsers(users)
     userSessions.forget(name)

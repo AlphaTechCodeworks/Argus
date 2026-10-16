@@ -41,8 +41,21 @@ export function parseProbeMatch(xml, from) {
   const name = scope(scopes, 'name')
   let port = 80
   try { port = Number(new URL(xaddrs[0]).port) || 80 } catch {}
-  const recorder = /\b(N|D|X|H)VR|NVR/i.test(`${model} ${name}`)
-  return { ip: from, name: name && name !== model ? name : '', model: model || null, type: recorder ? 'NVR' : 'IP camera', port, onvif: xaddrs[0] || null }
+  const maker = makerOf(scopes, model)
+  // (Hikvision's recorders are DS-7xxx/8xxx/9xxx and name themselves "Network Video Recorder"; its cameras are DS-2xxx)
+  const recorder = /\b(N|D|X|H)VR|NVR|recorder/i.test(`${model} ${name}`) || (maker === 'Hikvision' && /^i?DS-[789]\d{3}/i.test(model))
+  return { ip: from, name: name && name !== model ? name : '', model: model || null, type: recorder ? 'NVR' : 'IP camera', port, onvif: xaddrs[0] || null, maker }
+}
+
+/**
+ * The maker, when the answer gives it away: Hikvision devices name themselves "HIKVISION ..." in their
+ * scopes, and Hikvision model numbers start DS- (iDS- for the AI range). Anything else: null.
+ */
+export function makerOf(scopes, model) {
+  let s = String(scopes ?? '')
+  try { s = decodeURIComponent(s) } catch {}
+  if (/hikvision/i.test(s) || /^i?DS-\d/i.test(String(model ?? '').trim())) return 'Hikvision'
+  return null
 }
 
 /** Sends the Probe twice (UDP can lose one) and gathers the answers for waitMs. */

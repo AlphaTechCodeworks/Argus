@@ -283,6 +283,50 @@
       </ol>
       <p class="hp-note">For the app to use these links, this server must itself be on the tailnet with subnet routes accepted. The installer is built with your tailnet key and placed on this server by an admin; it is not part of the app.</p>
     </section>
+    <section class="se-section" data-tab="directory" aria-labelledby="ad-title">
+      <h2 id="ad-title">Windows sign-in (Active Directory)</h2>
+      <p class="st-help">Lets staff sign in with their Windows user name and password. What they may do comes from the AD group they are in: <b>CCTV Admins</b> are admins, <b>CCTV Viewers</b> are viewers, <b>CCTV Watch-only</b> watch only. Someone in none of them cannot sign in. Local Argus accounts keep working and always come first: keep one local admin for when the domain controllers cannot be reached.</p>
+      <p id="ad-status" class="st-help" role="status">Loading…</p>
+      <form id="ad-form" class="se-grid" autocomplete="off">
+        <label class="se-wide"><input id="ad-enabled" type="checkbox" /> Let staff sign in with their Windows account</label>
+        <label class="se-wide"><input id="ad-pwchange" type="checkbox" /> Let AD users change their Windows password in Argus (it changes on their PC too; when it has expired, this needs the look-up account below)</label>
+        <label class="se-wide">Domain controllers, tried in this order (one per line)
+          <textarea id="ad-servers" rows="2" spellcheck="false" autocapitalize="off"></textarea>
+        </label>
+        <label>Domain <input id="ad-domain" spellcheck="false" autocapitalize="off" placeholder="JFL.LOCAL" /></label>
+        <label>Base DN <input id="ad-basedn" spellcheck="false" autocapitalize="off" placeholder="DC=JFL,DC=LOCAL" /></label>
+        <label>AD group for Admins <input id="ad-g-admin" spellcheck="false" /></label>
+        <label>AD group for Viewers <input id="ad-g-viewer" spellcheck="false" /></label>
+        <label>AD group for Watch only <input id="ad-g-watch" spellcheck="false" /></label>
+        <label>Hours a session lasts if the domain controllers cannot be reached <input id="ad-grace" type="number" min="0.25" max="72" step="0.25" /></label>
+        <details class="se-wide">
+          <summary>Look-up account (optional, for re-checks)</summary>
+          <p class="st-help">With a look-up account, Argus checks every few minutes that each signed-in Windows user is still in a CCTV group and not disabled, and signs them out at once if not. It can be an ordinary domain user with no other rights; its password is kept on this server only. Without one, Windows users simply sign in again after the hours above.</p>
+          <label>Look-up account <input id="ad-lookup-user" spellcheck="false" autocapitalize="off" placeholder="e.g. svc-cctv" /></label>
+          <label>Its password <input id="ad-lookup-pass" type="password" autocomplete="new-password" placeholder="leave empty to keep" /></label>
+          <label>Re-check every <input id="ad-recheck" type="number" min="5" max="240" /> minutes</label>
+        </details>
+        <div class="se-actions se-wide"><button type="submit" class="st-primary">Save</button><span id="ad-msg" class="st-meta" role="status"></span></div>
+      </form>
+
+      <h3>Certificates</h3>
+      <p class="st-help">Argus talks to the domain controllers over an encrypted connection (LDAPS, port 636) and only to ones it trusts. Press <b>Check connection</b> for each, compare the fingerprint with the one on the domain controller if you can, then press <b>Trust this certificate</b>. A domain controller's certificate is renewed about once a year: check and trust it again then.</p>
+      <div id="ad-servers-trust"></div>
+      <details>
+        <summary>Or trust the domain's CA certificate instead</summary>
+        <p class="st-help">Paste the domain CA's certificate (exported as "Base-64 encoded X.509"). Every domain controller whose certificate it signed is then trusted, as long as the name in the certificate matches the address above (use the DC's name, e.g. DC01.JFL.LOCAL, not its IP address).</p>
+        <textarea id="ad-ca" rows="5" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+        <p><button type="button" id="ad-ca-save">Save CA certificate</button> <span id="ad-ca-msg" class="st-meta" role="status"></span></p>
+      </details>
+
+      <h3>Test a sign-in</h3>
+      <p class="st-help">Type someone's Windows user name and password to see what they would get, with the settings above (saved or not). The password is used once and not kept.</p>
+      <form id="ad-test" class="se-grid" autocomplete="off">
+        <label>User name <input id="ad-test-user" spellcheck="false" autocapitalize="off" autocomplete="off" /></label>
+        <label>Password <input id="ad-test-pass" type="password" autocomplete="off" /></label>
+        <div class="se-actions se-wide"><button type="submit">Test</button><span id="ad-test-msg" class="st-meta" role="status"></span></div>
+      </form>
+    </section>
     <section class="se-section" data-tab="server" aria-labelledby="srv-title">
       <h2 id="srv-title">Restart the server</h2>
       <p class="st-help">Stops and starts the Argus server. Live video and server recording pause for about 10 seconds, then every camera reconnects by itself. The NVRs keep recording to their own disks throughout. Only an admin can do this.</p>
@@ -337,6 +381,7 @@
   <script type="module" src="settings.js"></script>
   <script type="module" src="settings-tabs.js"></script>
   <script type="module" src="connector.js"></script>
+  <script type="module" src="ad-settings.js"></script>
   <script type="module" src="rtsp-links.js"></script>
   <script type="module" src="storage.js"></script>
   <script type="module" src="alert-banner.js"></script>

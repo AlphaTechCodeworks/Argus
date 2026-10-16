@@ -336,11 +336,20 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       rm.className = 'btn-ghost'
       rm.textContent = 'Remove'
       rm.addEventListener('click', async () => {
-        if (!confirm(`Remove the account ${u.name}? They can no longer sign in.`)) return
+        if (!confirm(fromAd ? `Forget ${u.name}? Their sessions end and their rights here are removed. While they are in a CCTV group in Active Directory they can sign in again, starting with no rights.` : `Remove the account ${u.name}? They can no longer sign in.`)) return
         try { await usersApi('DELETE', `/${encodeURIComponent(u.name)}`); uSay(`Removed ${u.name}`); loadUsers(); loadRights() } catch (e) { uSay(e.message, true) }
       })
       const name = document.createElement('td'); name.textContent = u.name
       const role = document.createElement('td'); role.textContent = u.role === 'admin' ? 'Admin' : u.role === 'watch' ? 'Watch only' : 'Viewer'
+      // a Windows (Active Directory) user: its role is its AD group's, it has no Argus password
+      const fromAd = u.source === 'ad'
+      if (fromAd) {
+        if (u.displayName) name.append(el('div', { className: 'st-meta', textContent: u.displayName }))
+        name.append(' ', el('span', { className: 'ac-badge', textContent: 'Active Directory', title: 'Signs in with their Windows account' }))
+        role.append(el('div', { className: 'st-meta', textContent: 'from their AD group' }))
+        rm.textContent = 'Forget'
+        rm.title = 'Removes their record and rights here; if still in a CCTV group they can sign in again, starting with no rights'
+      }
       const connections = el('td')
       const sessions = Array.isArray(u.sessions) ? u.sessions : []
       if (!sessions.length) connections.textContent = 'Not connected'
@@ -362,7 +371,7 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       const setup = el('button', { type: 'button', className: 'btn-ghost', textContent: 'Set up a phone' })
       setup.setAttribute('aria-label', `Show a set-up QR code for ${u.name}`)
       setup.addEventListener('click', () => openSetupCode(u.name))
-      const act = document.createElement('td'); act.className = 'ac-user-actions'; act.append(edit, setup, reset, kick, rm)
+      const act = document.createElement('td'); act.className = 'ac-user-actions'; act.append(edit, setup, ...(fromAd ? [] : [reset]), kick, rm)
       tr.append(name, role, connections, act)
       return tr
     }))

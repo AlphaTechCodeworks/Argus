@@ -84,6 +84,16 @@ export function makeSetupCodes(file, { now = Date.now, random = randomBytes } = 
       const kept = live(all).filter((e) => e.user !== user)
       if (kept.length !== all.length) save(kept)
     },
+    /** An account renamed (AD, ad.mjs): its unused codes follow it. @returns {() => void} undoes it */
+    rename(from, to) {
+      const move = (a, b) => {
+        const all = load()
+        if (!all.some((e) => e.user === a)) return false
+        save(all.map((e) => (e.user === a ? { ...e, user: b } : e)))
+        return true
+      }
+      return move(from, to) ? () => move(to, from) : () => {}
+    },
     /** How many unused codes there are for an account (the page says one is waiting). */
     pending(user) {
       return live(load()).filter((e) => e.user === user).length

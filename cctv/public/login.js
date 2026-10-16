@@ -39,6 +39,8 @@ form.addEventListener('submit', async (e) => {
       return
     }
     const body = await res.json().catch(() => ({}))
+    // AD says this Windows password must be changed first: offer that here
+    if (body.canChangePassword) { showWindowsChange(form.user.value.trim()); return }
     error.textContent = body.error ?? 'Sign in failed'
     error.hidden = false
     form.password.select()
@@ -50,3 +52,44 @@ form.addEventListener('submit', async (e) => {
     button.textContent = label
   }
 })
+
+// ---- a Windows (AD) password that must be changed before signing in (ad.mjs changeExpired) ----
+const win = document.getElementById('winPassword')
+const winError = document.getElementById('winError')
+function showWindowsChange(user) {
+  form.hidden = true
+  win.hidden = false
+  win.dataset.user = user
+  document.getElementById('winUser').textContent = user
+  winError.hidden = true
+  document.getElementById('winCurrent').focus()
+}
+document.getElementById('winCancel')?.addEventListener('click', () => { win.reset(); win.hidden = true; form.hidden = false; form.password.value = '' })
+win?.addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const next = document.getElementById('winNew')
+  const again = document.getElementById('winConfirm')
+  again.setCustomValidity(next.value === again.value ? '' : 'The new passwords are not the same')
+  if (!win.reportValidity()) return
+  const button = win.querySelector('button[type="submit"]')
+  button.disabled = true
+  winError.hidden = true
+  try {
+    const res = await fetch('/api/login/windows-password', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user: win.dataset.user, currentPassword: document.getElementById('winCurrent').value, newPassword: next.value }) })
+    const body = await res.json().catch(() => ({}))
+    if (res.ok) {
+      win.reset()
+      alert(body.message ?? 'Your Windows password has been changed. Use the new one on your PC too.')
+      location.href = '/'
+      return
+    }
+    winError.textContent = body.error ?? 'The password was not changed.'
+    winError.hidden = false
+  } catch {
+    winError.textContent = 'Cannot reach the server'
+    winError.hidden = false
+  } finally {
+    button.disabled = false
+  }
+})
+document.getElementById('winConfirm')?.addEventListener('input', (e) => e.target.setCustomValidity(''))

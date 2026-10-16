@@ -164,15 +164,24 @@ export const verifySession = (token, { allowPasswordChange = false } = {}) => {
   const since = users[user]?.since
   if (Number.isFinite(since) && Number(parts[1]) - SESSION_TTL_MS < since) return null
   if (users[user]?.mustChangePassword && !allowPasswordChange) return null
+  // An Active Directory user (ad.mjs) is good only while the directory's last "yes" holds: re-checks
+  // move adValidUntil on; removal from the CCTV groups, or no answer for longer than the grace, ends it.
+  if (users[user]?.source === 'ad' && !(users[user].adValidUntil > Date.now())) return null
   return user
 }
 
 export const mustChangePassword = (user) => loadUsers()[user]?.mustChangePassword === true
 
+// A Windows (Active Directory) user's password is AD's: ad.mjs hands in how to change it there.
+let windowsPasswordChanger = null
+/** @param {(user: string, current: string, next: string) => Promise<{ ok: true } | { error: string }>} fn */
+export const setWindowsPasswordChanger = (fn) => { windowsPasswordChanger = fn }
+
 /** Change only the signed-in account, preserving role, rights and personal settings. */
 export async function changePassword(user, currentPassword, newPassword) {
   if (typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 1024) return { error: 'Use a password between 8 and 1024 characters.' }
   const before = loadUsers()[user]
+  if (before?.source === 'ad') return windowsPasswordChanger ? windowsPasswordChanger(user, String(currentPassword ?? ''), newPassword) : { error: 'Your password is your Windows password: change it on a Windows PC.' }
   if (!before || !(await checkLogin(user, currentPassword))) return { error: 'The current password is incorrect.' }
   if (await checkLogin(user, newPassword)) return { error: 'Choose a different password from the temporary password.' }
   const hash = await hashPassword(newPassword)
