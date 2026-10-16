@@ -46,6 +46,12 @@ export const REF_EVERY = 4
 export const BRIGHT_JUMP = 25
 /** ...or in colour (mean distance from grey, 0-255): the camera switching to infrared and back. */
 export const COLOUR_JUMP = 10
+/**
+ * A picture at least this wide is moved by whole pixels, a row at a time (a memory copy), not between
+ * pixels: at 1920 wide moving each pixel took longer than a camera's picture lasts (g-port/3's main
+ * stream, 2026-10-16), and a pixel there is a fifth of one at 704, finer than the sub-stream's lock.
+ */
+export const WHOLE_PIXEL_WIDTH = 1000
 /** Unsure for this long (a new view, a covered lens): the background is taken again from the picture. */
 export const UNSURE_RESET_S = 2
 
@@ -300,6 +306,17 @@ export class Locker {
    */
   #shift(src, w, h, dx, dy, at) {
     const out = this.canvas
+    if (this.width >= WHOLE_PIXEL_WIDTH) {
+      const ix = Math.round(dx)
+      const iy = Math.round(dy)
+      const x0 = Math.max(0, -ix)
+      const x1 = Math.min(w, w - ix)
+      for (let y = Math.max(0, -iy); y < Math.min(h, h - iy); y++) {
+        const s = (y + iy) * w + ix
+        src.copy(out, at + y * w + x0, s + x0, s + x1)
+      }
+      return
+    }
     const ix = Math.floor(dx)
     const iy = Math.floor(dy)
     const fx = dx - ix

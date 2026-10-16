@@ -6,7 +6,7 @@
 //   node cctv/test/steady-lock.test.mjs
 import { EventEmitter } from 'node:events'
 import {
-  InlineLocker, LockTranscoder, Locker, MAX_SHIFT_SHARE, RESET_SAY_MS, Y4mReader, decodeArgs, encodeArgs, fft2
+  InlineLocker, LockTranscoder, Locker, MAX_SHIFT_SHARE, RESET_SAY_MS, WHOLE_PIXEL_WIDTH, Y4mReader, decodeArgs, encodeArgs, fft2
 } from '../steady-lock.mjs'
 import { CODEC_H264, CODEC_H265 } from '../transcode.mjs'
 
@@ -114,6 +114,31 @@ const view = (ox, oy, { uv = 140, light = 0 } = {}) => {
   L.process(view(33, 30))
   const big = L.process(view(30 + MAX_SHIFT_SHARE * W * 1.2 + 3, 30))
   check('a jump bigger than the wind could make is not followed: moved as the picture before', Math.abs(big.dx + 3) < 0.4, big.dx.toFixed(2))
+}
+{
+  // full quality (at least WHOLE_PIXEL_WIDTH wide): moved by whole pixels, a row at a time
+  const BW = WHOLE_PIXEL_WIDTH + 24
+  const BH = 200
+  const scene = new Uint8Array((BW + 40) * BH)
+  for (let k = 0; k < 120; k++) {
+    const cx = rnd() * (BW + 40)
+    const cy = rnd() * BH
+    const r = 4 + rnd() * 30
+    const v = 40 + rnd() * 180
+    for (let y = Math.max(0, (cy - r) | 0); y < Math.min(BH, cy + r); y++) for (let x = Math.max(0, (cx - r) | 0); x < Math.min(BW + 40, cx + r); x++) if ((x - cx) ** 2 + (y - cy) ** 2 < r * r) scene[y * (BW + 40) + x] = v
+  }
+  const big = (ox) => {
+    const f = Buffer.alloc(BW * BH * 1.5, 128)
+    for (let y = 0; y < BH; y++) for (let x = 0; x < BW; x++) f[y * BW + x] = scene[y * (BW + 40) + x + ox]
+    return f
+  }
+  const L = new Locker({ width: BW, height: BH })
+  L.process(big(10))
+  const r = L.process(big(15))
+  const row = 120 * BW
+  let match = 0
+  for (let x = 0; x < BW - 10; x++) if (r.frame[row + x] === big(10)[row + x]) match++
+  check('a full-quality picture is moved back by whole pixels, onto its background exactly', Math.round(r.dx) === -5 && match === BW - 10, `${r.dx.toFixed(2)}, ${match} of ${BW - 10}`)
 }
 check('a picture that is not even sized cannot be steadied', (() => { try { new Locker({ width: 353, height: 198 }); return false } catch { return true } })())
 

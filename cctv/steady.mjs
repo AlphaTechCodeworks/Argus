@@ -15,9 +15,10 @@
 // conversions for office PCs share theirs: h264-fallback.mjs), started when the first viewer comes and
 // stopped LINGER_MS after the last leaves. Every live viewer of the camera gets it -- grid tiles, the
 // full-size view, phones, viewers from outside, the Android app: they all come through live-attach.mjs.
-// A viewer who asks for the main stream (full quality) gets it too: full quality is not offered while
-// the camera is steadied, and its tile says "Steady picture" (live-tile.js). That is simpler and safer
-// than a refusal, which every page would need code to handle; this needs none.
+// A viewer who asks for the main stream (full quality) gets the main stream steadied, at most
+// STEADY_MAIN_WIDTH wide (attach main), within the recorder's full-quality limit and a cap of its own
+// (CCTV_STEADY_MAIN_MAX, 2: about 2 cores each). Past either, the steadied standard picture: never a
+// refusal, which every page would need code to handle. Its tile says "Steady picture" (live-tile.js).
 //
 // How many cameras are steadied at once has a cap of its own (CCTV_STEADY_MAX, DEFAULT_MAX: 4, about
 // 2 cores), apart from every other conversion's budget so that neither starves the other, and counted
@@ -42,6 +43,17 @@ import { TranscodePool } from './transcode.mjs'
 
 /** A steadied picture is at most this wide (never wider than the camera's own sub-stream). */
 export const STEADY_WIDTH = 704
+/**
+ * Full quality steadied (a viewer asking for the main stream of a steadied camera): the main stream,
+ * scaled to at most this wide. Measured on the server with g-port/3's 2560x1440 H.265 main stream:
+ * 1920 wide keeps up at about 2 cores a camera (moved by whole pixels: steady-lock.mjs
+ * WHOLE_PIXEL_WIDTH); 2560 fell behind the camera.
+ */
+export const STEADY_MAIN_WIDTH = 1920
+export const STEADY_MAIN_KBPS = 6000
+export const MAIN_ENCODER_THREADS = 2
+/** How many cameras may be steadied in full quality at once, unless CCTV_STEADY_MAIN_MAX says otherwise. */
+export const DEFAULT_MAIN_MAX = 2
 /** The encoder's settings: veryfast on one thread is what was measured (about half a core a camera, all in). */
 export const STEADY_PRESET = 'veryfast'
 export const STEADY_CRF = 22
@@ -88,11 +100,20 @@ export const STREAM = Object.freeze({
 })
 
 /** The cap, from the environment; a bad or missing value means 4. 0: off (nothing is ever steadied). */
-export function maxSteady(env = process.env) {
-  const raw = env.CCTV_STEADY_MAX
+export function maxSteady(env = process.env, name = 'CCTV_STEADY_MAX', fallback = DEFAULT_MAX) {
+  const raw = env[name]
   const n = raw == null || String(raw).trim() === '' ? NaN : Number(raw)
-  return Number.isInteger(n) && n >= 0 && n <= 16 ? n : DEFAULT_MAX
+  return Number.isInteger(n) && n >= 0 && n <= 16 ? n : fallback
 }
+
+/** The cap on full quality steadied at once (CCTV_STEADY_MAIN_MAX, default 2; 0: never, the standard picture). */
+export const maxSteadyMain = (env = process.env) => maxSteady(env, 'CCTV_STEADY_MAIN_MAX', DEFAULT_MAIN_MAX)
+
+/** The full-quality stream of a camera, as the shared streams are keyed ("nvr-2/4:main"). */
+const mainId = (key) => `${key}:main`
+
+/** How a full-quality steadied stream runs: STREAM, but the main stream, at most STEADY_MAIN_WIDTH wide. */
+export const MAIN_STREAM = Object.freeze({ ...STREAM, type: 0, maxWidth: STEADY_MAIN_WIDTH, mainKbps: STEADY_MAIN_KBPS })
 
 /** A camera as this file keys it: its NVR and channel from 0 ("nvr-2/4"), as event-rules.mjs cameraKey. */
 export const steadyKey = (nvr, ch) => `${nvr}/${Number(ch)}`
@@ -165,9 +186,10 @@ export class SteadyLive {
    *   max: the cap (maxSteady); isOn: the setting, by key (steadyStore has); makeTranscoder, now,
    *   stopDelayMs, defer: for tests
    */
-  constructor({ max = maxSteady(), isOn = () => false, makeTranscoder = (o) => new LockTranscoder(o), log = (l) => console.log(l), now = () => Date.now(), stopDelayMs = LINGER_MS, defer = queueMicrotask } = {}) {
+  constructor({ max = maxSteady(), mainMax = maxSteadyMain(), isOn = () => false, makeTranscoder = (o) => new LockTranscoder(o), log = (l) => console.log(l), now = () => Date.now(), stopDelayMs = LINGER_MS, defer = queueMicrotask } = {}) {
     Object.assign(this, { isOn, makeTranscoder, log, now, stopDelayMs, defer })
     this.pool = new TranscodePool(max)
+    this.mainPool = new TranscodePool(mainMax) // full quality: its own cap, about 2 cores each
     this.streams = new Map() // key -> PhoneStream
     this.failed = new Map() // key -> when its conversion was given up
     this.waiting = new Map() // key -> sockets playing the camera's own stream for want of room
@@ -208,18 +230,22 @@ export class SteadyLive {
    * @returns {true|string} true: attached; else BUSY or FAILED, and the caller gives it the camera's own
    *   stream (and the note: noteNotSteady). A BUSY one is moved onto a place when one frees.
    */
-  attach(key, source, ws, { camera } = {}) {
-    let s = this.streams.get(key)
+  attach(key, source, ws, { camera, main = false } = {}) {
+    // full quality (main): its own stream and cap; past the cap the caller falls back to the steadied
+    // standard picture, so a full-quality viewer never waits for a place
+    const id = main ? mainId(key) : key
+    let s = this.streams.get(id)
     // made on a stream that is not the camera's any more (its NVR edited and made again), or ended:
     // closed (its viewers connect again) and made again on this one, as phone-live.mjs does
     if (s && !s.closed && (s.source !== source || ended(s.source))) s.close()
     if (!s || s.closed) {
-      const at = this.failed.get(key)
+      const at = this.failed.get(id)
       if (at !== undefined) {
         if (this.now() - at < FAILED_QUIET_MS) return FAILED
-        this.failed.delete(key)
+        this.failed.delete(id)
       }
-      const slot = this.#slot()
+      const slot = this.#slot(main)
+      if (!slot && main) return BUSY
       if (!slot) {
         this.refused++
         const t = this.now()
@@ -232,16 +258,16 @@ export class SteadyLive {
       }
       s = new PhoneStream({
         source, slot, camera, tag: 'steady',
-        makeTranscoder: (o) => this.#make(key, o),
+        makeTranscoder: (o) => this.#make(id, { ...o, encThreads: main ? MAIN_ENCODER_THREADS : ENCODER_THREADS }),
         log: this.log, now: this.now, stopDelayMs: this.stopDelayMs,
-        ...STREAM,
+        ...(main ? MAIN_STREAM : STREAM),
         onEmpty: () => {
-          if (this.streams.get(key) === s) this.streams.delete(key)
+          if (this.streams.get(id) === s) this.streams.delete(id)
         }
       })
       // (made and closed in one go when its conversion fails at its very first frame)
       if (s.closed) return FAILED
-      this.streams.set(key, s)
+      this.streams.set(id, s)
     }
     s.add(ws)
     ws.on?.('close', () => s.remove(ws))
@@ -255,7 +281,7 @@ export class SteadyLive {
     const x = this.makeTranscoder({
       ...o,
       preset: STEADY_PRESET,
-      encThreads: ENCODER_THREADS,
+      encThreads: o.encThreads ?? ENCODER_THREADS,
       onFail: (e) => {
         o.onFail?.(e)
         this.#failed(key, e?.message ?? String(e))
@@ -284,13 +310,14 @@ export class SteadyLive {
   }
 
   /** A place, or null. One nobody watches any more gives its place up, the one left longest first. */
-  #slot() {
-    let slot = this.pool.acquire()
+  #slot(main = false) {
+    const pool = main ? this.mainPool : this.pool
+    let slot = pool.acquire()
     if (!slot) {
-      const idle = [...this.streams.values()].filter((s) => !s.closed && s.clients.size === 0).sort((a, b) => (a.emptyAt ?? -Infinity) - (b.emptyAt ?? -Infinity))
+      const idle = [...this.streams].filter(([id, s]) => id.endsWith(':main') === main && !s.closed && s.clients.size === 0).map(([, s]) => s).sort((a, b) => (a.emptyAt ?? -Infinity) - (b.emptyAt ?? -Infinity))
       for (const s of idle) {
         s.close()
-        if ((slot = this.pool.acquire())) break
+        if ((slot = pool.acquire())) break
       }
     }
     if (!slot) return null
@@ -332,6 +359,8 @@ export class SteadyLive {
     this.failed.delete(key)
     this.waiting.delete(key)
     this.streams.get(key)?.close()
+    this.streams.get(mainId(key))?.close()
+    this.failed.delete(mainId(key))
     for (const ws of [...(this.viewers.get(key) ?? [])]) {
       if (isOpen(ws)) ws.close?.(MOVE_CODE, MOVE_REASON)
     }
@@ -341,7 +370,7 @@ export class SteadyLive {
   summary() {
     let viewers = 0
     for (const s of this.streams.values()) viewers += s.clients.size
-    return { running: this.pool.active, cap: this.pool.max, viewers, refused: this.refused }
+    return { running: this.pool.active, cap: this.pool.max, mainRunning: this.mainPool.active, mainCap: this.mainPool.max, viewers, refused: this.refused }
   }
 }
 
