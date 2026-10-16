@@ -351,12 +351,22 @@ export class Y4mReader {
   constructor({ onHeader, onFrame }) {
     Object.assign(this, { onHeader, onFrame })
     this.buf = Buffer.alloc(0)
+    this.chunks = [] // pieces not joined yet, and how many bytes they hold
+    this.held = 0
     this.header = null
     this.size = 0
   }
 
   push(chunk) {
-    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : Buffer.from(chunk)
+    // Joined only once a whole picture is in: ffmpeg writes 64 KB at a time, and joining each piece
+    // to what came before copied a 1920x1080 picture (3 MB) about 47 times over, 1.4 GB a second on
+    // the main thread at 20 a second: full quality steadied fell behind the camera (2026-10-16).
+    this.chunks.push(chunk)
+    this.held += chunk.length
+    if (this.header && this.buf.length + this.held < this.size + 6) return
+    this.buf = Buffer.concat([this.buf, ...this.chunks])
+    this.chunks = []
+    this.held = 0
     for (;;) {
       const nl = this.buf.indexOf(10)
       if (!this.header) {
