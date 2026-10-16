@@ -74,7 +74,11 @@ export function makeRtsp({ dataDir, appDir, httpPort, nvrs, mainLimit, audit = (
   const secret = randomBytes(24).toString('hex') // this boot's
   const envOff = env.CCTV_RTSP === 'off'
   const port = (() => { const n = Number(env.CCTV_RTSP_PORT); return Number.isInteger(n) && n > 0 && n < 65536 ? n : DEFAULT_PORT })()
-  const udp = env.CCTV_RTSP_UDP !== 'off'
+  // TCP only unless CCTV_RTSP_UDP=on: over UDP a lost packet of a big stream smears the picture grey
+  // until the next keyframe (2026-10-16: the container reader on the test PC pulled Lawrence 14 in 4K
+  // H.265 over UDP, grey and broken, while the app's own view was perfect). Offered only TCP, a program
+  // asking for UDP is told so (461) and asks again over TCP by itself (ffmpeg, VLC and OpenCV do).
+  const udp = env.CCTV_RTSP_UDP === 'on'
   const ffmpeg = env.CCTV_FFMPEG || 'ffmpeg'
   let store = readStore(file)
   let lastSaved = 0
