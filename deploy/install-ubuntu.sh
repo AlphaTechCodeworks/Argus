@@ -74,6 +74,10 @@ dest="/opt/cctv/releases/$release"
 mkdir -p /opt/cctv/releases
 rm -rf "$dest"
 cp -a "$here" "$dest"
+# dated now: cp -a keeps the date of what it copied, and a code-only push copies the live release, so
+# every release carried the same old date and "the three newest" below was a coin toss. On 2026-10-16
+# it removed the release that was running, and every page then failed (ENOENT) until a new one was put in.
+touch "$dest"
 chown -R root:root "$dest"
 chmod -R go-w "$dest"
 # Before switching: remember the live release and how many NVRs are online right now. The deploy is
@@ -204,6 +208,10 @@ if [ "$baseline" -gt 0 ] && [ -n "${prev:-}" ] && [ "$prev" != "$dest" ]; then
 fi
 
 # gate passed: now it is safe to prune older releases (keep the three newest)
-ls -1dt /opt/cctv/releases/*/ | tail -n +4 | xargs -r rm -rf || true
+# (never the one running, whatever the dates say)
+live="$(readlink -f /opt/cctv/current)"
+ls -1dt /opt/cctv/releases/*/ | tail -n +4 | while read -r old; do
+  [ "$(readlink -f "$old")" = "$live" ] || rm -rf "$old"
+done || true
 echo "OK: CCTV $release is running"
 exit 0
