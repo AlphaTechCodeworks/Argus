@@ -1,5 +1,5 @@
 // "Steady picture" (steady.mjs): the setting's store, the cap on cameras steadied at once, the
-// conversion's settings (deshake after the 704-wide scale), giving up a conversion that fails or keeps
+// conversion's settings (locked to the background at 704 wide: steady-lock.mjs), giving up a conversion that fails or keeps
 // falling behind, moving viewers when the setting changes or a place frees, which viewers live-attach.mjs
 // sends to it, and the admin route. Fake sources, sockets and converters: no ffmpeg, no SDK.
 //   node cctv/test/steady.test.mjs
@@ -10,6 +10,7 @@ import {
   BUSY, DEFAULT_MAX, FAILED, FAILED_QUIET_MS, MOVE_CODE, MOVE_REASON, READY_REASON, STALL_RESETS, STEADY_PATH, STEADY_PRESET, STEADY_WIDTH,
   SteadyLive, handleSteady, maxSteady, steadyKey, steadyStore
 } from '../steady.mjs'
+import { LockTranscoder } from '../steady-lock.mjs'
 import { CODEC_H264, CODEC_H265, Transcoder, ffmpegArgs } from '../transcode.mjs'
 
 let failures = 0
@@ -27,6 +28,9 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
   check('not steadied: no deshake anywhere (every other conversion as it was)', !plain.join(' ').includes('deshake') && plain[plain.indexOf('-vf') + 1] === 'scale=min(704\\,iw):-2')
   check('... nor with deshake anything but true', !ffmpegArgs({ deshake: 'yes' }).join(' ').includes('deshake') && !ffmpegArgs({}).includes('-vf'))
   check('a steadying Transcoder is software, whatever the box has (the GPU path has no filters)', new Transcoder({ deshake: true, onFrame() {} }).encoder === 'libx264')
+  // what steadies now: the lock to the background, not deshake (it followed the sway: steady-lock.mjs)
+  const real = new SteadyLive({ max: 1, isOn: () => true })
+  check('a steadied camera is converted by the lock to the background (LockTranscoder), not deshake', real.makeTranscoder({ onFrame() {} }) instanceof LockTranscoder)
 }
 
 // ---- the cap ----------------------------------------------------------------------------------------
@@ -97,7 +101,7 @@ const fakeMaker = (o) => {
   for (let i = 0; i < 14; i++) sources[0].send(frame(i))
   const x = makers[0]
   check('an H.264 camera is converted all the same (the conversion is what steadies it)', x && x.pushed > 0, String(x?.pushed))
-  check('... steadied, 704 wide at most, veryfast on one thread, every frame kept', x.o.deshake === true && x.o.maxWidth === STEADY_WIDTH && x.o.preset === 'veryfast' && x.o.encThreads === 1 && x.o.keepEvery === 1, J({ ...x.o, onFrame: undefined, onFail: undefined, log: undefined }))
+  check('... 704 wide at most (no deshake: the converter is what steadies), veryfast on one thread, every frame kept', x.o.deshake === undefined && x.o.maxWidth === STEADY_WIDTH && x.o.preset === 'veryfast' && x.o.encThreads === 1 && x.o.keepEvery === 1, J({ ...x.o, onFrame: undefined, onFail: undefined, log: undefined }))
   x.o.onFrame(1000, true, Buffer.from([0, 0, 0, 1, 0x65, 9]))
   check('its pictures go to every viewer of the camera as H.264', viewers[0].got.length === 1 && second.got.length === 1 && viewers[0].got[0][1] === CODEC_H264)
 

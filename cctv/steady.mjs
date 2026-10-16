@@ -1,14 +1,15 @@
 // "Steady picture": a camera that shakes (on a pole in the wind, on a gate post) is steadied on the
 // server, for every live viewer of it, when an admin has switched it on for that camera. The cameras
 // have no stabilisation of their own (queryChlVideoParam on 9 cameras over 3 NVRs, 2026-10-14: no
-// antiShake / EIS), so the server does it with ffmpeg's one-pass deshake filter. (vidstab is two-pass
-// and has to see the future: no use for live view.)
+// antiShake / EIS), so the server does it: each picture is locked to the camera's own background and
+// its empty edge kept from the picture before (steady-lock.mjs LockTranscoder). ffmpeg's deshake, used
+// first, followed the sway instead of cancelling it (2026-10-16, g-port/3 in the wind: "it dont work";
+// on a measured clip it left 6.9 of 8.8 px, the lock 0.10).
 //
-// What it costs, measured on the production server (8 cores) with a real 1280x720 20 fps H.265
-// sub-stream, paced as the camera sends, libx264 veryfast on one thread: converting it alone, scaled
-// to 704 wide, 16 % of a core; scaled and then steadied 38 %; a wider search (rx=ry=32) 46 %; steadied
-// at full size 89 %. So: the sub-stream, scaled to STEADY_WIDTH first, deshake with its defaults after
-// the scale (transcode.mjs ffmpegArgs deshake), H.264 out at the camera's own frame rate.
+// What it costs, measured on the production server (Xeon Gold 5317, 8 cores) with a 704-wide 20 fps
+// stream paced as the camera sends, libx264 veryfast on one thread: about half a core per camera
+// (decode, lock in a worker thread, encode), pictures out 0.1 s after they go in. So: the sub-stream,
+// scaled to STEADY_WIDTH, H.264 out at the camera's own frame rate.
 //
 // One conversion per camera, shared by everybody watching it (phone-live.mjs PhoneStream, as the H.264
 // conversions for office PCs share theirs: h264-fallback.mjs), started when the first viewer comes and
@@ -19,7 +20,7 @@
 // than a refusal, which every page would need code to handle; this needs none.
 //
 // How many cameras are steadied at once has a cap of its own (CCTV_STEADY_MAX, DEFAULT_MAX: 4, about
-// 1.5 cores), apart from every other conversion's budget so that neither starves the other, and counted
+// 2 cores), apart from every other conversion's budget so that neither starves the other, and counted
 // in the minute history (metrics-history.mjs other.steady). A camera past it plays as it always did and
 // its tiles say "Steady picture paused: the server is busy"; when a place frees, those viewers are moved
 // onto it (closed with MOVE_CODE: their tiles connect again at once and are steadied this time).
@@ -36,11 +37,12 @@
 import { readFileSync } from 'node:fs'
 import { writeFileAtomicSync } from './atomic-write.mjs'
 import { ended, PhoneStream } from './phone-live.mjs'
-import { Transcoder, TranscodePool } from './transcode.mjs'
+import { LockTranscoder } from './steady-lock.mjs'
+import { TranscodePool } from './transcode.mjs'
 
 /** A steadied picture is at most this wide (never wider than the camera's own sub-stream). */
 export const STEADY_WIDTH = 704
-/** The encoder's settings: veryfast on one thread is what was measured (38 % of a core). */
+/** The encoder's settings: veryfast on one thread is what was measured (about half a core a camera, all in). */
 export const STEADY_PRESET = 'veryfast'
 export const STEADY_CRF = 22
 export const STEADY_KBPS = 3000
@@ -163,7 +165,7 @@ export class SteadyLive {
    *   max: the cap (maxSteady); isOn: the setting, by key (steadyStore has); makeTranscoder, now,
    *   stopDelayMs, defer: for tests
    */
-  constructor({ max = maxSteady(), isOn = () => false, makeTranscoder = (o) => new Transcoder(o), log = (l) => console.log(l), now = () => Date.now(), stopDelayMs = LINGER_MS, defer = queueMicrotask } = {}) {
+  constructor({ max = maxSteady(), isOn = () => false, makeTranscoder = (o) => new LockTranscoder(o), log = (l) => console.log(l), now = () => Date.now(), stopDelayMs = LINGER_MS, defer = queueMicrotask } = {}) {
     Object.assign(this, { isOn, makeTranscoder, log, now, stopDelayMs, defer })
     this.pool = new TranscodePool(max)
     this.streams = new Map() // key -> PhoneStream
@@ -247,14 +249,13 @@ export class SteadyLive {
     return true
   }
 
-  /** The converter: the stream's own settings, steadied, and given up when it keeps falling behind. */
+  /** The converter: the stream's own settings, locked to the background, given up when it keeps falling behind. */
   #make(key, o) {
     const resets = []
     const x = this.makeTranscoder({
       ...o,
       preset: STEADY_PRESET,
       encThreads: ENCODER_THREADS,
-      deshake: true,
       onFail: (e) => {
         o.onFail?.(e)
         this.#failed(key, e?.message ?? String(e))
