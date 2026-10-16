@@ -29,6 +29,9 @@
     <input id="password" name="password" type="password" autocomplete="current-password" required />
     <p id="error" role="alert" hidden></p>
     <button type="submit">Sign in</button>
+    <!-- Windows single sign-on (sso-login.js): only on a Windows PC in the office, when it is set up -->
+    <p id="ssoStatus" class="login-sso-status" role="status" hidden></p>
+    <button id="ssoButton" type="button" class="login-sso" hidden>Sign in with Windows</button>
   </form>
   <!-- Windows (Active Directory) accounts whose password AD says must be changed (expired, or "change at next logon"): changed here, then signed in -->
   <form id="winPassword" class="login-card" autocomplete="off" hidden>

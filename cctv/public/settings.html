@@ -326,6 +326,22 @@
         <label>Password <input id="ad-test-pass" type="password" autocomplete="off" /></label>
         <div class="se-actions se-wide"><button type="submit">Test</button><span id="ad-test-msg" class="st-meta" role="status"></span></div>
       </form>
+
+      <h3 id="sso-title">Single sign-on (Windows)</h3>
+      <p class="st-help">With single sign-on, someone at an office Windows PC that is signed in to the domain opens Argus and is signed in as themselves straight away, with nothing to type. What they may do still comes from the AD groups above. It works only on the office network at the office address, never through the internet link (there the normal sign-in page is shown). It needs the look-up account above. Local Argus accounts are never signed in this way.</p>
+      <p id="sso-status" class="st-help" role="status">Loading…</p>
+      <dl class="ad-cert"><dt>Service name</dt><dd id="sso-principal"></dd></dl>
+      <ol class="st-help">
+        <li>On the domain controller (DC01), run <b>sso-setup-dc.ps1</b> (in the deploy folder) in PowerShell as Administrator. It makes the file <b>C:\argus-sso.keytab</b>.</li>
+        <li>Upload that file here, then delete it from DC01.</li>
+        <li>Run <b>sso-browsers-gpo.ps1</b> on DC01 once, so Edge and Chrome on office PCs give Argus their Windows sign-in.</li>
+        <li>Tick the box below.</li>
+      </ol>
+      <p><label>Keytab file <input id="sso-keytab" type="file" accept=".keytab,application/octet-stream" /></label> <button type="button" id="sso-upload">Upload keytab</button> <button type="button" id="sso-remove">Remove keytab</button> <span id="sso-keytab-msg" class="st-meta" role="status"></span></p>
+      <div id="sso-keytab-info"></div>
+      <p><label><input id="sso-enabled" type="checkbox" /> Sign office Windows PCs in automatically</label> <span id="sso-msg" class="st-meta" role="status"></span></p>
+      <h4>Last single sign-on attempts</h4>
+      <ul id="sso-recent" class="st-help"></ul>
     </section>
     <section class="se-section" data-tab="server" aria-labelledby="srv-title">
       <h2 id="srv-title">Restart the server</h2>
@@ -382,6 +398,7 @@
   <script type="module" src="settings-tabs.js"></script>
   <script type="module" src="connector.js"></script>
   <script type="module" src="ad-settings.js"></script>
+  <script type="module" src="sso-settings.js"></script>
   <script type="module" src="rtsp-links.js"></script>
   <script type="module" src="storage.js"></script>
   <script type="module" src="alert-banner.js"></script>

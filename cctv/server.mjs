@@ -7,6 +7,7 @@
 //
 //   GET  /                     -> viewer page (cctv/public)
 //   POST /api/login            -> { user, password } sets the session cookie
+//   GET  /api/sso[/available]  -> Windows single sign-on (Kerberos "Negotiate"), see sso.mjs
 //   POST /api/logout
 //   GET  /api/me               -> { user, admin }
 //   /api/admin/nvrs            -> manage NVRs and sites (admins only), see admin.mjs
@@ -166,6 +167,7 @@ import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
 import { makeAd } from './ad.mjs'
 import { handleAd } from './ad-api.mjs'
+import { makeSso } from './sso.mjs'
 import { forgetRights, renameRights } from './rights.mjs'
 import { renameUserViews } from './views.mjs'
 import { renameUserPrefs } from './user-prefs.mjs'
@@ -573,7 +575,7 @@ const MIME = {
 // the pages a watch-only account may open (auth.mjs isWatchOnly): Live, Playback (and its wall and the
 // player of an exported pack), Map, and its own password
 const WATCH_PAGES = new Set(['/index.html', '/playback.html', '/wall.html', '/pack-player.html', '/map.html', '/change-password.html', '/login.html', '/setup.html'])
-const PUBLIC_PATHS = new Set(['/setup.html', '/setup.js', '/login.html', '/login.js', '/show-password.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
+const PUBLIC_PATHS = new Set(['/setup.html', '/setup.js', '/login.html', '/login.js', '/sso-login.js', '/show-password.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
 const SECURITY_HEADERS = securityHeaders()
 
 // CCTV_AUTH=off is for local development only: never publish such an instance beyond 127.0.0.1
@@ -729,6 +731,19 @@ const handleWindowsPassword = async (req, res) => {
   auth.clearFailures(ip)
   sendJson(res, 200, { user: r.user, changed: true, message: r.message }, { 'set-cookie': auth.sessionCookie(auth.createSession(r.user), Boolean(req.socket.encrypted)), 'cache-control': 'no-store' })
 }
+// Windows single sign-on (sso.mjs, kerberos.mjs): an office PC on the domain is signed in as its
+// Windows user with no typing, through the same AD path (ad.mjs loginSso). GET /api/sso is the only
+// route that ever answers WWW-Authenticate: Negotiate.
+const sso = makeSso({ ad, audit: (row) => audit(auth.DATA_DIR, row) })
+const handleSso = async (req, res, pathname) => {
+  const ip = clientIp(req)
+  const r = await sso.handlePublic(req, pathname, { ip, blocked: auth.loginBlocked(ip) })
+  if (r.count) auth.recordFailure(ip)
+  if (r.clear) auth.clearFailures(ip)
+  const headers = { ...r.headers }
+  if (r.user) headers['set-cookie'] = auth.sessionCookie(auth.createSession(r.user), Boolean(req.socket.encrypted))
+  sendJson(res, r.status, r.body, headers)
+}
 ad.start({ ended: (name) => { presence.disconnectUser(name); userSessions.forget(name); setupCodes.forget(name) } })
 const handleSetupRedeem = async (req, res) => {
   const ip = clientIp(req)
@@ -819,6 +834,7 @@ const handleRequest = async (req, res) => {
   if (pathname === '/api/login' && req.method === 'POST') return handleLogin(req, res)
   if (pathname === '/api/login/windows-password' && req.method === 'POST') return handleWindowsPassword(req, res)
   if (pathname === '/api/setup/redeem' && req.method === 'POST') return handleSetupRedeem(req, res)
+  if (pathname === '/api/sso' || pathname === '/api/sso/available') return handleSso(req, res, pathname)
   if (pathname === '/api/logout' && req.method === 'POST') {
     // Read before the cookie is cleared, or there is nobody to name in the entry.
     const leaving = currentUser(req)
@@ -1064,6 +1080,9 @@ const handleRequest = async (req, res) => {
       usersRoute = [e.status, { error: e.message }]
     }
     if (usersRoute) return sendJson(res, ...usersRoute)
+    // Settings > Active Directory > Single sign-on (sso.mjs): the keytab and the switch
+    const ssoRoute = await sso.handleAdmin(req.method, pathname, () => readJsonObject(req, 131072), who, { ip: clientIp(req), device: deviceOf(req.headers['user-agent']), withDevice })
+    if (ssoRoute) return sendJson(res, ...ssoRoute)
     // Settings > Active Directory (ad-api.mjs): admins only; answers its own refusals
     const adRoute = await handleAd(ad, req.method, pathname, () => readJsonObject(req, 65536), who, { ip: clientIp(req), device: deviceOf(req.headers['user-agent']) })
     if (adRoute) return sendJson(res, ...adRoute)
@@ -1755,7 +1774,10 @@ const upgrade = (req, socket, head) => {
   server.handleUpgrade(req, socket, head, (ws) => server.emit('connection', ws, req))
 }
 
-const httpServer = createServer(onRequest)
+// 64 KB of headers, not node's 16 KB: a Windows single sign-on ticket of someone in many AD groups
+// is large (Microsoft's own advice for IIS is 64 KB), and would otherwise be refused with a 431
+const MAX_HEADER_BYTES = 64 * 1024
+const httpServer = createServer({ maxHeaderSize: MAX_HEADER_BYTES }, onRequest)
 httpServer.on('upgrade', onUpgrade)
 // Reports (reports.mjs): made in their own thread, kept a few minutes (a page re-opened, the daily
 // summary and the page asking for the same day) so the database is not counted again for nothing
@@ -1789,7 +1811,7 @@ warmFiles(PUBLIC_DIR, MIME)
 httpServer.listen(Number(HTTP_PORT), () => console.log(`HTTP  on port ${HTTP_PORT} (use http://localhost on this PC)`))
 
 const certHosts = CERT_HOSTS.split(',').map((h) => h.trim()).filter(Boolean)
-const httpsServer = createHttpsServer(httpsOptions(certHosts), onRequest)
+const httpsServer = createHttpsServer({ ...httpsOptions(certHosts), maxHeaderSize: MAX_HEADER_BYTES }, onRequest)
 httpsServer.on('upgrade', onUpgrade)
 httpsServer.listen(Number(HTTPS_PORT), () => console.log(`HTTPS on port ${HTTPS_PORT} (for other PCs and phones)`))
 

@@ -1,3 +1,5 @@
+import { clearFailed, failedAt, isWindows, markFailed, shouldTry, ssoAvailable, trySso } from './sso-login.js'
+
 const form = document.getElementById('login')
 const error = document.getElementById('error')
 
@@ -7,6 +9,58 @@ const error = document.getElementById('error')
 try {
   globalThis.caches?.delete('argus-stills').catch(() => {})
 } catch {}
+
+/** Signed in (by password or by Windows single sign-on): on into the app. */
+async function goOn(signedIn) {
+  // the mark's ring pulses once to say so (the wordmark's #authenticated), then the app opens
+  try { document.getElementById('authenticated')?.beginElement(); await new Promise((r) => setTimeout(r, 320)) } catch {}
+  if (signedIn.mustChangePassword) { location.href = '/change-password.html'; return }
+  // Signed out when a phone alert's link was tapped: the server sent the browser here from
+  // /alarms.html#event=<id>, and the browser kept the # across that redirect (the Fetch
+  // standard carries a fragment over when the new address has none). Go on to that alarm
+  // rather than to the grid.
+  // A Live link to a view (?view=…, a TV's &screen=1) goes back to it: the server and the Live page
+  // send ?next=/?<query> here. Only the Live page with a plain query (view-links.js safeNext, the
+  // same pattern), so this page can never be made to send anyone to another site.
+  const next = new URLSearchParams(location.search).get('next') ?? ''
+  const back = /^\/(index\.html)?\?[A-Za-z0-9=&,|%._~-]{0,512}$/.test(next) ? next : '/'
+  location.href = /^#event=\d{1,15}$/.test(location.hash) ? `/alarms.html${location.hash}` : back
+}
+
+// ---- Windows single sign-on (sso-login.js, the server's sso.mjs) ----
+// On a Windows PC in the office, with it set up, try the PC's own Windows sign-in first, silently,
+// while the form is already there to use. Not working: the form stays, with "Sign in with Windows"
+// to try again, and this browser does not try by itself for a day.
+const ssoButton = document.getElementById('ssoButton')
+const ssoStatus = document.getElementById('ssoStatus')
+let store = null
+try { store = globalThis.localStorage ?? null } catch {}
+async function signInWithWindows(byHand) {
+  ssoButton.disabled = true
+  ssoStatus.textContent = 'Signing you in with Windows…'
+  ssoStatus.hidden = false
+  const r = await trySso()
+  if (r.ok) {
+    clearFailed(store)
+    await goOn({ user: r.user })
+    return
+  }
+  markFailed(store)
+  ssoStatus.hidden = true
+  ssoButton.disabled = false
+  if (byHand) {
+    error.textContent = r.message || 'Windows could not sign you in. Sign in with your user name and password.'
+    error.hidden = false
+  }
+}
+ssoButton?.addEventListener('click', () => { error.hidden = true; void signInWithWindows(true) })
+if (ssoButton && isWindows(navigator.userAgent)) {
+  ssoAvailable().then((available) => {
+    if (!available) return
+    ssoButton.hidden = false
+    if (shouldTry({ available, ua: navigator.userAgent, failed: failedAt(store) })) void signInWithWindows(false)
+  })
+}
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault()
@@ -22,20 +76,7 @@ form.addEventListener('submit', async (e) => {
       body: JSON.stringify({ user: form.user.value.trim(), password: form.password.value })
     })
     if (res.ok) {
-      const signedIn = await res.json()
-      // the mark's ring pulses once to say so (the wordmark's #authenticated), then the app opens
-      try { document.getElementById('authenticated')?.beginElement(); await new Promise((r) => setTimeout(r, 320)) } catch {}
-      if (signedIn.mustChangePassword) { location.href = '/change-password.html'; return }
-      // Signed out when a phone alert's link was tapped: the server sent the browser here from
-      // /alarms.html#event=<id>, and the browser kept the # across that redirect (the Fetch
-      // standard carries a fragment over when the new address has none). Go on to that alarm
-      // rather than to the grid.
-      // A Live link to a view (?view=…, a TV's &screen=1) goes back to it: the server and the Live page
-      // send ?next=/?<query> here. Only the Live page with a plain query (view-links.js safeNext, the
-      // same pattern), so this page can never be made to send anyone to another site.
-      const next = new URLSearchParams(location.search).get('next') ?? ''
-      const back = /^\/(index\.html)?\?[A-Za-z0-9=&,|%._~-]{0,512}$/.test(next) ? next : '/'
-      location.href = /^#event=\d{1,15}$/.test(location.hash) ? `/alarms.html${location.hash}` : back
+      await goOn(await res.json())
       return
     }
     const body = await res.json().catch(() => ({}))

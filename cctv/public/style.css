@@ -2268,6 +2268,10 @@ body.playback-page.is-fullscreen .pb-bar { --pb-head-ink: #14171c; }
 .ac-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); color: var(--accent-strong); font-size: 11px; font-weight: 600; white-space: nowrap; }
 .ad-trust { margin: 8px 0; }
 .login-card[hidden] { display: none; } /* the sign-in page's two forms: one shown at a time */
+/* the sign-in page's Windows single sign-on: a quieter second button, and the "Signing you in" line */
+.login-card button.login-sso { background: transparent; color: var(--text); border-color: var(--border); font-weight: 500; }
+.login-card button.login-sso[hidden], .login-sso-status[hidden] { display: none; }
+.login-sso-status { margin: 0; color: var(--muted); font-size: 13px; }
 .ad-cert { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0; font-size: 13px; }
 .ad-cert dt { color: var(--text-muted); }
 .ad-cert dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }

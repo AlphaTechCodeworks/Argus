@@ -41,6 +41,10 @@
 // verified LDAPS. Bound as the person when AD lets them bind; when it does not (expired / must
 // change) bound as the look-up account, AD then checks the old password itself. Argus never resets
 // or stores a Windows password, and never logs either one.
+//
+// Windows single sign-on (sso.mjs, kerberos.mjs) hands a name the browser proved with a Kerberos
+// ticket to loginSso: the person is read through the look-up account and the sign-in ends in the same
+// finish() as a password one (record, role, renames, audit). Local accounts are never signed in so.
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -88,6 +92,7 @@ export const REFUSALS = Object.freeze({
   'time-restricted': [403, 'Your Windows account may not sign in at this time of day.'],
   'workstation-restricted': [403, 'Your Windows account may not sign in from here.'],
   'no-group': [403, 'Your account is not in a CCTV group. Ask an administrator.'],
+  'sso-local': [403, 'That name is a local Argus account: sign in with its Argus password.'],
   'local-name': [401, 'That name is a local Argus account: sign in with just the name and its Argus password.'],
   'renamed-onto-local': [409, 'Your Windows account was renamed to a name that is also a local Argus account, so it cannot sign in. Ask an administrator.'],
   'rename-failed': [503, 'Your Windows account was renamed and Argus could not move your settings to the new name. Try again, or ask an administrator.'],
@@ -592,10 +597,24 @@ export function makeAd({ store = makeAdStore(), open = ldapOpen, now = Date.now,
     if (twin && isLocalAccount(twin[1])) r = refusal('local-name')
     else r = await authenticate(s, typed, password, { open })
     const shown = r.name ?? who?.sam ?? String(typed ?? '').trim()
+    const done = finish(r, shown, { ip, how: 'Active Directory' })
+    if (done.ok) return done
+    const change = MUST_CHANGE.has(done.reason) && canChangeExpired(s)
+    // a DC that cannot be reached is not somebody guessing passwords
+    return { ok: false, status: done.status, message: change ? 'Your Windows password must be changed. You can change it here.' : done.message, count: !['unreachable', 'config', 'password-expired', 'must-change-password'].includes(done.reason), ...(change ? { canChangePassword: true } : {}) }
+  }
+
+  /**
+   * After AD said yes (or no): the users.json record, renames and the audit row, one path for a
+   * password sign-in and for Windows single sign-on (`how` names which in the audit).
+   * @returns {{ ok: true, user } | { ok: false, status, message, reason }}
+   */
+  function finish(r, shown, { ip, how }) {
     if (r.ok) {
+      const s = store.get()
       const rec = recordAdUser(r, { now: now(), graceMs: s.graceHours * 3_600_000, renamers, forgetRights })
       if (rec.error) {
-        if (rec.from) audit({ user: r.name, action: 'login-failed', ip, ok: false, detail: `Active Directory: renamed in AD: ${rec.from} → ${r.name}, ${rec.error === 'renamed-onto-local' ? 'refused: a local account has that name' : `not carried over (${rec.detail})`}` })
+        if (rec.from) audit({ user: r.name, action: 'login-failed', ip, ok: false, detail: `${how}: renamed in AD: ${rec.from} → ${r.name}, ${rec.error === 'renamed-onto-local' ? 'refused: a local account has that name' : `not carried over (${rec.detail})`}` })
         r = refusal(rec.error)
       } else {
         if (rec.renamedFrom) {
@@ -609,16 +628,54 @@ export function makeAd({ store = makeAdStore(), open = ldapOpen, now = Date.now,
           ended(rec.replaced)
         }
         if (rec.isNew && !rec.replaced) forgetRights(rec.name) // a row left behind by an earlier account of this name
-        audit({ user: rec.name, action: 'login', ip, detail: `Active Directory, ${ROLE_LABELS[r.role]}${r.server ? ` (${r.server})` : ''}` })
-        console.log(`[ad] login ok for "${rec.name}" (${r.role}) from ${ip}`)
+        audit({ user: rec.name, action: 'login', ip, detail: `${how}, ${ROLE_LABELS[r.role]}${r.server ? ` (${r.server})` : ''}` })
+        console.log(`[ad] ${how}: login ok for "${rec.name}" (${r.role}) from ${ip}`)
         return { ok: true, user: rec.name }
       }
     }
-    audit({ user: shown, action: 'login-failed', ip, ok: false, detail: `Active Directory: ${r.reason}${r.detail ? ` (${r.detail})` : ''}` })
-    console.log(`[ad] login refused for "${shown}" from ${ip}: ${r.reason}${r.detail ? ` (${r.detail})` : ''}`)
-    const change = MUST_CHANGE.has(r.reason) && canChangeExpired(s)
-    // a DC that cannot be reached is not somebody guessing passwords
-    return { ok: false, status: r.status, message: change ? 'Your Windows password must be changed. You can change it here.' : r.message, count: !['unreachable', 'config', 'password-expired', 'must-change-password'].includes(r.reason), ...(change ? { canChangePassword: true } : {}) }
+    audit({ user: shown, action: 'login-failed', ip, ok: false, detail: `${how}: ${r.reason}${r.detail ? ` (${r.detail})` : ''}` })
+    console.log(`[ad] ${how}: login refused for "${shown}" from ${ip}: ${r.reason}${r.detail ? ` (${r.detail})` : ''}`)
+    return { ok: false, status: r.status, message: r.message, reason: r.reason }
+  }
+
+  /**
+   * Windows single sign-on (sso.mjs): the browser proved with a Kerberos ticket that it is `name` of
+   * this domain. There is no password to bind with, so the person is read through the look-up account
+   * (by sAMAccountName: objectGUID, groups, enabled), and it then ends exactly as a password sign-in
+   * does (finish): the same record, role, renames and audit. A local Argus account of that name is
+   * never signed in this way. Never throws.
+   * @returns {Promise<{ ok: true, user } | { ok: false, status, message, reason }>}
+   */
+  async function loginSso(name, { ip = '' } = {}) {
+    const s = store.get()
+    const who = parseTypedName(String(name ?? ''), s.domain)
+    const holder = who?.sam ? findAccount(loadUsers(), who.sam) : null
+    let r
+    if (!s.enabled) r = refusal('config', { detail: 'Windows sign-in (Active Directory) is off' })
+    else if (!who?.sam) r = refusal('not-found', { detail: 'not a Windows user name' })
+    else if (holder && isLocalAccount(holder[1])) r = refusal('sso-local')
+    else if (!s.lookupUser || !s.lookupPassword) r = refusal('config', { detail: 'single sign-on needs the look-up account' })
+    else {
+      try {
+        const svc = parseTypedName(s.lookupUser, s.domain)
+        r = await withServer(
+          s,
+          async (client, server) => {
+            await client.bind(svc.bindName, s.lookupPassword)
+            const p = await lookupPerson(client, s, { sam: who.sam })
+            if (!p.found) return refusal('not-found', { detail: `not found under ${s.baseDn}`, server })
+            if (p.disabled) return refusal('disabled', { server })
+            if (!p.role) return refusal('no-group', { server, groups: p.groups, name: p.name })
+            if (!p.guid) return refusal('config', { detail: 'the directory did not give the objectGUID', server })
+            return { ok: true, guid: p.guid, name: p.name, displayName: p.displayName, role: p.role, groups: p.groups, server }
+          },
+          open
+        )
+      } catch (e) {
+        r = e.unreachable ? refusal('unreachable', { detail: e.message }) : refusal('config', { detail: `the look-up account could not read the directory: ${e.message}` })
+      }
+    }
+    return finish(r, r.name ?? who?.sam ?? String(name ?? ''), { ip, how: 'Windows single sign-on' })
   }
 
   /**
@@ -738,6 +795,7 @@ export function makeAd({ store = makeAdStore(), open = ldapOpen, now = Date.now,
     store,
     state,
     login,
+    loginSso,
     changeExpired,
     changeSignedIn,
     recheck,
