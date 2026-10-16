@@ -94,7 +94,7 @@ export const CONVERTED_MAIN_TITLE = 'This camera sends H.265, which this browser
 // "Steady picture" (steady.mjs): an admin has switched it on for this camera, and the server steadies
 // its picture for every viewer. The server says so on each connection ({"op":"steady","on":true}), or
 // that it plays the camera's own picture for now ({"op":"steady","on":false,"why":"busy"|"failed"}).
-export const STEADY_TITLE = 'Steady picture is on for this camera: the server steadies its picture, so it does not shake. Full quality is not available while it is on.'
+export const STEADY_TITLE = 'Steady picture is on for this camera: the server steadies its picture, so it does not shake. Full quality is steadied too when the server has room; otherwise the standard picture, steadied.'
 export const STEADY_BUSY_TEXT = 'Steady picture paused: the server is busy'
 export const STEADY_FAILED_TEXT = 'Steady picture paused: the server could not steady this camera just now'
 

@@ -30,7 +30,7 @@ const { STEADY_HELP, STEADY_LABEL, steadyWords } = await import('../public/stead
 // ---- the mark
 {
   const full = steadyBadge('on', MAIN_STREAM)
-  check('full size, steadied: "Steady picture", saying full quality is not available', full.text === 'Steady picture' && full.title === STEADY_TITLE && /Full quality is not available/.test(full.title) && full.paused === false)
+  check('full size, steadied: "Steady picture", saying full quality is steadied when there is room', full.text === 'Steady picture' && full.title === STEADY_TITLE && /Full quality is steadied too/.test(full.title) && full.paused === false)
   check('a grid tile, steadied: short, the words in its title', steadyBadge('on', SUB_STREAM).text === 'STEADY' && steadyBadge('on', SUB_STREAM).title === STEADY_TITLE)
   const busy = steadyBadge('busy', MAIN_STREAM)
   check('past the cap, full size: "Steady picture paused: the server is busy"', busy.text === 'Steady picture paused: the server is busy' && busy.text === STEADY_BUSY_TEXT && busy.paused === true && /comes back by itself/.test(busy.title))
