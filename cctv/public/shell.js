@@ -6,7 +6,7 @@
 // the ten hand-copied header links and admin-tabs.js.
 import { PHONE_BAR, currentId, navFor } from './nav-model.js'
 import { icon } from './icons.js'
-import { markSvg, replayMarks } from './logo-mark.js'
+import { markSvg, playMarks, replayMarks } from './logo-mark.js'
 import { nextTheme, readTheme, saveTheme } from './theme.js'
 
 // ARGUS as the brand draws it (the app repository's docs/brand, concept A): five stroked letters in the
@@ -66,6 +66,7 @@ function render(parts, me) {
     `<button type="button" class="shell-more-btn${rest.some((i) => i.id === here) ? ' on' : ''}" aria-expanded="${!sheet.hidden}">${icon('more')}<span>More</span></button>`
   sheet.innerHTML = rest.map((i) => link(i, here)).join('') + themeButton(theme, 'shell-theme') +
     `<button type="button" data-sign-out>${icon('out')}<span>Sign out</span></button>`
+  playMarks(side) // (a logo drawn again plays from the start: logo-mark.js)
 }
 
 export function mountShell() {
@@ -100,6 +101,7 @@ export function mountShell() {
   top.innerHTML = `${markSvg('shell-top-logo mark-anim')}<strong>${WORDMARK}</strong><span>${esc(label)}</span>`
   main.prepend(top)
   // the eye plays when the page opens and again every minute (logo-mark.js)
+  playMarks(top)
   replayMarks(document)
 
   document.body.prepend(side)

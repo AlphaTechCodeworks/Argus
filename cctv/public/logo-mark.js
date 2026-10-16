@@ -17,6 +17,24 @@ export function markSvg(className) {
  * Plays every mark in root from the start every MARK_REPLAY_MS, while the page is in view; one that
  * comes back into view plays at once. Returns a stop function.
  */
+/**
+ * Plays every mark in root from the start, now. A mark drawn after the page has loaded (the sidebar is
+ * drawn again when the account is known, or the page changes) does not always start its own clock at
+ * nought: it could show the finished eye with nothing played (2026-10-16: "the animation is not always
+ * working"). So whoever draws one plays it, on the next frame, once it is in the page.
+ */
+export function playMarks(root, { raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(f, 0) } = {}) {
+  raf(() => {
+    for (const svg of root?.querySelectorAll?.('svg.mark-anim') ?? []) {
+      if (!svg.isConnected) continue
+      try {
+        svg.setCurrentTime(0)
+        svg.unpauseAnimations()
+      } catch {} // (an SVG without SMIL: the mark stays as it is)
+    }
+  })
+}
+
 export function replayMarks(root, { every = MARK_REPLAY_MS, doc = document, setTimer = setInterval, clearTimer = clearInterval } = {}) {
   const play = () => {
     if (doc.hidden) return
