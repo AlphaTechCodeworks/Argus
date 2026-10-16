@@ -678,7 +678,8 @@ const handleLogin = async (req, res) => {
   const viaAd = await ad.login(String(creds.user ?? ''), creds.password ?? '', { ip })
   if (viaAd && !viaAd.ok) {
     if (viaAd.count) auth.recordFailure(ip)
-    return sendJson(res, viaAd.status, { error: viaAd.message })
+    // (canChangePassword: the sign-in page then offers to change an expired Windows password there)
+    return sendJson(res, viaAd.status, { error: viaAd.message, ...(viaAd.canChangePassword ? { canChangePassword: true } : {}) })
   }
   if (viaAd) {
     auth.clearFailures(ip)
