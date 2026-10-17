@@ -150,9 +150,9 @@ export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, p
     if (streamType !== 1 && !hd()) return ws.close(1008, HD_NOT_ALLOWED)
     // Steady picture (steady.mjs): a camera an admin switched it on for is steadied on the server, for
     // every viewer -- local or remote, PC or phone, a grid tile or the full-size view. A main stream
-    // asked for gets it too (full quality is not offered while it is on; the tile says "Steady picture"),
-    // so none of the main stream's own path below applies: no recorder limit, no full-quality line. Its
-    // pictures come from the sub-stream, so only the live right is watched for as it plays. Not for a
+    // asked for is steadied in full quality when there is room (below); otherwise it gets the steadied
+    // sub-stream, and none of the main stream's own path below applies: no full-quality line, only the
+    // live right watched for as it plays. Not for a
     // sub-stream the NVR holds back at its limit (nothing to steady until there is room: as it was).
     // Past the cap, or a conversion that failed: the camera's own stream as below, its tile told why
     // first (before anything else is sent). Every socket is noted (watch) so that switching the setting
@@ -161,6 +161,30 @@ export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, p
       const key = `${nvr.id}/${ch}`
       try {
         steady.watch(key, ws)
+        // Full quality asked for (2026-10-16, Mike: "it wont load the main stream"): the main stream
+        // steadied, 1920 wide, within the recorder's full-quality limit and Steady picture's own cap
+        // for full quality. Refused by either, or failed: the steadied standard picture, as before.
+        if (streamType === 0 && steady.wants(key)) {
+          let room = false
+          try {
+            room = mainLimit.ask(nvr, ch, ws) === true
+          } catch {}
+          if (room) {
+            const got = steady.attach(key, nvr.getStream(ch, 0), ws, { camera: `${nvr.id}/${ch + 1}`, main: true })
+            if (got === true) {
+              ws.on?.('close', () => {
+                try {
+                  mainLimit.leave(ws)
+                } catch {}
+              })
+              track(ws, req, { actions: ['live', 'live-hd'], nvr: nvr.id, ch })
+              return
+            }
+            try {
+              mainLimit.leave(ws)
+            } catch {}
+          }
+        }
         if (steady.wants(key) && nvr.subHeld?.(ch) !== true) {
           const got = steady.attach(key, nvr.getStream(ch, 1), ws, { camera: `${nvr.id}/${ch + 1}` })
           if (got === true) {

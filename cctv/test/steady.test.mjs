@@ -1,5 +1,5 @@
 // "Steady picture" (steady.mjs): the setting's store, the cap on cameras steadied at once, the
-// conversion's settings (deshake after the 704-wide scale), giving up a conversion that fails or keeps
+// conversion's settings (locked to the background at 704 wide: steady-lock.mjs), giving up a conversion that fails or keeps
 // falling behind, moving viewers when the setting changes or a place frees, which viewers live-attach.mjs
 // sends to it, and the admin route. Fake sources, sockets and converters: no ffmpeg, no SDK.
 //   node cctv/test/steady.test.mjs
@@ -8,8 +8,9 @@ import { buildSample } from '../metrics-history.mjs'
 import { encodeFrame } from '../phone-live.mjs'
 import {
   BUSY, DEFAULT_MAX, FAILED, FAILED_QUIET_MS, MOVE_CODE, MOVE_REASON, READY_REASON, STALL_RESETS, STEADY_PATH, STEADY_PRESET, STEADY_WIDTH,
-  SteadyLive, handleSteady, maxSteady, steadyKey, steadyStore
+  SteadyLive, handleSteady, maxSteady, maxSteadyMain, steadyKey, steadyStore
 } from '../steady.mjs'
+import { LockTranscoder } from '../steady-lock.mjs'
 import { CODEC_H264, CODEC_H265, Transcoder, ffmpegArgs } from '../transcode.mjs'
 
 let failures = 0
@@ -27,6 +28,9 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
   check('not steadied: no deshake anywhere (every other conversion as it was)', !plain.join(' ').includes('deshake') && plain[plain.indexOf('-vf') + 1] === 'scale=min(704\\,iw):-2')
   check('... nor with deshake anything but true', !ffmpegArgs({ deshake: 'yes' }).join(' ').includes('deshake') && !ffmpegArgs({}).includes('-vf'))
   check('a steadying Transcoder is software, whatever the box has (the GPU path has no filters)', new Transcoder({ deshake: true, onFrame() {} }).encoder === 'libx264')
+  // what steadies now: the lock to the background, not deshake (it followed the sway: steady-lock.mjs)
+  const real = new SteadyLive({ max: 1, isOn: () => true })
+  check('a steadied camera is converted by the lock to the background (LockTranscoder), not deshake', real.makeTranscoder({ onFrame() {} }) instanceof LockTranscoder)
 }
 
 // ---- the cap ----------------------------------------------------------------------------------------
@@ -97,7 +101,7 @@ const fakeMaker = (o) => {
   for (let i = 0; i < 14; i++) sources[0].send(frame(i))
   const x = makers[0]
   check('an H.264 camera is converted all the same (the conversion is what steadies it)', x && x.pushed > 0, String(x?.pushed))
-  check('... steadied, 704 wide at most, veryfast on one thread, every frame kept', x.o.deshake === true && x.o.maxWidth === STEADY_WIDTH && x.o.preset === 'veryfast' && x.o.encThreads === 1 && x.o.keepEvery === 1, J({ ...x.o, onFrame: undefined, onFail: undefined, log: undefined }))
+  check('... 704 wide at most (no deshake: the converter is what steadies), veryfast on one thread, every frame kept', x.o.deshake === undefined && x.o.maxWidth === STEADY_WIDTH && x.o.preset === 'veryfast' && x.o.encThreads === 1 && x.o.keepEvery === 1, J({ ...x.o, onFrame: undefined, onFail: undefined, log: undefined }))
   x.o.onFrame(1000, true, Buffer.from([0, 0, 0, 1, 0x65, 9]))
   check('its pictures go to every viewer of the camera as H.264', viewers[0].got.length === 1 && second.got.length === 1 && viewers[0].got[0][1] === CODEC_H264)
 
@@ -150,6 +154,21 @@ const fakeMaker = (o) => {
   check('... the resets themselves still reached the converter', x.resets === STALL_RESETS)
 }
 
+{
+  makers.length = 0
+  const sl = new SteadyLive({ max: 4, mainMax: 1, isOn: () => true, makeTranscoder: fakeMaker, log: () => {}, stopDelayMs: 5 })
+  const main = src()
+  check('full quality steadied: attached, counted on its own cap', sl.attach('n1/0', main, sock(), { camera: 'n1/1', main: true }) === true && sl.summary().mainRunning === 1 && sl.summary().running === 0 && sl.streams.has('n1/0:main'))
+  for (let i = 0; i < 14; i++) main.send(frame(i))
+  const x = makers.at(-1)
+  check('... the main stream at most 1920 wide, two encoder threads, every frame kept', x && x.o.maxWidth === 1920 && x.o.encThreads === 2 && x.o.keepEvery === 1, J({ ...x?.o, onFrame: undefined, onFail: undefined, log: undefined }))
+  check('a second camera in full quality past its cap: BUSY at once, never waiting (the caller gives it the standard picture)', sl.attach('n1/1', src(), sock(), { main: true }) === BUSY && !sl.waiting.has('n1/1'))
+  check('... the standard picture of a camera is still steadied alongside', sl.attach('n1/0', src(), sock()) === true && sl.summary().running === 1)
+  sl.restart('n1/0')
+  check('switched off: its full-quality stream ends too', sl.streams.get('n1/0:main') === undefined || sl.streams.get('n1/0:main').closed)
+}
+check('CCTV_STEADY_MAIN_MAX: 2 unless it says otherwise, 0 for never', maxSteadyMain({}) === 2 && maxSteadyMain({ CCTV_STEADY_MAIN_MAX: '0' }) === 0 && maxSteadyMain({ CCTV_STEADY_MAIN_MAX: 'x' }) === 2)
+
 check('off (a cap of nothing): not enabled, nothing wanted', new SteadyLive({ max: 0, isOn: () => true }).enabled === false && new SteadyLive({ max: 0, isOn: () => true }).wants('n1/0') === false)
 
 // ---- who live-attach.mjs sends to it ---------------------------------------------------------------
@@ -170,11 +189,11 @@ const LOCAL = { socket: { remoteAddress: '192.168.1.20' }, headers: { cookie: 'c
 const REMOTE = { socket: { remoteAddress: '100.64.1.2' }, headers: { cookie: 'c=1', 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0' } }
 const PHONE = { socket: { remoteAddress: '192.168.1.30' }, headers: { cookie: 'c=1', 'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148' } }
 
-function run({ on = true, answer = true, streamType = 1, r = LOCAL, held = false, enabled = true, can = () => true } = {}) {
-  const steady = { enabled, calls: [], watched: [], wants: (k) => on && k === 'n1/3', watch(k, ws) { this.watched.push(k) }, attach(k, source, ws, o) { this.calls.push({ key: k, source, ws, o }); return answer } }
+function run({ on = true, answer = true, streamType = 1, r = LOCAL, held = false, enabled = true, can = () => true, room = true } = {}) {
+  const steady = { enabled, calls: [], watched: [], wants: (k) => on && k === 'n1/3', watch(k, ws) { this.watched.push(k) }, attach(k, source, ws, o) { this.calls.push({ key: k, source, ws, o }); return typeof answer === 'function' ? answer(o) : answer } }
   const adaptive = { calls: [], attach(viewer, a) { this.calls.push(a) } }
   const phone = { calls: [], attach(...a) { this.calls.push(a); return true }, has: () => false, room: () => 8 }
-  const mainLimit = { asked: 0, ask() { this.asked++; return true }, leave() {} }
+  const mainLimit = { asked: 0, left: 0, ask() { this.asked++; return room ? true : 'main: recorder at its limit' }, leave() { this.left++ } }
   const tracked = []
   const logs = []
   const attach = liveAttacher({ can, currentUser: () => 'ann', adaptiveLive: adaptive, phoneLive: phone, h264Fallback: null, track: (ws, req, o) => tracked.push(o), log: (l) => logs.push(l), mainLimit, steady })
@@ -189,8 +208,12 @@ function run({ on = true, answer = true, streamType = 1, r = LOCAL, held = false
   check('... nothing else attached, the live right watched for', t.nvr.getStream(3, 1).viewers.size === 0 && J(t.tracked) === J([{ actions: ['live'], nvr: 'n1', ch: 3 }]))
   check('... and the socket noted for the switch', J(t.steady.watched) === J(['n1/3']))
   const m = run({ streamType: 0 })
-  check('the main stream asked for (the full-size view): the steadied stream too', m.steady.calls.length === 1 && m.steady.calls[0].source === m.nvr.getStream(3, 1) && m.nvr.getStream(3, 0).viewers.size === 0)
-  check('... the recorder\'s full-quality limit not asked, no full-quality line', m.mainLimit.asked === 0 && !m.logs.some((l) => /full quality/.test(l)))
+  check('the main stream asked for (the full-size view): the main stream steadied ("it wont load the main stream")', m.steady.calls.length === 1 && m.steady.calls[0].o.main === true && m.steady.calls[0].source === m.nvr.getStream(3, 0) && m.nvr.getStream(3, 0).viewers.size === 0)
+  check('... within the recorder\'s full-quality limit, the HD right watched for, left when it closes', m.mainLimit.asked === 1 && J(m.tracked) === J([{ actions: ['live', 'live-hd'], nvr: 'n1', ch: 3 }]) && m.mainLimit.left === 0 && (m.ws.handlers.close?.forEach((f) => f()), m.mainLimit.left === 1))
+  const mb = run({ streamType: 0, answer: (o) => (o.main ? BUSY : true) })
+  check('full quality steadied past its cap: the steadied standard picture instead, the recorder\'s place given back', mb.steady.calls.length === 2 && mb.steady.calls[1].o.main !== true && mb.steady.calls[1].source === mb.nvr.getStream(3, 1) && mb.mainLimit.left === 1 && mb.ws.closedWith === null)
+  const rf = run({ streamType: 0, room: false })
+  check('the recorder at its full-quality limit: the steadied standard picture, nothing refused', rf.steady.calls.length === 1 && rf.steady.calls[0].o.main !== true && rf.ws.closedWith === null)
   const noHd = run({ streamType: 0, can: (who, action) => action !== 'live-hd' })
   check('... but without Live HD refused as before (the page then asks for the sub-stream, steadied)', noHd.ws.closedWith?.code === 1008 && noHd.steady.calls.length === 0)
   const rem = run({ r: REMOTE })
@@ -202,7 +225,7 @@ function run({ on = true, answer = true, streamType = 1, r = LOCAL, held = false
   const busy = run({ answer: BUSY })
   check('past the cap: the camera\'s own stream, its tile told why first', busy.nvr.getStream(3, 1).viewers.has(busy.ws) && J(busy.ws.sent.slice(0, 1).map((s) => JSON.parse(s))) === J([{ op: 'steady', on: false, why: 'busy' }]))
   const failed = run({ answer: FAILED, streamType: 0 })
-  check('failed: the camera\'s own stream (a main asked for: the main), told so', failed.nvr.getStream(3, 0).viewers.has(failed.ws) && JSON.parse(failed.ws.sent[0]).why === 'failed' && failed.mainLimit.asked === 1)
+  check('failed: the camera\'s own stream (a main asked for: the main), told so', failed.nvr.getStream(3, 0).viewers.has(failed.ws) && JSON.parse(failed.ws.sent[0]).why === 'failed' && failed.mainLimit.asked === 2 && failed.mainLimit.left === 1)
   const held = run({ held: true })
   check('a sub-stream the NVR holds back: not steadied (nothing to steady yet), as it was', held.steady.calls.length === 0 && held.ws.sent.length === 0)
   const dis = run({ enabled: false })
