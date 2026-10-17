@@ -1419,10 +1419,8 @@ function renderSites({ reveal = true } = {}) {
   const all = btn('all', { className: 'map-site-go', textContent: 'All sites', 'aria-pressed': String(!planSite && !site) })
   all.addEventListener('click', () => goSite(''))
   parts.push(el('span', { className: `map-site${!planSite && !site ? ' sel' : ''}` }, all))
-  const quickSites = oneMap().sites
-  const selectedQuick = quickSites.find((s) => s.name === site)
-  const shownSites = selectedQuick ? [selectedQuick, ...quickSites.filter((s) => s !== selectedQuick).slice(0, 11)] : quickSites.slice(0, 12)
-  for (const s of shownSites) {
+  // every site, always in the same order (the row scrolls; the chosen one is brought into view below)
+  for (const s of oneMap().sites) {
     const offline = s.keys.filter((k) => stateFor(k) === 'offline').length
     // said in full for a screen reader: read as written, "37" and "4 offline" run together as 374
     const spoken = `${s.name}, ${s.count} camera${s.count === 1 ? '' : 's'}${offline ? `, ${offline} offline` : ''}${s.placed ? '' : ', not placed on the map'}`
@@ -1527,9 +1525,11 @@ function viewPanel() {
   let on = 0
   let total = 0
   const matches = names.flatMap((n) => searchCameras(siteCams(n), mapListQuery))
-  const pageCount = Math.max(1, Math.ceil(matches.length / MAP_LIST_LIMIT))
+  // one site chosen: all its cameras in one list; pages only for every site at once
+  const perPage = name ? Math.max(matches.length, 1) : MAP_LIST_LIMIT
+  const pageCount = Math.max(1, Math.ceil(matches.length / perPage))
   mapListPage = Math.min(mapListPage, pageCount - 1)
-  const visibleKeys = new Set(matches.slice(mapListPage * MAP_LIST_LIMIT, (mapListPage + 1) * MAP_LIST_LIMIT).map(camKey))
+  const visibleKeys = new Set(matches.slice(mapListPage * perPage, (mapListPage + 1) * perPage).map(camKey))
   for (const n of names) {
     const matching = searchCameras(siteCams(n), mapListQuery)
     if (!matching.length) continue
