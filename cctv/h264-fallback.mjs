@@ -23,7 +23,7 @@
 //
 // What it may cost is a budget, and it is this feature's own: phones and remote viewers share a pool
 // (phone-live.mjs CCTV_PHONE_LIVE_MAX) that these conversions never draw on, so neither starves the
-// other. The budget is CPU, in units of 1 % of one core (CCTV_H264_FALLBACK_CORES, 2 cores by
+// other. The budget is CPU, in units of 1 % of one core (CCTV_H264_FALLBACK_CORES, 3 cores by
 // default), with a plain count on top (CCTV_H264_FALLBACK_MAX, 24). Inside it the encoder follows a
 // ladder: few conversions running, the better preset; more, a faster one, so the total stays inside
 // the budget (LADDER, stepFor). Past the last step a viewer is refused, and its tile says the server
@@ -46,11 +46,22 @@ import { Transcoder, TranscodePool } from './transcode.mjs'
  * the ceiling instead. These viewers are on the local network: bits are cheap there, cores are not.
  * maxKbps is only a ceiling (crf decides the rate), there so that a camera pointed at rain cannot
  * fill a viewer's queue (backpressure.mjs: 1 MB for a sub-stream).
+ *
+ * Measured again on 2026-10-13, because the fleet's sub-streams are no longer what the figures above
+ * were taken on: 1280x720 at 20 fps, H.265+, converted as it is now (scaled to SUB_MAX_WIDTH, one
+ * thread, low_delay). The costs of 8 / 13 / 16 let 14 to 22 conversions run that really took 24-34 %
+ * of a core each unscaled: 2 to 4 of the server's 8 cores against a budget of 2, a load average over
+ * 10, and video stuttering for everybody.
+ *   - On the server in service, daytime scenes, eight running at veryfast: 10.7 to 17.9 % each.
+ *   - One camera's real stream (Value4U 2, a still night scene, 160 kbit/s), replayed at its own rate:
+ *     decoding alone 6.1; veryfast 14.1; superfast 15.2; ultrafast 11.1 (unscaled ultrafast: 14.9).
+ * Decoding and scaling 720p is now most of it, so the steps differ by less than they did; each cost
+ * is the top of what was seen for it and a little more.
  */
 export const LADDER = Object.freeze([
-  Object.freeze({ id: 'veryfast', preset: 'veryfast', crf: 21, maxKbps: 3000, cost: 16 }),
-  Object.freeze({ id: 'superfast', preset: 'superfast', crf: 21, maxKbps: 4000, cost: 13 }),
-  Object.freeze({ id: 'ultrafast', preset: 'ultrafast', crf: 20, maxKbps: 6000, cost: 8 })
+  Object.freeze({ id: 'veryfast', preset: 'veryfast', crf: 21, maxKbps: 3000, cost: 20 }),
+  Object.freeze({ id: 'superfast', preset: 'superfast', crf: 21, maxKbps: 4000, cost: 18 }),
+  Object.freeze({ id: 'ultrafast', preset: 'ultrafast', crf: 20, maxKbps: 6000, cost: 15 })
 ])
 /**
  * The same for a main stream scaled to 1920 wide. Measured on the same server, 2560x1440 at 20 fps,
@@ -66,8 +77,13 @@ export const MAIN_LADDER = Object.freeze([
   Object.freeze({ id: 'veryfast', preset: 'veryfast', crf: 22, maxKbps: 8000, cost: 95 }),
   Object.freeze({ id: 'superfast', preset: 'superfast', crf: 22, maxKbps: 10000, cost: 80 })
 ])
-/** The CPU these conversions may take in all, in cores (CCTV_H264_FALLBACK_CORES). */
-export const DEFAULT_CORES = 2
+/**
+ * The CPU these conversions may take in all, in cores (CCTV_H264_FALLBACK_CORES). Three of the
+ * server's eight, now that a conversion is counted at what it really costs (LADDER): 15 at veryfast,
+ * 20 at ultrafast. The rest of the box is the NVR workers (about 1.7 cores), the main-stream
+ * conversions' own budget (1.6) and the server itself.
+ */
+export const DEFAULT_CORES = 3
 /** ...and how many may run at once whatever they cost: each is a process (CCTV_H264_FALLBACK_MAX). */
 export const DEFAULT_MAX = 24
 /** ...and the same two for main streams (CCTV_H264_FALLBACK_MAIN_CORES, CCTV_H264_FALLBACK_MAIN_MAX): two at superfast. */
@@ -75,6 +91,14 @@ export const DEFAULT_MAIN_CORES = 1.6
 export const DEFAULT_MAIN_MAX = 2
 /** A converted main is at most this wide, never wider than the camera's (transcode.mjs ffmpegArgs maxWidth). */
 export const MAIN_MAX_WIDTH = 1920
+/**
+ * ...and a converted sub-stream this wide. The ladder's costs were measured on 704x480 at 15 fps; the
+ * fleet's sub-streams have since become 1280x720 at 20, and each conversion was measured at 24-34 % of
+ * a core on 2026-10-13 (14 to 22 of them: 2 to 4 of the server's 8 cores, a load average over 10, video
+ * stuttering for everybody). A grid tile is rarely drawn wider than this, and a camera opened full size
+ * is the main stream's conversion, not this one.
+ */
+export const SUB_MAX_WIDTH = 704
 /** One encoder thread each: the box is shared with a worker process per NVR, and a sub-stream needs no more. */
 export const ENCODER_THREADS = 1
 /**
@@ -147,7 +171,7 @@ export const FAILED = 'h265: conversion failed'
 /** ...and a main refused for want of room: its own, so the full-size view stays on its sub-stream instead (viewer.js). */
 export const NO_ROOM_MAIN = 'h265: no room to convert main'
 
-/** The CPU budget in units (1 % of one core), from the environment; a bad or missing value means 2 cores. 0: off. */
+/** The CPU budget in units (1 % of one core), from the environment; a bad or missing value means 3 cores. 0: off. */
 export function budgetUnits(env = process.env) {
   const raw = env.CCTV_H264_FALLBACK_CORES
   const n = raw == null || String(raw).trim() === '' ? NaN : Number(raw)
@@ -210,7 +234,7 @@ export function stepFor(n, { units = DEFAULT_CORES * 100, current = null, ladder
  */
 const SHARED = { fps: 0, h264Only: true, keySeconds: KEY_SECONDS, bufSeconds: BUF_SECONDS, learnMs: 1000, wholeReplay: true, rejudge: true, maxLagS: MAX_LAG_S }
 export const KINDS = Object.freeze({
-  sub: Object.freeze({ id: 'sub', ladder: LADDER, spare: STEP_UP_SPARE, encThreads: ENCODER_THREADS, lingerMs: LINGER_MS, noRoom: NO_ROOM, stream: Object.freeze({ ...SHARED, type: 1, slowFps: EACH_PICTURE_BELOW_FPS }) }),
+  sub: Object.freeze({ id: 'sub', ladder: LADDER, spare: STEP_UP_SPARE, encThreads: ENCODER_THREADS, lingerMs: LINGER_MS, noRoom: NO_ROOM, stream: Object.freeze({ ...SHARED, type: 1, subMaxWidth: SUB_MAX_WIDTH, slowFps: EACH_PICTURE_BELOW_FPS }) }),
   main: Object.freeze({ id: 'main', ladder: MAIN_LADDER, spare: MAIN_STEP_UP_SPARE, encThreads: MAIN_ENCODER_THREADS, lingerMs: MAIN_LINGER_MS, noRoom: NO_ROOM_MAIN, stream: Object.freeze({ ...SHARED, type: 0, maxWidth: MAIN_MAX_WIDTH, lowDelay: false, slowFps: MAIN_EACH_PICTURE_BELOW_FPS, endEach: true }) })
 })
 

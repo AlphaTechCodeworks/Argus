@@ -451,7 +451,11 @@ check('speedFor: NVR mode takes 1-8 (reverse -> 1, 16/32 -> 8); server keeps any
       refusedMessage: () => null,
       showMessage: () => {},
       stopStallWatch: () => {},
-      seek: () => {}
+      seek: () => {},
+      // the Sound button's (pb-sound.test.mjs)
+      soundNewSocket: () => {},
+      syncSound: () => {},
+      onSoundFormat: () => {}
     }
     Object.assign(r, new Function(...Object.keys(deps), `${fn('open')}\n${fn('onStatus')}\nreturn { open, onStatus }`)(...Object.values(deps)))
     return r

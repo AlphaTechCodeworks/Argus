@@ -225,6 +225,16 @@ const d = dir('read')
   check('renderAudit survives an error body', renderAudit({ error: 'nope' }).rows.length === 0)
 }
 
+// ---- the device on a sensitive row (withDevice) ----
+{
+  check('withDevice: the device after the detail', A.withDevice('admin, password set', 'Windows PC · Chrome 141') === 'admin, password set; device: Windows PC · Chrome 141')
+  check('withDevice: no detail, the device alone', A.withDevice('', 'iPhone · Safari 18') === 'device: iPhone · Safari 18' && A.withDevice(undefined, 'Mac') === 'device: Mac')
+  check('withDevice: no device, the detail as it was', A.withDevice('x', '') === 'x' && A.withDevice(null, undefined) === '')
+  const long = A.withDevice('y'.repeat(600), 'Android phone (Pixel 8) · Chrome 141')
+  check('withDevice: a long detail is cut, the device kept, and the row fits', long.endsWith('; device: Android phone (Pixel 8) · Chrome 141') && long.length <= 500 && A.auditRow({ user: 'a', action: 'x', detail: long }).detail === long, String(long.length))
+  check('withDevice: no new line can be smuggled in by a User-Agent', !/\n/.test(A.withDevice('a', 'Mac\nforged')))
+}
+
 rmSync(DATA, { recursive: true, force: true })
 console.log(failures ? `\n${failures} failed` : '\nall passed')
 process.exit(failures ? 1 : 0)

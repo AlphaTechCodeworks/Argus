@@ -89,6 +89,7 @@ export const PLAYBACK_CLOCK = { startDelayMs: 300, minDelayMs: 200, maxDelayMs: 
  * (player.js REMOTE_QUEUED_FRAMES).
  */
 export const REMOTE_CLOCK = { startDelayMs: 350, minDelayMs: 150, maxDelayMs: 2000, stretchLate: true, shrinkWindowMs: 60_000 }
+export const LOW_LATENCY_CLOCK = { startDelayMs: 120, minDelayMs: 60, maxDelayMs: 300, stretchLate: true, shrinkWindowMs: 10_000 }
 
 /**
  * Recorded footage for a viewer the server calls remote (playback.js, once {type:'fit'} has said so;

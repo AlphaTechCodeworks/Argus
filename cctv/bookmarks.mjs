@@ -299,6 +299,21 @@ export function protectedRanges(fromMs, toMs, { marginMs = DEFAULT_MARGIN_MS } =
   return protectedByCamera(rows, margin)
 }
 
+/**
+ * An AD account renamed in AD (ad.mjs): the bookmarks with its old name on them are its, under the new
+ * one (only the maker or an admin may change a bookmark). @returns {() => void} undoes it
+ */
+export function renameBookmarkUser(from, to) {
+  open()
+  const moved = db.prepare('SELECT id FROM bookmarks WHERE user = ?').all(from).map((r) => r.id)
+  if (!moved.length) return () => {}
+  db.prepare('UPDATE bookmarks SET user = ? WHERE user = ?').run(to, from)
+  return () => {
+    const back = db.prepare('UPDATE bookmarks SET user = ? WHERE id = ?')
+    for (const id of moved) back.run(from, id)
+  }
+}
+
 /** Whether this person may edit or delete this bookmark. `who` is a name or { user, admin }. */
 function mayChange(bookmark, who) {
   const { user, admin } = whoOf(who)

@@ -70,6 +70,9 @@ export function boundsOf(map, keys) {
  */
 export const STATES = {
   recording: { rank: 0, label: 'recording', title: 'online and recording' },
+  // (while nothing anywhere is being recorded: recording is switched off, and "not recording" would
+  // paint every camera amber for a fault nobody has. Green for live, red for offline, at the owner's wish.)
+  live: { rank: 0, label: 'live', title: 'online (recording is switched off)' },
   unknown: { rank: 1, label: 'state unknown', title: 'the server has not said what this camera is doing' },
   idle: { rank: 2, label: 'not recording', title: 'online, but nothing is being recorded' },
   alert: { rank: 3, label: 'alert', title: 'there is an open alert about this camera' },
@@ -106,12 +109,14 @@ export function alertsByNvr(open = []) {
  *
  * @param {{online?: boolean, recording?: boolean}|null|undefined} entry
  * @param {object[]} alerts the open alerts naming this camera's NVR
+ * @param {{ recordingOff?: boolean }} [o] recordingOff: no camera anywhere is recording (cameraStates),
+ *   so one that is online and not recording is simply live, not a camera that has stopped recording
  */
-export function stateOf(entry, alerts = []) {
+export function stateOf(entry, alerts = [], { recordingOff = false } = {}) {
   if (!entry || typeof entry.online !== 'boolean') return 'unknown'
   if (!entry.online) return 'offline'
   if (typeof entry.recording !== 'boolean') return 'unknown'
-  if (!entry.recording) return 'idle'
+  if (!entry.recording) return recordingOff ? 'live' : 'idle'
   return alerts.length > 0 ? 'alert' : 'recording'
 }
 
@@ -122,10 +127,13 @@ export function stateOf(entry, alerts = []) {
 export function cameraStates(health) {
   const alerts = alertsByNvr(health?.open ?? [])
   const byKey = {}
+  // Not one camera recording, on any NVR: recording is switched off (the health answer has no word
+  // for that itself). With even one recording, a camera that is not stays amber: that is the fault.
+  const recordingOff = !(health?.cameras ?? []).some((c) => c?.recording === true)
   for (const c of health?.cameras ?? []) {
     if (c?.nvrId === undefined || c?.ch === undefined) continue
     const mine = alerts.get(String(c.nvrId)) ?? []
-    byKey[camKey(c.nvrId, c.ch)] = { state: stateOf(c, mine), alerts: mine }
+    byKey[camKey(c.nvrId, c.ch)] = { state: stateOf(c, mine, { recordingOff }), alerts: mine }
   }
   return { byKey, at: Number.isFinite(health?.now) ? health.now : null }
 }
@@ -241,7 +249,7 @@ export function worstState(states) {
 
 /** How many cameras are in each state, for the count under the map's legend. */
 export function stateCounts(markers) {
-  const counts = { recording: 0, idle: 0, alert: 0, offline: 0, unknown: 0 }
+  const counts = { recording: 0, live: 0, idle: 0, alert: 0, offline: 0, unknown: 0 }
   for (const m of markers) counts[STATES[m.state] ? m.state : 'unknown']++
   return counts
 }

@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="colour-check.css" />
   <link rel="stylesheet" href="grid-order.css" />
   <link rel="stylesheet" href="css/live.css" />
+  <link rel="stylesheet" href="css/start-order.css" />
 </head>
 <body class="live-page">
   <section class="live-heading" aria-label="Live view overview">
@@ -66,10 +67,18 @@
           <option value="">(not saved)</option>
         </select>
       </label>
+      <button id="cycleStop" type="button" title="Stop going round the views" hidden>Stop cycling</button>
       </div>
       <details class="live-options"><summary>View options</summary><div class="live-options-panel">
-      <button id="saveView" type="button" title="Save the cameras shown and this layout as a named view">Save view…</button>
+      <button id="saveView" type="button" title="Make a view of your own: choose cameras from any sites and a layout">New view…</button>
+      <button id="editView" type="button" title="Change the cameras, layout or sharing of the view shown" hidden>Edit view…</button>
+      <button id="copyView" type="button" title="Save this shared view as your own, to change it" hidden>Save a copy…</button>
       <button id="deleteView" type="button" title="Delete the saved view shown" hidden>Delete view</button>
+      <button id="copyLink" type="button" title="A link that opens Live on this view" hidden>Copy link</button>
+      <button id="copyScreenLink" type="button" title="A link for a TV or second monitor: just this view's cameras, full window" hidden>Copy TV screen link</button>
+      <button id="cycleViews" type="button" title="Show your views in turn">Cycle views…</button>
+      <button id="startOrderBtn" type="button" title="Choose which cameras start first. The tiles stay where they are.">Start order…</button>
+      <p id="linkMsg" class="live-help" role="status" hidden></p>
       <label title="Leave offline cameras out of the layout"><input id="hideOffline" type="checkbox" checked /> Hide offline</label>
       <label title="Steadier motion: holds about 0.4 s more video (a little more delay)"><input id="smooth" type="checkbox" /> Smooth</label>
       <label for="pictureFit">Picture
@@ -100,15 +109,46 @@
     </div>
   </header>
   <p id="filterNote" class="filter-note" role="status" hidden></p>
+  <div id="startOrderBar" class="start-order-bar" role="region" aria-label="Start order" hidden>
+    <p id="startOrderText">Click cameras in the order you want them to start. The rest follow in reading order.</p>
+    <p id="startOrderMsg" class="start-order-msg" role="status"></p>
+    <div class="start-order-actions">
+      <button id="startOrderSave" type="button" class="btn-primary">Save</button>
+      <button id="startOrderClear" type="button">Clear</button>
+      <button id="startOrderCancel" type="button">Cancel</button>
+    </div>
+  </div>
   <main id="grid" aria-label="Live camera grid"></main>
   <p id="notice" hidden></p>
   <p id="layoutNote" class="page-note" role="status" hidden></p>
   <p id="orderNote" class="order-note" role="status" hidden></p>
-  <dialog id="saveViewDlg" class="wall-pick">
+  <dialog id="saveViewDlg" class="wall-pick view-editor" aria-labelledby="veTitle">
     <form method="dialog">
-      <h2>Save this view</h2>
-      <p class="wall-pick-note">The cameras shown and the layout, kept with your account so they follow you to any screen.</p>
-      <label>Name <input id="viewName" type="text" maxlength="60" placeholder="Yard and gates" /></label>
+      <h2 id="veTitle">New view</h2>
+      <p class="wall-pick-note">Your own set of cameras, from any sites, and how they are laid out. Kept with your account, so it follows you to any screen.</p>
+      <label class="ve-name">Name <input id="viewName" type="text" maxlength="60" placeholder="Yard and gates" /></label>
+      <section class="ve-step">
+        <h3>1. Cameras</h3>
+        <p id="veCount" class="live-help" role="status"></p>
+        <div class="ve-pick-head"><label class="visually-hidden" for="veSearch">Find cameras</label><input id="veSearch" type="search" placeholder="Find cameras…" autocomplete="off" /><button type="button" id="veClear">Untick all</button></div>
+        <div id="vePick" class="ve-pick"></div>
+      </section>
+      <section class="ve-step">
+        <h3>2. Layout</h3>
+        <label class="visually-hidden" for="veLayout">Layout</label><select id="veLayout"></select>
+        <div id="veDraw" class="ve-draw" hidden>
+          <label>Squares <select id="veSize"></select></label>
+          <p class="live-help">Drag across squares to join them into one bigger tile. Click a big tile to split it again.</p>
+          <div id="veDrawGrid" class="ve-grid ve-draw-grid"></div>
+        </div>
+      </section>
+      <section class="ve-step">
+        <h3>3. Where each camera goes</h3>
+        <p class="live-help">Drag a camera onto another tile to swap them, or click one and then the other.</p>
+        <div id="vePlace" class="ve-grid ve-place"></div>
+        <div id="veMore" class="ve-more"></div>
+      </section>
+      <label id="veShareRow" class="ve-share"><input id="veShare" type="checkbox" /> Share with everyone <span class="live-help">Everyone else can use it (with only the cameras they are allowed to see). Only you can change it.</span></label>
       <p class="pb-ex-msg" id="viewMsg" role="status"></p>
       <div class="pb-ex-actions">
         <button type="submit" value="cancel">Cancel</button>
@@ -116,6 +156,20 @@
       </div>
     </form>
   </dialog>
+  <dialog id="cycleDlg" class="wall-pick" aria-labelledby="cycleTitle">
+    <form method="dialog">
+      <h2 id="cycleTitle">Cycle views</h2>
+      <p class="wall-pick-note">Live shows each view in turn. It waits while you are using the page or have a camera open full size.</p>
+      <div id="cycleList" class="wall-pick-list"></div>
+      <label>Seconds on each view <input id="cycleEvery" type="number" min="10" max="300" step="5" value="30" /></label>
+      <p class="pb-ex-msg" id="cycleMsg" role="status"></p>
+      <div class="pb-ex-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="button" id="cycleStart" class="pb-primary">Start</button>
+      </div>
+    </form>
+  </dialog>
+  <a id="screenExit" class="screen-exit" href="/" hidden>Leave this screen</a>
   <dialog id="moveCameraDlg" class="wall-pick">
     <form method="dialog"><h2>Move camera</h2><p id="moveCameraName"></p>
       <label for="moveCameraTarget">Swap with</label><select id="moveCameraTarget"></select>
@@ -124,7 +178,6 @@
   </dialog>
   <script type="module" src="shell.js"></script>
   <script type="module" src="viewer.js"></script>
-  <script type="module" src="alert-banner.js"></script>
   <script type="module" src="build-badge.js"></script>
 </body>
 </html>

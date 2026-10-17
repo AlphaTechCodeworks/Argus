@@ -12,7 +12,7 @@ const xmlMod = await import('../nvr-xml.mjs')
 const { nvrs } = await import('../nvrs.mjs')
 const { Lane } = await import('../lanes.mjs')
 
-const { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, recommendedRange, optimisePlan, capPlan, downTarget, TIMING } = _test
+const { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, sizeChange, buildEdit, buildRemain, parseRemain, worstCase, recommendedRange, optimisePlan, capPlan, downTarget, TIMING } = _test
 const dir = process.argv[2] ?? join(import.meta.dirname, 'fixtures', 'streams')
 let failures = 0
 const check = (name, ok, extra = '') => {
@@ -84,6 +84,42 @@ check('refused: a codec or size the camera does not offer', refuses(() => planCh
 check('S5: a bigger picture alone is refused', refuses(() => planChange(driveWay, sys, { res: '3840x2160' }), /bitrate raised with it/))
 check('S5: ... and with too small a raise', refuses(() => planChange(driveWay, sys, { res: '3840x2160', QoI: 8192 }), /at least 10240/))
 check('S5: with the cap raised in proportion (2.03x -> 10240, the top step)', planChange(driveWay, sys, { res: '3840x2160', QoI: 10240 }).next.res === '3840x2160')
+// A size picked by hand (the Picture tab's picker): the change names only the size, and sizeChange
+// brings the cap -- and, where the size is slower, the frame rate -- with it. planChange still checks all.
+{
+  const picked = (item, res, lowerRes = false, s = sys) => {
+    const asked = sizeChange(item, s, { res }, lowerRes)
+    return { asked, ...planChange(item, s, asked.change, asked.opts) }
+  }
+  const up = picked(driveWay, '3840x2160')
+  check('size, bigger: the cap is worked out (5120 × 2.03 → 10240, the top step) and both are planned', up.next.res === '3840x2160' && up.next.QoI === 10240 && up.next.fps === 20, JSON.stringify(up.next))
+  check('  ... the next list step at or above cap × pixel ratio (2688x1520 → 3200x1800: 5120 × 1.41 → 8192)', picked(driveWay, '3200x1800').next.QoI === 8192)
+  check('  ... the top step the NVR offers on PoE mode 10 (6144)', picked(driveWay, '3840x2160', false, { ...sys, poeMode: '10' }).next.QoI === 6144)
+  check('  ... a change that names its own cap is left exactly as asked (and refused as before when too small)', JSON.stringify(sizeChange(driveWay, sys, { res: '3840x2160', QoI: 8192 }).change) === '{"res":"3840x2160","QoI":8192}' && refuses(() => planChange(driveWay, sys, { res: '3840x2160', QoI: 8192 }), /at least 10240/))
+  check('  ... the review shows both: the storage text carries the size, and the encoder restart', (() => {
+    const t = _test.impactsOf(up.cur, up.next)
+    return t.map((i) => i.key).join() === 'storage,encoder-restart' && /^Recording uses up to 10240 instead of 5120 kbit\/s for this camera \(with 2688x1520 → 3840x2160\): the NVR keeps fewer days/.test(t[0].text)
+  })())
+  check('size, smaller: refused without the flag', refuses(() => picked(gate, '1920x1080'), /never lowers the resolution/))
+  const down = picked(gate, '1920x1080', true)
+  check('  ... allowed with it; the cap is kept where the NVR offers the same figure at the smaller size', down.next.res === '1920x1080' && down.next.QoI === 5120 && down.next.fps === 20 && down.next.enct === 'h265' && down.next.level === 'higher')
+  const downText = _test.impactsOf(down.cur, down.next)
+  check('  ... and the review says, to be acknowledged, that every recording has less detail and that Undo puts it back', downText.map((i) => i.key).join() === 'storage,encoder-restart,less-detail' && /every recording from now on has less detail/.test(downText[2].text) && /Undo puts the size back/.test(downText[2].text) && /The cap stays at 5120 kbit\/s \(the NVR offers the same figure at the smaller size\)/.test(downText[0].text), downText.map((i) => i.text).join(' | '))
+  // a camera whose list for the smaller size stops short of the present cap
+  const short = { ...gate, qualityCaps: gate.qualityCaps.map((q) => (q.enct === 'h265' && q.res === '1920x1080' ? { ...q, values: [1024, 2048, 3072, 4096] } : q)) }
+  const low = picked(short, '1920x1080', true)
+  check('  ... else the nearest choice for that size that is not above the present cap (5120 → 4096), said in the review', low.next.QoI === 4096 && /uses up to 4096 instead of 5120 kbit\/s.*the NVR does not offer 5120 at the smaller size, and 4096 is its nearest choice under it/.test(_test.impactsOf(low.cur, low.next)[0].text), _test.impactsOf(low.cur, low.next)[0].text)
+  check('  ... a lower cap is never allowed without a smaller size', refuses(() => planChange(gate, sys, { QoI: 4096 }, { allowLowerCap: true }), /never lowers the bitrate cap/) && refuses(() => planChange(gate, sys, { QoI: 4096 }, { allowLowerRes: true, allowLowerCap: true }), /never lowers the bitrate cap/) && refuses(() => planChange(short, sys, { res: '1920x1080', QoI: 4096 }, { allowLowerRes: true }), /never lowers the bitrate cap/))
+  check('  ... the flag does nothing for a bigger size (the cap is still raised)', picked(driveWay, '3840x2160', true).next.QoI === 10240)
+  // frame rate: Bike Parking at 30 fps, and 2880x1620 goes no faster than 20
+  const fast = { ...bike, an: { ...bike.an, fps: '30' }, ae: { ...bike.ae, fps: '30' } }
+  const slow = picked(fast, '2880x1620')
+  check('size: one that goes no faster than the camera runs now takes the size\'s most (30 → 20 fps), and says so', slow.next.fps === 20 && slow.asked.opts.allowLowerFps === true && slow.next.QoI >= 4096 && _test.impactsOf(slow.cur, slow.next).some((i) => i.key === 'frame-rate' && /no faster than 20 frames a second at 2880x1620, so the frame rate goes from 30 down to 20/.test(i.text)), JSON.stringify(slow.next))
+  check('  ... the frame rate is left alone where the size allows it, and never lowered otherwise', picked(bike, '2880x1620').next.fps === 20 && picked(bike, '2880x1620').asked.opts.allowLowerFps === undefined && refuses(() => planChange(fast, sys, { fps: 20 }), /never lowers the frame rate/))
+  check('size: the size in use, or one the camera does not offer, is passed on untouched', JSON.stringify(sizeChange(gate, sys, { res: '3840x2160' }).change) === '{"res":"3840x2160"}' && refuses(() => picked(gate, '4000x3000', true), /resolution 4000x3000 is not offered/))
+  check('size: a camera that cannot be changed here stays refused (no bitrate type: LCL Cage)', /no bitrate type/.test(whyNot(cage, sys, true)) && refuses(() => picked(cage, '1280x720', true), /^Refused: /))
+  check('Undo of a smaller size puts back the logged size and cap', planChange({ ...short, an: { ...short.an, res: '1920x1080', QoI: '4096' }, ae: { ...short.ae, res: '1920x1080', QoI: '4096' } }, sys, null, { undoTo: low.cur }).next.res === '3840x2160')
+}
 check('S4: H.265+ to H.265 at the same cap', planChange(pwExit, sys, { enct: 'h265' }).next.enct === 'h265')
 check('S6: H.264 to H.265 at the same cap', planChange(bike, sys, { enct: 'h265' }).next.enct === 'h265')
 check('"never lowers anything": H.265 -> H.264 refused', refuses(() => planChange(pwEntrance, sys, { enct: 'h264' }), /codec only from H\.265\+ to H\.265 or from H\.264 to H\.265/))
@@ -226,6 +262,34 @@ check('536871004 -> "over the NVR\'s bandwidth limit"', s9 === 200 && b9.result.
 editAnswer = '<response><status>success</status></response>'
 const [s10] = await post(30, { device: DEV, change: { QoI: 4096 }, seen: { enct: 'h264', res: '1280x960', fps: 30, QoI: 3072, level: 'higher' }, confirm: true })
 check('not a candidate (LCL Cage) -> refused', s10 === 400)
+// a size picked by hand, through the same gate (truckview: 1920x1080 at 4096; it offers 2880x1620 and 1280x720)
+{
+  const [, gT] = await handleStreams('stream', 'GET', nvr.id, 26, q(), async () => ({}), 'tester')
+  check('GET: the sizes the camera offers, each with its most frames a second', gT.stream.caps.resolutions.map((r) => `${r.res}@${r.fps}`).join() === '2880x1620@30,2560x1440@30,2304x1296@30,1920x1080@30,1280x720@30', JSON.stringify(gT.stream.caps.resolutions))
+  const seenT = { ...gT.stream.current }
+  const n = edits().length
+  const [, eU] = await handleStreams('estimate', 'POST', nvr.id, 26, q(), async () => ({ change: { res: '2880x1620' } }), 'tester')
+  check('estimate, bigger size: both the size and the cap the server worked out (4096 × 2.25 → 10240)', eU.estimate.to.res === '2880x1620' && eU.estimate.to.QoI === 10240 && eU.estimate.from.QoI === 4096 && eU.estimate.impacts.map((i) => i.key).join() === 'storage,encoder-restart', JSON.stringify(eU.estimate.to))
+  const [u1, bU1] = await post(26, { device: DEV, change: { res: '2880x1620' }, seen: seenT, confirm: true })
+  const [u2, bU2] = await post(26, { device: DEV, change: { res: '2880x1620' }, seen: seenT, ack: bU1.needsAck?.map((x) => x.key), ackToken: bU1.ackToken, confirm: true })
+  check('apply, bigger size: acknowledged, then size and cap sent together and read back', u1 === 409 && u2 === 200 && bU2.result.status === 'done' && edits().length === n + 1 && /<an res="2880x1620" fps="30" QoI="10240" /.test(edits().at(-1).xml) && bU2.stream.current.res === '2880x1620', JSON.stringify(bU2.result ?? bU2))
+  const seenB = { ...bU2.stream.current }
+  const [d0, bD0] = await post(26, { device: DEV, change: { res: '1280x720' }, seen: seenB, confirm: true })
+  const [, eD0] = await handleStreams('estimate', 'POST', nvr.id, 26, q(), async () => ({ change: { res: '1280x720' } }), 'tester')
+  check('smaller size without lowerRes: refused outright (apply and estimate); nothing sent', d0 === 400 && /never lowers the resolution/.test(bD0.error) && /never lowers the resolution/.test(eD0.error ?? '') && edits().length === n + 1, bD0.error)
+  const [, eD] = await handleStreams('estimate', 'POST', nvr.id, 26, q(), async () => ({ change: { res: '1280x720' }, lowerRes: true }), 'tester')
+  check('estimate, smaller size with lowerRes: the "less detail" acknowledgement, cap kept', eD.estimate.to.res === '1280x720' && eD.estimate.to.QoI === 10240 && eD.estimate.impacts.some((i) => i.key === 'less-detail' && /less detail/.test(i.text)), JSON.stringify(eD.estimate?.impacts))
+  const [d1, bD1] = await post(26, { device: DEV, change: { res: '1280x720' }, lowerRes: true, seen: seenB, confirm: true })
+  const [d2] = await post(26, { device: DEV, change: { res: '1280x720' }, lowerRes: true, seen: seenB, ack: ['storage', 'encoder-restart'], ackToken: bD1.ackToken, confirm: true })
+  check('apply, smaller size: not sent until "less detail" itself is acknowledged', d1 === 409 && bD1.needsAck.map((x) => x.key).join() === 'storage,encoder-restart,less-detail' && d2 === 409 && edits().length === n + 1)
+  const [d3, bD3] = await post(26, { device: DEV, change: { res: '1280x720' }, lowerRes: true, seen: seenB, ack: bD1.needsAck.map((x) => x.key), ackToken: bD1.ackToken, confirm: true })
+  check('  ... then sent and read back', d3 === 200 && bD3.result.status === 'done' && /<an res="1280x720" fps="30" QoI="10240" /.test(edits().at(-1).xml) && bD3.stream.undo?.seq === bD3.result.seq, JSON.stringify(bD3.result ?? bD3))
+  const [z1, bZ1] = await post(26, { device: DEV, undo: true, seq: bD3.result.seq, confirm: true })
+  const [z2, bZ2] = await post(26, { device: DEV, undo: true, seq: bD3.result.seq, ack: bZ1.needsAck?.map((x) => x.key), ackToken: bZ1.ackToken, confirm: true })
+  check('Undo puts the size back (2880x1620), with its own acknowledgement', z1 === 409 && z2 === 200 && bZ2.result.status === 'done' && bZ2.stream.current.res === '2880x1620' && bZ2.stream.current.QoI === 10240, JSON.stringify(bZ2.result ?? bZ2))
+  const [c1, bC1] = await post(30, { device: DEV, change: { res: '1280x720' }, lowerRes: true, seen: { enct: 'h264', res: '1280x960', fps: 30, QoI: 3072, level: 'higher', bitType: '' }, confirm: true })
+  check('a camera that cannot be changed here (LCL Cage) is refused whatever is picked', c1 === 400 && /can't be changed here/.test(bC1.error), bC1.error)
+}
 const [s11] = await handleStreams('stream', 'POST', nvr.id, 13, q(), async () => null, 'tester')
 check('a JSON null body is a 400', s11 === 400)
 check('never written: record mode, dual-stream switch', !calls.some((c) => /editRecordDistributeInfo/.test(c.url)))

@@ -28,8 +28,8 @@
 // through the same seen/ack/confirm gate as every other change here, one camera at a time.
 //
 //   GET  /api/admin/nvrs/:id/channels/:ch/stream[?usage=0.96]   -> { stream }
-//   POST /api/admin/nvrs/:id/channels/:ch/stream/estimate       { change, measuredKbps? } -> { estimate }   (read only)
-//   POST /api/admin/nvrs/:id/channels/:ch/stream                { device, change, seen, ack, ackToken, confirm: true }
+//   POST /api/admin/nvrs/:id/channels/:ch/stream/estimate       { change, lowerRes?, measuredKbps? } -> { estimate }   (read only)
+//   POST /api/admin/nvrs/:id/channels/:ch/stream                { device, change, lowerRes?, seen, ack, ackToken, confirm: true }
 //                                                               { device, undo: true, seq, ack, ackToken, confirm: true }
 import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync } from 'node:fs'
@@ -243,6 +243,11 @@ function whyNot(item, sys, online, usage) {
 
 /** The only codec moves offered (plan S4, S6): off the smart codec, and H.264 up to H.265. */
 const CODEC_MOVES = new Set(['h265p>h265', 'h264>h265'])
+// ... and, only where the owner has asked for it by name (handleStreamSmartCodec, allowSmart): on to
+// H.265+. It is refused everywhere else for the reason given below (less detail at the same cap, and
+// keyframes far apart: a stream slower to open and coarser to seek). The owner chose it for the whole
+// fleet on 2026-10-12, told of both, because the NVRs' own disks are the only recording there is.
+const SMART_MOVES = new Set(['h265>h265p', 'h264>h265p'])
 
 /**
  * The stream after a change, checked against what the camera offers. Refuses anything that
@@ -250,8 +255,10 @@ const CODEC_MOVES = new Set(['h265p>h265', 'h264>h265'])
  * and H.264 -> H.265 (to H.264, or to a smart codec, is a lower quality at the same cap), and
  * more pixels or frames without a bitrate raised in proportion (each would get fewer bits).
  * undoTo: Undo sets exactly these logged values (it may lower).
+ * allowLowerCap: only ever together with a lowered resolution (sizeChange below): a smaller size
+ * whose list of bitrates does not hold the present figure takes the nearest one under it.
  */
-function planChange(item, sys, change, { undoTo = null, allowLowerRes = false } = {}) {
+function planChange(item, sys, change, { undoTo = null, allowLowerRes = false, allowSmart = false, allowLowerFps = false, allowLowerCap = false } = {}) {
   const cur = current(item)
   let next
   if (undoTo) next = { ...cur, ...Object.fromEntries(KEYS.filter((k) => k in undoTo).map((k) => [k, undoTo[k]])) }
@@ -281,10 +288,10 @@ function planChange(item, sys, change, { undoTo = null, allowLowerRes = false } 
   const offered = item.bitTypes?.length ? item.bitTypes : [cur.bitType]
   if (!offered.includes(next.bitType)) bad(`bitrate type ${next.bitType} is not offered by this camera (it offers ${offered.join(', ')})`)
   if (!undoTo) {
-    if (next.QoI < cur.QoI) bad('this never lowers the bitrate cap (Undo can put back a raise)')
-    if (next.fps < cur.fps) bad('this never lowers the frame rate')
+    if (next.QoI < cur.QoI && !(allowLowerCap && px(next.res) < px(cur.res))) bad('this never lowers the bitrate cap (Undo can put back a raise)')
+    if (!allowLowerFps && next.fps < cur.fps) bad('this never lowers the frame rate')
     if (LEVELS.indexOf(next.level) < LEVELS.indexOf(cur.level)) bad('this never lowers the quality level')
-    if (next.enct !== cur.enct && !CODEC_MOVES.has(`${cur.enct}>${next.enct}`)) bad(`this changes the codec only from H.265+ to H.265 or from H.264 to H.265, not ${cur.enct} to ${next.enct} (a lower quality at the same cap)`)
+    if (next.enct !== cur.enct && !CODEC_MOVES.has(`${cur.enct}>${next.enct}`) && !(allowSmart && SMART_MOVES.has(`${cur.enct}>${next.enct}`))) bad(`this changes the codec only from H.265+ to H.265 or from H.264 to H.265, not ${cur.enct} to ${next.enct} (a lower quality at the same cap)`)
     if (!allowLowerRes && next.res !== cur.res && px(next.res) < px(cur.res)) bad('this never lowers the resolution')
     // more pixels or frames at the same cap means fewer bits for each: only with the cap raised
     // in proportion (rounded up to a list step; the top step when the list ends)
@@ -297,6 +304,46 @@ function planChange(item, sys, change, { undoTo = null, allowLowerRes = false } 
     }
   }
   return { cur, next }
+}
+
+/**
+ * A size chosen by hand (the Picture tab's resolution picker) made into a whole change. The page
+ * names only the size; what has to move with it is worked out here, from the camera's own lists,
+ * so the page cannot get it wrong. Returns { change, opts } for planChange, which still checks all.
+ *   bigger:  the cap raised in proportion, by the rule planChange enforces (the next of the NVR's
+ *            choices at or above cap × pixel ratio, or the top choice).
+ *   smaller: only when the request says so (lowerRes: every recording from then on has less detail,
+ *            and the owner has to have been told). The cap is kept if the NVR offers that figure at
+ *            the smaller size, else the nearest choice under it.
+ *   frame rate: a size that goes no faster than the camera runs now takes the size's most. This is
+ *            the one case where the frame rate may go down.
+ * A change that names its own cap (QoI) is left exactly as asked.
+ */
+function sizeChange(item, sys, change, lowerRes = false) {
+  const asked = { change, opts: {} }
+  if (!isPlainObject(change) || !('res' in change) || 'QoI' in change) return asked
+  const cur = current(item)
+  const size = item.resolutions.find((r) => r.res === change.res)
+  if (!size || change.res === cur.res) return asked // planChange says what is wrong with it
+  const smaller = px(change.res) < px(cur.res)
+  if (smaller && !lowerRes) return asked // refused there: "this never lowers the resolution"
+  const out = { ...change }
+  const opts = {}
+  if (!('fps' in change) && size.fps && cur.fps > size.fps) {
+    out.fps = size.fps
+    opts.allowLowerFps = true
+  }
+  const choices = qoiList(item, sys, normEnct(out.enct ?? cur.enct), out.res)
+  if (!choices.length) return { change: out, opts } // no list for this size: planChange refuses it
+  if (smaller) {
+    opts.allowLowerRes = true
+    opts.allowLowerCap = true
+    out.QoI = choices.includes(cur.QoI) ? cur.QoI : (choices.filter((v) => v <= cur.QoI).at(-1) ?? choices[0])
+  } else {
+    const ratio = (px(out.res) / px(cur.res)) * ((out.fps ?? cur.fps) / cur.fps)
+    out.QoI = choices.find((v) => v >= cur.QoI * Math.max(1, ratio)) ?? choices.at(-1)
+  }
+  return { change: out, opts }
 }
 
 /** editNodeEncodeInfo for one channel, as the page's getSaveData writes it, every other attribute echoed. */
@@ -382,8 +429,9 @@ function worstCase(cur, next, measuredKbps) {
 const tokenOf = (parts) => createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 16)
 const sortObj = (o) => Object.fromEntries(Object.entries(o ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
 
-function impactsOf(cur, next) {
+function impactsOf(cur, next, action = 'change') {
   const changed = KEYS.filter((k) => String(cur[k]) !== String(next[k]))
+  const smaller = next.res !== cur.res && px(next.res) < px(cur.res)
   const other = [
     next.level !== cur.level ? `quality level ${cur.level} → ${next.level}` : null,
     next.enct !== cur.enct ? `codec ${cur.enct} → ${next.enct}` : null,
@@ -392,13 +440,27 @@ function impactsOf(cur, next) {
   ].filter(Boolean)
   const also = other.length ? ` (with ${other.join(', ')})` : ''
   let text
-  if (next.QoI < cur.QoI) text = `Recording uses up to ${next.QoI} instead of ${cur.QoI} kbit/s for this camera${also}: a lower picture quality again, and the NVR keeps more days of recordings.` // only an Undo lowers
+  // a cap goes down only in an Undo, or with a smaller size picked by hand (sizeChange)
+  if (next.QoI < cur.QoI && smaller && action !== 'undo') text = `Recording uses up to ${next.QoI} instead of ${cur.QoI} kbit/s for this camera${also}: the NVR does not offer ${cur.QoI} at the smaller size, and ${next.QoI} is its nearest choice under it. The NVR keeps more days of recordings.`
+  else if (next.QoI < cur.QoI) text = `Recording uses up to ${next.QoI} instead of ${cur.QoI} kbit/s for this camera${also}: a lower picture quality again, and the NVR keeps more days of recordings.`
   else if (next.QoI > cur.QoI) text = `Recording uses up to ${next.QoI} instead of ${cur.QoI} kbit/s for this camera${also}: the NVR keeps fewer days of recordings.`
   else if (!other.length) text = `Nothing changes (${cur.QoI} kbit/s).`
+  else if (next.QoI === cur.QoI && smaller) text = `The cap stays at ${cur.QoI} kbit/s (the NVR offers the same figure at the smaller size), with ${other.join(', ')}: recordings take no more space than now.`
   else if (next.enct !== cur.enct && cur.enct === 'h264' && other.length === 1) text = `The cap stays at ${cur.QoI} kbit/s and H.265 gives a better picture for it; recordings take about as much space as now when the camera sends its full cap.`
   else text = `The cap stays at ${cur.QoI} kbit/s, but with ${other.join(', ')} the camera sends closer to it (up to its full cap): the NVR may keep fewer days of recordings.`
   const out = [{ key: 'storage', text, paths: changed }]
   if (cur.enct !== next.enct || cur.res !== next.res) out.push({ key: 'encoder-restart', text: 'The camera restarts its encoder: a few seconds without video or recording.', paths: ['enct', 'res'].filter((k) => cur[k] !== next[k]) })
+  // The two things a hand-picked size can take away, each said plainly and each to be acknowledged.
+  if (smaller) {
+    out.push({
+      key: 'less-detail',
+      text: action === 'undo'
+        ? `The picture goes back from ${cur.res} to ${next.res}: every recording from now on has less detail again.`
+        : `The picture goes from ${cur.res} down to ${next.res}: every recording from now on has less detail (faces and number plates are harder to read). What is already recorded is not touched, and Undo puts the size back.`,
+      paths: ['res']
+    })
+  }
+  if (action !== 'undo' && next.res !== cur.res && next.fps < cur.fps) out.push({ key: 'frame-rate', text: `The camera goes no faster than ${next.fps} frames a second at ${next.res}, so the frame rate goes from ${cur.fps} down to ${next.fps}: movement is a little less smooth.`, paths: ['fps'] })
   return out
 }
 
@@ -458,7 +520,8 @@ async function estimate(ctx, body) {
   const { nvr, chlId, gen } = ctx
   const item = await readChannel(nvr, chlId, gen)
   const sys = await readSystem(nvr, gen)
-  const { cur, next } = planChange(item, sys, body.change)
+  const asked = sizeChange(item, sys, body.change, body.lowerRes === true)
+  const { cur, next } = planChange(item, sys, asked.change, asked.opts)
   // the NVR's storage estimate, with every enabled channel, before and after
   const { all, before, after, cycle } = await storageEstimate(nvr, gen, item, sys, next)
   const refused = retentionRefusal(cur, next, before, after, cycle)
@@ -504,7 +567,9 @@ async function apply(ctx, body) {
     if (!isPlainObject(body.seen) || !KEYS.every((k) => k in body.seen)) throw new HttpError(400, `seen must list the stream shown (${KEYS.join(', ')})`)
     const stale = KEYS.filter((k) => String(body.seen[k]) !== String(now[k]))
     if (stale.length) throw new HttpError(409, `The stream changed since you looked (${stale.map((k) => `${k} is now ${now[k]}`).join(', ')}); nothing was sent`, { stale: stale.map((k) => ({ path: k, now: now[k] })) })
-    plan = planChange(item, sys, body.change)
+    // a size picked by hand brings its cap (and, where the size is slower, its frame rate) with it
+    const asked = sizeChange(item, sys, body.change, body.lowerRes === true)
+    plan = planChange(item, sys, asked.change, asked.opts)
   }
   const { cur, next } = plan
   if (sameKeys(cur, next)) return { status: 'done', message: 'Nothing to change' }
@@ -514,7 +579,7 @@ async function apply(ctx, body) {
     const refused = retentionRefusal(cur, next, before, after, cycle)
     if (refused) throw new HttpError(400, `Refused: ${refused}. Nothing was sent.`)
   }
-  const list = impactsOf(cur, next)
+  const list = impactsOf(cur, next, action)
   const token = tokenOf([device, chlId, 'stream', action, sortObj(pick(cur)), sortObj(pick(next)), list.map((i) => [i.key, i.text])])
   const ack = Array.isArray(body.ack) ? body.ack : []
   if (body.ackToken !== token || !list.every((i) => ack.includes(i.key))) throw new HttpError(409, 'This change needs your confirmation', { needsAck: list, ackToken: token })
@@ -655,6 +720,109 @@ export async function handleStreamOptimise(method, nvrId, readJson, user) {
     if (body.confirm !== true) return [200, { nvr: nvr.id, name: nvr.name, dryRun: true, cameras: await optimiseList(nvr, gen) }]
     const ctx = { nvr, gen, user, device: deviceOf(nvr) }
     const results = await withNvrLock(nvr, 'H.265 + VBR optimise', () => optimiseApply(ctx))
+    return [200, { nvr: nvr.id, name: nvr.name, applied: true, results }]
+  } catch (e) {
+    return errorAnswer(e)
+  }
+}
+
+// ---- H.265+ for a whole NVR: the owner's choice, by name ------------------------------------------
+// The one place a camera is moved ON to the smart codec (SMART_MOVES). Everything else about the
+// stream is kept: resolution, frame rate, quality level, bitrate type, and the bitrate cap, or the
+// next of the NVR's choices above it where H.265+ does not offer the same figure (never a lower one).
+// With { fps }, the frame rate is set to that as well, in the same write (the owner, 2026-10-12: 20
+// frames a second everywhere): lowered where it was higher, the cap kept; raised where it was lower
+// and the camera offers it at this size, the cap raised in proportion as planChange requires.
+// Each camera's encoder restarts as it is changed; the change is logged like any other, and Undo
+// (or the editor's own H.265+ -> H.265 move) puts a camera back.
+
+/** The H.265+ change (and the frame rate, when one is named) for one camera, or why it is skipped. */
+function smartPlan(item, sys, online, { fps = null } = {}) {
+  const why = whyNot(item, sys, online)
+  if (why) return { skip: why }
+  const cur = current(item)
+  const change = {}
+  const notes = []
+  const smartNow = cur.enct === 'h265p' || cur.enct === 'h265s'
+  if (smartNow) notes.push(`already ${cur.enct === 'h265p' ? 'H.265+' : 'H.265 smart'}`)
+  else if (!item.supEnct.some((e) => normEnct(e) === 'h265p')) notes.push('the camera does not offer H.265+')
+  else change.enct = 'h265p'
+  if (fps !== null && cur.fps !== fps) {
+    const most = item.resolutions.find((r) => r.res === cur.res)?.fps
+    if (most && fps > most) notes.push(`this size goes no faster than ${most} frames a second`)
+    else if (sys.mainStreamLimitFps && fps < sys.mainStreamLimitFps) notes.push(`the NVR allows no fewer than ${sys.mainStreamLimitFps} frames a second`)
+    else change.fps = fps
+  } else if (fps !== null) notes.push(`already ${fps} frames a second`)
+  if (Object.keys(change).length === 0) return { skip: notes.join('; ') }
+  // the cap: the same figure, or the next of the codec's choices above it; and above what more frames need
+  const enct = change.enct ?? cur.enct
+  const choices = qoiList(item, sys, enct, cur.res)
+  const want = cur.QoI * Math.max(1, (change.fps ?? cur.fps) / cur.fps)
+  if (!choices.includes(cur.QoI) || want > cur.QoI) {
+    const up = choices.find((v) => v >= want) ?? (want > cur.QoI ? choices.at(-1) : undefined)
+    if (up === undefined || up < cur.QoI) return { skip: `${enct === 'h265p' ? 'H.265+' : 'this codec'} offers no bitrate cap as high as this camera's ${cur.QoI} kbps` }
+    change.QoI = up
+  }
+  try {
+    const { next } = planChange(item, sys, change, { allowSmart: true, allowLowerFps: true })
+    const moves = KEYS.filter((k) => String(cur[k]) !== String(next[k])).map((k) => `${k} ${cur[k]}→${next[k]}`)
+    return { change, from: pick(cur), to: pick(next), moves }
+  } catch (e) {
+    return { skip: e.message.replace(/^Refused: /, '') }
+  }
+}
+
+/**
+ * H.265+ on every camera of an NVR that offers it. { confirm?: true }: without it a dry run (what
+ * would change, per camera, nothing written); with it, applied one camera at a time under the NVR
+ * lock. Not on a route: called by name from a maintenance run, at the owner's word.
+ * @returns {Promise<[number, any]>}
+ */
+export async function handleStreamSmartCodec(method, nvrId, readJson, user) {
+  try {
+    if (method !== 'POST') return [405, { error: 'Method not allowed' }]
+    const nvr = nvrs.get(nvrId)
+    if (!nvr) return [404, { error: 'Unknown NVR' }]
+    requireOnline(nvr)
+    const body = await readJson()
+    if (!isPlainObject(body)) throw new HttpError(400, 'The request must be a JSON object')
+    const gen = xmlGen(nvr)
+    const fps = body.fps === undefined ? null : body.fps
+    if (fps !== null && (!Number.isInteger(fps) || fps < 1 || fps > 60)) throw new HttpError(400, 'fps must be a whole number of frames a second')
+    const onlineOf = (id) => { const ch = chOfGuid(id); return { ch, online: ch === null ? true : nvr.channels.find((c) => c.ch === ch)?.online !== false } }
+    const sys = await readSystem(nvr, gen)
+    const all = await readAll(nvr, gen, true)
+    if (body.confirm !== true) {
+      return [200, { nvr: nvr.id, name: nvr.name, dryRun: true, cameras: all.items.map((item) => {
+        const { ch, online } = onlineOf(item.id)
+        const p = smartPlan(item, sys, online, { fps })
+        return { ch: ch === null ? null : ch + 1, name: item.name, moves: p.moves ?? null, from: p.from ?? null, to: p.to ?? null, skip: p.skip ?? null }
+      }) }]
+    }
+    const ctx = { nvr, gen, user, device: deviceOf(nvr) }
+    const results = await withNvrLock(nvr, 'H.265+ for the NVR', async () => {
+      const out = []
+      for (const listed of all.items) {
+        if (xmlGen(nvr) !== gen || nvr.stopped) break
+        const { ch, online } = onlineOf(listed.id)
+        const plan0 = smartPlan(listed, sys, online, { fps })
+        const row = { ch: ch === null ? null : ch + 1, name: listed.name }
+        if (!plan0.change) { out.push({ ...row, status: 'skipped', message: plan0.skip }); continue }
+        // a fresh read right before writing, in case the camera changed since the list read
+        let item, cur, next
+        try {
+          item = await readChannel(nvr, listed.id, gen)
+          ;({ cur, next } = planChange(item, sys, plan0.change, { allowSmart: true, allowLowerFps: true }))
+        } catch (e) {
+          out.push({ ...row, status: 'skipped', message: String(e?.message ?? e).replace(/^Refused: /, '') })
+          continue
+        }
+        if (sameKeys(cur, next)) { out.push({ ...row, status: 'skipped', message: 'already set' }); continue }
+        const res = await writeChange({ ...ctx, ch, chlId: listed.id, name: item.name }, item, cur, next, impactsOf(cur, next))
+        out.push({ ...row, status: res.status, message: res.message, from: pick(cur), moves: KEYS.filter((k) => String(cur[k]) !== String(next[k])).map((k) => `${k} ${cur[k]}→${next[k]}`) })
+      }
+      return out
+    })
     return [200, { nvr: nvr.id, name: nvr.name, applied: true, results }]
   } catch (e) {
     return errorAnswer(e)
@@ -827,4 +995,4 @@ export async function handleStreams(what, method, nvrId, ch, params, readJson, u
 }
 
 // for the offline tests (cctv/test/streams.test.mjs)
-export const _test = { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, buildEdit, buildRemain, parseRemain, worstCase, impactsOf, undoable, recommendedRange, retentionRefusal, optimisePlan, capPlan, downTarget, LOG_FILE, TIMING }
+export const _test = { parseEncode, current, qoiList, digitalDefault, whyNot, planChange, sizeChange, buildEdit, buildRemain, parseRemain, worstCase, impactsOf, undoable, recommendedRange, retentionRefusal, optimisePlan, capPlan, downTarget, LOG_FILE, TIMING }

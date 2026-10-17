@@ -1,9 +1,11 @@
 // One live camera in a tile: streams it over WebSocket into a VideoPlayer, with reconnects.
 // Used by the live grid (viewer.js) and the map's live popup (map.js).
-import { clearStill, maybeKeepStill, showStill } from './stills.js'
+import { clearStill, disposeStill, maybeKeepStill, showStill } from './stills.js'
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { sicexOn } from './sicex.js'
 import { liveSocket } from './live-mux.js'
 import { activeTrace } from './frame-trace.js'
+import { isLocalHost, maxLiveFps } from './device.js'
 
 // Whether this device can play H.265, told to the server with each live stream: a remote viewer
 // who can is sent an H.265 camera as it is (about half the data of H.264 for the same picture)
@@ -32,6 +34,9 @@ export function h265Forced(search) {
   }
 }
 const forcedNoH265 = typeof location !== 'undefined' && h265Forced(location.search)
+// a page not on a local address (through the tunnel or the tailnet): the server converts H.265 for it
+// (adaptive-live.mjs), so a tile there never gives up on an H.265 camera for good (onUnsupported)
+const remotePage = () => typeof location !== 'undefined' && !isLocalHost()
 /**
  * What a stream is opened with: true (plays H.265), false (cannot: forced, learnt, or the check said
  * so), null (not known yet: the server is told nothing, and sends the camera's stream as it is).
@@ -52,8 +57,14 @@ export function cannotPlayH265() {
 // The server's reasons for closing a stream it could not convert (h264-fallback.mjs NO_ROOM, FAILED)
 export const H264_NO_ROOM = 'h265: no room to convert'
 export const H264_FAILED = 'h265: conversion failed'
-// ...after which the tile asks again this often: room comes back when another viewer closes a camera
+// ...after which the tile asks again: first after H264_RETRY_FIRST_MS, then twice as long each time, at
+// most H264_RETRY_MS (h264RetryDelay). Room comes back when another viewer closes a camera: on 15 Oct a
+// remote PC paging through H.265 cameras found none for the moment the last page's conversions ran on
+// (adaptive-live.mjs #noRoom), and a page refresh a minute later played the camera converted.
+export const H264_RETRY_FIRST_MS = 5000
 export const H264_RETRY_MS = 30_000
+/** The wait before the tile's n-th ask in a row (0: the first) for a camera the server did not convert. */
+export const h264RetryDelay = (n) => Math.min(H264_RETRY_FIRST_MS * 2 ** Math.max(0, n), H264_RETRY_MS)
 // H.265 keyframes a tile may meet in a row, each answered by asking again for H.264, before it gives
 // up and shows the message: the first can be a stream opened before the page knew, the second one the
 // server attached before it had seen what the camera sends. A third is a server that does not convert.
@@ -61,8 +72,9 @@ export const H264_ASKS = 2
 const H265_ADVICE = 'On Windows, Chrome and Edge need the "HEVC Video Extensions" from the Microsoft Store — installing it usually fixes this. Otherwise set the camera’s sub-stream to H.264 on the NVR.'
 /**
  * What a tile says when it cannot show an H.265 camera: the badge and the message under it.
- * why: H264_NO_ROOM / H264_FAILED (the server said it cannot convert it); anything else: this
- * browser cannot play it and nothing converts it (a main stream, a remote viewer, an older server).
+ * why: H264_NO_ROOM / H264_FAILED (the server said it cannot convert it, or sent H.265 all the same
+ * where it converts: a remote viewer, live-tile.js onUnsupported); anything else: this browser cannot
+ * play it and nothing converts it (a PC on the local network and a server that does not convert).
  */
 export function h265Text(why) {
   if (why === H264_NO_ROOM) return { status: 'H.265 — server busy', text: `This camera sends H.265, which this browser cannot play, and the server has no room to convert another H.265 camera right now: it is already converting as many as it is allowed. It will try again by itself. ${H265_ADVICE}` }
@@ -73,13 +85,40 @@ export const CONVERTED_TITLE = 'This camera sends H.265, which this browser cann
 // The server's reason for refusing a main stream it has no room to convert (NO_ROOM_MAIN): the server
 // converts few of those at once, and the full-size view has the sub-stream to show instead
 export const H264_NO_ROOM_MAIN = 'h265: no room to convert main'
+// The server's reason for refusing a main stream because the recorder already sends as many cameras in
+// full quality as the server allows it (main-limit.mjs MAIN_AT_LIMIT): treated as the one above, the
+// standard picture meanwhile and the full-quality one asked for again later
+export const MAIN_AT_LIMIT = 'main: recorder at its limit'
 // ...and on a converted main stream (the full-size view): what it is, and that it is not the camera's full size
 export const CONVERTED_MAIN_TITLE = 'This camera sends H.265, which this browser cannot play, so the server is converting its full-quality picture to H.264 for this PC, at up to 1920 pixels wide. That costs the server most of a processor core for as long as it is watched; the "HEVC Video Extensions" from the Microsoft Store let Chrome and Edge play the camera’s own picture instead.'
+// "Steady picture" (steady.mjs): an admin has switched it on for this camera, and the server steadies
+// its picture for every viewer. The server says so on each connection ({"op":"steady","on":true}), or
+// that it plays the camera's own picture for now ({"op":"steady","on":false,"why":"busy"|"failed"}).
+export const STEADY_TITLE = 'Steady picture is on for this camera: the server steadies its picture, so it does not shake. Full quality is steadied too when the server has room; otherwise the standard picture, steadied.'
+export const STEADY_BUSY_TEXT = 'Steady picture paused: the server is busy'
+export const STEADY_FAILED_TEXT = 'Steady picture paused: the server could not steady this camera just now'
+
+/**
+ * The tile's small mark for its steadiness, beside its name: null for none (the camera is not
+ * steadied). state: 'on', 'busy' or 'failed'. In full size (the main stream asked for) the words in
+ * full; on a grid tile, short, with the words in its title.
+ * @returns {{ text: string, title: string, paused: boolean }|null}
+ */
+export function steadyBadge(state, streamType) {
+  const full = streamType === MAIN_STREAM
+  if (state === 'on') return { text: full ? 'Steady picture' : 'STEADY', title: STEADY_TITLE, paused: false }
+  if (state !== 'busy' && state !== 'failed') return null
+  const words = state === 'failed' ? STEADY_FAILED_TEXT : STEADY_BUSY_TEXT
+  const title = `${words}. The camera's own picture is shown meanwhile; Steady picture comes back by itself.`
+  return { text: full ? words : 'STEADY PAUSED', title, paused: true }
+}
+
 /**
  * The title of the full-size view's small mark while it stays on the sub-stream because the server
  * did not convert the main one (viewer.js): no room among the few it converts at once, or it failed.
  */
 export function mainNotConvertedTitle(why) {
+  if (why === MAIN_AT_LIMIT) return 'This recorder is already sending as many cameras in full quality as it safely can. This view shows the standard picture meanwhile and tries the full-quality one again by itself.'
   const what = why === H264_FAILED ? 'the server could not convert its full-quality picture just now' : 'the server is already converting as many full-quality pictures as it is allowed'
   return `This camera sends H.265, which this browser cannot play, and ${what}. This view shows the standard picture meanwhile and tries the full-quality one again by itself.`
 }
@@ -188,6 +227,20 @@ export function tileDot({ hasVideo = false, recording = undefined, stale = false
   return { className: 'dot dot-live', title: 'Video is arriving' }
 }
 
+/**
+ * Whether a frame the decoder kept past its display time grows the playout buffer (player.js
+ * countDecoderHold). On unless this browser was told otherwise: localStorage 'argus.decoderHold' =
+ * 'off' puts the player back as it was, for comparing the two on the same screen.
+ */
+export function decoderHoldCounted(storage) {
+  try {
+    // (read in here: where storage is blocked, reading the property itself throws)
+    return (storage ?? globalThis.localStorage)?.getItem('argus.decoderHold') !== 'off'
+  } catch {
+    return true
+  }
+}
+
 export class LiveTile {
   /**
    * @param {HTMLElement} tile element with TILE_HTML inside
@@ -204,6 +257,10 @@ export class LiveTile {
    *   recording: tells the dot whether the server is also recording this camera (red rather than
    *   green); leave it out where that is not known. onUnsupported: replaces the built-in handling (main -> sub fallback, message) when the
    *   browser can't play the stream
+   *   serverConverts: whether the server converts H.265 for this browser on this page's path, so a
+   *   tile that is sent H.265 all the same says so and asks again (back off: h264RetryDelay) rather
+   *   than give up for good; by default a page not on a local address (device.js isLocalHost: through
+   *   the tunnel or the tailnet, where adaptive-live.mjs converts every H.265 camera for it)
    *   onHdRefused: the main stream was refused for want of Live HD; return true when handled
    *   (viewer.js drops a layer not shown yet), else the tile goes over to the sub-stream itself
    *   onMainNotConverted: the server did not convert this H.265 main stream for a browser that cannot
@@ -228,10 +285,12 @@ export class LiveTile {
     this.attempts = 0 // reconnects since video last arrived
     this.now = opts.now ?? (() => Date.now()) // (tests)
     this.lastDataAt = 0 // the last frame on this socket, or when it opened
-    this.maxFps = opts.maxFps ?? null // a phone asks the server for its 15 fps stream (phone-live.mjs)
+    this.maxFps = opts.maxFps === undefined ? maxLiveFps() : opts.maxFps // also covers map and wall tiles
     this.h264Asks = 0 // H.265 keyframes in a row answered by asking again for H.264 (#askH264)
     this.converted = false // the server converts this camera to H.264 for this browser (its badge)
+    this.steady = null // 'on', 'busy', 'failed': what the server said of Steady picture on this connection (its badge)
     this.convMsg = null // the message shown while the server cannot convert it (#noConversion)
+    this.convRetries = 0 // asks in a row since then, for its back-off (h264RetryDelay)
     this.taps = new Set() // tiles borrowing this one's stream (#borrow)
     this.gop = null // the stream since its last keyframe (#keep)
     this.gopBytes = 0
@@ -244,10 +303,13 @@ export class LiveTile {
       // each frame timed as it arrives, and the burst after a hiccup decoded, not dropped to the next
       // keyframe as if the decoder could not keep up (player.js; stutter report 2.2, 29 Sep)
       arrivalClock: true,
+      countDecoderHold: decoderHoldCounted() && sicexOn('decoderHold'),
       clock: opts.clock,
       maxQueuedFrames: opts.maxQueuedFrames,
       noRewindMs: opts.noRewindMs,
-      maxFps: opts.maxFps,
+      maxFps: this.maxFps,
+      onResourceLimit: reason => { this.setStatus('Device video limit'); opts.onResourceLimit?.(reason) },
+      onError: () => { this.setStatus('Video restarted'); this.reconnectNow() },
       onUnsupported: (codecId) => {
         // this browser cannot play H.265, whatever the check said: every tile from now on says so.
         // The tile asks again, for H.264 (the server converts it, a main stream as well as a sub);
@@ -259,6 +321,7 @@ export class LiveTile {
       },
       onFrame: () => {
         this.h264Asks = 0
+        this.convRetries = 0
         if (this.convMsg) this.#clearConvMsg()
         if (!shown) clearStill(tile)
         // keep the last picture of this camera on this device, for the next time its tile appears
@@ -290,7 +353,13 @@ export class LiveTile {
     if (this.status.textContent !== text) this.status.textContent = text
     this.status.classList.toggle('live', live)
     const placeholder = this.tile?.querySelector('.tile-placeholder strong')
-    if (placeholder && placeholder.textContent !== text) placeholder.textContent = text === 'LIVE' ? 'Live video' : text
+    if (placeholder) {
+      // words for a wait ("connecting…") end in dots that move instead (live.css)
+      const waiting = text !== 'LIVE' && text.endsWith('…')
+      const words = text === 'LIVE' ? 'Live video' : waiting ? text.slice(0, -1) : text
+      if (placeholder.textContent !== words) placeholder.textContent = words
+      placeholder.classList.toggle('waiting', waiting)
+    }
   }
 
   /** Paints the state dot (only when it changes: a big grid would otherwise rewrite every tile every second). */
@@ -398,7 +467,8 @@ export class LiveTile {
       this.setStatus(seconds >= 30 ? 'No video received · waiting to connect' : `Waiting for video · ${seconds}s`)
     }
     this.setDot({
-      hasVideo: Boolean(open && this.lastDataAt && s.fps > 0),
+      // (a tile shown from its keyframes alone draws nothing in most seconds: it has video all the same, wall-thin.js)
+      hasVideo: Boolean(open && this.lastDataAt && (s.fps > 0 || this.player.keysOnly || this.player.afterThin)),
       stale: Boolean(open && since >= NO_VIDEO_MS),
       // the live grid has no per-camera recording flag yet; a caller that knows can supply one
       recording: this.opts.recording?.(this)
@@ -439,6 +509,7 @@ export class LiveTile {
     // On the Live page a channel on the page's one shared connection (live-mux.js), which behaves
     // like a socket here; elsewhere a socket of its own to /live, as always
     this.#setConverted(false) // (said again by the server if this connection is converted too)
+    this.#setSteady(null) // (the same for Steady picture)
     this.ws = liveSocket({ nvr: this.nvr, ch: this.ch, stream: this.streamType, fps: this.maxFps, h265: h265Answer({ device: deviceH265, forced: forcedNoH265, learned: learnedNoH265 }) })
     this.ws.binaryType = 'arraybuffer'
     this.lastDataAt = 0
@@ -469,9 +540,10 @@ export class LiveTile {
       // the main stream refused for want of Live HD (at once, or taken away while it played): not
       // asked for again from here, the sub-stream instead
       if (e?.code === 1008 && e.reason === HD_REFUSED && this.streamType === MAIN_STREAM) return this.#hdRefused()
-      // a main stream the server did not convert (no room among the few it converts, or it failed):
-      // nothing is said over the picture, the sub-stream is there to show instead
-      if (this.streamType === MAIN_STREAM && (e?.reason === H264_NO_ROOM_MAIN || e?.reason === H264_FAILED)) return this.#mainNotConverted(e.reason)
+      // a main stream the server did not convert (no room among the few it converts, or it failed), or
+      // did not start because the recorder is at its full-quality limit: nothing is said over the
+      // picture, the sub-stream is there to show instead
+      if (this.streamType === MAIN_STREAM && (e?.reason === H264_NO_ROOM_MAIN || e?.reason === H264_FAILED || e?.reason === MAIN_AT_LIMIT)) return this.#mainNotConverted(e.reason)
       // H.265 that this browser cannot play and the server cannot convert just now: said, not black
       if (e?.reason === H264_NO_ROOM || e?.reason === H264_FAILED) return this.#noConversion(e.reason)
       this.opts.onDisconnect?.()
@@ -488,6 +560,7 @@ export class LiveTile {
    *  - {"op":"wait","why":…}  while the sub-stream has no picture yet
    *  - {"op":"ease","on":bool} quality is (no longer) being eased for bandwidth (adaptive-live.mjs)
    *  - {"op":"convert","on":true} this H.265 camera is converted to H.264 for this browser (h264-fallback.mjs)
+   *  - {"op":"steady","on":bool,"why"?} this camera is steadied on the server, or paused (steady.mjs)
    */
   #note(text) {
     let m
@@ -502,6 +575,7 @@ export class LiveTile {
       return updateEaseChip()
     }
     if (m?.op === 'convert') return this.#setConverted(m.on === true)
+    if (m?.op === 'steady') return this.#setSteady(m.on === true ? 'on' : m.why === 'failed' ? 'failed' : 'busy')
     if (m?.op !== 'wait') return
     this.waiting = true
     this.setStatus(waitText(m.why))
@@ -552,6 +626,24 @@ export class LiveTile {
     this.convBadge = b
   }
 
+  /** The Steady picture mark beside its name (steadyBadge), as the server last said; null takes it away. */
+  #setSteady(state) {
+    if (this.steady === state) return
+    this.steady = state
+    if (typeof document === 'undefined') return
+    this.steadyBadge?.remove()
+    this.steadyBadge = null
+    const s = steadyBadge(state, this.streamType)
+    if (!s) return
+    const b = document.createElement('span')
+    b.className = `sd-badge steady-badge${s.paused ? ' paused' : ''}`
+    b.textContent = s.text
+    b.title = s.title
+    b.setAttribute('aria-label', s.title)
+    this.tile.querySelector('.label')?.append(b)
+    this.steadyBadge = b
+  }
+
   /**
    * An H.265 keyframe this browser cannot decode: connect again at once, this time saying so
    * (learnedNoH265 is set by now), and the server sends its H.264 conversion instead. At most
@@ -582,8 +674,11 @@ export class LiveTile {
 
   /**
    * The server closed the stream because it cannot convert this H.265 camera now (no room in its
-   * budget, or the conversion failed). The tile says so, with the same advice as ever, and asks again
-   * every H264_RETRY_MS: the first picture that comes takes the message away.
+   * budget, or the conversion failed; or, where it converts, sent H.265 all the same: onUnsupported).
+   * The tile says so, with the same advice as ever, and asks again by itself, backing off
+   * (h264RetryDelay: 5, 10, 20, then every 30 s): the first picture that comes takes the message away.
+   * The message is the tile's one text: the placeholder's words and dots under it are hidden (has-msg,
+   * live.css), they were drawn over each other.
    */
   #noConversion(why) {
     const { status, text } = h265Text(why)
@@ -596,8 +691,9 @@ export class LiveTile {
       }
       if (this.convMsg.textContent !== text) this.convMsg.textContent = text
     } else this.convMsg = { textContent: text, remove() {} } // (tests: no page)
+    this.tile.classList?.toggle?.('has-msg', true)
     clearTimeout(this.retry)
-    this.retry = setTimeout(() => this.#retryConversion(status), H264_RETRY_MS * (0.8 + Math.random() * 0.4))
+    this.retry = setTimeout(() => this.#retryConversion(status), h264RetryDelay(this.convRetries++) * (0.8 + Math.random() * 0.4))
   }
 
   #retryConversion(status) {
@@ -611,6 +707,7 @@ export class LiveTile {
   #clearConvMsg() {
     this.convMsg?.remove?.()
     this.convMsg = null
+    this.tile.classList?.toggle?.('has-msg', false)
   }
 
   onMessage(buf) {
@@ -665,6 +762,7 @@ export class LiveTile {
     if (!src?.lendable || src.streamType !== this.streamType || src.nvr !== this.nvr || src.ch !== this.ch) return false
     this.source = src
     this.#setConverted(src.converted === true) // (its stream is this one's now)
+    this.#setSteady(src.steady ?? null)
     this.lastDataAt = this.now()
     activeTrace()?.event(this, 'borrow', src) // its frames are the source's, traced there
     for (const m of src.gop) this.onMessage(m)
@@ -679,9 +777,11 @@ export class LiveTile {
   /** Stops borrowing (the source went away, or this tile closes). */
   #unborrow() {
     if (!this.source) return
-    this.source.taps.delete(this.tap)
+    const src = this.source
+    src.taps.delete(this.tap)
     this.source = null
     this.tap = null
+    this.opts.onUnborrow?.(src) // (viewer.js: a main stream started ahead goes when nothing shows it)
   }
 
   onUnsupported(codecId) {
@@ -693,11 +793,30 @@ export class LiveTile {
       this.ws.close()
       return
     }
-    // Reached for H.265 only when asking the server for H.264 did not help (#askH264: a server that
-    // does not convert, or a path it does not convert on). Same correction as playback.js (h265Text's
-    // advice): on Windows this is nearly always a missing codec, not a machine that cannot cope.
-    // Saying "change it on the NVR" first sends people to reconfigure a camera when installing one
-    // extension would have done.
+    // Reached for H.265 only when asking the server for H.264 did not help (#askH264). Where the server
+    // converts for this page (a page through the tunnel: adaptive-live.mjs converts every H.265 camera
+    // for a browser that cannot play it), that was a moment with no conversion to be had: never for
+    // good. On 15 Oct a remote PC paging through H.265 cameras was sent value4u/2's own H.265 while
+    // every conversion slot was taken, asked twice within the same moment, and showed this message
+    // until the page was refreshed. Said as a conversion that did not happen, and asked again, backing
+    // off (#noConversion); the first picture takes it away.
+    if (codecId === CODEC_H265 && (this.opts.serverConverts ?? remotePage())) {
+      this.#unborrow()
+      this.gop = null
+      const ws = this.ws
+      if (ws) {
+        ws.onclose = null
+        ws.onmessage = null
+        ws.close()
+      }
+      // (called from inside the player: its reset after this turn)
+      setTimeout(() => { if (!this.closed) this.player.reset() }, 0)
+      return this.#noConversion(H264_FAILED)
+    }
+    // A PC on the local network and a server path that does not convert: as it always was. Same
+    // correction as playback.js (h265Text's advice): on Windows this is nearly always a missing codec,
+    // not a machine that cannot cope. Saying "change it on the NVR" first sends people to reconfigure a
+    // camera when installing one extension would have done.
     this.setStatus(codecId === CODEC_H265 ? h265Text().status : 'unsupported codec')
     // the browser can't show this stream: stop pulling it rather than load the NVR for nothing
     this.#clearConvMsg()
@@ -705,6 +824,7 @@ export class LiveTile {
     msg.className = 'tile-msg'
     msg.textContent = codecId === CODEC_H265 ? h265Text().text : 'This browser cannot play this camera’s video format.'
     this.tile.append(msg)
+    this.tile.classList?.toggle?.('has-msg', true) // (its one text: live.css)
     liveTiles.delete(this) // (off the ticker too)
     this.closed = true
     // its decoder and timers: this tile will never play (called from inside the player: after this turn)
@@ -719,6 +839,7 @@ export class LiveTile {
    */
   suspend() {
     this.suspended = true
+    this.player.reset()
     activeTrace()?.event(this, 'suspend')
   }
 
@@ -735,6 +856,9 @@ export class LiveTile {
     this.released = true
     clearTimeout(this.retry)
     this.retry = null
+    this.player.reset()
+    this.gop = null
+    this.gopBytes = 0
     if (this.ws) {
       this.ws.onclose = null // resume() does the reconnect, not the socket's own close handler
       this.ws.onmessage = null
@@ -803,5 +927,6 @@ export class LiveTile {
     clearTimeout(this.retry)
     this.ws?.close()
     this.player.close()
+    if (typeof document !== 'undefined') disposeStill(this.tile)
   }
 }

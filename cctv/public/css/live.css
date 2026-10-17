@@ -44,8 +44,15 @@
 .tile-placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--s2); padding: 48px 16px; background: radial-gradient(ellipse at center, var(--accent-soft), var(--surface-1) 75%); color: var(--text-muted); text-align: center; pointer-events: none; }
 .tile-placeholder .icon { width: 32px; height: 32px; margin-bottom: var(--s2); color: var(--text-muted); }
 .tile-placeholder strong { font-size: var(--fs-body); font-weight: 550; color: var(--text); }
+/* a camera on its way: three dots that fill in one by one and start again; they keep their room, so the words do not move */
+.tile-placeholder strong.waiting::after { content: '...'; display: inline-block; clip-path: inset(0 100% 0 0); animation: tile-dots 1.6s steps(4, jump-none) infinite; }
+@keyframes tile-dots { to { clip-path: inset(0 0 0 0); } }
+@media (prefers-reduced-motion: reduce) { .tile-placeholder strong.waiting::after { animation: none; clip-path: none; } }
 .tile-placeholder > span { font-size: var(--fs-meta); }
 .tile[data-live="1"] > .tile-placeholder, .tile.has-still > .tile-placeholder { display: none; }
+/* a tile saying why it shows nothing (live-tile.js .tile-msg: H.265 it cannot play, the server busy): that message alone, not the placeholder's words and dots under it (they were drawn over each other); over the camera's last picture, on a scrim */
+.tile.has-msg > .tile-placeholder > * { visibility: hidden; }
+.tile.has-msg.has-still > .tile-msg { background: var(--scrim); color: var(--ov-text); }
 .tile:not([data-live="1"]):not(.has-still) > .status { visibility: hidden; }
 .tile.offline .tile-placeholder { background: var(--surface-1); }
 #grid[data-size="5"] .tile-placeholder > span, #grid[data-size="6"] .tile-placeholder > span, #grid[data-size="8"] .tile-placeholder > span, #grid[data-size="10"] .tile-placeholder > span, #grid[data-size="12"] .tile-placeholder > span { display: none; }
@@ -124,8 +131,10 @@
 .live-page #grid[data-picture-fit="stretch"] { --camera-fit: fill; }
 .live-page #grid .tile canvas:not(.ln-overlay):not(.ln-loupe) { object-fit: var(--camera-fit); }
 .live-page #grid:fullscreen { padding: 0; gap: 2px; }
-.live-page #grid:fullscreen .tile[data-live="1"] > .label,
-.live-page.phone-full #grid .tile[data-live="1"] > .label {
+/* (not the one camera shown full size: its label carries Recordings, Sound and Mark, and on a phone
+   there is no hover to bring it back: the owner, 2026-10-12, "the buttons only appear for 2 seconds") */
+.live-page #grid:fullscreen .tile[data-live="1"]:not(.single-overlay) > .label,
+.live-page.phone-full #grid .tile[data-live="1"]:not(.single-overlay) > .label {
   opacity: 0; visibility: hidden; transform: translateY(6px);
   transition: opacity 180ms ease, transform 180ms ease, visibility 0s linear 180ms;
 }
@@ -138,3 +147,129 @@
   .live-page #grid:fullscreen .tile > .label,
   .live-page.phone-full #grid .tile > .label { transition: none; transform: none; }
 }
+/* Which page of the grid this is, for a moment after ← → or a flick turned it in full screen
+   (viewer.js notePage): the pager is out of sight there. Never in the way of a tile. */
+.live-page #grid > .page-note { display: none; }
+.live-page #grid:fullscreen > .page-note {
+  display: block; position: absolute; z-index: 4;
+  left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  padding: 6px 14px; border-radius: 999px;
+  background: var(--ov-bg); color: var(--ov-text); border: 1px solid var(--ov-line);
+  font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: .02em;
+  pointer-events: none;
+}
+/* The header's count of offline cameras: a button that lists them (viewer.js showOffline). Red, as
+   an offline tile's badge is: it is the number that needs someone. */
+.live-page .offline-count {
+  font: inherit; font-weight: 600; color: var(--ov-text); background: var(--ov-bad);
+  border: 0; border-radius: 999px; padding: 1px 9px; cursor: pointer;
+}
+.live-page .offline-count:hover, .live-page .offline-count:focus-visible { background: var(--ov-bad-hover); }
+.offline-dlg { max-width: min(92vw, 460px); padding: 14px 16px; }
+.offline-dlg h3 { font-size: 15px; color: var(--text); margin: 0 0 8px; }
+.offline-dlg h4 { margin: 10px 0 2px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.offline-dlg ul { margin: 0; padding-left: 18px; }
+.offline-list { max-height: 60vh; overflow: auto; margin-bottom: 12px; }
+/* LIVE is a small green dot in the corner, not a pill over the picture (the owner, 2026-10-09: on a
+   wall of small tiles the pills hid the cameras). Every other state keeps its words; the word LIVE
+   stays in the element for a screen reader. */
+.live-page #grid .tile .status.live, .live-page .tile .status.live, .live-page .single-overlay > .status.live {
+  top: 5px; left: 5px; width: 8px; height: 8px; padding: 0; font-size: 0; line-height: 0; letter-spacing: 0;
+  overflow: hidden; border-radius: 50%; background: var(--ok); border: 1px solid var(--ov-edge);
+  -webkit-backdrop-filter: none; backdrop-filter: none; box-sizing: content-box;
+}
+.live-page #grid .tile .status.live::before, .live-page .tile .status.live::before { display: none; }
+body.phone-full .single-overlay .status.live { top: calc(6px + env(safe-area-inset-top)); left: calc(6px + env(safe-area-inset-left)); }
+/* No Move box over the picture (the owner, 2026-10-09): a tile is moved by dragging it. The button
+   stays for the keyboard, shown only while it has the keyboard's focus. */
+.live-page .tile .tile-move { opacity: 0 !important; pointer-events: none; }
+.live-page .tile .tile-move:focus-visible { opacity: 1 !important; pointer-events: auto; }
+/* One click to a linked camera, beside the name in the full-size view (viewer.js linkedCameras). */
+.live-page .single-overlay .links .cam-link {
+  font: inherit; font-size: var(--fs-meta, 12px); font-weight: 600; color: var(--ov-text); cursor: pointer;
+  background: var(--ov-bg-soft); border: 1px solid var(--ov-line-strong); border-radius: 999px;
+  padding: 3px 10px; margin-inline-start: 6px; min-height: 0; white-space: nowrap; max-width: 22ch; overflow: hidden; text-overflow: ellipsis;
+}
+.live-page .single-overlay .links .cam-link:hover, .live-page .single-overlay .links .cam-link:focus-visible { background: var(--ov-bg-hover); }
+.live-page .single-overlay .links .cam-link.suggested { border-style: dashed; font-weight: 400; }
+/* The share of arriving frames this screen draws (viewer.js updateWallHealth). */
+.live-page .wall-health { margin-inline-start: auto; margin-inline-end: 8px; cursor: help; }
+.live-page .wall-health + .live-state { margin-inline-start: 0; }
+.live-page .wall-health[data-level="ok"] { color: var(--ok-text); }
+.live-page .wall-health[data-level="warn"] { color: var(--ov-mark); border-color: var(--ov-mark); }
+.live-page .wall-health[data-level="bad"] { color: var(--ov-text); background: var(--ov-bad); border-color: transparent; }
+/* The administrator's wall tolerance, in View options (viewer.js wallToleranceSetup). */
+.live-page .wall-tol { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.live-page .wall-tol input[type="number"] { width: 5ch; min-height: 32px; }
+.live-page .wall-tol button { min-height: 32px; }
+/* Mark: bookmark what is on screen under a case title (viewer.js openMark). */
+.live-page .single-overlay .links .cam-mark { border-color: var(--ov-mark-line); }
+.mark-dlg label { display: block; margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+.mark-dlg input[type="text"], .mark-dlg textarea { display: block; width: min(80vw, 420px); margin-top: 3px; font: inherit; color: var(--text); }
+.mark-dlg .mark-when { margin: 0; font-size: 12px; color: var(--muted); }
+.mark-dlg .mark-said { min-height: 1.2em; margin: 8px 0 0; font-size: 13px; }
+
+/* One camera enlarged: it covers the whole grid, and the grid's own tiles (stopped while it is open)
+   are not drawn at all, so nothing of them shows round its edges or behind it. */
+.live-page #grid > .tile.single-overlay { inset: 0; background-color: var(--video-bg); } /* (the colour alone: "background" would also undo how a still is sized, and tile it) */
+.live-page #grid:has(> .single-overlay) > :not(.single-overlay) { visibility: hidden; }
+
+/* the speaker button of the full-size view: lit while the camera is being listened to */
+.live-page .single-overlay .links .cam-sound.on { border-color: var(--ov-on-line); background: var(--ov-on-bg); }
+
+/* Once the full-quality picture has taken over the full-size view, its own name bar carries the
+   buttons (viewer.js upgradeToMain moves them there). The bar of the picture underneath sat on top
+   of it, so Recordings, Sound and Mark vanished about two seconds after a camera opened. */
+.single-overlay:has(> .tile-upgrade:not(.pending)) > .label { display: none; }
+
+/* sound: the volume and the background filter beside the speaker button, while it is on */
+.cam-sound-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.cam-sound-vol { width: 90px; accent-color: var(--ov-on); }
+.cam-sound-vol[hidden], .cam-sound-filter[hidden] { display: none; }
+.live-page .single-overlay .links .cam-sound-filter.on { border-color: var(--ov-on-line); background: var(--ov-on-bg); }
+
+/* The view editor (view-editor.js): pick cameras from any sites, choose or draw a layout, place them */
+.wall-pick.view-editor { width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); background: var(--surface-1); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-md); }
+.view-editor form { display: grid; gap: var(--s3); }
+.view-editor h2 { margin: 0; font-size: var(--fs-section); }
+.view-editor .ve-name input { width: 100%; margin-top: var(--s1); }
+.ve-step { display: grid; gap: var(--s2); padding-top: var(--s3); border-top: 1px solid var(--border); }
+.ve-step h3 { margin: 0; font-size: var(--fs-body); color: var(--text); }
+.ve-pick-head { display: flex; gap: var(--s2); }
+.ve-pick-head input { flex: 1; min-width: 0; min-height: 36px; padding: 6px 10px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm); font: inherit; }
+.ve-pick { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2); }
+.ve-site + .ve-site { border-top: 1px solid var(--border); }
+.ve-site summary { display: flex; gap: var(--s2); align-items: center; padding: var(--s2) var(--s3); cursor: pointer; font-weight: 600; }
+.ve-site-count { margin-inline-start: auto; color: var(--accent-strong); font-weight: 400; font-size: var(--fs-dense); }
+.ve-site-body { display: grid; gap: 2px; padding: 0 var(--s3) var(--s3); }
+.ve-site-body .ve-all { justify-self: start; margin-bottom: var(--s1); font-size: var(--fs-dense); }
+.ve-cam { display: flex; gap: var(--s2); align-items: center; padding: 3px 0; font-size: var(--fs-dense); cursor: pointer; }
+.ve-cam.off { color: var(--text-muted); }
+.ve-grid { display: grid; gap: 3px; width: 100%; max-width: 480px; aspect-ratio: 16 / 9; touch-action: none; user-select: none; }
+.ve-draw { display: grid; gap: var(--s2); }
+.ve-draw-grid { position: relative; cursor: crosshair; }
+.ve-draw-tile { background: var(--surface-3); border: 1px solid var(--border); border-radius: 3px; display: grid; place-items: center; font-size: var(--fs-meta); color: var(--text-muted); text-align: center; overflow: hidden; }
+.ve-draw-tile.ve-big { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+.ve-draw-sel { border: 2px dashed var(--accent-strong); background: var(--accent-soft); border-radius: 3px; pointer-events: none; z-index: 1; }
+.ve-draw-sel[hidden] { display: none; }
+.ve-place-tile { background: var(--video-bg); color: var(--on-accent); border: 1px solid var(--border); border-radius: 3px; padding: 2px 4px; font-size: var(--fs-meta); overflow: hidden; display: flex; align-items: flex-end; cursor: grab; min-width: 0; }
+.ve-place-tile.empty { background: var(--surface-2); color: var(--text-faint); cursor: default; border-style: dashed; }
+.ve-place-tile.picked, .ve-chip.picked { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
+.ve-place[data-size="6"] .ve-place-tile, .ve-place[data-size="8"] .ve-place-tile, .ve-place[data-size="10"] .ve-place-tile, .ve-place[data-size="12"] .ve-place-tile { font-size: 9px; padding: 1px 2px; }
+.ve-more { display: flex; flex-wrap: wrap; gap: var(--s1); align-items: center; }
+.ve-chip { padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); font-size: var(--fs-meta); cursor: grab; }
+.ve-share { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; padding-top: var(--s3); border-top: 1px solid var(--border); }
+.ve-share[hidden] { display: none; }
+.ve-share .live-help { flex-basis: 100%; }
+#linkMsg { user-select: all; overflow-wrap: anywhere; }
+#cycleStop { color: var(--accent-strong); }
+
+/* ?view=<id>&screen=1: a TV or second monitor shows the grid and the camera names, nothing else */
+body.screen-mode { grid-template-columns: minmax(0, 1fr); background: var(--video-bg); }
+body.screen-mode .app-shell, body.screen-mode .shell-bar, body.screen-mode .shell-top, body.screen-mode .live-heading,
+body.screen-mode .app-main > header, body.screen-mode .alert-banner, body.screen-mode #filterNote, body.screen-mode #notice,
+body.screen-mode #layoutNote { display: none !important; }
+body.screen-mode #grid { position: fixed; inset: 0; z-index: 80; padding: 2px; gap: 2px; background: var(--video-bg); }
+.screen-exit { position: fixed; top: var(--s2); right: var(--s2); z-index: 85; padding: 6px 10px; border-radius: var(--r-sm); background: var(--ov-bg); color: var(--on-accent); font-size: var(--fs-meta); text-decoration: none; opacity: 0; transition: opacity var(--t-fast); }
+.screen-exit:hover, .screen-exit:focus-visible { opacity: 1; }
+.screen-exit[hidden] { display: none; }

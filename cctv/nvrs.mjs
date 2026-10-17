@@ -32,6 +32,9 @@ import { checkHealth, listLocations, onChange as onStorageChange, startHealthChe
 import { SPOOL_ID, drainSpool, spoolLocation, trimSpool, writableLocations } from './ram-spool.mjs'
 import { noteRecorderGap, noteRecorderQueues } from './thin-pace.mjs'
 import { HOLD_CHECK_MS, holdControlLogin } from './login-hold.mjs'
+// Hikvision devices (brand 'hikvision' in nvrs.json): their own class and child process, no TVT SDK
+import { isHik } from './hik-config.mjs'
+import { HikNvr } from './hik-nvr.mjs'
 
 export const NVRS_FILE = join(DATA_DIR, 'nvrs.json')
 
@@ -120,6 +123,35 @@ export const jittered = (ms, rnd = Math.random) => Math.round(ms * (0.8 + 0.4 * 
 const MAX_LIVE_FAILURES = 6 // consecutive LivePlay failures -> log in again
 const RETRY_MIN_MS = 5000
 const RETRY_MAX_MS = 60_000
+// An NVR that does not answer its login at all (not one that refuses it) holds the one login lane for
+// about 80 s each time it is tried, whatever our timeout says: the SDK call only returns then. Tried
+// every minute, JFL Wharf Alan (hung on 2026-10-12) had the lane more than half of the time, and after
+// a restart the other NVRs' settings logins took four minutes ("Lawrence is connecting", with its
+// video up). From its third silence on such an NVR is tried less and less often, up to this.
+const SILENT_RETRY_MAX_MS = 10 * 60_000
+export const silentRetryMs = (silences, delay) => (silences >= 3 ? Math.min(RETRY_MAX_MS * 2 ** (silences - 3), SILENT_RETRY_MAX_MS) : delay)
+// ...and it is remembered across a restart (DATA_DIR/silent-nvrs.json: { id: silences }): a silent NVR's
+// first login of a new process waits SILENT_START_HOLD_MS, so every NVR that does answer is in before it
+// takes the lane. Without this each restart began with the silent one's 80 s, three times over.
+const SILENT_FILE = join(DATA_DIR, 'silent-nvrs.json')
+const SILENT_START_HOLD_MS = 4 * 60_000
+const readSilent = () => {
+  try {
+    const o = JSON.parse(readFileSync(SILENT_FILE, 'utf8'))
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : {}
+  } catch {
+    return {}
+  }
+}
+const noteSilent = (id, silences) => {
+  try {
+    const o = readSilent()
+    if (silences >= 3) o[id] = silences
+    else if (Object.hasOwn(o, id)) delete o[id]
+    else return
+    writeFileSync(SILENT_FILE, JSON.stringify(o), { mode: 0o600 })
+  } catch {} // a note that cannot be kept only costs the wait it would have saved
+}
 
 // ---- config file ----------------------------------------------------------
 
@@ -490,6 +522,7 @@ export class Nvr {
     this.loginHeld = false // that login is being left untried: said once in the journal, and once when it ends
     this.gen = 0 // session generation: results from an older session are ignored
     this.controlFailed = false // this login has failed since it was last up (or since the start): see borrowing
+    this.borrowingSaid = false // what the journal was last told about borrowing (#logBorrowing)
     this.lane = new Lane(cfg.id, LANE_CONCURRENCY, { holdAt: LANE_HOLD_AT })
     this.sessions = new SessionPool(this)
     this.playback = createPlayback(this)
@@ -631,6 +664,16 @@ export class Nvr {
     this.connecting = true
     try {
       await initSdk()
+      // silent before this process started (see SILENT_FILE): the others log in first
+      if (this.loginSilences === undefined && !process.env.CCTV_WORKER_NVR) {
+        this.loginSilences = Number(readSilent()[this.id]) || 0
+        if (this.loginSilences >= 3) {
+          this.status = 'offline'
+          this.error = 'The NVR did not answer in time'
+          console.log(`[${this.id}] was not answering before the restart: its login waits ${SILENT_START_HOLD_MS / 60_000} min for the others`)
+          await sleep(SILENT_START_HOLD_MS)
+        }
+      }
       for (let delay = RETRY_MIN_MS; !this.stopped; delay = Math.min(delay * 2, RETRY_MAX_MS)) {
         this.status = this.status === 'offline' ? 'offline' : 'connecting'
         const { host, port, user, password, sn, nat } = this.cfg
@@ -673,14 +716,19 @@ export class Nvr {
           this.status = 'online'
           this.error = ''
           this.controlFailed = false
+          if (this.loginSilences) noteSilent(this.id, 0)
+          this.loginSilences = 0
           console.log(`[${this.id}] logged in to ${where} (${this.model || 'NVR'}) in ${Date.now() - t0} ms, ${this.channels.length} cameras`)
           return
         }
         this.error = why
         this.status = 'offline'
         this.controlFailed = true
-        console.log(`[${this.id}] login to ${where} failed: ${this.error}; retrying in ${delay / 1000}s`)
-        await sleep(delay)
+        this.loginSilences = /did not answer/i.test(String(why ?? '')) ? (this.loginSilences ?? 0) + 1 : 0
+        if (!process.env.CCTV_WORKER_NVR && (this.loginSilences === 3 || (this.loginSilences > 3 && this.loginSilences % 5 === 0) || this.loginSilences === 0)) noteSilent(this.id, this.loginSilences)
+        const wait = silentRetryMs(this.loginSilences, delay)
+        console.log(`[${this.id}] login to ${where} failed: ${this.error}; retrying in ${Math.round(wait / 1000)}s`)
+        await sleep(wait)
       }
     } finally {
       this.connecting = false
@@ -883,6 +931,22 @@ export class Nvr {
     return 'quiet'
   }
 
+  /**
+   * Whether this process's own streams say the NVR is there: at least one plays, and most of those
+   * that play have had video within SILENT_MS. A camera list that is not answered then is the list
+   * being slow (over the P2P cloud it takes 10 s and more), not the NVR being gone.
+   */
+  #videoFlowing(now = Date.now()) {
+    let playing = 0
+    let fresh = 0
+    for (const s of this.streams.values()) {
+      if (s.stopped || s.state !== 'playing') continue
+      playing++
+      if (now - s.lastFrameAt < SILENT_MS) fresh++
+    }
+    return playing > 0 && fresh >= playing * MASS_STALL_SHARE
+  }
+
   /** Once an hour (this NVR's own streams only: its worker, or the main process without workers): how often the list was read, and why not. */
   #logListTurns(now = Date.now()) {
     const t = this.listTurns
@@ -892,7 +956,24 @@ export class Nvr {
     this.listTurns = { since: now, read: 0, failed: 0, quiet: 0, frozen: 0, busy: 0 }
   }
 
+  /**
+   * Says in the journal, once each way, when the XML settings start going out on the worker's login
+   * and when they stop (see borrowing). Asked at every camera-list turn (~30 s), not in the getter,
+   * which every settings request reads.
+   */
+  #logBorrowing() {
+    const now = this.borrowing
+    if (now === this.borrowingSaid) return
+    this.borrowingSaid = now
+    if (now) console.log(`[${this.id}] settings now go through the video connection (this login is down: ${this.error || 'no reason given'})`)
+    else if (this.online) console.log(`[${this.id}] settings are back on their own login`)
+    else console.log(`[${this.id}] settings no longer go through the video connection (it is not logged in either, or CCTV_XML_VIA_WORKER=off)`)
+  }
+
   async #refresh() {
+    try {
+      this.#logBorrowing()
+    } catch {} // (a line for the journal: never in the way of the turn)
     this.#logListTurns()
     const turns = this.listTurns
     // one at a time, and not while this NVR cools down after a late call (it would only add another and renew the cool-down),
@@ -907,6 +988,11 @@ export class Nvr {
     // replaced after MAX_CHANNEL_FAILURES turns (~2 minutes) as without a worker, where it took
     // that many keepalives (15 to 20 minutes with settings, playback and motion search failing)
     if (this.#workerPolls && Date.now() - this.lastOwnPoll < CONTROL_KEEPALIVE_MS) return
+    // (reads that went unanswered while the video flowed: the next is not tried at every turn; see below)
+    if (Date.now() < (this.listSkipUntil ?? 0)) {
+      turns.busy++
+      return
+    }
     const held = this.#listHeld()
     if (held) {
       turns[held]++
@@ -924,12 +1010,26 @@ export class Nvr {
       if (ok) {
         this.lastOwnPoll = Date.now()
         this.health.channelFailures = 0
+        this.listSlowSaid = false
         if (!this.online && !this.relogging) {
           this.status = 'online'
           this.controlFailed = false // up again: see borrowing
         }
       } else if (++this.health.channelFailures >= MAX_CHANNEL_FAILURES) {
-        this.#relogin('NVR not answering').catch((e) => this.#log('relogin', e))
+        // Not while its video is flowing. Logging in again stops every stream of the NVR, and over the
+        // P2P cloud the list alone is often not answered in time: on 2026-10-13 Marine Satety was
+        // logged out and in 79 times in 12 hours, and Bounty Kitty 30, with 10 and 16 streams playing
+        // throughout. The list is asked again, but not at every turn (each unanswered read is one
+        // more slow call to an NVR that is already slow). A stream that really stops is seen by the
+        // stall check, which still logs in again when the NVR does not answer it.
+        if (this.#videoFlowing()) {
+          this.health.channelFailures = MAX_CHANNEL_FAILURES - 1
+          this.listSkipUntil = Date.now() + CHANNEL_QUIET_MS
+          if (!this.listSlowSaid) console.warn(`[${this.id}] the camera list is not being answered, but video is flowing: staying logged in and asking again every ${CHANNEL_QUIET_MS / 60_000} min`)
+          this.listSlowSaid = true
+        } else {
+          this.#relogin('NVR not answering').catch((e) => this.#log('relogin', e))
+        }
       }
     } finally {
       this.refreshing = false
@@ -1325,6 +1425,9 @@ function startRecording() {
 
 /** A new Nvr, with its live worker when CCTV_LIVE_WORKER=on. */
 const makeNvr = (cfg) => {
+  // a Hikvision device always has its own worker (hik-nvr.mjs), whatever CCTV_LIVE_WORKER says; it
+  // does no server recording yet, so it gets no recording settings
+  if (isHik(cfg)) return new HikNvr(cfg)
   const nvr = new Nvr(cfg)
   if (LIVE_WORKER) {
     // (each worker's recorders' write queues, every 5 s: writes waiting make time-lapse stand back before a gap, thin-pace.mjs)
@@ -1376,7 +1479,8 @@ async function syncNow() {
     if (!existing) {
       await workerGone(id)
       nvrs.set(id, makeNvr(c))
-    } else if (existing.apply(c)) {
+    } else if ((existing.brand === 'hikvision') !== isHik(c) || existing.apply(c)) {
+      // (a record switched between TVT and Hikvision is a new device: new class, new worker)
       console.log(`[${id}] connection settings changed, reconnecting`)
       nvrs.delete(id)
       await retire(existing)
@@ -1463,7 +1567,8 @@ async function startEvents() {
   }
 
   eventIntake = makeEventIntake({
-    listNvrs: () => [...nvrs.values()],
+    // (TVT NVRs only: the intake reads a TVT NVR's recorded-file index; a Hikvision device has none here yet)
+    listNvrs: () => [...nvrs.values()].filter((n) => n.brand !== 'hikvision'),
     camerasOf: (nvr) => nvr.channels.filter((c) => c.configured !== false),
     // background work: nobody waits on these, so one that comes back late does not hold the NVR's
     // playback and searches (sdk.mjs); the clock is the NVR's last read while it is under a minute old
@@ -1500,7 +1605,7 @@ async function startEvents() {
     if (!LIVE_WORKER) return
     const recording = getSettings().recording
     for (const nvr of nvrs.values()) {
-      if (!nvr.worker) continue
+      if (!nvr.worker || nvr.brand === 'hikvision') continue
       nvr.worker.setEventWindows(buildWindowMessage({
         nvrId: nvr.id,
         cameras: nvr.channels,
@@ -1582,15 +1687,17 @@ export const allCameras = ({ live = false, anyLogin = false } = {}) =>
         nvrName: nvr.name,
         ch: c.ch,
         name: c.name,
-        // live: the video login (Live waited for the control login, one NVR at a time, up to ~31 s)
-        online: c.online && (anyLogin ? nvr.online || nvr.liveOnline : live ? nvr.liveOnline : nvr.online),
+        // live: the video login (Live waited for the control login, one NVR at a time, up to ~31 s).
+        // A Hikvision device has only its worker's login, so that one counts everywhere
+        online: c.online && (nvr.brand === 'hikvision' ? nvr.liveOnline : anyLogin ? nvr.online || nvr.liveOnline : live ? nvr.liveOnline : nvr.online),
         // false for an empty channel slot on the NVR: there is no camera there to be offline
         configured: c.configured !== false,
         model: c.model || null,
         maker: c.maker || null,
         // whether the server is set to record this camera, so a live tile can show the red dot
         // that tells a viewer at a glance this one is being kept
-        recording: cameraRecording(nvr.id, c.ch).mode !== 'off',
+        // (a Hikvision device's cameras are not recorded by the server yet, whatever the setting says)
+        recording: nvr.brand !== 'hikvision' && cameraRecording(nvr.id, c.ch).mode !== 'off',
         // another site (VPN, TVT P2P): little bandwidth, so the full-size view stays on the sub stream
         remote: Boolean(nvr.cfg.sn || nvr.cfg.remote)
       }))

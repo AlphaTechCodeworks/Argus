@@ -9,7 +9,7 @@ body.has-shell .app-main { display: flex; flex-direction: column; min-width: 0; 
   background: var(--surface-1); border-right: 1px solid var(--border); overflow-y: auto; overflow-x: hidden; }
 .shell-brand { display: flex; align-items: center; gap: var(--s3); padding: 2px var(--s2) var(--s5); color: var(--text);
   font-weight: 600; font-size: var(--fs-section); text-decoration: none; }
-.shell-logo { width: 32px; height: 32px; border-radius: 9px; display: block; }
+.shell-logo { width: 40px; height: 40px; border-radius: 10px; display: block; flex-shrink: 0; }
 .shell-brand-type { display: flex; flex-direction: column; gap: 3px; }
 .shell-brand-type strong { font-size: 22px; line-height: 1.1; letter-spacing: -0.04em; font-weight: 700; }
 .shell-brand-type small { color: var(--text-muted); font-size: 11px; font-weight: 500; letter-spacing: 0.02em; }
@@ -38,6 +38,10 @@ body.has-shell .app-main { display: flex; flex-direction: column; min-width: 0; 
 .shell-settings-status { width: 100%; overflow-wrap: anywhere; font-size: 12px; color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 4px; }
 .shell-settings-status[hidden] { display: none; }
 .alert-banner[hidden] { display: none !important; }
+/* open problems (alert-banner.js): the bell turns red, with a dot, wherever the shell draws it */
+body.has-problems a[href="/alarms.html"] .icon { color: var(--bad); }
+body.has-problems a[href="/alarms.html"] { position: relative; }
+body.has-problems a[href="/alarms.html"]::after { content: ''; position: absolute; top: 6px; left: 26px; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
 .alert-dismiss { min-width: 44px; min-height: 44px; padding: 8px 12px; border: 1px solid currentColor; border-radius: var(--r-sm); background: transparent; color: inherit; cursor: pointer; }
 .alert-dismiss:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
@@ -169,3 +173,8 @@ html.shell-pending body { padding-left: var(--shell-w); }
 html.shell-pending body header .brand h1, html.shell-pending body header nav.tabs, html.shell-pending body header .account { display: none; }
 @media (max-width: 1199px) { html.shell-pending body { padding-left: var(--rail-w); } }
 @media (max-width: 699px), (pointer: coarse) and (max-height: 500px) { html.shell-pending body { padding-left: 0; padding-bottom: calc(var(--bar-h) + env(safe-area-inset-bottom)); } }
+
+/* the drawn ARGUS lettering, in place of the word set in the text font */
+.shell-wordmark { display: block; height: 19px; width: auto; }
+.shell-top .shell-wordmark { height: 15px; }
+.shell-brand-type strong, .shell-top strong { display: inline-flex; align-items: center; }

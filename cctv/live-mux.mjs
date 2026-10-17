@@ -55,7 +55,7 @@
 // grid's channels queuing more than an even share are held back (a heavy tile skips to its next
 // keyframe, the rest stay live), and past SOCKET_CAP_BYTES every channel is. adaptive-live reads the
 // whole socket's queue (sharedBufferedAmount): on one FIFO any backlog is every tile's latency.
-import { STUCK_MS } from './backpressure.mjs'
+import { CAP_BYTES, STUCK_MS } from './backpressure.mjs'
 import { REPLAY_MAX_BYTES } from './gop-replay.mjs'
 
 export const MAX_MESSAGE_BYTES = 1024
@@ -70,6 +70,17 @@ export const MAX_MALFORMED = 20
 // of latency (about 3 s at 20 Mbit/s for the cap, a tenth of that on the local network).
 export const SOCKET_SOFT_BYTES = 2 * 1024 * 1024
 export const SOCKET_CAP_BYTES = 8 * 1024 * 1024
+// A local page's marks follow its measured drain rate instead (about 0.25 s soft, 0.5 s cap, with
+// floors), so a phone on Wi-Fi is not seconds behind. A remote page keeps the fixed marks: adaptive-live
+// (its levels; "held over its cap for more than 2 s") is that page's control and is tuned against them.
+// Rate-based marks there held tiles to their next keyframe at 0.5 s queued, so on a link just short of
+// full the page stayed at full dropping GOPs instead of stepping to an even 15 fps, and on a slow link
+// the steps came off the mux's holds, not the controller's looks (adaptive-live.test.mjs).
+export function backlogLimits(bps, who = '') {
+  if (who === 'remote' || !(bps > 0)) return { soft: SOCKET_SOFT_BYTES, hard: SOCKET_CAP_BYTES }
+  return { soft: Math.max(128 * 1024, Math.min(SOCKET_SOFT_BYTES, Math.floor(bps * 0.25))),
+    hard: Math.max(256 * 1024, Math.min(SOCKET_CAP_BYTES, Math.floor(bps * 0.5))) }
+}
 // How fast the page's socket drains: the bytes ws finished writing (its send callbacks) per second of
 // the time it had something queued, over about the last DRAIN_WINDOW_MS. The queued bytes alone say
 // nothing about how long they take to go: 256 KB is 0.05 s on the local network and 0.4 s through a
@@ -217,9 +228,10 @@ class MuxChannel {
   // whole socket's queue, which is then over every channel's cap.
   get bufferedAmount() {
     const all = this.#mux.queued
-    if (all > SOCKET_CAP_BYTES) return all
+    const limits = this.#mux.limits()
+    if (all > limits.hard) return Math.max(all, CAP_BYTES[this.#type] + 1)
     // the grid's tiles, not a main stream: that is the one being looked at full size
-    if (this.#type !== MAIN && all > SOCKET_SOFT_BYTES && this.#queued > all / Math.max(1, this.#mux.channels.size)) return all
+    if (this.#type !== MAIN && all > limits.soft && this.#queued > all / Math.max(1, this.#mux.channels.size)) return Math.max(all, CAP_BYTES[this.#type] + 1)
     return this.#queued
   }
 
@@ -268,7 +280,7 @@ class MuxChannel {
   // what is left of REPLAY_MAX_BYTES on the socket; past that, just its keyframe (the picture
   // appears at once and moves from the next keyframe).
   get replayMaxBytes() {
-    return Math.max(0, REPLAY_MAX_BYTES - this.#mux.queued)
+    return Math.max(0, Math.min(REPLAY_MAX_BYTES, this.#mux.limits().hard) - this.#mux.queued)
   }
 
   /** Sends one frame (a Buffer, or a Uint8Array from the worker) under this channel's id. */
@@ -277,7 +289,7 @@ class MuxChannel {
     if (!this.#open || mux.ws.readyState !== OPEN || !(data instanceof Uint8Array)) return
     // The socket over its cap: nothing more. A GOP replay goes to a new viewer without gateSend; this
     // is its gate (without it 128 subs of one camera on a page that stopped reading queued 128 replays).
-    if (mux.queued > SOCKET_CAP_BYTES) {
+    if (mux.queued > mux.limits().hard) {
       this.waitForKey = true
       return
     }
@@ -395,6 +407,7 @@ export function serveMux(ws, { attach, session, now = Date.now, log = (line) => 
     queued: 0, // bytes of frames handed to ws and not written yet: every channel's, ended ones' too
     progressAt: now(), // when ws last wrote some of them (or the queue last started from empty)
     drain: drainMeter(now), // how fast it writes them (DRAIN_WINDOW_MS)
+    limits: () => backlogLimits(mux.drain.bps(), who), // its soft mark and cap now (backlogLimits)
     page: Object.freeze({}), // this socket, as its channels name it (MuxChannel.page)
     pending: () => {
       const n = ws._socket?._handle?.writeQueueSize

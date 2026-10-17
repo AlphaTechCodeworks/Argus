@@ -7,6 +7,7 @@
 //
 //   GET  /                     -> viewer page (cctv/public)
 //   POST /api/login            -> { user, password } sets the session cookie
+//   GET  /api/sso[/available]  -> Windows single sign-on (Kerberos "Negotiate"), see sso.mjs
 //   POST /api/logout
 //   GET  /api/me               -> { user, admin }
 //   /api/admin/nvrs            -> manage NVRs and sites (admins only), see admin.mjs
@@ -15,7 +16,11 @@
 //   /api/maps, /api/admin/maps -> camera maps per site, see maps.mjs
 //   /api/camera-links, /api/admin/camera-links -> which camera adjoins which, see camera-links.mjs
 //   /api/admin/discovery       -> find TVT NVRs on the network (admins), see discovery.mjs
+//   GET  /api/admin/find-device?q=…[&search=1] -> which site/recorder/camera a MAC, address or name is (admins), see find-device.mjs
 //   GET  /api/admin/vpn        -> VPN hub status and the remote sites (admins), see vpn.mjs
+//   GET  /api/app/android[/download] -> the Android app's installer: its version and checksum, and
+//                                 the file, for the app to update itself (any signed-in user), see
+//                                 app-download.mjs; app-fetch.mjs brings each new release from GitHub
 //   GET  /api/admin/connector[/installer] -> the NVR site-server installer: its status, and the
 //                                 download (admins), see connector-download.mjs
 //   /api/admin/nvrs/:id/substreams -> sub-stream codec per channel, switch to H.264 (admins), see substreams.mjs
@@ -38,6 +43,12 @@
 //   POST /api/admin/alerts/test { method: 'ntfy'|'email' } -> sends a test message (admins)
 //   POST /api/admin/lines/alert { nvr, ch, on } -> a camera's line-crossing phone alert on or off
 //                                 (admins): the "Line crossing" alarm rule, see line-actions.mjs
+//   GET/POST /api/admin/steady { nvr, ch, on } -> "Steady picture" for a camera: the server steadies
+//                                 its live picture for everyone (admins change it), see steady.mjs
+//   GET  /api/admin/metrics?hours=24 -> the key numbers minute by minute, up to 14 days back
+//                                 (admins; Health's "Last 24 hours"), see metrics-history.mjs
+//   /api/admin/rtsp            -> Camera links (RTSP): keys and the switch (admins), see rtsp.mjs; its
+//                                 RTSP server (MediaMTX, a child process) asks /internal/rtsp-* (this machine only)
 //   GET  /healthz              -> used by the Docker healthcheck and the watchers on this machine;
 //                                 { ok } only for anyone else who is not an admin (security.mjs localProbe)
 //   WS   /live?nvr=ID&ch=N&stream=S -> binary frames, S: 0 = main, 1 = sub
@@ -77,7 +88,7 @@ import { power as nvrPower, transparent } from './nvr-xml.mjs'
 import { readAlerts } from './alert-log.mjs'
 import { PERIODS, composeReport, countInThread, periodWindow, startDailySummary } from './reports.mjs'
 import { commonOffset, siteOffsetMin, useSiteOffset } from './site-time.mjs'
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync, readdirSync, statSync, statfsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { extname, join } from 'node:path'
@@ -86,15 +97,18 @@ import { keepAlive } from './backpressure.mjs'
 import * as auth from './auth.mjs'
 import { motionScan } from './motion.mjs'
 import { handleAdmin } from './admin.mjs'
-import { handleDiscovery } from './discovery.mjs'
+import { handleDiscovery, networkSearch } from './discovery.mjs'
+import { makeFindDevice, readArpTable } from './find-device.mjs'
+import { wsDiscover } from './onvif-discovery.mjs'
 import { handleImaging } from './imaging.mjs'
 import { handleLens } from './lens.mjs'
 import { handleStreamCapResolution, handleStreamOptimise, handleStreams } from './streams.mjs'
 import { handleLines } from './tripwire.mjs'
+import { handleCameraCfg } from './camera-cfg.mjs'
 import { ADMIN_OSD_PATH, OSD_PATH, handleCameraNotes, handleOsd as handleCameraOsd, handleSiteNotes } from './camera-notes.mjs'
 import { handleSubstreams } from './substreams.mjs'
 import { handleClocks, handleProbe } from './nvr-probe.mjs'
-import { cameraExport, camerasReport, camerasXlsx, startCameraReportSchedule } from './camera-export.mjs'
+import { cameraExport, cameraSnapshot, camerasReport, camerasXlsx, startCameraReportSchedule } from './camera-export.mjs'
 import { nvrRegister, registerXlsx } from './register.mjs'
 import { handleClockWrite, measuredDrift, startClockSync, zoneOffsets } from './nvr-clock.mjs'
 import { handleSettings } from './settings-api.mjs'
@@ -106,13 +120,19 @@ import { lastBackup, runBackup } from './backup.mjs'
 import { freeOf, freePercent, listLocations, markerMatches } from './storage.mjs'
 import { PhoneLive, isPhoneRequest } from './phone-live.mjs'
 import { H264Fallback } from './h264-fallback.mjs'
+import { STEADY_PATH, SteadyLive, handleSteady, steadyStore } from './steady.mjs'
 import { AdaptiveLive, isRemoteAddress } from './adaptive-live.mjs'
 import { MAX_MESSAGE_BYTES, serveMux } from './live-mux.mjs'
 import { liveAttacher, viewerOf } from './live-attach.mjs'
+import { makeMainLimit } from './main-limit.mjs'
+import { hostAddresses, makeRtsp } from './rtsp.mjs'
 import { makePresence } from './presence.mjs'
 import { handleViewers, liveKind, trackingOpen } from './viewers.mjs'
+import { audioHub } from './audio-hub.mjs'
+import { deviceOf, hostNameOf } from './device-name.mjs'
 import { ffmpegCpuPercent, meterSocket, trafficSummary } from './traffic.mjs'
 import { isCached, fileResponse, setAssetStamp, warmFiles } from './static-files.mjs'
+import { pagesFrom } from './page-reload.mjs'
 import { startWarmStreams } from './warm-streams.mjs'
 import { allGridOrders } from './user-prefs.mjs'
 import { pool as playbackTranscodes } from './transcode.mjs'
@@ -130,6 +150,9 @@ import { NVR_MAIN_ACTIONS, connectPlayback } from './rec-playback.mjs'
 import { accessWatch } from './access-watch.mjs'
 import { vpnView } from './vpn.mjs'
 import { sendInstaller, statusOf } from './connector-download.mjs'
+import { describeApp, sendApp } from './app-download.mjs'
+import { startAppFetch } from './app-fetch.mjs'
+import { startDiscovery } from './app-discovery.mjs'
 import { nvrCooling, sdkStats } from './sdk.mjs'
 import { discoverStorage, makeNvrStorage, probeSmart, readStorage, sdkQuery } from './nvr-disks.mjs'
 import { recentRefusals } from './nvr-health.mjs'
@@ -142,8 +165,16 @@ import { can, canPlayAnyOn, handleRights, liveCameras, mayHd, onRightsSaved, pla
 import { streamParam } from './stream-param.mjs'
 import { healthFor } from './health-view.mjs'
 import { handleUsers } from './users-api.mjs'
+import { makeAd } from './ad.mjs'
+import { handleAd } from './ad-api.mjs'
+import { makeSso } from './sso.mjs'
+import { forgetRights, renameRights } from './rights.mjs'
+import { renameUserViews } from './views.mjs'
+import { renameUserPrefs } from './user-prefs.mjs'
+import { renameBookmarkUser } from './bookmarks.mjs'
+import { DEVICE_SESSION_MARK_MS, DEVICE_SESSION_MS, makeSetupCodes, sessionLeftMs } from './setup-codes.mjs'
 import { machineRebootAvailable, requestReboot } from './machine-reboot.mjs'
-import { audit, handleAudit, pruneAudit } from './audit.mjs'
+import { audit, handleAudit, pruneAudit, withDevice } from './audit.mjs'
 import { handleViews } from './views.mjs'
 import { handleEvents } from './events.mjs'
 import { handleSnapshot, sweepSnapshots } from './event-snapshot.mjs'
@@ -162,7 +193,15 @@ import { loopWorstMs } from './loop-lag.mjs'
 import { processErrors } from './process-guard.mjs'
 import { memoryNow, startMemoryLog } from './proc-memory.mjs'
 import { GRID_ORDER_PATH, handleGridOrder, UI_PREFS_PATH, handleUiPreferences } from './user-prefs.mjs'
+import { cohortOf, handleTelemetry, makeTelemetry } from './telemetry.mjs'
+import { handleSicex, makeSicex } from './sicex.mjs'
+import { handleHold, makeHolds } from './stream-holds.mjs'
+import { handleTolerance, makeTolerance } from './wall-tolerance.mjs'
 import { xmlOnline } from './xml-session.mjs'
+import { METRICS_PATH, countNamed, handleMetrics, makeMetricsHistory } from './metrics-history.mjs'
+import { diskFree, makeServerHealth } from './server-health-alerts.mjs'
+import { lightPool as lightTranscodePool, pool as transcodePool } from './transcode.mjs'
+import { availableParallelism, loadavg } from 'node:os'
 
 const {
   HTTP_PORT = '8080',
@@ -170,7 +209,7 @@ const {
   CERT_HOSTS = '' // extra names/IPs for the certificate, e.g. this PC's LAN address
 } = process.env
 
-const PUBLIC_DIR = join(import.meta.dirname, 'public')
+let PUBLIC_DIR = join(import.meta.dirname, 'public') // (let: a pages-only release is taken up without a restart, see SIGHUP)
 
 startWatchdog()
 // an error that ends this process leaves DATA_DIR/last-crash.json behind (the watchdog covers hangs, not these)
@@ -226,6 +265,12 @@ function thinAndRetain(roundStart = Date.now()) {
     limit: MAX_SEGMENTS_PER_RUN
   })
 }
+
+// The Android app's releases come from GitHub by themselves once a token has been placed (app-fetch.mjs).
+startAppFetch()
+// The Android app finds this server on the local network by itself (app-discovery.mjs); the address it is
+// told to use is the public one from Settings, so it connects by the name the certificate is for.
+startDiscovery({ about: () => ({ port: Number(HTTPS_PORT), url: getSettings().publicUrl ?? '' }) })
 
 // server recording (CCTV_LIVE_WORKER=on only): retention, each location's space limit and low-space
 // deletion every 5 minutes. Its file calls go to each location's helper (housekeeping.mjs); it keeps
@@ -291,6 +336,23 @@ if (LIVE_WORKER) {
 // ---- health alerts and nightly settings backups ---------------------------
 
 const DATA_DIR = auth.DATA_DIR
+// SICE-X: the optional speed-ups, switched from one place, and switched off by itself when the screens
+// running it measurably fare worse than the ones kept without it (sicex.mjs; looked at once an hour)
+const sicex = makeSicex({ dir: auth.DATA_DIR, log: console.log })
+// built after sicex so each batch is bucketed by the current holdout fraction the admins set there
+const telemetry = makeTelemetry({ holdoutOf: () => sicex.get().holdoutOf })
+setInterval(() => { try { sicex.autoCheck(telemetry.summary()) } catch (e) { console.warn(`[sicex] check failed: ${e?.message ?? e}`) } }, 3_600_000).unref()
+// Only on an NVR reached on the local network that is refusing nothing: a P2P or VPN NVR's main
+// stream rides the same slow link as the one being watched, and one that refuses streams has none
+// to spare (warm-streams.mjs keeps away from it for the same reason).
+const wallTolerance = makeTolerance({ dir: auth.DATA_DIR })
+const holds = makeHolds({
+  streamOf: (id, ch) => {
+    const n = nvrs.get(id)
+    return n?.liveOnline && !(n.cfg?.sn || n.cfg?.remote) && refusalsOf(n) === 0 ? n.getStream(ch, 0) : null
+  },
+  log: console.log
+})
 const STARTED_MS = Date.now()
 
 // Only a hang from just before this start is worth reporting as "the server restarted": an older
@@ -388,6 +450,11 @@ const clockSync = startClockSync(nvrs, { enabled: () => getSettings().clockSync?
 // silence looked exactly like success.
 detectEncoder().catch((e) => console.warn(`[transcode] could not work out which encoder to use: ${e.message}`))
 
+// The server-health alerts (server-health-alerts.mjs): made from the key numbers' history, which is
+// set up further down (metricsHistory). Null until then; the first checks fall in the start-up grace,
+// when no alert but the restart notice goes out anyway.
+let serverHealth = null
+
 const alerts = startAlerts({
   dataDir: DATA_DIR,
   startedMs: STARTED_MS,
@@ -401,14 +468,25 @@ const alerts = startAlerts({
   // only the newest 24 h or bookmarked footage left, or one where deleting does not free space.
   // And days kept short of the target (retention-target.mjs, 2026-09-30), from the same report: a location
   // recycling at 8 days against 30 is quiet for the forecast above and exactly what this one is for.
+  // And the server's own health (server-health-alerts.mjs, 2026-10-14): overloaded, its own disk nearly
+  // full, a recorder failing again and again, viewers refused. Asked apart from the storage forecast, so
+  // either failing leaves the other's alerts standing (candidates() itself never throws). That matters
+  // more for these: they clear on the first check they are missing from (alerts.mjs SELF_TIMED).
   extraCandidates: () => {
-    const report = buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf })
-    // The samples that forecast is drawn from are taken here, at most one an hour (recordSample's own rule).
-    // They were taken only when an admin opened the Storage page, so a server nobody looked at never had
-    // enough of them to forecast from (audit of 2026-10-07, M11). This check's forecast was drawn before
-    // the sample; the next check has it.
-    recordSample(DATA_DIR, report.locations)
-    return [...driveFullCandidates(report, { days: 7 }), ...retentionCandidates(report), ...housekeepingCandidates()]
+    const health = serverHealth?.candidates() ?? []
+    let storage = []
+    try {
+      const report = buildStorageReport({ settings: getSettings(), index: recIndex(), history: readHistory(DATA_DIR), present: markerMatches, freeOf })
+      // The samples that forecast is drawn from are taken here, at most one an hour (recordSample's own rule).
+      // They were taken only when an admin opened the Storage page, so a server nobody looked at never had
+      // enough of them to forecast from (audit of 2026-10-07, M11). This check's forecast was drawn before
+      // the sample; the next check has it.
+      recordSample(DATA_DIR, report.locations)
+      storage = [...driveFullCandidates(report, { days: 7 }), ...retentionCandidates(report), ...housekeepingCandidates()]
+    } catch (e) {
+      console.warn(`[alerts] the storage forecast could not be read: ${e.message}`)
+    }
+    return [...health, ...storage]
   },
   listNvrs: () =>
     [...nvrs.values()].map((n) => ({
@@ -494,7 +572,10 @@ const MIME = {
   '.webmanifest': 'application/manifest+json'
 }
 // the sign-in page's own stylesheets and theme script: without them it is unstyled until signed in
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/show-password.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
+// the pages a watch-only account may open (auth.mjs isWatchOnly): Live, Playback (and its wall and the
+// player of an exported pack), Map, and its own password
+const WATCH_PAGES = new Set(['/index.html', '/playback.html', '/wall.html', '/pack-player.html', '/map.html', '/change-password.html', '/login.html', '/setup.html'])
+const PUBLIC_PATHS = new Set(['/setup.html', '/setup.js', '/login.html', '/login.js', '/sso-login.js', '/show-password.js', '/style.css', '/theme-boot.js', '/css/tokens.css', '/css/base.css', '/css/components.css', '/logo.svg', '/manifest.webmanifest', '/icon-180.png', '/icon-512.png', '/sw.js', '/healthz'])
 const SECURITY_HEADERS = securityHeaders()
 
 // CCTV_AUTH=off is for local development only: never publish such an instance beyond 127.0.0.1
@@ -511,7 +592,7 @@ const read = (name, fallback) => {
   }
 }
 const VERSION = read('VERSION', '0.0')
-const RELEASE = read('RELEASE', 'dev')
+let RELEASE = read('RELEASE', 'dev')
 const BUILD = { version: `v${VERSION}`, release: RELEASE }
 if (AUTH_OFF) console.warn('WARNING: CCTV_AUTH=off, sign-in is disabled. Development use only.')
 
@@ -552,9 +633,10 @@ const CAMERA_METHODS = {
   'stream/estimate': ['POST'], // read only, but takes a body
   notes: ['GET', 'POST'],
   figures: ['GET', 'POST'],
-  lines: ['GET', 'POST'] // read / change, undo
+  lines: ['GET', 'POST'], // read / change, undo
+  cfg: ['GET', 'POST'] // motion, sterile area, item monitoring, fault: read / change (camera-cfg.mjs)
 }
-const CAMERA_ROUTE = /^\/api\/admin\/nvrs\/([^/]+)\/channels\/(\d{1,3})\/(image|image\/profiles|image\/schedule|lens|stream|stream\/estimate|notes|figures|lines)$/
+const CAMERA_ROUTE = /^\/api\/admin\/nvrs\/([^/]+)\/channels\/(\d{1,3})\/(image|image\/profiles|image\/schedule|lens|stream|stream\/estimate|notes|figures|lines|cfg\/(?:motion|perimeter|osc|avd))$/
 
 const sendJson = (res, status, data, headers = {}) => {
   res.writeHead(status, { 'content-type': 'application/json', ...SECURITY_HEADERS, ...headers })
@@ -591,7 +673,20 @@ const handleLogin = async (req, res) => {
   } catch {
     return sendJson(res, 400, { error: 'Bad request' })
   }
-  const user = String(creds.user ?? '')
+  // (the user name in any capitals: auth.accountName; the password exactly as set)
+  const user = auth.accountName(String(creds.user ?? ''))
+  // Windows (Active Directory) sign-in, ad.mjs: only for a name with no local account, while it is
+  // switched on (null otherwise: on as before). It audits its own sign-ins and refusals.
+  const viaAd = await ad.login(String(creds.user ?? ''), creds.password ?? '', { ip })
+  if (viaAd && !viaAd.ok) {
+    if (viaAd.count) auth.recordFailure(ip)
+    // (canChangePassword: the sign-in page then offers to change an expired Windows password there)
+    return sendJson(res, viaAd.status, { error: viaAd.message, ...(viaAd.canChangePassword ? { canChangePassword: true } : {}) })
+  }
+  if (viaAd) {
+    auth.clearFailures(ip)
+    return sendJson(res, 200, { user: viaAd.user, mustChangePassword: false }, { 'set-cookie': auth.sessionCookie(auth.createSession(viaAd.user), Boolean(req.socket.encrypted)) })
+  }
   if (!(await auth.checkLogin(user, creds.password ?? ''))) {
     auth.recordFailure(ip)
     console.log(`login failed for "${user}" from ${ip}`)
@@ -605,6 +700,72 @@ const handleLogin = async (req, res) => {
   audit(auth.DATA_DIR, { user, action: 'login', ip })
   const cookie = auth.sessionCookie(auth.createSession(user), Boolean(req.socket.encrypted))
   sendJson(res, 200, { user, mustChangePassword: auth.mustChangePassword(user) }, { 'set-cookie': cookie })
+}
+
+// A scanned set-up code signs the device in as the account it was made for (setup-codes.mjs): once,
+// within its time, and never for an account removed or signed out since. Counted with the failed
+// sign-ins of its address, so codes cannot be guessed at any faster than passwords.
+const setupCodes = makeSetupCodes(join(auth.DATA_DIR, 'setup-codes.json'))
+// Windows (Active Directory) sign-in and its re-checks (ad.mjs, Settings > Active Directory). A user
+// a re-check finds gone from the CCTV groups has their sessions ended (auth.mjs refuses them); here
+// their open pages, listed sessions and unused set-up codes go too.
+// An AD account renamed in AD keeps what was kept under its old name: each of these moves one kind
+// (and gives back how to undo it, so the move is all or nothing).
+const ad = makeAd({ audit: (row) => audit(auth.DATA_DIR, row), forgetRights, renamers: [renameRights, renameUserViews, renameUserPrefs, (from, to) => setupCodes.rename(from, to), renameBookmarkUser] })
+// The sign-in page's "Change your Windows password", when AD says it has expired or must be changed:
+// counted with the failed sign-ins; on success the person is signed in with the new password.
+const handleWindowsPassword = async (req, res) => {
+  const ip = clientIp(req)
+  if (auth.loginBlocked(ip)) return sendJson(res, 429, { error: 'Too many attempts, try again later' })
+  let body
+  try {
+    body = JSON.parse(await readBody(req))
+  } catch {
+    return sendJson(res, 400, { error: 'Bad request' })
+  }
+  const r = await ad.changeExpired(String(body?.user ?? ''), String(body?.currentPassword ?? ''), String(body?.newPassword ?? ''), { ip })
+  if (!r.ok) {
+    if (r.count) auth.recordFailure(ip)
+    return sendJson(res, r.status, { error: r.message, changed: r.changed === true })
+  }
+  auth.clearFailures(ip)
+  sendJson(res, 200, { user: r.user, changed: true, message: r.message }, { 'set-cookie': auth.sessionCookie(auth.createSession(r.user), Boolean(req.socket.encrypted)), 'cache-control': 'no-store' })
+}
+// Windows single sign-on (sso.mjs, kerberos.mjs): an office PC on the domain is signed in as its
+// Windows user with no typing, through the same AD path (ad.mjs loginSso). GET /api/sso is the only
+// route that ever answers WWW-Authenticate: Negotiate.
+const sso = makeSso({ ad, audit: (row) => audit(auth.DATA_DIR, row) })
+const handleSso = async (req, res, pathname) => {
+  const ip = clientIp(req)
+  const r = await sso.handlePublic(req, pathname, { ip, blocked: auth.loginBlocked(ip) })
+  if (r.count) auth.recordFailure(ip)
+  if (r.clear) auth.clearFailures(ip)
+  const headers = { ...r.headers }
+  if (r.user) headers['set-cookie'] = auth.sessionCookie(auth.createSession(r.user), Boolean(req.socket.encrypted))
+  sendJson(res, r.status, r.body, headers)
+}
+ad.start({ ended: (name) => { presence.disconnectUser(name); userSessions.forget(name); setupCodes.forget(name) } })
+const handleSetupRedeem = async (req, res) => {
+  const ip = clientIp(req)
+  if (auth.loginBlocked(ip)) return sendJson(res, 429, { error: 'Too many attempts, try again later' })
+  let body
+  try {
+    body = JSON.parse(await readBody(req))
+  } catch {
+    return sendJson(res, 400, { error: 'Bad request' })
+  }
+  const made = setupCodes.redeem(body?.code)
+  const account = made ? auth.loadUsers()[made.user] : null
+  if (!made || !account || (account.since || 0) > made.at) {
+    auth.recordFailure(ip)
+    audit(auth.DATA_DIR, { user: made?.user ?? '', action: 'setup-code-refused', ip, ok: false })
+    return sendJson(res, 401, { error: 'This set-up code has been used already or is too old. Ask for a new one.' })
+  }
+  console.log(`set-up code used for "${made.user}" from ${ip} (made by ${made.by})`)
+  audit(auth.DATA_DIR, { user: made.user, action: 'setup-code-used', ip, detail: `made by ${made.by}` })
+  const secure = Boolean(req.socket.encrypted) || req.headers['x-forwarded-proto'] === 'https'
+  const cookie = auth.sessionCookie(auth.createSession(made.user, DEVICE_SESSION_MS), secure, DEVICE_SESSION_MS)
+  sendJson(res, 200, { user: made.user }, { 'set-cookie': cookie, 'cache-control': 'no-store' })
 }
 
 const handleRequest = async (req, res) => {
@@ -637,7 +798,11 @@ const handleRequest = async (req, res) => {
       // (h264-fallback.mjs): how many of how many, the encoder step they are on, and the CPU they
       // are counted as against their budget, in units of 1 % of a core; under `main` the same for
       // the main streams of their full-size views, which have a budget of their own
-      h264: h264Fallback.summary()
+      h264: h264Fallback.summary(),
+      // cameras steadied on the server (steady.mjs): how many now, of how many at most
+      steady: steadyLive.summary(),
+      // Camera links (RTSP, rtsp.mjs): switched on, its server running, cameras fed into it and programs reading them
+      rtsp: rtsp.summary()
     }
     // CCTV_LIVE_WORKER=on: each NVR's live worker (its own SDK calls are counted there, not above)
     if (list.some((n) => n.worker)) {
@@ -659,15 +824,21 @@ const handleRequest = async (req, res) => {
   }
   // Per-camera export (camera-export.mjs): a read-only inventory report. Localhost only -- like the
   // full /healthz body, it is for the box itself, never reachable off it, so it needs no sign-in.
+  // Camera links (RTSP): the RTSP server's questions, its feeds and its readers (rtsp.mjs). This
+  // machine only, with this boot's secret; never a session.
+  if (pathname.startsWith('/internal/') && (await rtsp.handleInternal(req, res, url, { local: localProbe(req.socket.remoteAddress, req.headers['cf-connecting-ip']) }))) return
   if (pathname === '/api/cameras-export') {
     if (!localProbe(req.socket.remoteAddress, req.headers['cf-connecting-ip'])) return sendJson(res, 403, { error: 'This report is only available on the server itself.' })
     return sendJson(res, 200, { at: new Date().toISOString(), nvrs: await cameraExport(nvrs) })
   }
   if (pathname === '/api/login' && req.method === 'POST') return handleLogin(req, res)
+  if (pathname === '/api/login/windows-password' && req.method === 'POST') return handleWindowsPassword(req, res)
+  if (pathname === '/api/setup/redeem' && req.method === 'POST') return handleSetupRedeem(req, res)
+  if (pathname === '/api/sso' || pathname === '/api/sso/available') return handleSso(req, res, pathname)
   if (pathname === '/api/logout' && req.method === 'POST') {
     // Read before the cookie is cleared, or there is nobody to name in the entry.
     const leaving = currentUser(req)
-    if (leaving) audit(auth.DATA_DIR, { user: leaving, action: 'logout', ip: clientIp(req) })
+    if (leaving) audit(auth.DATA_DIR, { user: leaving, action: 'logout', ip: clientIp(req), detail: withDevice('', deviceOf(req.headers['user-agent'])) })
     // Clearing the cookie signs out this browser only: the token would stay good for its 7 days, and a
     // page still open with it would keep its video and could open more. Revoked, it is refused from
     // now on, and the sockets it opened are closed (auth.mjs revokeSession, access-watch.mjs).
@@ -683,7 +854,10 @@ const handleRequest = async (req, res) => {
   const user = AUTH_OFF ? 'dev' : auth.verifySession(auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME], { allowPasswordChange: true })
   if (!user) {
     if (pathname.startsWith('/api/')) return sendJson(res, 401, { error: 'Not logged in' })
-    res.writeHead(302, { location: '/login.html', ...SECURITY_HEADERS }).end()
+    // a Live link to a view (a TV's ?view=…&screen=1) comes back to that view after signing in
+    // (public/view-links.js safeNext: only the Live page and a plain query, never another site)
+    const next = (pathname === '/' || pathname === '/index.html') && /^\?[A-Za-z0-9=&,|%._~-]{1,512}$/.test(url.search) ? `?next=${encodeURIComponent(`/${url.search}`)}` : ''
+    res.writeHead(302, { location: `/login.html${next}`, ...SECURITY_HEADERS }).end()
     return
   }
 
@@ -698,8 +872,8 @@ const handleRequest = async (req, res) => {
     const result = await auth.changePassword(user, body.currentPassword, body.newPassword)
     if (!result.ok) { auth.recordFailure(clientIp(req)); return sendJson(res, 400, result) }
     auth.clearFailures(clientIp(req))
-    audit(auth.DATA_DIR, { user, action: 'password-change', ip: clientIp(req), ok: true })
-    return sendJson(res, 200, { ok: true }, { 'set-cookie': auth.sessionCookie(auth.createSession(user), Boolean(req.socket.encrypted)) })
+    audit(auth.DATA_DIR, { user, action: 'password-change', ip: clientIp(req), ok: true, ...(result.message ? { detail: 'changed Windows password (Active Directory)' } : {}) })
+    return sendJson(res, 200, { ok: true, ...(result.message ? { message: result.message } : {}) }, { 'set-cookie': auth.sessionCookie(auth.createSession(user), Boolean(req.socket.encrypted)) })
   }
   if (!AUTH_OFF && auth.mustChangePassword(user)) {
     if (pathname.startsWith('/api/')) return sendJson(res, 403, { error: 'Choose a new password before continuing.', mustChangePassword: true })
@@ -720,15 +894,45 @@ const handleRequest = async (req, res) => {
   // links, overlays) keep every other camera out of their answers with it.
   const canSee = (nvr, ch) => who.admin || ['live', 'playback-server', 'playback-nvr'].some((a) => can(who, a, { nvr, ch }))
 
-  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable() })
+  // a watch-only account has Live, Playback and Map: any other page of the app sends it to Live
+  const watchOnly = !AUTH_OFF && !who.admin && auth.isWatchOnly(user)
+  if (watchOnly && req.method === 'GET' && pathname.endsWith('.html') && !WATCH_PAGES.has(pathname)) return res.writeHead(302, { location: '/', ...SECURITY_HEADERS }).end()
+  // a device set up from a set-up code never signs itself out: its browser is handed the same cookie
+  // again, so the 400 days a browser will keep one start over each time the app is opened
+  const deviceCookie = (() => {
+    if (AUTH_OFF || pathname !== '/api/me') return {}
+    const token = auth.parseCookies(req.headers.cookie)[auth.COOKIE_NAME]
+    return sessionLeftMs(token) > DEVICE_SESSION_MARK_MS ? { 'set-cookie': auth.sessionCookie(token, Boolean(req.socket.encrypted) || req.headers['x-forwarded-proto'] === 'https', 400 * 24 * 60 * 60_000) } : {}
+  })()
+  if (pathname === '/api/me') return sendJson(res, 200, { user, admin: who.admin, watchOnly, ...routeOf(req.socket.remoteAddress, req.headers['cf-connecting-ip']), p2p: P2P_ENABLED, build: BUILD, canRebootMachine: who.admin && machineRebootAvailable(), ...(auth.loadUsers()[user]?.source === 'ad' ? { windows: true } : {}) }, deviceCookie)
   if (pathname === GRID_ORDER_PATH) return sendJson(res, ...(await handleGridOrder(req, user)))
   if (pathname === UI_PREFS_PATH) return sendJson(res, ...(await handleUiPreferences(req, user)))
+  // what viewers actually got, as their pages measured it, and the score made from it (telemetry.mjs)
+  const telemetryRoute = await handleTelemetry(req, pathname, who, telemetry)
+  if (telemetryRoute) return sendJson(res, ...telemetryRoute)
+  const sicexRoute = await handleSicex(req, pathname, { user, admin: who.admin === true, store: sicex, cohortOf, device: url.searchParams.get('device') ?? '', log: console.log })
+  if (sicexRoute) return sendJson(res, ...sicexRoute)
+  // (the hold is one of the engine's modules: with it switched off nothing is held, whatever a page asks)
+  if (pathname === '/api/live/hold' && user && (() => { const s = sicex.get(); return !s.enabled || s.modules.hold === false })()) return sendJson(res, 200, { held: false, why: 'switched off' })
+  // the main stream of the camera this viewer is expected to open next, kept running (stream-holds.mjs)
+  const holdRoute = await handleHold(req, pathname, {
+    user,
+    viewer: viewerOf(req, currentUser),
+    holds,
+    mayHd: (nvr, ch) => can(who, 'live', { nvr, ch }) === true && can(who, 'live-hd', { nvr, ch }) === true
+  })
+  if (holdRoute) return sendJson(res, ...holdRoute)
+  // what counts as an acceptable wall, as the administrator says (wall-tolerance.mjs)
+  const toleranceRoute = await handleTolerance(req, pathname, { user, admin: who.admin === true, store: wallTolerance, log: console.log })
+  if (toleranceRoute) return sendJson(res, ...toleranceRoute)
 
   // Signed in is enough for these. Bookmarks: only those on cameras this user may see, and in them
-  // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own.
+  // only those cameras (canSee; bookmarks.mjs). Saved views are each user's own; one its owner shared
+  // is listed to the others with only the cameras each may watch live (views.mjs sharedViews). 128 KB:
+  // MAX_VIEWS views of MAX_VIEW_CAMERAS camera keys each, now that a view is picked camera by camera.
   const marks = await handleBookmarks(req.method, pathname + url.search, () => readJsonObject(req, 8192), who, { canSee })
   if (marks) return sendJson(res, ...marks)
-  const views = await handleViews(req.method, pathname, () => readJsonObject(req, 32768), user)
+  const views = await handleViews(req.method, pathname, () => readJsonObject(req, 128 * 1024), user, { mayWatch: (nvr, ch) => who.admin || can(who, 'live', { nvr, ch }) === true })
   if (views) return sendJson(res, ...views)
   // An event's picture (event-snapshot.mjs): a JPEG, not JSON, so it is answered here, before the JSON
   // routes; who may see it is decided inside (a playback right for that camera)
@@ -777,8 +981,14 @@ const handleRequest = async (req, res) => {
     return sendJson(res, 200, { at: new Date().toISOString(), nvrs: nvrRegister(nvrs) })
   }
   // GET /api/admin/viewers — who is connected and what each has open now (admins; viewers.mjs)
-  const viewersRoute = handleViewers(req.method, pathname, who, presence, { nameOf: cameraNames })
+  const viewersRoute = handleViewers(req.method, pathname, who, presence, { nameOf: cameraNames, hostOf: hostNameOf })
   if (viewersRoute) return sendJson(res, ...viewersRoute)
+  // GET /api/admin/metrics?hours=24 — the history of the key numbers, for Health's "Last 24 hours"
+  // (admins; metrics-history.mjs)
+  if (pathname === METRICS_PATH) {
+    const metricsRoute = await handleMetrics(req.method, pathname, who, url.searchParams, metricsHistory)
+    if (metricsRoute) return sendJson(res, ...metricsRoute)
+  }
   if (pathname === '/api/admin/register.xlsx') {
     if (!who.admin) return sendJson(res, 403, { error: 'Admins only' })
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
@@ -856,23 +1066,30 @@ const handleRequest = async (req, res) => {
     const backfill = await handleBackfill(req.method, pathname, () => readJsonObject(req, 2048), user)
     if (backfill) return sendJson(res, backfill[0], backfill[1])
     // Who may do what, and the record of who did.
-    const rightsRoute = await handleRights(req.method, pathname, () => readJsonObject(req, 8192), who)
+    // (the address and device go on the audit rows of a change to rights or accounts)
+    const rightsRoute = await handleRights(req.method, pathname, () => readJsonObject(req, 8192), who, { ip: clientIp(req), device: deviceOf(req.headers['user-agent']) })
     if (rightsRoute) return sendJson(res, ...rightsRoute)
     // accounts: add a viewer or an admin from the app (users-api.mjs). It refuses by throwing an
     // HttpError (status and message): answered as that, or a short password and every other refusal
     // reached the page as a bare 500 with nothing to show.
     let usersRoute
     try {
-      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who, { disconnectUser: name => presence.disconnectUser(name) })
+      usersRoute = await handleUsers(req.method, pathname, () => readJsonObject(req, 2048), who, { disconnectUser: name => presence.disconnectUser(name), setupCodes, baseUrl: getSettings().publicUrl || `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host ?? ''}`, ip: clientIp(req), device: deviceOf(req.headers['user-agent']) })
     } catch (e) {
       if (!Number.isInteger(e?.status)) throw e
       usersRoute = [e.status, { error: e.message }]
     }
     if (usersRoute) return sendJson(res, ...usersRoute)
+    // Settings > Active Directory > Single sign-on (sso.mjs): the keytab and the switch
+    const ssoRoute = await sso.handleAdmin(req.method, pathname, () => readJsonObject(req, 131072), who, { ip: clientIp(req), device: deviceOf(req.headers['user-agent']), withDevice })
+    if (ssoRoute) return sendJson(res, ...ssoRoute)
+    // Settings > Active Directory (ad-api.mjs): admins only; answers its own refusals
+    const adRoute = await handleAd(ad, req.method, pathname, () => readJsonObject(req, 65536), who, { ip: clientIp(req), device: deviceOf(req.headers['user-agent']) })
+    if (adRoute) return sendJson(res, ...adRoute)
     // Settings > Server: restart. The answer goes out first; systemd (Restart=always) starts it again.
     if (req.method === 'POST' && pathname === '/api/admin/restart') {
       if (!who?.admin) return sendJson(res, 403, { error: 'Only an admin can restart the server' })
-      audit(auth.DATA_DIR, { user: who.user, action: 'server-restart', target: 'server', ok: true })
+      audit(auth.DATA_DIR, { user: who.user, action: 'server-restart', target: 'server', detail: withDevice('', deviceOf(req.headers['user-agent'])), ip: clientIp(req), ok: true })
       console.log(`[server] restart asked for by ${who.user}`)
       sendJson(res, 200, { restarting: true })
       setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500)
@@ -897,7 +1114,7 @@ const handleRequest = async (req, res) => {
       } catch (e) {
         r = { status: 500, body: { error: `Could not ask for the reboot: ${e.message}` } }
       }
-      audit(auth.DATA_DIR, { user: who.user, action: 'machine-reboot', target: 'server', ok: r.status === 200, detail: r.body.error })
+      audit(auth.DATA_DIR, { user: who.user, action: 'machine-reboot', target: 'server', ok: r.status === 200, detail: withDevice(r.body.error, deviceOf(req.headers['user-agent'])), ip: clientIp(req) })
       console.log(`[server] machine reboot asked for by ${who.user}: ${r.status === 200 ? 'rebooting' : r.body.error}`)
       return sendJson(res, r.status, r.body)
     }
@@ -967,7 +1184,7 @@ const handleRequest = async (req, res) => {
         err = e.message
         if (e?.status === 503) busy = e.extra ?? {}
       }
-      audit(auth.DATA_DIR, { user: who.user, action: `nvr-${action}`, target: id, ok, detail: err ?? undefined })
+      audit(auth.DATA_DIR, { user: who.user, action: `nvr-${action}`, target: id, ok, detail: withDevice(err, deviceOf(req.headers['user-agent'])), ip: clientIp(req) })
       console.log(`[admin] NVR ${action} ${id} (${nvr.name}) by ${who.user}: ${err ? `failed: ${err}` : ok ? 'accepted' : 'refused'}`)
       // Nothing was sent: an earlier call to this NVR is still inside the SDK (nvr-xml.mjs xmlInside).
       // Answered as the other busy refusals are (503 with retryAfterS, see playback.mjs), not as a
@@ -1023,7 +1240,7 @@ const handleRequest = async (req, res) => {
       } catch {
         return sendJson(res, 400, { error: 'Bad NVR id' })
       }
-      const what = cam[3]
+      const what = cam[3].startsWith('cfg/') ? 'cfg' : cam[3]
       if (!CAMERA_METHODS[what].includes(req.method)) return sendJson(res, 405, { error: 'Method not allowed' }, { allow: CAMERA_METHODS[what].join(', ') })
       const ch = Number(cam[2])
       const readJson = () => readJsonObject(req, 8192)
@@ -1035,7 +1252,9 @@ const handleRequest = async (req, res) => {
             ? await handleStreams(what === 'stream' ? 'stream' : 'estimate', req.method, id, ch, url.searchParams, readJson, user)
             : what === 'lines'
               ? await handleLines(req.method, id, ch, url.searchParams, readJson, user)
-              : await handleCameraNotes(what, req.method, id, ch, readJson, user)
+              : what === 'cfg'
+                ? await handleCameraCfg(req.method, id, ch, cam[3].slice('cfg/'.length), readJson, who)
+                : await handleCameraNotes(what, req.method, id, ch, readJson, user)
       return sendJson(res, status, body)
     }
     const siteNotes = /^\/api\/admin\/sites\/([^/]+)\/notes$/.exec(pathname)
@@ -1049,6 +1268,16 @@ const handleRequest = async (req, res) => {
       }
       const [status, body] = await handleSiteNotes(req.method, site, () => readJsonObject(req, 4096))
       return sendJson(res, status, body)
+    }
+    // "Steady picture" for one camera (steady.mjs): the camera editor's Picture tab switches it; a
+    // change is audited and moves the camera's live viewers onto what they should have now
+    if (pathname === STEADY_PATH) {
+      const known = (id, ch) => Boolean(nvrs.get(id)?.channels.some((c) => c.ch === ch && c.configured !== false))
+      const [status, body] = await handleSteady(req.method, () => readJsonObject(req, 1024), {
+        user, store: steadyCameras, live: steadyLive, knownCamera: known,
+        audit: (row) => audit(auth.DATA_DIR, { ...row, ip: clientIp(req), detail: withDevice(row.detail, deviceOf(req.headers['user-agent'])) })
+      })
+      return sendJson(res, status, body, status === 405 ? { allow: 'GET, POST' } : {})
     }
     // The Lines panel's "Alert my phone for this camera": the camera joins or leaves the "Line
     // crossing" alarm rule, and the ntfy topic is made the first time one is switched on.
@@ -1081,6 +1310,13 @@ const handleRequest = async (req, res) => {
       const [status, body] = await handleDiscovery(req.method, async () => JSON.parse((await readBody(req, 4096)) || '{}'))
       return sendJson(res, status, body)
     }
+    // Find device (Sites page): which site, recorder and camera a MAC, an address or a name is, from
+    // what the server already has (Cameras report, recorders, its network table); &search=1 also runs
+    // the TVT network search (the same one as Find NVRs, under its lock)
+    if (pathname === '/api/admin/find-device') {
+      const [status, body] = await findDevice(req.method, url.searchParams)
+      return sendJson(res, status, body, status === 405 ? { allow: 'GET' } : {})
+    }
     if (pathname.startsWith('/api/admin/maps/')) {
       const limit = pathname.endsWith('/plan') ? UPLOAD_LIMIT : SAVE_LIMIT
       const [status, body] = await handleMapsAdmin(req.method, pathname, async () => JSON.parse((await readBody(req, limit)) || '{}'))
@@ -1090,12 +1326,17 @@ const handleRequest = async (req, res) => {
       const answer = await handleCameraLinks(req.method, pathname, () => readJsonObject(req, LINKS_BODY_LIMIT), { admin: true, cameras: allCameras, maps: readMaps })
       if (answer) return sendJson(res, answer[0], answer[1], answer[2])
     }
+    // Camera links (RTSP): keys, the switch, and the one-click link of a camera (rtsp.mjs)
+    const rtspRoute = await rtsp.handleAdmin(req.method, pathname, () => readJsonObject(req, 64 * 1024), who, { ip: clientIp(req), device: deviceOf(req.headers['user-agent']) })
+    if (rtspRoute) return sendJson(res, ...rtspRoute)
     // (the RAM estimate: the NVRs' cameras, not a scan of the whole index; one small query per camera)
     const ramEstimate = () => estimateRecentRam({ index: recIndex(), settings: getSettings(), list: allCameras() })
     const settingsAnswer = await handleSettings(req.method, pathname, () => readJsonObject(req, 16384), user, AUTH_OFF || auth.isAdmin(user), { ramEstimate, params: url.searchParams })
     if (settingsAnswer) return sendJson(res, settingsAnswer[0], settingsAnswer[1], settingsAnswer[2])
     const readJson = async () => JSON.parse((await readBody(req, 8192)) || '{}')
-    const [status, body] = await handleAdmin(req.method, pathname, readJson)
+    // NVRs and Hikvision devices added, changed, removed and tested go in the audit trail
+    const nvrAudit = (row) => audit(auth.DATA_DIR, { user, ...row, ip: clientIp(req), detail: withDevice(row.detail, deviceOf(req.headers['user-agent'])) })
+    const [status, body] = await handleAdmin(req.method, pathname, readJson, { audit: nvrAudit })
     return sendJson(res, status, body)
   }
   // The Health page: how the server is doing, for anyone signed in (see alert-checks.mjs health()).
@@ -1119,6 +1360,8 @@ const handleRequest = async (req, res) => {
           // for local PCs without H.265, on their own budget (h264-fallback.mjs): { running, cap, step, units, budgetUnits, ...,
           // main: the same for their full-size views' main streams, unless those are off }
           h264: h264Fallback.summary(),
+          // cameras an admin set to "Steady picture", steadied now (steady.mjs)
+          steady: steadyLive.summary(),
           cpu: ffmpegCpuPercent()
         }
       }
@@ -1131,6 +1374,14 @@ const handleRequest = async (req, res) => {
   // ?for=playback: the ones they may play back instead (playbackCameras: sd, hd, nvrHd, legs). An admin
   // gets every camera with everything allowed.
   if (pathname === '/api/cameras') return sendJson(res, 200, url.searchParams.get('for') === 'playback' ? playbackCameras(who, allCameras({ live: true })) : liveCameras(who, allCameras({ live: true })))
+  // Argus for Android updates itself from the server it is signed in to: what installer this server
+  // holds, and the installer (app-download.mjs). Any signed-in user: it is the app they are running.
+  if (pathname === '/api/app/android' || pathname === '/api/app/android/download') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed' })
+    if (pathname.endsWith('/download')) return sendApp(res)
+    const app = await describeApp()
+    return app ? sendJson(res, 200, app) : sendJson(res, 404, { error: 'No app installer has been placed on this server.' })
+  }
   // a map shows where cameras are and what they cover: only the sites and cameras this user may see
   // (maps.mjs mapsFor; a site is visible when one of its NVRs' cameras is)
   const siteVisible = (site) => [...nvrs.values()].some((n) => n.site === site && n.channels.some((c) => canSee(n.id, c.ch)))
@@ -1259,7 +1510,7 @@ const onConnection = (ws, req) => {
   // count this browser among the people connected now; its other tiles/tabs share the one key
   const vkey = viewerOf(req, currentUser)
   // (the name and the visitor's own address, not cloudflared's, are for the admins' list of who is watching)
-  presence.join(vkey, ws, { remote: isRemoteAddress(req.socket.remoteAddress), user: currentUser(req), address: clientIp(req) })
+  presence.join(vkey, ws, { remote: isRemoteAddress(req.socket.remoteAddress), user: currentUser(req), address: clientIp(req), device: deviceOf(req.headers['user-agent']) })
   ws.on('close', () => presence.leave(vkey, ws))
   // every live tile of a page on this one socket (live-mux.mjs)
   if (url.pathname === '/live-mux') {
@@ -1288,6 +1539,20 @@ const onConnection = (ws, req) => {
   const user = currentUser(req)
   const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }
   const target = { nvr: nvr.id, ch: Number(url.searchParams.get('ch')) }
+  // /audio: the camera's microphone, for someone who may watch it live (audio-hub.mjs). Its own socket,
+  // only while the speaker button is on; watched for its right like a video socket, so a right taken
+  // away or a sign-out ends the sound too.
+  if (url.pathname === '/audio') {
+    if (!Number.isInteger(target.ch) || target.ch < 0 || !(who.admin || can(who, 'live', target) === true)) return ws.close(1008, 'not allowed')
+    const stop = audioHub.listen(nvr.id, target.ch, ws)
+    if (!stop) return ws.close(1013, 'too many listeners')
+    ws.on('close', stop)
+    ws.on('error', stop)
+    ws.on('message', () => {}) // nothing is taken from the listener
+    watch.track(ws, req, { actions: ['live'], nvr: nvr.id, ch: target.ch })
+    console.log(`[audio] ${user} listens to ${nvr.id}/${target.ch + 1}`)
+    return
+  }
   if (url.pathname === '/playback') {
     // server recordings (src=auto) or the NVR as before; the "NVR offline" refusal is for NVR
     // sessions only (server playback runs without the NVR), see rec-playback.mjs. Either playback
@@ -1364,7 +1629,115 @@ const adaptiveLive = new AdaptiveLive({ pool: phoneLive.pool }) // one cap on co
 // H.265 sub-streams converted to H.264 for PCs on the local network whose browsers cannot play them,
 // on a budget of their own (h264-fallback.mjs): never from the pool phones and remote viewers share
 const h264Fallback = new H264Fallback()
-const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track })
+// "Steady picture" (steady.mjs): the cameras an admin switched it on for, in DATA_DIR/steady.json, and
+// their shared steadied streams, on a cap of their own (CCTV_STEADY_MAX, 4)
+const steadyCameras = steadyStore({ file: join(auth.DATA_DIR, 'steady.json') })
+const steadyLive = new SteadyLive({ isOn: (key) => steadyCameras.has(key) })
+// Find device (find-device.mjs): reads only what the server already has; a recorder is never asked
+const findDevice = makeFindDevice({
+  recorders: () => [...nvrs.values()].map((n) => ({
+    id: n.id, name: n.name, site: n.site, host: n.cfg?.host ?? null, port: n.cfg?.port ?? null, sn: n.cfg?.sn || null,
+    via: n.cfg?.sn ? 'p2p' : 'lan', online: n.online, model: n.model || null,
+    channels: (n.channels ?? []).filter((c) => c.configured !== false).map((c) => ({ ch: c.ch, name: c.name, online: c.online, ip: c.ip || null, model: c.model || null, maker: c.maker || null, httpPort: c.httpPort ?? null }))
+  })),
+  report: cameraSnapshot,
+  arp: () => readArpTable(),
+  // TVT's own search (its recorders answer it) and the standard ONVIF one (its IP cameras answer that),
+  // side by side; a device's MAC from the server's network table, which the answers have just filled
+  search: async () => {
+    const [tvt, onvif] = await Promise.all([networkSearch(), wsDiscover()])
+    const macs = new Map((readArpTable().rows ?? []).map((a) => [a.ip, a.mac]))
+    const devices = [...(tvt.devices ?? []), ...(onvif.devices ?? [])].map((d) => ({ ...d, mac: d.mac || macs.get(d.ip) || null }))
+    return { ran: Boolean(tvt.ran || onvif.ran), devices, why: tvt.ran || onvif.ran ? null : tvt.why || onvif.why }
+  }
+})
+
+// clientAddress: the visitor's own address (not cloudflared's), for the line that says who opened a
+// camera in full quality
+// One count of the cameras in full quality per recorder, for viewers and camera links alike (main-limit.mjs)
+const mainLimit = makeMainLimit()
+const attachLive = liveAttacher({ can, currentUser, isAdmin: (u) => AUTH_OFF || auth.isAdmin(u), adaptiveLive, phoneLive, h264Fallback, track: watch.track, clientAddress: clientIp, steady: steadyLive, mainLimit })
+// Camera links (RTSP, rtsp.mjs): outside programs pull a camera as rtsp://<server>:8554/<nvr>/<camera>[/main]
+// with an admin's key. Off unless switched on in Settings (and never with CCTV_RTSP=off); its RTSP
+// server is a child process, and nothing else depends on it being there.
+const publicHost = () => {
+  try {
+    return new URL(getSettings().publicUrl).hostname
+  } catch {
+    return null
+  }
+}
+const rtsp = makeRtsp({ dataDir: auth.DATA_DIR, appDir: join(import.meta.dirname, '..'), httpPort: HTTP_PORT, nvrs, mainLimit, audit: (row) => audit(auth.DATA_DIR, row), hosts: () => hostAddresses(undefined, [publicHost()]) })
+try {
+  rtsp.start()
+} catch (e) {
+  console.warn(`[rtsp] not started: ${e?.message ?? e}`)
+}
+
+// A history of the key numbers, one line a minute in DATA_DIR/metrics.jsonl, 14 days kept
+// (metrics-history.mjs), for Health's "Last 24 hours". The same sources as /healthz above; with live
+// workers the SDK calls are theirs, so those are added, and the event loop's worst pause is the
+// worst of this process and the workers. Each number is asked for on its own there: one that
+// throws is left out of that minute's line. Nothing here can stop the server starting.
+const workerStats = () => [...nvrs.values()].filter((n) => n.worker).map((n) => n.worker.stats())
+// every ffmpeg on the box, whoever started it: the processes' names in /proc (Linux; null elsewhere)
+const ffmpegRunning = () => {
+  try {
+    const comms = []
+    for (const d of readdirSync('/proc')) {
+      if (!/^\d+$/.test(d)) continue
+      try {
+        comms.push(readFileSync(`/proc/${d}/comm`, 'utf8'))
+      } catch {} // (a process that ended meanwhile)
+    }
+    return countNamed('ffmpeg', comms)
+  } catch {
+    return null
+  }
+}
+const metricsHistory = makeMetricsHistory({
+  file: join(auth.DATA_DIR, 'metrics.jsonl'),
+  providers: {
+    load1: () => loadavg()[0],
+    cpuCount: () => availableParallelism(),
+    nvrs: () => ({ online: [...nvrs.values()].filter((n) => n.online).length, total: nvrs.size }),
+    streams: () => [...nvrs.values()].reduce((n, nvr) => n + (nvr.worker ? nvr.worker.hub.streams.size : nvr.streams.size), 0),
+    viewers: () => presence.summary(),
+    h264: () => h264Fallback.summary(),
+    sdk: () => {
+      const s = sdkStats()
+      const w = workerStats()
+      return { inFlight: s.inFlight + w.reduce((n, x) => n + (x?.sdk?.inFlight ?? 0), 0), late: s.late + w.reduce((n, x) => n + (x?.sdk?.late ?? 0), 0) }
+    },
+    loopWorstMs: () => Math.max(loopWorstMs() ?? 0, ...workerStats().map((x) => x?.loop?.worstMs ?? 0)),
+    // remote viewers' and phones' conversions (one pool), playback's, the steadied cameras', and every ffmpeg on the box
+    other: () => ({ remote: phoneLive.pool.active, playback: transcodePool.active, playbackSd: lightTranscodePool.active, steady: steadyLive.pool.active, ffmpeg: ffmpegRunning(), rtsp: rtsp.summary().feeds, rtspConverting: rtsp.summary().converting, rtspReaders: rtsp.summary().readers })
+  }
+})
+try {
+  metricsHistory.start()
+} catch (e) {
+  console.warn(`[metrics] the history was not started: ${e?.message ?? e}`)
+}
+// The server-health alerts read the samples above from memory (recent()), the free space of the disk
+// holding the app and of DATA_DIR's (once if they are the same disk, read at most every 30 s: health()
+// polls ask too), and the NVRs' names for the "recorder failing" wording. Used by the alert check
+// (startAlerts above), which asks through serverHealth?. and so never before this line.
+const serverDisks = (() => {
+  let at = -Infinity
+  let last = []
+  return () => {
+    if (Date.now() - at < 30_000) return last
+    at = Date.now()
+    last = diskFree(['/opt/cctv', DATA_DIR], { statSync, statfsSync })
+    return last
+  }
+})()
+serverHealth = makeServerHealth({
+  samples: () => metricsHistory.recent(),
+  disks: serverDisks,
+  nvrNames: () => Object.fromEntries([...nvrs.values()].map((n) => [n.id, n.name || n.id]))
+})
 
 // This listener is synchronous and nothing above it catches: anything that throws here takes the
 // whole process down. A malformed Cookie did exactly that, unauthenticated, until 2026-09-27
@@ -1393,7 +1766,7 @@ const upgrade = (req, socket, head) => {
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
     return
   }
-  if (!['/live', '/live-mux', '/playback', '/motion'].includes(url.pathname) || !sameOrigin || !currentUser(req)) {
+  if (!['/live', '/live-mux', '/playback', '/motion', '/audio'].includes(url.pathname) || !sameOrigin || !currentUser(req)) {
     socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n')
     return
   }
@@ -1401,7 +1774,10 @@ const upgrade = (req, socket, head) => {
   server.handleUpgrade(req, socket, head, (ws) => server.emit('connection', ws, req))
 }
 
-const httpServer = createServer(onRequest)
+// 64 KB of headers, not node's 16 KB: a Windows single sign-on ticket of someone in many AD groups
+// is large (Microsoft's own advice for IIS is 64 KB), and would otherwise be refused with a 431
+const MAX_HEADER_BYTES = 64 * 1024
+const httpServer = createServer({ maxHeaderSize: MAX_HEADER_BYTES }, onRequest)
 httpServer.on('upgrade', onUpgrade)
 // Reports (reports.mjs): made in their own thread, kept a few minutes (a page re-opened, the daily
 // summary and the page asking for the same day) so the database is not counted again for nothing
@@ -1435,7 +1811,7 @@ warmFiles(PUBLIC_DIR, MIME)
 httpServer.listen(Number(HTTP_PORT), () => console.log(`HTTP  on port ${HTTP_PORT} (use http://localhost on this PC)`))
 
 const certHosts = CERT_HOSTS.split(',').map((h) => h.trim()).filter(Boolean)
-const httpsServer = createHttpsServer(httpsOptions(certHosts), onRequest)
+const httpsServer = createHttpsServer({ ...httpsOptions(certHosts), maxHeaderSize: MAX_HEADER_BYTES }, onRequest)
 httpsServer.on('upgrade', onUpgrade)
 httpsServer.listen(Number(HTTPS_PORT), () => console.log(`HTTPS on port ${HTTPS_PORT} (for other PCs and phones)`))
 
@@ -1444,6 +1820,9 @@ if (Object.keys(auth.loadUsers()).length === 0) {
 }
 
 const shutdown = async () => {
+  try {
+    rtsp.stop() // (its RTSP server: KillMode=mixed would end it too)
+  } catch {}
   try {
     // a clean logout is nice but must not hang; SIGKILL avoids exit() waiting on stuck SDK threads
     // (9 s: the NVR workers get 8 s to close their segments and log out; the unit allows 15)
@@ -1459,3 +1838,21 @@ const shutdown = async () => {
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
+// A release that changes only pages is taken up without a restart (page-reload.mjs): the installer
+// switches the `current` link and sends this process SIGHUP. Anything else in it: said, and left for
+// a restart. Never throws: a failed reload leaves the pages being served as they were.
+process.on('SIGHUP', () => {
+  try {
+    const r = pagesFrom({ running: join(import.meta.dirname, '..'), link: process.env.CCTV_CURRENT_LINK ?? join(import.meta.dirname, '..', '..', '..', 'current') })
+    if (!r.ok) return console.warn(`[pages] not taken up without a restart: ${r.why}`)
+    if (r.release === RELEASE) return console.log(`[pages] already serving ${RELEASE}`)
+    PUBLIC_DIR = r.publicDir
+    RELEASE = r.release
+    BUILD.release = r.release
+    setAssetStamp(RELEASE)
+    warmFiles(PUBLIC_DIR, MIME)
+    console.log(`[pages] now serving the pages of ${RELEASE} (no restart)`)
+  } catch (e) {
+    console.warn(`[pages] reload failed, pages unchanged: ${e?.message ?? e}`)
+  }
+})

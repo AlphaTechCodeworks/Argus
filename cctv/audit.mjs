@@ -33,6 +33,9 @@ export const ACTIONS = Object.freeze([
   'playback-view',
   'live-view',
   'audit-prune',
+  // Camera links (RTSP, rtsp.mjs): a key made or revoked, the service switched; a key's first use each day
+  'camera-link',
+  'camera-link-use',
   'other'
 ])
 
@@ -53,6 +56,19 @@ export const resetAuditHealth = () => {
 }
 
 const str = (v, max = 200) => (v === null || v === undefined ? '' : String(v).replace(/[\u0000-\u001f]/g, ' ').slice(0, max))
+
+/**
+ * A row's detail with the device it was done from at the end ("…; device: Windows PC · Chrome 141",
+ * from device-name.mjs deviceOf), for the admin actions that power something off, restart it or change
+ * who may get in: the address alone says where, not on what. The detail is cut first if it must be,
+ * so the device is never the part lost to the length cap. No device: the detail as it was.
+ */
+export function withDevice(detail, device) {
+  const dev = str(device, 80)
+  if (!dev) return str(detail, MAX_DETAIL)
+  const d = str(detail, MAX_DETAIL - dev.length - 12)
+  return d ? `${d}; device: ${dev}` : `device: ${dev}`
+}
 
 /**
  * One row, cleaned. Control characters are stripped and every field is length-capped, because a

@@ -248,6 +248,29 @@
       </form>
       </details>
     </section>
+    <section class="se-section" data-tab="links" aria-labelledby="rl-title-s">
+      <h2 id="rl-title-s">Camera links (RTSP)</h2>
+      <p class="st-help">Lets programs on this network — VLC, another recorder, a number-plate reader — take any camera Argus sees, P2P sites included, as an RTSP address. Each program gets a key of its own, which you can revoke here at any time. The quickest way to one camera's address is its <strong>Stream link</strong> button (Live, full-size view; or the camera under Sites).</p>
+      <p id="rl-status" class="st-help" role="status">Checking…</p>
+      <p><button type="button" id="rl-toggle" class="st-primary" hidden>Turn on camera links</button> <span id="rl-toggle-msg" class="st-meta" role="status"></span></p>
+      <details class="rl-new" id="rl-new">
+        <summary>Make a key for a program</summary>
+        <form id="rl-form" class="rl-form" autocomplete="off">
+          <label>Name (who or what will use it) <input id="rl-name" maxlength="60" required placeholder="e.g. Gate plate reader" /></label>
+          <fieldset class="rl-which"><legend>Cameras</legend>
+            <label><input type="radio" name="rl-which" value="all" checked /> Every camera, now and later</label>
+            <label><input type="radio" name="rl-which" value="some" /> Only the cameras I choose</label>
+            <div id="rl-cams" class="rl-cams" hidden></div>
+          </fieldset>
+          <label><input type="checkbox" id="rl-main" /> Full quality too (the main stream: heavier on the recorder; P2P recorders allow only a few cameras at once). It also gives a lighter 1080p H.264 link for older PCs and OCR tools.</label>
+          <div class="se-actions"><button type="submit" class="st-primary">Make the key</button><span id="rl-msg" class="st-meta" role="status"></span></div>
+        </form>
+      </details>
+      <div id="rl-made" class="rl-made" hidden></div>
+      <h3>Keys</h3>
+      <div id="rl-keys"></div>
+      <p class="hp-note">In VLC: Media → Open Network Stream, paste the address, Play. Addresses work on this network only (port 8554), not through the internet address. A program reading a camera keeps that camera's stream running on the server; the picture is passed on as the camera sends it, except the 1080p links (…/1080), which the server converts to H.264 at most 1920×1080 while they are read: only a couple of cameras at once.</p>
+    </section>
     <section class="se-section" data-tab="connector" aria-labelledby="conn-title">
       <h2 id="conn-title">Remote site connector</h2>
       <p class="st-help">Connects a server at an NVR site to this app over Tailscale, so the app reaches that site's NVRs by their LAN IP — no port forwarding, no fixed IP. Install it once on a Windows server that sits on the NVRs' network; it finds the LAN and joins your tailnet by itself.</p>
@@ -259,6 +282,66 @@
         <li>Approve the new machine's subnet route in your Tailscale admin console if it is not auto-approved.</li>
       </ol>
       <p class="hp-note">For the app to use these links, this server must itself be on the tailnet with subnet routes accepted. The installer is built with your tailnet key and placed on this server by an admin; it is not part of the app.</p>
+    </section>
+    <section class="se-section" data-tab="directory" aria-labelledby="ad-title">
+      <h2 id="ad-title">Windows sign-in (Active Directory)</h2>
+      <p class="st-help">Lets staff sign in with their Windows user name and password. What they may do comes from the AD group they are in: <b>CCTV Admins</b> are admins, <b>CCTV Viewers</b> are viewers, <b>CCTV Watch-only</b> watch only. Someone in none of them cannot sign in. Local Argus accounts keep working and always come first: keep one local admin for when the domain controllers cannot be reached.</p>
+      <p id="ad-status" class="st-help" role="status">Loading…</p>
+      <form id="ad-form" class="se-grid" autocomplete="off">
+        <label class="se-wide"><input id="ad-enabled" type="checkbox" /> Let staff sign in with their Windows account</label>
+        <label class="se-wide"><input id="ad-pwchange" type="checkbox" /> Let AD users change their Windows password in Argus (it changes on their PC too; when it has expired, this needs the look-up account below)</label>
+        <label class="se-wide">Domain controllers, tried in this order (one per line)
+          <textarea id="ad-servers" rows="2" spellcheck="false" autocapitalize="off"></textarea>
+        </label>
+        <label>Domain <input id="ad-domain" spellcheck="false" autocapitalize="off" placeholder="JFL.LOCAL" /></label>
+        <label>Base DN <input id="ad-basedn" spellcheck="false" autocapitalize="off" placeholder="DC=JFL,DC=LOCAL" /></label>
+        <label>AD group for Admins <input id="ad-g-admin" spellcheck="false" /></label>
+        <label>AD group for Viewers <input id="ad-g-viewer" spellcheck="false" /></label>
+        <label>AD group for Watch only <input id="ad-g-watch" spellcheck="false" /></label>
+        <label>Hours a session lasts if the domain controllers cannot be reached <input id="ad-grace" type="number" min="0.25" max="72" step="0.25" /></label>
+        <details class="se-wide">
+          <summary>Look-up account (optional, for re-checks)</summary>
+          <p class="st-help">With a look-up account, Argus checks every few minutes that each signed-in Windows user is still in a CCTV group and not disabled, and signs them out at once if not. It can be an ordinary domain user with no other rights; its password is kept on this server only. Without one, Windows users simply sign in again after the hours above.</p>
+          <label>Look-up account <input id="ad-lookup-user" spellcheck="false" autocapitalize="off" placeholder="e.g. svc-cctv" /></label>
+          <label>Its password <input id="ad-lookup-pass" type="password" autocomplete="new-password" placeholder="leave empty to keep" /></label>
+          <label>Re-check every <input id="ad-recheck" type="number" min="5" max="240" /> minutes</label>
+        </details>
+        <div class="se-actions se-wide"><button type="submit" class="st-primary">Save</button><span id="ad-msg" class="st-meta" role="status"></span></div>
+      </form>
+
+      <h3>Certificates</h3>
+      <p class="st-help">Argus talks to the domain controllers over an encrypted connection (LDAPS, port 636) and only to ones it trusts. Press <b>Check connection</b> for each, compare the fingerprint with the one on the domain controller if you can, then press <b>Trust this certificate</b>. A domain controller's certificate is renewed about once a year: check and trust it again then.</p>
+      <div id="ad-servers-trust"></div>
+      <details>
+        <summary>Or trust the domain's CA certificate instead</summary>
+        <p class="st-help">Paste the domain CA's certificate (exported as "Base-64 encoded X.509"). Every domain controller whose certificate it signed is then trusted, as long as the name in the certificate matches the address above (use the DC's name, e.g. DC01.JFL.LOCAL, not its IP address).</p>
+        <textarea id="ad-ca" rows="5" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+        <p><button type="button" id="ad-ca-save">Save CA certificate</button> <span id="ad-ca-msg" class="st-meta" role="status"></span></p>
+      </details>
+
+      <h3>Test a sign-in</h3>
+      <p class="st-help">Type someone's Windows user name and password to see what they would get, with the settings above (saved or not). The password is used once and not kept.</p>
+      <form id="ad-test" class="se-grid" autocomplete="off">
+        <label>User name <input id="ad-test-user" spellcheck="false" autocapitalize="off" autocomplete="off" /></label>
+        <label>Password <input id="ad-test-pass" type="password" autocomplete="off" /></label>
+        <div class="se-actions se-wide"><button type="submit">Test</button><span id="ad-test-msg" class="st-meta" role="status"></span></div>
+      </form>
+
+      <h3 id="sso-title">Single sign-on (Windows)</h3>
+      <p class="st-help">With single sign-on, someone at an office Windows PC that is signed in to the domain opens Argus and is signed in as themselves straight away, with nothing to type. What they may do still comes from the AD groups above. It works only on the office network at the office address, never through the internet link (there the normal sign-in page is shown). It needs the look-up account above. Local Argus accounts are never signed in this way.</p>
+      <p id="sso-status" class="st-help" role="status">Loading…</p>
+      <dl class="ad-cert"><dt>Service name</dt><dd id="sso-principal"></dd></dl>
+      <ol class="st-help">
+        <li>On the domain controller (DC01), run <b>sso-setup-dc.ps1</b> (in the deploy folder) in PowerShell as Administrator. It makes the file <b>C:\argus-sso.keytab</b>.</li>
+        <li>Upload that file here, then delete it from DC01.</li>
+        <li>Run <b>sso-browsers-gpo.ps1</b> on DC01 once, so Edge and Chrome on office PCs give Argus their Windows sign-in.</li>
+        <li>Tick the box below.</li>
+      </ol>
+      <p><label>Keytab file <input id="sso-keytab" type="file" accept=".keytab,application/octet-stream" /></label> <button type="button" id="sso-upload">Upload keytab</button> <button type="button" id="sso-remove">Remove keytab</button> <span id="sso-keytab-msg" class="st-meta" role="status"></span></p>
+      <div id="sso-keytab-info"></div>
+      <p><label><input id="sso-enabled" type="checkbox" /> Sign office Windows PCs in automatically</label> <span id="sso-msg" class="st-meta" role="status"></span></p>
+      <h4>Last single sign-on attempts</h4>
+      <ul id="sso-recent" class="st-help"></ul>
     </section>
     <section class="se-section" data-tab="server" aria-labelledby="srv-title">
       <h2 id="srv-title">Restart the server</h2>
@@ -314,6 +397,9 @@
   <script type="module" src="settings.js"></script>
   <script type="module" src="settings-tabs.js"></script>
   <script type="module" src="connector.js"></script>
+  <script type="module" src="ad-settings.js"></script>
+  <script type="module" src="sso-settings.js"></script>
+  <script type="module" src="rtsp-links.js"></script>
   <script type="module" src="storage.js"></script>
   <script type="module" src="alert-banner.js"></script>
   <script type="module" src="build-badge.js"></script>

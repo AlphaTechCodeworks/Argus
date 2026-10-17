@@ -319,6 +319,24 @@ async function scan({ ranges, port = SDK_PORT }) {
 }
 
 /**
+ * The TVT network search alone, for Find device (find-device.mjs): the same search the scan runs,
+ * under the same one-at-a-time lock, so it never overlaps a Find NVRs scan. Never throws.
+ * @returns {Promise<{ ran: boolean, where?: string, devices: object[], why?: string }>}
+ */
+export async function networkSearch() {
+  if (running) return { ran: false, devices: [], why: 'a Find NVRs search is running; try again in a few seconds' }
+  running = true
+  try {
+    const r = await tvtSearch()
+    return { ...r, devices: (r.devices ?? []).slice(0, MAX_DEVICES) }
+  } catch (e) {
+    return { ran: false, devices: [], why: e.message }
+  } finally {
+    running = false
+  }
+}
+
+/**
  * @returns {Promise<[number, any]>}
  */
 export async function handleDiscovery(method, readJson) {

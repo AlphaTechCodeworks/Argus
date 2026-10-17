@@ -7,6 +7,8 @@
 // with the code a /live socket has always had; on a channel that is an "end" message, and the page's
 // other tiles carry on. One that is let in is tracked (access-watch.mjs) for as long as it is open, so
 // losing the live right to that camera, the account or the session ends it too.
+// A camera an admin set to "Steady picture" (steady.mjs) goes another way before all of those: every
+// viewer of it, whatever it asked for, gets the camera's one shared steadied stream, while there is room.
 // Live HD (rights.mjs) decides every main-stream picture here: the main stream asked for directly
 // (refused 1008 'hd not allowed' without it), and the main stream standing in for a sub-stream that
 // has no picture yet (none without it: the viewer is told why it waits instead, live-wait.mjs).
@@ -15,9 +17,12 @@
 // NVRs); server.mjs hands in what it owns.
 import { createHash } from 'node:crypto'
 import { isRemoteAddress } from './adaptive-live.mjs'
+import { deviceOf } from './device-name.mjs'
 import { waitForSub } from './live-wait.mjs'
+import { makeMainLimit } from './main-limit.mjs'
 import { isPhoneRequest } from './phone-live.mjs'
 import { HD_NOT_ALLOWED } from './stream-param.mjs'
+import { noteNotSteady } from './steady.mjs'
 import { bridgeSub } from './sub-bridge.mjs'
 import { CODEC_H265 } from './transcode.mjs'
 
@@ -28,6 +33,34 @@ export const PHONE_SPARE = 4
 // for as long as the owner's page was open (review of 29 Sep). Its line is said once in this long for
 // the same camera and viewer, with how many were left out.
 export const H265_QUIET_MS = 10 * 60_000
+// Who asked for a camera in full quality (its main stream) is said in the journal: a main stream is
+// several times a sub-stream's load on the NVR and the server, and on 2026-10-13 nothing said who
+// had opened the ones that were running. Once in this long for the same viewer and camera: a
+// full-size view that reconnects, or a wall asking again, is one line.
+export const FULL_QUALITY_QUIET_MS = 60_000
+
+/**
+ * Whether to say now that this viewer opened this camera in full quality: true the first time, and
+ * again once everyMs has passed since it was last said.
+ * @param {{ everyMs?: number, now?: () => number }} [o]
+ * @returns {(viewer: string, camera: string) => boolean}
+ */
+export function fullQualityGate({ everyMs = FULL_QUALITY_QUIET_MS, now = Date.now } = {}) {
+  const said = new Map() // viewer and camera -> when it was last said
+  return (viewer, camera) => {
+    const t = now()
+    const key = `${viewer}|${camera}`
+    const at = said.get(key)
+    if (at !== undefined && t - at < everyMs) return false
+    for (const [k, v] of said) if (t - v >= everyMs) said.delete(k) // (past their quiet: of no more use)
+    said.set(key, t)
+    return true
+  }
+}
+
+/** The line itself: "[live] ann (Windows PC · Chrome 141, local 192.168.1.20) opened full quality nvr1/4". */
+export const fullQualityLine = ({ user, device, remote, address, camera }) =>
+  `[live] ${user || 'someone'} (${device || 'unknown device'}, ${remote ? 'remote' : 'local'} ${address || 'address unknown'}) opened full quality ${camera}`
 
 /** One key per browser, from the upgrade request: a page's /live and /live-mux sockets are one viewer. */
 export const viewerOf = (req, currentUser) => createHash('sha1').update(`${currentUser(req) ?? '?'}|${req.headers['user-agent'] ?? ''}|${req.headers.cookie ?? ''}`).digest('hex')
@@ -76,13 +109,17 @@ const standInHandle = (ws, bridge, wait) => ({
  *   (without it, the `who` a socket was let in with, for the same user); track: access-watch.mjs's,
  *   which asks the rights again while the socket or channel is open; waitTimers: live-wait.mjs's timers
  *   (tests); log: the stand-ins' lines; now: the clock (tests); h264Fallback: the conversions for local
- *   PCs without H.265 (h264-fallback.mjs), none without it
+ *   PCs without H.265 (h264-fallback.mjs), none without it; clientAddress (in o): the visitor's own
+ *   address for a request (server.mjs clientIp), for the line that says who opened full quality;
+ *   mainLimit (in o): the per-recorder limit on cameras in full quality (main-limit.mjs; tests hand one in)
+ *   steady (in o): the steadied cameras' shared streams (steady.mjs SteadyLive), none without it
  * @returns {(ws: object, req: object, o: { nvr: object, who: object, ch: number, streamType: number,
  *   clientH265: boolean, noH265?: boolean, phone15: boolean }) => void} attachLive
  *   clientH265: the page said its browser plays H.265 (h265=1); noH265: it said it does not (h265=0).
  *   Neither: it did not say (an older page, or one that does not know yet), which is not "cannot"
  */
-export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, h264Fallback = null, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now }) {
+export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, phoneLive, h264Fallback = null, track = () => {}, waitTimers = {}, log = (line) => console.log(line), now = Date.now, clientAddress = (req) => req.socket?.remoteAddress, mainLimit = makeMainLimit({ now, log }), steady = null }) {
+  const sayFullQuality = fullQualityGate({ now })
   const quiet = new Map() // camera and viewer -> { at, left }: its H.265 stand-in line last said, and those left out since
   /** The H.265 stand-in line for a camera and viewer, or null when it was said less than H265_QUIET_MS ago. */
   const h265Line = (line, key) => {
@@ -111,10 +148,87 @@ export function liveAttacher({ can, currentUser, isAdmin = null, adaptiveLive, p
     // own reason, so the page drops to the sub-stream instead of asking again.
     const hd = () => can(who, 'live-hd', { nvr: nvr.id, ch })
     if (streamType !== 1 && !hd()) return ws.close(1008, HD_NOT_ALLOWED)
+    // Steady picture (steady.mjs): a camera an admin switched it on for is steadied on the server, for
+    // every viewer -- local or remote, PC or phone, a grid tile or the full-size view. A main stream
+    // asked for is steadied in full quality when there is room (below); otherwise it gets the steadied
+    // sub-stream, and none of the main stream's own path below applies: no full-quality line, only the
+    // live right watched for as it plays. Not for a
+    // sub-stream the NVR holds back at its limit (nothing to steady until there is room: as it was).
+    // Past the cap, or a conversion that failed: the camera's own stream as below, its tile told why
+    // first (before anything else is sent). Every socket is noted (watch) so that switching the setting
+    // moves it at once. None of this may cost the video: if it throws, the normal path.
+    if (steady?.enabled) {
+      const key = `${nvr.id}/${ch}`
+      try {
+        steady.watch(key, ws)
+        // Full quality asked for (2026-10-16, Mike: "it wont load the main stream"): the main stream
+        // steadied, 1920 wide, within the recorder's full-quality limit and Steady picture's own cap
+        // for full quality. Refused by either, or failed: the steadied standard picture, as before.
+        if (streamType === 0 && steady.wants(key)) {
+          let room = false
+          try {
+            room = mainLimit.ask(nvr, ch, ws) === true
+          } catch {}
+          if (room) {
+            const got = steady.attach(key, nvr.getStream(ch, 0), ws, { camera: `${nvr.id}/${ch + 1}`, main: true })
+            if (got === true) {
+              ws.on?.('close', () => {
+                try {
+                  mainLimit.leave(ws)
+                } catch {}
+              })
+              track(ws, req, { actions: ['live', 'live-hd'], nvr: nvr.id, ch })
+              return
+            }
+            try {
+              mainLimit.leave(ws)
+            } catch {}
+          }
+        }
+        if (steady.wants(key) && nvr.subHeld?.(ch) !== true) {
+          const got = steady.attach(key, nvr.getStream(ch, 1), ws, { camera: `${nvr.id}/${ch + 1}` })
+          if (got === true) {
+            track(ws, req, { actions: ['live'], nvr: nvr.id, ch })
+            return
+          }
+          noteNotSteady(ws, got)
+        }
+      } catch (e) {
+        log(`[steady] ${nvr.id}/${ch + 1}: ${e?.message ?? e}; the camera's own stream`)
+      }
+    }
+    // Full quality is limited per recorder (main-limit.mjs): seven main streams asked of a P2P recorder
+    // at once (2026-10-13) had it drop its links again and again. A new camera past the limit is refused
+    // with MAIN_AT_LIMIT, which the page takes as "the standard picture for now" (live-tile.js), never
+    // as an error; a camera already in full quality for someone is always joined. Counted until this
+    // socket or channel closes. The bookkeeping must not cost the video: if it fails, the main is let in.
+    if (streamType === 0) {
+      let got = true
+      try {
+        got = mainLimit.ask(nvr, ch, ws)
+      } catch {}
+      if (got !== true) return ws.close(1013, got)
+      ws.on?.('close', () => {
+        try {
+          mainLimit.leave(ws)
+        } catch {}
+      })
+    }
     // let in: the same question again for as long as it is open, from the session as it is then.
     // Every path below (sub-bridge, adaptive, phone, the stream itself) ends with this socket or
     // channel closing, which is how it leaves the watch.
     track(ws, req, { actions: streamType === 1 ? ['live'] : ['live', 'live-hd'], nvr: nvr.id, ch })
+    // The main stream asked for and let in: who, from what and where (FULL_QUALITY_QUIET_MS). Only a
+    // viewer's own request comes this way: the recorder's streams, the warm-ups and a main standing
+    // in for a cold sub-stream (below) never do. The line is for people; it must not cost the video
+    if (streamType === 0) {
+      try {
+        const camera = `${nvr.id}/${ch + 1}`
+        if (sayFullQuality(viewerOf(req, currentUser), camera)) {
+          log(fullQualityLine({ user: who?.user ?? currentUser(req), device: deviceOf(req.headers?.['user-agent']), remote: isRemoteAddress(req.socket?.remoteAddress), address: clientAddress(req), camera }))
+        }
+      } catch {}
+    }
     const stream = nvr.getStream(ch, streamType)
     const remote = isRemoteAddress(req.socket.remoteAddress)
     const phone = !remote && phone15 && isPhoneRequest(req.headers)

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response cmdId="" cmdUrl="queryAvd">
+	<status>success</status>
+	<content>
+		<chl id="{00000001-0000-0000-0000-000000000000}">
+			<param>
+				<mutexList type="list" itemType="mutexObjectType"></mutexList>
+				<sceneChangeSwitch>false</sceneChangeSwitch>
+				<clarityAbnormalSwitch>false</clarityAbnormalSwitch>
+				<colorAbnormalSwitch>false</colorAbnormalSwitch>
+				<sensitivity min="1" max="100">51</sensitivity>
+				<holdTimeNote>3,5,10,20,30,60,120</holdTimeNote>
+				<holdTime uint="s">20</holdTime>
+				<triggerAudio>false</triggerAudio>
+			</param>
+			<trigger>
+				<sysRec>
+					<switch>true</switch>
+					<chls type="list">
+						<item id="{00000001-0000-0000-0000-000000000000}">JP Wharf South</item>
+					</chls>
+				</sysRec>
+				<alarmOut>
+					<switch>false</switch>
+					<alarmOuts type="list"></alarmOuts>
+				</alarmOut>
+				<preset>
+					<switch>false</switch>
+					<presets type="list"></presets>
+				</preset>
+				<sysSnap>
+					<switch>false</switch>
+					<chls type="list"></chls>
+				</sysSnap>
+				<msgPushSwitch>true</msgPushSwitch>
+				<snapSwitch>false</snapSwitch>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<emailSwitch>false</emailSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<sysAudio id="{00000000-0000-0000-0000-000000000000}"></sysAudio>
+				<manualAudioSwitch>false</manualAudioSwitch>
+				<manualLightSwitch>false</manualLightSwitch>
+			</trigger>
+		</chl>
+	</content>
+	<types>
+		<mutexObjectType></mutexObjectType>
+	</types>
+</response>

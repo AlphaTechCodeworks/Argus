@@ -68,6 +68,7 @@ import {
   transparent,
   withNvrLock
 } from './nvr-xml.mjs'
+import { parseDetections } from './camera-cfg-xml.mjs'
 import { nvrs } from './nvrs.mjs'
 import { getSettings } from './settings.mjs'
 import { applyChange, buildEditTripwire, checkChange, compareReadBack, flatten, parseSchedules, parseSupport, parseTripwire } from './tripwire-xml.mjs'
@@ -158,7 +159,7 @@ export function noteLinesOn(nvrId, ch, on) {
 
 // ---- NVR reads ------------------------------------------------------------------------------------
 
-const supportCache = new Map() // nvr id -> { at, device, cams, offline, map: chlId -> { tripwire, pea } }
+const supportCache = new Map() // nvr id -> { at, device, cams, offline, map: chlId -> { tripwire, pea }, detections: chlId -> { pea, osc, avd } }
 const supportReads = new Map() // nvr id -> the support read in flight: opens meanwhile wait for it instead of asking again
 
 /** Which camera sits in each of the NVR's channels (address, model): another camera there may have other detections. */
@@ -183,11 +184,11 @@ const tripwireOf = (hit, chlId) => {
   return false
 }
 
-/** Whether the NVR says this camera has line crossing (its channel list, cached per NVR: supportFresh). */
-async function supported(ctx) {
-  const { nvr, chlId, gen, device, deps } = ctx
+/** The NVR's list of its cameras' detections (cached per NVR: supportFresh), read now if it is not held. */
+async function supportList(ctx) {
+  const { nvr, gen, device, deps } = ctx
   const hit = supportFresh(nvr, device)
-  if (hit) return tripwireOf(hit, chlId)
+  if (hit) return hit
   // one read per NVR at a time: four full-size opens while nvr-2 took 10-18 s to list its cameras
   // were four such reads, one after the other in the NVR's XML queue
   let read = supportReads.get(nvr.id)
@@ -201,7 +202,7 @@ async function supported(ctx) {
         const xml = await deps.transparent(nvr, NODE_LIST_URL, NODE_LIST_REQUEST, 'line-crossing support', { gen, outBytes: NODE_LIST_BYTES })
         const a = parseAnswer(xml)
         if (a.status !== 'success') throw new HttpError(502, `The NVR refused to list its cameras' detections (${a.errorCode || a.status || 'no status'})`)
-        const fresh = { at: Date.now(), device, cams, offline, map: parseSupport(xml) }
+        const fresh = { at: Date.now(), device, cams, offline, map: parseSupport(xml), detections: parseDetections(xml) }
         supportCache.set(nvr.id, fresh)
         return fresh
       } finally {
@@ -210,7 +211,21 @@ async function supported(ctx) {
     })()
     read = mine
   }
-  return tripwireOf(await read.answer, chlId)
+  return read.answer
+}
+
+/** Whether the NVR says this camera has line crossing. */
+const supported = async (ctx) => tripwireOf(await supportList(ctx), ctx.chlId)
+
+/**
+ * Which of the camera's other detections the NVR says it has: { pea, osc, avd }, all false for a
+ * camera the list does not name (camera-cfg.mjs). The same list, cache and single read as above.
+ * ctx: { nvr, chlId, gen, device, deps: { transparent } }.
+ */
+export async function detectionsOf(ctx) {
+  const hit = await supportList(ctx)
+  for (const [id, s] of hit.detections) if (sameId(id, ctx.chlId)) return s
+  return { pea: false, osc: false, avd: false }
 }
 
 /** The camera's line-crossing settings, read now (tripwire-xml.mjs parseTripwire's shape). */
@@ -237,7 +252,7 @@ async function readCfg(ctx) {
  * The NVR's schedules [{ id, name }]. strict: a failure is an error (a change that names a schedule
  * must be checked against the list); otherwise [] (the panel then only shows the one in use).
  */
-async function readSchedules(ctx, { strict = false } = {}) {
+export async function readSchedules(ctx, { strict = false } = {}) {
   const { nvr, gen, deps } = ctx
   try {
     const xml = await deps.transparent(nvr, SCHEDULES_URL, `${XML_HEADER}</request>`, 'schedules', { gen })

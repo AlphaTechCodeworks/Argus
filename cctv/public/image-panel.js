@@ -208,6 +208,84 @@ export function estimateLines(e) {
   return out
 }
 
+// ---- picture size (the pickers in the Recording quality box) -------------------------------------
+
+const pixels = (res) => String(res).split('x').map(Number).reduce((a, b) => a * b, 1)
+/** A size as the pickers list it: "1920x1080 (2.1 MP, up to 30 fps)". */
+export function sizeLabel(res, fps, now = false) {
+  const mp = pixels(res) / 1e6
+  return `${res} (${mp >= 1 ? `${mp.toFixed(1)} MP` : `${Math.round(mp * 100) / 100} MP`}${fps ? `, up to ${fps} fps` : ''})${now ? ' — now' : ''}`
+}
+
+/**
+ * A recording size picked by hand, as one more Recording-quality item (the shape auto-adjust's
+ * streamBox makes), so it goes through the same review, estimate and acknowledgement as a
+ * suggestion. It names only the size: the server works out the bitrate cap that goes with it, and
+ * the review shows that figure. A smaller size carries lowerRes, which is what lets the server
+ * lower a resolution at all. null when the size is the one in use, or not one the camera offers.
+ * si: GET …/stream (current, caps.resolutions: [{ res, fps }]).
+ */
+export function sizeItem(si, res) {
+  const cur = si?.current ?? {}
+  const size = (si?.caps?.resolutions ?? []).find((r) => r.res === res)
+  if (!size || !cur.res || res === cur.res) return null
+  const smaller = pixels(res) < pixels(cur.res)
+  const slower = size.fps && cur.fps > size.fps ? ` The camera goes no faster than ${size.fps} frames a second at this size, so the frame rate drops from ${cur.fps} to ${size.fps}.` : ''
+  const restart = 'The camera restarts its encoder (a few seconds without video or recording).'
+  return {
+    id: 'size',
+    rule: 'your choice',
+    picked: true,
+    lowerRes: smaller,
+    change: { res },
+    from: { res: cur.res },
+    why: smaller
+      ? `Your own choice of recording size, not a suggestion: ${cur.res} down to ${res}. Recordings take less room on the NVR's disks.`
+      : `Your own choice of recording size, not a suggestion: ${cur.res} up to ${res}. More detail in every recording from then on.`,
+    downside: smaller
+      ? `Every recording from then on has less detail (Undo puts the size back). The bitrate cap stays where the NVR offers the same figure at this size; otherwise it takes the nearest one under it, shown in the review.${slower} ${restart}`
+      : `The bitrate cap is raised in proportion with it (the review shows the new figure), so the NVR keeps fewer days of recordings.${slower} ${restart}`,
+    ticked: true,
+    encoderRestart: true
+  }
+}
+
+/**
+ * The Recording-quality items after a size is picked: the earlier pick replaced (or dropped, when
+ * the size in use is picked again), and with a pick in the list every bitrate-cap suggestion is
+ * unticked, since it was worked out for the present size and the new size brings its own cap.
+ */
+export function pickSize(items, si, res) {
+  const rest = (items ?? []).filter((i) => !i.picked)
+  const it = sizeItem(si, res)
+  return it ? [it, ...rest.map((i) => ('QoI' in (i.change ?? {}) ? { ...i, ticked: false } : i))] : rest
+}
+
+/**
+ * What the ticked items ask of POST …/stream and its estimate: { change, lowerRes }. With a picked
+ * size the cap is left to the server (no QoI), and lowerRes is true only for a picked smaller size.
+ */
+export function streamRequestOf(ticked) {
+  const change = streamChangeOf(ticked)
+  const size = (ticked ?? []).find((i) => i.picked)
+  if (size) delete change.QoI
+  return { change, lowerRes: Boolean(size?.lowerRes) }
+}
+
+/** The question asked before a camera's grid (sub-stream) size is changed. */
+export const subSizeConfirm = (from, to) => `Change this camera's grid picture from ${from} to ${to}? Its picture stops for a few seconds while the camera restarts its stream.`
+
+/** How a grid-size change ended, in words: { text, error } from the job's one step (substreams.mjs). */
+export function subStepText(step) {
+  switch (step?.status) {
+    case 'done': return { text: `Grid picture changed: now ${step.now}.`, error: false }
+    case 'skipped': return { text: `Grid picture not changed: ${step.reason}.`, error: true }
+    case 'unknown': return { text: `Unclear whether the grid picture changed: ${step.reason}. Check it on the NVR.`, error: true }
+    case 'failed': return { text: `Grid picture not changed: ${step.reason}.`, error: true }
+    default: return { text: 'The change ended without a result; reopen this panel to see the grid picture\'s size.', error: true }
+  }
+}
+
 const FOCUS_LIGHT_MS = 10 * 60_000
 
 /**
@@ -404,6 +482,11 @@ export class ImagePanel {
     return `/api/admin/nvrs/${encodeURIComponent(this.cam.nvr)}/channels/${this.cam.ch}/${what}`
   }
 
+  /** The recorder's Sub-streams list (substreams.mjs); '/job' for the change that is running. */
+  subsUrl(what = '') {
+    return `/api/admin/nvrs/${encodeURIComponent(this.cam.nvr)}/substreams${what}`
+  }
+
   /** @param cam { nvr, ch, name, site, remote } */
   open(cam, { opener = null } = {}) {
     this.close({ quiet: true })
@@ -415,6 +498,12 @@ export class ImagePanel {
     this.position = null
     this.streamInfo = null
     this.streamError = null
+    this.subInfo = null // the camera's sub (grid) stream, as the NVR's Sub-streams list has it
+    this.subError = null
+    this.subDevice = null // the NVR's address when the sub-stream was read: sent back with a change
+    this.subPick = null // the grid size chosen in the picker, until Apply
+    this.subBusy = false
+    this.subResult = null // { text, error }: how the last grid-size change ended
     this.streamItems = []
     this.streamNotes = []
     this.lensInfo = null
@@ -623,11 +712,26 @@ export class ImagePanel {
     this.streamInfo = stream.ok ? stream.data.stream : null
     this.streamError = stream.ok ? null : stream.data?.error
     this.renderStream()
+    // ...and the sub (grid) stream beside it: one line, so both are seen in one place (the owner,
+    // 2026-10-12). Not waited for: the rest of the panel loads meanwhile. Its size can be changed
+    // here (applySubSize); its codec from Sites, the recorder's Sub-streams button (substreams.mjs).
+    get(this.subsUrl()).then((r) => {
+      if (r) this.showSub(r)
+    })
     const lens = await get(this.url('lens'))
     if (!lens) return
     this.lensInfo = lens.ok ? lens.data.lens : null
     this.renderLens()
     await this.loadPlan(session)
+  }
+
+  /** Takes this camera's row from an answer of the recorder's Sub-streams list and shows it. */
+  showSub(r) {
+    const row = r.ok ? (r.data.channels ?? []).find((c) => c.ch === this.cam.ch + 1) : null
+    this.subInfo = row?.res ? row : null
+    this.subDevice = r.ok ? (r.data.nvr?.device ?? null) : null
+    this.subError = this.subInfo ? null : r.ok ? 'the recorder lists no sub-stream for this camera' : (r.data?.error ?? 'no answer')
+    this.renderStream()
   }
 
   /** The Day/Night set-up plan, read only where a quick look says it could be offered (3 reads on the NVR). */
@@ -848,6 +952,8 @@ export class ImagePanel {
       box.disabled = this.busy
     }
     for (const b of this.el.querySelectorAll('.ip-box button, .ip-split button, .ip-result button')) if (!b.dataset.keep) b.disabled = this.busy || b.dataset.off === '1'
+    // the two size pickers of the Recording quality box
+    for (const p of this.el.querySelectorAll('.ip-box select[data-pick]')) p.disabled = this.busy || (p.dataset.pick === 'sub' && this.subBusy)
   }
 
   // ---- dialogs ---------------------------------------------------------------------------------
@@ -1248,7 +1354,10 @@ export class ImagePanel {
     this.pending = merged.pending
     this.origins = merged.origins
     this.items = items
+    // (a recording size picked by hand stays in the list: measuring again must not drop it)
+    const size = (this.streamItems ?? []).find((i) => i.picked)
     this.streamItems = sug.stream.filter((x) => !x.note)
+    if (size) this.streamItems = pickSize(this.streamItems, this.streamInfo, size.change.res)
     this.streamNotes = sug.stream.filter((x) => x.note).map((x) => x.note)
     this.lensSug = sug.lens
     // for Focus now: good light is judged again at the click (it goes off after 10 minutes)
@@ -1448,7 +1557,44 @@ export class ImagePanel {
       box.replaceChildren(...kids)
       return
     }
-    kids.push(el('p', {}, `${String(c.enct ?? '').toUpperCase()} ${c.res} at ${c.fps} fps, bitrate cap ${c.QoI} kbit/s (${c.bitType}), quality ${c.level}.`))
+    // (the box is rebuilt on every change: a picker that had the keyboard gets it back below)
+    const focused = box.contains(document.activeElement) ? document.activeElement.dataset?.pick : null
+    kids.push(el('p', {}, `Main (recording) stream: ${String(c.enct ?? '').toUpperCase()} ${c.res} at ${c.fps} fps, bitrate cap ${c.QoI} kbit/s (${c.bitType}), quality ${c.level}.`))
+    // The recording size, picked by hand: it becomes one more item in the list below and is sent
+    // only from "Review stream changes…", like a suggestion. Not offered for a camera whose stream
+    // cannot be changed here (its sentence follows).
+    const sizes = si.caps?.resolutions ?? []
+    if (si.candidate && sizes.length > 1 && sizes.some((r) => r.res === c.res)) {
+      const picked = this.streamItems?.find((i) => i.picked)
+      const sel = el('select', { dataset: { pick: 'main' }, disabled: this.busy }, sizes.map((r) => el('option', { value: r.res }, sizeLabel(r.res, r.fps, r.res === c.res))))
+      sel.value = picked?.change.res ?? c.res
+      sel.addEventListener('change', () => {
+        this.streamItems = pickSize(this.streamItems, this.streamInfo, sel.value)
+        this.renderStream()
+      })
+      kids.push(el('div', { className: 'ip-box-buttons' }, el('label', {}, 'Recording size ', sel)))
+    }
+    const s = this.subInfo
+    kids.push(el('p', { className: s ? '' : 'ip-muted' }, s
+      ? `Sub (grid) stream: ${s.codec ?? ''} ${s.res}${s.fps ? ` at ${s.fps} fps` : ''}${s.kbps ? `, bitrate ${s.kbps} kbit/s` : ''}${s.bitType ? ` (${s.bitType})` : ''}.`
+      : this.subError ? `Sub (grid) stream: not read (${this.subError}).` : 'Sub (grid) stream: reading…'))
+    // The grid size: applied by its own button, after a plain question (applySubSize).
+    const subSizes = s?.resolutions ?? []
+    if (s && subSizes.length > 1) {
+      const chosen = subSizes.some((r) => r.value === this.subPick) ? this.subPick : s.res
+      const sel = el('select', { dataset: { pick: 'sub' }, disabled: this.busy || this.subBusy }, subSizes.map((r) => el('option', { value: r.value }, sizeLabel(r.value, r.fps, r.value === s.res))))
+      sel.value = chosen
+      const go = el('button', { type: 'button', dataset: { off: this.subBusy || chosen === s.res ? '1' : '0' } }, this.subBusy ? 'Changing…' : 'Apply')
+      sel.addEventListener('change', () => {
+        this.subPick = sel.value
+        go.dataset.off = this.subBusy || sel.value === s.res ? '1' : '0'
+        this.update()
+      })
+      go.addEventListener('click', () => this.applySubSize())
+      kids.push(el('div', { className: 'ip-box-buttons' }, el('label', {}, 'Grid size ', sel), go))
+      kids.push(el('p', { className: 'ip-muted' }, 'Bigger grid pictures use more of the viewing PC\'s decoder and more network for every tile.'))
+    }
+    if (this.subResult) kids.push(el('p', { className: this.subResult.error ? 'ip-warn-text' : 'ip-good', role: 'status' }, this.subResult.text))
     kids.push(el('p', { className: 'ip-stream-line ip-muted' }, ''))
     if (!si.candidate) kids.push(el('p', { className: 'ip-muted' }, `Changes are not offered here: ${si.why}.`))
     for (const n of this.streamNotes ?? []) kids.push(el('p', { className: 'ip-muted' }, n))
@@ -1462,7 +1608,7 @@ export class ImagePanel {
           this.update()
           this.renderStream()
         })
-        const what = Object.keys(it.change).map((k) => `${k} ${it.from[k]} → ${it.change[k]}`).join(', ')
+        const what = it.picked ? `Recording size ${it.from.res} → ${it.change.res}` : Object.keys(it.change).map((k) => `${k} ${it.from[k]} → ${it.change[k]}`).join(', ')
         return el('li', {}, el('label', {}, cb, el('span', {}, `${what} `, el('small', { className: 'ip-rule' }, it.rule))), el('small', { id: wid, className: 'ip-why' }, it.why, el('br'), `Downside: ${it.downside}`))
       })))
       const ticked = this.streamItems.filter((i) => i.ticked)
@@ -1477,8 +1623,65 @@ export class ImagePanel {
       kids.push(el('div', { className: 'ip-box-buttons' }, u))
     }
     box.replaceChildren(...kids)
+    if (focused) box.querySelector(`select[data-pick="${focused}"]`)?.focus()
     this.renderStreamLine()
     this.update()
+  }
+
+  /**
+   * Changes this camera's grid (sub-stream) size to the one picked: a plain question, then the
+   * recorder's own sub-stream change (one camera, read back by the server), followed until it
+   * ends and said in words. The line is then read again from the recorder.
+   */
+  async applySubSize() {
+    const s = this.subInfo
+    const to = this.subPick
+    if (!s || !to || to === s.res || this.busy || this.subBusy) return
+    if (!window.confirm(subSizeConfirm(s.res, to))) return
+    const session = this.session
+    this.subBusy = true
+    this.subResult = null
+    this.renderStream()
+    let result
+    try {
+      const r = await api('POST', this.subsUrl(), { action: 'res', res: to, channels: [s.id], device: this.subDevice, confirm: true }).catch((e) => {
+        throw new Error(`The request did not reach the server (${e.message}); reopen this panel to see the grid picture's size.`)
+      })
+      if (session !== this.session) return
+      if (!r.ok) throw new Error(`Grid picture not changed: ${String(r.data?.error || `HTTP ${r.status}`).replace(/\.$/, '')}. Nothing was sent.`)
+      const started = r.data.job?.startedAt
+      let step = null
+      let errors = 0
+      for (;;) {
+        await sleep(1500)
+        if (session !== this.session) return
+        const j = await api('GET', this.subsUrl('/job')).catch(() => null)
+        if (session !== this.session) return
+        if (!j?.ok) {
+          if (++errors >= 5) throw new Error('The change was sent, but its result could not be read. Reopen this panel to see the grid picture\'s size.')
+          continue
+        }
+        errors = 0
+        const job = j.data.job
+        // (the recorder keeps one job: another change on it, running or started since, hides this one's result)
+        if (!job || job.startedAt !== started) throw new Error('The result of this change could not be found: another change on this recorder was running or has started since. Reopen this panel to see the grid picture\'s size.')
+        if (!job.running) {
+          step = job.steps?.[0] ?? null
+          break
+        }
+      }
+      result = subStepText(step)
+    } catch (e) {
+      result = { text: e.message, error: true }
+    }
+    if (session !== this.session) return
+    this.subBusy = false
+    this.subResult = result
+    this.subPick = null
+    this.renderStream()
+    // the line again, from the recorder (whatever the outcome: it shows what the camera has now)
+    const again = await api('GET', this.subsUrl()).catch(() => null)
+    if (session === this.session && again?.ok) this.showSub(again)
   }
 
   renderStreamLine() {
@@ -1494,13 +1697,16 @@ export class ImagePanel {
     const ticked = (this.streamItems ?? []).filter((i) => i.ticked)
     if (!si || !ticked.length || this.busy) return
     const seq = this.seq
-    const change = streamChangeOf(ticked)
+    // (a size picked by hand leaves its cap to the server; a smaller one says so with lowerRes,
+    // which the server needs before it lowers a resolution at all)
+    const { change, lowerRes } = streamRequestOf(ticked)
+    const lower = lowerRes ? { lowerRes: true } : {}
     const measured = this.streamFigures()?.kbps ?? null
     this.busy = true
     this.update()
     this.status('Asking the NVR for its storage estimate…')
     try {
-      const est = await api('POST', this.url('stream/estimate'), { change, ...(measured !== null ? { measuredKbps: measured } : {}) })
+      const est = await api('POST', this.url('stream/estimate'), { change, ...lower, ...(measured !== null ? { measuredKbps: measured } : {}) })
       if (seq !== this.seq) return
       if (!est.ok) throw errorOf(est)
       const e = est.data.estimate
@@ -1513,7 +1719,7 @@ export class ImagePanel {
         await this.dialog({ title: 'This stream change is refused', lead: 'The NVR\'s storage estimate, before and after:', items: estimateLines(e), action: 'OK' })
         return this.status(`${e.retention.refused} Nothing was sent.`, { error: true })
       }
-      const ok = await this.dialog({ title: 'Change the recording stream?', lead: 'The NVR\'s storage estimate, before and after:', items: [...estimateLines(e), ...impacts.map((i) => i.text)], action: 'Apply stream change' })
+      const ok = await this.dialog({ title: 'Change the recording stream?', lead: 'The NVR\'s storage estimate, before and after:', items: [...estimateLines(e), ...impacts.map((i) => i.text)], action: 'Apply stream change', danger: lowerRes })
       if (!ok || seq !== this.seq) return this.status('Nothing was sent.')
       this.busy = true
       this.update()
@@ -1523,7 +1729,7 @@ export class ImagePanel {
       // does not list them all -- the point being that nobody can confirm a change against a
       // picture of the camera that has since moved on -- so a setting added there has to be added
       // here in the same breath, or every stream change starts failing.
-      const body = { device: this.settings.nvr.device, change, seen: { enct: cur.enct, res: cur.res, fps: cur.fps, QoI: cur.QoI, level: cur.level, bitType: cur.bitType }, confirm: true }
+      const body = { device: this.settings.nvr.device, change, ...lower, seen: { enct: cur.enct, res: cur.res, fps: cur.fps, QoI: cur.QoI, level: cur.level, bitType: cur.bitType }, confirm: true }
       const r = await this.post('stream', body, { title: 'Change the recording stream?', shown: impacts.map((i) => i.text), action: 'Apply stream change' })
       if (seq !== this.seq) return
       if (r.cancelled) return this.status('Nothing was sent.')

@@ -34,6 +34,14 @@ import { HttpError, cameraOf, chlIdOf, transparent, withNvrLock } from './nvr-xm
 import { allApplied, buildEdit, checkWanted, osdRequest, parseOsd, probeShapes } from './osd-doc.mjs'
 import { xmlOnline } from './xml-session.mjs'
 
+// What the NVR's own pages read as "camera offline" (imaging.mjs, tripwire.mjs): also its answer for a
+// camera that keeps its name and clock to itself (one added by ONVIF or from another maker). Said in
+// words, not as a number: the owner was shown "(536870962)" on 2026-10-12.
+const OFFLINE_CODES = new Set(['536870935', '536870962'])
+const notRead = (code) => OFFLINE_CODES.has(String(code))
+  ? 'The recorder cannot read this camera\'s on-screen name and time: the camera is offline, or it is a kind the recorder cannot set these on.'
+  : `The recorder would not say what this camera shows (its answer: ${code || 'none'}).`
+
 const QUERY_URL = 'queryIPChlORChlOSD'
 const EDIT_URL = 'editIPChlORChlOSD'
 const LOG_FILE = join(DATA_DIR, 'osd-changes.log')
@@ -79,7 +87,7 @@ export async function setOsd(nvr, ch, want, user, query = transparent) {
   return withNvrLock(nvr, 'osd', async () => {
     const beforeXml = String((await query(nvr, QUERY_URL, osdRequest(chlId), 'osd before')) ?? '')
     const before = parseOsd(beforeXml)
-    if (!before.ok) throw new HttpError(502, `the NVR would not say what this camera shows (${before.errorCode}); nothing was changed`)
+    if (!before.ok) throw new HttpError(OFFLINE_CODES.has(String(before.errorCode)) ? 409 : 502, `${notRead(before.errorCode)} Nothing was changed.`)
     // validated against the camera's own grid bounds and its <types> list, now that we have them
     const wanted = checkWanted(want, before.osd)
 
@@ -130,7 +138,7 @@ export async function handleOsd(method, pathname, search, readJson, nvrs, who, q
       // ?probe=1 while we do not yet know which request shape this firmware wants. Read-only.
       if (search?.get('probe')) return [200, { nvr: nvr.id, ch, ...(await probeOsd(nvr, ch, query)) }]
       const r = parseOsd(String((await query(nvr, QUERY_URL, osdRequest(chlIdOf(ch)), 'osd')) ?? ''))
-      if (!r.ok) return [502, { error: `the NVR would not say what this camera shows (${r.errorCode})` }]
+      if (!r.ok) return [OFFLINE_CODES.has(String(r.errorCode)) ? 409 : 502, { error: notRead(r.errorCode) }]
       return [200, { nvr: nvr.id, ch, osd: r.osd }]
     }
     if (method === 'POST') {

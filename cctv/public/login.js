@@ -1,3 +1,5 @@
+import { clearFailed, failedAt, isWindows, markFailed, shouldTry, ssoAvailable, trySso } from './sso-login.js'
+
 const form = document.getElementById('login')
 const error = document.getElementById('error')
 
@@ -7,6 +9,58 @@ const error = document.getElementById('error')
 try {
   globalThis.caches?.delete('argus-stills').catch(() => {})
 } catch {}
+
+/** Signed in (by password or by Windows single sign-on): on into the app. */
+async function goOn(signedIn) {
+  // the mark's ring pulses once to say so (the wordmark's #authenticated), then the app opens
+  try { document.getElementById('authenticated')?.beginElement(); await new Promise((r) => setTimeout(r, 320)) } catch {}
+  if (signedIn.mustChangePassword) { location.href = '/change-password.html'; return }
+  // Signed out when a phone alert's link was tapped: the server sent the browser here from
+  // /alarms.html#event=<id>, and the browser kept the # across that redirect (the Fetch
+  // standard carries a fragment over when the new address has none). Go on to that alarm
+  // rather than to the grid.
+  // A Live link to a view (?view=…, a TV's &screen=1) goes back to it: the server and the Live page
+  // send ?next=/?<query> here. Only the Live page with a plain query (view-links.js safeNext, the
+  // same pattern), so this page can never be made to send anyone to another site.
+  const next = new URLSearchParams(location.search).get('next') ?? ''
+  const back = /^\/(index\.html)?\?[A-Za-z0-9=&,|%._~-]{0,512}$/.test(next) ? next : '/'
+  location.href = /^#event=\d{1,15}$/.test(location.hash) ? `/alarms.html${location.hash}` : back
+}
+
+// ---- Windows single sign-on (sso-login.js, the server's sso.mjs) ----
+// On a Windows PC in the office, with it set up, try the PC's own Windows sign-in first, silently,
+// while the form is already there to use. Not working: the form stays, with "Sign in with Windows"
+// to try again, and this browser does not try by itself for a day.
+const ssoButton = document.getElementById('ssoButton')
+const ssoStatus = document.getElementById('ssoStatus')
+let store = null
+try { store = globalThis.localStorage ?? null } catch {}
+async function signInWithWindows(byHand) {
+  ssoButton.disabled = true
+  ssoStatus.textContent = 'Signing you in with Windows…'
+  ssoStatus.hidden = false
+  const r = await trySso()
+  if (r.ok) {
+    clearFailed(store)
+    await goOn({ user: r.user })
+    return
+  }
+  markFailed(store)
+  ssoStatus.hidden = true
+  ssoButton.disabled = false
+  if (byHand) {
+    error.textContent = r.message || 'Windows could not sign you in. Sign in with your user name and password.'
+    error.hidden = false
+  }
+}
+ssoButton?.addEventListener('click', () => { error.hidden = true; void signInWithWindows(true) })
+if (ssoButton && isWindows(navigator.userAgent)) {
+  ssoAvailable().then((available) => {
+    if (!available) return
+    ssoButton.hidden = false
+    if (shouldTry({ available, ua: navigator.userAgent, failed: failedAt(store) })) void signInWithWindows(false)
+  })
+}
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault()
@@ -22,16 +76,12 @@ form.addEventListener('submit', async (e) => {
       body: JSON.stringify({ user: form.user.value.trim(), password: form.password.value })
     })
     if (res.ok) {
-      const signedIn = await res.json()
-      if (signedIn.mustChangePassword) { location.href = '/change-password.html'; return }
-      // Signed out when a phone alert's link was tapped: the server sent the browser here from
-      // /alarms.html#event=<id>, and the browser kept the # across that redirect (the Fetch
-      // standard carries a fragment over when the new address has none). Go on to that alarm
-      // rather than to the grid.
-      location.href = /^#event=\d{1,15}$/.test(location.hash) ? `/alarms.html${location.hash}` : '/'
+      await goOn(await res.json())
       return
     }
     const body = await res.json().catch(() => ({}))
+    // AD says this Windows password must be changed first: offer that here
+    if (body.canChangePassword) { showWindowsChange(form.user.value.trim()); return }
     error.textContent = body.error ?? 'Sign in failed'
     error.hidden = false
     form.password.select()
@@ -43,3 +93,44 @@ form.addEventListener('submit', async (e) => {
     button.textContent = label
   }
 })
+
+// ---- a Windows (AD) password that must be changed before signing in (ad.mjs changeExpired) ----
+const win = document.getElementById('winPassword')
+const winError = document.getElementById('winError')
+function showWindowsChange(user) {
+  form.hidden = true
+  win.hidden = false
+  win.dataset.user = user
+  document.getElementById('winUser').textContent = user
+  winError.hidden = true
+  document.getElementById('winCurrent').focus()
+}
+document.getElementById('winCancel')?.addEventListener('click', () => { win.reset(); win.hidden = true; form.hidden = false; form.password.value = '' })
+win?.addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const next = document.getElementById('winNew')
+  const again = document.getElementById('winConfirm')
+  again.setCustomValidity(next.value === again.value ? '' : 'The new passwords are not the same')
+  if (!win.reportValidity()) return
+  const button = win.querySelector('button[type="submit"]')
+  button.disabled = true
+  winError.hidden = true
+  try {
+    const res = await fetch('/api/login/windows-password', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user: win.dataset.user, currentPassword: document.getElementById('winCurrent').value, newPassword: next.value }) })
+    const body = await res.json().catch(() => ({}))
+    if (res.ok) {
+      win.reset()
+      alert(body.message ?? 'Your Windows password has been changed. Use the new one on your PC too.')
+      location.href = '/'
+      return
+    }
+    winError.textContent = body.error ?? 'The password was not changed.'
+    winError.hidden = false
+  } catch {
+    winError.textContent = 'Cannot reach the server'
+    winError.hidden = false
+  } finally {
+    button.disabled = false
+  }
+})
+document.getElementById('winConfirm')?.addEventListener('input', (e) => e.target.setCustomValidity(''))

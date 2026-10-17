@@ -4,6 +4,8 @@
 // which is why the banner wording lives here rather than in the page.
 import { smartRows, smartSummary } from './smart-view.js'
 import { viewersView } from './viewers-view.js'
+import { BOX, figure, metricsView } from './metrics-view.js'
+import { experienceView } from './experience-view.js'
 
 // Absolute times are shown on the site's wall clock, not the viewing PC's zone (a screen set to UTC
 // otherwise showed UTC): add the site offset, then read it back as UTC. siteTzMs is set from
@@ -751,6 +753,33 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
   // and under each what it has open, by site and NVR. Asked on the page's own refresh; the rows are
   // rebuilt each time, so which of them were open is kept across it, as for the NVR panels. Every
   // name and address is set as text.
+  // Kick: signs that account out everywhere and closes its video (users-api.mjs sign-out). Beside the
+  // name, where it cannot be pushed off the edge of a narrow screen (the owner could not find it in a
+  // last column, 2026-10-12).
+  const kickButton = (name, tr) => {
+    const kick = el('button', { type: 'button', className: 'hp-kick', textContent: 'Kick', title: `Sign ${name} out and close their video` })
+    kick.addEventListener('click', async () => {
+      if (!confirm(`Sign ${name} out? Their video closes on every device and they have to sign in again.`)) return
+      kick.disabled = true
+      try {
+        const res = await fetch(`/api/admin/users/${encodeURIComponent(name)}/sign-out`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+        const j = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(j.error || `status ${res.status}`)
+        for (const row of [...tr.parentElement.children]) if (row.dataset.user === name) row.remove()
+      } catch (e) {
+        kick.disabled = false
+        alert(`Could not sign ${name} out: ${e.message}`)
+      }
+    })
+    return kick
+  }
+  const nameCell = (name, canKick, tr) => {
+    tr.dataset.user = name
+    const td = el('td', { className: 'hp-who' }, el('span', { textContent: name }))
+    if (canKick) td.append(kickButton(name, tr))
+    return td
+  }
+  let signedIn = [] // accounts with a session open (users-api.mjs), for those with no video open
   const paintWatching = (d) => {
     const box = document.getElementById('watching')
     if (!box) return
@@ -770,16 +799,171 @@ if (typeof document !== 'undefined' && document.getElementById('cards')) {
       }
       if (p.more) what.append(el('div', { className: 'hp-sub', textContent: p.more }))
       const tr = el('tr')
-      for (const text of [p.name, p.where, p.address, p.connected]) tr.append(el('td', { textContent: text }))
+      tr.append(nameCell(p.name, p.canKick, tr))
+      for (const text of [p.device, p.where, p.address, p.connected]) tr.append(el('td', { textContent: text }))
       // nothing to unfold: the words alone
+      if (p.streams) what.append(el('div', { className: 'hp-sub', textContent: p.streams }))
       tr.append(p.groups.length ? el('td', {}, what) : el('td', { textContent: p.watching }))
       return tr
     }))
+    // ...and everyone signed in with no video open just now: they can be signed out as well
+    const watching = new Set(r.rows.map((p) => p.name))
+    for (const u of signedIn) {
+      if (watching.has(u.name) || !u.sessions?.length) continue
+      const tr = el('tr', { className: 'hp-idle' })
+      tr.append(nameCell(u.name, u.self !== true, tr))
+      const from = [...new Set(u.sessions.map((s) => s.connection === 'LAN' ? 'on the network' : 'outside'))].join(', ')
+      for (const text of ['', from, [...new Set(u.sessions.map((s) => s.address))].slice(0, 3).join(', '), '', 'signed in, no video open']) tr.append(el('td', { textContent: text }))
+      body.append(tr)
+    }
     document.getElementById('watchingNote').textContent = [r.rows.length ? r.summary : r.empty, r.more].filter(Boolean).join(' ')
+  }
+  // Viewing experience (admins only; experience-view.js shapes it): the score viewers' pages measured.
+  const paintExperience = (d) => {
+    const box = document.getElementById('experience')
+    if (!box) return
+    const v = experienceView(d)
+    box.hidden = false
+    document.getElementById('experienceHeads').replaceChildren(...v.heads.map((h) => el('th', { textContent: h })))
+    document.getElementById('experienceRows').replaceChildren(...v.rows.map((r) => { const tr = el('tr'); for (const c of r) tr.append(el('td', { textContent: c })); return tr }))
+    document.getElementById('experienceNote').textContent = v.note
+    const rowsOf = (rows) => rows.map((r) => { const tr = el('tr'); for (const c of r) tr.append(el('td', { textContent: c })); return tr })
+    document.getElementById('experienceNvrHeads')?.replaceChildren(...v.nvrHeads.map((h) => el('th', { textContent: h })))
+    document.getElementById('experienceNvrRows')?.replaceChildren(...rowsOf(v.nvrRows))
+    document.getElementById('experienceWallHeads')?.replaceChildren(...v.wallHeads.map((h) => el('th', { textContent: h })))
+    document.getElementById('experienceWallRows')?.replaceChildren(...rowsOf(v.wallRows))
+  }
+  // SICE-X (admins only; sicex.mjs): the engine's switches. Read once and after a save, so the
+  // page's own refresh never undoes a change being made.
+  let sicexAsked = false
+  const paintSicex = (s) => {
+    const box = document.getElementById('sicex')
+    if (!box || !Array.isArray(s?.list)) return
+    box.hidden = false
+    document.getElementById('sicexState').textContent = s.enabled ? 'on' : 'OFF'
+    const auto = document.getElementById('sicexAuto')
+    auto.hidden = !s.auto
+    auto.textContent = s.auto ? `It switched itself off at ${String(s.auto.at).slice(0, 16).replace('T', ' ')} UTC: ${s.auto.why}. Turn it on again here once that has been looked into.` : ''
+    document.getElementById('sicexEnabled').checked = s.enabled === true
+    document.getElementById('sicexSites').value = (s.sitesOff ?? []).join(', ')
+    const hsel = document.getElementById('sicexHoldout')
+    if (hsel && Number.isInteger(s.holdoutOf)) {
+      if (![...hsel.options].some((o) => o.value === String(s.holdoutOf))) hsel.add(new Option(String(s.holdoutOf), String(s.holdoutOf)))
+      hsel.value = String(s.holdoutOf)
+    }
+    document.getElementById('sicexRows').replaceChildren(...s.list.map((m) => {
+      const on = el('input', { type: 'checkbox', checked: s.set?.[m.id] !== false })
+      on.dataset.module = m.id
+      on.setAttribute('aria-label', `${m.name} on`)
+      const tr = el('tr')
+      tr.append(el('td', { textContent: m.name }), el('td', { textContent: m.what }), el('td', {}, on))
+      return tr
+    }))
+  }
+  const saveSicex = async () => {
+    const said = document.getElementById('sicexSaid')
+    said.textContent = 'Saving…'
+    const modules = {}
+    for (const b of document.querySelectorAll('#sicexRows input[data-module]')) modules[b.dataset.module] = b.checked
+    const sitesOff = document.getElementById('sicexSites').value.split(',').map((x) => x.trim()).filter(Boolean)
+    const holdoutOf = Number(document.getElementById('sicexHoldout')?.value) || undefined
+    try {
+      const r = await fetch('/api/admin/sicex', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: document.getElementById('sicexEnabled').checked, modules, sitesOff, holdoutOf }) })
+      const j = await r.json().catch(() => null)
+      if (!r.ok) { said.textContent = j?.error ?? 'Not saved'; return }
+      paintSicex(j)
+      said.textContent = 'Saved'
+    } catch {
+      said.textContent = 'Not saved: the server did not answer'
+    }
+  }
+  document.getElementById('sicexSave')?.addEventListener('click', saveSicex)
+  // Last 24 hours (admins only; metrics-view.js works out every point and word): small line charts
+  // of the server's key numbers, drawn here as SVG with no library. The server adds a figure a
+  // minute, so this is asked once a minute, not at every refresh, and at once when the span is
+  // changed. Every label is set as text. A failure here leaves the section as it was: it is never
+  // in the way of the rest of the page.
+  const SVG_NS = 'http://www.w3.org/2000/svg'
+  const svg = (tag, attrs = {}, text = '') => {
+    const node = document.createElementNS(SVG_NS, tag)
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v))
+    if (text) node.textContent = text
+    return node
+  }
+  let trendHours = 24
+  let trendsAskedAt = 0
+  let trendsData = null
+  const trendTime = (ms) => (trendHours > 48
+    ? new Date(ms + siteTzMs).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', timeZone: 'UTC' })
+    : hhmm(ms))
+  const drawChart = (c, ticks) => {
+    const g = svg('svg', { viewBox: `0 0 ${BOX.width} ${BOX.height}`, role: 'img', 'aria-label': `${c.title}. ${c.series.map((s) => s.legend).join('. ')}` })
+    const bottom = BOX.height - BOX.bottom
+    for (const y of [BOX.top, (BOX.top + bottom) / 2, bottom]) g.append(svg('line', { class: 'mv-grid', x1: BOX.left, x2: BOX.width - BOX.right, y1: y, y2: y }))
+    g.append(svg('text', { x: BOX.left - 4, y: BOX.top + 4, 'text-anchor': 'end' }, figure(c.yMax)))
+    g.append(svg('text', { x: BOX.left - 4, y: bottom + 3, 'text-anchor': 'end' }, '0'))
+    ticks.forEach((t, i) => g.append(svg('text', { x: t.x, y: BOX.height - 4, 'text-anchor': i === 0 ? 'start' : i === ticks.length - 1 ? 'end' : 'middle' }, trendTime(t.t))))
+    for (const s of c.series) {
+      for (const run of s.runs) {
+        // a single figure on its own is a dot: a line needs two
+        if (!run.includes(' ')) {
+          const [x, y] = run.split(',')
+          g.append(svg('circle', { class: `mv-dot mv-${s.tone}`, cx: x, cy: y, r: 1.6 }))
+        } else g.append(svg('polyline', { class: `mv-line mv-${s.tone}`, points: run }))
+      }
+    }
+    const legend = el('ul', { className: 'mv-legend' })
+    for (const s of c.series) legend.append(el('li', {}, el('span', { className: `mv-key mv-${s.tone}` }), el('span', { textContent: s.legend })))
+    return el('div', { className: 'mv-chart' }, el('h3', { textContent: c.title }), g, legend, el('p', { className: 'hp-note', textContent: c.note }))
+  }
+  const paintTrends = () => {
+    const box = document.getElementById('trends')
+    if (!box) return
+    box.hidden = false
+    const names = Object.fromEntries((latestHealth?.nvrs ?? []).map((n) => [n.id, n.name || n.id]))
+    const v = metricsView(trendsData, { hours: trendHours, names })
+    document.getElementById('trendsTitle').textContent = v.title
+    document.getElementById('trendsSaid').textContent = v.message
+    document.getElementById('trendCharts').replaceChildren(...v.charts.map((c) => drawChart(c, v.ticks)))
+    document.getElementById('trendTopBox').hidden = v.collecting
+    document.getElementById('trendTop').replaceChildren(...v.top.map((line) => el('li', { textContent: line })))
+    document.getElementById('trendTopNote').textContent = v.topNote
+  }
+  const loadTrends = (force = false) => {
+    if (!isAdmin || !document.getElementById('trends')) return
+    if (!force && Date.now() - trendsAskedAt < 60_000) return
+    trendsAskedAt = Date.now()
+    const asked = trendHours
+    fetch(`/api/admin/metrics?hours=${asked}`, { cache: 'no-store' })
+      .then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status)))))
+      .then((d) => {
+        if (asked !== trendHours) return // (the span was changed meanwhile: its own answer is coming)
+        trendsData = d
+        paintTrends()
+      })
+      .catch(() => {})
+  }
+  for (const b of document.querySelectorAll('#trends .mv-switch button')) {
+    b.addEventListener('click', () => {
+      trendHours = Number(b.dataset.hours) || 24
+      for (const o of document.querySelectorAll('#trends .mv-switch button')) o.setAttribute('aria-pressed', String(o === b))
+      loadTrends(true)
+    })
   }
   const loadWatching = () => {
     if (!isAdmin) return
-    fetch('/api/admin/viewers').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))).then(paintWatching).catch(() => {})
+    try {
+      loadTrends()
+    } catch {}
+    if (!sicexAsked) {
+      sicexAsked = true
+      fetch('/api/sicex').then((x) => (x.ok ? x.json() : null)).then(paintSicex).catch(() => {})
+    }
+    fetch('/api/admin/telemetry').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))).then(paintExperience).catch(() => {})
+    Promise.all([
+      fetch('/api/admin/viewers').then((x) => (x.ok ? x.json() : Promise.reject(new Error(String(x.status))))),
+      fetch('/api/admin/users').then((x) => (x.ok ? x.json() : null)).catch(() => null)
+    ]).then(([d, u]) => { signedIn = Array.isArray(u?.users) ? u.users : []; paintWatching(d) }).catch(() => {})
   }
 
   // The same account wiring every page does: who is signed in, and the admin-only tabs.

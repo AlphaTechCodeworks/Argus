@@ -11,6 +11,17 @@ export function isPhone(nav = globalThis.navigator) {
 /** The most frames a second worth drawing here: a phone's small screen gains nothing above 15. */
 export const maxLiveFps = (nav) => (isPhone(nav) ? 15 : null)
 
+/** Bound phone display surfaces; snapshots still use the original decoded frame. */
+export function canvasSize(videoWidth, videoHeight, box, dpr = 1, nav = globalThis.navigator) {
+  const phone = isPhone(nav)
+  const density = phone ? Math.min(dpr, 1.5) : dpr
+  const pixels = phone ? (nav?.deviceMemory <= 2 ? 960 * 540 : 1280 * 720) : Infinity
+  const scale = Math.min(1, box.width * density / videoWidth, box.height * density / videoHeight,
+    Math.sqrt(pixels / (videoWidth * videoHeight)))
+  const round = phone ? Math.floor : Math.round
+  return { width: Math.max(2, round(videoWidth * scale)), height: Math.max(2, round(videoHeight * scale)) }
+}
+
 /**
  * Whether the page was opened on the local network (https://192.168.1.232:8443) rather than through
  * the Cloudflare tunnel (https://cctv.jfl.gripe) or the tailnet, judged by the address in the address

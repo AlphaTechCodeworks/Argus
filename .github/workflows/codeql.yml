@@ -1,6 +1,7 @@
 name: CodeQL
 
 on:
+  workflow_dispatch: # lets an admin run it by hand from the Actions tab
   schedule:
     - cron: 0 4 * * 1
 

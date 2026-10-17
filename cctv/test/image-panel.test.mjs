@@ -15,10 +15,16 @@ import {
   estimateLines,
   focusLight,
   needMet,
+  pickSize,
   resultView,
   sameTexts,
   scheduleText,
   seenOf,
+  sizeItem,
+  sizeLabel,
+  streamRequestOf,
+  subSizeConfirm,
+  subStepText,
   undoText,
   usingText
 } from '../public/image-panel.js'
@@ -149,6 +155,39 @@ const settings = {
   check('sameTexts: the server\'s confirmation equals what the estimate showed (one click covers it)', sameTexts(e.impacts, e.impacts.map((i) => i.text)) && !sameTexts([{ text: 'other' }], ['Recording uses']) && !sameTexts([], []))
 }
 
+// ---- picture size: the two pickers of the Recording quality box -------------------------------------------
+{
+  const si = {
+    candidate: true,
+    current: { enct: 'h265', res: '2688x1520', fps: 25, QoI: 4096, level: 'higher', bitType: 'VBR' },
+    caps: { resolutions: [{ res: '3840x2160', fps: 20 }, { res: '2688x1520', fps: 30 }, { res: '1920x1080', fps: 30 }] }
+  }
+  const up = sizeItem(si, '3840x2160')
+  check('size: a bigger pick is one ticked item naming only the size (the server works out the cap)', up.picked && up.ticked && !up.lowerRes && JSON.stringify(up.change) === '{"res":"3840x2160"}' && up.from.res === '2688x1520' && up.encoderRestart === true)
+  check('  worded as the owner\'s own choice, with the cap raise, fewer days and the restart as its downside', /^Your own choice of recording size, not a suggestion: 2688x1520 up to 3840x2160/.test(up.why) && /bitrate cap is raised in proportion/.test(up.downside) && /fewer days/.test(up.downside) && /restarts its encoder/.test(up.downside), up.downside)
+  check('  a size slower than the camera runs now says the frame rate drops', /no faster than 20 frames a second at this size, so the frame rate drops from 25 to 20/.test(up.downside))
+  const down = sizeItem(si, '1920x1080')
+  check('size: a smaller pick carries lowerRes and says every recording has less detail, and Undo', down.lowerRes === true && /Every recording from then on has less detail \(Undo puts the size back\)/.test(down.downside) && /nearest one under it/.test(down.downside) && !/frame rate drops/.test(down.downside), down.downside)
+  check('size: the size in use, or one the camera does not offer, is no item', sizeItem(si, '2688x1520') === null && sizeItem(si, '1280x720') === null && sizeItem(null, '1920x1080') === null)
+  const s1 = { id: 'S1', rule: 'S1', change: { QoI: 5120 }, from: { QoI: 4096 }, ticked: true }
+  const s7 = { id: 'S7', rule: 'S7', change: { bitType: 'VBR' }, from: { bitType: 'CBR' }, ticked: true }
+  const list = pickSize([s1, s7], si, '3840x2160')
+  check('pick: the size goes first, and a bitrate-cap suggestion is unticked (it was for the present size)', list.map((i) => `${i.id}:${i.ticked}`).join() === 'size:true,S1:false,S7:true' && s1.ticked === true)
+  check('  picking again replaces the pick; picking the size in use drops it', pickSize(list, si, '1920x1080').filter((i) => i.picked).map((i) => i.change.res).join() === '1920x1080' && pickSize(list, si, '2688x1520').every((i) => !i.picked))
+  const req = streamRequestOf(list.filter((i) => i.ticked))
+  check('request: the size and the other ticked changes, no cap, lowerRes only for a smaller pick', JSON.stringify(req) === '{"change":{"res":"3840x2160","bitType":"VBR"},"lowerRes":false}' && streamRequestOf([down]).lowerRes === true && JSON.stringify(streamRequestOf([down]).change) === '{"res":"1920x1080"}', JSON.stringify(req))
+  check('  a cap ticked again beside a pick is still left to the server', !('QoI' in streamRequestOf([up, s1]).change))
+  check('  without a pick the request is the suggestions\' own (cap included), never lowerRes', JSON.stringify(streamRequestOf([s1, s7])) === '{"change":{"QoI":5120,"bitType":"VBR"},"lowerRes":false}')
+  check('size label: megapixels, the most frames a second, and which is in use', sizeLabel('1920x1080', 30, true) === '1920x1080 (2.1 MP, up to 30 fps) — now' && sizeLabel('704x480', 0) === '704x480 (0.34 MP)', `${sizeLabel('1920x1080', 30, true)} | ${sizeLabel('704x480', 0)}`)
+  check('grid size: the question asked before it is sent', subSizeConfirm('704x480', '1280x720') === 'Change this camera\'s grid picture from 704x480 to 1280x720? Its picture stops for a few seconds while the camera restarts its stream.')
+  const words = (step) => subStepText(step)
+  check('grid size: the result in words (done / skipped / failed / unclear), only "done" as good news',
+    words({ status: 'done', now: 'H.264 1280x720 at 20 fps, 1024 kbps' }).text === 'Grid picture changed: now H.264 1280x720 at 20 fps, 1024 kbps.' && words({ status: 'done', now: 'x' }).error === false &&
+    words({ status: 'skipped', reason: 'already 1280x720' }).text === 'Grid picture not changed: already 1280x720.' && words({ status: 'skipped', reason: 'x' }).error &&
+    /^Grid picture not changed: the NVR refused it \(12\)\.$/.test(words({ status: 'failed', reason: 'the NVR refused it (12)' }).text) &&
+    /^Unclear whether the grid picture changed: .*Check it on the NVR\.$/.test(words({ status: 'unknown', reason: 'could not read it back (timeout)' }).text) && words(null).error)
+}
+
 // ---- no camera write without a click ----------------------------------------------------------------------
 {
   const src = readFileSync(join(import.meta.dirname, '..', 'public', 'image-panel.js'), 'utf8')
@@ -162,17 +201,20 @@ const settings = {
   }
   const posters = new Map()
   lines.forEach((l, i) => {
-    for (const m of l.matchAll(/api\('POST', this\.url\('([\w/]+)'\)|this\.post\('([\w/]+)'/g)) {
-      const what = m[1] ?? m[2]
+    // (this.subsUrl() is the recorder's Sub-streams list: the grid-size change goes there)
+    for (const m of l.matchAll(/api\('POST', this\.url\('([\w/]+)'\)|this\.post\('([\w/]+)'|api\('POST', this\.(subsUrl)\(/g)) {
+      const what = m[1] ?? m[2] ?? 'substreams'
       const name = methodAt(i)
       posters.set(`${name}:${what}`, (posters.get(`${name}:${what}`) ?? 0) + 1)
     }
   })
-  const expected = ['change:image', 'saveLocation:notes', 'postFigures:figures', 'reviewStream:stream/estimate', 'reviewStream:stream', 'undoStream:stream', 'lensPost:lens', 'split:image/profiles', 'undoSchedule:image/schedule']
+  const expected = ['change:image', 'saveLocation:notes', 'postFigures:figures', 'reviewStream:stream/estimate', 'reviewStream:stream', 'undoStream:stream', 'applySubSize:substreams', 'lensPost:lens', 'split:image/profiles', 'undoSchedule:image/schedule']
   check('POSTs only from these methods (camera writes: change, stream, lens, split, schedule; app data: notes, figures)', [...posters.keys()].sort().join() === [...expected].sort().join(), [...posters.keys()].join())
   const changeCalls = lines.map((l, i) => (/this\.change\(/.test(l) ? methodAt(i) : null)).filter(Boolean)
   check('  a picture change is only sent from Apply, Undo, "Apply the other N" and "Restart camera"', [...new Set(changeCalls)].sort().join() === ['apply', 'applyOther', 'restart', 'undo'].join(), changeCalls.join())
-  const clickers = ['apply', 'undo', 'applyOther', 'restart', 'reviewStream', 'undoStream', 'saveLens', 'focusNow', 'split', 'undoSchedule']
+  check('  a picked recording size is only put in the list: it is sent from "Review stream changes…" like a suggestion', /sel\.addEventListener\('change', \(\) => \{\s*this\.streamItems = pickSize\(this\.streamItems, this\.streamInfo, sel\.value\)\s*this\.renderStream\(\)\s*\}\)/.test(src))
+  check('  the grid size asks first, in plain words, before its POST', /if \(!window\.confirm\(subSizeConfirm\(s\.res, to\)\)\) return[\s\S]{0,400}api\('POST', this\.subsUrl\(\)/.test(src))
+  const clickers = ['apply', 'undo', 'applyOther', 'restart', 'reviewStream', 'undoStream', 'applySubSize', 'saveLens', 'focusNow', 'split', 'undoSchedule']
   check('  each is started by a click handler', clickers.every((m) => new RegExp(`addEventListener\\('click', \\(\\) => this\\.${m}\\(`).test(src)), clickers.filter((m) => !new RegExp(`addEventListener\\('click', \\(\\) => this\\.${m}\\(`).test(src)).join())
   const auto = src.slice(src.indexOf('  async autoAdjust('), src.indexOf('  /** Two keyframe-aligned sets'))
   check('  Auto adjust itself sends nothing to the camera (reads only)', !/api\('POST'|this\.post\(|this\.change\(/.test(auto))

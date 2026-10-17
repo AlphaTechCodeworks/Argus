@@ -21,13 +21,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const mkHub = () => new StreamHub('n1', () => {}, { stopDelayMs: { 0: 5, 1: 5 } })
 
 // ---- the budget, from the environment ----
-check('the budget is 2 cores and 24 conversions unless said otherwise', DEFAULT_CORES === 2 && DEFAULT_MAX === 24 && budgetUnits({}) === 200 && maxFallbacks({}) === 24)
+check('the budget is 3 cores and 24 conversions unless said otherwise', DEFAULT_CORES === 3 && DEFAULT_MAX === 24 && budgetUnits({}) === 300 && maxFallbacks({}) === 24)
 check('CCTV_H264_FALLBACK_CORES: cores, fractions too, in units of 1 % of a core', budgetUnits({ CCTV_H264_FALLBACK_CORES: '1.5' }) === 150 && budgetUnits({ CCTV_H264_FALLBACK_CORES: '4' }) === 400)
 check('... 0 turns it off', budgetUnits({ CCTV_H264_FALLBACK_CORES: '0' }) === 0 && capacity({ units: 0 }) === 0)
-check('... negative, silly, empty or not a number: the default', ['-1', '99', '', '  ', 'lots', 'NaN', 'Infinity'].every((v) => budgetUnits({ CCTV_H264_FALLBACK_CORES: v }) === 200))
+check('... negative, silly, empty or not a number: the default', ['-1', '99', '', '  ', 'lots', 'NaN', 'Infinity'].every((v) => budgetUnits({ CCTV_H264_FALLBACK_CORES: v }) === 300))
 check('CCTV_H264_FALLBACK_MAX: a whole number of conversions', maxFallbacks({ CCTV_H264_FALLBACK_MAX: '8' }) === 8 && maxFallbacks({ CCTV_H264_FALLBACK_MAX: '0' }) === 0)
 check('... negative, fractional, silly or empty: the default', ['-1', '2.5', '100', '', 'many'].every((v) => maxFallbacks({ CCTV_H264_FALLBACK_MAX: v }) === 24))
-check('how many fit: the count, or what the budget holds at the last step, whichever is less', capacity({ units: 200, max: 24 }) === 24 && capacity({ units: 200, max: 64 }) === 25 && capacity({ units: 100, max: 24 }) === 12 && capacity({ units: 200, max: 3 }) === 3 && capacity({ units: 7, max: 24 }) === 0)
+check('how many fit: the count, or what the budget holds at the last step, whichever is less', capacity({ units: 400, max: 24 }) === 24 && capacity({ units: 400, max: 64 }) === 26 && capacity({ units: 300, max: 24 }) === 20 && capacity({ units: 100, max: 24 }) === 6 && capacity({ units: 300, max: 3 }) === 3 && capacity({ units: 14, max: 24 }) === 0)
 
 // ---- the ladder ----
 {
@@ -35,11 +35,11 @@ check('how many fit: the count, or what the budget holds at the last step, which
   check('... every preset one ffmpeg is allowed to be given', LADDER.every((l) => PRESETS.includes(l.preset)))
   check('... near-lossless for a 480p picture at every step (crf 20-21), never worse further down', LADDER.every((l) => l.crf >= 20 && l.crf <= 21) && LADDER.at(-1).crf <= LADDER[0].crf)
   check('... ultrafast, the weaker encoder, has the most bitrate headroom', LADDER.every((l, i) => i === 0 || l.maxKbps > LADDER[i - 1].maxKbps))
-  check('... each cost is no less than what was measured on the server (15.1, 11.8, 6.6 % of a core)', LADDER[0].cost >= 15.1 && LADDER[1].cost >= 11.8 && LADDER[2].cost >= 6.6)
+  check('... each cost is no less than what was measured on the server (in service, eight at veryfast: up to 17.9 % of a core each; one real stream replayed: 14.1, 15.2, 11.1)', LADDER[0].cost >= 17.9 && LADDER[1].cost >= 15.2 && LADDER[2].cost >= 11.1)
   const steps = []
-  for (let n = 0; n <= 30; n++) steps.push(stepFor(n, { units: 200 }))
-  check('2 cores: veryfast up to 12 running, superfast to 15, ultrafast to 25', steps.slice(0, 13).every((s) => s === 0) && steps.slice(13, 16).every((s) => s === 1) && steps.slice(16, 26).every((s) => s === 2), steps.join(''))
-  check('... past what fits, still the last step (the caller refuses)', steps.slice(26).every((s) => s === 2))
+  for (let n = 0; n <= 30; n++) steps.push(stepFor(n, { units: 300 }))
+  check('3 cores: veryfast up to 15 running, superfast at 16, ultrafast to 20', steps.slice(0, 16).every((s) => s === 0) && steps.slice(16, 17).every((s) => s === 1) && steps.slice(17, 21).every((s) => s === 2) && capacity({ units: 300, max: 64 }) === 20, steps.join(''))
+  check('... past what fits, still the last step (the caller refuses)', steps.slice(21).every((s) => s === 2))
   let ok = true
   let mono = true
   for (let units = 0; units <= 800; units += 7) {
@@ -60,11 +60,11 @@ check('how many fit: the count, or what the budget holds at the last step, which
   }
   check('whatever the budget: n running at the step for n is never over it, for every n that fits', ok)
   check('... and more running never means a better preset', mono)
-  check('going down is at once', stepFor(13, { units: 200, current: 0 }) === 1 && stepFor(16, { units: 200, current: 1 }) === 2 && stepFor(16, { units: 200, current: 0 }) === 2)
-  check(`back up only with room for ${STEP_UP_SPARE} more at the better step`, stepFor(12, { units: 200, current: 1 }) === 1 && stepFor(11, { units: 200, current: 1 }) === 1 && stepFor(10, { units: 200, current: 1 }) === 0)
-  check('... from ultrafast: to superfast at 13, straight to veryfast at 10', stepFor(15, { units: 200, current: 2 }) === 2 && stepFor(14, { units: 200, current: 2 }) === 2 && stepFor(13, { units: 200, current: 2 }) === 1 && stepFor(10, { units: 200, current: 2 }) === 0)
-  check('... nothing running: the best step', stepFor(0, { units: 200, current: 2 }) === 0)
-  check('a step that is not one (a bad `current`) is ignored', stepFor(13, { units: 200, current: 7 }) === 1 && stepFor(13, { units: 200, current: -1 }) === 1 && stepFor(13, { units: 200, current: 1.5 }) === 1)
+  check('going down is at once', stepFor(16, { units: 300, current: 0 }) === 1 && stepFor(17, { units: 300, current: 1 }) === 2 && stepFor(17, { units: 300, current: 0 }) === 2)
+  check(`back up only with room for ${STEP_UP_SPARE} more at the better step`, stepFor(15, { units: 300, current: 1 }) === 1 && stepFor(14, { units: 300, current: 1 }) === 1 && stepFor(13, { units: 300, current: 1 }) === 0)
+  check('... from ultrafast: to superfast at 14, straight to veryfast at 13', stepFor(16, { units: 300, current: 2 }) === 2 && stepFor(15, { units: 300, current: 2 }) === 2 && stepFor(14, { units: 300, current: 2 }) === 1 && stepFor(13, { units: 300, current: 2 }) === 0)
+  check('... nothing running: the best step', stepFor(0, { units: 300, current: 2 }) === 0)
+  check('a step that is not one (a bad `current`) is ignored', stepFor(16, { units: 300, current: 7 }) === 1 && stepFor(16, { units: 300, current: -1 }) === 1 && stepFor(16, { units: 300, current: 1.5 }) === 1 && stepFor(16, { units: 300, current: 2 }) === 2)
 
   // what ffmpeg is given at each step
   for (const L of LADDER) {
@@ -213,7 +213,7 @@ const feed = (stream, from, n, make = h265) => { for (let i = from; i < from + n
   check('one ffmpeg for it, niced below the workers (ionice idle, nice 10)', procs.length === 1 && procs[0].bin === 'ionice' && procs[0].args.slice(0, 5).join(' ') === '-c 3 nice -n 10', procs[0]?.args.slice(0, 6).join(' '))
   const args = procs[0].args.join(' ')
   check('... H.265 in, libx264 veryfast crf 21 out, one encoder thread, zerolatency, no B-frames', args.includes('-f hevc -i pipe:0') && args.includes('-c:v libx264 -preset veryfast -threads 1 -crf 21 -tune zerolatency -bf 0'), args)
-  check(`... a keyframe every ${KEY_SECONDS} s of the camera's own rate (15 fps: 30 pictures), nothing dropped or scaled`, / -g 30 /.test(args) && !args.includes('select=') && !args.includes('scale='), args)
+  check(`... a keyframe every ${KEY_SECONDS} s of the camera's own rate (15 fps: 30 pictures), nothing dropped, no wider than 704`, / -g 30 /.test(args) && !args.includes('select=') && args.includes('scale=min(704'), args)
   // (after each, the 7 bytes that end its picture: ffmpeg lets it go without waiting for the next)
   check('... every frame of the camera goes in, each ended as it goes: out without waiting for the next', procs[0].written.length === 40 && procs[0].written.every((b, i) => (i % 2 ? b.length === 7 && b[4] === 0x46 : b.length === 8)) && args.includes('-flags low_delay'))
   check('... its log lines say what it is, with the camera', logs.some((l) => l === '[h264-fallback] n1/5: converting a sub stream at 15.0 fps to H.264, every frame kept, each picture out as it comes'), logs.join(' | '))
@@ -250,26 +250,26 @@ const feed = (stream, from, n, make = h265) => { for (let i = from; i < from + n
   procs.length = 0
   const logs = []
   const hub = mkHub()
-  const fb = new H264Fallback({ units: 48, max: 4, makeTranscoder: realMaker, log: (l) => logs.push(l), stopDelayMs: 15 })
-  check('a budget of 0.48 cores and at most 4: room for 4', fb.pool.max === 4 && fb.enabled)
+  const fb = new H264Fallback({ units: 60, max: 4, makeTranscoder: realMaker, log: (l) => logs.push(l), stopDelayMs: 15 })
+  check('a budget of 0.6 cores and at most 4: room for 4', fb.pool.max === 4 && fb.enabled)
   const socks = []
   const open = (ch) => { const w = sock(); socks[ch] = w; const r = fb.attach(`n1/${ch}/1`, hub.getStream(ch, 1), w, { camera: `n1/${ch + 1}` }); feed(hub.getStream(ch, 1), 0, 20); return r }
   open(0); open(1); open(2)
-  check('three running: all at veryfast, the whole budget', procs.length === 3 && procs.every((p) => p.args.includes('veryfast')) && fb.summary().step === 'veryfast' && fb.summary().units === 48)
+  check('three running: all at veryfast, the whole budget', procs.length === 3 && procs.every((p) => p.args.includes('veryfast')) && fb.summary().step === 'veryfast' && fb.summary().units === 60)
   open(3)
-  check('a fourth: it starts at ultrafast (4 x 8 fits, 4 x 13 does not)', procs.length === 4 && procs[3].args.includes('ultrafast') && procs[3].args.join(' ').includes('-crf 20') && fb.summary().step === 'ultrafast')
-  check('... said in the log, with the cores it comes to', logs.some((l) => /^\[h264-fallback\] 4 of 4 conversions running: ultrafast crf 20 \(was veryfast\), each from its camera's next keyframe; about 0\.32 of 0\.48 cores/.test(l)), logs.filter((l) => l.includes('conversions running')).join(' | '))
+  check('a fourth: it starts at ultrafast (4 x 15 fits, 4 x 18 does not)', procs.length === 4 && procs[3].args.includes('ultrafast') && procs[3].args.join(' ').includes('-crf 20') && fb.summary().step === 'ultrafast')
+  check('... said in the log, with the cores it comes to', logs.some((l) => /^\[h264-fallback\] 4 of 4 conversions running: ultrafast crf 20 \(was veryfast\), each from its camera's next keyframe; about 0\.60 of 0\.60 cores/.test(l)), logs.filter((l) => l.includes('conversions running')).join(' | '))
   check('... those already running stay as they are until their next keyframe', procs.length === 4 && !procs.slice(0, 3).some(killed))
   feed(hub.getStream(0, 1), 20, 11) // frames 20-30: a keyframe at 30
   check('... where each starts again at ultrafast, the old ffmpeg given a moment to hand back', procs.length === 5 && procs[4].args.includes('ultrafast') && !killed(procs[0]) && procs[0].written.at(-1).length === 7 && procs[4].written.length === 2 && procs[4].written[0][4] === 0x26)
   await sleep(HANDOVER_MS + 60)
   check('... and then killed', killed(procs[0]) && !killed(procs[1]) && !killed(procs[4]))
-  check('... the CPU counted follows: ultrafast + veryfast + veryfast + ultrafast', fb.summary().units === 8 + 16 + 16 + 8, String(fb.summary().units))
+  check('... the CPU counted follows: ultrafast + veryfast + veryfast + ultrafast', fb.summary().units === 15 + 20 + 20 + 15, String(fb.summary().units))
   const full = sock()
   const said = logs.length
   check('the budget full: a fifth camera is refused with the reason', fb.attach('n1/9/1', hub.getStream(9, 1), full, { camera: 'n1/10' }) === NO_ROOM && procs.length === 5 && fb.summary().refused === 1 && full.closedWith === null)
   check('... the camera\'s own stream is not asked for on its account', hub.getStream(9, 1).clients.size === 0 && hub.getStream(9, 1).wanted === false)
-  check('... said in the log once, with how to raise it', logs.length === said + 1 && /no room to convert n1\/10: 4 of 4 conversions running/.test(logs.at(-1)) && logs.at(-1).includes('CCTV_H264_FALLBACK_CORES'), logs.at(-1))
+  check('... said in the log once, with how to raise it', logs.length === said + 1 && /no room to convert n1\/10: 4 of 4 conversions running \(0\.60 cores allowed\)/.test(logs.at(-1)) && logs.at(-1).includes('CCTV_H264_FALLBACK_CORES'), logs.at(-1))
   fb.attach('n1/9/1', hub.getStream(9, 1), sock(), { camera: 'n1/10' })
   check('... not again within the minute', logs.length === said + 1 && fb.summary().refused === 2)
   const joiner = sock()
@@ -363,13 +363,13 @@ const feed = (stream, from, n, make = h265) => { for (let i = from; i < from + n
   const phones = new TranscodePool(16)
   const phoneLive = new PhoneLive({ pool: phones, makeTranscoder: () => ({ push() {}, close() {} }), log: () => {} })
   const hub = mkHub()
-  const fb = new H264Fallback({ units: 16, max: 1, makeTranscoder: () => ({ push() {}, close() {} }), log: () => {} })
+  const fb = new H264Fallback({ units: 20, max: 1, makeTranscoder: () => ({ push() {}, close() {} }), log: () => {} })
   fb.attach('n1/0/1', hub.getStream(0, 1), sock())
   check('a conversion here takes nothing from the pool phones and remote viewers share', phones.active === 0 && fb.summary().running === 1)
   phoneLive.attach('n1/0/1', hub.getStream(0, 1), 1, sock(), { camera: 'n1/1' })
   check('... and theirs nothing from this budget: full here, a phone still gets its stream', fb.attach('n1/1/1', hub.getStream(1, 1), sock()) === NO_ROOM && phones.active === 1 && fb.summary().running === 1)
   const s = fb.summary()
-  check('the summary for Health: running, cap, step, units of budget', s.running === 1 && s.cap === 1 && s.step === 'veryfast' && s.crf === 21 && s.units === 0 && s.budgetUnits === 16 && s.viewers === 1 && s.refused === 1, JSON.stringify(s))
+  check('the summary for Health: running, cap, step, units of budget', s.running === 1 && s.cap === 1 && s.step === 'veryfast' && s.crf === 21 && s.units === 0 && s.budgetUnits === 20 && s.viewers === 1 && s.refused === 1, JSON.stringify(s))
   for (const x of [...fb.streams.values(), ...phoneLive.streams.values()]) x.close()
 }
 
@@ -382,7 +382,7 @@ const feed = (stream, from, n, make = h265) => { for (let i = from; i < from + n
   check('CCTV_H264_FALLBACK_MAIN_CORES: cores; 0 off; nonsense the default', mainBudgetUnits({ CCTV_H264_FALLBACK_MAIN_CORES: '2.5' }) === 250 && mainBudgetUnits({ CCTV_H264_FALLBACK_MAIN_CORES: '0' }) === 0 && ['-1', '99', '', 'x'].every((v) => mainBudgetUnits({ CCTV_H264_FALLBACK_MAIN_CORES: v }) === 160))
   const subOff = { CCTV_H264_FALLBACK_CORES: '0', CCTV_H264_FALLBACK_MAX: '0' }
   const mainOff = { CCTV_H264_FALLBACK_MAIN_CORES: '0', CCTV_H264_FALLBACK_MAIN_MAX: '0' }
-  check('each budget reads its own settings only', budgetUnits(mainOff) === 200 && maxFallbacks(mainOff) === 24 && mainBudgetUnits(subOff) === 160 && maxMainFallbacks(subOff) === 2)
+  check('each budget reads its own settings only', budgetUnits(mainOff) === 300 && maxFallbacks(mainOff) === 24 && mainBudgetUnits(subOff) === 160 && maxMainFallbacks(subOff) === 2)
   check('the main ladder: veryfast, then superfast, cheaper; both presets ffmpeg may be given', MAIN_LADDER.map((l) => l.preset).join() === 'veryfast,superfast' && MAIN_LADDER[1].cost < MAIN_LADDER[0].cost && MAIN_LADDER.every((l) => PRESETS.includes(l.preset)))
   check('... crf 21-22, what looks right at 1080p; the weaker preset has the higher ceiling', MAIN_LADDER.every((l) => l.crf >= 21 && l.crf <= 22) && MAIN_LADDER[1].maxKbps > MAIN_LADDER[0].maxKbps)
   check('... each cost is no less than the most measured on the server (90 and 75 % of a core)', MAIN_LADDER[0].cost >= 90 && MAIN_LADDER[1].cost >= 75)
@@ -390,7 +390,7 @@ const feed = (stream, from, n, make = h265) => { for (let i = from; i < from + n
   check('the default budget: one running at veryfast, two at superfast, never a third', stepFor(1, { units: 160, ...M }) === 0 && stepFor(2, { units: 160, ...M }) === 1 && 2 * MAIN_LADDER[1].cost <= 160 && capacity({ units: 160, max: 2, ladder: MAIN_LADDER }) === 2 && capacity({ units: 160, max: 8, ladder: MAIN_LADDER }) === 2)
   check('... a budget under one conversion at the last step: none', capacity({ units: 79, max: 2, ladder: MAIN_LADDER }) === 0 && capacity({ units: 80, max: 2, ladder: MAIN_LADDER }) === 1)
   check('down at once, and back up as soon as it fits (no spare to wait for with two at most)', stepFor(2, { units: 160, current: 0, ...M }) === 1 && stepFor(1, { units: 160, current: 1, ...M }) === 0 && MAIN_STEP_UP_SPARE === 0)
-  check('... the sub-streams\' rule is their own still: with their spare it would have stayed', stepFor(1, { units: 160, current: 1, ladder: MAIN_LADDER }) === 1 && stepFor(13, { units: 200 }) === 1 && stepFor(10, { units: 200, current: 1 }) === 0)
+  check('... the sub-streams\' rule is their own still: with their spare it would have stayed', stepFor(1, { units: 160, current: 1, ladder: MAIN_LADDER }) === 1 && stepFor(16, { units: 300 }) === 1 && stepFor(13, { units: 300, current: 1 }) === 0)
   let ok = true
   for (let units = 0; units <= 600; units += 5) {
     const cap = capacity({ units, max: 8, ladder: MAIN_LADDER })
@@ -406,7 +406,7 @@ const feed = (stream, from, n, make = h265) => { for (let i = from; i < from + n
     }
   }
   check('whatever the budget: n mains at the step for n are never over it, and more never means a better preset', ok)
-  check('the kinds: a sub-stream as it was, a main scaled to 1920 wide on two decoder threads, each picture ended as it goes in', KINDS.sub.stream.type === 1 && KINDS.sub.stream.maxWidth === undefined && KINDS.sub.stream.lowDelay === undefined && KINDS.sub.stream.endEach === undefined && KINDS.sub.stream.slowFps === 1000
+  check('the kinds: a sub-stream as it was, a main scaled to 1920 wide on two decoder threads, each picture ended as it goes in', KINDS.sub.stream.type === 1 && KINDS.sub.stream.maxWidth === undefined && KINDS.sub.stream.subMaxWidth === 704 && KINDS.sub.stream.lowDelay === undefined && KINDS.sub.stream.endEach === undefined && KINDS.sub.stream.slowFps === 1000
     && KINDS.main.stream.type === 0 && KINDS.main.stream.maxWidth === 1920 && MAIN_MAX_WIDTH === 1920 && KINDS.main.stream.lowDelay === false && KINDS.main.stream.endEach === true && KINDS.main.stream.slowFps === 10)
   check('... both keep every frame, convert only H.265, a keyframe every 2 s, and are reset when 2 s behind', [KINDS.sub, KINDS.main].every((K) => K.stream.fps === 0 && K.stream.h264Only === true && K.stream.keySeconds === KEY_SECONDS && K.stream.maxLagS === 2 && K.stream.bufSeconds === BUF_SECONDS))
   check('... a main lingers 3 s after its last viewer, a sub-stream 10', MAIN_LINGER_MS === 3000 && KINDS.main.lingerMs === 3000 && KINDS.sub.lingerMs === LINGER_MS && LINGER_MS === 10_000)
@@ -447,7 +447,7 @@ const feedMain = (stream, from, n) => { for (let i = from; i < from + n; i++) st
   const logs = []
   const hub = mkHub()
   const src = hub.getStream(4, 0)
-  const fb = new H264Fallback({ units: 200, max: 24, mainUnits: 160, mainMax: 2, makeTranscoder: realMaker, log: (l) => logs.push(l), stopDelayMs: 15, mainStopDelayMs: 15 })
+  const fb = new H264Fallback({ units: 400, max: 24, mainUnits: 160, mainMax: 2, makeTranscoder: realMaker, log: (l) => logs.push(l), stopDelayMs: 15, mainStopDelayMs: 15 })
   check('main conversion on: its own two places beside the sub-streams\' 24', fb.mainEnabled && fb.enabled && fb.kinds.main.pool.max === 2 && fb.pool.max === 24 && fb.kinds.main.pool !== fb.pool)
   const a = channel()
   check('a viewer is attached to the conversion of its camera\'s main stream', fb.attach('n1/4/0', src, a, { camera: 'n1/5', kind: 'main' }) === true && fb.summary().main.running === 1)
@@ -491,13 +491,13 @@ const feedMain = (stream, from, n) => { for (let i = from; i < from + n; i++) st
   procs.length = 0
   const logs = []
   const hub = mkHub()
-  const fb = new H264Fallback({ units: 32, max: 2, mainUnits: 160, mainMax: 2, makeTranscoder: realMaker, log: (l) => logs.push(l), stopDelayMs: 15, mainStopDelayMs: 15 })
+  const fb = new H264Fallback({ units: 40, max: 2, mainUnits: 160, mainMax: 2, makeTranscoder: realMaker, log: (l) => logs.push(l), stopDelayMs: 15, mainStopDelayMs: 15 })
   const m = []
   const openMain = (ch) => { const w = sock(); m[ch] = w; const r = fb.attach(`n1/${ch}/0`, hub.getStream(ch, 0), w, { camera: `n1/${ch + 1}`, kind: 'main' }); if (r === true) feedMain(hub.getStream(ch, 0), 0, 20); return r }
   const subs = []
   const openSub = (ch) => { const w = sock(); subs[ch] = w; const r = fb.attach(`n1/${ch}/1`, hub.getStream(ch, 1), w, { camera: `n1/${ch + 1}` }); if (r === true) feed(hub.getStream(ch, 1), 0, 20); return r }
   check('one main and one sub-stream of the same camera: two conversions, each in its own budget', openMain(0) === true && openSub(0) === true && procs.length === 2 && fb.summary().main.running === 1 && fb.summary().running === 1 && fb.streams.size === 2)
-  check('... the sub-stream is converted as it always was: veryfast crf 21, low_delay, nothing scaled', procs[1].args.join(' ').includes('-preset veryfast -threads 1 -crf 21') && procs[1].args.includes('low_delay') && !procs[1].args.join(' ').includes('scale='))
+  check('... the sub-stream is converted as before but no wider than 704: veryfast crf 21, low_delay', procs[1].args.join(' ').includes('-preset veryfast -threads 1 -crf 21') && procs[1].args.includes('low_delay') && procs[1].args.join(' ').includes('scale=min(704'))
   check('a second main: it starts at superfast (2 x 80 fits 1.6 cores, 2 x 95 does not)', openMain(1) === true && procs.length === 3 && procs[2].args.includes('superfast') && procs[2].args.join(' ').includes('-crf 22') && procs[2].args.join(' ').includes('-maxrate 10000k') && fb.summary().main.step === 'superfast')
   check('... said in the log as the main streams\' step, with the cores it comes to', logs.some((l) => /^\[h264-fallback\] 2 of 2 main-stream conversions running: superfast crf 22 \(was veryfast\), each from its camera's next keyframe; about 1\.60 of 1\.60 cores/.test(l)), logs.filter((l) => l.includes('conversions running')).join(' | '))
   check('... the sub-streams\' step has not moved, nor their conversion', fb.summary().step === 'veryfast' && fb.step === 0 && !killed(procs[1]))
@@ -567,7 +567,7 @@ const feedMain = (stream, from, n) => { for (let i = from; i < from + n; i++) st
   const made = []
   const mk = (o) => { made.push(o); return { push() {}, close() {} } }
   for (const [what, o] of [['CCTV_H264_FALLBACK_MAIN_MAX=0', { mainMax: 0 }], ['a main budget of nothing', { mainUnits: 0 }], ['a main budget under one conversion', { mainUnits: 79 }]]) {
-    const fb = new H264Fallback({ units: 200, max: 24, ...o, makeTranscoder: mk, log: () => {} })
+    const fb = new H264Fallback({ units: 400, max: 24, ...o, makeTranscoder: mk, log: () => {} })
     const hub = mkHub()
     check(`${what}: main conversion is off, the sub-streams' untouched`, fb.mainEnabled === false && fb.enabled === true && fb.pool.max === 24)
     check('... the summary is the one it was, with nothing about mains', Object.keys(fb.summary()).join() === 'running,cap,step,crf,units,budgetUnits,viewers,refused')
@@ -576,7 +576,7 @@ const feedMain = (stream, from, n) => { for (let i = from; i < from + n; i++) st
   }
   const subOnlyOff = new H264Fallback({ units: 0, mainUnits: 160, mainMax: 2, makeTranscoder: mk, log: () => {} })
   check('the sub-streams off and the mains on: each switch is its own', subOnlyOff.enabled === false && subOnlyOff.mainEnabled === true && subOnlyOff.summary().cap === 0 && subOnlyOff.summary().main.cap === 2)
-  const s = new H264Fallback({ units: 200, max: 24, mainUnits: 160, mainMax: 2, makeTranscoder: mk, log: () => {} }).summary()
+  const s = new H264Fallback({ units: 400, max: 24, mainUnits: 160, mainMax: 2, makeTranscoder: mk, log: () => {} }).summary()
   check('the summary for Health with mains on: theirs under main, the same fields', JSON.stringify(s.main) === '{"running":0,"cap":2,"step":"veryfast","crf":22,"units":0,"budgetUnits":160,"viewers":0,"refused":0}' && s.cap === 24 && s.step === 'veryfast' && s.crf === 21, JSON.stringify(s))
 }
 

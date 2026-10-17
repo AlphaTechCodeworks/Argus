@@ -64,9 +64,17 @@ export function viewersView(d) {
     const c = v.counts ?? {}
     const open = (c.live ?? 0) + (c.playback ?? 0) + (c.other ?? 0)
     const cameras = Number.isFinite(c.cameras) ? c.cameras : listed
+    const lives = Array.isArray(v.live) ? v.live : []
+    const mains = lives.filter((o) => o.stream === 'main').length
+    const converted = lives.filter((o) => o.kind === 'remote' || o.kind === 'phone' || o.kind === 'h264').length
     return {
       key: `${v.user ?? ''}|${v.address ?? ''}|${v.since ?? ''}`,
       name: v.user || 'unknown',
+      // the computer's own name where the network knows it, then what kind of device and browser
+      device: [v.host, v.device].filter(Boolean).join(' — ') || 'unknown',
+      // signing someone out here ends every session of that account; never one's own
+      canKick: Boolean(v.user) && v.user !== d?.self,
+      streams: [(c.live ?? 0) > 0 ? `${c.live} live` : '', mains > 0 ? `${mains} full quality` : '', converted > 0 ? `${converted} converted by the server` : ''].filter(Boolean).join(' · '),
       where: v.remote ? 'outside' : 'on the network',
       address: v.address || '',
       connected: connectedFor(now - v.since),

@@ -60,7 +60,9 @@ const STEP_MS = 0.5
 let vnow = 0
 const intervals = []
 const decoders = []
-let decoderModel = { pool: Infinity, decodeMs: 4, inFlight: 0 }
+// (hold: a decoded picture is handed over only once this many later frames have been fed: the H.264
+// decoders that keep about ten frames back, measured on the viewing PC 2026-10-09)
+let decoderModel = { pool: Infinity, decodeMs: 4, inFlight: 0, hold: 0 }
 let playing = false // play() is running: one replay at a time
 
 class Frame {
@@ -87,6 +89,7 @@ class FakeDecoder {
     this.state = 'unconfigured'
     this.pending = []
     this.busy = null // { chunk, doneAt }: the frame being decoded
+    this.ready = [] // decoded, kept back until `hold` later frames have been fed
     this.open = 0 // decoded pictures the page holds (not closed)
     this.fed = 0
     decoders.push(this)
@@ -96,11 +99,13 @@ class FakeDecoder {
   configure() { this.state = 'configured' }
   decode(chunk) {
     this.fed++
+    chunk.seq = this.fed
     this.pending.push(chunk)
   }
   reset() {
     this.pending = []
     this.busy = null
+    this.ready = []
     this.state = 'unconfigured'
   }
   close() {
@@ -115,7 +120,11 @@ class FakeDecoder {
       if (this.busy && now >= this.busy.doneAt) {
         const { chunk } = this.busy
         this.busy = null
-        this.output(new Frame(this, chunk.timestamp))
+        this.ready.push(chunk)
+        progress = true
+      }
+      while (this.ready.length && this.fed - this.ready[0].seq >= (decoderModel.hold ?? 0)) {
+        this.output(new Frame(this, this.ready.shift().timestamp))
         progress = true
       }
       if (!this.busy && this.pending.length && this.open < decoderModel.pool) {
@@ -377,7 +386,7 @@ export async function play(arr, { player = REPO_PLAYER, clock, maxFps, playerOpt
     vnow = from
     intervals.length = 0
     decoders.length = 0
-    decoderModel = { pool: Infinity, decodeMs: 4, inFlight: 0, ...decoder }
+    decoderModel = { pool: Infinity, decodeMs: 4, inFlight: 0, hold: 0, ...decoder }
     const shown = []
     const p = new VideoPlayer(canvas(), { clock, maxFps, paintFirst: true, arrivalClock: true, ...playerOptions, onFrame: (ts) => shown.push({ at: vnow, ts: ts - TS0 }) })
     patch?.(p)

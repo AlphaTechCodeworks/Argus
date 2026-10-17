@@ -532,7 +532,11 @@ const ERRORS = {
   92: 'unknown user',
   93: 'user name or password empty',
   95: 'NVR busy',
-  97: 'NVR not ready'
+  96: 'the NVR does not support this', // NET_SDK_DEVICE_NOT_SUPPROT
+  97: 'NVR not ready',
+  98: 'the camera is offline at the NVR', // NET_SDK_CHANNEL_OFFLINE
+  99: 'the NVR could not say what it supports', // NET_SDK_GETREADYINFO_FAIL
+  100: 'the SDK has no resources left' // NET_SDK_NORESOURCE (the SDK on this server, not the NVR: that is 31)
 }
 /** An SDK error code as text. */
 export const errorText = (code) => ERRORS[code] ?? `error ${code}`
@@ -670,6 +674,9 @@ export const HEADER_SIZE = 16
 
 /** View of a frame's bytes: native memory (only valid inside the callback) or an already copied Buffer. */
 const bytesOf = (buf, len) => (Buffer.isBuffer(buf) ? buf : Buffer.from(koffi.view(buf, len)))
+
+/** A frame's bytes as a Buffer of their own: what is kept after the callback returns must be a copy. */
+export const copyBytes = (buf, len) => (Buffer.isBuffer(buf) ? Buffer.from(buf.subarray(0, len)) : Buffer.from(new Uint8Array(koffi.view(buf, len))))
 
 /** Codec announced by a VIDEO_FORMAT frame (BITMAPINFOHEADER, FOURCC at offset 16). */
 export const codecOf = (info, buf) =>

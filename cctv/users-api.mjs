@@ -6,6 +6,8 @@
 //   POST   /api/admin/users              { name, password?, role } -> { user: { name, role } }
 //                                         (password required for a new user, at least 8 characters)
 //   DELETE /api/admin/users/:name        -> { removed: name }
+//   POST   /api/admin/users/:name/setup-code -> { user, link, expires }  a one-use link, shown as a QR
+//                                         code, that signs a phone in as that account (setup-codes.mjs)
 //
 // The same rules as adduser.mjs, and two of its own: the last admin cannot be removed or made a
 // viewer (nobody could administer the system after), and an admin cannot remove themselves. The
@@ -15,23 +17,30 @@
 // with none (rights.mjs forgetRights): a new viewer sees nothing until an admin ticks something, and
 // a name that comes back never inherits what its last holder was allowed. A new account records
 // `since`, so the last holder's unexpired cookie does not sign in as the new one (auth.mjs).
-import { audit } from './audit.mjs'
+import { audit, withDevice } from './audit.mjs'
 import { DATA_DIR, hashPassword, loadUsers, saveUsers, signOutUser } from './auth.mjs'
 import { userSessions } from './user-sessions.mjs'
 import { HttpError } from './nvr-xml.mjs'
 import { forgetRights } from './rights.mjs'
+import { setupLink } from './setup-codes.mjs'
 
 const NAME_RE = /^[\w.@-]{1,64}$/
-const ROLES = ['viewer', 'admin']
+const ROLES = ['viewer', 'watch', 'admin'] // 'watch': a viewer shown only Live, Playback and Map (auth.mjs isWatchOnly)
 
-const list = (users) => Object.entries(users).map(([name, u]) => ({ name, role: u.role === 'admin' ? 'admin' : 'viewer' })).sort((a, b) => a.name.localeCompare(b.name))
-const admins = (users) => Object.entries(users).filter(([, u]) => u.role === 'admin').map(([n]) => n)
+// An Active Directory user (ad.mjs, source 'ad') is listed with where it came from; its role is AD's
+const list = (users) => Object.entries(users).map(([name, u]) => ({ name, role: u.role === 'admin' ? 'admin' : u.role === 'watch' ? 'watch' : 'viewer', ...(u.source === 'ad' ? { source: 'ad', displayName: u.displayName ?? '', lastSignIn: u.lastSignIn ?? null } : {}) })).sort((a, b) => a.name.localeCompare(b.name))
+// Only local admins count for "the last admin": an AD admin cannot sign in when the DCs are down, and
+// a local admin is then the only way in.
+const admins = (users) => Object.entries(users).filter(([, u]) => u.role === 'admin' && u.source !== 'ad').map(([n]) => n)
+const isLastAdmin = (users, name) => users[name]?.source !== 'ad' && users[name]?.role === 'admin' && admins(users).length <= 1
 
 /**
  * @returns {Promise<[number, object]|null>} null when the path is not ours
  * @param {{ user: string, admin: boolean }} who from the signed session, never the request body
+ * @param {object} [o] ...ip, device: where the admin did it from (server.mjs clientIp, device-name.mjs
+ *   deviceOf), on each audit row: the address in its own field, the device at the end of the detail
  */
-export async function handleUsers(method, pathname, readJson, who, { disconnectUser = () => {} } = {}) {
+export async function handleUsers(method, pathname, readJson, who, { disconnectUser = () => {}, setupCodes = null, baseUrl = '', ip = '', device = '' } = {}) {
   if (pathname !== '/api/admin/users' && !pathname.startsWith('/api/admin/users/')) return null
   if (!who?.admin) throw new HttpError(403, 'Only an admin can manage accounts')
   let users = loadUsers()
@@ -53,8 +62,22 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     if (!signOutUser(name)) throw new HttpError(404, 'No such user')
     disconnectUser(name)
     userSessions.forget(name)
-    audit(DATA_DIR, { user: who.user, action: 'user-sign-out', target: name, ok: true })
+    setupCodes?.forget(name) // a code not yet scanned must not let them straight back in
+    audit(DATA_DIR, { user: who.user, action: 'user-sign-out', target: name, detail: withDevice('', device), ip, ok: true })
     return [200, { signedOut: name }]
+  }
+
+  // a set-up code for a phone: the link is given once, here, and only its hash is kept
+  const setup = /^\/api\/admin\/users\/([^/]+)\/setup-code$/.exec(pathname)
+  if (method === 'POST' && setup) {
+    const name = decodeURIComponent(setup[1])
+    if (!Object.hasOwn(users, name)) throw new HttpError(404, 'No such user')
+    if (!setupCodes) throw new HttpError(503, 'Set-up codes are not available on this server')
+    if (!/^https?:\/\//.test(baseUrl)) throw new HttpError(409, 'Set the address people use to reach Argus first (Settings, public address)')
+    const { code, expires } = setupCodes.create(name, who.user)
+    audit(DATA_DIR, { user: who.user, action: 'setup-code-made', target: name, detail: withDevice('', device), ip, ok: true })
+    console.log(`[users] ${who.user} made a set-up code for ${name}`)
+    return [200, { user: name, link: setupLink(baseUrl, code), expires }, { 'cache-control': 'no-store' }]
   }
 
   if (method === 'POST' && pathname === '/api/admin/users') {
@@ -63,8 +86,13 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     const role = String(body?.role ?? 'viewer')
     const password = body?.password === undefined || body?.password === '' ? null : String(body.password)
     if (!NAME_RE.test(name)) throw new HttpError(400, 'A user name is letters, digits and . _ @ - (up to 64)')
-    if (!ROLES.includes(role)) throw new HttpError(400, 'role must be viewer or admin')
+    if (!ROLES.includes(role)) throw new HttpError(400, 'role must be viewer, watch or admin')
     const existed = Object.hasOwn(users, name)
+    const adTwin = Object.entries(users).find(([u, v]) => v.source === 'ad' && u.toLowerCase() === name.toLowerCase())
+    if (adTwin) throw new HttpError(409, `${adTwin[0]} signs in with Windows (Active Directory): their role comes from their AD group, and they have no Argus password`)
+    // sign-in ignores capitals (auth.accountName), so two names that differ only in them would be one
+    const twin = existed ? null : Object.keys(users).find((u) => u.toLowerCase() === name.toLowerCase())
+    if (twin) throw new HttpError(409, `There is already an account called ${twin}: user names do not depend on capitals`)
     if (!existed && !password) throw new HttpError(400, 'A new user needs a password')
     if (password !== null && password.length < 8) throw new HttpError(400, 'A password is at least 8 characters')
     if (existed && users[name].role === 'admin' && role !== 'admin' && admins(users).length <= 1) {
@@ -79,7 +107,7 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     saveUsers(users)
     if (hash !== null && existed) userSessions.forget(name)
     if (!existed) forgetRights(name) // a row left behind by an earlier account of this name
-    audit(DATA_DIR, { user: who.user, action: existed ? 'user-change' : 'user-add', target: name, detail: `${role}${password !== null ? ', password set' : ''}`, ok: true })
+    audit(DATA_DIR, { user: who.user, action: existed ? 'user-change' : 'user-add', target: name, detail: withDevice(`${role}${password !== null ? ', password set' : ''}`, device), ip, ok: true })
     console.log(`[users] ${who.user} ${existed ? 'changed' : 'added'} ${name} (${role}${password !== null ? ', password set' : ''})`)
     return [200, { user: { name, role } }]
   }
@@ -89,12 +117,13 @@ export async function handleUsers(method, pathname, readJson, who, { disconnectU
     const name = decodeURIComponent(m[1])
     if (!Object.hasOwn(users, name)) throw new HttpError(404, 'No such user')
     if (name === who.user) throw new HttpError(409, 'You cannot remove your own account')
-    if (users[name].role === 'admin' && admins(users).length <= 1) throw new HttpError(409, `${name} is the only admin`)
+    if (isLastAdmin(users, name)) throw new HttpError(409, `${name} is the only admin`)
     delete users[name]
     saveUsers(users)
     userSessions.forget(name)
+    setupCodes?.forget(name)
     forgetRights(name)
-    audit(DATA_DIR, { user: who.user, action: 'user-remove', target: name, ok: true })
+    audit(DATA_DIR, { user: who.user, action: 'user-remove', target: name, detail: withDevice('', device), ip, ok: true })
     console.log(`[users] ${who.user} removed ${name}`)
     return [200, { removed: name }]
   }

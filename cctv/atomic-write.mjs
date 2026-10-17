@@ -31,10 +31,11 @@ function syncDirSync(dir, fs) {
 }
 
 /** Writes `data` to `file` atomically and durably (temp + fsync + rename). Throws on an I/O error. */
-export function writeFileAtomicSync(file, data, fs = nodeFs) {
+export function writeFileAtomicSync(file, data, fs = nodeFs, mode = 0o600) {
   const tmp = tmpName(file)
-  const fd = fs.openSync(tmp, 'w')
+  const fd = fs.openSync(tmp, 'w', mode)
   try {
+    fs.fchmodSync?.(fd, mode)
     fs.writeSync(fd, data)
     fs.fsyncSync(fd)
   } finally {
@@ -61,10 +62,11 @@ async function syncDir(dir, fsp) {
 }
 
 /** Writes `data` to `file` atomically and durably (temp + fsync + rename). Rejects on an I/O error. */
-export async function writeFileAtomic(file, data, fsp = nodeFsp) {
+export async function writeFileAtomic(file, data, fsp = nodeFsp, mode = 0o600) {
   const tmp = tmpName(file)
-  const fh = await fsp.open(tmp, 'w')
+  const fh = await fsp.open(tmp, 'w', mode)
   try {
+    await fh.chmod?.(mode)
     await fh.writeFile(data)
     await fh.sync()
   } finally {

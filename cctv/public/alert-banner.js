@@ -1,20 +1,30 @@
-// The red strip shown at the top of every page while any alert is open, so a problem is seen by
-// whoever happens to be looking at a camera — not only by someone who opens the Health page.
+// Open problems (the Health page's list: cameras offline, a recorder refusing streams, the server's
+// own alerts) shown as the bell in the sidebar and the phone bar turning red, on every page (shell.js
+// loads this). It used to be a red strip across the top of the page; the owner asked for the bell
+// instead (2026-10-15: "just make the bell red on the side bar", "don't have it at the top").
+// Hovering the bell lists the problems; the Health page has them in full.
 //
-// The wording comes from renderHealth() so the banner and the Health page can never disagree.
-// A failed request is ignored on purpose: if the server is unreachable the page has bigger
-// problems to report, and a banner that shouts about its own fetch would be noise.
+// The wording comes from renderHealth() so the bell and the Health page can never disagree.
+// A failed request is ignored on purpose: if the server is unreachable the page has bigger problems
+// to report, and a bell that turned red about its own fetch would be noise.
 
 import { renderHealth } from './health.js'
 
 const POLL_MS = 30_000
-const dismissalKey = 'cctv.dismissedHealthBanner'
-let dismissed = ''
-try { dismissed = sessionStorage.getItem(dismissalKey) ?? '' } catch {}
+let said = '' // what the bell says, kept to put back after the shell is drawn again
 
-const bar = document.createElement('div')
-bar.className = 'alert-banner'
-bar.hidden = true
+/** The bell's links (sidebar, phone bar, More sheet), as the shell has drawn them now. */
+const bells = () => document.querySelectorAll('a[href="/alarms.html"]')
+
+/** Turns every bell red (with the problems as its tooltip) or back to normal. */
+function paint() {
+  const on = said !== ''
+  document.body.classList.toggle('has-problems', on)
+  for (const a of bells()) {
+    if (on) a.title = `${said}. Open Health for the details.`
+    else if (a.title !== 'Alarms') a.title = 'Alarms'
+  }
+}
 
 async function poll() {
   let data
@@ -26,65 +36,11 @@ async function poll() {
     return
   }
   const { bannerText, criticalText } = renderHealth(data)
-  if (!bannerText && !criticalText) {
-    bar.hidden = true
-    dismissed = ''
-    try { sessionStorage.removeItem(dismissalKey) } catch {}
-    return
-  }
-  // Include the account and the actual problems, so another account or a changed
-  // warning never inherits this tab's dismissal. A cleared problem can recur.
-  let account = ''
-  try { account = JSON.parse(sessionStorage.getItem('cctv.me') ?? '{}').user ?? '' } catch {}
-  const signature = JSON.stringify([account, criticalText, (data.open ?? []).map((a) => [a.key, a.kind, a.severity, a.title]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))])
-  if (dismissed === signature) { bar.hidden = true; return }
-  const link = document.createElement('a')
-  link.href = '/health.html'
-  link.textContent = 'Open Health'
-  const lines = []
-  if (criticalText) {
-    const c = document.createElement('strong')
-    c.className = 'alert-critical'
-    c.textContent = `⛔ ${criticalText}`
-    lines.push(c)
-  }
-  if (bannerText) {
-    const o = document.createElement('span')
-    o.textContent = `⚠ ${bannerText}`
-    lines.push(o)
-  }
-  const text = document.createElement('div')
-  text.className = 'alert-lines'
-  text.append(...lines)
-  const details = document.createElement('details')
-  details.className = 'alert-disclosure'
-  details.open = Boolean(bar.querySelector('details')?.open)
-  const summary = document.createElement('summary')
-  summary.textContent = bannerText ? `⚠ ${bannerText.split(':')[0]} · Show details` : 'Show details'
-  details.append(summary, text)
-  // Critical failures remain visible even when the routine problem list is collapsed.
-  const critical = document.createElement('strong')
-  critical.textContent = criticalText ? `⛔ ${criticalText}` : ''
-  critical.hidden = !criticalText
-  const dismiss = document.createElement('button')
-  dismiss.type = 'button'
-  dismiss.textContent = 'Dismiss'
-  dismiss.className = 'alert-dismiss'
-  dismiss.setAttribute('aria-label', 'Dismiss this warning banner')
-  dismiss.title = 'Hide these warnings in this tab. Changed problems will appear again.'
-  dismiss.addEventListener('click', () => {
-    dismissed = signature
-    try { sessionStorage.setItem(dismissalKey, signature) } catch {}
-    bar.hidden = true
-  })
-  bar.replaceChildren(critical, details, link, dismiss)
-  bar.classList.toggle('critical', Boolean(criticalText))
-  bar.hidden = false
-  // inside the page's own column once the shell is there (body is then the two-column frame)
-  const host = document.querySelector('.app-main') ?? document.body
-  const after = host.querySelector(':scope > .shell-top')
-  if (bar.parentElement !== host) (after ? after.after(bar) : host.prepend(bar))
+  said = [criticalText, bannerText].filter(Boolean).join(' · ')
+  paint()
 }
 
+// (the red comes from body.has-problems, so it survives the shell drawing its links again; the
+// tooltip goes back on at the next poll)
 poll()
 setInterval(poll, POLL_MS)

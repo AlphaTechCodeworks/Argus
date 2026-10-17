@@ -176,11 +176,15 @@ export const lightPool = new TranscodePool((() => { const n = Number(process.env
  * preset / encThreads (a local PC's live conversion, h264-fallback.mjs): the libx264 preset, one of
  * PRESETS (anything else: PRESET), and how many threads the encoder may use (-threads after the input
  * is the encoder's), 0 or not given for its own choice, as every other conversion has. Software only.
+ * deshake (a camera an admin set to "Steady picture", steady.mjs): ffmpeg's one-pass deshake filter
+ * with its own defaults, AFTER the scale. Measured on the server (1280x720 H.265 at 20 fps, veryfast,
+ * one thread): scaled to 704 wide, 16 % of a core; scaled and then steadied, 38 %; steadied at full
+ * size, 89 %; a wider search (rx=ry=32), 46 %. Software only.
  * @param {{ encoder?: 'libx264'|'h264_vaapi', inCodec?: number, keepEvery?: number, maxWidth?: number,
  *   crf?: number, maxKbps?: number, bufSeconds?: number, lowDelay?: boolean, picturesPerS?: number, gop?: number,
- *   preset?: string, encThreads?: number }} o
+ *   preset?: string, encThreads?: number, deshake?: boolean }} o
  */
-export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0, bufSeconds = 4, lowDelay = true, picturesPerS = 0, gop = GOP_FRAMES, preset = PRESET, encThreads = 0 } = {}) {
+export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEvery = 1, maxWidth = 0, crf = CRF, maxKbps = 0, bufSeconds = 4, lowDelay = true, picturesPerS = 0, gop = GOP_FRAMES, preset = PRESET, encThreads = 0, deshake = false } = {}) {
   // (-threads here is an input option: it is the decoder's; libx264 picks its own)
   const decode = lowDelay ? ['-flags', 'low_delay'] : ['-threads', String(DECODE_THREADS)]
   const g = String(Number.isInteger(gop) && gop > 0 ? gop : GOP_FRAMES)
@@ -206,6 +210,8 @@ export function ffmpegArgs({ encoder = 'libx264', inCodec = CODEC_H265, keepEver
   // and a fixed ratio is what lets Transcoder hand each kept frame the right capture time
   if (keepEvery > 1) filters.push(`select=not(mod(n\\,${keepEvery}))`)
   if (maxWidth > 0) filters.push(`scale=min(${maxWidth}\\,iw):-2`)
+  // (after the scale: what the filter costs follows the size of the picture it is given)
+  if (deshake === true) filters.push('deshake')
   return [
     ...head,
     ...input,
@@ -390,9 +396,9 @@ export class Transcoder {
    *   spawn?: Function, platform?: string, hasNice?: boolean, hasIonice?: boolean,
    *   setPriority?: Function, now?: () => number, setTimer?: Function, clearTimer?: Function,
    *   flushIdleMs?: number, lowDelay?: boolean|(() => boolean), picturesPerS?: number|(() => number), gop?: number,
-   *   preset?: string, encThreads?: number }} o
+   *   preset?: string, encThreads?: number, deshake?: boolean }} o
    *   lowDelay, picturesPerS: see ffmpegArgs; a function is asked each time an ffmpeg starts. gop, preset,
-   *   encThreads: see ffmpegArgs
+   *   encThreads, deshake: see ffmpegArgs
    */
   constructor({
     inCodec = CODEC_H265,
@@ -406,7 +412,8 @@ export class Transcoder {
     gop = GOP_FRAMES,
     preset = PRESET,
     encThreads = 0,
-    encoder = keepEvery > 1 || maxWidth > 0 ? 'libx264' : encoderNow(),
+    deshake = false,
+    encoder = keepEvery > 1 || maxWidth > 0 || deshake === true ? 'libx264' : encoderNow(),
     onFrame,
     onFail = () => {},
     onHardwareFailed = () => {},
@@ -420,7 +427,7 @@ export class Transcoder {
     clearTimer = clearTimeout,
     flushIdleMs = FLUSH_IDLE_MS
   } = {}) {
-    Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, bufSeconds, lowDelay, picturesPerS, gop, preset, encThreads, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
+    Object.assign(this, { inCodec, keepEvery, maxWidth, crf, maxKbps, bufSeconds, lowDelay, picturesPerS, gop, preset, encThreads, deshake, encoder, onFrame, onFail, onHardwareFailed, log, spawn, platform, hasNice, hasIonice, prio, setTimer, clearTimer, flushIdleMs })
     this.proc = null
     this.closed = false
     this.times = [] // the times of the frames pushed in and not yet handed back, smallest first (in reverse: as pushed)
@@ -452,7 +459,7 @@ export class Transcoder {
     // (and so is the rate the pictures are stamped at: the cap's share per picture follows the run)
     const perS = Number(typeof this.picturesPerS === 'function' ? this.picturesPerS() : this.picturesPerS)
     const picturesPerS = Number.isFinite(perS) && perS > 0 ? perS : 0
-    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth, crf: this.crf, maxKbps: this.maxKbps, bufSeconds: this.bufSeconds, lowDelay, picturesPerS, gop: this.gop, preset: this.preset, encThreads: this.encThreads })
+    const args = ffmpegArgs({ encoder: this.encoder, inCodec: this.inCodec, keepEvery: this.keepEvery, maxWidth: this.maxWidth, crf: this.crf, maxKbps: this.maxKbps, bufSeconds: this.bufSeconds, lowDelay, picturesPerS, gop: this.gop, preset: this.preset, encThreads: this.encThreads, deshake: this.deshake === true })
     const { bin, args: full } = niceWrap('ffmpeg', args, { platform: this.platform, hasNice: this.hasNice, hasIonice: this.hasIonice })
     const proc = this.spawn(bin, full, { stdio: ['pipe', 'pipe', 'pipe'] })
     this.proc = proc

@@ -26,6 +26,7 @@
       <h1>CCTV</h1>
     </div>
     <div class="controls">
+      <button id="findDevice" type="button" title="Scan for every recorder, camera and device: which site, recorder and camera each is, its address and MAC">Discover devices</button>
       <button id="find" type="button">Find NVRs</button>
       <button id="add" type="button" class="st-primary">+ Add NVR</button>
     </div>
@@ -52,7 +53,12 @@
       <label>NVR name
         <input id="f-name" name="name" required maxlength="64" placeholder="e.g. Gate NVR" />
       </label>
-      <fieldset class="st-connect">
+      <fieldset class="st-connect" id="f-brand-set">
+        <legend>Make</legend>
+        <label class="st-check"><input type="radio" name="brand" id="f-brand-tvt" value="tvt" checked /> TVT (also sold as Provision and Eye in Cloud)</label>
+        <label class="st-check"><input type="radio" name="brand" id="f-brand-hik" value="hikvision" /> Hikvision (recorder or camera, by its address)</label>
+      </fieldset>
+      <fieldset class="st-connect" id="f-via-set">
         <legend>Connect by</legend>
         <label class="st-check"><input type="radio" name="via" id="f-via-lan" value="lan" checked /> IP address (this network, or port forwarding)</label>
         <label class="st-check"><input type="radio" name="via" id="f-via-p2p" value="p2p" /> Serial number (cloud ID), through the P2P cloud (NVRs at other sites)</label>
@@ -77,6 +83,40 @@
         </label>
         <small class="st-help">Type the NVR’s serial number, which is its cloud ID: it is printed on the label on the NVR and shown on its P2P page (next to the QR code) in the network settings. No address or port is needed: the server finds the NVR through the P2P cloud these NVRs are sold with (Eye in Cloud, Provision, TVT), and the serial number and the login pass through that cloud. P2P must be switched on in the NVR’s network settings. Leave <b>P2P version</b> on NAT 2.0 unless the NVR’s own P2P page shows it is on <b>NAT 1.0 (nat.eyeincloud.com)</b> — older firmware. Video is slower than on the local network, so the full-size view stays on the sub-stream.</small>
       </div>
+      <small class="st-help" id="f-hik-help" hidden>Hikvision devices are reached at their own address on the SDK port (8000 unless it was changed on the device). Live view only for now: playback, recording and the camera settings pages are not available for Hikvision devices yet.</small>
+      <details id="f-hikp2p" class="st-hikp2p" hidden>
+        <summary>Connect through Hik-Connect (P2P)</summary>
+        <p class="st-warn-text" id="f-hp-state">Off — needs Hik-Connect developer access (AppID and server addresses from Hikvision).</p>
+        <label class="st-check"><input id="f-hp-on" type="checkbox" disabled /> Sign in to Hik-Connect for this device</label>
+        <label>Hik-Connect account (email or phone number)
+          <input id="f-hp-account" maxlength="128" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>Hik-Connect password
+          <input id="f-hp-password" type="password" maxlength="128" autocomplete="new-password" />
+          <small id="f-hp-password-hint">Kept on the server like the device password, never shown again.</small>
+        </label>
+        <details id="f-hp-adv">
+          <summary>Advanced: developer access from Hikvision</summary>
+          <label>AppID
+            <input id="f-hp-appid" type="password" maxlength="255" autocomplete="off" spellcheck="false" />
+            <small id="f-hp-appid-hint">not set</small>
+          </label>
+          <label>Sign-in server address
+            <input id="f-hp-auth" type="password" maxlength="255" autocomplete="off" spellcheck="false" />
+            <small id="f-hp-auth-hint">not set</small>
+          </label>
+          <label>Platform address
+            <input id="f-hp-platform" type="password" maxlength="255" autocomplete="off" spellcheck="false" />
+            <small id="f-hp-platform-hint">not set</small>
+          </label>
+          <label>Platform type
+            <input id="f-hp-ptype" type="number" min="0" max="255" step="1" />
+            <small id="f-hp-ptype-hint">not set</small>
+          </label>
+          <small class="st-help">These four come from Hikvision with developer access. Argus has no defaults for them and does not guess them; they are kept on the server and never shown again.</small>
+        </details>
+        <small class="st-help">Unverified: Hik-Connect sign-in has not been tried against Hikvision’s service, and how the SDK reaches a recorder through it is not documented, so the device is still connected by its address.</small>
+      </details>
       <label class="st-check"><input id="f-remote" type="checkbox" /> At another site (VPN or a slow link): the full-size view stays on the sub-stream</label>
       <label>NVR user name
         <input id="f-user" name="user" required maxlength="64" value="admin" autocomplete="off" />
@@ -87,8 +127,10 @@
       </label>
       <label class="st-check"><input id="f-skip" type="checkbox" /> Save even if the NVR can't be reached right now</label>
       <p id="formError" class="st-error" role="alert" hidden></p>
+      <p id="formResult" class="st-meta" role="status" hidden></p>
       <div class="st-actions">
         <button type="button" id="cancel">Cancel</button>
+        <button type="button" id="test" hidden>Test</button>
         <button type="submit" id="save" class="st-primary">Test &amp; save</button>
       </div>
     </form>
@@ -115,6 +157,26 @@
       <ul id="d-results" class="st-found"></ul>
       <div class="st-actions">
         <button type="button" id="d-close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="fd" class="st-dialog st-discover" aria-labelledby="fd-title">
+    <form id="fd-form" method="dialog" autocomplete="off">
+      <h2 id="fd-title">Discover devices</h2>
+      <p class="st-help">The TVT recorders and cameras on your network that are not in Argus yet, like TVT’s own search tool: each with its address, MAC, model and firmware. Anything already added is left out. The scan starts as this opens; type to narrow the list.</p>
+      <label>Narrow the list (optional)
+        <input id="fd-q" maxlength="64" placeholder="e.g. North Gate, 192.168.35. or 58:5b:69" spellcheck="false" autocapitalize="off" />
+      </label>
+      <div class="st-actions st-actions-start">
+        <button type="button" id="fd-search" class="st-primary" title="Asks the TVT recorders and cameras on the server’s own network to answer again (the same search as Find NVRs)">Scan again</button>
+        <button type="submit" id="fd-go" hidden>Find</button>
+        <span id="fd-status" class="st-meta" role="status"></span>
+      </div>
+      <div id="fd-notes"></div>
+      <ul id="fd-results" class="st-found fd-results"></ul>
+      <div class="st-actions">
+        <button type="button" id="fd-close">Close</button>
       </div>
     </form>
   </dialog>

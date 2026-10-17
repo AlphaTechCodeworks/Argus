@@ -1,29 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Argus">
-  <!-- Argus: the watchman's eye. The pupil is a lens, and light fans out from it: seeing and
-       projecting in one mark. Drawn to stay readable down to a 16 px browser tab. -->
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#3b82f6"/>
-      <stop offset="1" stop-color="#1e40af"/>
-    </linearGradient>
-    <radialGradient id="iris" cx="0.5" cy="0.5" r="0.5">
-      <stop offset="0" stop-color="#93c5fd"/>
-      <stop offset="1" stop-color="#2563eb"/>
-    </radialGradient>
-  </defs>
-  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
-  <!-- the rays, cast upward and out -->
-  <g stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.9">
-    <line x1="32" y1="9" x2="32" y2="15"/>
-    <line x1="18" y1="13" x2="21.5" y2="18"/>
-    <line x1="46" y1="13" x2="42.5" y2="18"/>
-    <line x1="8.5" y1="21" x2="13.5" y2="24"/>
-    <line x1="55.5" y1="21" x2="50.5" y2="24"/>
-  </g>
-  <!-- the eye -->
-  <path d="M6 37 C 16 22, 48 22, 58 37 C 48 52, 16 52, 6 37 Z" fill="#ffffff"/>
-  <circle cx="32" cy="37" r="11" fill="url(#iris)"/>
-  <!-- the pupil: a lens -->
-  <circle cx="32" cy="37" r="5.2" fill="#0b1220"/>
-  <circle cx="34.2" cy="34.8" r="1.8" fill="#ffffff"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Guardian Eye app icon"><title>Guardian Eye app icon</title><rect width="128" height="128" rx="28" fill="#0A192F"/><g transform="translate(-3.2,-3.2) scale(1.05)"><defs><clipPath id="a-guardian-eye-eye-clip"><path d="M32,62 C48,41 80,41 96,62 C80,81 48,81 32,62 Z"/></clipPath></defs>
+<g fill="none" transform="rotate(0 64 62)" opacity="0">
+ <circle cx="64" cy="62" r="25" stroke="#00F5FF" stroke-opacity=".07" stroke-width="10"/>
+ <circle cx="64" cy="62" r="23" stroke="#00AEEF" stroke-width="4"/>
+ <path d="M64,45 A17,17 0 0 1 81,62" stroke="#00F5FF" stroke-width="3" stroke-linecap="round"/>
+</g>
+<path d="M64,15 L102,31 L102,65 C102,88 82,103 64,113 C46,103 26,88 26,65 L26,31 L64,15 Z" fill="#00AEEF" fill-opacity=".045" stroke="#00AEEF" stroke-width="5.5" stroke-linejoin="round" stroke-linecap="round" pathLength="1" stroke-dasharray="1" stroke-dashoffset="0" opacity="1"/>
+<g opacity="1">
+ <path d="M32,62 C48,41 80,41 96,62 C80,81 48,81 32,62 Z" fill="#FFFFFF"/>
+ <g clip-path="url(#a-guardian-eye-eye-clip)">
+  <circle cx="64" cy="62" r="14" fill="#00AEEF"/>
+  <circle cx="64" cy="62" r="10" fill="#0A192F"/>
+  <path d="M61,57 L69,62 L61,67Z" fill="#00F5FF"/>
+  <circle cx="69" cy="56" r="1.5" fill="#FFFFFF" opacity=".85"/>
+  <path d="M64,45V79" stroke="#00F5FF" stroke-width="2" opacity="0"/>
+ </g>
+</g>
+<circle cx="64" cy="62" r="47" fill="none" stroke="#00F5FF" stroke-width="2" opacity="0"/>
+</g></svg>

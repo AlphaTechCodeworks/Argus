@@ -20,7 +20,8 @@ const { refuseNewCalls, sdkStats } = await import('./sdk.mjs')
 const { spareWhile, startWatchdog } = await import('./watchdog.mjs')
 const { Recorder } = await import('./recorder.mjs')
 const { power, transparent } = await import('./nvr-xml.mjs')
-const { linkReset } = await import('./live.mjs')
+const { linkReset, setAudioSink } = await import('./live.mjs')
+const { parseWaveFormat } = await import('./audio-hub.mjs')
 
 const id = process.env.CCTV_WORKER_NVR
 const cfg = readConfig().nvrs.find((n) => n?.id === id)
@@ -265,9 +266,31 @@ const stallTimer = setInterval(() => {
 }, STALL_CHECK_MS)
 stallTimer.unref()
 
+// Sound for the cameras somebody is listening to (audio-hub.mjs, MSG.AUDIOWANT): taken from whichever of
+// the camera's streams is playing (the sub-stream and the main both carry it), one of them at a time,
+// so a camera playing twice is not heard twice. Nothing is started or asked of the NVR for it.
+const AUDIO_SOURCE_STALE_MS = 1500
+const audioWanted = new Map() // ch -> { key: the stream it is taken from, at: its last frame }
+const audioSink = (stream, bytes, formatBytes) => {
+  const w = audioWanted.get(stream.ch)
+  if (!w || !process.connected) return
+  const key = streamKey(stream.ch, stream.streamType)
+  const now = Date.now()
+  if (w.key !== key && now - w.at < AUDIO_SOURCE_STALE_MS) return
+  w.key = key
+  w.at = now
+  const f = parseWaveFormat(formatBytes)
+  if (f) process.send({ t: MSG.AUDIO, ch: stream.ch, buf: bytes, ...f })
+}
+
 process.on('message', (m) => {
   // stopping: nothing is started, stopped, re-created or restarted any more (see shutdown)
   if (stopping) return
+  if (m?.t === MSG.AUDIOWANT) {
+    if (m.on === true) { if (!audioWanted.has(m.ch)) audioWanted.set(m.ch, { key: null, at: 0 }) } else audioWanted.delete(m.ch)
+    setAudioSink(audioWanted.size ? audioSink : null)
+    return
+  }
   if (m?.t === MSG.WANT) {
     const key = streamKey(m.ch, m.type)
     const had = taps.get(key)

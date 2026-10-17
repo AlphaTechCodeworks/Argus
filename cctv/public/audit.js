@@ -13,6 +13,7 @@
 // and posts its row. The server decides again on save (rights.mjs), so nothing here is trusted.
 
 import { COLUMNS, COLUMN_LABELS, COLUMN_TITLES, FORMATS, FORMAT_LABELS, HEAD_ROWS, buildTree, click, copyFrom, copySources, dropKept, fromRow, sameRow, setAdmin, setAll, setFormat, toRow, view } from './access-model.js'
+import qrcode from './vendor/qrcode-generator.js' // (MIT, Kazuhiko Arase) draws the set-up code
 
 const PAD = (n) => String(n).padStart(2, '0')
 
@@ -37,6 +38,8 @@ export const ACTION_LABELS = Object.freeze({
   'playback-view': 'Played back',
   'live-view': 'Watched live',
   'audit-prune': 'Old entries removed',
+  'camera-link': 'Camera link (RTSP) changed',
+  'camera-link-use': 'Camera link (RTSP) used',
   other: 'Other'
 })
 
@@ -236,6 +239,54 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
   const resetSave = document.getElementById('resetPasswordSave')
   let resetAccount = null
   let resettingPassword = false
+  // A set-up code: a one-use link, drawn as a QR code, that signs a phone in as this account
+  // (setup-codes.mjs). Asked for when the dialog opens; closing it forgets the link (the code itself
+  // stays good until used or 48 hours pass, and a new one cancels it).
+  const setupDialog = document.getElementById('setupCodeDialog')
+  let setupLinkNow = ''
+  const drawQr = (canvas, text) => {
+    const qr = qrcode(0, 'M')
+    qr.addData(text)
+    qr.make()
+    const n = qr.getModuleCount()
+    const quiet = 4
+    const cell = Math.max(2, Math.floor(canvas.width / (n + quiet * 2)))
+    const size = cell * (n + quiet * 2)
+    canvas.width = canvas.height = size
+    const g = canvas.getContext('2d')
+    g.fillStyle = '#fff'
+    g.fillRect(0, 0, size, size)
+    g.fillStyle = '#000'
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) g.fillRect((c + quiet) * cell, (r + quiet) * cell, cell, cell)
+  }
+  const openSetupCode = async (name) => {
+    const say = document.getElementById('setupCodeError')
+    const canvas = document.getElementById('setupCodeQr')
+    say.textContent = ''
+    setupLinkNow = ''
+    canvas.width = canvas.height = 264
+    canvas.getContext('2d').clearRect(0, 0, 264, 264)
+    document.getElementById('setupCodeAccount').textContent = `For ${name}. Making the code…`
+    document.getElementById('setupCodeNote').textContent = ''
+    if (!setupDialog.open) setupDialog.showModal()
+    try {
+      const j = await usersApi('POST', `/${encodeURIComponent(name)}/setup-code`, {})
+      setupLinkNow = j.link
+      drawQr(canvas, j.link)
+      document.getElementById('setupCodeAccount').textContent = `For ${name}. Anyone who scans this is signed in as ${name}: show it only to them.`
+      document.getElementById('setupCodeNote').textContent = `Works once, until ${new Date(j.expires).toLocaleString()}. The phone then stays signed in until you press Sign out user.`
+    } catch (e) {
+      document.getElementById('setupCodeAccount').textContent = `For ${name}.`
+      say.textContent = e.message
+    }
+  }
+  document.getElementById('setupCodeClose').addEventListener('click', () => setupDialog.close())
+  setupDialog.addEventListener('close', () => { setupLinkNow = ''; const c = document.getElementById('setupCodeQr'); c.getContext('2d').clearRect(0, 0, c.width, c.height) })
+  document.getElementById('setupCodeCopy').addEventListener('click', async () => {
+    if (!setupLinkNow) return
+    try { await navigator.clipboard.writeText(setupLinkNow); document.getElementById('setupCodeNote').textContent = 'Link copied. It signs in whoever opens it first, once.' } catch { document.getElementById('setupCodeError').textContent = 'Could not copy the link.' }
+  })
+
   const openPasswordReset = (name) => {
     resetAccount = name
     resetForm.reset()
@@ -285,11 +336,20 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       rm.className = 'btn-ghost'
       rm.textContent = 'Remove'
       rm.addEventListener('click', async () => {
-        if (!confirm(`Remove the account ${u.name}? They can no longer sign in.`)) return
+        if (!confirm(fromAd ? `Forget ${u.name}? Their sessions end and their rights here are removed. While they are in a CCTV group in Active Directory they can sign in again, starting with no rights.` : `Remove the account ${u.name}? They can no longer sign in.`)) return
         try { await usersApi('DELETE', `/${encodeURIComponent(u.name)}`); uSay(`Removed ${u.name}`); loadUsers(); loadRights() } catch (e) { uSay(e.message, true) }
       })
       const name = document.createElement('td'); name.textContent = u.name
-      const role = document.createElement('td'); role.textContent = u.role === 'admin' ? 'Admin' : 'Viewer'
+      const role = document.createElement('td'); role.textContent = u.role === 'admin' ? 'Admin' : u.role === 'watch' ? 'Watch only' : 'Viewer'
+      // a Windows (Active Directory) user: its role is its AD group's, it has no Argus password
+      const fromAd = u.source === 'ad'
+      if (fromAd) {
+        if (u.displayName) name.append(el('div', { className: 'st-meta', textContent: u.displayName }))
+        name.append(' ', el('span', { className: 'ac-badge', textContent: 'Active Directory', title: 'Signs in with their Windows account' }))
+        role.append(el('div', { className: 'st-meta', textContent: 'from their AD group' }))
+        rm.textContent = 'Forget'
+        rm.title = 'Removes their record and rights here; if still in a CCTV group they can sign in again, starting with no rights'
+      }
       const connections = el('td')
       const sessions = Array.isArray(u.sessions) ? u.sessions : []
       if (!sessions.length) connections.textContent = 'Not connected'
@@ -308,7 +368,10 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       const reset = el('button', { type: 'button', className: 'btn-ghost', textContent: 'Reset password' })
       reset.setAttribute('aria-label', `Reset password for ${u.name}`)
       reset.addEventListener('click', () => openPasswordReset(u.name))
-      const act = document.createElement('td'); act.className = 'ac-user-actions'; act.append(edit, reset, kick, rm)
+      const setup = el('button', { type: 'button', className: 'btn-ghost', textContent: 'Set up a phone' })
+      setup.setAttribute('aria-label', `Show a set-up QR code for ${u.name}`)
+      setup.addEventListener('click', () => openSetupCode(u.name))
+      const act = document.createElement('td'); act.className = 'ac-user-actions'; act.append(edit, setup, ...(fromAd ? [] : [reset]), kick, rm)
       tr.append(name, role, connections, act)
       return tr
     }))
@@ -328,7 +391,8 @@ if (typeof document !== 'undefined' && document.getElementById('auditRows')) {
       loadRights()
       // A new viewer can see nothing yet (users-api.mjs starts them with no rights), so the next
       // thing the admin needs is to say what they may see.
-      if (isNew && role === 'viewer') openAccess(name)
+      if (isNew && role !== 'admin') openAccess(name)
+      if (isNew) uSay(`Saved ${name} (${role}). Tick what they may see, then press "Set up a phone" on their row for a QR code.`)
     } catch (err) { uSay(err.message, true) }
   })
   loadUsers()

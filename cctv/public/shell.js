@@ -6,8 +6,14 @@
 // the ten hand-copied header links and admin-tabs.js.
 import { PHONE_BAR, currentId, navFor } from './nav-model.js'
 import { icon } from './icons.js'
+import { markSvg, playMarks, replayMarks } from './logo-mark.js'
 import { nextTheme, readTheme, saveTheme } from './theme.js'
-import { preferenceStorage, savePendingSettings } from './user-settings.js'
+
+// ARGUS as the brand draws it (the app repository's docs/brand, concept A): five stroked letters in the
+// colour of the text around them, so it reads in the light theme and the dark.
+const WORDMARK = `<svg class="shell-wordmark" viewBox="-2 -1 194 38" role="img" aria-label="Argus" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"><path d="M1 34L14 2L27 34M7 23H21" transform="translate(0,0)"/><path d="M2 34V2H15Q27 2 27 12Q27 22 15 22H2M15 22L28 34" transform="translate(40,0)"/><path d="M28 7Q22 2 15 2Q2 2 2 18Q2 34 15 34Q23 34 28 29V19H17" transform="translate(80,0)"/><path d="M2 2V22Q2 34 15 34Q28 34 28 22V2" transform="translate(120,0)"/><path d="M27 6Q22 2 15 2Q3 2 3 10Q3 18 15 18Q27 18 27 26Q27 34 15 34Q7 34 2 29" transform="translate(160,0)"/></svg>`
+import { preferenceAccount, preferenceStorage, preferencesReady, savePendingSettings } from './user-settings.js'
+import { purgeCameraStills } from './stills.js'
 
 const store = preferenceStorage
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
@@ -33,14 +39,14 @@ const themeButton = (t, cls) => `<button type="button" class="${cls}" data-theme
 /** Fills the sidebar, phone bar and More sheet for this user. Safe to call again. */
 function render(parts, me) {
   const { side, bar, sheet } = parts
-  const groups = navFor({ admin: me.admin === true })
+  const groups = navFor({ admin: me.admin === true, watchOnly: me.watchOnly === true })
   // Storage is a tab of Settings (settings.html#storage), but has its own place in the menu
   // Many cameras (wall.html) is a view of Playback, not a page of its own in the menu
   const here = /wall.html$/.test(location.pathname) ? 'playback' : location.hash === '#storage' && /settings.html$/.test(location.pathname) ? 'storage' : currentId(location.pathname)
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
   const version = me.build?.version ? esc(me.build.version) : ''
   side.innerHTML = `
-    <a class="shell-brand" href="/" aria-label="Argus home"><img class="shell-logo" src="/logo.svg" alt="" /><span class="shell-brand-type"><strong>Argus</strong><small>Security everywhere</small></span></a>
+    <a class="shell-brand" href="/" aria-label="Argus home">${markSvg('shell-logo mark-anim')}<span class="shell-brand-type"><strong>${WORDMARK}</strong><small>Security everywhere</small></span></a>
     <button type="button" class="shell-pin" data-sidebar-pin aria-label="Keep sidebar expanded" aria-pressed="${document.body.classList.contains('sidebar-pinned')}" title="Keep sidebar expanded">${icon('pin')}<span class="shell-pin-label">Keep sidebar open</span></button>
     <nav class="shell-nav">
       ${groups.map((g) => `<div class="shell-group"><div class="shell-group-label">${esc(g.label)}</div>${g.items.map((i) => link(i, here)).join('')}</div>`).join('')}
@@ -49,8 +55,8 @@ function render(parts, me) {
       <button type="button" class="shell-settings-status" data-settings-retry hidden aria-live="polite"></button>
       ${themeButton(theme, 'shell-theme btn-ghost')}
       <div class="shell-user"><span class="shell-avatar">${esc((me.user ?? '?').slice(0, 1).toUpperCase())}</span>
-        <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small>${me.address ? `<small class="shell-route" title="${me.direct ? 'You are connected straight to the server on the local network' : 'You are connected over the internet (through Cloudflare)'}">${esc(me.address)} · ${me.direct ? 'local' : 'internet'}</small>` : ''}</span>
-        <button type="button" class="btn-ghost btn-icon" data-sign-out title="Sign out" aria-label="Sign out">${icon('out')}</button></div>
+        <span class="shell-who">${esc(me.user ?? '')}<small>${me.user ? (me.admin ? 'Administrator' : me.watchOnly ? 'Watch only' : 'Viewer') : ''}${version ? ` · ${version}` : ''}</small>${me.address ? `<small class="shell-route" title="${me.direct ? 'You are connected straight to the server on the local network' : 'You are connected over the internet (through Cloudflare)'}">${esc(me.address)} · ${me.direct ? 'local' : 'internet'}</small>` : ''}</span>
+        ${me.windows ? '<a class="btn-ghost btn-icon" href="/change-password.html" title="Change your Windows password" aria-label="Change your Windows password">' + icon('cog') + '</a>' : ''}<button type="button" class="btn-ghost btn-icon" data-sign-out title="Sign out" aria-label="Sign out">${icon('out')}</button></div>
     </div>`
   // the phone bar: the four used most, then More for everything else
   const all = groups.flatMap((g) => g.items)
@@ -60,6 +66,7 @@ function render(parts, me) {
     `<button type="button" class="shell-more-btn${rest.some((i) => i.id === here) ? ' on' : ''}" aria-expanded="${!sheet.hidden}">${icon('more')}<span>More</span></button>`
   sheet.innerHTML = rest.map((i) => link(i, here)).join('') + themeButton(theme, 'shell-theme') +
     `<button type="button" data-sign-out>${icon('out')}<span>Sign out</span></button>`
+  playMarks(side) // (a logo drawn again plays from the start: logo-mark.js)
 }
 
 export function mountShell() {
@@ -91,8 +98,11 @@ export function mountShell() {
   const top = document.createElement('div')
   top.className = 'shell-top'
   const label = navFor({ admin: true }).flatMap((g) => g.items).find((i) => i.id === (/wall.html$/.test(location.pathname) ? 'playback' : currentId(location.pathname)))?.label ?? ''
-  top.innerHTML = `<img src="/logo.svg" alt="" /><strong>Argus</strong><span>${esc(label)}</span>`
+  top.innerHTML = `${markSvg('shell-top-logo mark-anim')}<strong>${WORDMARK}</strong><span>${esc(label)}</span>`
   main.prepend(top)
+  // the eye plays when the page opens and again every minute (logo-mark.js)
+  playMarks(top)
+  replayMarks(document)
 
   document.body.prepend(side)
   side.after(main)
@@ -139,8 +149,8 @@ export function mountShell() {
     .then((r) => (r.ok ? r.json() : null))
     .then((fresh) => {
       if (!fresh) return
-      try { session?.setItem(ME_KEY, JSON.stringify({ user: fresh.user, admin: fresh.admin, build: fresh.build, address: fresh.address, direct: fresh.direct })) } catch {}
-      const changed = fresh.user !== me.user || fresh.admin !== me.admin || fresh.build?.version !== me.build?.version || fresh.address !== me.address || fresh.direct !== me.direct
+      try { session?.setItem(ME_KEY, JSON.stringify({ user: fresh.user, admin: fresh.admin, watchOnly: fresh.watchOnly, build: fresh.build, address: fresh.address, direct: fresh.direct })) } catch {}
+      const changed = fresh.user !== me.user || fresh.admin !== me.admin || fresh.watchOnly !== me.watchOnly || fresh.build?.version !== me.build?.version || fresh.address !== me.address || fresh.direct !== me.direct
       me = fresh
       if (changed) render(parts, me)
     })
@@ -150,18 +160,34 @@ export function mountShell() {
 }
 
 mountShell()
+// the bell turns red while there are open problems, on every page (alert-banner.js); only once the
+// shell is drawn, and never in the way of it
+void import('./alert-banner.js').catch(() => {})
+void preferencesReady.then(() => {
+  applyTheme(readTheme(store))
+  document.body.classList.toggle('sidebar-pinned', store.getItem('cctv.sidebarPinned') === '1')
+})
 
 // Presence heartbeat also notices an administrator revoking this browser's cookie.
-setInterval(async () => {
+async function refreshSession() {
+  if (document.hidden) return
   try {
     const response = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(10_000) })
     if (response.status === 401) location.href = '/login.html'
-    else if (response.status === 403) {
+    else if (response.ok) {
+      const fresh = await response.json()
+      if (preferenceAccount() && fresh.user !== preferenceAccount()) {
+        await purgeCameraStills()
+        location.reload()
+      }
+    } else if (response.status === 403) {
       const body = await response.json()
       if (body.mustChangePassword) location.href = '/change-password.html'
     }
   } catch { /* A transient connection loss is not a sign-out. */ }
-}, 30_000)
+}
+setInterval(refreshSession, 30_000)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void refreshSession() })
 
 // keep the app's own files on the device (sw.js): Argus opens at once on a weak signal
 if ('serviceWorker' in navigator && isSecureContext) {

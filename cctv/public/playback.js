@@ -28,7 +28,11 @@
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
 import { searchCameras } from './grid-view.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
+import { preferencesReady } from './user-settings.js'
 import { PLAYBACK_CLOCK, REMOTE_PLAYBACK_CLOCK } from './playout.js'
+import { soundOut } from './live-audio.js'
+import { SOUND_CODEC, soundDelayS, soundWanted } from './pb-sound.js'
+import { startTelemetry } from './telemetry.js'
 import { attachZoom } from './pinch-zoom.js'
 import {
   MESSAGE_STICKY_MS,
@@ -63,10 +67,16 @@ import {
   waitingText,
   watchesStart
 } from './pb-sources.js'
-import { MAX_BOXES, boxSeekMs, follow as followView, fmtClock, laneBoxes, makeView, panBy, spanLabel, ticks, zoomAt } from './pb-view.js'
+import { MAX_BOXES, boxSeekMs, follow as followView, fmtClock, laneBoxes, makeView, panBy, ticks, zoomAt } from './pb-view.js'
+import { SEQUENCE_TOLERANCE_MS, canReverse, liveHref, pillText, recordingEnd, recordingStart, sequenceTarget, sliderIndex, sliderSpeed, sliderSpeeds, spanWords, speedText } from './pb-bar.js'
 import { bookmarkMarkers, canEdit, checkBookmark, filterBookmarks, sortBookmarks, spanText } from './bookmarks-view.js'
 import { allowedSpeeds, clampSpeed, frameStep, ignoredRepeat, shuttleLabel, shuttleRate, stepNotBefore } from './pb-transport.js'
 import { DEFAULT_OSD, drawOsd, osdFont, osdIsOff, osdLayout } from './osd-overlay.js'
+
+// The site last worked in (camera-browser.js workspaceSite) comes with the account, and decides
+// which camera opens: this page's own script waits here until the preferences are known
+// (user-settings.js, which may not wait itself).
+await preferencesReady
 
 // Video is decoded here in the browser, exactly as the camera encoded it; the
 // server never converts it. Recordings in H.265 need a browser/PC that can decode H.265.
@@ -115,6 +125,12 @@ const laneRec = $('laneRec')
 const laneMotion = $('laneMotion')
 const ticksEl = $('ticks')
 const playheadEl = $('playhead')
+const rulerHeadEl = $('rulerHead') // the playhead's line carried up through the ruler, to the pill
+const pillEl = $('pill') // the day and time under the playhead
+const liveLink = $('liveLink')
+const playBackBtn = $('playBack')
+const speedSlider = $('speedSlider')
+const speedTextEl = $('speedText')
 const nowEl = $('tlNow')
 const hoverLine = $('hoverLine')
 const hoverLabel = $('hoverLabel')
@@ -210,6 +226,8 @@ let stepHold = false // a frame step's seek is playing: its first picture pauses
 let knownFps = { cam: null, fps: 0 } // the camera's frame rate as last measured while it played (it reads 0 while paused)
 let seekAt = null // performance.now() of the last seek, until its first picture (D overlay)
 let startMs = null // seek to first picture, ms
+// seeks only: this page has no live tiles to sample (telemetry.js)
+const telemetry = startTelemetry({ page: 'playback', tiles: () => [] })
 let lastEndSkip = -Infinity // the last stretch jumped to at an end (never the same one twice)
 let hoverX = null // where the pointer is over the timeline, in px from its left edge
 let drag = null // { x, startMs, moved, box } while the timeline is being panned
@@ -220,8 +238,16 @@ const boxSeek = new WeakMap()
 
 const player = new VideoPlayer(videoEl.querySelector('canvas'), {
   clock: PLAYBACK_CLOCK,
+  onResourceLimit: () => {
+    showMessage('Device video limit. Select a lighter recording source.')
+    if (ws) { ws.onclose = null; ws.close(); ws = null }
+    player.reset()
+  },
+  onError: () => showMessage('Video restarted. Seek to retry.'),
   onFrame: (ts) => {
     if (!scrub) state.position = ts // (while scrubbing the playhead follows the pointer)
+    sound.shown = { ts, at: performance.now() } // the picture's clock, which the sound keeps to
+    soundQuietCheck()
     if (ws?.stepGen != null) ws.stepGen = null // a server step's frame is on screen: the next may go
     const fpsNow = Number(player.stats?.fps)
     if (fpsNow > 0) knownFps = { cam: camKey(), fps: fpsNow }
@@ -252,6 +278,8 @@ function noteStart() {
   spinnerEl.hidden = true // the first picture is here: whatever we were waiting for has arrived
   if (seekAt === null) return
   startMs = Math.round(performance.now() - seekAt)
+  // (how long a seek takes, for the baseline nobody had: telemetry.mjs 'seek-picture')
+  telemetry.event('seek-picture', { nvr: state.nvr, ch: state.ch, ms: startMs })
   seekAt = null
 }
 
@@ -620,17 +648,50 @@ function renderSpeeds() {
     speedsEl.dataset.kind = state.mode
   }
   for (const b of speedsEl.children) b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === state.speed))
-  speedCycleBtn.querySelector('.pb-glyph').textContent = speedLabel(state.speed)
+  // the slider on the bar: one stop for each forward speed this source plays (pb-bar.js
+  // sliderSpeeds), so it cannot be left between two, and the speed chosen in words beside it
+  const allowed = allowedSpeeds(state.mode)
+  speedSlider.max = String(Math.max(0, sliderSpeeds(allowed).length - 1))
+  speedSlider.value = String(sliderIndex(state.speed, allowed))
+  speedSlider.setAttribute('aria-valuetext', speedText(state.speed))
+  speedTextEl.textContent = speedText(state.speed)
+  updatePlayButton()
 }
 
-// The one speed button on the bar: each click goes to the next faster forward speed, and from the
-// fastest back to normal. Slow motion and reverse are under More, with the full ladder.
-const speedCycleBtn = $('speedCycle')
-speedCycleBtn.addEventListener('click', () => {
-  const ladder = allowedSpeeds(state.mode).filter((x) => x >= 1)
-  const next = ladder.find((x) => x > state.speed) ?? 1
-  setSpeed(next)
+// The speed slider says how fast; the two play buttons say which way. So a speed picked while the
+// footage runs backwards stays backwards.
+speedSlider.addEventListener('input', () => {
+  setSpeed(sliderSpeed(Number(speedSlider.value), allowedSpeeds(state.mode), state.speed < 0 ? -1 : 1))
 })
+
+/** One stop slower (-1) or faster (+1) on the slider; nothing at either end. */
+function stepSpeed(by) {
+  const allowed = allowedSpeeds(state.mode)
+  setSpeed(sliderSpeed(sliderIndex(state.speed, allowed) + by, allowed, state.speed < 0 ? -1 : 1))
+}
+
+/**
+ * Whether Play backwards is offered. Only the server's own recordings can be played backwards
+ * (rec-playback.mjs sends them keyframe by keyframe, shown as a run of stills); the NVR's playback
+ * has no reverse at all, in NVR mode or over a stretch of the day only the NVR has. The button is
+ * hidden there rather than left to do something else.
+ */
+const reverseOffered = () => canReverse(allowedSpeeds(state.mode)) && !(state.mode === 'server' && state.src === 'nvr')
+
+/**
+ * Play in `direction` (1 forwards, -1 backwards) at the speed the slider shows; pressed while it
+ * already plays that way, pause. Changing direction while it plays carries straight on the other way.
+ */
+function playToward(direction) {
+  const playing = !state.paused && Boolean(ws)
+  const sameWay = (state.speed < 0 ? -1 : 1) === direction
+  if (playing && sameWay) return togglePause()
+  if (!sameWay) {
+    const allowed = allowedSpeeds(state.mode)
+    setSpeed(sliderSpeed(sliderIndex(state.speed, allowed), allowed, direction))
+  }
+  if (!playing) togglePause()
+}
 
 // More: the controls used now and then, one click away
 const moreBtn = $('moreBtn')
@@ -639,6 +700,118 @@ moreBtn.addEventListener('click', () => {
   moreEl.hidden = !moreEl.hidden
   moreBtn.setAttribute('aria-expanded', String(!moreEl.hidden))
 })
+
+// ---- Sound: the camera's microphone as it was recorded (NVR playback) ----------------------
+// The server sends it down the playback socket with the picture once asked ({sound: true}), at 1x
+// forwards only (cctv/pb-sound.mjs); it plays through live-audio.js soundOut, with the volume and
+// Filter of Live's Sound button and the same kept choices (argus.sound). Each packet is played when its
+// picture is on screen (pb-sound.js soundDelayS). The button's choice stays through a change of camera
+// or time; pausing or another speed silences it until 1x plays again. Off when the page opens: a
+// browser starts sound only from a click.
+const SOUND_PREFS_KEY = 'argus.sound'
+const soundPrefs = (() => {
+  try {
+    const p = JSON.parse(localStorage.getItem(SOUND_PREFS_KEY) ?? '{}')
+    return { volume: Number.isFinite(p.volume) ? Math.min(2, Math.max(0, p.volume)) : 1, filter: p.filter === true }
+  } catch {
+    return { volume: 1, filter: false }
+  }
+})()
+const saveSoundPrefs = () => { try { localStorage.setItem(SOUND_PREFS_KEY, JSON.stringify(soundPrefs)) } catch {} }
+// on: the button; out: the speaker (soundOut), made at the first click; format: what the socket said
+// its sound is ({type:'sound'}); shown: the picture's clock; heard: a packet played since the sound was
+// last asked for, and since when it was asked (soundQuietCheck)
+const sound = { on: false, out: null, format: null, shown: null, heard: false, askedAt: 0 }
+const soundBtn = $('soundBtn')
+const soundCap = soundBtn.querySelector('.pb-cap')
+const soundExtras = $('soundExtras')
+const soundVol = $('soundVol')
+const soundFilter = $('soundFilter')
+soundVol.value = String(soundPrefs.volume)
+soundVol.addEventListener('input', () => { soundPrefs.volume = Number(soundVol.value); sound.out?.setVolume(soundPrefs.volume); saveSoundPrefs() })
+const showSoundFilter = () => { soundFilter.classList.toggle('on', soundPrefs.filter); soundFilter.setAttribute('aria-pressed', String(soundPrefs.filter)) }
+showSoundFilter()
+soundFilter.addEventListener('click', () => { soundPrefs.filter = !soundPrefs.filter; sound.out?.setFilter(soundPrefs.filter); showSoundFilter(); saveSoundPrefs() })
+
+/** The button's words, as Live's: Sound, Sound…, Sound on, No sound yet, No sound. */
+function showSound(text, title) {
+  soundCap.textContent = text
+  soundBtn.title = title
+  soundBtn.setAttribute('aria-pressed', String(sound.on))
+  soundExtras.hidden = !sound.on
+}
+
+const soundNow = () => soundWanted({ on: sound.on, mode: state.mode, speed: state.speed, paused: state.paused, stepping: stepHold })
+
+/**
+ * Tells the open socket whether to send sound, when that has changed (each socket starts without), and
+ * silences what is scheduled when it is no longer wanted. Called wherever play, pause, speed, a step or
+ * the mode change.
+ */
+function syncSound() {
+  const want = soundNow()
+  if (!want) sound.out?.silence()
+  if (ws?.kind === 'nvr' && ws.readyState === WebSocket.OPEN && Boolean(ws.soundAsked) !== want) {
+    ws.soundAsked = want
+    ws.send(JSON.stringify({ sound: want }))
+    if (want) {
+      sound.heard = false
+      sound.askedAt = performance.now()
+    }
+  }
+  if (!sound.on) return
+  if (state.speed !== 1) showSound('Sound on', 'Sound plays at normal speed (1×) only. Click to stop.')
+  else if (sound.heard) showSound('Sound on', 'Listening to this recording. Click to stop.')
+}
+
+/** Nothing heard 6 s after asking while the picture plays: this camera recorded no sound here. */
+function soundQuietCheck() {
+  if (!sound.on || sound.heard || soundCap.textContent === 'No sound' || !ws?.soundAsked || performance.now() - sound.askedAt < 6000) return
+  if (soundCap.textContent !== 'No sound yet') showSound('No sound yet', 'No sound is coming from this recording.')
+}
+
+/** One sound frame from the socket (codec byte SOUND_CODEC): played with its picture, or dropped. */
+function playSound(buf, view) {
+  if (!sound.on || !sound.out || !sound.format || !soundNow()) return
+  const delay = soundDelayS({ tsMs: Number(view.getBigInt64(8, true)) / 1000, shown: sound.shown, nowMs: performance.now() })
+  if (delay === null) return
+  if (!sound.out.play(buf.subarray(HEADER_SIZE), sound.format, delay) || sound.heard) return
+  sound.heard = true
+  showSound('Sound on', 'Listening to this recording. Click to stop.')
+}
+
+/** A new playback socket (another camera or moment): the old position's sound is not heard over the new one, and the new socket says its own format. */
+function soundNewSocket() {
+  sound.out?.silence()
+  sound.shown = null
+  sound.format = null
+  sound.heard = false
+  if (sound.on) showSound('Sound…', 'Waiting for the recording\'s sound')
+}
+
+/** {type:'sound'}: the format of the sound frames that follow, or why there are none. */
+function onSoundFormat(msg) {
+  sound.format = msg.format ? msg : null
+  if (!msg.format && sound.on) showSound('No sound', msg.why ?? 'This recording has no sound.')
+}
+
+soundBtn.addEventListener('click', () => {
+  sound.on = !sound.on
+  if (sound.on) {
+    // (made here, from the click: a browser starts sound only then)
+    sound.out ??= soundOut({ volume: soundPrefs.volume, filter: soundPrefs.filter })
+    if (!sound.out) {
+      sound.on = false
+      showSound('No sound', 'This browser cannot play sound here.')
+      return
+    }
+    showSound('Sound…', 'Waiting for the recording\'s sound')
+  } else {
+    showSound('Sound', 'Listen to this camera\'s microphone as it was recorded')
+  }
+  syncSound()
+})
+showSound('Sound', 'Listen to this camera\'s microphone as it was recorded')
 
 /** Speeds, quality choices, legend, skew hint and source badge for the mode shown. */
 function updateModeUi() {
@@ -671,6 +844,10 @@ function updateModeUi() {
   // motion search reads the NVR's copy: only with Playback SD
   const search = document.getElementById('searchToggle')
   if (search) search.hidden = !r.sd
+  // Sound comes with the NVR's playback only: the server's own recordings keep none
+  soundBtn.hidden = server
+  soundExtras.hidden = server || !sound.on
+  syncSound()
   legendServer.hidden = !server
   const hint = server ? describeSkew(state.skew) : ''
   skewEl.textContent = hint
@@ -684,6 +861,7 @@ function updateModeUi() {
 function setSource(src) {
   state.src = src ?? 'server'
   badgeEl.hidden = !(state.mode === 'server' && state.src === 'nvr')
+  updatePlayButton() // (a stretch from the NVR cannot be played backwards: the button goes with it)
 }
 
 // ---- streaming ------------------------------------------------------------
@@ -724,6 +902,7 @@ function open(start) {
     ws.onclose = null
     ws.close()
   }
+  soundNewSocket()
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const sock = new WebSocket(`${proto}://${location.host}/playback?${nvrQ()}&ch=${state.ch}&stream=${rightsNow().nvrHd ? state.stream : 1}&start=${start}&h265=${state.h265 ? 1 : 0}`)
   sock.binaryType = 'arraybuffer'
@@ -733,6 +912,7 @@ function open(start) {
     // paused while it was still connecting: send() drops what an unopened socket cannot take, and
     // the NVR went on playing behind a page that said it was paused
     if (state.paused) sock.send(JSON.stringify({ pause: true }))
+    if (ws === sock) syncSound() // (sound, when the button is on and it plays at 1x)
   }
   sock.onmessage = (e) => {
     if (typeof e.data === 'string') return onStatus(JSON.parse(e.data))
@@ -754,6 +934,7 @@ function pushFrame(data) {
   const buf = new Uint8Array(data)
   if (buf.length <= HEADER_SIZE) return
   const view = new DataView(buf.buffer, buf.byteOffset)
+  if (buf[1] === SOUND_CODEC) return playSound(buf, view) // the camera's sound, not a picture
   player.push({
     isKey: (buf[0] & 1) === 1,
     codecId: buf[1],
@@ -773,6 +954,7 @@ function closeSocket() {
 
 function onStatus(msg) {
   if (msg.type === 'error') showMessage(msg.message)
+  if (msg.type === 'sound') onSoundFormat(msg)
   if (msg.type === 'fit') {
     // a remote viewer's HD from the NVR (playback.mjs): converted to fit the link, or the NVR's
     // stream itself for want of a free conversion; said when it changes, not at every seek
@@ -1119,12 +1301,24 @@ function togglePause() {
     stopStallWatch()
   } else player.resume()
   updatePlayButton()
+  syncSound() // (silent while paused)
 }
 
+/**
+ * The two play buttons. The one for the way the footage is running shows Pause while it runs; the
+ * other always offers its own direction. Play backwards is there only when the source can do it.
+ */
 function updatePlayButton() {
-  playBtn.querySelector('.pb-glyph').textContent = state.paused ? '▶' : '⏸'
-  playBtn.querySelector('.pb-cap').textContent = state.paused ? 'Play' : 'Pause'
-  playBtn.setAttribute('aria-label', state.paused ? 'Play' : 'Pause')
+  const back = state.speed < 0
+  const fwdOn = !state.paused && !back
+  const backOn = !state.paused && back
+  playBtn.dataset.state = fwdOn ? 'playing' : 'paused'
+  playBtn.setAttribute('aria-label', fwdOn ? 'Pause' : 'Play')
+  playBtn.title = fwdOn ? 'Pause (Space)' : 'Play (Space)'
+  playBackBtn.hidden = !reverseOffered()
+  playBackBtn.dataset.state = backOn ? 'playing' : 'paused'
+  playBackBtn.setAttribute('aria-label', backOn ? 'Pause' : 'Play backwards')
+  playBackBtn.title = backOn ? 'Pause (Space)' : 'Play backwards, as a run of still pictures (R)'
 }
 
 // The mode we have already explained a clamp for: an NVR leg refuses reverse and anything above 8x,
@@ -1145,6 +1339,7 @@ function setSpeed(speed) {
   send({ speed: allowed })
   player.setRate(rateOf(allowed))
   renderSpeeds()
+  syncSound() // (sound at 1x only)
   scheduleDraw()
   return allowed
 }
@@ -1196,6 +1391,7 @@ function stepFrame(direction) {
   const target = frameStep(from / 1000, direction, fps) * 1000
   seek(target)
   stepHold = true
+  syncSound() // (none on the way to a stepped frame)
   // The NVR starts at the keyframe before the time asked for, up to a GOP earlier. Held at its first
   // picture, a step forward went BACK to that keyframe (2 s, on a camera with a keyframe every 2 s).
   // The frames up to the one wanted are decoded unseen (player.stepTo, after seek()'s reset): the
@@ -1203,14 +1399,48 @@ function stepFrame(direction) {
   player.stepTo(stepNotBefore(from, direction, fps))
 }
 
+/** What the top lane shows as recorded, for the day on screen: in server mode the NVR-only stretches too. */
+const recordedNow = () => (state.mode === 'server' ? state.stretches : state.ranges)
+
+/**
+ * Previous (-1) or next (+1) sequence: the start of the nearest recorded stretch or motion mark
+ * (a search hit too) that way from the playhead (pb-bar.js sequenceTarget). Going against the way
+ * the footage runs, the mark just jumped to is already behind the playhead by the time of a second
+ * press, the more so the faster it plays: the tolerance grows with the speed, so two presses walk
+ * two marks instead of landing on the same one twice. At the first or the last one the page says
+ * so and stays where it is.
+ */
 function jumpEvent(direction) {
   const pos = state.position ?? state.view.startMs
-  const list = state.events.map(([s]) => s)
-  const target = direction > 0 ? list.find((s) => s > pos + 2000) : list.filter((s) => s < pos - 2000).at(-1)
-  if (target !== undefined) {
-    ensureVisible(target)
-    seek(target)
+  const against = !state.paused && (state.speed < 0 ? 1 : -1) === direction
+  const target = sequenceTarget({
+    spans: recordedNow(),
+    marks: [...state.events, ...state.hits.map((h) => h.start)],
+    atMs: pos,
+    direction,
+    toleranceMs: SEQUENCE_TOLERANCE_MS * (against ? Math.abs(state.speed) : 1)
+  })
+  if (target === null) {
+    showNotice(direction < 0 ? 'Nothing earlier on this day: this is the first recording or motion.' : 'Nothing later on this day: this is the last recording or motion.')
+    return
   }
+  ensureVisible(target)
+  seek(target)
+}
+
+/** How far before the end of today's newest recording "go to the newest" starts, as the page does when it opens. */
+const endBackMs = () => (state.date !== fmtDate(state.nvrNow) ? 10_000 : state.mode === 'server' ? START_BACK_SERVER_MS : START_BACK_MS)
+
+/** The first recording of the day shown (-1), or its newest (+1): a little before its end, so it plays. */
+function jumpToEdge(direction) {
+  if (state.mode === 'server' && state.live) rebuildStretches() // the live edge as it is now
+  const target = direction < 0 ? recordingStart(recordedNow()) : recordingEnd(recordedNow(), { backMs: endBackMs() })
+  if (target === null) {
+    showNotice('Nothing is recorded on this day.')
+    return
+  }
+  ensureVisible(target)
+  seek(target)
 }
 
 // ---- timeline -------------------------------------------------------------
@@ -1316,6 +1546,7 @@ function drawTimeline() {
 
   playheadEl.hidden = state.position === null || !inView(state.position)
   if (!playheadEl.hidden) playheadEl.style.left = `${pct(state.position)}%`
+  drawPill(playheadEl.hidden ? null : pct(state.position))
   nowEl.hidden = !inView(state.nvrNow)
   if (!nowEl.hidden) nowEl.style.left = `${pct(state.nvrNow)}%`
 
@@ -1327,13 +1558,38 @@ function drawTimeline() {
       return s
     })
   )
-  spanEl.textContent = spanLabel(v.spanMs)
+  spanEl.textContent = spanWords(v.spanMs)
+  // Playback | Live: Live opens this same camera, full-size (pb-bar.js liveHref, read by viewer.js)
+  const live = liveHref({ nvr: state.nvr, ch: state.ch })
+  if (liveLink.getAttribute('href') !== live) liveLink.setAttribute('href', live)
   for (const b of zoomBtns) b.setAttribute('aria-pressed', String(Number(b.dataset.span) === Math.round(v.spanMs)))
   followBtn.setAttribute('aria-pressed', String(state.follow))
   drawClip()
   drawBookmarks()
   drawOverview()
   drawHover()
+}
+
+/**
+ * The pill on the playhead, and the line that joins it to the tracks: the day and the time under
+ * the playhead, on the site's own clock (state.tz, as every other time on this page). `at` is the
+ * playhead's place across the view in percent, or null when it is out of sight. The pill is kept
+ * inside the ruler by the style sheet (it stops at either end while its line goes on to the edge).
+ *
+ * Milliseconds are shown only where the time is a frame's own timestamp and can be read: paused on
+ * a frame, or zoomed in under two minutes as the clock does. Never while the playhead is dragged,
+ * when the time is the pointer's and not a frame's.
+ */
+function drawPill(at) {
+  pillEl.hidden = at === null
+  rulerHeadEl.hidden = at === null
+  if (at === null) return
+  const millis = !scrub && (state.paused || state.view.spanMs < 120_000)
+  const text = pillText(state.position, { tzOffsetMs: state.tz, millis })
+  if (pillEl.textContent !== text) pillEl.textContent = text
+  pillEl.classList.toggle('pb-pill-ms', millis)
+  pillEl.style.setProperty('--at', `${at}%`)
+  rulerHeadEl.style.left = `${at}%`
 }
 
 /** The whole day, with the zoomed part marked. Its own view is the day itself, so laneBoxes clips to it. */
@@ -1540,11 +1796,14 @@ new ResizeObserver(() => drawTimeline()).observe(timeline)
 
 // ---- controls -------------------------------------------------------------
 
-playBtn.addEventListener('click', togglePause)
+playBtn.addEventListener('click', () => playToward(1))
+playBackBtn.addEventListener('click', () => playToward(-1))
 $('back').addEventListener('click', () => seek((state.position ?? state.view.startMs) - SEEK_STEP))
 $('fwd').addEventListener('click', () => seek((state.position ?? state.view.startMs) + SEEK_STEP))
-$('prevEvent').addEventListener('click', () => jumpEvent(-1))
-$('nextEvent').addEventListener('click', () => jumpEvent(1))
+$('toStart').addEventListener('click', () => jumpToEdge(-1))
+$('toEnd').addEventListener('click', () => jumpToEdge(1))
+$('seqPrev').addEventListener('click', () => jumpEvent(-1))
+$('seqNext').addEventListener('click', () => jumpEvent(1))
 $('framePrev').addEventListener('click', () => stepFrame(-1))
 $('frameNext').addEventListener('click', () => stepFrame(1))
 
@@ -2176,6 +2435,15 @@ document.addEventListener('keydown', (e) => {
     stepFrame(-1)
   } else if (e.key === '.') {
     stepFrame(1)
+  } else if (e.key === 'Home' || e.key === 'End') {
+    // the first or the newest recording of the day (the page has nothing to scroll in their place)
+    e.preventDefault()
+    if (!e.repeat) jumpToEdge(e.key === 'Home' ? -1 : 1)
+  } else if (e.key === 'r' || e.key === 'R') {
+    // play backwards, where the footage can be (the button is hidden where it cannot)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && reverseOffered()) playToward(-1)
+  } else if (e.key === '<' || e.key === '>') {
+    stepSpeed(e.key === '<' ? -1 : 1)
   } else if (e.key === '+' || e.key === '=') {
     zoom(1 / 2)
   } else if (e.key === '-' || e.key === '_') {

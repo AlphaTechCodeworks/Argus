@@ -584,6 +584,7 @@ const B = await import('../public/player.js?range=full')
   check('  a stream that flags full range (JPB DOOR) is left as it is', !env.decoders.at(-1).config.colorSpace && !q.rangeFixed && q.displayColour().range === 'full')
   q.close()
   env.refuseColour = true
+  B.clearDecoderConfigCache()
   const r = new B.VideoPlayer(canvas())
   r.push(chunk(0, true))
   await tick()

@@ -3,10 +3,11 @@
 // Sessions are stateless signed cookies: base64url(user).expiry.hmac. A signed-out one is remembered
 // (revokeSession) until it would have run out anyway, so the token is refused wherever it still is.
 import { createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileCache } from './file-cache.mjs'
+import { writeFileAtomicSync } from './atomic-write.mjs'
 
 const scrypt = promisify(scryptCb)
 
@@ -36,6 +37,19 @@ const loadSecret = () => {
 const usersCache = fileCache(USERS_FILE, () => readUsers())
 /** A fresh copy: callers change it and saveUsers() it. */
 export const loadUsers = () => ({ ...usersCache.get() })
+/**
+ * The account a typed user name means: the account of exactly that name, or else the one whose name
+ * differs from it only in capitals ("Mike" signs in as mike; the owner's wish, 2026-10-15). Names that
+ * differ only in capitals cannot be created (users-api.mjs), so there is never more than one. A name
+ * with no account is given back as typed (the sign-in then fails as before). Passwords stay exact.
+ * @param {string} typed @param {Record<string, object>} [users]
+ */
+export function accountName(typed, users = loadUsers()) {
+  const name = String(typed ?? '').trim()
+  if (Object.hasOwn(users, name)) return name
+  const lower = name.toLowerCase()
+  return Object.keys(users).find((u) => u.toLowerCase() === lower) ?? name
+}
 
 const readUsers = () => {
   if (!existsSync(USERS_FILE)) return {}
@@ -43,6 +57,15 @@ const readUsers = () => {
   return Object.fromEntries(
     Object.entries(raw).map(([name, v]) => [name, typeof v === 'string' ? { hash: v, role: 'admin' } : v])
   )
+}
+
+/**
+ * A "watch only" account (role 'watch'): a viewer in every check of rights, shown only Live, Playback
+ * and Map; the Alarms and Health pages send it back to Live (server.mjs, nav-model.js).
+ */
+export const isWatchOnly = (user) => {
+  const users = loadUsers()
+  return Object.hasOwn(users, user) && users[user]?.role === 'watch'
 }
 
 /** Admins can manage NVRs and sites; viewers can only watch. */
@@ -72,7 +95,7 @@ const usersChanged = () => {
 
 export const saveUsers = (users) => {
   ensureDir(USERS_FILE)
-  writeFileSync(USERS_FILE, `${JSON.stringify(users, null, 2)}\n`, { mode: 0o600 })
+  writeFileAtomicSync(USERS_FILE, `${JSON.stringify(users, null, 2)}\n`)
   usersCache.forget()
   usersChanged()
 }
@@ -102,9 +125,10 @@ export const checkLogin = async (user, password) => {
 const secret = loadSecret()
 const sign = (payload) => createHmac('sha256', secret).update(payload).digest('base64url')
 
-export const createSession = (user) => {
+/** ttlMs: longer for a device set up by a set-up code, which has no password to fall back on (setup-codes.mjs). */
+export const createSession = (user, ttlMs = SESSION_TTL_MS) => {
   const issued = Math.max(Date.now(), loadUsers()[user]?.since || 0)
-  const payload = `${Buffer.from(user).toString('base64url')}.${issued + SESSION_TTL_MS}`
+  const payload = `${Buffer.from(user).toString('base64url')}.${issued + ttlMs}`
   return `${payload}.${sign(payload)}`
 }
 
@@ -127,7 +151,7 @@ export const verifySession = (token, { allowPasswordChange = false } = {}) => {
   const expected = Buffer.from(sign(payload))
   if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) return null
   if (Number(parts[1]) < Date.now()) return null
-  if (revokedSessions().has(parts[2])) return null // signed out (revokeSession)
+  if (revokedSessions().has(parts[2]) || !revocationReadable) return null
   const user = Buffer.from(parts[0], 'base64url').toString()
   const users = loadUsers()
   // hasOwn, not `in`: `'constructor' in {}` is true, and a name that resolves through
@@ -140,15 +164,24 @@ export const verifySession = (token, { allowPasswordChange = false } = {}) => {
   const since = users[user]?.since
   if (Number.isFinite(since) && Number(parts[1]) - SESSION_TTL_MS < since) return null
   if (users[user]?.mustChangePassword && !allowPasswordChange) return null
+  // An Active Directory user (ad.mjs) is good only while the directory's last "yes" holds: re-checks
+  // move adValidUntil on; removal from the CCTV groups, or no answer for longer than the grace, ends it.
+  if (users[user]?.source === 'ad' && !(users[user].adValidUntil > Date.now())) return null
   return user
 }
 
 export const mustChangePassword = (user) => loadUsers()[user]?.mustChangePassword === true
 
+// A Windows (Active Directory) user's password is AD's: ad.mjs hands in how to change it there.
+let windowsPasswordChanger = null
+/** @param {(user: string, current: string, next: string) => Promise<{ ok: true } | { error: string }>} fn */
+export const setWindowsPasswordChanger = (fn) => { windowsPasswordChanger = fn }
+
 /** Change only the signed-in account, preserving role, rights and personal settings. */
 export async function changePassword(user, currentPassword, newPassword) {
   if (typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 1024) return { error: 'Use a password between 8 and 1024 characters.' }
   const before = loadUsers()[user]
+  if (before?.source === 'ad') return windowsPasswordChanger ? windowsPasswordChanger(user, String(currentPassword ?? ''), newPassword) : { error: 'Your password is your Windows password: change it on a Windows PC.' }
   if (!before || !(await checkLogin(user, currentPassword))) return { error: 'The current password is incorrect.' }
   if (await checkLogin(user, newPassword)) return { error: 'Choose a different password from the temporary password.' }
   const hash = await hashPassword(newPassword)
@@ -166,15 +199,18 @@ export async function changePassword(user, currentPassword, newPassword) {
 // by temp-file-and-rename, read once: only this process signs sessions out.
 const REVOKED_FILE = join(DATA_DIR, 'revoked-sessions.json')
 let revoked = null // signature -> expiry (ms)
+let revocationReadable = true
 const revokedSessions = () => {
   if (revoked) return revoked
   revoked = new Map()
   if (!existsSync(REVOKED_FILE)) return revoked
   try {
     const raw = JSON.parse(readFileSync(REVOKED_FILE, 'utf8'))
-    for (const [sig, exp] of Object.entries(raw && typeof raw === 'object' ? raw : {})) if (Number.isFinite(exp) && exp >= Date.now()) revoked.set(sig, exp)
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.values(raw).some(exp => !Number.isFinite(exp))) throw new Error('invalid revocation store')
+    for (const [sig, exp] of Object.entries(raw)) if (exp >= Date.now()) revoked.set(sig, exp)
   } catch (e) {
-    console.error(`[auth] ${REVOKED_FILE} is unreadable (${e.message}); sessions signed out before now are good again until they run out`)
+    revocationReadable = false
+    console.error(`[auth] ${REVOKED_FILE} is unreadable (${e.message}); sessions are refused until the store is repaired and the server restarted`)
   }
   return revoked
 }
@@ -193,9 +229,7 @@ export const revokeSession = (token) => {
   list.set(sig, Number(expiry))
   try {
     ensureDir(REVOKED_FILE)
-    const tmp = `${REVOKED_FILE}.tmp-${process.pid}`
-    writeFileSync(tmp, `${JSON.stringify(Object.fromEntries(list))}\n`, { mode: 0o600 })
-    renameSync(tmp, REVOKED_FILE)
+    writeFileAtomicSync(REVOKED_FILE, `${JSON.stringify(Object.fromEntries(list))}\n`)
   } catch (e) {
     console.error(`[auth] could not write ${REVOKED_FILE} (${e.message}); that session is signed out until the server restarts`)
   }
@@ -224,8 +258,8 @@ export const parseCookies = (header = '') =>
       .map(([k, v]) => [k, decodeCookie(v)])
   )
 
-export const sessionCookie = (token, secure) =>
-  `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure ? '; Secure' : ''}`
+export const sessionCookie = (token, secure, ttlMs = SESSION_TTL_MS) =>
+  `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.round(ttlMs / 1000)}${secure ? '; Secure' : ''}`
 
 export const clearCookie = () => `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`
 

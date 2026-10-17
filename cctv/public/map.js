@@ -12,7 +12,7 @@ import { showStill } from './stills.js'
 import { searchCameras } from './grid-view.js'
 import { planFlight, flightPose } from './map-flight.js'
 import { mountCameraBrowser, rememberSite, workspaceSite } from './camera-browser.js'
-import { preferenceStorage } from './user-settings.js'
+import { preferenceStorage, preferencesReady } from './user-settings.js'
 import {
   MAX_LAT,
   STATES,
@@ -56,6 +56,10 @@ import {
   visibleMarkers
 } from './map-model.js'
 
+// The names switch, the layer and the site last chosen come with the account: this page's own
+// script waits here until they are known (user-settings.js, which may not wait itself).
+await preferencesReady
+
 const $ = (id) => document.getElementById(id)
 const LAYERS = {
   street: {
@@ -76,6 +80,10 @@ const DEFAULT_GEO = { lat: 30, lng: -40, zoom: 2, layer: 'street' }
 const MAX_RANGE = { geo: 5000, plan: 20_000 }
 /** Marker centres closer together than this are one illegible smudge, so they are clustered. */
 const CLUSTER_GAP = 26
+// With one site chosen there is room to spare and its cameras are what is being looked for: only
+// markers that all but sit on each other are piled (the owner, 2026-10-12: "make it easier to understand").
+const CLUSTER_GAP_SITE = 15
+const CONES_IN_CLUSTER = 8 // a cluster of up to this many cameras still draws each one's cone
 
 // ---- map engine -------------------------------------------------------------
 
@@ -613,7 +621,8 @@ async function api(method, path, body) {
   const res = await fetch(path, {
     method,
     headers: body !== undefined ? { 'content-type': 'application/json' } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(8000)
   })
   if (res.status === 401) location.href = '/login.html'
   const data = await res.json().catch(() => ({}))
@@ -725,7 +734,7 @@ function currentMarkers() {
 }
 
 /** One camera's marker: the dot, its channel number, and its name when names are on. */
-function markerNode(marker, sel, showNames) {
+function markerNode(marker, sel, showNames, quiet = false) {
   const motion = lighting.motion.has(marker.key)
   const alarm = lighting.alarm.has(marker.key)
   const lit = `${alarm ? ' alarm' : ''}${motion ? ' motion' : ''}`
@@ -740,7 +749,8 @@ function markerNode(marker, sel, showNames) {
   if (motion) g.append(svgEl('circle', { r: 12, class: 'cam-pulse' }))
   g.append(svgEl('circle', { r: 12, class: 'cam-dot' }), num)
   if (showNames && marker.cam) {
-    const name = svgEl('text', { x: 17, class: 'cam-name' })
+    // quiet: no room for it beside its neighbours, so it shows only under the pointer or when chosen
+    const name = svgEl('text', { x: 17, class: quiet ? 'cam-name quiet' : 'cam-name' })
     name.textContent = marker.cam.name
     g.append(name)
   }
@@ -806,6 +816,10 @@ function scene() {
   // the site of the camera being watched or worked on stays open under the person's hands
   const open = [selected, popup?.key].filter(Boolean).map((k) => siteOf[k])
   const shut = collapsedSites(badges, view.zoom, { open, editing: editing || linkMode })
+  // One site chosen: its cameras alone are drawn. Its neighbours' made a site with none of its own
+  // placed look full (Bounty Stabroek, 2026-10-12); they stay as their badges, a click away. Not while
+  // editing or linking, where a camera of any site may be what is being placed or joined.
+  if (site && !editing && !linkMode) for (const name of new Set(Object.values(siteOf))) if (name !== site && !open.includes(name)) shut.add(name)
   return {
     markers: visibleMarkers(all, siteOf, shut),
     badges: badges.filter((b) => shut.has(b.name)).map((b) => {
@@ -833,12 +847,29 @@ view.onDraw = () => {
     // While editing, every camera stays its own marker: an admin is moving and aiming individual
     // cameras, and one that merged into a pile under the pointer could not be worked with at all.
     const pinned = [selected, popup?.key].filter(Boolean)
-    const clusters = editing ? markers.map((x) => ({ x: x.x, y: x.y, members: [x], state: x.state, count: 1, key: x.key })) : clusterMarkers(markers, CLUSTER_GAP, pinned)
+    const clusters = editing ? markers.map((x) => ({ x: x.x, y: x.y, members: [x], state: x.state, count: 1, key: x.key })) : clusterMarkers(markers, site ? CLUSTER_GAP_SITE : CLUSTER_GAP, pinned)
     const alone = new Set(clusters.filter((c) => c.count === 1).map((c) => c.key))
+    // A few cameras under one count still show where each looks (the owner, 2026-10-09: "I can't see
+    // the 3 cameras' coverage"); the cones of a big pile would be a smear saying nothing, so past
+    // CONES_IN_CLUSTER its cameras keep their positions and lose their cones, as before.
+    const coned = new Set(clusters.filter((c) => c.count > 1 && c.count <= CONES_IN_CLUSTER).flatMap((c) => c.members.map((x) => x.key)))
+    // Names that would be written over a neighbour's dot or over another name are left off (they show
+    // under the pointer, and for the camera chosen): a few names that can be read, not a heap that cannot.
+    const crowded = new Set()
+    if (showNames && !editing) {
+      const dots = clusters.map((c) => ({ key: c.count === 1 ? c.key : null, x: c.x, y: c.y }))
+      const kept = []
+      for (const marker of markers) {
+        if (!alone.has(marker.key) || !marker.cam) continue
+        const box = { x0: marker.x + 14, x1: marker.x + 19 + String(marker.cam.name).length * 6.8, y0: marker.y - 9, y1: marker.y + 9 }
+        const hitsDot = dots.some((d) => d.key !== marker.key && d.x + 13 > box.x0 && d.x - 13 < box.x1 && d.y + 13 > box.y0 && d.y - 13 < box.y1)
+        const hitsName = kept.some((k) => k.x1 > box.x0 && k.x0 < box.x1 && k.y1 > box.y0 && k.y0 < box.y1)
+        if (hitsDot || hitsName) crowded.add(marker.key)
+        else kept.push(box)
+      }
+    }
     for (const marker of markers) {
-      // A cone belongs to one camera; drawing the cones of a whole cluster would be a blue smear
-      // saying nothing, so a clustered camera keeps its position and loses its cone.
-      if (!alone.has(marker.key)) continue
+      if (!alone.has(marker.key) && !coned.has(marker.key)) continue
       const sel = marker.key === selected || marker.key === popup?.key ? ' sel' : ''
       const cone = svgEl('path', { d: conePath([marker.x, marker.y], marker.dir, marker.fov, marker.r), class: `cone st-${marker.state}${sel}` })
       // an admin-chosen group colour overrides the status colour of the cone; the dot still carries
@@ -854,7 +885,8 @@ view.onDraw = () => {
         cone.style.strokeOpacity = '0.9'
       }
       cones.append(cone)
-      marks.append(markerNode(marker, sel, showNames))
+      if (!alone.has(marker.key)) continue // (in a cluster: its cone only, the count is its marker)
+      marks.append(markerNode(marker, sel, showNames, crowded.has(marker.key)))
       if (editing && marker.key === selected) {
         const p = [marker.x, marker.y]
         const tip = polar(p, marker.dir, marker.r)
@@ -1139,7 +1171,15 @@ const EVENT_LOOKBACK_MS = 90_000 // long enough to still be lighting a lingering
  * was given, so nothing lights or reveals a camera the viewer may not see. A failed poll leaves the
  * last lighting alone: a dropped request is not evidence that nothing is happening.
  */
-async function loadEvents() {
+let eventLoad = null
+function loadEvents() {
+  if (document.hidden) return Promise.resolve()
+  if (eventLoad) return eventLoad
+  eventLoad = loadEventsImpl().finally(() => { eventLoad = null })
+  return eventLoad
+}
+async function loadEventsImpl() {
+  if (document.hidden) return
   try {
     const from = Date.now() - EVENT_LOOKBACK_MS
     const data = await api('GET', `/api/events?from=${from}&limit=300`)
@@ -1379,10 +1419,8 @@ function renderSites({ reveal = true } = {}) {
   const all = btn('all', { className: 'map-site-go', textContent: 'All sites', 'aria-pressed': String(!planSite && !site) })
   all.addEventListener('click', () => goSite(''))
   parts.push(el('span', { className: `map-site${!planSite && !site ? ' sel' : ''}` }, all))
-  const quickSites = oneMap().sites
-  const selectedQuick = quickSites.find((s) => s.name === site)
-  const shownSites = selectedQuick ? [selectedQuick, ...quickSites.filter((s) => s !== selectedQuick).slice(0, 11)] : quickSites.slice(0, 12)
-  for (const s of shownSites) {
+  // every site, always in the same order (the row scrolls; the chosen one is brought into view below)
+  for (const s of oneMap().sites) {
     const offline = s.keys.filter((k) => stateFor(k) === 'offline').length
     // said in full for a screen reader: read as written, "37" and "4 offline" run together as 374
     const spoken = `${s.name}, ${s.count} camera${s.count === 1 ? '' : 's'}${offline ? `, ${offline} offline` : ''}${s.placed ? '' : ', not placed on the map'}`
@@ -1487,9 +1525,11 @@ function viewPanel() {
   let on = 0
   let total = 0
   const matches = names.flatMap((n) => searchCameras(siteCams(n), mapListQuery))
-  const pageCount = Math.max(1, Math.ceil(matches.length / MAP_LIST_LIMIT))
+  // one site chosen: all its cameras in one list; pages only for every site at once
+  const perPage = name ? Math.max(matches.length, 1) : MAP_LIST_LIMIT
+  const pageCount = Math.max(1, Math.ceil(matches.length / perPage))
   mapListPage = Math.min(mapListPage, pageCount - 1)
-  const visibleKeys = new Set(matches.slice(mapListPage * MAP_LIST_LIMIT, (mapListPage + 1) * MAP_LIST_LIMIT).map(camKey))
+  const visibleKeys = new Set(matches.slice(mapListPage * perPage, (mapListPage + 1) * perPage).map(camKey))
   for (const n of names) {
     const matching = searchCameras(siteCams(n), mapListQuery)
     if (!matching.length) continue
@@ -1530,6 +1570,12 @@ function viewPanel() {
     if (acts.childElementCount) parts.push(acts)
   } else {
     parts.push(el('p', { className: 'map-help', textContent: mapListQuery ? `${total} matching camera${total === 1 ? '' : 's'} · ${on} placed. Search filters this list only.` : `${on} of ${total} on the ${planSite ? 'plan' : 'map'}. Select a camera for live video.` }))
+    // cameras nobody has placed: say it in so many words, and what to do, instead of an empty map
+    if (!mapListQuery && !planSite && name && total > 0 && on < total) {
+      parts.push(el('p', { className: 'map-help map-unplaced', textContent: on === 0
+        ? `None of ${name}'s cameras have been placed on the map yet${isAdmin ? ': press Edit map, pick a camera in this list, then click where it is.' : '. An administrator can place them.'}`
+        : `${total - on} of ${name}'s cameras are not on the map yet${isAdmin ? ': press Edit map to place them.' : '.'}` }))
+    }
   }
   parts.push(legend(), coneLegend(), list)
   if (!total) parts.push(el('p', { className: 'map-help', textContent: 'No cameras match. Try another name, site or recorder.' }))
@@ -2304,6 +2350,16 @@ mapBrowser = mountCameraBrowser({
 applyView(false)
 renderSites()
 renderSide()
+void preferencesReady.then(() => {
+  namesBox.checked = preferenceStorage.getItem('cctv.mapNames') !== '0'
+  const savedLayer = preferenceStorage.getItem('cctv.mapLayer')
+  // (keeping the view: applyView(false) put the map back to the whole world just after it had landed
+  // on the sites, every time a layer had been saved -- 2026-10-16 "the map is showing the whole world")
+  if (LAYERS[savedLayer] && savedLayer !== layer) { layer = savedLayer; satBox.checked = layer === 'satellite'; applyView(true) }
+  const savedSite = workspaceSite() ?? preferenceStorage.getItem('cctv.mapSite') ?? ''
+  if (siteNames.includes(savedSite) && savedSite !== site) goSite(savedSite)
+  stale()
+})
 {
   // arrive already looking at the chosen site (or every site): no flight on opening the page
   const land = () => {
@@ -2318,6 +2374,7 @@ renderSide()
 
 // camera colours every 30 s: the roster for names and new cameras, the health poll for the states
 setInterval(async () => {
+  if (document.hidden) return
   try {
     setCameras(await api('GET', '/api/cameras'))
   } catch {}

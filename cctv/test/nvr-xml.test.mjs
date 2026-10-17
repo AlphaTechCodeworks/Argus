@@ -26,6 +26,7 @@ process.env.SDK_COOL_MS = '100' // a late read cools its NVR (not used by XML ca
 const { exclusiveSettled, lateCalls, onCallSettled, sdkCallT, sdkStuck } = await import('../sdk.mjs')
 const { Lane } = await import('../lanes.mjs')
 const { HttpError, _test, isReadCommand, power, transparent, xmlSettled } = await import('../nvr-xml.mjs')
+_test.setMaxWaiting(10) // the cases below count against a queue of 10 (it is 30 in service since 2026-10-12)
 
 const print = console.log.bind(console)
 const out = []

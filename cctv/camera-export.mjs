@@ -81,6 +81,9 @@ export async function camerasReport(nvrs, { fresh = false } = {}) {
   return readNow(nvrs)
 }
 
+/** The last snapshot as it is, or null: never reads a recorder (Find device, find-device.mjs). */
+export const cameraSnapshot = () => (cache.nvrs ? { at: cache.at, nvrs: cache.nvrs } : null)
+
 /** Milliseconds from `now` to the next time the site's clock (`offsetMin` minutes from UTC) reads `hour`:00. */
 export function msUntilSiteHour(now, hour, offsetMin) {
   const site = new Date(now + offsetMin * 60_000) // its getUTC* read back as the site's wall clock

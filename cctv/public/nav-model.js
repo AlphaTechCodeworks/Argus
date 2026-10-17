@@ -34,7 +34,9 @@ export const PHONE_BAR = Object.freeze(['live', 'playback', 'alarms', 'health'])
  * behind them checks rights for itself -- it only spares a viewer links to pages that would refuse
  * them. Anyone not positively an admin is treated as a viewer.
  */
-export function navFor({ admin = false } = {}) {
+export function navFor({ admin = false, watchOnly = false } = {}) {
+  // a watch-only account: Live, Playback and Map, nothing else (the server sends it back from the rest)
+  if (watchOnly === true && admin !== true) return NAV_GROUPS.filter((g) => g.id === 'watch')
   return NAV_GROUPS.filter((g) => !g.adminOnly || admin === true)
 }
 

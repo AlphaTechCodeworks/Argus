@@ -193,6 +193,7 @@ export function openPage({ tiles, linkMbps, durMs, poolMax = 16, remote = true, 
       const channels = new Map() // ch -> its channel on this socket
       serveMux(ws, {
         session: () => 'owner',
+        who: 'remote', // as server.mjs names a page through the tunnel (the one adaptive-live controls)
         now: clock.now,
         log: () => {},
         attach: (channel, sub) => {

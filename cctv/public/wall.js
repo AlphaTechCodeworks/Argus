@@ -18,9 +18,11 @@
 // for the speed ladder and the shuttle, pb-sources.js for merging and skew, player.js for decoding.
 // playback.js itself is deliberately not touched or imported: its state is the single-camera page's.
 import { CODEC_H265, VideoPlayer, canDecodeH265 } from './player.js'
+import { deviceVideoBudget } from './video-budget.js'
 import { PLAYBACK_CLOCK } from './playout.js'
 import { describeSkew, mergeSources, pbRights, recordedFrom, refusedMessage, wallQualities, wallTileMode } from './pb-sources.js'
-import { follow as followView, fmtClock, makeView, spanLabel, ticks, zoomAt } from './pb-view.js'
+import { follow as followView, fmtClock, makeView, ticks, zoomAt } from './pb-view.js'
+import { SEQUENCE_TOLERANCE_MS, liveHref, pillText, recordingEnd, recordingStart, sequenceTarget, sliderIndex, sliderSpeed, sliderSpeeds, spanStarts, spanWords, speedText } from './pb-bar.js'
 import { allowedSpeeds, clampSpeed, shuttleLabel, shuttleRate } from './pb-transport.js'
 import {
   MAX_TILES,
@@ -80,6 +82,11 @@ const laneNamesEl = $('laneNames')
 const laneRowsEl = $('laneRows')
 const ticksEl = $('ticks')
 const playheadEl = $('playhead')
+const rulerHeadEl = $('rulerHead') // the playhead's line carried up through the ruler, to the pill
+const pillEl = $('pill') // the day and time under the playhead
+const liveLink = $('liveLink')
+const speedSlider = $('speedSlider')
+const speedTextEl = $('speedText')
 const nowEl = $('tlNow')
 const clockEl = $('clock')
 const clockInput = $('clockInput')
@@ -101,6 +108,7 @@ const laneModeSel = $('laneMode')
 const viewSel = $('viewSel')
 const pagerEl = $('pager')
 const pageLabel = $('pageLabel')
+const zoomBtns = [...document.querySelectorAll('.pb-zoom button')]
 
 const state = {
   user: '',
@@ -237,6 +245,14 @@ class Tile {
       // the playback page's clock: recordings arrive in bursts, not at frame rate, and after a
       // server stall they arrive late for good (playout.js PLAYBACK_CLOCK)
       clock: PLAYBACK_CLOCK,
+      onResourceLimit: () => {
+        this.resourceBlocked = true
+        this.undecodable = true
+        this.error = 'Device video limit. Select fewer cameras or a lighter recording source.'
+        this.close()
+        this.player.reset()
+      },
+      onError: () => { this.error = 'Video restarted. Seek to retry.'; this.close() },
       onFrame: (ts) => {
         // ts is in whatever clock this tile's source stamps: the server's own recordings are
         // already server time (skew 0 below), the NVR's playback is the NVR's clock.
@@ -343,6 +359,12 @@ class Tile {
    */
   wantsStream(atMs) {
     if (document.hidden || !pageAwake) return false
+    const budget = deviceVideoBudget()
+    if (this.resourceBlocked && (!budget || budget.active < budget.limit)) {
+      this.resourceBlocked = false
+      this.undecodable = false
+      this.error = null
+    }
     if (state.maximised && state.maximised !== this.key) return false
     return this.status(atMs).kind === 'playing'
   }
@@ -515,6 +537,7 @@ class Tile {
   }
 
   close() {
+    this.player.reset()
     if (!this.ws) return
     this.ws.onclose = null
     this.ws.close()
@@ -677,6 +700,16 @@ function goPage(delta) {
   showPage()
 }
 
+// A few words from the bar's own buttons ("No recording starts earlier on this day."), shown at the
+// front of the note above the grid for a few seconds: a button that did nothing must say why.
+const BAR_NOTE_MS = 5000
+const barNote = { text: '', until: 0 }
+function sayBriefly(text) {
+  barNote.text = text
+  barNote.until = performance.now() + BAR_NOTE_MS
+  updateLoadNote()
+}
+
 /**
  * What this page is asking of this PC and of the NVRs. The load warning counts the tiles actually
  * streaming — a page of four out of twelve cameras costs four streams, not twelve — and the opening
@@ -689,6 +722,7 @@ function updateLoadNote() {
   const load = loadWarning(state.tiles.length, state.quality)
   const off = state.cameras.length - state.tiles.length
   const parts = [
+    performance.now() < barNote.until ? barNote.text : '',
     load.text,
     off > 0 ? `${off} more on other pages, not streaming.` : '',
     opening.text
@@ -840,13 +874,29 @@ function drawPlayhead() {
   const pct = ((at - v.startMs) / v.spanMs) * 100
   playheadEl.hidden = pct < 0 || pct > 100
   playheadEl.style.left = `${pct}%`
+  // The pill on the playhead: the day and the time every tile is showing, in the site's zone and
+  // server time like every other time here. To the second only: this is the wall's own clock, not
+  // any one frame's timestamp, so there are no milliseconds to be honest about. The style sheet
+  // keeps the pill inside the ruler; its line goes on to the edge.
+  pillEl.hidden = playheadEl.hidden
+  rulerHeadEl.hidden = playheadEl.hidden
+  if (!pillEl.hidden) {
+    const text = pillText(at, { tzOffsetMs: state.tz })
+    if (pillEl.textContent !== text) pillEl.textContent = text
+    pillEl.style.setProperty('--at', `${pct}%`)
+    rulerHeadEl.style.left = `${pct}%`
+  }
   const nowPct = ((state.serverNow - v.startMs) / v.spanMs) * 100
   nowEl.hidden = nowPct < 0 || nowPct > 100
   nowEl.style.left = `${nowPct}%`
 
   clockEl.textContent = fmtClock(at, { tzOffsetMs: state.tz })
   dateEl.textContent = fmtDate(at)
-  spanEl.textContent = spanLabel(v.spanMs)
+  const span = spanWords(v.spanMs)
+  if (spanEl.textContent !== span) {
+    spanEl.textContent = span
+    for (const b of zoomBtns) b.setAttribute('aria-pressed', String(Number(b.dataset.span) === Math.round(v.spanMs)))
+  }
   // Counted over the cameras the server has an index of. A camera it has never recorded is not
   // "no footage here" — we simply do not know, and saying so is better than a number that is wrong.
   const indexed = state.tiles.filter((t) => t.available)
@@ -884,16 +934,29 @@ function renderSpeeds() {
   const { speed } = clampSpeed(state.speed, mode)
   state.speed = speed
   for (const b of speedsEl.children) b.setAttribute('aria-pressed', String(Number(b.dataset.speed) === speed))
-  if (speedCycleBtn) speedCycleBtn.textContent = speedLabel(speed)
+  // the slider on the bar: one stop for each forward speed the whole wall can play (pb-bar.js
+  // sliderSpeeds), so it cannot be left between two, and the speed chosen in words beside it
+  const allowed = allowedSpeeds(mode)
+  speedSlider.max = String(Math.max(0, sliderSpeeds(allowed).length - 1))
+  speedSlider.value = String(sliderIndex(speed, allowed))
+  speedSlider.setAttribute('aria-valuetext', speedText(speed))
+  speedTextEl.textContent = speedText(speed)
 }
 
-// the one speed button on the bar: 1x -> 2x -> 4x -> 8x -> 1x; the full ladder is under More
-const speedCycleBtn = $('speedCycle')
-speedCycleBtn?.addEventListener('click', () => {
-  const mode = wallMode(state.tiles.map((t) => ({ mode: t.mode() })))
-  const ladder = allowedSpeeds(mode).filter((x) => x >= 1)
-  setSpeed(ladder.find((x) => x > state.speed) ?? 1)
+/** The speeds the whole wall can play now: one tile on an NVR session holds it to the NVR's. */
+const wallSpeeds = () => allowedSpeeds(wallMode(state.tiles.map((t) => ({ mode: t.mode() }))))
+
+// the speed slider: 1x, 2x, 4x, 8x (and 16x, 32x when every tile plays the server's recordings).
+// The full ladder is still under More.
+speedSlider.addEventListener('input', () => {
+  setSpeed(sliderSpeed(Number(speedSlider.value), wallSpeeds(), state.speed < 0 ? -1 : 1))
 })
+
+/** One stop slower (-1) or faster (+1) on the slider; nothing at either end. */
+function stepSpeed(by) {
+  const allowed = wallSpeeds()
+  setSpeed(sliderSpeed(sliderIndex(state.speed, allowed) + by, allowed, state.speed < 0 ? -1 : 1))
+}
 $('moreBtn')?.addEventListener('click', () => {
   const m = $('pbMore')
   m.hidden = !m.hidden
@@ -911,8 +974,9 @@ function setSpeed(speed) {
 function setPlaying(on) {
   if (on) clock.play()
   else clock.pause()
-  playBtn.textContent = on ? '❚❚' : '▶'
+  playBtn.dataset.state = on ? 'playing' : 'paused' // (the style sheet swaps the play and pause pictures)
   playBtn.setAttribute('aria-label', on ? 'Pause' : 'Play')
+  playBtn.title = on ? 'Pause (Space)' : 'Play (Space)'
   for (const t of state.tiles) {
     // Play at another speed than 1x, on a tile the NVR plays: asked for again, not resumed. A paused
     // NVR playback comes back at about normal speed whatever speed it is then given (measured
@@ -1056,7 +1120,50 @@ laneTrack.addEventListener('wheel', (e) => {
   scheduleDraw()
 }, { passive: false })
 
-for (const b of document.querySelectorAll('.pb-zoom button')) {
+// ---- previous and next recording, first and newest ---------------------------------------------
+//
+// The wall has no motion marks, only where each camera's footage begins and ends. So "previous" and
+// "next" stop wherever a recording starts on ANY camera on this page (after a gap, or the first of
+// the day): the moment a blank tile gets its picture back. Cameras the server has no index of have
+// nothing to offer and are left out, as they are from the coverage count.
+
+const indexedTiles = () => state.tiles.filter((t) => t.available)
+
+/** Previous (-1) or next (+1) start of a recording on any camera here (pb-bar.js sequenceTarget). */
+function jumpSequence(direction) {
+  // against the way it plays the playhead has run on from the start just jumped to, by more the
+  // faster it plays: the tolerance grows with the speed, so two presses walk back two starts
+  const against = clock.playing && (clock.speed < 0 ? 1 : -1) === direction
+  const target = sequenceTarget({
+    spans: [],
+    // each camera's own starts (its stretches joined first): joined across cameras, one camera
+    // starting while another records would not count
+    marks: indexedTiles().flatMap((t) => spanStarts(t.stretches)),
+    atMs: clock.atMs,
+    direction,
+    toleranceMs: SEQUENCE_TOLERANCE_MS * (against ? Math.abs(clock.speed) : 1)
+  })
+  if (target === null) {
+    sayBriefly(direction < 0 ? 'No recording starts earlier on this day.' : 'No recording starts later on this day.')
+    return
+  }
+  seek(target)
+}
+
+/** The first recording of the day on any camera here (-1), or the newest (+1), a little before its end. */
+function jumpToEdge(direction) {
+  const spans = indexedTiles().flatMap((t) => t.stretches)
+  // today the newest footage is still being written: a few minutes back, as the wall opens
+  const backMs = state.date === fmtDate(state.serverNow) ? 5 * 60_000 : 10_000
+  const target = direction < 0 ? recordingStart(spans) : recordingEnd(spans, { backMs })
+  if (target === null) {
+    sayBriefly('Nothing is recorded on this day for these cameras.')
+    return
+  }
+  seek(target)
+}
+
+for (const b of zoomBtns) {
   b.addEventListener('click', () => {
     state.view = makeView({ ...state.view, spanMs: Number(b.dataset.span), startMs: clock.atMs - Number(b.dataset.span) / 2 })
     scheduleDraw()
@@ -1069,6 +1176,10 @@ $('followBtn').addEventListener('click', () => {
 })
 
 playBtn.addEventListener('click', () => setPlaying(!clock.playing))
+$('toStart').addEventListener('click', () => jumpToEdge(-1))
+$('toEnd').addEventListener('click', () => jumpToEdge(1))
+$('seqPrev').addEventListener('click', () => jumpSequence(-1))
+$('seqNext').addEventListener('click', () => jumpSequence(1))
 $('back').addEventListener('click', () => seek(clock.atMs - SEEK_STEP))
 $('fwd').addEventListener('click', () => seek(clock.atMs + SEEK_STEP))
 $('dayPrev').addEventListener('click', () => seek(clock.atMs - DAY))
@@ -1175,8 +1286,14 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault()
     setPlaying(!clock.playing)
   }
-  if (e.key === 'ArrowLeft') seek(clock.atMs - SEEK_STEP)
-  if (e.key === 'ArrowRight') seek(clock.atMs + SEEK_STEP)
+  // with Shift the arrows go to the previous or next start of a recording, as on the single-camera page
+  if (e.key === 'ArrowLeft') e.shiftKey ? jumpSequence(-1) : seek(clock.atMs - SEEK_STEP)
+  if (e.key === 'ArrowRight') e.shiftKey ? jumpSequence(1) : seek(clock.atMs + SEEK_STEP)
+  if (e.key === 'Home' || e.key === 'End') {
+    e.preventDefault()
+    if (!e.repeat) jumpToEdge(e.key === 'Home' ? -1 : 1)
+  }
+  if (e.key === '<' || e.key === '>') stepSpeed(e.key === '<' ? -1 : 1)
 })
 
 window.addEventListener('resize', layoutGrid)
@@ -1328,7 +1445,10 @@ $('viewSave').addEventListener('click', async () => {
     id: existing?.id ?? `v${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
     name,
     cameras: state.cameras,
-    layout: state.layout
+    layout: state.layout,
+    // a view shared from Live stays shared when saved again here (its drawn layout, if it had one,
+    // is replaced by this page's grid: the Wall draws only its own)
+    shared: existing?.shared
   }
   const { ok, error, value } = checkView(candidate)
   if (!ok) return (viewMsgEl.textContent = error)
@@ -1343,7 +1463,9 @@ viewSel.addEventListener('change', () => {
   const view = state.views.find((v) => v.id === viewSel.value)
   state.viewId = view?.id ?? ''
   if (!view) return renderPager()
-  state.layout = view.layout ?? layoutFor(view.cameras.length)
+  // a layout drawn on Live ('custom') is not one this page draws: a grid that fits the cameras instead
+  // (and saving here then saves that grid, which a drawn layout without its drawing could not be)
+  state.layout = view.layout && view.layout !== 'custom' ? view.layout : layoutFor(view.cameras.length)
   layoutSel.value = state.layout
   writeStore(normaliseChoice(view.cameras))
   setCameras(view.cameras)
@@ -1537,7 +1659,23 @@ setInterval(() => {
     t.nameEl.href = `/playback.html?nvr=${encodeURIComponent(t.nvr)}&ch=${t.ch}&t=${Math.round(clock.atMs)}`
     t.nameEl.title = `${t.name} · ${t.nvrName} — open on the playback page (this wall is at ${fmtClock(clock.atMs, { tzOffsetMs: state.tz })} server time)`
   }
+  updateLiveLink()
 }, 1000)
+
+/**
+ * Playback | Live: Live opens showing these same cameras (pb-bar.js liveHref, read by viewer.js).
+ * A saved view goes by its id, so Live shows it under its own name; cameras picked by hand go as
+ * a list; a single camera opens full-size.
+ */
+function updateLiveLink() {
+  const one = state.cameras.length === 1 ? state.cameras[0] : null
+  const cut = one ? one.lastIndexOf('/') : -1
+  const href = one
+    ? liveHref({ nvr: one.slice(0, cut), ch: one.slice(cut + 1) })
+    : liveHref({ view: state.viewId || null, cameras: state.cameras })
+  if (liveLink.getAttribute('href') !== href) liveLink.setAttribute('href', href)
+}
+updateLiveLink()
 
 // One camera | Many cameras: back to one camera (the first on the wall), at the wall's moment
 document.getElementById('modeOne')?.addEventListener('click', () => {

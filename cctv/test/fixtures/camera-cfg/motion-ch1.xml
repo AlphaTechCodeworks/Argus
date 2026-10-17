@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response cmdId="" cmdUrl="queryMotion">
+	<status>success</status>
+	<content>
+		<chl id="{00000001-0000-0000-0000-000000000000}">
+			<param>
+				<switch>true</switch>
+				<sensitivity min="1" max="8">4</sensitivity>
+				<holdTimeNote>3,5,10,15,20,25,30,60,120,180</holdTimeNote>
+				<holdTime uint="s">20</holdTime>
+				<area type="list" count="18">
+					<itemType minLen="22" maxLen="22"></itemType>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+					<item>1111111111111111111111</item>
+				</area>
+				<objectFilter>
+					<person>
+						<switch>false</switch>
+					</person>
+					<car>
+						<switch>false</switch>
+					</car>
+				</objectFilter>
+				<triggerAudio>false</triggerAudio>
+			</param>
+			<trigger>
+				<triggerSchedule>
+					<schedule id="{ED0F2AE8-6E54-4D89-BE10-E85445FAC8FB}">24x7</schedule>
+				</triggerSchedule>
+				<sysRec>
+					<switch>true</switch>
+					<chls type="list">
+						<item id="{00000001-0000-0000-0000-000000000000}">JP Wharf South</item>
+					</chls>
+				</sysRec>
+				<sysSnap>
+					<switch>true</switch>
+					<chls type="list">
+						<item id="{00000001-0000-0000-0000-000000000000}">JP Wharf South</item>
+					</chls>
+				</sysSnap>
+				<alarmOut>
+					<switch>false</switch>
+					<alarmOuts type="list"></alarmOuts>
+				</alarmOut>
+				<preset>
+					<switch>false</switch>
+					<presets type="list"></presets>
+				</preset>
+				<msgPushSwitch>true</msgPushSwitch>
+				<buzzerSwitch>false</buzzerSwitch>
+				<popVideoSwitch>false</popVideoSwitch>
+				<popMsgSwitch>false</popMsgSwitch>
+				<emailSwitch>false</emailSwitch>
+			</trigger>
+		</chl>
+	</content>
+</response>

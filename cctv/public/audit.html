@@ -41,7 +41,7 @@
       <form id="addUser" class="se-grid" autocomplete="off">
         <label>Name <input id="u-name" required maxlength="64" pattern="[\w.@\-]{1,64}" title="Letters, digits and . _ @ -" autocapitalize="off" spellcheck="false" /></label>
         <label>Password (8 or more) <input id="u-pass" type="password" minlength="8" autocomplete="new-password" /></label>
-        <label>Role <select id="u-role"><option value="viewer">Viewer</option><option value="admin">Admin</option></select></label>
+        <label>Role <select id="u-role"><option value="viewer">Viewer</option><option value="watch">Watch only (Live, Playback, Map)</option><option value="admin">Admin</option></select></label>
         <div class="se-actions"><button type="submit" class="st-primary">Add or update</button><span id="u-msg" class="st-meta"></span></div>
       </form>
     </section>
@@ -128,6 +128,23 @@
         <button type="submit" id="ac-save" class="st-primary">Save</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- A set-up code for a phone (setup-codes.mjs): scanned, it signs the phone in as this account. -->
+  <dialog id="setupCodeDialog" aria-labelledby="setupCodeTitle">
+    <div class="se-grid setup-code">
+      <h2 id="setupCodeTitle">Set up a phone</h2>
+      <p id="setupCodeAccount" class="st-help"></p>
+      <canvas id="setupCodeQr" width="264" height="264" role="img" aria-label="Set-up QR code"></canvas>
+      <ol class="st-help setup-code-steps">
+        <li>Open the phone's camera (or the Argus app's Scan) and point it at this code.</li>
+        <li>Camera: tap the link, then <b>Use Argus in this browser</b>. Argus app: it connects by itself.</li>
+        <li>The phone is signed in as this account, with what this account may see. No password is typed.</li>
+      </ol>
+      <p id="setupCodeNote" class="st-help"></p>
+      <p id="setupCodeError" role="alert" class="st-error"></p>
+      <div class="se-actions"><button id="setupCodeCopy" type="button">Copy the link instead</button><button id="setupCodeClose" type="button" class="st-primary">Done</button></div>
+    </div>
   </dialog>
 
   <dialog id="resetPasswordDialog" aria-labelledby="resetPasswordTitle">

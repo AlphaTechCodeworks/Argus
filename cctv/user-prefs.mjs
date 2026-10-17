@@ -22,6 +22,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DATA_DIR } from './auth.mjs'
+import { checkStartOrder } from './public/grid-view.js'
 
 export const GRID_ORDER_PATH = '/api/me/grid-order'
 export const UI_PREFS_PATH = '/api/me/preferences'
@@ -102,7 +103,23 @@ function saveAll(all, previousText) {
 
 const isVersion = (v) => Number.isSafeInteger(v) && v >= 0
 
-const UI_KEYS = new Set(['cctv.theme', 'cctv.sidebarPinned', 'cctv.layout', 'cctv.layout.phone', 'cctv.activeView', 'cctv.smooth', 'cctv.hideOffline', 'cctv.site', 'cctv.workspaceSite', 'cctv.favoriteSites', 'cctv.recentSites', 'cctv.mapSite', 'cctv.mapNames', 'cctv.mapLayer', 'cctv.alarmFilters'])
+/**
+ * Moves one user's camera order and preferences to a new name (an AD account renamed in AD, ad.mjs).
+ * Throws when the file cannot be read or written. @returns {() => void} undoes it
+ */
+export function renameUserPrefs(from, to) {
+  const move = (a, b) => {
+    const { all, text } = loadAll()
+    if (!Object.hasOwn(all, a)) return false
+    all[b] = all[a]
+    delete all[a]
+    saveAll(all, text)
+    return true
+  }
+  return move(from, to) ? () => move(to, from) : () => {}
+}
+
+const UI_KEYS = new Set(['cctv.theme', 'cctv.sidebarPinned', 'cctv.layout', 'cctv.layout.phone', 'cctv.activeView', 'cctv.smooth', 'cctv.hideOffline', 'cctv.site', 'cctv.workspaceSite', 'cctv.favoriteSites', 'cctv.recentSites', 'cctv.mapSite', 'cctv.mapNames', 'cctv.mapLayer', 'cctv.alarmFilters', 'cctv.startOrder'])
 const layouts = new Set(['auto', 'list', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g8', 'g10', 'g12', '1+5', '1+7', '1+12', '2+8'])
 function validUiValue(key, value) {
   if (key === 'cctv.pictureFit') return ['auto', 'fit', 'fill', 'stretch'].includes(value)
@@ -110,11 +127,21 @@ function validUiValue(key, value) {
   if (key === 'cctv.theme') return ['dark', 'light'].includes(value)
   if (key === 'cctv.mapLayer') return ['street', 'satellite'].includes(value)
   if (['cctv.sidebarPinned', 'cctv.smooth', 'cctv.hideOffline', 'cctv.mapNames'].includes(key)) return ['0', '1'].includes(value)
-  if (key.startsWith('cctv.layout')) return layouts.has(value) && (key !== 'cctv.layout.phone' || ['auto', 'list', 'g1', 'g2'].includes(value))
+  if (key.startsWith('cctv.layout')) return layouts.has(value) && (key !== 'cctv.layout.phone' || ['auto', 'list', 'g1', 'g2', 'g3'].includes(value))
   if (key === 'cctv.alarmFilters') {
     try {
       const data = JSON.parse(value)
       return isPlainObject(data) && Object.entries(data).every(([k, v]) => ['acked', 'type', 'priority', 'text', 'from', 'to'].includes(k) && typeof v === 'string' && v.length <= 256)
+    } catch { return false }
+  }
+  // the cameras the all-cameras grid starts first (public/grid-view.js startPlan): a JSON list of
+  // camera keys, each once, at most MAX_START_ORDER (144 keys of at most 69 characters fit in 16 KB)
+  if (key === 'cctv.startOrder') {
+    if (value.length > 16 * 1024) return false
+    try {
+      const data = JSON.parse(value)
+      const { ok, value: kept } = checkStartOrder(data)
+      return ok && kept.length === data.length
     } catch { return false }
   }
   if (['cctv.favoriteSites', 'cctv.recentSites', 'cctv.workspaceSite'].includes(key)) {

@@ -6,6 +6,7 @@ name: CCTV tests (Linux)
 # `npm run build`), so they need Linux, a build, and bin/linux on the library path. A few need a
 # browser runtime (WebCodecs VideoDecoder) that node has no equivalent for and are skipped here.
 on:
+  workflow_dispatch: # lets an admin run it by hand from the Actions tab (on any branch)
   pull_request:
     paths-ignore:
       - 'docs/**'

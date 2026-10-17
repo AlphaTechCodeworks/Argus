@@ -16,6 +16,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { DATA_DIR } from './auth.mjs'
 import { EVENTS_SCHEMA } from './rec-index.mjs'
 import { DEFAULT_PRIORITY, PRIORITIES, checkRule } from './event-rules.mjs'
+import { closeEventReaders, readEventPage } from './event-search.mjs'
 
 export const EVENTS_DB = join(DATA_DIR, 'recordings.db')
 /** One page of results. A guard against a runaway query, not a paging scheme. */
@@ -49,10 +50,12 @@ const RULE_COLS = `id, name, enabled, cameras, types, schedule, priority, notify
 
 let db = null
 let q = null
+let databaseFile = EVENTS_DB
 
 /** The connection, opened on first use. The schema statement only ever creates what is missing. */
 function open(file = EVENTS_DB) {
   if (db) return q
+  databaseFile = file
   mkdirSync(dirname(file), { recursive: true })
   db = new DatabaseSync(file)
   db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;')
@@ -72,7 +75,7 @@ function open(file = EVENTS_DB) {
     byId: db.prepare(`SELECT ${EV_COLS} FROM events WHERE id = ?`),
     // The window query is the only filter with an index behind it; the rest are applied in JS by
     // event-rules.filterAlarms, which the page uses on the same data.
-    inWindow: db.prepare(`SELECT ${EV_COLS} FROM events WHERE start_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC LIMIT ?`),
+    inWindow: db.prepare(`SELECT ${EV_COLS} FROM events WHERE start_ms >= ? AND start_ms <= ? ORDER BY start_ms DESC, id DESC LIMIT ?`),
     ofCamera: db.prepare(`SELECT ${EV_COLS} FROM events WHERE nvr = ? AND ch = ? AND start_ms >= ? AND start_ms <= ? ORDER BY start_ms`),
     unacked: db.prepare(`SELECT ${EV_COLS} FROM events WHERE ack_ms IS NULL ORDER BY start_ms DESC LIMIT ?`),
     ack: db.prepare('UPDATE events SET ack_ms = ?, ack_user = ?, ack_note = ? WHERE id = ?'),
@@ -106,6 +109,7 @@ export function useEventsDb(file) {
 
 /** Closes the connection (tests, and a clean shutdown). The next call opens it again. */
 export function closeEvents() {
+  closeEventReaders()
   db?.close()
   db = null
   q = null
@@ -247,13 +251,17 @@ export const getEvent = (id) => plain(open().byId.get(Number(id)))
  * maxScan: with `keep`, the most rows read. Past it the search stops and the list returned has
  * `scanLimited` set: the caller says so rather than pass a cut-off list off as everything.
  */
-export function listEvents({ fromMs = null, toMs = null, limit = MAX_RESULTS, keep = null, where = null, maxScan = MAX_SCAN } = {}) {
+export function listEvents({ fromMs = null, toMs = null, limit = MAX_RESULTS, keep = null, where = null, maxScan = MAX_SCAN, before = null } = {}) {
   const s = open()
   const cap = Math.min(Math.max(1, Math.floor(Number(limit) || MAX_RESULTS)), MAX_RESULTS)
   const from = Number.isFinite(fromMs) ? Math.round(fromMs) : -8.64e15
   const to = Number.isFinite(toMs) ? Math.round(toMs) : 8.64e15
   const tests = []
   const args = [from, to]
+  if (before && Number.isFinite(before.startMs) && Number.isInteger(before.id)) {
+    tests.push('(start_ms, id) < (?, ?)')
+    args.push(before.startMs, before.id)
+  }
   const oneOf = (col, values) => {
     if (!values?.length) return
     tests.push(`${col} IN (${values.map(() => '?').join(', ')})`)
@@ -287,7 +295,7 @@ export function listEvents({ fromMs = null, toMs = null, limit = MAX_RESULTS, ke
   }
   if (typeof keep !== 'function' && !tests.length) return s.inWindow.all(from, to, cap).map(plain)
   // (prepared per call: the tests differ from one request to the next, and this is a page being opened)
-  const q = db.prepare(`SELECT ${EV_COLS} FROM events WHERE start_ms >= ? AND start_ms <= ?${tests.map((t) => ` AND ${t}`).join('')} ORDER BY start_ms DESC LIMIT ?`)
+  const q = db.prepare(`SELECT ${EV_COLS} FROM events WHERE start_ms >= ? AND start_ms <= ?${tests.map((t) => ` AND ${t}`).join('')} ORDER BY start_ms DESC, id DESC LIMIT ?`)
   if (typeof keep !== 'function') return q.all(...args, cap).map(plain)
   const out = []
   let read = 0
@@ -302,6 +310,30 @@ export function listEvents({ fromMs = null, toMs = null, limit = MAX_RESULTS, ke
     out.push(row)
     if (out.length >= cap) break
   }
+  return out
+}
+
+/** Disk scans run off the video loop; permission checks stay in the request's process. */
+export async function listEventsAsync({ keep = null, limit = MAX_RESULTS, maxScan = MAX_SCAN, ...options } = {}) {
+  open()
+  const cap = Math.min(MAX_RESULTS, Math.max(1, Math.floor(Number(limit) || MAX_RESULTS)))
+  const scan = Math.min(MAX_SCAN, Math.max(1, Number(maxScan) || MAX_SCAN))
+  const deadline = Date.now() + 8000
+  const out = []
+  let before = null, read = 0
+  while (read < scan && out.length < cap) {
+    const pageSize = Math.min(256, scan - read)
+    const rows = await readEventPage(databaseFile, { ...options, before, limit: pageSize }, deadline - Date.now())
+    for (const row of rows) {
+      read++
+      if (!keep || keep(row)) out.push(row)
+      if (out.length >= cap) break
+    }
+    if (rows.length < pageSize) return out
+    const last = rows.at(-1)
+    before = { startMs: last.startMs, id: last.id }
+  }
+  if (read >= scan && out.length < cap) out.scanLimited = true
   return out
 }
 

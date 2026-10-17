@@ -96,9 +96,9 @@ const req = (url, cookie = 'c=1') => ({ url, headers: { cookie }, socket: { remo
   check('route: GET only', post[0] === 405 && post[2].allow === 'GET' && post[2]['cache-control'] === 'no-store')
   const [st, body, headers] = handleViewers('GET', VIEWERS_PATH, admin, p, { now: () => 9000, nameOf })
   check('route: an admin gets it, never cached', st === 200 && headers['cache-control'] === 'no-store')
-  check('route: the shape', J(Object.keys(body)) === J(['now', 'viewers', 'total', 'people']) && body.now === 9000 && body.total === 1 && J(body.people) === J({ people: 1, local: 0, remote: 1 }), J(body))
+  check('route: the shape', J(Object.keys(body)) === J(['now', 'self', 'viewers', 'total', 'people']) && body.self === admin.user && body.now === 9000 && body.total === 1 && J(body.people) === J({ people: 1, local: 0, remote: 1 }), J(body))
   check('route: one viewer, with what it has open', J(body.viewers) === J([{
-    user: 'alice', address: '203.0.113.9', remote: true, since: 5000,
+    user: 'alice', address: '203.0.113.9', device: '', host: '', remote: true, since: 5000,
     live: [{ nvr: 'n1', ch: 0, site: 'Shop', nvrName: 'Main', camera: 'Cam 1', stream: 'sub', kind: 'remote' }],
     playback: [], other: [],
     counts: { sockets: 1, live: 1, playback: 0, other: 0, cameras: 1 }
@@ -109,10 +109,10 @@ const req = (url, cookie = 'c=1') => ({ url, headers: { cookie }, socket: { remo
 // ---- server.mjs wiring (source scan: the server needs the SDK) ------------------------------------------
 {
   const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-  check('server.mjs: the route, with the request\'s own who', /const viewersRoute = handleViewers\(req\.method, pathname, who, presence, \{ nameOf: cameraNames \}\)\n\s*if \(viewersRoute\) return sendJson\(res, \.\.\.viewersRoute\)/.test(src))
+  check('server.mjs: the route, with the request\'s own who', /const viewersRoute = handleViewers\(req\.method, pathname, who, presence, \{ nameOf: cameraNames, hostOf: hostNameOf \}\)\n\s*if \(viewersRoute\) return sendJson\(res, \.\.\.viewersRoute\)/.test(src))
   check('server.mjs: ...answered after the sign-in check made who', src.indexOf('const who = { user, admin: AUTH_OFF || auth.isAdmin(user) }') < src.indexOf('const viewersRoute') && src.indexOf('const who = {') > 0)
   check('server.mjs: every track goes through trackingOpen, set before attachLive reads it', /watch\.track = trackingOpen\(\{\n\s*track: watch\.track,/.test(src) && src.indexOf('watch.track = trackingOpen(') < src.indexOf('const attachLive = liveAttacher(') && src.indexOf('watch.track = trackingOpen(') < src.indexOf('const onConnection ='))
-  check('server.mjs: a socket joins with its user and the visitor\'s address', /presence\.join\(vkey, ws, \{ remote: isRemoteAddress\(req\.socket\.remoteAddress\), user: currentUser\(req\), address: clientIp\(req\) \}\)/.test(src))
+  check('server.mjs: a socket joins with its user and the visitor\'s address', /presence\.join\(vkey, ws, \{ remote: isRemoteAddress\(req\.socket\.remoteAddress\), user: currentUser\(req\), address: clientIp\(req\), device: deviceOf\(req\.headers\['user-agent'\]\) \}\)/.test(src))
   check('server.mjs: a mux channel\'s "sub" is kept for its kind', /asked\.set\(channel, sub\)/.test(src) && src.indexOf('asked.set(channel, sub)') < src.indexOf('attachLive(channel, req,'))
 }
 
